@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# REV quality-floor pre-commit gate (P2-9).
+#
+# Runs scripts/rev_precommit_quality.py, which fires the G-floor regression
+# gate ONLY when src/ai/rev/extractor.py (or its prompt assets) are staged.
+# Target latency ≤ 30s warm cache. The gate is measurement-only (reads the
+# staged candidate store + labeled corpus from disk; never re-runs extraction).
+#
+# Enable in a local clone:
+#     git config core.hooksPath .githooks
+#
+# Override the gated program:
+#     VERTEX_REV_QC_PROGRAM=nova  (default)
+#
+# The hook never blocks on a fresh clone / before OA-3 labels exist — it prints
+# an advisory notice and exits 0 when no labeled corpus is present.
+set -euo pipefail
+
+# Staged files (added/copied/modified/renamed).
+staged=$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null || true)
+if [ -z "$staged" ]; then
+  exit 0
+fi
+
+tmp=$(mktemp 2>/dev/null || mktemp -t revqc)
+printf '%s\n' "$staged" > "$tmp"
+trap 'rm -f "$tmp"' EXIT
+
+# Prefer python on PATH; fall back to python3.
+PY=python
+if ! command -v "$PY" >/dev/null 2>&1; then
+  PY=python3
+fi
+
+"$PY" scripts/rev_precommit_quality.py --changed-files "$tmp"

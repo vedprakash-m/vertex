@@ -1,0 +1,50 @@
+{% macro render_trust_row(row) -%}
+<li>
+  <strong>{{ row.label }}</strong>
+  <span>{{ row.summary }}</span>
+  <div class="trust-gauge" role="img" aria-label="Confidence {{ row.confidence_percent }}%">
+    <span class="trust-gauge-fill" style="width: {{ row.confidence_percent }}%;"></span>
+  </div>
+  <p>Trust level: {{ row.trust_level }} · confidence={{ row.confidence_percent }}%</p>
+</li>
+{%- endmacro %}
+
+<div class="section-card">
+  <h3>Autonomy Trust Calibration</h3>
+  {% if trust_editorial_rows %}
+  <p>Editorial generation quality from recent confirms.</p>
+  <ul class="review-list review-list--compact">
+    {% for row in trust_editorial_rows %}
+    {{ render_trust_row(row) }}
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% if trust_claim_extraction_rows %}
+  <p{% if trust_editorial_rows %} style="margin-top: 14px;"{% endif %}>Claim-extraction agreement from recent calibration cycles.</p>
+  <ul class="review-list review-list--compact">
+    {% for row in trust_claim_extraction_rows %}
+    {{ render_trust_row(row) }}
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% if trust_autonomy_rows %}
+  <p{% if trust_editorial_rows or trust_claim_extraction_rows %} style="margin-top: 14px;"{% endif %}>Autonomy actions calibrated from recent approvals.</p>
+  <ul class="review-list review-list--compact">
+    {% for row in trust_autonomy_rows %}
+    {{ render_trust_row(row) }}
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% if trust_attention_gap_rows %}
+  <p{% if trust_editorial_rows or trust_claim_extraction_rows or trust_autonomy_rows %} style="margin-top: 14px;"{% endif %}>Salience-calibration bridge: workstreams where slip calibration pressure is outpacing author attention.</p>
+  <ul class="review-list review-list--compact">
+    {% for row in trust_attention_gap_rows %}
+    <li>
+      <strong>{{ row.workstream_id }}</strong>
+      <span>slip_modifier=+{{ "%.2f"|format(row.slip_modifier) }} | attention_weight={{ "%.2f"|format(row.attention_weight) }}</span>
+      <p>{{ row.bridge_summary }}</p>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</div>

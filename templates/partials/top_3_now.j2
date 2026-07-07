@@ -1,0 +1,48 @@
+<a id="top-3"></a>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 16px 0; border:1px solid #E5E7EB; background-color:#FFFFFF;">
+  <tr>
+    <td style="padding:14px 16px 8px 16px; font-size:12px; line-height:1.4; font-weight:600; letter-spacing:0.05em; text-transform:uppercase; color:#6B7280;">DECISIONS &amp; SIGNALS</td>
+  </tr>
+  {% if forwarding_context %}
+  <tr>
+    <td style="padding:0 16px 12px 16px; font-size:12px; line-height:1.5; color:#4B5563;">
+      <p style="margin:0 0 4px 0; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color:#6B7280;">Forwarding Context</p>
+      <p style="margin:0; font-size:14px; line-height:1.6; color:#111827;">"{{ forwarding_context }}"</p>
+    </td>
+  </tr>
+  {% endif %}
+  {% set source_items = top_items if top_items else (auto_suggestions if is_dry_run else ()) %}
+  {% if source_items %}
+  {% for item in source_items %}
+  <tr>
+    <td style="padding:12px 16px; border-left:3px {% if item.suggested %}dashed{% else %}solid{% endif %} {{ item.item_type | top_item_border }}; border-top:{% if loop.first %}0{% else %}1px solid #E5E7EB{% endif %};">
+      <p style="margin:0 0 6px 0; font-size:11px; line-height:1.4; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color:{{ item.item_type | top_item_border }};">{{ item.label or 'RISK' }}{% if item.suggested %} · SUGGESTED{% endif %}</p>
+      <p style="margin:0 0 6px 0; font-size:14px; line-height:1.6; color:#111827;">{{ item.text }}</p>
+      <p style="margin:0; font-size:13px; line-height:1.5; color:#4B5563;">Owner: {{ item.owner or 'TBD' }}{% if item.by_date %} · By: {{ item.by_date | format_date('%b %d') }}{% endif %}{% if item.anchor %} · <a href="#{{ item.anchor }}" style="color:#2563EB; text-decoration:underline;">Details</a>{% endif %}{% if item.ado_link %} · <a href="{{ item.ado_link }}" style="color:#2563EB; text-decoration:underline;">ADO</a>{% endif %}</p>
+    </td>
+  </tr>
+  {% endfor %}
+  {% else %}
+  {% if health.health_reason and 'New High' in health.health_reason %}
+  {% set fallback_bg = '#FEE2E2' %}
+  {% set fallback_fg = '#B91C1C' %}
+  {% set fallback_text = health.high_count ~ ' new items at High — author review recommended.' %}
+  {% elif health.high_count > 0 %}
+  {% set fallback_bg = '#FEF3C7' %}
+  {% set fallback_fg = '#92400E' %}
+  {% set fallback_text = health.high_count ~ ' items remain at High — no new decisions this week.' %}
+  {% else %}
+  {% set fallback_bg = '#D1FAE5' %}
+  {% set fallback_fg = '#047857' %}
+  {% set fallback_text = 'No leadership decisions needed this week.' %}
+  {% endif %}
+  <tr>
+    <td style="padding:12px 16px; background-color:{{ fallback_bg }}; color:{{ fallback_fg }}; font-size:14px; line-height:1.6;">{{ fallback_text }}</td>
+  </tr>
+  {% if decision_strip_ack_required and is_dry_run %}
+  <tr>
+    <td style="padding:0 16px 12px 16px; font-size:12px; line-height:1.5; color:#B91C1C;">Author confirmation required before publish.</td>
+  </tr>
+  {% endif %}
+  {% endif %}
+</table>

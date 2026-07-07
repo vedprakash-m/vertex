@@ -1,0 +1,5 @@
+schema_version: "1.0"
+people:
+  - alias: example_tpm
+    email: tpm@example.com
+    display_name: Example TPM

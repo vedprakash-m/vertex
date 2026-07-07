@@ -1,0 +1,21 @@
+<div class="section-card anticipation-card">
+  <h3>Anticipated Questions</h3>
+  <p>Likely leadership asks inferred from current drift, risk movement, recent signal coverage, and known reader priorities.</p>
+  <ul class="anticipation-list">
+    {% for row in anticipated_questions %}
+    <li class="anticipation-row">
+      <div class="anticipation-header">
+        <strong>{{ row.reader }}</strong>
+        <span class="anticipation-confidence">{{ row.confidence }}</span>
+      </div>
+      <div class="anticipation-body">
+        <span class="anticipation-label">Question</span>
+        <p>{{ row.question }}</p>
+        <span class="anticipation-label">Suggested Response</span>
+        <p>{{ row.suggested_response }}</p>
+        <p class="anticipation-evidence">Evidence: {{ row.evidence | join(", ") }}</p>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+</div>

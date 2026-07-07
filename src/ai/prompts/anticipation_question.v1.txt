@@ -1,0 +1,8 @@
+Return strict JSON with keys "question" and "suggested_response".
+Keep both strings concise, concrete, and non-redundant.
+Do not mention AI or speculation.
+
+Reader: {reader}
+Question seed: {question_seed}
+Suggested response seed: {response_seed}
+Evidence: {evidence}

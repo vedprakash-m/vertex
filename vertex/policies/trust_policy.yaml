@@ -1,0 +1,56 @@
+policy_schema_version: "1"
+
+# ---------------------------------------------------------------------------
+# Bootstrap trust scores (cold-start grants by provenance class)
+# These become trust.bootstrap_grant facts — never synthetic review events.
+# ---------------------------------------------------------------------------
+bootstrap_trust:
+  ado:
+    score: 0.80
+    rationale: "ADO is the authoritative work-item system; high reliability track record"
+  kusto:
+    score: 0.85
+    rationale: "Kusto telemetry is high-signal for metrics; low noise in practice"
+  icm:
+    score: 0.80
+    rationale: "IcM is authoritative for incidents; signal quality is high"
+  human_comms:
+    score: 0.60
+    rationale: "Teams/mail/transcripts are high-value but require human review by default"
+
+# ---------------------------------------------------------------------------
+# Anomaly circuit breaker thresholds
+# ---------------------------------------------------------------------------
+circuit_breaker:
+  volume_sigma: 3.0           # suspend if volume > mean + sigma * std (QG-SG-01)
+  malform_rate: 0.2            # suspend if malformed signals > 20% of run volume
+  zero_yield_runs: 3           # suspend after N consecutive runs with 0 promoted signals
+  suspension_label: "QG-SG-01"
+
+# ---------------------------------------------------------------------------
+# Laplace smoothing parameters
+# The prior alpha_0 = beta_0 = laplace_pseudo_count.
+# A fresh uninitialised key scores 0.5 (= 1/(1+1)).
+# ---------------------------------------------------------------------------
+laplace_pseudo_count: 1.0
+
+# ---------------------------------------------------------------------------
+# Contradiction weighting
+# A contradiction counts as `contradiction_weight` rejects in the beta update.
+# ---------------------------------------------------------------------------
+contradiction_weight: 2.0
+
+# ---------------------------------------------------------------------------
+# O-16 regret bucket configuration
+# ---------------------------------------------------------------------------
+regret:
+  # Bucket (a): same/next-gather — contradiction within gather_cadence * multiplier
+  gather_cadence_multiplier: 1.0
+  # Bucket (b): in-TTL — between cadence and fact-type TTL
+  # (TTL comes from freshness_policy.yaml per fact_type; no duplicate here)
+  # Bucket (c): post-TTL — beyond TTL; tracked but untargeted
+  # Bucket (d): dismissed within this many days → relevance judgment
+  dismiss_window_days: 7
+  # revoke_on_dismissal fires ONLY on bucket (a) AND within this window of
+  # the contradiction event (independent of the dismiss_window check)
+  revoke_on_dismissal_hours: 24

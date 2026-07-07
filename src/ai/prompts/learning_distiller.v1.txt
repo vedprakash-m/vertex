@@ -1,0 +1,36 @@
+You are distilling repeated author corrections into durable editorial rules for Vertex.
+
+Return JSON only with this shape:
+{
+  "proposals": [
+    {
+      "target": "banned_openings",
+      "action": "append",
+      "value": "This week we are",
+      "rationale": "Authors repeatedly rewrote generic executive-summary openings into direct deltas.",
+      "supporting_issue_numbers": [51, 52],
+      "supporting_examples": [
+        "Issue 051 suggestion 2 accepted: trimmed a generic opener from exec_summary.",
+        "Issue 052 suggestion 1 accepted: replaced a generic opener with a direct answer."
+      ]
+    }
+  ]
+}
+
+Allowed targets:
+- banned_phrases
+- banned_openings
+- verbosity.workstream_blurb_max_sentences
+- verbosity.workstream_blurb_max_words
+- verbosity.exec_bullet_max_words
+- verbosity.exec_max_bullets
+- verbosity.scorecard_summary_max_sentences
+
+Rules:
+- Propose additions only when the tracked author-correction history shows a repeated, durable pattern.
+- Prefer zero proposals over speculative proposals.
+- Do not repeat rules already present in the current editorial rules.
+- Use action `append` for banned_phrases or banned_openings.
+- Use action `set` for verbosity.* targets and provide a positive integer value.
+- Base every proposal only on the supplied tracked author-correction history.
+- Do not use markdown fences or any prose outside the JSON object.

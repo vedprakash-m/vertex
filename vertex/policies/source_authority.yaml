@@ -1,0 +1,144 @@
+policy_schema_version: "1"
+
+# Provenance classes — independence vocabulary for corroboration (§6.2.3)
+provenance_classes:
+  ado: ado
+  ado_pr: ado              # PR signals derive from ADO — NOT independent of it
+  kusto: telemetry
+  icm: icm
+  workiq: human_comms
+  teams: human_comms
+  transcript: human_comms
+
+# Family map — every fact_type → exactly one authority_family
+family_map:
+  action.item:          workitem.state
+  dependency.link:      workitem.state
+  milestone.entry:      workitem.state
+  workstream.entry:     workitem.state
+  signal.observation:   BY_SIGNAL_CLASS    # metric.validated→metric, icm.incident→incident,
+                                           # ado.field_change→workitem.state, text.human→narrative
+  risk.entry:           judgment
+  decision.entry:       judgment
+  assumption.entry:     judgment
+  commitment.entry:     commitment
+  claim.entry:          narrative
+  # Phase 2 entries — deliverable and incident authority (deliv-incident-fu)
+  # Bridge appender and fact-projection stubs land in Phase 2; KNOWN_UNPROJECTEABLE in v1 (S-2d/Q9).
+  deliverable.entry:    deliverable        # Phase 2: bridge appender + ADO/IcM deliverable source
+  incident.entry:       incident           # Phase 2: IcM source wired (S-10a/S-10b)
+
+# Authority matrix — per family: primary source, secondaries, human role, mirror fields
+authority:
+  workitem.state:
+    primary: ado
+    secondary: [human_comms]
+    human_role: resolve_ambiguity
+    mirror_fields: [state, status_date]
+  metric:
+    primary: kusto
+    secondary: [reality_assertions]
+    human_role: validate_interpretation
+    mirror_fields: [value, observed_at]
+  incident:
+    primary: icm
+    secondary: [ado, human_comms]
+    human_role: confirm_impact
+    mirror_fields: [severity, state]
+  judgment:
+    primary: human
+    secondary: [signals, metrics]
+    human_role: own_judgment
+    mirror_fields: []
+  commitment:
+    primary: human
+    secondary: [ado, human_comms]
+    human_role: own_commitment
+    mirror_fields: []
+  narrative:
+    primary: human
+    secondary: [signals]
+    human_role: own_wording
+    mirror_fields: []
+  deliverable:
+    primary: ado                          # Phase 2: ADO work items / IcM deliverable tracking
+    secondary: [human_comms, icm]
+    human_role: confirm_completion
+    mirror_fields: [status, due_date]     # Phase 2: populated by bridge appender
+
+# Corroboration window configuration
+corroboration:
+  base_window_hours: 72        # effective window = max(base, cadence of the two sources)
+  compare_on_event_time: true
+
+# Conflict detection configuration
+conflict:
+  trust_gap_threshold: 0.15
+  materiality:
+    material_if:
+      - predicate: family_is_commitment
+      - predicate: severity_critical_or_high
+      - predicate: entity_in_open_milestone_due_14d
+      - predicate: governance_locked_adjacent
+
+# Override governance (§6.2.2)
+override_ttl_days: 90
+
+# SoR flip gate configuration (S-0k — §5.3 / §27)
+# Controls when a family transitions from shadow → primary mode.
+# clean_cycles_to_flip: consecutive gather cycles with parity (shadow == primary)
+#   required before the flip is allowed.  Default: 5 (§23.1.9 bound).
+# divergence_tolerance: maximum fraction of entities that may diverge and still
+#   count as a "clean" cycle.  0.02 = 98% match rate.  Default: 0.02.
+# critical_zero: if true, Critical/P0 entities must have zero divergence.
+# max_persistent_cycles: consecutive otherwise-healthy divergence cycles before
+#   the family is quarantined for projection investigation.
+# require_s0g_policy: if true, the flip for this family also requires S-0g
+#   policy approval (human_comms admitted as secondary or primary).
+sor_flip:
+  defaults:
+    clean_cycles_to_flip: 5
+    divergence_tolerance: 0.02
+    critical_zero: true
+    max_persistent_cycles: 8
+  per_family:
+    workitem.state:
+      clean_cycles_to_flip: 5
+      divergence_tolerance: 0.02
+      critical_zero: true
+      max_persistent_cycles: 8
+      require_s0g_policy: false     # ADR-0006 accepted: human_comms secondary admitted
+    judgment:
+      clean_cycles_to_flip: 5
+      divergence_tolerance: 0.02
+      critical_zero: true
+      max_persistent_cycles: 8
+      require_s0g_policy: true      # judgment has no human_comms slot — Phase 2
+    commitment:
+      clean_cycles_to_flip: 5
+      divergence_tolerance: 0.02
+      critical_zero: true
+      max_persistent_cycles: 8
+      require_s0g_policy: false     # ADR-0006 accepted: human_comms secondary admitted
+    metric:
+      clean_cycles_to_flip: 5
+      divergence_tolerance: 0.05    # higher tolerance for telemetry noise
+      critical_zero: true
+      max_persistent_cycles: 8
+    incident:
+      clean_cycles_to_flip: 5
+      divergence_tolerance: 0.05
+      critical_zero: true
+      max_persistent_cycles: 8
+    narrative:
+      clean_cycles_to_flip: 3       # narrative is human-primary; faster ramp
+      divergence_tolerance: 0.10
+      critical_zero: true
+      max_persistent_cycles: 8
+    # Phase 2 families — not evaluated until bridge appender lands (KNOWN_UNPROJECTEABLE in v1)
+    deliverable:
+      clean_cycles_to_flip: 5
+      divergence_tolerance: 0.05
+      critical_zero: true
+      max_persistent_cycles: 8
+      require_s0g_policy: true      # Phase 2: human acceptance required before authority flip

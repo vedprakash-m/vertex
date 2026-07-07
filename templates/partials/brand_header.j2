@@ -1,0 +1,9 @@
+{% if continuity and continuity.brand_header_url %}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" data-vertex-block="brand-header" style="width:100%; border-collapse:collapse; margin:0 0 12px 0;">
+  <tr>
+    <td style="padding:0;">
+      <img src="{{ continuity.brand_header_url }}" alt="{{ continuity.brand_name or 'Program newsletter' }}" width="640" style="display:block; width:100%; max-width:640px; height:auto; border:0;">
+    </td>
+  </tr>
+</table>
+{% endif %}

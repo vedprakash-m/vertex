@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ title }}</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --page-bg: #f4f7fb;
+      --panel-bg: #ffffff;
+      --panel-border: #d6dde8;
+      --text-strong: #0f172a;
+      --text-muted: #475569;
+      --text-subtle: #64748b;
+      --surface-muted: #f8fafc;
+      --surface-accent: #e2e8f0;
+      --link: #1d4ed8;
+      --approved-bg: #dcfce7;
+      --approved-fg: #166534;
+      --pending-bg: #f1f5f9;
+      --pending-fg: #475569;
+      --changes-bg: #fef3c7;
+      --changes-fg: #92400e;
+      --rejected-bg: #fee2e2;
+      --rejected-fg: #991b1b;
+      --shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
+      --radius: 18px;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --page-bg: #0f172a;
+        --panel-bg: #111827;
+        --panel-border: #334155;
+        --text-strong: #e2e8f0;
+        --text-muted: #cbd5e1;
+        --text-subtle: #94a3b8;
+        --surface-muted: #0f172a;
+        --surface-accent: #1e293b;
+        --link: #93c5fd;
+        --approved-bg: #14532d;
+        --approved-fg: #bbf7d0;
+        --pending-bg: #1e293b;
+        --pending-fg: #cbd5e1;
+        --changes-bg: #78350f;
+        --changes-fg: #fde68a;
+        --rejected-bg: #7f1d1d;
+        --rejected-fg: #fecaca;
+        --shadow: 0 20px 45px rgba(2, 6, 23, 0.45);
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Segoe UI", -apple-system, Roboto, Helvetica, Arial, sans-serif;
+      background: linear-gradient(180deg, #dbeafe 0%, var(--page-bg) 260px);
+      color: var(--text-strong);
+    }
+
+    a {
+      color: var(--link);
+    }
+
+    .page {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 32px 20px 40px;
+    }
+
+    .header {
+      margin-bottom: 22px;
+    }
+
+    .eyebrow {
+      margin: 0 0 8px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-subtle);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 30px;
+      line-height: 1.2;
+    }
+
+    .subtitle {
+      margin: 10px 0 0;
+      font-size: 15px;
+      line-height: 1.6;
+      color: var(--text-muted);
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 16px;
+    }
+
+    .link-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: var(--panel-bg);
+      border: 1px solid var(--panel-border);
+      text-decoration: none;
+      box-shadow: var(--shadow);
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 14px;
+      margin-bottom: 20px;
+    }
+
+    .summary-card,
+    .panel {
+      border: 1px solid var(--panel-border);
+      border-radius: var(--radius);
+      background: var(--panel-bg);
+      box-shadow: var(--shadow);
+    }
+
+    .summary-card {
+      padding: 16px 18px;
+    }
+
+    .summary-card h2,
+    .panel h2 {
+      margin: 0 0 10px;
+      font-size: 14px;
+      line-height: 1.4;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--text-subtle);
+    }
+
+    .summary-card p,
+    .panel p,
+    .panel li {
+      margin: 0;
+      font-size: 14px;
+      line-height: 1.7;
+      color: var(--text-muted);
+    }
+
+    .state-pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      background: var(--pending-bg);
+      color: var(--pending-fg);
+    }
+
+    .state-pill.approved {
+      background: var(--approved-bg);
+      color: var(--approved-fg);
+    }
+
+    .state-pill.changes_requested {
+      background: var(--changes-bg);
+      color: var(--changes-fg);
+    }
+
+    .state-pill.rejected {
+      background: var(--rejected-bg);
+      color: var(--rejected-fg);
+    }
+
+    .grid {
+      display: grid;
+      gap: 18px;
+    }
+
+    .panel {
+      padding: 18px 20px;
+    }
+
+    .panel pre {
+      margin: 0;
+      white-space: pre-wrap;
+      font: inherit;
+      color: var(--text-muted);
+    }
+
+    .list {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      display: grid;
+      gap: 10px;
+    }
+
+    .list li {
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: var(--surface-muted);
+      border: 1px solid var(--surface-accent);
+    }
+
+    .list strong {
+      display: block;
+      color: var(--text-strong);
+      margin-bottom: 4px;
+    }
+
+    .meta {
+      display: block;
+      font-size: 12px;
+      color: var(--text-subtle);
+      margin-bottom: 6px;
+    }
+
+    .commands {
+      display: grid;
+      gap: 10px;
+    }
+
+    code {
+      display: block;
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: #0f172a;
+      color: #e2e8f0;
+      overflow-x: auto;
+      font-family: Consolas, "SFMono-Regular", Menlo, monospace;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
+    @media (max-width: 720px) {
+      .page {
+        padding: 24px 14px 32px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="header">
+      <p class="eyebrow">DRI Self-Service</p>
+      <h1>{{ section.title }}</h1>
+      <p class="subtitle">{{ subtitle }}</p>
+      <div class="actions">
+        <a class="link-chip" href="{{ published_html_uri }}">Open published report section context</a>
+        <a class="link-chip" href="{{ reviewer_html_uri }}">Open full reviewer pane</a>
+      </div>
+    </header>
+
+    <section class="summary-grid">
+      <article class="summary-card">
+        <h2>Review State</h2>
+        <p><span class="state-pill {{ section.state.value }}">{{ section.state_label }}</span></p>
+      </article>
+      <article class="summary-card">
+        <h2>Reviewer</h2>
+        <p>{{ section.reviewer_display }}</p>
+      </article>
+      <article class="summary-card">
+        <h2>Current Note</h2>
+        <p>{{ section.note or "No reviewer note recorded yet." }}</p>
+      </article>
+    </section>
+
+    <main class="grid">
+      <section class="panel">
+        <h2>Published Section</h2>
+        <pre>{{ section.published_text }}</pre>
+      </section>
+
+      <section class="panel">
+        <h2>Vitality Scores</h2>
+        {% if vitality_rows %}
+        <ul class="list">
+          {% for row in vitality_rows %}
+          <li>
+            <strong>{{ row.owner_alias }} · {{ row.composite_score }}</strong>
+            <span class="meta">{{ row.fresh_items }}/{{ row.total_items }} fresh items · {{ row.leakage_label }}</span>
+            {{ row.summary }}
+          </li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        <p>No owner vitality scores are available for this section yet.</p>
+        {% endif %}
+      </section>
+
+      <section class="panel">
+        <h2>Telemetry</h2>
+        {% if telemetry_rows %}
+        <ul class="list">
+          {% for row in telemetry_rows %}
+          <li>
+            <strong>{{ row.title }}</strong>
+            {% if row.detail %}<span class="meta">{{ row.detail }}</span>{% endif %}
+            {{ row.summary }}
+          </li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        <p>No approved telemetry is available for this section yet.</p>
+        {% endif %}
+      </section>
+
+      <section class="panel">
+        <h2>Remediation Actions</h2>
+        {% if remediation_rows %}
+        <ul class="list">
+          {% for row in remediation_rows %}
+          <li>
+            {% if row.href %}
+            <strong><a href="{{ row.href }}">{{ row.title }}</a></strong>
+            {% else %}
+            <strong>{{ row.title }}</strong>
+            {% endif %}
+            {% if row.detail %}<span class="meta">{{ row.detail }}</span>{% endif %}
+            {{ row.summary }}
+          </li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        <p>No active remediation actions are linked to this section.</p>
+        {% endif %}
+      </section>
+
+      {% if section.delta_rows %}
+      <section class="panel">
+        <h2>What Changed</h2>
+        <ul class="list">
+          {% for row in section.delta_rows %}
+          <li>
+            {% if row.ado_url %}
+            <strong><a href="{{ row.ado_url }}">{{ row.label }} · {{ row.title }}</a></strong>
+            {% else %}
+            <strong>{{ row.label }} · {{ row.title }}</strong>
+            {% endif %}
+            {{ row.detail }}
+          </li>
+          {% endfor %}
+        </ul>
+      </section>
+      {% endif %}
+
+      {% if section.evidence_rows %}
+      <section class="panel">
+        <h2>Evidence</h2>
+        <ul class="list">
+          {% for row in section.evidence_rows %}
+          <li>
+            {% if row.ado_url %}
+            <strong><a href="{{ row.ado_url }}">WI:{{ row.work_item_id }} · {{ row.title }}</a></strong>
+            {% else %}
+            <strong>WI:{{ row.work_item_id }} · {{ row.title }}</strong>
+            {% endif %}
+            {{ row.summary }}
+          </li>
+          {% endfor %}
+        </ul>
+      </section>
+      {% endif %}
+
+      {% if section.context_rows %}
+      <section class="panel">
+        <h2>Context</h2>
+        <ul class="list">
+          {% for row in section.context_rows %}
+          <li>
+            {% if row.ado_url %}
+            <strong><a href="{{ row.ado_url }}">{{ row.label }}</a></strong>
+            {% else %}
+            <strong>{{ row.label }}</strong>
+            {% endif %}
+            {{ row.summary }}
+          </li>
+          {% endfor %}
+        </ul>
+      </section>
+      {% endif %}
+
+      {% if section.why_block %}
+      <section class="panel">
+        <h2>Why This Section Matters</h2>
+        <p>{{ section.why_block.summary }}</p>
+        <ul class="list">
+          {% for line in section.why_block.lines %}
+          <li>
+            {% if line.href %}
+            <strong><a href="{{ line.href }}">{{ line.label }}</a></strong>
+            {{ line.value }}
+            {% else %}
+            <strong>{{ line.label }}</strong>
+            {{ line.value }}
+            {% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+      </section>
+      {% endif %}
+
+      <section class="panel">
+        <h2>Offline Feedback Path</h2>
+        <p>At the current L0/L1 workflow, feedback is communicated offline and then recorded by the author with `vertex review-sections set`.</p>
+        <div class="commands">
+          <code>{{ approve_command }}</code>
+          <code>{{ changes_requested_command }}</code>
+        </div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

@@ -1,0 +1,6 @@
+schema_version: "1.0"
+stale_warn_days: 14
+stale_block_days: 30
+banned_phrases: []
+banned_openings: []
+verbosity: {}

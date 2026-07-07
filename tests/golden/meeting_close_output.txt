@@ -1,0 +1,43 @@
++------------------------------------------------------------- Meeting close --------------------------------------------------------------+
+| Program: acme                                                                                                                            |
+| Transcript: lt-sync-123                                                                                                                  |
+| Title: LT Sync                                                                                                                           |
+| Captured: 2026-05-21T12:00:00+00:00                                                                                                      |
+| Source: https://contoso/meetings/lt-sync-123                                                                                             |
+| Extractor: stub                                                                                                                          |
+| Actions: 2 total | 1 mapped | 1 net-new                                                                                                  |
+| Suggested next checkpoint: 2026-06-01                                                                                                    |
++------------------------------------------------------------------------------------------------------------------------------------------+
++----------------- Action review ------------------+                     +--------------- Evidence excerpts ----------------+               
+| +------------------ Action 1 ------------------+ |                     | +----------------- Evidence 1 -----------------+ |               
+| | Confirm UD mitigation plan with              | |                     | | trace: action 1                              | |               
+| | leadership.                                  | |                     | | reason: matched transcript ref WI:101        | |               
+| | status: mapped                               | |                     | | excerpt:                                     | |               
+| | work item: WI:101 | UD chunking              | |                     | | Review WI:101 and confirm next steps.        | |               
+| | workstream: ud                               | |                     | +----------------------------------------------+ |               
+| | owner: alice                                 | |                     | +----------------- Evidence 2 -----------------+ |               
+| | due: 2026-06-01                              | |                     | | trace: action 2                              | |               
+| | review: action 1 -> approve | edit | dismiss | |                     | | reason: first transcript sentence fallback   | |               
+| +----------------------------------------------+ |                     | | excerpt:                                     | |               
+| +------------------ Action 2 ------------------+ |                     | | Review WI:101 and confirm next steps.        | |               
+| | Send readiness recap to the broader launch   | |                     | +----------------------------------------------+ |               
+| | list.                                        | |                     +--------------------------------------------------+               
+| | status: net-new                              | |                                                                                        
+| | owner: needs_owner                           | |                                                                                        
+| | due: needs_date                              | |                                                                                        
+| | link: no matching work item                  | |                                                                                        
+| | review: action 2 -> approve | edit | dismiss | |                                                                                        
+| +----------------------------------------------+ |                                                                                        
++--------------------------------------------------+                                                                                        
++--------------------------------------------------------------- Next steps ---------------------------------------------------------------+
+| Follow-up draft:                                                                                                                         |
+| LT Sync follow-up                                                                                                                        |
+| - alice by 2026-06-01: Confirm UD mitigation plan with leadership. (WI:101)                                                              |
+| - owner/date needed: Send readiness recap to the broader launch list.                                                                    |
+|                                                                                                                                          |
+| Apply choices: approve | edit | dismiss                                                                                                  |
+| Closure packet: programs/acme/publications/acme/meeting_close/lt-sync-123.txt                                                            |
+| ADO proposal: programs/acme/publications/acme/ado_proposals/meeting-action-lt-sync-123.json                                              |
+| HTML artifact: programs/acme/publications/acme/meeting_close/lt-sync-123.html                                                            |
+| Teams draft: programs/acme/publications/acme/meeting_close/lt-sync-123.teams.md                                                          |
++------------------------------------------------------------------------------------------------------------------------------------------+

@@ -1,0 +1,119 @@
+{
+  "entity_links": [],
+  "event_orphan_links": [],
+  "event_shadow_links": [
+    {
+      "event_id": "01JGWEJJ00KVHVG5SHDWNAET2Q",
+      "field_name": "risk.status",
+      "shadowed_by": "01JKS4WE00ME4ER37QHZAF5TYW"
+    },
+    {
+      "event_id": "01KEJK7S00PD2FTBGTMJ6NYCY4",
+      "field_name": "decision.decision_text",
+      "shadowed_by": "01KEJK7S00PD2FTBGTMJ6NYCY5"
+    },
+    {
+      "event_id": "01KEJK7S00PD2FTBGTMJ6NYCY4",
+      "field_name": "decision.status",
+      "shadowed_by": "01KEJK7S00PD2FTBGTMJ6NYCY5"
+    }
+  ],
+  "field_locks": [],
+  "gaps": [],
+  "proj_assumption": [],
+  "proj_commitment": [],
+  "proj_decision": [
+    {
+      "decided_by": "[\"operator\"]",
+      "decision_id": "decision:d1",
+      "decision_text": "Ship Gen9 after storage and compliance signoff",
+      "derived_from_event_ids": "[\"01KEJK7S00PD2FTBGTMJ6NYCY4\", \"01KEJK7S00PD2FTBGTMJ6NYCY5\"]",
+      "forum": null,
+      "made_at": "2025-03-01T00:00:00+00:00",
+      "min_confidence": "source_authoritative",
+      "min_temporal_confidence": "exact",
+      "status": "revised",
+      "superseded_by_decision_id": null,
+      "title": "Launch scope"
+    }
+  ],
+  "proj_deliverable": [],
+  "proj_dependency": [],
+  "proj_incident": [],
+  "proj_knowledge_article": [],
+  "proj_kpi": [],
+  "proj_kpi_series": [],
+  "proj_milestone": [
+    {
+      "completed_on": null,
+      "date_revision_count": 0,
+      "derived_from_event_ids": "[\"01JKS4WE00ME4ER37QHZAF5TYX\"]",
+      "milestone_id": "milestone:m1",
+      "min_confidence": "source_authoritative",
+      "min_temporal_confidence": "exact",
+      "name": "Gen9 GA",
+      "original_target_date": "2025-09-30",
+      "status": "on_track",
+      "target_date": "2025-09-30",
+      "workstream_id": null
+    },
+    {
+      "completed_on": null,
+      "date_revision_count": 1,
+      "derived_from_event_ids": "[\"01KEJK7S00PD2FTBGTMJ6NYCY3\"]",
+      "milestone_id": "milestone:m2",
+      "min_confidence": "operator_confirmed",
+      "min_temporal_confidence": "exact",
+      "name": null,
+      "original_target_date": null,
+      "status": "stub",
+      "target_date": "2021-10-15",
+      "workstream_id": null
+    }
+  ],
+  "proj_phase": [],
+  "proj_playbook": [],
+  "proj_program": [
+    {
+      "charter_event_id": null,
+      "current_phase_id": null,
+      "derived_from_event_ids": "[]",
+      "min_confidence": null,
+      "min_temporal_confidence": null,
+      "program_id": "acme",
+      "sub_programs": "[]"
+    }
+  ],
+  "proj_published_artifact": [],
+  "proj_risk": [
+    {
+      "closed_at": null,
+      "closure_reason": null,
+      "derived_from_event_ids": "[\"01JGWEJJ00KVHVG5SHDWNAET2Q\", \"01JKS4WE00ME4ER37QHZAF5TYW\"]",
+      "likelihood": null,
+      "min_confidence": "source_authoritative",
+      "min_temporal_confidence": "exact",
+      "owner_person_id": null,
+      "raised_at": "2025-01-05T00:00:00+00:00",
+      "risk_id": "risk:r1",
+      "severity": "high",
+      "status": "active",
+      "title": "Storage launch risk",
+      "workstream_id": null
+    }
+  ],
+  "proj_schedule_baseline": [],
+  "proj_sku_generation": [],
+  "proj_workstream": [],
+  "projection_meta": [
+    {
+      "as_of": null,
+      "coverage_earliest": "2021-06-01T00:00:00+00:00",
+      "coverage_latest": "2025-03-20T00:00:00+00:00",
+      "event_watermark": "01KEJK7S00PD2FTBGTMJ6NYCY3",
+      "knowledge_as_of": null,
+      "projector_version": "2",
+      "schema_version": "1"
+    }
+  ]
+}

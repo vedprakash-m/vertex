@@ -1,0 +1,67 @@
+{% extends "base.email.j2" %}
+
+{% block content %}
+<a id="health"></a>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 12px 0; border:1px solid #E5E7EB; background-color:#FFFFFF;">
+  <tr>
+    <td style="padding:14px 16px 12px 16px;">
+      <p style="margin:0 0 6px 0; font-size:12px; line-height:1.4; font-weight:600; letter-spacing:0.05em; text-transform:uppercase; color:#6B7280;">Daily Digest</p>
+      {% if health %}
+      <p style="margin:0 0 6px 0; font-size:16px; line-height:1.4; font-weight:600; color:#111827;">{{ health.overall_risk | risk_icon }} {{ health.overall_risk | risk_label }}</p>
+      <p style="margin:0 0 6px 0; font-size:13px; line-height:1.5; color:#4B5563;">
+        {% if health.delta_direction == "improved" %}Improved from last issue{% elif health.delta_direction == "degraded" %}Degraded from last issue{% else %}No change from last issue{% endif %}
+      </p>
+      {% endif %}
+        <p style="margin:0; font-size:12px; line-height:1.5; color:#6B7280;">Issue {{ edition.issue_number }} · Data as of {{ edition.ado_data_as_of | format_datetime }}</p>
+    </td>
+  </tr>
+</table>
+
+<a id="changes"></a>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 12px 0; border:1px solid #E5E7EB; background-color:#FFFFFF;">
+  <tr>
+    <td style="padding:14px 16px 12px 16px;">
+      <p style="margin:0 0 6px 0; font-size:12px; line-height:1.4; font-weight:600; letter-spacing:0.05em; text-transform:uppercase; color:#6B7280;">Change Summary</p>
+      <p style="margin:0; font-size:14px; line-height:1.5; color:#111827;">{{ delta_counts.new }} new · {{ delta_counts.closed }} closed · {{ delta_counts.risk_up + delta_counts.risk_down }} risk changes · {{ delta_counts.eta }} ETA shifts</p>
+      {% if visible_delta_rows %}
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:10px 0 0 0;">
+        {% for row in visible_delta_rows %}
+        <tr>
+          <td style="padding:0 0 6px 0; font-size:13px; line-height:1.5; color:#111827;">
+            <span style="font-weight:600; color:#374151; text-transform:uppercase; font-size:11px; letter-spacing:0.04em;">{{ row.label }}</span>
+            <span style="color:#111827;"> {{ row.title }}</span>{% if row.detail %}<span style="color:#4B5563;"> — {{ row.detail }}</span>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </table>
+      {% if delta_rows | length > visible_delta_rows | length %}
+      <p style="margin:0; font-size:12px; line-height:1.5; color:#6B7280;">{{ visible_delta_rows | length }} of {{ delta_rows | length }} changes shown</p>
+      {% endif %}
+      {% endif %}
+      {% if changes_url %}
+      <p style="margin:8px 0 0 0; font-size:12px; line-height:1.5;"><a href="{{ changes_url }}" style="color:#2563EB; text-decoration:underline;">View changed items in ADO →</a></p>
+      {% endif %}
+    </td>
+  </tr>
+</table>
+
+{% if top_items %}
+<a id="top-3"></a>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 12px 0; border:1px solid #E5E7EB; background-color:#FFFFFF;">
+  <tr>
+    <td style="padding:14px 16px 8px 16px; font-size:12px; line-height:1.4; font-weight:600; letter-spacing:0.05em; text-transform:uppercase; color:#6B7280;">Top 3 Summary</td>
+  </tr>
+  {% for item in top_items %}
+  <tr>
+    <td style="padding:0 16px 10px 16px; font-size:13px; line-height:1.5; color:#111827;">
+      <p style="margin:0;">{{ item.item_type | top_item_icon }} {{ item.text }}</p>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+{% endblock %}
+
+{% block footer %}
+{% include "partials/provenance_footer.j2" %}
+{% endblock %}

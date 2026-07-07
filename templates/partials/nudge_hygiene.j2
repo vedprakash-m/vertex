@@ -1,0 +1,75 @@
+{% if deadline_label %}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 16px 0; background-color:#FEF3C7; border:1px solid #FCD34D;">
+  <tr>
+    <td style="padding:12px 16px; font-size:13px; line-height:1.5; color:#92400E;">
+      <strong>Action needed by {{ deadline_label }}</strong><br/>
+      Please refresh the items below by {{ deadline_label }} so the weekly newsletter reflects current state.
+    </td>
+  </tr>
+</table>
+{% endif %}
+{% if snapshot_fallback %}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 16px 0; background-color:#FFF7ED; border:1px solid #FB923C;">
+  <tr>
+    <td style="padding:10px 16px; font-size:12px; line-height:1.5; color:#7C2D12;">
+      <strong>Data note:</strong> Live ADO fetch returned no data today. Item data is from the last confirmed snapshot and may be a few days old. Comment freshness checks are paused.
+    </td>
+  </tr>
+</table>
+{% endif %}
+
+{% if item_rows %}
+<p style="margin:0 0 12px 0;">Hi {{ recipient_name }},</p>
+<p style="margin:0 0 12px 0;">The following ADO items need an update.</p>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 12px 0;">
+  <tr>
+    <td style="padding:8px 8px 8px 0; border-bottom:1px solid #E5E7EB; font-size:12px; font-weight:600; color:#374151;">ADO ID</td>
+    <td style="padding:8px 8px 8px 0; border-bottom:1px solid #E5E7EB; font-size:12px; font-weight:600; color:#374151;">Title</td>
+    <td style="padding:8px 8px 8px 0; border-bottom:1px solid #E5E7EB; font-size:12px; font-weight:600; color:#374151;">Workstream</td>
+    <td style="padding:8px 8px 8px 0; border-bottom:1px solid #E5E7EB; font-size:12px; font-weight:600; color:#374151;">Business Days</td>
+    <td style="padding:8px 0; border-bottom:1px solid #E5E7EB; font-size:12px; font-weight:600; color:#374151;">Missing Fields</td>
+  </tr>
+  {% for row in item_rows %}
+  <tr>
+    <td style="padding:8px 8px 8px 0; border-bottom:1px solid #F3F4F6; vertical-align:top;"><a href="{{ row.item_url }}">WI:{{ row.work_item_id }}</a>{% if row.is_overdue %}<br><span style="background:#FEF3C7; color:#92400E; font-size:9px; font-weight:700; padding:1px 4px; border-radius:2px; text-transform:uppercase;">OVERDUE</span>{% endif %}</td>
+    <td style="padding:8px 8px 8px 0; border-bottom:1px solid #F3F4F6; vertical-align:top;">{{ row.title }}</td>
+    <td style="padding:8px 8px 8px 0; border-bottom:1px solid #F3F4F6; vertical-align:top;">{{ row.workstream_name or 'Unmapped' }}</td>
+    <td style="padding:8px 8px 8px 0; border-bottom:1px solid #F3F4F6; vertical-align:top;">{{ row.freshness_business_days }}</td>
+    <td style="padding:8px 0; border-bottom:1px solid #F3F4F6; vertical-align:top;">{{ row.missing_fields_display }}</td>
+  </tr>
+  {% if row.call_to_action %}
+  <tr>
+    <td colspan="5" style="padding:6px 0 10px 0; border-bottom:1px solid #F3F4F6; font-size:12px; color:#4B5563;">
+      WI:{{ row.work_item_id }} - {{ row.call_to_action }}
+    </td>
+  </tr>
+  {% endif %}
+  {% endfor %}
+</table>
+{% endif %}
+
+{% if coverage_rows %}
+<p style="margin:0 0 12px 0;">The following field-quality coverage alerts were detected for your stale ADO items.</p>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 12px 0;">
+  {% for row in coverage_rows %}
+  <tr>
+    <td style="padding:8px 0; border-bottom:1px solid #F3F4F6; color:#4B5563;">{{ row.summary_text }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+{% if suppressed_items %}
+<p style="margin:0 0 12px 0;">The following items were suppressed by the active owner cooldown window.</p>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 12px 0;">
+  {% for entry in suppressed_items %}
+  <tr>
+    <td style="padding:8px 0; border-bottom:1px solid #F3F4F6; color:#4B5563;">{{ entry }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+{% if not item_rows and not coverage_rows and not suppressed_items %}
+<p style="margin:0;">No hygiene findings were generated for this draft.</p>
+{% endif %}

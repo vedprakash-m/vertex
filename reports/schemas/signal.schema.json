@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Vertex Signal Record",
+  "type": "object",
+  "required": [
+    "id",
+    "ts",
+    "src",
+    "prog",
+    "ws",
+    "refs",
+    "text",
+    "raw_ref",
+    "conf",
+    "meta",
+    "thread_id"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "src": {
+      "type": "string",
+      "minLength": 1
+    },
+    "prog": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ws": {
+      "type": ["string", "null"],
+      "minLength": 1
+    },
+    "refs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "raw_ref": {
+      "type": ["string", "null"]
+    },
+    "conf": {
+      "type": "string",
+      "enum": ["high", "medium", "low", "none"]
+    },
+    "meta": {
+      "type": ["object", "null"],
+      "additionalProperties": {
+        "type": ["string", "integer", "number", "boolean", "null"]
+      }
+    },
+    "thread_id": {
+      "type": ["string", "null"]
+    }
+  },
+  "additionalProperties": true
+}

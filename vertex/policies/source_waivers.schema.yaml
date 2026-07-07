@@ -1,0 +1,121 @@
+# Source Waivers Schema (D-32 / spec §SourceWaivers)
+#
+# Materialized governance file describing what a valid
+# `programs/<program_id>/source_waivers.yaml` must look like. The runtime
+# (`src/core/source_waiver_store.py::load_source_waivers`) parses program
+# files against this contract; `src/core/source_waiver_store.py::load_source_waivers_schema`
+# parses THIS file and returns a structured `SourceWaiverSchema` so
+# `vertex doctor --source-waivers` can verify programs against the same
+# contract and surface expired / malformed waivers.
+#
+# This file is the canonical schema for source-waiver documents and is
+# referenced by:
+#   * src/core/source_waiver_store.py (runtime)
+#   * src/commands/doctor_checks/source_waiver_checks.py (doctor sub-check)
+#   * specs/debt.md (D-32 closeout)
+#   * specs/vertex-prd.md (FR-SG-03)
+#   * specs/vertex-ux-spec.md (QG-SG-01 surface)
+#
+# Format: declarative schema with type + cardinality metadata for each
+# field. Validators MUST consume this file rather than hard-coding the
+# contract; this is the standing "no program literals in core" extension
+# of the keywords-in-config pattern.
+
+schema_version: "1.0"
+schema_id: vertex.source_waivers
+description: >
+  Program-level governance document that records approved waivers of
+  QG-SG-01 (source-health) for a specific source/contract role. Each
+  waiver is owned, dated, and time-bounded so that waivers cannot
+  silently bypass the gate. Used by 'vertex doctor --source-waivers'
+  and by confirm-time force-past logic.
+
+location:
+  program: programs/<program_id>/source_waivers.yaml
+  notes: >
+    The file is OPTIONAL. Absent file == no waivers == the gate runs
+    strict. Doctor surfaces the absence as INFO, not as a failure.
+
+top_level:
+  - field: schema_version
+    type: string
+    required: true
+    allowed_values: ["1.0"]
+    description: "Schema major.minor version. Loaders MUST reject anything other than '1.0'."
+
+  - field: waivers
+    type: list
+    required: false
+    default: []
+    item: SourceWaiver
+    description: "Ordered list of approved waivers; ordered by 'granted' (oldest first) at author time."
+
+waiver_fields:
+  - field: contract_id
+    type: string
+    required: true
+    description: "Slice/source contract id the waiver applies to (e.g. 'acme.kusto.os_compliance')."
+
+  - field: role
+    type: string
+    required: true
+    allowed_values: ["telemetry", "advisory", "unbacked"]
+    description: >
+      Source role being waived. Must be one of:
+        * 'telemetry'    -- slice contract telemetry role (slice_contracts.yaml)
+        * 'advisory'     -- slice contract advisory role (slice_contracts.yaml)
+        * 'unbacked'     -- required-but-unbound role that QG-SG-01 cannot waive;
+                            the schema still allows declaring intent, but
+                            the gate will treat this waiver as non-forceable.
+
+  - field: owner
+    type: string
+    required: true
+    pattern: "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
+    description: "Email-shaped contact that owns this waiver. Used for accountability and expiry follow-up."
+
+  - field: reason
+    type: string
+    required: true
+    min_length: 8
+    description: "Free-text reason. Short labels are rejected to force a real justification."
+
+  - field: granted
+    type: date
+    required: true
+    format: YYYY-MM-DD
+    description: "Effective date of the waiver (inclusive)."
+
+  - field: expires
+    type: date
+    required: true
+    format: YYYY-MM-DD
+    invariants:
+      - "expires >= granted"
+    description: >
+      Expiry date (inclusive). Doctor surfaces waivers whose 'expires'
+      is in the past as warnings; confirm-time logic still considers
+      them active until the run is re-anchored.
+
+invariants:
+  - id: SW-INV-1
+    description: "A waiver's 'expires' MUST be on or after 'granted'."
+    enforcement: "schema + runtime + doctor"
+
+  - id: SW-INV-2
+    description: "'owner' MUST be email-shaped (RFC-5321 local-part@domain.tld)."
+    enforcement: "schema + runtime + doctor"
+
+  - id: SW-INV-3
+    description: "'role' MUST be in the allowed set."
+    enforcement: "schema + runtime + doctor"
+
+example_minimal:
+  schema_version: "1.0"
+  waivers:
+    - contract_id: acme.kusto.os_compliance
+      role: telemetry
+      owner: "owner@example.com"
+      reason: "Telemetry pipeline upgrade completes 2026-07-01; deferring to align rollout."
+      granted: 2026-05-01
+      expires: 2026-07-31

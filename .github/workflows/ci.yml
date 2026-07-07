@@ -1,0 +1,339 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        # BL-C5: requirements.txt is retired. This installs the base package
+        # plus every optional extra (dev/ai/ai-local/m365/kusto/render) --
+        # the same superset requirements.txt + `pip install -e .` used to
+        # provide, now declared in one place (pyproject.toml).
+        #
+        # setuptools upgrade (2026-07-27, first real CI run): pyproject.toml's
+        # [build-system].requires only governs the ephemeral, discarded build
+        # isolation env `pip install -e .` uses to build the wheel -- it does
+        # NOT touch the setuptools already present in THIS target environment,
+        # which actions/setup-python@v5 ships pre-installed (79.0.1 as of this
+        # writing, vulnerable per PYSEC-2026-3447). Must upgrade it here
+        # explicitly or the pip-audit step below fails on every run.
+        run: |
+          python -m pip install --upgrade pip setuptools
+          python -m pip install -e ".[dev,ai,ai-local,m365,kusto,render]"
+
+      - name: Supply-chain audit (WS-7 — pip-audit against OSV)
+        # Runs `pip-audit --strict` against the currently installed
+        # environment (no --requirement flag; requirements.txt is retired).
+        # `--strict` makes pip-audit exit non-zero on ANY known
+        # vulnerability. OSV is the default keyless vulnerability service;
+        # no GitHub/GHSA token is needed for public PRs. Findings block the
+        # PR (continue-on-error is intentionally false).
+        run: |
+          python scripts/run_pip_audit.py --strict
+
+      - name: Regenerate CLI reference (keeps specs/cli-reference.md current for this Python version)
+        run: python scripts/generate_cli_reference.py
+
+      - name: Run full test suite
+        run: python -m pytest tests/ -q
+
+      - name: Run contract suite
+        run: python -m pytest tests/contracts/ -q
+
+      - name: Run golden smoke
+        run: python -m pytest tests/golden/test_report_pipeline_snapshots.py -q
+
+      - name: Run coverage baseline suite
+        run: python -m pytest tests/unit/test_observability.py tests/unit/test_commands_gather.py tests/contracts/test_ai_safety_pipeline.py tests/contracts/test_import_boundaries.py -q --cov=src --cov-report=json:output/__coverage_tmp.json
+
+      - name: Check coverage baseline
+        run: python scripts/check_coverage_baseline.py output/__coverage_tmp.json
+
+      - name: Type check (mypy)
+        run: python -m mypy src/ --ignore-missing-imports --no-error-summary
+
+      - name: Spec drift guard (WS-9)
+        run: python scripts/check_spec_drift.py
+
+  extras-offline-wheel-check:
+    # BL-C5 (specs/backlog.md §7): pydantic-core (openai's transitive
+    # dependency, isolated into the `ai` extra so a base install never
+    # needs it) is a compiled/Rust wheel. If no prebuilt wheel exists for a
+    # given platform/Python combination, `pip install` silently falls back
+    # to a source build requiring a Rust toolchain most CI runners and
+    # locked-down operator machines don't have. This job proves (1) a base
+    # install genuinely never pulls in pydantic (the isolation this extras
+    # split exists for), and (2) every optional extra installs from
+    # prebuilt wheels only (`--only-binary=:all:`), so a missing-wheel
+    # regression is caught here rather than by a user's fresh install.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Base package installs wheel-only, no extras
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --only-binary=:all: -e .
+
+      - name: Confirm base install does not pull in pydantic (extras isolation)
+        run: |
+          python -c "
+          import importlib.util
+          import sys
+          if importlib.util.find_spec('pydantic') is not None:
+              print('FAIL: pydantic importable from a base-only install; the ai extra is not actually isolated.', file=sys.stderr)
+              sys.exit(1)
+          print('OK: pydantic is not present in a base-only install.')
+          "
+
+      - name: Every optional extra installs wheel-only
+        run: |
+          set -euo pipefail
+          for extra in ai ai-local m365 kusto render dev; do
+            echo "--- pip install --only-binary=:all: -e .[$extra] ---"
+            python -m pip install --only-binary=:all: -e ".[$extra]"
+          done
+
+  fresh-clone-smoke:
+    # WS-16: fresh-clone → pip install → vertex --help → setup → doctor → migrate round-trip.
+    # Runs on a CLEAN clone with NO programs/ data. The repo is checked out fresh by
+    # `actions/checkout@v4` (no cache), then we `pip install`, then we run the
+    # smoke chain against a temporary programs-root that the job wipes on exit.
+    # Any failure here = a real user hitting `pip install` + `vertex ...` for the
+    # first time WILL fail. This is the ratchet that makes "does it install
+    # cleanly on a new machine?" a contract, not a vibe.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: "Install dependencies (no cache, mirrors a fresh pip install)"
+        # BL-C5: requirements.txt is retired; extras replace the old
+        # `-r requirements.txt` + `pip install -e .` two-step.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,ai,ai-local,m365,kusto,render]"
+
+      - name: "Confirm vertex entry point is installed and CLI loads"
+        # `--help` must exit 0; any non-zero exit means the Typer tree is broken
+        # (typer/click pins, missing app.command, broken app.add_typer).
+        run: |
+          set -euo pipefail
+          vertex --help
+          vx --help
+          python -c "from cli import app; import typer; typer.main.get_command(app)"
+
+      - name: Set up isolated test program on a temp programs-root
+        # We deliberately do NOT touch the repo's `programs/` (program data is gitignored
+        # and operator-managed; CI must not depend on it). Instead we materialize
+        # the tracked `_templates/example_tpm` into a tmpdir and point every
+        # command at it via VERTEX_PROGRAMS_ROOT.
+        run: |
+          set -euo pipefail
+          TMP_PROGRAMS=$(mktemp -d -t vertex-fresh-clone-XXXXXX)
+          echo "TMP_PROGRAMS=${TMP_PROGRAMS}" >> "$GITHUB_ENV"
+          # Copy the tracked template into our isolated root
+          mkdir -p "${TMP_PROGRAMS}/_templates"
+          cp -R programs/_templates/example_tpm "${TMP_PROGRAMS}/_templates/"
+          python scripts/setup_test_program.py \
+            --template example_tpm \
+            --program freshclone \
+            --programs-root "${TMP_PROGRAMS}"
+          # Sanity: the program materialized
+          test -f "${TMP_PROGRAMS}/freshclone/program.yaml"
+          test -f "${TMP_PROGRAMS}/freshclone/.bootstrapped"
+          python - "${TMP_PROGRAMS}" <<'PY'
+          import sys
+          from pathlib import Path
+          import yaml
+
+          program_dir = Path(sys.argv[1]) / "freshclone"
+          for path, field in (
+              (program_dir / "program.yaml", "id"),
+              (program_dir / "editions" / "example_tpm_weekly.yaml", "program_id"),
+          ):
+              data = yaml.safe_load(path.read_text(encoding="utf-8"))
+              data[field] = "freshclone"
+              path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+          PY
+          # And is gitignored-friendly: nothing leaked into the real programs/
+          # directory in the repo working tree.
+          if [ -d programs/freshclone ]; then
+            echo "FAIL: setup_test_program wrote into the repo's programs/ — should be isolated" >&2
+            exit 1
+          fi
+
+      - name: "vertex doctor against the fresh-clone program"
+        # Completed unhealthy reports are expected without credentials; crashes are not.
+        env:
+          VERTEX_PROGRAMS_ROOT: ${{ env.TMP_PROGRAMS }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+
+          if not os.environ.get("VERTEX_PROGRAMS_ROOT"):
+              raise SystemExit("FAIL: doctor smoke requires an isolated programs root")
+          result = subprocess.run(
+              ["vertex", "doctor", "--edition", "example_tpm_weekly", "--format", "json"],
+              capture_output=True, text=True, timeout=600, check=False,
+          )
+          print(result.stdout, end="")
+          print(result.stderr, end="", file=sys.stderr)
+          if result.returncode not in (0, 1):
+              raise SystemExit(f"FAIL: unexpected doctor exit code {result.returncode}")
+          if "Traceback (most recent call last):" in result.stdout + result.stderr:
+              raise SystemExit("FAIL: doctor emitted a Python traceback")
+          payload = json.loads(result.stdout)
+          if not isinstance(payload, dict) or payload.get("edition") != "example_tpm_weekly":
+              raise SystemExit("FAIL: doctor did not report the requested edition")
+          checks = payload.get("checks")
+          if not isinstance(checks, list) or not checks or any(
+              not isinstance(check, dict) or check.get("status") not in ("ok", "warn", "info", "fail", "error")
+              for check in checks
+          ):
+              raise SystemExit("FAIL: doctor did not complete its checks")
+          failures = sum(check["status"] in ("fail", "error") for check in checks)
+          warnings = sum(check["status"] == "warn" for check in checks)
+          if (
+              type(payload.get("failures")) is not int or payload["failures"] != failures
+              or type(payload.get("warnings")) is not int or payload["warnings"] != warnings
+              or payload.get("overall") != ("UNHEALTHY" if failures else "HEALTHY")
+              or result.returncode != int(failures > 0)
+          ):
+              raise SystemExit("FAIL: doctor exit code and health summary disagree")
+          print(f"Doctor smoke completed: {len(checks)} checks, {failures} failed, {warnings} warned")
+          subprocess.run(["vertex", "doctor", "--help"], timeout=600, check=True)
+          PY
+
+      - name: "Schema-major migration round-trip: file to sqlite to file (with rollback)"
+        # Spec WS-16 acceptance: "schema-major migration round-trips with
+        # rollback; existing programs upgrade cleanly." We seed a tiny file
+        # history, migrate file->sqlite, verify counts, then file->sqlite
+        # rollback path, then a final dry-run to prove idempotence.
+        # VERTEX_PROGRAMS_ROOT env var points all vertex commands at the
+        # isolated tmpdir so they never touch the repo's programs/ directory.
+        env:
+          VERTEX_PROGRAMS_ROOT: ${{ env.TMP_PROGRAMS }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          """Seed a deterministic file-side history on the fresh program and
+          prove the file->sqlite round-trip is lossless."""
+          import json, os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          programs_root = Path(os.environ["TMP_PROGRAMS"])
+          prog = programs_root / "freshclone"
+          captured_at = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc).isoformat()
+
+          # Seed two signal files (file-backend history)
+          (prog / "signals").mkdir(parents=True, exist_ok=True)
+          for i, sig in enumerate([
+              {"id": "smoke-1", "kind": "smoke", "captured_at": captured_at, "payload": {"i": 1}},
+              {"id": "smoke-2", "kind": "smoke", "captured_at": captured_at, "payload": {"i": 2}},
+          ], start=1):
+              (prog / "signals" / f"{sig['id']}.json").write_text(json.dumps(sig, indent=2), encoding="utf-8")
+
+          # Seed one review decision (file-backend review log)
+          reviews = prog / "reviews.jsonl"
+          with reviews.open("a", encoding="utf-8") as fh:
+              fh.write(json.dumps({
+                  "signal_id": "smoke-1",
+                  "decision": "accept",
+                  "captured_at": captured_at,
+              }) + "\n")
+
+          print(f"OK: seeded {len(list((prog/'signals').glob('*.json')))} signals + 1 review")
+          PY
+
+          # Round-trip 1: file -> sqlite (with --dry-run, then real)
+          echo "--- file -> sqlite (dry run) ---"
+          vertex migrate --program freshclone --to sqlite --dry-run
+          echo "--- file -> sqlite (real) ---"
+          vertex migrate --program freshclone --to sqlite
+
+          # Verify program.yaml was updated AND the sqlite store was written
+          python - <<'PY'
+          import os, yaml
+          from pathlib import Path
+          programs_root = Path(os.environ["TMP_PROGRAMS"])
+          prog_yaml = yaml.safe_load((programs_root / "freshclone" / "program.yaml").read_text(encoding="utf-8"))
+          assert prog_yaml.get("storage_backend") == "sqlite", f"storage_backend not flipped: {prog_yaml}"
+          sqlite_path = programs_root / "freshclone" / "vertex_store.sqlite3"
+          assert sqlite_path.exists(), f"expected {sqlite_path} to exist after migration"
+          print(f"OK: storage_backend=sqlite + vertex_store.sqlite3 exists ({sqlite_path.stat().st_size} bytes)")
+          PY
+
+          # Round-trip 2: sqlite -> file (rollback path)
+          echo "--- sqlite -> file (rollback) ---"
+          vertex migrate --program freshclone --to file
+
+          # Verify program.yaml was flipped back AND the sqlite store was removed
+          python - <<'PY'
+          import os, yaml
+          from pathlib import Path
+          programs_root = Path(os.environ["TMP_PROGRAMS"])
+          prog_yaml = yaml.safe_load((programs_root / "freshclone" / "program.yaml").read_text(encoding="utf-8"))
+          # After file rollback, the key MUST be gone or explicitly 'file'
+          backend = prog_yaml.get("storage_backend")
+          assert backend in (None, "file"), f"rollback did not remove sqlite backend: {backend!r}"
+          sqlite_path = programs_root / "freshclone" / "vertex_store.sqlite3"
+          assert not sqlite_path.exists(), f"sqlite store should be removed on rollback; still at {sqlite_path}"
+          # And the file-side history is still there (round-trip is lossless)
+          assert (programs_root / "freshclone" / "signals" / "smoke-1.json").exists()
+          assert (programs_root / "freshclone" / "reviews.jsonl").exists()
+          print("OK: rollback removed sqlite store + kept file history intact")
+          PY
+
+      - name: Analytics rebuild (--rebuild-analytics) round-trip
+        # The second migration verb is --rebuild-analytics (a no-migration
+        # in-place rebuild of the per-program analytics projection). We
+        # re-flip to sqlite, then run --rebuild-analytics, then assert the
+        # projection is non-empty. This is the third leg of the round-trip
+        # contract: migration -> projection rebuild -> still readable.
+        env:
+          VERTEX_PROGRAMS_ROOT: ${{ env.TMP_PROGRAMS }}
+        run: |
+          set -euo pipefail
+          vertex migrate --program freshclone --to sqlite
+          vertex migrate --program freshclone --rebuild-analytics
+          vertex migrate --program freshclone --to file
+          echo "OK: --rebuild-analytics round-trip closed"
+
+      - name: Tidy up isolated test program
+        if: always()
+        # Even if a step failed we should not leave the temp dir on the
+        # runner; actions/checkout is by default clean: true on the
+        # next job, but a cross-runner leak would be ugly. GITHUB_ENV
+        # already points us at the path.
+        run: |
+          rm -rf "${TMP_PROGRAMS:-/tmp/vertex-fresh-clone-noop}" || true

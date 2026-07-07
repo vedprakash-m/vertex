@@ -1,0 +1,141 @@
+# Issue {{ issue_number }} — {{ issue_date_label }}
+
+## Health
+{% if health_rows %}
+{% for row in health_rows %}
+- {{ row.dimension_name }}: {{ row.risk | risk_icon }} {{ row.summary }}
+{% endfor %}
+{% else %}
+- No scorecard dimensions are available for this issue.
+{% endif %}
+
+---
+
+## Top Risks
+{% if top_risk_rows %}
+{% for row in top_risk_rows %}
+- {{ row.text }}{% if row.risk is not none %} — {{ row.risk | risk_icon }}{% endif %}{% if row.delta_text %} ({{ row.delta_text }}){% endif %}{% if row.work_item_id is not none %} ← #{{ row.work_item_id }}{% endif %}
+{% endfor %}
+{% else %}
+- No Top 3 entries are currently recorded in overrides.yaml.
+{% endif %}
+
+---
+
+## What Changed This Week
+{% for row in change_rows %}
+- {{ row.text }}
+{% endfor %}
+
+---
+
+## Data
+{% for row in data_rows %}
+- {{ row.label }}: {{ row.value }}
+{% endfor %}
+
+---
+
+{% if telemetry_summary %}
+## Telemetry
+- {{ telemetry_summary }}{% if telemetry_confidence %} ({{ telemetry_confidence }} confidence){% endif %}
+
+---
+{% endif %}
+
+## Charter
+{% if charter_lines %}
+{% for line in charter_lines %}
+- {{ line }}
+{% endfor %}
+{% else %}
+- No charter context is currently authored for this program.
+{% endif %}
+
+---
+
+## Milestones
+{% if milestone_rows %}
+{% for row in milestone_rows %}
+- {{ row.name }} — {{ row.status }} · target {{ row.target_date_label }} · {{ row.detail }}{% if row.source_document_key %} · source {{ row.source_document_key }}{% if row.approval_event_id %} · approval {{ row.approval_event_id }}{% endif %}{% endif %}
+{% endfor %}
+{% else %}
+- No milestone assessments are available for this issue.
+{% endif %}
+
+---
+
+## Open Issues
+{% if open_issue_rows %}
+{% for row in open_issue_rows %}
+- {% if row.href %}[{{ row.title }}]({{ row.href }}){% else %}{{ row.title }}{% endif %} — {{ row.detail }}
+{% endfor %}
+{% else %}
+- No active issues are currently projected.
+{% endif %}
+
+---
+
+## Open Risks
+{% if open_risk_rows %}
+{% for row in open_risk_rows %}
+- {{ row.title }} — {{ row.detail }}
+{% endfor %}
+{% else %}
+- No open risk-register entries are currently tracked.
+{% endif %}
+
+---
+
+## Dependency Proposals
+{% if dependency_proposal_rows %}
+{% for row in dependency_proposal_rows %}
+- {{ row.title }} — {{ row.detail }}
+{% endfor %}
+{% else %}
+- No pending dependency proposals are currently tracked.
+{% endif %}
+
+---
+
+## Key Decisions
+{% if key_decision_rows %}
+{% for row in key_decision_rows %}
+- {{ row.title }} — {{ row.detail }}
+{% endfor %}
+{% else %}
+- No key decisions are currently tracked.
+{% endif %}
+
+---
+
+## Key Assumptions
+{% if key_assumption_rows %}
+{% for row in key_assumption_rows %}
+- {{ row.title }} — {{ row.detail }}
+{% endfor %}
+{% else %}
+- No key assumptions are currently tracked.
+{% endif %}
+
+---
+
+## Open Asks
+{% if open_ask_rows %}
+{% for row in open_ask_rows %}
+- {{ row.title }} — {{ row.detail }}
+{% endfor %}
+{% else %}
+- No open asks are currently tracked.
+{% endif %}
+
+---
+
+## Closed Asks
+{% if closed_ask_rows %}
+{% for row in closed_ask_rows %}
+- {{ row.title }} — {{ row.detail }}
+{% endfor %}
+{% else %}
+- No asks were newly closed since the last confirmed issue.
+{% endif %}

@@ -1,0 +1,118 @@
+{
+  "_schema": "rev_ground_truth.v1",
+  "_description": "Human-labeled ground-truth facts for nova_mail_fixture.json. Keyed by message_id. Do NOT embed in the fixture file.",
+  "_fixture": "nova_mail_fixture.json (10 messages)",
+  "_fact_count": 14,
+
+  "AAMkNOVA001": [
+    {
+      "fact_id": "GT-001-1",
+      "event_type": "deployment.completed",
+      "description": "Gen9 BIOS AP rollout deployment completed successfully at 2:00 PM PT on 2026-06-20",
+      "key_excerpt": "The Gen9 BIOS AP rollout deployment completed successfully at 2:00 PM PT on 2026-06-20"
+    },
+    {
+      "fact_id": "GT-001-2",
+      "event_type": "commitment.date_set",
+      "description": "Broad fleet push scheduled for 2026-06-30",
+      "key_excerpt": "schedule the broad fleet push for 2026-06-30"
+    }
+  ],
+
+  "AAMkNOVA002": [
+    {
+      "fact_id": "GT-002-1",
+      "event_type": "deployment.rollback",
+      "description": "KRDMA driver update rolled back on Gen8 fleet after Sev2 latency spikes",
+      "key_excerpt": "We rolled back the KRDMA driver update on the Gen8 fleet"
+    },
+    {
+      "fact_id": "GT-002-2",
+      "event_type": "incident.severity_changed",
+      "description": "Sev2 IcM #78-4421 opened for KRDMA latency spikes",
+      "key_excerpt": "Sev2 latency spikes were observed across 3 clusters"
+    }
+  ],
+
+  "AAMkNOVA003": [
+    {
+      "fact_id": "GT-003-1",
+      "event_type": "commitment.date_set",
+      "description": "Gen9 broad fleet target date slipped to 2026-07-15",
+      "key_excerpt": "agreed to slip the Gen9 broad fleet target date to 2026-07-15"
+    },
+    {
+      "fact_id": "GT-003-2",
+      "event_type": "ownership.changed",
+      "description": "Priya now owns Gen9 bringup coordination",
+      "key_excerpt": "Priya will now own the Gen9 bringup coordination going forward"
+    },
+    {
+      "fact_id": "GT-003-3",
+      "event_type": "incident.severity_changed",
+      "description": "KRDMA IcM #78-4421 escalated from Sev2 to Sev1 by CAB at 16:45",
+      "key_excerpt": "The Sev2 on KRDMA (IcM #78-4421) was escalated to Sev1 by the CAB at 16:45"
+    },
+    {
+      "fact_id": "GT-003-4",
+      "event_type": "commitment.date_set",
+      "description": "Jordan to finalize Gen7 phase-out risk mitigation runbook by 2026-06-25",
+      "key_excerpt": "Jordan will finalize the risk mitigation runbook for the Gen7 phase-out by 2026-06-25"
+    }
+  ],
+
+  "AAMkNOVA004": [
+    {
+      "fact_id": "GT-004-1",
+      "event_type": "milestone.completed",
+      "description": "Gen7 BIOS AP phase-out milestone complete; all 4,891 devices migrated or decommissioned",
+      "key_excerpt": "The Gen7 BIOS AP phase-out milestone is now complete. All 4,891 Gen7 devices have been migrated or decommissioned"
+    }
+  ],
+
+  "AAMkNOVA005": [
+    {
+      "fact_id": "GT-005-1",
+      "event_type": "ownership.changed",
+      "description": "Sam Chen replaces David Kim as BIOS AP shared service lead",
+      "key_excerpt": "Sam Chen will take over as lead for the BIOS AP shared service, replacing David Kim"
+    }
+  ],
+
+  "AAMkNOVA006": [
+    {
+      "fact_id": "GT-006-1",
+      "event_type": "incident.severity_changed",
+      "description": "KRDMA IcM #78-4421 downgraded from Sev1 to Sev3 after mitigation at 21:00 UTC",
+      "key_excerpt": "the KRDMA Sev1 (IcM #78-4421) has been mitigated and downgraded to Sev3 at 21:00 UTC"
+    }
+  ],
+
+  "AAMkNOVA007": [],
+
+  "AAMkNOVA008": [],
+
+  "AAMkNOVA009": [
+    {
+      "fact_id": "GT-009-1",
+      "event_type": "risk.blocking_milestone",
+      "description": "Partner silicon validation dependency blocking Gen9 P0 milestone; sign-off pushed to no earlier than July 10",
+      "key_excerpt": "dependency on the partner silicon validation team is now blocking our P0 milestone"
+    },
+    {
+      "fact_id": "GT-009-2",
+      "event_type": "commitment.date_set",
+      "description": "Triparty alignment call scheduled for 2026-06-24",
+      "key_excerpt": "scheduling a triparty call with silicon validation, BIOS AP, and NOVA leads for 2026-06-24"
+    }
+  ],
+
+  "AAMkNOVA010": [
+    {
+      "fact_id": "GT-010-1",
+      "event_type": "deployment.completed",
+      "description": "Gen9 broad fleet push completed; all 12,400 production devices on new BIOS AP firmware",
+      "key_excerpt": "the Gen9 broad fleet push went through without a hitch this afternoon. All 12,400 production devices are now on the new BIOS AP firmware"
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "confidence": "medium",
+  "evidence_refs": [
+    "sig-1",
+    "sig-2"
+  ],
+  "key_findings": [
+    "Target date slipped twice within one week.",
+    "No confirming recovery signal is present."
+  ],
+  "open_questions": [
+    "Who owns the servicing validation exit criteria?"
+  ],
+  "overall_assessment": "Networking remains the gating lane until servicing validation closes.",
+  "prompt_version": "synthesizer.v1",
+  "proposed_risk": "high",
+  "recommended_actions": [
+    "Lock the servicing validation owner and date."
+  ],
+  "workstream_id": "networking"
+}

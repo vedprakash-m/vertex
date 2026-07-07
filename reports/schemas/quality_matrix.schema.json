@@ -1,0 +1,237 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Vertex Quality Matrix",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "edition",
+    "issue_number",
+    "generated_at",
+    "continuity",
+    "summary",
+    "sections",
+    "slices"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "edition": {
+      "type": "string",
+      "minLength": 1
+    },
+    "issue_number": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "continuity": {
+      "type": "object",
+      "required": ["baseline_available", "previous_issue_number", "state", "statement"],
+      "properties": {
+        "baseline_available": {
+          "type": "boolean"
+        },
+        "previous_issue_number": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "state": {
+          "type": "string",
+          "enum": ["continuation_ready", "baseline_missing"]
+        },
+        "statement": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "summary": {
+      "type": "object",
+      "required": ["healthy", "degraded", "stale", "under_specified", "manual_only"],
+      "properties": {
+        "healthy": {"type": "integer", "minimum": 0},
+        "degraded": {"type": "integer", "minimum": 0},
+        "stale": {"type": "integer", "minimum": 0},
+        "under_specified": {"type": "integer", "minimum": 0},
+        "manual_only": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "sections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["section_id", "quality_state", "status", "slice_ids", "issues"],
+        "properties": {
+          "section_id": {"type": "string", "minLength": 1},
+          "quality_state": {
+            "type": "string",
+            "enum": ["healthy", "degraded", "stale", "under_specified", "manual_only"]
+          },
+          "status": {
+            "type": "string",
+            "enum": ["green", "yellow", "red", "manual_only"]
+          },
+          "slice_ids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1}
+          },
+          "issues": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1}
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "slices": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "slice_id",
+          "scorecard_name",
+          "title",
+          "section",
+          "workstream",
+          "primary_owner",
+          "source_of_truth",
+          "assignment_mode",
+          "quality_state",
+          "status",
+          "newsletter_surface",
+          "assigned_item_count",
+          "assigned_item_ids",
+          "saved_queries",
+          "ado_query_url",
+          "required_fields",
+          "missing_fields",
+          "stale_item_ids",
+          "failing_conditions",
+          "issues",
+          "checks",
+          "telemetry"
+        ],
+        "properties": {
+          "slice_id": {"type": "string", "minLength": 1},
+          "scorecard_name": {"type": "string", "minLength": 1},
+          "title": {"type": "string", "minLength": 1},
+          "section": {"type": "string", "minLength": 1},
+          "workstream": {"type": "string", "minLength": 1},
+          "primary_owner": {"type": "string", "minLength": 1},
+          "support_tpm": {"type": ["string", "null"]},
+          "source_of_truth": {
+            "type": "string",
+            "enum": ["ado_primary", "telemetry_primary", "hybrid", "manual_only"]
+          },
+          "assignment_mode": {"type": "string", "enum": ["auto", "manual_only"]},
+          "quality_state": {
+            "type": "string",
+            "enum": ["healthy", "degraded", "stale", "under_specified", "manual_only"]
+          },
+          "status": {
+            "type": "string",
+            "enum": ["green", "yellow", "red", "manual_only"]
+          },
+          "newsletter_surface": {"type": "string", "minLength": 1},
+          "assigned_item_count": {"type": "integer", "minimum": 0},
+          "assigned_item_ids": {
+            "type": "array",
+            "items": {"type": "integer", "minimum": 1}
+          },
+          "saved_queries": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1}
+          },
+          "ado_query_url": {"type": "string"},
+          "required_fields": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1}
+          },
+          "missing_fields": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {"type": "integer", "minimum": 1}
+            }
+          },
+          "stale_item_ids": {
+            "type": "array",
+            "items": {"type": "integer", "minimum": 1}
+          },
+          "failing_conditions": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1}
+          },
+          "issues": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1}
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "outcome", "detail"],
+              "properties": {
+                "name": {"type": "string", "minLength": 1},
+                "outcome": {"type": "string", "enum": ["pass", "warn", "fail", "skip"]},
+                "detail": {"type": "string", "minLength": 1}
+              },
+              "additionalProperties": false
+            }
+          },
+          "telemetry": {
+            "type": ["object", "null"],
+            "required": [
+              "query_id",
+              "cluster",
+              "database",
+              "expected_grain",
+              "freshness_sla_hours",
+              "confidence_threshold",
+              "fallback_behavior",
+              "cross_check_rules",
+              "validates_slice",
+              "status",
+              "query_success",
+              "last_successful_fetch_at",
+              "confidence",
+              "contradiction"
+            ],
+            "properties": {
+              "query_id": {"type": "string", "minLength": 1},
+              "cluster": {"type": "string"},
+              "database": {"type": "string"},
+              "expected_grain": {"type": "string", "minLength": 1},
+              "freshness_sla_hours": {"type": "integer", "minimum": 1},
+              "confidence_threshold": {"type": "string", "enum": ["high", "medium", "low"]},
+              "fallback_behavior": {"type": "string", "minLength": 1},
+              "cross_check_rules": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1}
+              },
+              "validates_slice": {"type": "boolean"},
+              "status": {
+                "type": "string",
+                "enum": ["supporting", "degraded", "absent", "not_evaluated"]
+              },
+              "query_success": {"type": ["boolean", "null"]},
+              "last_successful_fetch_at": {"type": ["string", "null"], "format": "date-time"},
+              "confidence": {"type": ["string", "null"]},
+              "contradiction": {"type": ["string", "null"]}
+            },
+            "additionalProperties": false
+          },
+          "remediation_template": {"type": ["string", "null"]}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

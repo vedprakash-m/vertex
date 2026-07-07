@@ -1,0 +1,21 @@
+Trust Calibration - acme
+Generated: 2026-05-20T12:00:00+00:00
+Window: last 10 issue(s)
+
+Editorial
+---------
+- Blurb generation: override=0.1000 | calibration=0.9000 | samples=3 | trust=L2
+- Exec summary generation: override=0.3000 | calibration=0.7000 | samples=3 | trust=L1
+
+Claim extraction
+----------------
+- Claim extraction: agreement=0.9000 | avg_difference=1.00 | samples=10 | calibration_samples=12 | trust=L2 | last=2026-05-12T12:00:00+00:00
+
+Autonomy
+--------
+- Decision ask escalation: accepted=10/10 (100%) | level=l3 | trust=L3 | last=2026-05-10T08:00:00+00:00
+- Decision ask nudge: accepted=3/3 (100%) | level=l2 | trust=L2 | last=2026-05-15T09:00:00+00:00
+
+Salience-calibration bridge
+--------------------------
+- repair: slip_modifier=+0.18 | attention_weight=0.31 | Forecast slip pressure is high while editorial attention remains low. Review salience weighting and calibration inputs together.

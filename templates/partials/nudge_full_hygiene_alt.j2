@@ -1,0 +1,370 @@
+{# Full Hygiene Heat-map — single-section program ADO readiness (alt layout) #}
+{# Columns: ADO# · Title · Owner · Hygiene (📅 Date · 📌 Committed · 🎯 Risk — required for readiness, bold with a divider · 📋 Reason · 💬 Update · 📰 Status — muted "FYI" signals, informational only) · Stale · Fix this (plain-English gap tags, auto-generated from the 3 required checks; "✓ Ready" when all pass) #}
+{# Column header row repeats after every workstream sub-header (so it stays nearby during long scrolls), except immediately under a section's own top header, to avoid a redundant back-to-back repeat for the first group. #}
+{# Within each section: all leader portfolios' active (non-empty) workstream groups render first, then a single consolidated "no open items" block for fully-quiet portfolios at the end — rather than interleaving active tables with empty-portfolio one-liners leader by leader. #}
+
+{%- macro check(val) -%}
+  {%- if val is none -%}<span style="color:#9CA3AF;">—</span>
+  {%- elif val -%}<span style="color:#16A34A;font-weight:600;">✓</span>
+  {%- else -%}<span style="color:#DC2626;font-weight:600;">✗</span>
+  {%- endif -%}
+{%- endmacro -%}
+
+{%- macro stale_badge(days, threshold) -%}
+  {%- if days < threshold -%}
+    <span style="color:#16A34A;font-size:11px;">{{ days }}d</span>
+  {%- elif days <= (threshold * 2) -%}
+    <span style="color:#D97706;font-size:11px;font-weight:600;">{{ days }}d</span>
+  {%- else -%}
+    <span style="color:#DC2626;font-size:11px;font-weight:700;">{{ days }}d</span>
+  {%- endif -%}
+{%- endmacro -%}
+
+{#- The single "no thinking required" column: states the exact action, or confirms
+    ready. Auto-generated from the 3 scorecard checks only (recent comment / status
+    keyword never appear here — they're informational and never block readiness,
+    per explicit direction to stop docking teams for a missing comment/keyword).
+    Never requires the reader to cross-reference the icon grid or a legend. -#}
+{%- macro fix_this(row) -%}
+  {%- if row.is_ready -%}
+    <span style="color:#16A34A;font-weight:600;font-size:11px;white-space:nowrap;">&#10003; Ready</span>
+    {#- Ready items still get a muted, non-blocking nudge when an FYI-only signal
+        is missing, so hygiene gaps aren't hidden just because they don't count
+        against the scorecard. Grey (not red) signals "good practice", not "fix required". -#}
+    {%- if row.has_recent_comment == false %}<span style="display:inline-block;padding:1px 6px;margin-left:4px;border-radius:8px;font-size:10px;font-weight:500;background-color:#F3F4F6;color:#6B7280;white-space:nowrap;">💬 No recent comment</span>{% endif -%}
+    {%- if row.comment_has_status_keyword == false %}<span style="display:inline-block;padding:1px 6px;margin-left:4px;border-radius:8px;font-size:10px;font-weight:500;background-color:#F3F4F6;color:#6B7280;white-space:nowrap;">📰 No status keyword</span>{% endif -%}
+  {%- else -%}
+    {%- set ns = namespace(gaps=[]) -%}
+    {%- if not row.has_valid_target_date %}{% set ns.gaps = ns.gaps + ["Target date"] %}{% endif -%}
+    {%- if not row.has_committed %}{% set ns.gaps = ns.gaps + ["Commitment"] %}{% endif -%}
+    {%- if not row.has_risk_assessment %}{% set ns.gaps = ns.gaps + ["Risk assessment"] %}{% endif -%}
+    {%- for gap in ns.gaps -%}
+      <span style="display:inline-block;padding:1px 6px;margin:0 3px 2px 0;border-radius:8px;font-size:10px;font-weight:600;background-color:#FEE2E2;color:#991B1B;white-space:nowrap;">{{ gap }}</span>
+    {%- endfor -%}
+  {%- endif -%}
+{%- endmacro -%}
+
+{%- macro column_header_row() -%}
+  <tr style="background:#E5E7EB;">
+    <td style="padding:4px 6px;color:#374151;font-weight:600;white-space:nowrap;">ADO#</td>
+    <td style="padding:4px 6px;color:#374151;font-weight:600;">Title</td>
+    <td style="padding:4px 6px;color:#374151;font-weight:600;white-space:nowrap;">Owner</td>
+    <td style="padding:4px 6px;color:#374151;font-weight:600;text-align:center;white-space:nowrap;" title="Required for readiness: 📅 Date set &amp; future · 📌 Committed · 🎯 Risk assessment. FYI only, never blocks readiness: 📋 Risk reason (if not On Track) · 💬 Recent comment · 📰 Status keyword in comment">
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 auto;border-collapse:collapse;">
+        <tr>
+          <td style="width:20px;text-align:center;font-size:12px;font-weight:700;color:#1F2937;">📅</td>
+          <td style="width:20px;text-align:center;font-size:12px;font-weight:700;color:#1F2937;">📌</td>
+          <td style="width:20px;text-align:center;font-size:12px;font-weight:700;color:#1F2937;border-right:2px solid #D1D5DB;">🎯</td>
+          <td style="width:16px;text-align:center;font-size:11px;color:#9CA3AF;padding-left:4px;">📋</td>
+          <td style="width:16px;text-align:center;font-size:11px;color:#9CA3AF;">💬</td>
+          <td style="width:16px;text-align:center;font-size:11px;color:#9CA3AF;">📰</td>
+        </tr>
+        <tr>
+          <td colspan="3" style="text-align:center;font-size:8px;font-weight:400;color:#6B7280;">required</td>
+          <td colspan="3" style="text-align:center;font-size:8px;font-weight:400;color:#9CA3AF;">fyi only</td>
+        </tr>
+      </table>
+    </td>
+    <td style="padding:4px 6px;color:#374151;font-weight:600;text-align:center;">Stale</td>
+    <td style="padding:4px 6px;color:#374151;font-weight:600;text-align:left;white-space:nowrap;">Fix this</td>
+  </tr>
+{%- endmacro -%}
+
+{%- macro group_header_and_rows(group, section, skip_header=false) -%}
+  <tr style="background:#DBEAFE;">
+    <td colspan="6" style="padding:5px 8px;font-size:11px;color:#1E3A8A;font-weight:600;">
+      ▶&nbsp;{{ group.workstream_name | e }}
+      {% if group.workstream_owners %}
+        <span style="color:#4B5563;font-weight:400;">&nbsp;·&nbsp;Owner:&nbsp;
+          {% for owner in group.workstream_owners %}
+            {%- if not loop.first %}&nbsp;/&nbsp;{% endif -%}
+            {% if owner.email %}
+              <a href="mailto:{{ owner.email }}" style="color:#2563EB;text-decoration:none;">@{{ owner.alias | e }}</a>
+            {% else %}
+              @{{ owner.alias | e }}
+            {% endif %}
+          {% endfor %}
+        </span>
+      {% endif %}
+    </td>
+  </tr>
+  {% if not skip_header %}{{ column_header_row() }}{% endif %}
+  {% for row in group.rows %}
+  <tr style="background:{% if row.is_ready == false %}#FFF8F8{% elif loop.index is odd %}#FFFFFF{% else %}#F9FAFB{% endif %};">
+    <td style="padding:3px 6px;white-space:nowrap;">
+      <a href="{{ row.item_url }}" style="color:#2563EB;text-decoration:none;font-size:11px;">{{ row.work_item_id }}</a>
+      {% if row.is_overdue %}<span style="color:#DC2626;" title="OVERDUE in registry">⚠</span>{% endif %}
+    </td>
+    <td style="padding:3px 6px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{{ row.title_original | e }}">
+      {{ row.title | e }}
+    </td>
+    <td style="padding:3px 6px;white-space:nowrap;">
+      {% if row.owner_email %}
+        <a href="mailto:{{ row.owner_email }}" style="color:#2563EB;text-decoration:none;">@{{ row.owner_alias or row.owner_email | e }}</a>
+      {% elif row.owner_alias %}
+        @{{ row.owner_alias | e }}
+      {% else %}
+        <span style="color:#9CA3AF;">—</span>
+      {% endif %}
+    </td>
+    <td style="padding:3px 6px;text-align:center;white-space:nowrap;">
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 auto;border-collapse:collapse;">
+        <tr>
+          <td style="width:20px;text-align:center;font-size:11px;">{{ check(row.has_valid_target_date) }}</td>
+          <td style="width:20px;text-align:center;font-size:11px;">{{ check(row.has_committed) }}</td>
+          <td style="width:20px;text-align:center;font-size:11px;border-right:2px solid #E5E7EB;">{{ check(row.has_risk_assessment) }}</td>
+          <td style="width:16px;text-align:center;font-size:10px;opacity:0.5;padding-left:4px;">{{ check(row.has_risk_reason) }}</td>
+          <td style="width:16px;text-align:center;font-size:10px;opacity:0.5;">{{ check(row.has_recent_comment) }}</td>
+          <td style="width:16px;text-align:center;font-size:10px;opacity:0.5;">{{ check(row.comment_has_status_keyword) }}</td>
+        </tr>
+      </table>
+    </td>
+    <td style="padding:3px 6px;text-align:center;">{{ stale_badge(row.stale_business_days, section.stale_threshold_days) }}</td>
+    <td style="padding:3px 6px;text-align:left;white-space:nowrap;">{{ fix_this(row) }}</td>
+  </tr>
+  {% endfor %}
+{%- endmacro -%}
+
+{%- macro empty_descriptor(group, section) -%}
+  {%- if group.closed_count > 0 -%}
+    {{ group.workstream_name | e }} ({{ group.closed_count }} closed)
+  {%- elif section.scope_tags -%}
+    {{ group.workstream_name | e }} (no {{ section.scope_tags | join(" / ") | e }}-tagged items)
+  {%- else -%}
+    {{ group.workstream_name | e }} (verify scope)
+  {%- endif -%}
+{%- endmacro -%}
+
+<!-- Call to action -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;border-collapse:collapse;">
+  <tr>
+    <td style="background:#EFF6FF;border:1px solid #BFDBFE;padding:12px 16px;border-radius:6px;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;font-size:12px;color:#1E3A5F;">
+      <p style="margin:0 0 8px 0;font-weight:700;font-size:13px;">What's in this report:</p>
+      <ol style="margin:0 0 10px 0;padding-left:20px;line-height:1.6;">
+        {% for section in sections %}
+        <li>
+          <strong>{% if sections | length > 1 %}Section {{ section.letter }} — {% endif %}{{ section.title }}:</strong>
+          {% if section.description %}{{ section.description | e }}. {% endif %}
+          Ensure each item has a current <strong>Target Date</strong>{% if section.deadline %} (by {% if section.deadline_uncertain %}~{% endif %}{{ section.deadline }}){% endif %},
+          is marked <strong>Committed</strong>, and has a <strong>Risk Assessment</strong> set.
+        </li>
+        {% endfor %}
+      </ol>
+      <p style="margin:0 0 8px 0;color:#374151;"><strong>Action needed from all assignees:</strong> For each item you own, (1) confirm or update the Target Date, (2) set Commitment status, (3) set Risk Assessment. Items already marked <span style="color:#16A34A;font-weight:600;">✓ Ready</span> need no action. A recent status comment (within {{ comment_window_days }} days) is good practice but is informational only — it will never hold an item back from being marked ready.</p>
+      {#- A section's tag vocabulary comes from either scope_tags (source=registry
+          sections with an aspirational required tag, e.g. SampleFleet's SampleFleetM1) or
+          selection_tags (source=tag sections, where the tag(s) already define
+          membership). Never hardcode a program's tag
+          name here -- read whichever one this section actually has. #}
+      {%- set _tag_sections = sections | selectattr('scope_tags') | list %}
+      {%- set _sel_tag_sections = sections | rejectattr('scope_tags') | selectattr('selection_tags') | list %}
+      {%- set _all_tag_sections = _tag_sections + _sel_tag_sections %}
+      {%- if _all_tag_sections %}
+      <p style="margin:0 0 4px 0;color:#374151;"><strong>Action needed from workstream leads:</strong></p>
+      <ul style="margin:0 0 8px 0;padding-left:20px;line-height:1.6;color:#374151;">
+        {%- for _s in _all_tag_sections %}
+        {%- set _etags = _s.scope_tags if _s.scope_tags else _s.selection_tags %}
+        <li><strong>{{ _s.title }}:</strong> ensure the right items carry the <strong>{{ _etags | join(" / ") | e }}</strong> tag — nothing missing, nothing extra.</li>
+        {%- endfor %}
+      </ul>
+      {%- endif %}
+      <p style="margin:0;color:#374151;font-style:italic;">Don't see a team, workstream, or item that should be here — or does a workstream below say "no items tracked" when it shouldn't? Contact the program manager (see footer) so we can correct the registry.</p>
+    </td>
+  </tr>
+</table>
+
+{% if leadership_rollup %}
+{% set total_items = leadership_rollup | sum(attribute='total_count') %}
+{% set total_compliant = leadership_rollup | sum(attribute='compliant_count') %}
+{% set overall_pct = ((((100 * total_compliant / total_items) | round) | int) if total_items > 0 else 0) %}
+{% set overall_bg = '#D1FAE5' if overall_pct >= 80 else ('#FEF3C7' if overall_pct >= 50 else '#FEE2E2') %}
+{% set overall_fg = '#065F46' if overall_pct >= 80 else ('#92400E' if overall_pct >= 50 else '#991B1B') %}
+{% set tile_count = leadership_rollup | length %}
+{% set tile_width = ((100 / tile_count) | round(2)) if tile_count > 0 else 100 %}
+<!-- Leadership rollup: ADO hygiene compliance scorecard by accountable leader -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;border-collapse:collapse;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;">
+  <tr>
+    <td style="background:#1E3A5F;padding:8px 12px;border-radius:4px 4px 0 0;">
+      <span style="color:#FFFFFF;font-weight:700;font-size:13px;">Leadership Rollup — ADO Hygiene Compliance</span>
+      <span style="color:#93C5FD;font-size:11px;margin-left:12px;">{{ tile_count }} team{{ 's' if tile_count != 1 else '' }}</span>
+    </td>
+  </tr>
+  <tr>
+    <td style="background:{{ overall_bg }};padding:8px 12px;border:1px solid #DBEAFE;border-top:none;font-size:12px;color:{{ overall_fg }};">
+      <strong>Program-wide ADO hygiene compliance: {{ overall_pct }}%</strong>
+      <span style="opacity:0.85;margin-left:6px;">— {{ total_compliant }} of {{ total_items }} items compliant across {{ tile_count }} teams</span>
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:8px 0 0 0;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:separate;border-spacing:0;table-layout:fixed;">
+        <tr>
+          {% for leader in leadership_rollup %}
+          {% set no_scope = leader.total_count == 0 and leader.closed_count == 0 %}
+          {% set fully_closed = leader.total_count == 0 and leader.closed_count > 0 %}
+          {% if no_scope %}
+            {% set band_bg = '#FEE2E2' %}
+            {% set band_fg = '#991B1B' %}
+            {% set band_border = '#DC2626' %}
+          {% elif fully_closed %}
+            {% set band_bg = '#DBEAFE' %}
+            {% set band_fg = '#1E3A8A' %}
+            {% set band_border = '#2563EB' %}
+          {% else %}
+            {% set band_bg = '#D1FAE5' if leader.percent_compliant >= 80 else ('#FEF3C7' if leader.percent_compliant >= 50 else '#FEE2E2') %}
+            {% set band_fg = '#065F46' if leader.percent_compliant >= 80 else ('#92400E' if leader.percent_compliant >= 50 else '#991B1B') %}
+            {% set band_border = '#16A34A' if leader.percent_compliant >= 80 else ('#D97706' if leader.percent_compliant >= 50 else '#DC2626') %}
+          {% endif %}
+          <td width="{{ tile_width }}%" style="width:{{ tile_width }}%;padding:0 {% if not loop.last %}4px{% else %}0{% endif %} 0 0;vertical-align:top;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;height:100%;border-collapse:collapse;background:{{ band_bg }};border-top:3px solid {{ band_border }};">
+              <tr>
+                <td style="padding:8px 4px 7px 4px;text-align:center;">
+                  <p style="margin:0 0 2px 0;font-size:10px;font-weight:700;line-height:1.2;color:{{ band_fg }};">
+                    {% if leader.leader_email %}<a href="mailto:{{ leader.leader_email }}" style="color:{{ band_fg }};text-decoration:none;">{{ leader.leader_display_name | e }}</a>{% else %}{{ leader.leader_display_name | e }}{% endif %}
+                  </p>
+                  <p style="margin:0 0 4px 0;font-size:9px;line-height:1.2;color:{{ band_fg }};opacity:0.8;">{{ leader.workstream_names | join(", ") | e }}</p>
+                  {% if no_scope %}
+                  <p style="margin:0;font-size:11px;font-weight:700;line-height:1.2;color:{{ band_fg }};">⚠ No items tracked</p>
+                  {% elif fully_closed %}
+                  <p style="margin:0;font-size:16px;font-weight:700;line-height:1;color:{{ band_fg }};">✓ {{ leader.closed_count }} closed</p>
+                  {% else %}
+                  <p style="margin:0;font-size:16px;font-weight:700;line-height:1;color:{{ band_fg }};">{{ leader.compliant_count }}/{{ leader.total_count }}</p>
+                  {% endif %}
+                </td>
+              </tr>
+            </table>
+          </td>
+          {% endfor %}
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>
+{% endif %}
+
+<!-- Legend -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;border-collapse:collapse;">
+  <tr>
+    <td style="background:#F3F4F6;padding:8px 12px;border-radius:4px;font-size:11px;color:#374151;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;">
+      <strong>Fix this</strong> column already tells you exactly what to do per item — the icon grid below is for reference only.
+      <br>
+      <strong>Required (bold, left of the divider):</strong>&nbsp;📅 Date set &amp; future&nbsp;&nbsp;📌 Committed&nbsp;&nbsp;🎯 Risk assessment — all 3 must be ✓ for an item to be marked <span style="color:#16A34A;font-weight:600;">✓ Ready</span>.
+      <br>
+      <strong>FYI only (muted, right of the divider — never blocks readiness):</strong>&nbsp;📋 Risk reason (if ≠ On Track)&nbsp;&nbsp;💬 Recent comment&nbsp;&nbsp;📰 Status keyword in comment
+      <br>
+      <span style="color:#16A34A;font-weight:600;">✓</span> = present&nbsp;&nbsp;
+      <span style="color:#DC2626;font-weight:600;">✗</span> = missing&nbsp;&nbsp;
+      <span style="color:#9CA3AF;">—</span> = N/A or not evaluated&nbsp;&nbsp;&nbsp;&nbsp;
+      <strong>Stale</strong> = business days since last update
+    </td>
+  </tr>
+</table>
+
+{% for section in sections %}
+{% if section.query_error %}
+<!-- Section {{ section.letter }}: {{ section.title }} — DEGRADED -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:20px;border-collapse:collapse;">
+  <tr>
+    <td style="background:#FEF2F2;padding:8px 12px;border:1px solid #FECACA;border-radius:4px;font-size:11px;color:#991B1B;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;">
+      <strong>{% if sections | length > 1 %}Section {{ section.letter }} — {% endif %}{{ section.title }} [DATA UNAVAILABLE]</strong><br>
+      Query error: {{ section.error_details | default("data unavailable") | e }}. Retry or check ADO connectivity.
+    </td>
+  </tr>
+</table>
+{% elif section.total_count > 0 %}
+<!-- Section: {{ section.title }} -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:4px;border-collapse:collapse;">
+  <tr>
+    <td style="background:#1E3A5F;padding:8px 12px;border-radius:4px 4px 0 0;">
+      <span style="color:#FFFFFF;font-weight:700;font-size:13px;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;">
+        {% if sections | length > 1 %}Section {{ section.letter }} — {% endif %}{{ section.title }}
+      </span>
+      <span style="color:#93C5FD;font-size:11px;margin-left:12px;">
+        {{ section.total_count }} items&nbsp;·&nbsp;{{ section.stale_count }} stale (≥{{ section.stale_threshold_days }}d)&nbsp;·&nbsp;{{ section.ready_count }} ready
+        {%- if section.unknown_ready_count > 0 %}&nbsp;·&nbsp;{{ section.unknown_ready_count }} unknown{%- endif %}
+      </span>
+    </td>
+  </tr>
+</table>
+
+<!-- Summary stats -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:8px;border-collapse:collapse;">
+  <tr>
+    <td style="background:#F0F4FF;padding:6px 12px;border:1px solid #DBEAFE;border-radius:0 0 4px 4px;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;font-size:11px;color:#374151;">
+      <strong>Summary:</strong>&nbsp;
+      {% if section.no_date_count > 0 %}<span style="background:#FEE2E2;color:#DC2626;font-weight:600;padding:1px 6px;border-radius:3px;margin-right:4px;">📅 No date: {{ section.no_date_count }}</span>{% endif %}
+      {% if section.past_due_count > 0 %}<span style="background:#FEE2E2;color:#991B1B;font-weight:600;padding:1px 6px;border-radius:3px;margin-right:4px;">🚨 Past due: {{ section.past_due_count }}</span>{% endif %}
+      {% if section.beyond_deadline_count > 0 and section.deadline %}<span style="background:#FEF3C7;color:#92400E;font-weight:600;padding:1px 6px;border-radius:3px;margin-right:4px;">⏰ Beyond {% if section.deadline_uncertain %}~{% endif %}{{ section.deadline }}: {{ section.beyond_deadline_count }}</span>{% endif %}
+      {% if section.stale_summary_count > 0 %}<span style="background:#F3E8FF;color:#6B21A8;font-weight:600;padding:1px 6px;border-radius:3px;margin-right:4px;">🕒 Stale &gt;{{ section.stale_summary_threshold_days }}d: {{ section.stale_summary_count }}</span>{% endif %}
+      {% if section.comment_fetch_skipped > 0 %}<span style="background:#F3F4F6;color:#6B7280;padding:1px 6px;border-radius:3px;margin-right:4px;">💬 Budget: {{ section.comment_fetch_skipped }} not evaluated</span>{% endif %}
+      {% if section.no_date_count == 0 and section.past_due_count == 0 and section.beyond_deadline_count == 0 and section.stale_summary_count == 0 and section.total_count > 0 %}<span style="color:#16A34A;font-weight:600;">✓ All items have valid dates and are fresh</span>{% endif %}
+      {% if section.total_count == 0 and not section.query_error %}<span style="color:#6B7280;">No items in this section.</span>{% endif %}
+      {% if section.elevated_from_other_pools > 0 %}<span style="color:#6B7280;font-size:10px;margin-left:8px;">ℹ️ {{ section.elevated_from_other_pools }} item(s) here also appear in other section pools — they will move to lower sections once this section's cooldown expires.</span>{% endif %}
+    </td>
+  </tr>
+</table>
+
+{% if section.leader_portfolios %}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:20px;border-collapse:collapse;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;font-size:11px;">
+  {{ column_header_row() }}
+
+  {%- set ns = namespace(first_group_rendered=false) %}
+  {% for portfolio in section.leader_portfolios %}
+  {% for group in portfolio.active_groups %}
+    {{ group_header_and_rows(group, section, skip_header=not ns.first_group_rendered) }}
+    {%- set ns.first_group_rendered = true %}
+  {% endfor %}
+
+  {% if portfolio.empty_groups and not portfolio.is_fully_empty %}
+    <!-- Partially-active leader: small trailing note for the quiet remainder, de-escalated vs. the active rows above -->
+    <tr>
+      <td colspan="6" style="padding:4px 8px;background:#F9FAFB;color:#6B7280;font-size:10px;font-style:italic;">
+        Also tracked{% if portfolio.leader %} under {{ portfolio.leader.display_name | e }}{% endif %}, currently clear:
+        {% for g in portfolio.empty_groups %}
+          {%- if not loop.first %}, {% endif -%}
+          {{ empty_descriptor(g, section) }}
+        {%- endfor %}
+      </td>
+    </tr>
+  {% endif %}
+  {% endfor %}
+
+  {%- set _fully_empty_portfolios = section.leader_portfolios | selectattr('is_fully_empty') | selectattr('empty_groups') | list %}
+  {% if _fully_empty_portfolios %}
+  <!-- All fully-quiet leader portfolios grouped together at the end, instead of interleaved between active tables -->
+  <tr>
+    <td colspan="6" style="padding:5px 8px;background:#F3F4F6;color:#374151;font-size:10px;font-weight:700;">
+      No open items to review this week — workstreams verified clear:
+    </td>
+  </tr>
+  {% for portfolio in _fully_empty_portfolios %}
+    {%- set _all_delivered = (portfolio.empty_groups | selectattr('closed_count', 'equalto', 0) | list | length) == 0 %}
+    <tr>
+      <td colspan="6" style="padding:6px 8px;background:{{ '#F0FDF4' if _all_delivered else '#FFFBEB' }};color:{{ '#065F46' if _all_delivered else '#92400E' }};font-size:11px;">
+        {{ '✓' if _all_delivered else '⚠' }}&nbsp;
+        {%- if portfolio.leader %}<strong>{{ portfolio.leader.display_name | e }}</strong>&nbsp;—&nbsp;{% endif -%}
+        no open items across {{ portfolio.empty_groups | length }} workstream{{ 's' if portfolio.empty_groups | length != 1 else '' }}:
+        {% for g in portfolio.empty_groups %}
+          {%- if not loop.first %}, {% endif -%}
+          {{ empty_descriptor(g, section) }}
+        {%- endfor %}
+      </td>
+    </tr>
+  {% endfor %}
+  {% endif %}
+</table>
+
+{% else %}
+<p style="color:#6B7280;font-size:12px;margin:4px 0 20px 0;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;">
+  No items in this section.
+</p>
+{% endif %}
+{% endif %}
+
+{% endfor %}
+
+{% if degraded_section_ids %}
+<p style="font-size:11px;color:#991B1B;margin-top:8px;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;">
+  ⚠ Degraded sections: {{ degraded_section_ids | join(", ") }}. Data may be incomplete.
+</p>
+{% endif %}
