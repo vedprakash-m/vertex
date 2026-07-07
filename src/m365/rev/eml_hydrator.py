@@ -84,6 +84,13 @@ _MIN_BODY_CHARS = 10          # below this → metadata_only / quarantine as bod
 _MAX_MIME_DEPTH = 3
 _MAX_EML_BYTES = 10 * 1024 * 1024   # 10 MB per .eml (size guard + quarantine trigger)
 _LOW_UNIQUE_BODY_RATIO = 0.2        # provisional; calibrate after 10 cycles (RK-3)
+# Per-text-part guard: a single MIME text part larger than this is almost
+# certainly an attachment payload mislabeled as text/plain (e.g. a base64 blob)
+# or a pasted log dump — never the human-authored message body. Including it in
+# canonical_text trips the credential scanner (high-entropy base64 looks like an
+# Azure key) and wastes the LLM token budget. Hard cap; the body itself is
+# typically a few KB.
+_MAX_TEXT_PART_BYTES = 256 * 1024   # 256 KB per text/* part
 _DENY_CONTENT_TYPES = {"application/ms-tnef", "application/octet-stream"}
 _DENY_CONTENT_TYPE_PREFIX = "application/"
 _WINMAIL_CONTENT_TYPE = "application/ms-tnef"
@@ -159,7 +166,15 @@ def _walk_parts(
     text_parts: list[str],
     denied_types: list[str],
 ) -> None:
-    """Recursively walk MIME parts, collecting text and denied-content logs."""
+    """Recursively walk MIME parts, collecting text and denied-content logs.
+
+    Attachments are **always** excluded from ``canonical_text`` — by
+    ``Content-Disposition`` (not just content-type) — so a base64 attachment
+    payload mislabeled ``text/plain`` cannot leak into the canonical body, trip
+    the credential scanner, or consume the LLM token budget. A text part larger
+    than ``_MAX_TEXT_PART_BYTES`` is treated the same way (it is not a
+    human-authored body).
+    """
     if depth > _MAX_MIME_DEPTH:
         return
     content_type = msg.get_content_type()
@@ -168,10 +183,28 @@ def _walk_parts(
             if isinstance(part, email.message.Message):
                 _walk_parts(part, depth=depth + 1, text_parts=text_parts, denied_types=denied_types)
         return
+    # An attachment part is denied regardless of its declared content-type: real
+    # attachments carry Content-Disposition: attachment (or inline with a
+    # filename), and their decoded payload (often base64) must never reach the
+    # shield/extractor. This closes the false-positive credential-hit path where
+    # a text/plain-labeled attachment blob scanned as an Azure key.
+    disposition = (msg.get_content_disposition() or "").lower()
+    attached_filename = msg.get_filename()
+    is_attachment = disposition == "attachment" or (disposition == "inline" and bool(attached_filename))
+    if is_attachment:
+        denied_types.append(content_type or "attachment")
+        return
     if content_type == "text/plain":
-        text_parts.append(_decode_part(msg))
+        decoded = _decode_part(msg)
+        if len(decoded.encode("utf-8", errors="replace")) > _MAX_TEXT_PART_BYTES:
+            denied_types.append("text/plain:oversized")
+            return
+        text_parts.append(decoded)
     elif content_type == "text/html":
         raw_html = _decode_part(msg)
+        if len(raw_html.encode("utf-8", errors="replace")) > _MAX_TEXT_PART_BYTES:
+            denied_types.append("text/html:oversized")
+            return
         text_parts.append(_strip_html(raw_html))
     elif content_type == "message/rfc822":
         # Forwarded message — recurse into it.

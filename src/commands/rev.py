@@ -34,12 +34,32 @@ from src.core.models_v2 import REV_PROFILE_LEGACY_NL, REV_PROFILE_REV_VERIFIED, 
 from src.core.rev.entity_types import EntityType
 from src.core.rev.governor import BudgetLimits
 from src.core.rev.pipeline import RevPipelineDeps, run_rev_cycle
-from src.core.rev.prompt_shields import LocalOnlyPromptShields
+from src.core.rev.prompt_shields import LocalOnlyPromptShields, PromptShields
 from src.core.rev.query_planner import RetrievalIntent
 from src.m365.rev import FakeRevGraphClient, GraphMessage
 from src.core.rev.ports import CandidateEnumerator, ContentHydrator
 from src.m365.rev.eml_enumerator import EmlEnumerator
 from src.m365.rev.eml_hydrator import EmlHydrator
+
+
+def _resolve_shields() -> PromptShields:
+    """Construct the Prompt Shields for a REV cycle (BL-A1).
+
+    When Azure Content Safety is configured (``AZURE_CONTENT_SAFETY_ENDPOINT`` +
+    ``AZURE_CONTENT_SAFETY_KEY``), use ``AzurePromptShields`` so cycles can run
+    with ``shield_degrade=false`` and count toward the AG-3 authority ladder.
+    Otherwise fall back to ``LocalOnlyPromptShields`` (visible degrade — never
+    silent). This was hardcoded to local-only, which meant provisioning Azure CS
+    had no effect on ``shield_degrade``; that is fixed here.
+    """
+    try:
+        from src.m365.azure_prompt_shields import AzurePromptShields, load_azure_shield_config
+        config = load_azure_shield_config()
+        if config is not None:
+            return AzurePromptShields(config=config)
+    except Exception:
+        pass
+    return LocalOnlyPromptShields()
 from src.m365.rev.enumerators import CollectionSearchEnumerator, MailboxContext
 from src.m365.rev.hydrator import MailHydrator
 from src.m365.rev.ics_enumerator import IcsEnumerator
@@ -236,7 +256,7 @@ def rev_run(
         deps = RevPipelineDeps(
             enumerator=_enumerator,
             hydrator=_hydrator,
-            shields=LocalOnlyPromptShields(),
+            shields=_resolve_shields(),
             extractor=_extractor,
             verifier=_verifier,
         )
@@ -257,7 +277,7 @@ def rev_run(
         deps = RevPipelineDeps(
             enumerator=_enumerator,
             hydrator=_hydrator,
-            shields=LocalOnlyPromptShields(),
+            shields=_resolve_shields(),
             extractor=_extractor,
             verifier=_verifier,
         )
@@ -270,7 +290,7 @@ def rev_run(
         deps = RevPipelineDeps(
             enumerator=CollectionSearchEnumerator(graph, mailbox_ctx),
             hydrator=MailHydrator(graph, mailbox_ctx),
-            shields=LocalOnlyPromptShields(),
+            shields=_resolve_shields(),
             extractor=_extractor,
             verifier=_verifier,
         )
@@ -293,7 +313,7 @@ def rev_run(
         f"REV cycle {report.correlation_id}: staged={report.candidates_staged} "
         f"hydrated={report.hydrated} metadata_only={report.metadata_only} "
         f"quarantined={report.quarantined} stop={report.stop_category}"
-        + (" (shield degrade: local-only Prompt Shields)" if report.shield_degrade else ""),
+        + (" (shield degrade: Prompt Shields unavailable — see logs)" if report.shield_degrade else ""),
         err=True,
     )
     raise typer.Exit(code=0 if report.stop_category == "complete" else 1)
