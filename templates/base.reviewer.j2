@@ -1,0 +1,1441 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ title }} | Leadership Review</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --page-bg: #f3f4f6;
+      --page-accent-bg: #e5eefb;
+      --panel-bg: #ffffff;
+      --panel-border: #d1d5db;
+      --text-strong: #111827;
+      --text-muted: #4b5563;
+      --text-subtle: #6b7280;
+      --chip-bg: #e5e7eb;
+      --approved-bg: #dcfce7;
+      --approved-fg: #166534;
+      --pending-bg: #f3f4f6;
+      --pending-fg: #4b5563;
+      --changes-bg: #fef3c7;
+      --changes-fg: #92400e;
+      --rejected-bg: #fee2e2;
+      --rejected-fg: #991b1b;
+      --link: #1d4ed8;
+      --review-note-bg: rgba(255, 255, 255, 0.82);
+      --review-note-border: rgba(209, 213, 219, 0.9);
+      --status-bar-bg: rgba(255, 255, 255, 0.9);
+      --status-chip-border: rgba(148, 163, 184, 0.35);
+      --skipped-bg: #f9fafb;
+      --skipped-fg: #6b7280;
+      --skipped-border: #e5e7eb;
+      --pane-header-bg: rgba(249, 250, 251, 0.92);
+      --pane-header-border: #e5e7eb;
+      --frame-bg: #ffffff;
+      --surface-muted: #f8fafc;
+      --surface-border: #e5e7eb;
+      --surface-emphasis: #eef2ff;
+      --success-fg: #166534;
+      --vitality-track: #dbeafe;
+      --vitality-fill-start: #2563eb;
+      --vitality-fill-end: #16a34a;
+      --command-bg: #111827;
+      --command-fg: #f9fafb;
+      --focus-ring: #1d4ed8;
+      --shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
+      --radius: 18px;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        color-scheme: dark;
+        --page-bg: #0f172a;
+        --page-accent-bg: #13233d;
+        --panel-bg: #111827;
+        --panel-border: #334155;
+        --text-strong: #e5e7eb;
+        --text-muted: #cbd5e1;
+        --text-subtle: #94a3b8;
+        --chip-bg: #1f2937;
+        --approved-bg: #14532d;
+        --approved-fg: #bbf7d0;
+        --pending-bg: #1e293b;
+        --pending-fg: #cbd5e1;
+        --changes-bg: #78350f;
+        --changes-fg: #fde68a;
+        --rejected-bg: #7f1d1d;
+        --rejected-fg: #fecaca;
+        --link: #93c5fd;
+        --review-note-bg: rgba(15, 23, 42, 0.88);
+        --review-note-border: rgba(71, 85, 105, 0.9);
+        --status-bar-bg: rgba(15, 23, 42, 0.9);
+        --status-chip-border: rgba(100, 116, 139, 0.45);
+        --skipped-bg: #0f172a;
+        --skipped-fg: #94a3b8;
+        --skipped-border: #334155;
+        --pane-header-bg: rgba(15, 23, 42, 0.94);
+        --pane-header-border: #334155;
+        --frame-bg: #0b1120;
+        --surface-muted: #0f172a;
+        --surface-border: #334155;
+        --surface-emphasis: #172554;
+        --success-fg: #86efac;
+        --vitality-track: #1e3a8a;
+        --vitality-fill-start: #60a5fa;
+        --vitality-fill-end: #34d399;
+        --command-bg: #020617;
+        --command-fg: #e2e8f0;
+        --focus-ring: #93c5fd;
+        --shadow: 0 20px 45px rgba(2, 6, 23, 0.45);
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Segoe UI", -apple-system, Roboto, Helvetica, Arial, sans-serif;
+      background: linear-gradient(180deg, var(--page-accent-bg) 0%, var(--page-bg) 220px);
+      color: var(--text-strong);
+    }
+
+    a {
+      color: var(--link);
+    }
+
+    a,
+    summary {
+      outline-offset: 3px;
+    }
+
+    a:focus-visible,
+    summary:focus-visible {
+      outline: 3px solid var(--focus-ring);
+      border-radius: 10px;
+    }
+
+    .page {
+      max-width: 1600px;
+      margin: 0 auto;
+      padding: 28px 20px 32px;
+    }
+
+    .page-header {
+      margin-bottom: 18px;
+    }
+
+    .persona-summary {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin: 10px 0 12px;
+      color: var(--text-muted);
+      font-size: 12px;
+    }
+
+    .persona-row {
+      border-left: 4px solid var(--surface-border);
+      padding-left: 10px;
+    }
+
+    .persona-row.failed.block {
+      border-left-color: var(--rejected-fg);
+    }
+
+    .persona-row.failed.warn,
+    .persona-row.scope_not_found {
+      border-left-color: var(--changes-fg);
+    }
+
+    .persona-row.passed {
+      border-left-color: var(--approved-fg);
+    }
+
+    .eyebrow {
+      margin: 0 0 8px;
+      font-size: 12px;
+      line-height: 1.4;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-subtle);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 28px;
+      line-height: 1.2;
+      font-weight: 700;
+    }
+
+    .subtitle {
+      margin: 8px 0 0;
+      font-size: 15px;
+      line-height: 1.6;
+      color: var(--text-muted);
+    }
+
+    .review-note {
+      margin: 14px 0 0;
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: var(--review-note-bg);
+      border: 1px solid var(--review-note-border);
+      color: var(--text-muted);
+      box-shadow: var(--shadow);
+    }
+
+    .status-bar {
+      margin: 18px 0 20px;
+      padding: 16px;
+      border: 1px solid var(--panel-border);
+      border-radius: var(--radius);
+      background: var(--status-bar-bg);
+      box-shadow: var(--shadow);
+    }
+
+    .status-title {
+      margin: 0 0 12px;
+      font-size: 13px;
+      line-height: 1.4;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--text-subtle);
+    }
+
+    .status-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .status-chip {
+      min-width: 190px;
+      padding: 10px 12px;
+      border-radius: 14px;
+      background: var(--chip-bg);
+      border: 1px solid var(--status-chip-border);
+    }
+
+    .status-chip.approved {
+      background: var(--approved-bg);
+      color: var(--approved-fg);
+    }
+
+    .status-chip.pending,
+    .status-chip.sent {
+      background: var(--pending-bg);
+      color: var(--pending-fg);
+    }
+
+    .status-chip.changes_requested {
+      background: var(--changes-bg);
+      color: var(--changes-fg);
+    }
+
+    .status-chip.skipped_no_delta {
+      background: var(--skipped-bg);
+      color: var(--skipped-fg);
+      border: 1px dashed var(--skipped-border);
+    }
+
+    .status-chip.rejected {
+      background: var(--rejected-bg);
+      color: var(--rejected-fg);
+    }
+
+    .status-chip strong,
+    .status-chip span {
+      display: block;
+    }
+
+    .status-chip strong {
+      font-size: 14px;
+      line-height: 1.4;
+    }
+
+    .status-chip span {
+      font-size: 12px;
+      line-height: 1.5;
+      opacity: 0.85;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1.35fr) minmax(340px, 0.95fr);
+      gap: 20px;
+      align-items: start;
+    }
+
+    .pane {
+      border: 1px solid var(--panel-border);
+      border-radius: var(--radius);
+      background: var(--panel-bg);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .pane-header {
+      padding: 18px 20px 14px;
+      border-bottom: 1px solid var(--pane-header-border);
+      background: var(--pane-header-bg);
+    }
+
+    .pane-header h2 {
+      margin: 0;
+      font-size: 18px;
+      line-height: 1.3;
+    }
+
+    .pane-header p {
+      margin: 8px 0 0;
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--text-muted);
+    }
+
+    .pane-header a {
+      display: inline-flex;
+      align-items: center;
+      margin-top: 8px;
+      min-width: 24px;
+      min-height: 24px;
+      font-size: 13px;
+      font-weight: 600;
+      text-decoration: none;
+    }
+
+    .published-frame {
+      display: block;
+      width: 100%;
+      height: calc(100vh - 280px);
+      min-height: 760px;
+      border: 0;
+      background: var(--frame-bg);
+    }
+
+    .evidence-stack {
+      padding: 14px;
+      display: grid;
+      gap: 12px;
+    }
+
+    .vitality-card > p {
+      margin: 8px 0 0;
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--text-muted);
+    }
+
+    .anticipation-card > p {
+      margin: 8px 0 0;
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--text-muted);
+    }
+
+    .anticipation-list {
+      margin: 14px 0 0;
+      padding: 0;
+      list-style: none;
+      display: grid;
+      gap: 12px;
+    }
+
+    .anticipation-row {
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: var(--surface-muted);
+      border: 1px solid var(--surface-border);
+    }
+
+    .anticipation-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .anticipation-confidence {
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--text-subtle);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      font-weight: 700;
+    }
+
+    .anticipation-body {
+      margin: 10px 0 0;
+      display: grid;
+      gap: 8px;
+    }
+
+    .anticipation-label {
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--text-subtle);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      font-weight: 700;
+    }
+
+    .anticipation-body p,
+    .anticipation-evidence {
+      margin: 0;
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--text-muted);
+    }
+
+    .vitality-list {
+      margin: 14px 0 0;
+      padding: 0;
+      list-style: none;
+      display: grid;
+      gap: 12px;
+    }
+
+    .vitality-row {
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: var(--surface-muted);
+      border: 1px solid var(--surface-border);
+    }
+
+    .vitality-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .vitality-score {
+      font-weight: 700;
+      color: var(--text-strong);
+    }
+
+    .vitality-score.perfect {
+      color: var(--success-fg);
+    }
+
+    .vitality-bar {
+      margin-top: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: var(--vitality-track);
+      overflow: hidden;
+    }
+
+    .vitality-fill {
+      display: block;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--vitality-fill-start) 0%, var(--vitality-fill-end) 100%);
+    }
+
+    .vitality-summary {
+      margin: 10px 0 0;
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--text-muted);
+    }
+
+    .trust-gauge {
+      margin-top: 10px;
+      height: 8px;
+      border-radius: 999px;
+      background: var(--surface-border);
+      overflow: hidden;
+    }
+
+    .trust-gauge-fill {
+      display: block;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--text-subtle) 0%, var(--text-strong) 100%);
+      opacity: 0.85;
+    }
+
+    .review-section {
+      border: 1px solid var(--surface-border);
+      border-radius: 16px;
+      background: var(--panel-bg);
+      overflow: hidden;
+    }
+
+    .review-section summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 16px 18px;
+      min-width: 24px;
+      min-height: 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      background: var(--surface-muted);
+    }
+
+    .review-section summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .section-title {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .section-title strong {
+      font-size: 15px;
+      line-height: 1.4;
+    }
+
+    .section-title span {
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--text-subtle);
+    }
+
+    .section-meta {
+      text-align: right;
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--text-muted);
+    }
+
+    .section-body {
+      padding: 18px;
+      display: grid;
+      gap: 16px;
+    }
+
+    .section-card {
+      padding: 16px;
+      margin-bottom: 16px;
+      border-radius: 14px;
+      border: 1px solid var(--surface-border);
+      background: var(--panel-bg);
+    }
+
+    .section-card h3 {
+      margin: 0 0 10px;
+      font-size: 13px;
+      line-height: 1.4;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--text-subtle);
+    }
+
+    .section-card p {
+      margin: 0;
+      font-size: 14px;
+      line-height: 1.6;
+      color: var(--text-muted);
+      white-space: pre-wrap;
+    }
+
+    .similarity-badge {
+      margin: 0 0 12px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: var(--surface-emphasis);
+      border: 1px solid var(--surface-border);
+      display: grid;
+      gap: 6px;
+    }
+
+    .similarity-badge strong,
+    .similarity-badge span,
+    .similarity-badge p {
+      margin: 0;
+    }
+
+    .similarity-badge span {
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--text-subtle);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      font-weight: 700;
+    }
+
+    .similarity-badge p {
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--text-muted);
+    }
+
+    .review-list {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      display: grid;
+      gap: 10px;
+    }
+
+    .review-list li {
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: var(--surface-muted);
+      border: 1px solid var(--surface-border);
+    }
+
+    .review-list strong,
+    .review-list span,
+    .review-list a,
+    .review-list p {
+      display: block;
+    }
+
+    .review-list strong {
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .review-list span {
+      margin-top: 4px;
+      font-size: 13px;
+      line-height: 1.5;
+      color: var(--text-muted);
+    }
+
+    .review-list p {
+      margin: 8px 0 0;
+      font-size: 13px;
+    }
+
+    .review-list--compact {
+      gap: 6px;
+    }
+
+    .review-list--compact li {
+      padding: 8px 12px;
+    }
+
+    .review-list--compact strong {
+      font-size: 13px;
+    }
+
+    .milestone-timeline {
+      margin: 0 0 12px;
+      padding: 0;
+      list-style: none;
+      display: grid;
+      gap: 10px;
+    }
+
+    .milestone-timeline-row {
+      display: grid;
+      grid-template-columns: 104px minmax(0, 1fr);
+      gap: 12px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: var(--surface-muted);
+      border: 1px solid var(--surface-border);
+    }
+
+    .milestone-timeline-row.critical {
+      background: var(--surface-emphasis);
+    }
+
+    .milestone-timeline-date {
+      font-size: 12px;
+      line-height: 1.5;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--text-subtle);
+    }
+
+    .milestone-timeline-body {
+      min-width: 0;
+    }
+
+    .milestone-timeline-body strong,
+    .milestone-timeline-body span {
+      display: block;
+    }
+
+    .milestone-timeline-body strong {
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .milestone-timeline-body span {
+      margin-top: 4px;
+      font-size: 13px;
+      line-height: 1.5;
+      color: var(--text-muted);
+    }
+
+    .signal-thread-list {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      display: grid;
+      gap: 12px;
+    }
+
+    .signal-thread-card {
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: var(--surface-muted);
+      border: 1px solid var(--surface-border);
+    }
+
+    .signal-thread-card > strong,
+    .signal-thread-card > span {
+      display: block;
+    }
+
+    .signal-thread-card > strong {
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .signal-thread-card > span {
+      margin-top: 4px;
+      font-size: 13px;
+      line-height: 1.5;
+      color: var(--text-muted);
+    }
+
+    .signal-thread-events {
+      margin: 10px 0 0;
+      padding: 0;
+      list-style: none;
+      display: grid;
+      gap: 8px;
+    }
+
+    .signal-thread-event {
+      display: grid;
+      gap: 4px;
+      padding-top: 8px;
+      border-top: 1px solid var(--surface-border);
+    }
+
+    .signal-thread-event:first-child {
+      padding-top: 0;
+      border-top: 0;
+    }
+
+    .signal-thread-event-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--text-subtle);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      font-weight: 700;
+    }
+
+    .signal-thread-source {
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: var(--panel-bg);
+      border: 1px solid var(--surface-border);
+      text-transform: none;
+      letter-spacing: 0;
+      font-weight: 600;
+    }
+
+    .signal-thread-event p {
+      margin: 0;
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--text-muted);
+      white-space: pre-wrap;
+    }
+      line-height: 1.6;
+      color: var(--text-muted);
+      white-space: pre-wrap;
+    }
+
+    .review-list a {
+      margin-top: 8px;
+      min-width: 24px;
+      min-height: 24px;
+      display: inline-flex;
+      align-items: center;
+      font-size: 12px;
+      line-height: 1.5;
+      font-weight: 600;
+      text-decoration: none;
+    }
+
+    .why-drawer {
+      border: 1px solid var(--surface-border);
+      border-radius: 12px;
+      background: var(--surface-muted);
+      overflow: hidden;
+    }
+
+    .why-drawer summary {
+      padding: 12px 14px;
+      min-width: 24px;
+      min-height: 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      cursor: pointer;
+      list-style: none;
+      background: var(--surface-emphasis);
+    }
+
+    .why-drawer summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .why-meta {
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--text-subtle);
+    }
+
+    .why-body {
+      padding: 14px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .why-grid {
+      margin: 0;
+      display: grid;
+      grid-template-columns: minmax(120px, 150px) minmax(0, 1fr);
+      gap: 8px 12px;
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    .why-grid dt {
+      font-weight: 700;
+      color: var(--text-subtle);
+    }
+
+    .why-grid dd {
+      margin: 0;
+      color: var(--text-muted);
+      word-break: break-word;
+    }
+
+    .command-card code {
+      display: block;
+      margin-top: 8px;
+      padding: 12px;
+      border-radius: 12px;
+      background: var(--command-bg);
+      color: var(--command-fg);
+      font-size: 12px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .why-grid a {
+      min-width: 24px;
+      min-height: 24px;
+      display: inline-flex;
+      align-items: center;
+    }
+
+    @media print {
+      @page {
+        margin: 0.6in;
+      }
+
+      :root {
+        color-scheme: light;
+        --page-bg: #ffffff;
+        --page-accent-bg: #ffffff;
+        --panel-bg: #ffffff;
+        --panel-border: #000000;
+        --text-strong: #000000;
+        --text-muted: #1f2937;
+        --text-subtle: #374151;
+        --chip-bg: #ffffff;
+        --approved-bg: #ffffff;
+        --approved-fg: #000000;
+        --pending-bg: #ffffff;
+        --pending-fg: #000000;
+        --changes-bg: #ffffff;
+        --changes-fg: #000000;
+        --rejected-bg: #ffffff;
+        --rejected-fg: #000000;
+        --link: #000000;
+        --review-note-bg: #ffffff;
+        --review-note-border: #000000;
+        --status-bar-bg: #ffffff;
+        --status-chip-border: #000000;
+        --skipped-bg: #ffffff;
+        --skipped-fg: #000000;
+        --skipped-border: #000000;
+        --pane-header-bg: #ffffff;
+        --pane-header-border: #000000;
+        --frame-bg: #ffffff;
+        --surface-muted: #ffffff;
+        --surface-border: #000000;
+        --surface-emphasis: #ffffff;
+        --success-fg: #000000;
+        --vitality-track: #d1d5db;
+        --vitality-fill-start: #4b5563;
+        --vitality-fill-end: #111827;
+        --command-bg: #ffffff;
+        --command-fg: #000000;
+        --shadow: none;
+      }
+
+      body {
+        background: #ffffff;
+      }
+
+      .page {
+        max-width: none;
+        padding: 0;
+      }
+
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      .pane,
+      .status-bar,
+      .section-card,
+      .review-section,
+      .why-drawer {
+        box-shadow: none;
+      }
+
+      .pane-header a,
+      .published-frame {
+        display: none;
+      }
+
+      .status-chip {
+        background: #ffffff !important;
+        color: #000000 !important;
+        border: 1px solid #000000 !important;
+      }
+
+      .status-chip.approved {
+        border-style: solid !important;
+      }
+
+      .status-chip.pending,
+      .status-chip.sent {
+        border-style: dashed !important;
+      }
+
+      .status-chip.changes_requested {
+        border-style: double !important;
+      }
+
+      .status-chip.skipped_no_delta {
+        border-style: dotted !important;
+      }
+
+      .status-chip.rejected {
+        border-width: 2px !important;
+      }
+
+      .review-section,
+      .section-card,
+      .why-drawer,
+      .review-list li {
+        break-inside: avoid;
+        page-break-inside: avoid;
+      }
+
+      .review-section {
+        break-before: page;
+        page-break-before: always;
+      }
+
+      .review-section:first-of-type {
+        break-before: auto;
+        page-break-before: auto;
+      }
+    }
+
+    @media (max-width: 1100px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      .published-frame {
+        min-height: 620px;
+        height: 72vh;
+      }
+    }
+
+    @media (max-width: 720px) {
+      .page {
+        padding: 18px 12px 24px;
+      }
+
+      h1 {
+        font-size: 24px;
+      }
+
+      .review-section summary {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+
+      .section-meta {
+        text-align: left;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="page-header">
+      <p class="eyebrow">Vertex Review</p>
+      <h1>{{ title }}</h1>
+      <p class="subtitle">{{ subtitle }}</p>
+      <p class="review-note">This is a pre-publication review. Please reply with corrections.</p>
+    </header>
+
+    <section class="status-bar">
+      <p class="status-title">Review Status</p>
+      <div class="status-grid">
+        {% for chip in status_chips %}
+        <div class="status-chip {{ chip.state.value }}">
+          <strong>{{ chip.state_icon }} {{ chip.label }}</strong>
+          {% if chip.raci_summary %}
+          <span>{{ chip.raci_summary }}</span>
+          {% endif %}
+          <span>{{ chip.reviewer_display }}</span>
+          <span>{{ chip.state_label }}</span>
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+
+    <main class="layout">
+      <section class="pane">
+        <div class="pane-header">
+          <h2>Published View</h2>
+          <p>Reader-facing draft from the latest `vertex report --dry-run` output.</p>
+          <a href="{{ published_html_uri }}">Open standalone draft</a>
+        </div>
+        <iframe class="published-frame" title="Published newsletter draft" srcdoc="{{ published_html | e }}"></iframe>
+      </section>
+
+      <aside class="pane">
+        <div class="pane-header">
+          <h2>Evidence</h2>
+          <p>Each section is collapsed by default when approved. Review state is read-only here; update via `vertex review-sections set ...`.</p>
+        </div>
+        <div class="evidence-stack">
+          {% if anticipated_questions %}
+          {% include "partials/reviewer_anticipated_questions.j2" %}
+          {% endif %}
+          {% if trust_editorial_rows or trust_autonomy_rows or trust_attention_gap_rows %}
+          {% include "partials/calibration_card.j2" %}
+          {% endif %}
+          {% if persona_coverage %}
+          <div class="section-card">
+            <h3>Persona Signal Coverage</h3>
+            <div class="persona-summary">
+              <span>{{ persona_coverage.results | selectattr("status", "equalto", "passed") | list | length }}/{{ persona_coverage.total_evaluations }} evaluations passed</span>
+              <span>{{ persona_coverage.total_checks }} checks defined</span>
+              <span>{{ persona_coverage.enforcement_mode }} mode</span>
+              <span>{{ persona_coverage.evaluation_time_ms | round(1) }} ms</span>
+            </div>
+            <ul class="review-list{% if persona_coverage.results | length >= 10 %} review-list--compact{% endif %}">
+              {% for result in persona_coverage.results if result.surfaced or result.status in ["scope_not_found", "quarantined"] %}
+              <li class="persona-row {{ result.status }} {{ result.effective_severity }}">
+                <strong>{{ result.persona_id }}/{{ result.check_id }}</strong>
+                <span>{{ result.location }} · {{ result.status }}{% if result.effective_severity != "none" %} · {{ result.effective_severity }}{% endif %}</span>
+                <p>{{ result.message }}</p>
+                {% if result.matched_text %}<p><code>{{ result.matched_text }}</code></p>{% endif %}
+                {% if result.remediation_hint %}<p>{{ result.remediation_hint }}</p>{% endif %}
+                {% if result.skip_reason %}<p>{{ result.skip_reason }}</p>{% endif %}
+              </li>
+              {% endfor %}
+            </ul>
+          </div>
+          {% endif %}
+          {% if owner_vitality_rows %}
+          {% include "partials/vitality_reviewer.j2" %}
+          {% endif %}
+          {% if coverage_gap_rows %}
+          <div class="section-card">
+            <h3>Coverage Gaps</h3>
+            <p>{{ coverage_gap_rows | length }} active items with no approved signals or narrative mention in {{ coverage_gap_window_days }} days.</p>
+            <ul class="review-list">
+              {% for row in coverage_gap_rows %}
+              <li>
+                <strong>{{ row.title }}</strong>
+                {% if row.detail %}<span>{{ row.detail }}</span>{% endif %}
+                <p>{{ row.summary }}</p>
+              </li>
+              {% endfor %}
+            </ul>
+          </div>
+          {% endif %}
+          {% if open_claim_rows %}
+          <div class="section-card">
+            <h3>Open Claims</h3>
+            <ul class="review-list">
+              {% for row in open_claim_rows %}
+              <li{% if row.anchor_id %} id="{{ row.anchor_id }}"{% endif %}>
+                <strong>{{ row.title }}</strong>
+                {% if row.detail %}<span>{{ row.detail }}</span>{% endif %}
+                <p>{{ row.summary }}</p>
+              </li>
+              {% endfor %}
+            </ul>
+          </div>
+          {% endif %}
+          {% if telemetry_rows %}
+          <div class="section-card">
+            <h3>Telemetry</h3>
+            <ul class="review-list">
+              {% for row in telemetry_rows %}
+              <li{% if row.anchor_id %} id="{{ row.anchor_id }}"{% endif %}>
+                <strong>{{ row.title }}</strong>
+                {% if row.detail %}<span>{{ row.detail }}</span>{% endif %}
+                <p>{{ row.summary }}</p>
+              </li>
+              {% endfor %}
+            </ul>
+          </div>
+          {% endif %}
+          {% if risk_rows %}
+          <div class="section-card">
+            <h3>Risk Register</h3>
+            <ul class="review-list">
+              {% for row in risk_rows %}
+              <li{% if row.anchor_id %} id="{{ row.anchor_id }}"{% endif %}>
+                <strong>{{ row.title }}</strong>
+                {% if row.detail %}<span>{{ row.detail }}</span>{% endif %}
+                <p>{{ row.summary }}</p>
+              </li>
+              {% endfor %}
+            </ul>
+          </div>
+          {% endif %}
+          {% if milestone_rows %}
+          <div class="section-card">
+            <h3>Milestone Health</h3>
+            {% if milestone_timeline_rows %}
+            <h3>Milestone Timeline</h3>
+            <div class="milestone-timeline">
+              {% for row in milestone_timeline_rows %}
+              <div class="milestone-timeline-row{% if row.critical_path %} critical{% endif %}">
+                <div class="milestone-timeline-date">{{ row.target_date_label }}</div>
+                <div class="milestone-timeline-body">
+                  <strong>{{ row.name }}</strong>
+                  <span>{{ row.status_summary }}</span>
+                </div>
+              </div>
+              {% endfor %}
+            </div>
+            {% endif %}
+            <ul class="review-list">
+              {% for row in milestone_rows %}
+              <li>
+                <strong>{{ row.title }}</strong>
+                {% if row.detail %}<span>{{ row.detail }}</span>{% endif %}
+                <p>{{ row.summary }}</p>
+              </li>
+              {% endfor %}
+            </ul>
+          </div>
+          {% endif %}
+          {% if cascade_rows %}
+          <div class="section-card">
+            <h3>Cross-Program Cascades</h3>
+            <ul class="review-list">
+              {% for row in cascade_rows %}
+              <li>
+                <strong>{{ row.title }}</strong>
+                {% if row.detail %}<span>{{ row.detail }}</span>{% endif %}
+                <p>{{ row.summary }}</p>
+              </li>
+              {% endfor %}
+            </ul>
+          </div>
+          {% endif %}
+          {% if dependency_lifecycle_rows %}
+          <div class="section-card">
+            <h3>Dependency Schedule</h3>
+            <ul class="review-list{% if dependency_lifecycle_rows | length >= 10 %} review-list--compact{% endif %}">
+              {% for row in dependency_lifecycle_rows %}
+              <li>
+                <strong>{{ row.title }}</strong>
+                {% if row.detail %}<span>{{ row.detail }}</span>{% endif %}
+                {% if dependency_lifecycle_rows | length < 10 %}<p>{{ row.summary }}</p>{% endif %}
+              </li>
+              {% endfor %}
+            </ul>
+          </div>
+          {% endif %}
+          {% include "partials/reviewer_calibration.j2" %}
+          {% if signal_thread_rows %}
+          <div class="section-card">
+            <h3>Signal Threads</h3>
+            <div class="signal-thread-list">
+              {% for row in signal_thread_rows %}
+              <div class="signal-thread-card">
+                <strong>{{ row.title }}</strong>
+                <span>{{ row.detail }}</span>
+                <ul class="signal-thread-events">
+                  {% for event in row.events %}
+                  <li class="signal-thread-event">
+                    <div class="signal-thread-event-meta">
+                      <span>{{ event.timestamp_label }}</span>
+                      <span class="signal-thread-source">{{ event.source }}</span>
+                      <span>{{ event.confidence }} confidence</span>
+                    </div>
+                    <p>{{ event.text }}</p>
+                  </li>
+                  {% endfor %}
+                </ul>
+              </div>
+              {% endfor %}
+            </div>
+          </div>
+          {% endif %}
+          {% if decision_rows %}
+          <div class="section-card">
+            <h3>Decision Register</h3>
+            <ul class="review-list">
+              {% for row in decision_rows %}
+              <li>
+                <strong>{{ row.title }}</strong>
+                {% if row.detail %}<span>{{ row.detail }}</span>{% endif %}
+                <p>{{ row.summary }}</p>
+              </li>
+              {% endfor %}
+            </ul>
+          </div>
+          {% endif %}
+          {% if assumption_rows %}
+          <div class="section-card">
+            <h3>Assumptions</h3>
+            <ul class="review-list">
+              {% for row in assumption_rows %}
+              <li{% if row.anchor_id %} id="{{ row.anchor_id }}"{% endif %}>
+                <strong>{{ row.title }}</strong>
+                {% if row.detail %}<span>{{ row.detail }}</span>{% endif %}
+                <p>{{ row.summary }}</p>
+              </li>
+              {% endfor %}
+            </ul>
+          </div>
+          {% endif %}
+          {% if reference_doc_rows %}
+          <div class="section-card">
+            <h3>Reference Docs</h3>
+            <ul class="review-list">
+              {% for row in reference_doc_rows %}
+              <li>
+                <strong>{{ row.title }}</strong>
+                {% if row.detail %}<span>{{ row.detail }}</span>{% endif %}
+                <p>{{ row.summary }}</p>
+                {% if row.href %}<p><a href="{{ row.href }}">Open document</a></p>{% endif %}
+              </li>
+              {% endfor %}
+            </ul>
+          </div>
+          {% endif %}
+          {% if action_rows %}
+          <div class="section-card">
+            <h3>Action Items</h3>
+            <ul class="review-list">
+              {% for row in action_rows %}
+              <li{% if row.anchor_id %} id="{{ row.anchor_id }}"{% endif %}>
+                <strong>{{ row.title }}</strong>
+                {% if row.detail %}<span>{{ row.detail }}</span>{% endif %}
+                <p>{{ row.summary }}</p>
+              </li>
+              {% endfor %}
+            </ul>
+          </div>
+          {% endif %}
+          {% if issue_rows %}
+          <div class="section-card">
+            <h3>Active Issues</h3>
+            <ul class="review-list">
+              {% for row in issue_rows %}
+              <li>
+                <strong>{{ row.title }}</strong>
+                {% if row.detail %}<span>{{ row.detail }}</span>{% endif %}
+                <p>{{ row.summary }}</p>
+                {% if row.href or row.links %}
+                <p>
+                  {% if row.href %}<a href="{{ row.href }}">Open in ADO</a>{% endif %}
+                  {% for link in row.links %}{% if row.href or not loop.first %} · {% endif %}<a href="{{ link.href }}">{{ link.label }}</a>{% endfor %}
+                </p>
+                {% endif %}
+              </li>
+              {% endfor %}
+            </ul>
+          </div>
+          {% endif %}
+          {% if open_ask_rows %}
+          <div class="section-card">
+            <h3>Open Asks</h3>
+            <ul class="review-list">
+              {% for row in open_ask_rows %}
+              <li{% if row.anchor_id %} id="{{ row.anchor_id }}"{% endif %}>
+                <strong>{{ row.title }}</strong>
+                {% if row.detail %}<span>{{ row.detail }}</span>{% endif %}
+                <p>{{ row.summary }}</p>
+              </li>
+              {% endfor %}
+            </ul>
+          </div>
+          {% endif %}
+          {% for section in sections %}
+          <details class="review-section"{% if section.state.value not in ['approved', 'skipped_no_delta'] %} open{% endif %}>
+            <summary>
+              <div class="section-title">
+                <strong>{{ section.state_icon }} {{ section.title }}</strong>
+                <span>{{ section.state_label }}{% if section.state.value == 'skipped_no_delta' %} · no delta - skipped{% endif %} · {{ section.reviewer_display }}</span>
+              </div>
+              <div class="section-meta">
+                <div>{{ section.section_id }}</div>
+                {% if section.note %}<div>Note captured</div>{% endif %}
+              </div>
+            </summary>
+            <div class="section-body">
+              <div class="section-card">
+                <h3>Published Text</h3>
+                {% if section.similarity_badge %}
+                <div class="similarity-badge">
+                  <strong>Similar prior narrative</strong>
+                  <span>Issue {{ "%03d"|format(section.similarity_badge.issue_number) }} · {{ section.similarity_badge.generated_at_label }} · {{ section.similarity_badge.similarity_percent }}% overlap{% if section.similarity_badge.risk_label_text %} · {{ section.similarity_badge.risk_label_text }} risk{% endif %}</span>
+                  <p>{{ section.similarity_badge.excerpt }}</p>
+                </div>
+                {% endif %}
+                <p>{{ section.published_text }}</p>
+              </div>
+
+              {% if section.why_block %}
+              <div class="section-card">
+                <h3>Why Drawer</h3>
+                <details class="why-drawer">
+                  <summary>
+                    <strong>Open Why drawer</strong>
+                    <span class="why-meta">Confidence {{ section.why_block.confidence }}</span>
+                  </summary>
+                  <div class="why-body">
+                    <p>{{ section.why_block.summary }}</p>
+                    <dl class="why-grid">
+                      {% for line in section.why_block.lines %}
+                      <dt>{{ line.label }}</dt>
+                      <dd>
+                        {% if line.href %}<a href="{{ line.href }}">{{ line.value }}</a>{% else %}{{ line.value }}{% endif %}
+                      </dd>
+                      {% endfor %}
+                    </dl>
+                    <div class="command-card">
+                      <code>{{ section.why_block.evidence_command }}</code>
+                    </div>
+                  </div>
+                </details>
+              </div>
+              {% endif %}
+
+              {% if section.delta_rows %}
+              <div class="section-card">
+                <h3>What Changed</h3>
+                <ul class="review-list">
+                  {% for row in section.delta_rows %}
+                  <li>
+                    <strong>{{ row.label }} · {{ row.title }}</strong>
+                    <span>{{ row.detail }}</span>
+                    {% if row.ado_url %}<a href="{{ row.ado_url }}">Open ADO item</a>{% endif %}
+                  </li>
+                  {% endfor %}
+                </ul>
+              </div>
+              {% endif %}
+
+              {% if section.evidence_rows %}
+              <div class="section-card">
+                <h3>Evidence Packets</h3>
+                <ul class="review-list">
+                  {% for row in section.evidence_rows %}
+                  <li>
+                    <strong>#{{ row.work_item_id }} · {{ row.title }}</strong>
+                    <p>{{ row.summary }}</p>
+                    {% if row.ado_url %}<a href="{{ row.ado_url }}">Open ADO item</a>{% endif %}
+                  </li>
+                  {% endfor %}
+                </ul>
+              </div>
+              {% endif %}
+
+              {% if section.context_rows %}
+              <div class="section-card">
+                <h3>Signals &amp; Patterns</h3>
+                <ul class="review-list">
+                  {% for row in section.context_rows %}
+                  <li>
+                    <strong>{{ row.label }}</strong>
+                    <p>{{ row.summary }}</p>
+                    {% if row.ado_url %}<a href="{{ row.ado_url }}">Open ADO item</a>{% endif %}
+                  </li>
+                  {% endfor %}
+                </ul>
+              </div>
+              {% endif %}
+
+              {% if section.override_rows %}
+              <div class="section-card">
+                <h3>Risk History</h3>
+                <ul class="review-list">
+                  {% for row in section.override_rows %}
+                  <li>
+                    <strong>{{ row.dimension_name }} · {{ row.current_risk_label }}</strong>
+                    <span>{{ row.scorecard_name }} · prior {{ row.prior_risk_label }}</span>
+                    <p>{{ row.summary }}</p>
+                    {% if row.ado_query_url %}<a href="{{ row.ado_query_url }}">Open scorecard query</a>{% endif %}
+                  </li>
+                  {% endfor %}
+                </ul>
+              </div>
+              {% endif %}
+
+              {% if section.note %}
+              <div class="section-card">
+                <h3>Latest Note</h3>
+                <p>{{ section.note }}</p>
+              </div>
+              {% endif %}
+
+              <div class="section-card command-card">
+                <h3>Update Review State</h3>
+                <code>vertex review-sections set --edition {{ edition_name }} --section {{ section.section_id }} --state approved --note "LGTM"</code>
+              </div>
+            </div>
+          </details>
+          {% endfor %}
+        </div>
+      </aside>
+    </main>
+  </div>
+</body>
+</html>

@@ -1,0 +1,48 @@
+<a id="{{ chapter.anchor_id }}"></a>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" data-vertex-block="chapter-{{ chapter.chapter_id }}" style="width:100%; border-collapse:collapse; margin:0 0 18px 0; border:1px solid #E5E7EB; background-color:#FFFFFF;">
+  <tr>
+    <td style="padding:14px 16px 10px 16px; font-size:18px; line-height:1.4; font-weight:600; color:#111827;">{{ chapter.title }}</td>
+  </tr>
+  {% if chapter.note %}
+  <tr>
+    <td style="padding:0 16px 12px 16px; font-size:14px; line-height:1.7; color:#374151;">{{ chapter.note | e | replace('\n\n', '<br><br>') | replace('\n', '<br>') | safe }}</td>
+  </tr>
+  {% endif %}
+  {% if chapter.rows %}
+  <tr>
+    <td style="padding:0 16px 16px 16px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; table-layout:fixed;">
+        <tr>
+          <td style="width:32px; padding:8px 8px 8px 0; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">#</td>
+          <td style="width:23%; padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">Workstream</td>
+          <td style="padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">Status / Business Impact</td>
+          <td style="width:84px; padding:8px 0 8px 8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280; text-align:right;">Risk</td>
+        </tr>
+        {% for row in chapter.rows %}
+        <tr>
+          <td style="padding:10px 8px 10px 0; border-bottom:1px solid #E5E7EB; font-size:13px; line-height:1.5; color:#111827; vertical-align:top;">{{ row.row_number }}</td>
+          <td style="padding:10px 8px; border-bottom:1px solid #E5E7EB; font-size:13px; line-height:1.5; color:#111827; vertical-align:top;">
+            <p style="margin:0 0 6px 0; font-weight:600;">{{ row.label }}</p>
+            {% if row.owner %}<p style="margin:0; color:#6B7280;">{{ row.owner }}{% if row.team %} · {{ row.team }}{% endif %}</p>{% endif %}
+          </td>
+          <td style="padding:10px 8px; border-bottom:1px solid #E5E7EB; font-size:13px; line-height:1.6; color:#374151; vertical-align:top;">
+            <p style="margin:0 0 6px 0; color:#111827;">{{ row.issue_text }}</p>
+            {% if row.approach_text %}<p style="margin:0 0 6px 0; color:#4B5563;">{{ row.approach_text }}</p>{% endif %}
+            {% if row.state_label or row.eta_label %}<p style="margin:0 0 6px 0; color:#6B7280;">{% if row.state_label %}{{ row.state_label }}{% endif %}{% if row.state_label and row.eta_label %} · {% endif %}{% if row.eta_label %}ETA {{ row.eta_label }}{% endif %}</p>{% endif %}
+            {% if row.ado_url and row.ado_work_item_id %}<p style="margin:0;"><a href="{{ row.ado_url }}" style="color:#2563EB; text-decoration:underline;">&rarr; ADO #{{ row.ado_work_item_id }}</a></p>{% endif %}
+          </td>
+          <td style="padding:10px 0 10px 8px; border-bottom:1px solid #E5E7EB; text-align:right; vertical-align:top;">
+            <span style="display:inline-block; padding:4px 8px; border-radius:999px; background-color:{{ row.risk | risk_bg }}; color:{{ row.risk | risk_fg }}; font-size:12px; line-height:1.2; font-weight:700;">{{ row.risk | risk_label }}</span>
+          </td>
+        </tr>
+        {% endfor %}
+      </table>
+    </td>
+  </tr>
+  {% endif %}
+  {% if chapter.chapter_owner %}
+  <tr>
+    <td style="padding:0 16px 14px 16px; font-size:12px; line-height:1.5; color:#6B7280;">{{ chapter.chapter_owner }}</td>
+  </tr>
+  {% endif %}
+</table>

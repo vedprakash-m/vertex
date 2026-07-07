@@ -1,0 +1,92 @@
+{% extends "base.email.j2" %}
+
+{% block content %}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse;">
+  <tr>
+    <td style="padding:0 0 16px 0; font-size:14px; line-height:1.6; color:#374151;">
+      Vertex drafted a manual escalation for {{ edition_name }}. Review the trigger details below, then send manually via Outlook if the escalation should proceed.
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:0 0 16px 0;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; border:1px solid #E5E7EB; background-color:#F9FAFB;">
+        <tr>
+          <td style="width:180px; padding:12px 16px; font-size:12px; line-height:1.4; font-weight:600; text-transform:uppercase; color:#6B7280; border-bottom:1px solid #E5E7EB;">Rule</td>
+          <td style="padding:12px 16px; font-size:14px; line-height:1.5; color:#111827; border-bottom:1px solid #E5E7EB;">{{ preview.rule_name }}</td>
+        </tr>
+        <tr>
+          <td style="width:180px; padding:12px 16px; font-size:12px; line-height:1.4; font-weight:600; text-transform:uppercase; color:#6B7280; border-bottom:1px solid #E5E7EB;">{{ subject_label }}</td>
+          <td style="padding:12px 16px; font-size:14px; line-height:1.5; color:#111827; border-bottom:1px solid #E5E7EB;">{{ preview.dimension_name }}</td>
+        </tr>
+        <tr>
+          <td style="width:180px; padding:12px 16px; font-size:12px; line-height:1.4; font-weight:600; text-transform:uppercase; color:#6B7280;">Linked Workstreams</td>
+          <td style="padding:12px 16px; font-size:14px; line-height:1.5; color:#111827;">{{ workstream_label }}</td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+  {% if fact_rows %}
+  <tr>
+    <td style="padding:0 0 12px 0; font-size:16px; line-height:1.4; font-weight:600; color:#111827;">Escalation Facts</td>
+  </tr>
+  <tr>
+    <td style="padding:0 0 16px 0;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; border:1px solid #E5E7EB;">
+        {% for label, value in fact_rows %}
+        <tr>
+          <td style="width:180px; padding:10px 16px; font-size:13px; line-height:1.5; color:#6B7280; border-bottom:1px solid #E5E7EB;">{{ label }}</td>
+          <td style="padding:10px 16px; font-size:13px; line-height:1.5; color:#111827; border-bottom:1px solid #E5E7EB;">{{ value }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+    </td>
+  </tr>
+  {% endif %}
+  {% if preview.trend_label %}
+  <tr>
+    <td style="padding:0 0 12px 0; font-size:16px; line-height:1.4; font-weight:600; color:#111827;">Scorecard Trend</td>
+  </tr>
+  <tr>
+    <td style="padding:16px; border:1px solid #E5E7EB; background-color:#F9FAFB; font-size:14px; line-height:1.6; color:#111827;">
+      {% if preview.risk_sparkline %}
+      <p style="margin:0 0 8px 0; font-size:18px; line-height:1.2; letter-spacing:0.12em; color:#111827;">{{ preview.risk_sparkline }}</p>
+      {% endif %}
+      <p style="margin:0;">{{ preview.trend_label }}</p>
+    </td>
+  </tr>
+  {% endif %}
+  {% if preview.evidence_lines %}
+  <tr>
+    <td style="padding:16px 0 12px 0; font-size:16px; line-height:1.4; font-weight:600; color:#111827;">Evidence Packet</td>
+  </tr>
+  <tr>
+    <td style="padding:16px; border:1px solid #E5E7EB; background-color:#FFFFFF;">
+      {% for line in preview.evidence_lines %}
+      <p style="margin:0 0 8px 0; font-size:14px; line-height:1.6; color:#111827;">{{ line }}</p>
+      {% endfor %}
+    </td>
+  </tr>
+  {% endif %}
+  <tr>
+    <td style="padding:16px; border:1px solid #E5E7EB; background-color:#FFFFFF;">
+      <p style="margin:0 0 8px 0; font-size:12px; line-height:1.4; font-weight:600; text-transform:uppercase; color:#6B7280;">{{ preview.detail_label }}</p>
+      <p style="margin:0; font-size:14px; line-height:1.6; color:#111827;">{{ preview.detail_text }}</p>
+    </td>
+  </tr>
+  {% if preview.recommended_action %}
+  <tr>
+    <td style="padding:16px 0 12px 0; font-size:16px; line-height:1.4; font-weight:600; color:#111827;">Recommended Action</td>
+  </tr>
+  <tr>
+    <td style="padding:16px; border:1px solid #E5E7EB; background-color:#FEF3C7; font-size:14px; line-height:1.6; color:#78350F;">
+      {{ preview.recommended_action }}
+    </td>
+  </tr>
+  {% endif %}
+  <tr>
+    <td style="padding:16px 0 0 0; font-size:13px; line-height:1.5; font-weight:600; color:#92400E;">
+      Review and send manually via Outlook.
+    </td>
+  </tr>
+</table>
+{% endblock %}

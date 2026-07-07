@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ title }}</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --page-bg: #f3f4f6;
+      --panel-bg: #ffffff;
+      --panel-border: #d1d5db;
+      --text-strong: #111827;
+      --text-muted: #4b5563;
+      --text-subtle: #6b7280;
+      --surface-muted: #f8fafc;
+      --surface-border: #e5e7eb;
+      --surface-emphasis: #eef2ff;
+      --link: #1d4ed8;
+      --command-bg: #111827;
+      --command-fg: #f9fafb;
+      --confidence-bg: #e0f2fe;
+      --confidence-fg: #075985;
+      --shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
+      --radius: 18px;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --page-bg: #0f172a;
+        --panel-bg: #111827;
+        --panel-border: #334155;
+        --text-strong: #e5e7eb;
+        --text-muted: #cbd5e1;
+        --text-subtle: #94a3b8;
+        --surface-muted: #0f172a;
+        --surface-border: #334155;
+        --surface-emphasis: #172554;
+        --link: #93c5fd;
+        --command-bg: #020617;
+        --command-fg: #e2e8f0;
+        --confidence-bg: #082f49;
+        --confidence-fg: #bae6fd;
+        --shadow: 0 20px 45px rgba(2, 6, 23, 0.45);
+      }
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: "Segoe UI", -apple-system, Roboto, Helvetica, Arial, sans-serif;
+      background: linear-gradient(180deg, #dbeafe 0%, var(--page-bg) 240px);
+      color: var(--text-strong);
+    }
+
+    a { color: var(--link); }
+
+    .page {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 28px 20px 40px;
+    }
+
+    .eyebrow {
+      margin: 0 0 8px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-subtle);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 30px;
+      line-height: 1.2;
+    }
+
+    .subtitle {
+      margin: 10px 0 0;
+      font-size: 15px;
+      line-height: 1.6;
+      color: var(--text-muted);
+    }
+
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 14px;
+      margin: 22px 0;
+    }
+
+    .card,
+    .section,
+    .panel {
+      border: 1px solid var(--panel-border);
+      border-radius: var(--radius);
+      background: var(--panel-bg);
+      box-shadow: var(--shadow);
+    }
+
+    .card,
+    .panel {
+      padding: 16px 18px;
+    }
+
+    .card h2,
+    .panel h3,
+    .section h2 {
+      margin: 0 0 10px;
+      font-size: 14px;
+      line-height: 1.4;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--text-subtle);
+    }
+
+    .section {
+      padding: 20px;
+      margin-bottom: 18px;
+    }
+
+    .section-header {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: baseline;
+      margin-bottom: 16px;
+    }
+
+    .section-title {
+      margin: 0;
+      font-size: 22px;
+      line-height: 1.3;
+    }
+
+    .section-id {
+      font-size: 13px;
+      line-height: 1.5;
+      color: var(--text-subtle);
+    }
+
+    .confidence-chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: var(--confidence-bg);
+      color: var(--confidence-fg);
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .compare-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .panel pre,
+    .command {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font: inherit;
+    }
+
+    .panel pre {
+      color: var(--text-muted);
+      line-height: 1.7;
+    }
+
+    .panel ul {
+      margin: 0;
+      padding-left: 18px;
+      color: var(--text-muted);
+      line-height: 1.7;
+    }
+
+    .panel p {
+      margin: 0;
+      color: var(--text-muted);
+      line-height: 1.7;
+    }
+
+    details {
+      margin-top: 16px;
+    }
+
+    summary {
+      cursor: pointer;
+      font-weight: 700;
+      color: var(--text-strong);
+      margin-bottom: 12px;
+    }
+
+    .evidence-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .command-list {
+      display: grid;
+      gap: 10px;
+      margin-top: 16px;
+    }
+
+    .signal-link-list {
+      margin: 0;
+      padding-left: 18px;
+      color: var(--text-muted);
+      line-height: 1.7;
+    }
+
+    .signal-meta {
+      margin-top: 8px;
+      font-size: 13px;
+      color: var(--text-subtle);
+    }
+
+    .command {
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: var(--command-bg);
+      color: var(--command-fg);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    @media (max-width: 900px) {
+      .compare-grid,
+      .evidence-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <p class="eyebrow">Vertex Proposal Review</p>
+    <h1>{{ title }}</h1>
+    <p class="subtitle">{{ subtitle }}</p>
+
+    <div class="summary">
+      <div class="card">
+        <h2>Edition</h2>
+        <p>{{ edition_name }}</p>
+      </div>
+      <div class="card">
+        <h2>Issue</h2>
+        <p>{{ "%03d"|format(issue_number) }}</p>
+      </div>
+      <div class="card">
+        <h2>Mode</h2>
+        <p>{{ mode_label }}</p>
+      </div>
+      <div class="card">
+        <h2>Generated</h2>
+        <p>{{ generated_at }}</p>
+      </div>
+      <div class="card">
+        <h2>{{ rendered_count_label }}</h2>
+        <p>{{ sections|length }}</p>
+      </div>
+      <div class="card">
+        <h2>{{ pending_count_label }}</h2>
+        <p>{{ decision_summary.pending_count }}</p>
+      </div>
+      {% if not resolved_only %}
+      <div class="card">
+        <h2>Dependency Proposals</h2>
+        <p>{{ dependency_proposals|length }}</p>
+      </div>
+      {% endif %}
+      <div class="card">
+        <h2>Accepted</h2>
+        <p>{{ decision_summary.accepted_count }}</p>
+      </div>
+      <div class="card">
+        <h2>{{ accepted_modified_label }}</h2>
+        <p>{{ decision_summary.accepted_modified_count }}</p>
+      </div>
+      <div class="card">
+        <h2>Rejected</h2>
+        <p>{{ decision_summary.rejected_count }}</p>
+      </div>
+      <div class="card">
+        <h2>Superseded</h2>
+        <p>{{ decision_summary.superseded_count }}</p>
+      </div>
+      <div class="card">
+        <h2>Section Filter</h2>
+        <p>{{ section_filter or ("All resolved sections" if resolved_only else "All pending sections") }}</p>
+      </div>
+      <div class="card">
+        <h2>{{ summary_mix_label }}</h2>
+        <p>{{ summary_mix }}</p>
+      </div>
+      {% if not resolved_only and sections %}
+      <div class="card">
+        <h2>Bulk Accept Hint</h2>
+        <p><code>{{ accept_all_command }}</code></p>
+      </div>
+      <div class="card">
+        <h2>Interactive Review</h2>
+        <p><code>{{ interactive_command }}</code></p>
+      </div>
+      {% endif %}
+    </div>
+
+    {% for section in sections %}
+    <section class="section">
+      <div class="section-header">
+        <div>
+          <h2 class="section-title">Section: {{ section.title }}</h2>
+          <div class="section-id">{{ section.section_id }}{% if section.status != "pending" %} · {{ section.status_label }}{% endif %}</div>
+        </div>
+        <span class="confidence-chip">{{ section.confidence }}</span>
+      </div>
+
+      {% if section.status != "pending" %}
+      <div class="panel">
+        <h3>Decision</h3>
+        <p>Status: {{ section.status_label }}</p>
+        {% if section.resolved_at %}<p>Resolved: {{ section.resolved_at }}</p>{% endif %}
+        {% if section.accepted_text %}<p>Accepted Text: {{ section.accepted_text }}</p>{% endif %}
+        {% if section.rejection_reason %}<p>Rejection Reason: {{ section.rejection_reason }}</p>{% endif %}
+      </div>
+      {% endif %}
+
+      <div class="compare-grid">
+        <div class="panel">
+          <h3>Current Text</h3>
+          <pre>{{ section.current_text }}</pre>
+        </div>
+        <div class="panel">
+          <h3>Proposed Revision</h3>
+          <pre>{{ section.proposed_text_display }}</pre>
+        </div>
+      </div>
+
+      <details>
+        <summary>Evidence Brief</summary>
+        <div class="evidence-grid">
+          <div class="panel">
+            <h3>ADO Delta Summary</h3>
+            <p>{{ section.ado_delta_summary }}</p>
+          </div>
+          <div class="panel">
+            <h3>Confidence</h3>
+            <p><span class="confidence-chip">{{ section.confidence }}</span></p>
+          </div>
+          <div class="panel">
+            <h3>KPI Summary</h3>
+            <p>{{ section.kpi_summary or "No KPI summary." }}</p>
+          </div>
+          <div class="panel">
+            <h3>Top Signals</h3>
+            {% if section.top_signals %}
+            <ul class="signal-link-list">
+              {% for signal in section.top_signals %}
+              <li><a href="#{{ signal.anchor_id }}">{{ signal.signal_id }}</a>{% if signal.confidence %} <span class="confidence-chip">{{ signal.confidence }}</span>{% endif %}</li>
+              {% endfor %}
+            </ul>
+            {% else %}
+            <p>No approved signals captured.</p>
+            {% endif %}
+          </div>
+          <div class="panel">
+            <h3>Stale Claims</h3>
+            {% if section.stale_claims %}
+            <ul>
+              {% for claim in section.stale_claims %}
+              <li>{{ claim }}</li>
+              {% endfor %}
+            </ul>
+            {% else %}
+            <p>No stale or contradicted claims.</p>
+            {% endif %}
+          </div>
+          <div class="panel">
+            <h3>Vitality Summary</h3>
+            <p>{{ section.vitality_summary }}</p>
+          </div>
+        </div>
+      </details>
+
+      {% if section.accept_command %}
+      <div class="command-list">
+        <div class="command">{{ section.accept_command }}</div>
+        <div class="command">{{ section.accept_modified_command }}</div>
+        <div class="command">{{ section.reject_command }}</div>
+      </div>
+      {% endif %}
+    </section>
+    {% endfor %}
+
+    {% if dependency_proposals %}
+    <section class="section">
+      <div class="section-header">
+        <div>
+          <h2 class="section-title">Dependency Proposals</h2>
+          <div class="section-id">Pending inferred dependencies staged alongside the proposal review pane</div>
+        </div>
+      </div>
+
+      <div class="evidence-grid">
+        {% for proposal in dependency_proposals %}
+        <div class="panel">
+          <h3>{{ proposal.proposal_id }}</h3>
+          <p>{{ proposal.title }}</p>
+          <p>{{ proposal.route_summary }}</p>
+          <p>Detection: {{ proposal.detection_method }} · {{ proposal.occurrence_summary }}</p>
+          <p>Rationale: {{ proposal.rationale }}</p>
+          <p><span class="confidence-chip">{{ proposal.confidence }}</span></p>
+          {% if proposal.top_signals %}
+          <p>Linked Signals</p>
+          <ul class="signal-link-list">
+            {% for signal in proposal.top_signals %}
+            <li><a href="#{{ signal.anchor_id }}">{{ signal.signal_id }}</a>{% if signal.confidence %} <span class="confidence-chip">{{ signal.confidence }}</span>{% endif %}</li>
+            {% endfor %}
+          </ul>
+          {% endif %}
+          {% if proposal.evidence_refs %}
+          <p class="signal-meta">Evidence Refs: {{ proposal.evidence_refs|join(", ") }}</p>
+          {% endif %}
+          <div class="command-list">
+            <div class="command">{{ proposal.accept_command }}</div>
+            <div class="command">{{ proposal.dismiss_command }}</div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+    {% endif %}
+
+    {% if decision_summary.recent_resolutions %}
+    <section class="section">
+      <div class="section-header">
+        <div>
+          <h2 class="section-title">Recent Decisions</h2>
+          <div class="section-id">Latest accepted, modified, rejected, or superseded proposal decisions for this issue</div>
+        </div>
+      </div>
+
+      <div class="evidence-grid">
+        {% for proposal in decision_summary.recent_resolutions %}
+        <div class="panel">
+          <h3>{{ proposal.section_id }}</h3>
+          <p>Status: {{ proposal.status.value|replace('_', ' ')|title if proposal.status.value != 'accepted_modified' else 'Accepted With Edits' }}</p>
+          {% if proposal.resolved_at %}<p>Resolved: {{ proposal.resolved_at.isoformat() }}</p>{% endif %}
+          {% if proposal.accepted_text %}<p>Accepted Text: {{ proposal.accepted_text }}</p>{% endif %}
+          {% if proposal.rejection_reason %}<p>Rejection Reason: {{ proposal.rejection_reason }}</p>{% endif %}
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+    {% endif %}
+
+    {% if signal_details %}
+    <section class="section">
+      <div class="section-header">
+        <div>
+          <h2 class="section-title">Signal Details</h2>
+          <div class="section-id">Approved signals referenced by the current proposal set</div>
+        </div>
+      </div>
+
+      <div class="evidence-grid">
+        {% for signal in signal_details %}
+        <div class="panel" id="{{ signal.anchor_id }}">
+          <h3>{{ signal.signal_id }}</h3>
+          <p>{{ signal.text or "Signal details are unavailable in the current store." }}</p>
+          <p class="signal-meta">
+            Source: {{ signal.source or "unknown" }}
+            {% if signal.confidence %}<br>Confidence: {{ signal.confidence }}{% endif %}
+            {% if signal.timestamp %}<br>Captured: {{ signal.timestamp }}{% endif %}
+            {% if signal.workstream_id %}<br>Workstream: {{ signal.workstream_id }}{% endif %}
+          </p>
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+    {% endif %}
+  </div>
+</body>
+</html>

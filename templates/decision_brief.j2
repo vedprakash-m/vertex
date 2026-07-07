@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ title }}</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --page-bg: #f3f4f6;
+      --panel-bg: #ffffff;
+      --panel-border: #d1d5db;
+      --text-strong: #111827;
+      --text-muted: #4b5563;
+      --text-subtle: #6b7280;
+      --surface-muted: #f8fafc;
+      --surface-border: #e5e7eb;
+      --link: #1d4ed8;
+      --command-bg: #111827;
+      --command-fg: #f9fafb;
+      --shadow: 0 8px 24px rgba(15, 23, 42, 0.07);
+      --radius: 14px;
+      --verdict-accept-bg: #dcfce7;
+      --verdict-accept-fg: #166534;
+      --verdict-accept-border: #86efac;
+      --verdict-revise-bg: #fef3c7;
+      --verdict-revise-fg: #92400e;
+      --verdict-revise-border: #fcd34d;
+      --verdict-reject-bg: #fee2e2;
+      --verdict-reject-fg: #991b1b;
+      --verdict-reject-border: #fca5a5;
+      --verdict-defer-bg: #f1f5f9;
+      --verdict-defer-fg: #475569;
+      --verdict-defer-border: #cbd5e1;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --page-bg: #0f172a;
+        --panel-bg: #111827;
+        --panel-border: #334155;
+        --text-strong: #e5e7eb;
+        --text-muted: #cbd5e1;
+        --text-subtle: #94a3b8;
+        --surface-muted: #1e293b;
+        --surface-border: #334155;
+        --link: #93c5fd;
+        --command-bg: #020617;
+        --command-fg: #e2e8f0;
+        --shadow: 0 10px 30px rgba(2, 6, 23, 0.4);
+        --verdict-accept-bg: #14532d;
+        --verdict-accept-fg: #bbf7d0;
+        --verdict-accept-border: #166534;
+        --verdict-revise-bg: #451a03;
+        --verdict-revise-fg: #fde68a;
+        --verdict-revise-border: #92400e;
+        --verdict-reject-bg: #450a0a;
+        --verdict-reject-fg: #fecaca;
+        --verdict-reject-border: #991b1b;
+        --verdict-defer-bg: #1e293b;
+        --verdict-defer-fg: #94a3b8;
+        --verdict-defer-border: #334155;
+      }
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: "Segoe UI", -apple-system, Roboto, Helvetica, Arial, sans-serif;
+      background: linear-gradient(180deg, #dbeafe 0%, var(--page-bg) 240px);
+      color: var(--text-strong);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    a { color: var(--link); }
+
+    .page {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 28px 20px 60px;
+    }
+
+    .eyebrow {
+      margin: 0 0 8px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-subtle);
+    }
+
+    h1 {
+      margin: 0 0 6px;
+      font-size: 26px;
+      line-height: 1.2;
+    }
+
+    .subtitle {
+      margin: 0 0 28px;
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+
+    .summary-bar {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 28px;
+    }
+
+    .summary-chip {
+      padding: 5px 14px;
+      border-radius: 999px;
+      background: var(--surface-muted);
+      border: 1px solid var(--surface-border);
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-muted);
+    }
+
+    .summary-chip.ai {
+      background: #eff6ff;
+      border-color: #93c5fd;
+      color: #1d4ed8;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      .summary-chip.ai {
+        background: #1e3a5f;
+        border-color: #3b82f6;
+        color: #93c5fd;
+      }
+    }
+
+    .item-card {
+      background: var(--panel-bg);
+      border: 1px solid var(--panel-border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      margin-bottom: 24px;
+      overflow: hidden;
+    }
+
+    .item-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 14px 20px 12px;
+      border-bottom: 1px solid var(--surface-border);
+      background: var(--surface-muted);
+    }
+
+    .item-title {
+      font-size: 16px;
+      font-weight: 700;
+      flex: 1;
+    }
+
+    .confidence-badge {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 3px 10px;
+      border-radius: 999px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .confidence-badge.high { background: #dcfce7; color: #166534; }
+    .confidence-badge.medium { background: #fef3c7; color: #92400e; }
+    .confidence-badge.low { background: #fee2e2; color: #991b1b; }
+    .confidence-badge.none { background: var(--surface-muted); color: var(--text-subtle); }
+
+    @media (prefers-color-scheme: dark) {
+      .confidence-badge.high { background: #14532d; color: #bbf7d0; }
+      .confidence-badge.medium { background: #451a03; color: #fde68a; }
+      .confidence-badge.low { background: #450a0a; color: #fecaca; }
+    }
+
+    .item-body {
+      padding: 16px 20px;
+      display: grid;
+      gap: 16px;
+    }
+
+    .section-label {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: var(--text-subtle);
+      margin-bottom: 6px;
+    }
+
+    .current-text-box {
+      background: var(--surface-muted);
+      border: 1px solid var(--surface-border);
+      border-radius: 8px;
+      padding: 12px 14px;
+      font-size: 13px;
+      color: var(--text-muted);
+      white-space: pre-wrap;
+    }
+
+    .delta-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .delta-item {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      font-size: 13px;
+    }
+
+    .delta-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #3b82f6;
+      flex-shrink: 0;
+      margin-top: 5px;
+    }
+
+    .signal-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .signal-item {
+      background: var(--surface-muted);
+      border: 1px solid var(--surface-border);
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-size: 12px;
+    }
+
+    .signal-text {
+      color: var(--text-strong);
+    }
+
+    .signal-meta {
+      margin-top: 2px;
+      color: var(--text-subtle);
+      font-size: 11px;
+    }
+
+    .verdict-card {
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+
+    .verdict-card.accept {
+      background: var(--verdict-accept-bg);
+      border: 1px solid var(--verdict-accept-border);
+      color: var(--verdict-accept-fg);
+    }
+
+    .verdict-card.revise {
+      background: var(--verdict-revise-bg);
+      border: 1px solid var(--verdict-revise-border);
+      color: var(--verdict-revise-fg);
+    }
+
+    .verdict-card.reject {
+      background: var(--verdict-reject-bg);
+      border: 1px solid var(--verdict-reject-border);
+      color: var(--verdict-reject-fg);
+    }
+
+    .verdict-card.defer {
+      background: var(--verdict-defer-bg);
+      border: 1px solid var(--verdict-defer-border);
+      color: var(--verdict-defer-fg);
+    }
+
+    .verdict-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .verdict-label {
+      font-size: 13px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .verdict-reasoning {
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .suggested-text-box {
+      margin-top: 10px;
+      background: rgba(255, 255, 255, 0.5);
+      border-radius: 6px;
+      padding: 10px 12px;
+      font-size: 13px;
+      white-space: pre-wrap;
+    }
+
+    .no-verdict-hint {
+      background: var(--surface-muted);
+      border: 1px dashed var(--surface-border);
+      border-radius: 10px;
+      padding: 12px 16px;
+      font-size: 13px;
+      color: var(--text-subtle);
+    }
+
+    .commands-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .command-block {
+      background: var(--command-bg);
+      color: var(--command-fg);
+      border-radius: 6px;
+      padding: 7px 12px;
+      font-family: "Cascadia Code", "Consolas", monospace;
+      font-size: 11px;
+      white-space: nowrap;
+      user-select: all;
+    }
+
+    .command-hint {
+      font-size: 11px;
+      color: var(--text-subtle);
+      margin-bottom: 4px;
+    }
+
+    .two-col {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    @media (max-width: 640px) {
+      .two-col { grid-template-columns: 1fr; }
+    }
+
+    .footer {
+      margin-top: 40px;
+      text-align: center;
+      font-size: 11px;
+      color: var(--text-subtle);
+    }
+  </style>
+</head>
+<body>
+<div class="page">
+  <p class="eyebrow">Vertex / {{ edition_name }}</p>
+  <h1>{{ title }}</h1>
+  <p class="subtitle">{{ subtitle }}</p>
+
+  <div class="summary-bar">
+    <span class="summary-chip">Issue {{ "%03d"|format(brief.issue_number) }}</span>
+    <span class="summary-chip">{{ brief.total_pending }} pending decision(s)</span>
+    {% if brief.ai_enriched %}
+    <span class="summary-chip ai">AI recommendations included</span>
+    {% else %}
+    <span class="summary-chip">Run with --ai to add recommendations</span>
+    {% endif %}
+  </div>
+
+  {% for item in brief.items %}
+  <div class="item-card">
+    <div class="item-header">
+      <span class="item-title">{{ item.section_title }}</span>
+      <span class="confidence-badge {{ item.confidence }}">{{ item.confidence }}</span>
+    </div>
+    <div class="item-body">
+
+      <!-- Current text -->
+      <div>
+        <div class="section-label">Current Published Text</div>
+        <div class="current-text-box">{{ item.current_text or "(empty)" }}</div>
+      </div>
+
+      <div class="two-col">
+        <!-- Evidence delta -->
+        <div>
+          <div class="section-label">Evidence Delta</div>
+          <ul class="delta-list">
+            {% for line in item.evidence_delta_lines %}
+            <li class="delta-item">
+              <span class="delta-dot"></span>
+              <span>{{ line }}</span>
+            </li>
+            {% endfor %}
+          </ul>
+          {% if item.kpi_summary %}
+          <div style="margin-top:8px;font-size:12px;color:var(--text-muted);">
+            <strong>KPI:</strong> {{ item.kpi_summary }}
+          </div>
+          {% endif %}
+          {% if item.vitality_summary %}
+          <div style="margin-top:4px;font-size:12px;color:var(--text-muted);">
+            <strong>Vitality:</strong> {{ item.vitality_summary }}
+          </div>
+          {% endif %}
+          {% if item.stale_claims %}
+          <div style="margin-top:8px;">
+            <div class="section-label">Stale Claims</div>
+            <ul class="delta-list">
+              {% for claim in item.stale_claims %}
+              <li class="delta-item">
+                <span class="delta-dot" style="background:#92400E;"></span>
+                <span style="font-size:12px;">{{ claim }}</span>
+              </li>
+              {% endfor %}
+            </ul>
+          </div>
+          {% endif %}
+        </div>
+
+        <!-- Top signals -->
+        <div>
+          <div class="section-label">Top Signals</div>
+          {% if item.top_signals %}
+          <ul class="signal-list">
+            {% for sig in item.top_signals %}
+            <li class="signal-item">
+              <div class="signal-text">{{ sig.text }}</div>
+              <div class="signal-meta">
+                {% if sig.timestamp %}{{ sig.timestamp }}{% endif %}
+                {% if sig.source %} &middot; {{ sig.source }}{% endif %}
+              </div>
+            </li>
+            {% endfor %}
+          </ul>
+          {% else %}
+          <p style="font-size:12px;color:var(--text-subtle);">No top signals for this section.</p>
+          {% endif %}
+        </div>
+      </div>
+
+      <!-- AI verdict or hint -->
+      <div>
+        <div class="section-label">Recommendation</div>
+        {% if item.verdict %}
+        <div class="verdict-card {{ item.verdict | lower }}">
+          <div class="verdict-header">
+            <span class="verdict-label">
+              {% if item.verdict == "ACCEPT" %}Accept as-is
+              {% elif item.verdict == "REVISE" %}Revise
+              {% elif item.verdict == "REJECT" %}Reject / skip
+              {% else %}Defer to PM
+              {% endif %}
+            </span>
+          </div>
+          <div class="verdict-reasoning">{{ item.verdict_reasoning }}</div>
+          {% if item.suggested_text %}
+          <div class="section-label" style="margin-top:10px;margin-bottom:4px;">Suggested Revised Text</div>
+          <div class="suggested-text-box">{{ item.suggested_text }}</div>
+          {% endif %}
+        </div>
+        {% else %}
+        <div class="no-verdict-hint">No AI recommendation — run <code>vertex decision-brief --edition {{ edition_name }} --ai</code> to generate one.</div>
+        {% endif %}
+      </div>
+
+      <!-- Commands -->
+      <div>
+        <div class="section-label">Actions</div>
+        <div class="commands-row">
+          <div>
+            <div class="command-hint">Accept current text:</div>
+            <div class="command-block">{{ item.accept_command }}</div>
+          </div>
+          <div>
+            <div class="command-hint">Accept with revision:</div>
+            <div class="command-block">{{ item.accept_modified_command }}</div>
+          </div>
+          <div>
+            <div class="command-hint">Reject (skip section):</div>
+            <div class="command-block">{{ item.reject_command }}</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+  {% endfor %}
+
+  <div class="footer">
+    Generated {{ generated_at }} by Vertex &middot; {{ edition_name }}
+  </div>
+</div>
+</body>
+</html>

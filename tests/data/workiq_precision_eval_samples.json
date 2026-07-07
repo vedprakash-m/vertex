@@ -1,0 +1,85 @@
+[
+  {
+    "sample_id": "wq-001",
+    "lane_id": "acme.networking",
+    "query_name": "newsletter_search",
+    "prompt_excerpt": "Summarize the last week of networking parity discussion for Acme.",
+    "response_excerpt": "Wingtip validation remained blocked on the SCHIE driver signoff and the team expects a June 24 retry.",
+    "label": "relevant",
+    "notes": "Directly references the lane's active blocker and ETA."
+  },
+  {
+    "sample_id": "wq-002",
+    "lane_id": "acme.networking",
+    "query_name": "teams_search",
+    "prompt_excerpt": "Find Teams messages about networking parity decisions.",
+    "response_excerpt": "The northwind launch party was moved to Friday afternoon.",
+    "label": "irrelevant",
+    "notes": "Contains the program keyword but no operational signal."
+  },
+  {
+    "sample_id": "wq-003",
+    "lane_id": "acme.store_rollout",
+    "query_name": "newsletter_search",
+    "prompt_excerpt": "Extract status for Adventure store rollout.",
+    "response_excerpt": "Store rollout hit 82% deployment and the last blocker is the SCHIE exception list review.",
+    "label": "relevant"
+  },
+  {
+    "sample_id": "wq-004",
+    "lane_id": "acme.store_rollout",
+    "query_name": "feedback_search",
+    "prompt_excerpt": "Find stakeholder feedback on Acme newsletters.",
+    "response_excerpt": "A reader asked whether the 82% deployment figure changes the field ramp timeline.",
+    "label": "relevant"
+  },
+  {
+    "sample_id": "wq-005",
+    "lane_id": "acme.compliance",
+    "query_name": "newsletter_search",
+    "prompt_excerpt": "Summarize compliance lane movement.",
+    "response_excerpt": "Compliance is green because all audits closed yesterday and no follow-up work remains.",
+    "label": "hallucinated",
+    "notes": "Known bad sample: source thread did not contain the audit-closure claim."
+  },
+  {
+    "sample_id": "wq-006",
+    "lane_id": "dd_on_pf.storage",
+    "query_name": "newsletter_search",
+    "prompt_excerpt": "Summarize Contoso storage readiness.",
+    "response_excerpt": "GFU SSD signoff is still the gating item and the owner committed to a June 21 confirmation.",
+    "label": "relevant"
+  },
+  {
+    "sample_id": "wq-007",
+    "lane_id": "dd_on_pf.storage",
+    "query_name": "teams_search",
+    "prompt_excerpt": "Find Teams updates for Contoso storage.",
+    "response_excerpt": "The thread mostly discussed travel logistics for next week's onsite.",
+    "label": "irrelevant"
+  },
+  {
+    "sample_id": "wq-008",
+    "lane_id": "dd_on_pf.deployment",
+    "query_name": "newsletter_search",
+    "prompt_excerpt": "Summarize Contoso deployment blockers.",
+    "response_excerpt": "Deployment remains medium risk after the validation rerun passed but field enablement is still pending.",
+    "label": "relevant"
+  },
+  {
+    "sample_id": "wq-009",
+    "lane_id": "acme.identity",
+    "query_name": "feedback_search",
+    "prompt_excerpt": "Find stakeholder feedback on identity lane updates.",
+    "response_excerpt": "Readers questioned whether the June 30 target is still credible after the last two slips.",
+    "label": "relevant"
+  },
+  {
+    "sample_id": "wq-010",
+    "lane_id": "acme.identity",
+    "query_name": "newsletter_search",
+    "prompt_excerpt": "Summarize identity lane movement.",
+    "response_excerpt": "Identity finished end-to-end validation and the team is ready for broad deployment.",
+    "label": "relevant"
+  }
+]

@@ -1,0 +1,225 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+
+# Tool state directories (local-only; contain workspace paths and session state)
+.antigravitycli/
+.vertex/
+.codex/
+.agents/
+.claude/
+.ci/
+.idea/
+.direnv/
+.azure/
+.cache/
+.history/
+.python-version
+.coverage_session/
+.pytest-temp-codex*/
+.pytest-temp-*/
+.vertex/setup_session_*.json
+.vertex/*.lock
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+.envrc
+.tokens/
+*.pat
+*.pem
+*.key
+credentials*.json
+
+# Editor
+.vscode/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+# Windows reserved-name artifact created by `> nul` / `2>nul` shell redirects
+nul
+nul.*
+
+# Local data, source material, and edition-specific config
+.archive/
+docs/
+output/
+.pytest-tmp/
+archive/
+# Stray real-program-data dumps sometimes redirected to repo root by hand
+# (should live under output/, which is already ignored).
+/activation_status.json
+/activation-*.json
+reports/*
+!reports/*/
+reports/*/*
+!reports/schemas/
+!reports/schemas/**
+!reports/*/backfill.yaml
+specs/*
+!specs/vertex-prd.md
+!specs/vertex-tech-spec.md
+!specs/vertex-ux-spec.md
+# Canonical specs tracked: PRD, Tech, UX only.
+# Other specs, including consolidated.md, are local-only implementation notes.
+# The generated CLI reference snapshot lives in tests/contracts/cli_reference_snapshot.md.
+
+# Scratch / temp files accidentally committed
+_tmp_check.txt
+tests/cassettes/
+tests/fixtures/
+tests/golden/snapshots/
+
+# Program data — internal/private. Users supply their own program configurations.
+# The only tracked exception is sealed example/template config under programs/_templates/.
+programs/*
+!programs/_templates/
+!programs/_templates/**
+# Program-level publications workspace (operator data, not committed).
+# Explicit scoped entry for PR diff clarity; logically covered by programs/[^_]*/ below.
+/programs/*/publications/
+
+# Local Vertex SQLite state databases — contain program-specific runtime data.
+vertex-db/
+# Runtime RealityStore + Program Fact Store DBs (internal program facts/signals —
+# never publish). These materialize under ~/.vertex/<id>/ or a repo-relative
+# <program_id>/ dir depending on VERTEX_DB_PATH/db_root; ignore them everywhere.
+*.sqlite3
+*.sqlite
+*.db
+vertex.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite-wal
+*.sqlite-shm
+*.db-wal
+*.db-shm
+*.sqlite-journal
+*.sqlite3-journal
+*.db-journal
+**/.workiq_*.json
+# Private program directories (operator-managed, never committed).
+# Pattern excludes all programs/<name>/ except the bundled _templates directory.
+# This also covers REV inbox dirs: programs/*/rev_inbox/ and programs/*/_rev/
+# (raw .eml files; never commit personal email content).
+programs/[^_]*/
+
+# Knowledge files — may contain PII or internal team/people data.
+# Only *.example.yaml templates are committed.
+knowledge/*
+!knowledge/*.example.yaml
+
+# Program-operational scripts (contain internal workstream IDs and edition names)
+scripts/p0_approve_sections.ps1
+scripts/program_*.py
+# Exception: generic inventory utility (no program-specific IDs; required by tests)
+!scripts/program_inventory.py
+
+# Local one-off enrichment / migration / seeding scripts.
+# These contain real stakeholder contacts and internal IDs hard-coded as
+# bootstrap data. They are essential for local Vertex operation but must
+# remain private. Users supply their own equivalents.
+scripts/_enrich_vertex.py
+scripts/apply_*.py
+scripts/seed_*.py
+scripts/bootstrap_*.py
+scripts/backfill_*.py
+scripts/check_*.py
+!scripts/check_backlog_citations.py
+!scripts/check_coverage_baseline.py
+!scripts/check_spec_drift.py
+scripts/create_*.py
+scripts/export_*.py
+scripts/plan_*.py
+scripts/preview_*.py
+
+# Debug / ad-hoc probe scripts — often contain hardcoded work-item IDs,
+# internal email addresses, or references to now-archived spec files.
+scripts/_*.py
+scripts/check3.py
+scripts/check_remaining.py
+scripts/find_wave_d.py
+scripts/close_*.py
+scripts/fix_*.py
+scripts/validate_*.py
+scripts/ddpf_*.py
+scripts/xpf_*.py
+scripts/nova_*.py
+scripts/scrub_*.py
+# Tests that import the hidden operational scripts above (would fail on a fresh clone).
+tests/unit/test_validate_*.py
+tests/unit/test_check_*.py
+!tests/unit/test_check_spec_drift.py
+tests/unit/test_seed_issue_076_baseline.py
+# Program-specific test files that import private scripts (gitignored).
+# Any test file whose name contains a specific program name should stay local.
+tests/unit/test_*xpf*.py
+tests/unit/test_*nova*.py
+
+# Contract tests that depend on local programs/<program-id>/ data (not in the repo).
+# These pass only when the operator's local program directory is present.
+tests/contracts/test_section_catalog.py
+tests/contracts/test_historical_issue_guard.py
+tests/contracts/test_workstream_kusto_registry.py
+
+# Local git backups created during history-scrub operations
+.git.backup/
+.git.backup.*/
+.git.backup-*/
+.git.bak/
+.git.old/
+
+# Local debug / scratch output sometimes left in workspace root
+*.eml
+*.tmp
+*.bak
+*.orig
+temp_*.txt
+temp_*.md
+*_scratch.*
+.staged_list.tmp
+fix_dates.py
+program_facts_backup.json
+tmp_chart_test/
+tmp_qm_debug/
+proof_runs/
+
+# Local migration / state manifests sometimes emitted by scripts
+.migration_manifest.json
+
+# Test artifacts
+.pytest_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+
+# Local editor/tool settings (contain local paths, not for repo)
+.claude/settings.local.json
+
+
+# transient local run logs
+.report_run.log
+.pytest_dm_broad.log
+*.dm_broad.log
+
+# Operator-specific governance files — contain program aliases, DPA reviewer names,
+# approver identities, and M365 series_ids that identify the operator's org.
+# These are required for local operation but must never be published.
+# Generic templates/documentation (README, model-cards, etc.) remain tracked.
+governance/dpa-scope.md
+governance/roles/*.yaml

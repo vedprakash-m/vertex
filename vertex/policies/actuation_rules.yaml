@@ -1,0 +1,49 @@
+# Governed actuation rules — §6.11.3 (re-debt.md)
+# Ships with enabled: false. Enabling is a per-program operator act after CP-7.
+# All rules are individually gated; no rule executes unless:
+#   (a) actuation.enabled: true  (global gate, this file or per-program override)
+#   (b) the individual rule's enabled: true
+#   (c) INV-12 approval gate satisfied (human approved the proposal)
+#
+# Condition predicates are predicate IDs keyed into code-backed dicts (A-12).
+# NEVER use expression strings or an evaluator — only IDs registered in
+# src/core/actuation_engine.py::_CONDITION_PREDICATES.
+#
+# CP-7 note: review dry-run payloads of every enabled rule against live Acme
+# before flipping actuation.enabled anywhere.
+policy_schema_version: "1"
+
+actuation:
+  enabled: false                    # CP-7 operator gate; flip only after dry-run review
+  approval_ttl_hours: 24
+  rate_caps:
+    per_adapter_per_run: 10
+
+rules:
+  - id: close_resolved_ado_item
+    adapter: ado
+    operation: state_transition
+    trigger:
+      entity_type: work_item
+      condition_predicate: ado_open_but_evidence_resolved
+    gate: same_system
+    rate_cap:
+      per_program_per_run: 10
+    enabled: false
+
+  - id: comment_on_slipped_commitment
+    adapter: ado
+    operation: comment
+    trigger:
+      entity_type: work_item
+      condition_predicate: linked_commitment_slipped
+    gate: cross_system
+    enabled: false
+
+  - id: draft_mitigation_for_uncovered_risk
+    trigger_kind: structural_gap
+    gap_id: critical_risk_no_mitigation
+    adapter: ado
+    operation: work_item_create
+    gate: same_system
+    enabled: false

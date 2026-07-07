@@ -1,0 +1,60 @@
+<a id="exec-summary"></a>
+{% if health %}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" data-vertex-block="exec-summary" style="width:100%; border-collapse:collapse; margin:0 0 16px 0; border:1px solid #E5E7EB; background-color:#FFFFFF;">
+  <tr>
+    <td style="padding:12px 16px 8px 16px; font-size:12px; line-height:1.4; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color:#6B7280;">Executive Summary</td>
+  </tr>
+  <tr>
+    <td style="padding:0 16px 16px 16px; font-size:14px; line-height:1.6; color:#374151;">
+      {% if health.risk_register_summary %}
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 10px 0; border:1px solid #E5E7EB; background-color:#F9FAFB;">
+        <tr>
+          <td style="padding:10px 12px;">
+            <p style="margin:0 0 6px 0; font-size:10px; line-height:1.4; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color:#6B7280;">Risk Register</p>
+            <p style="margin:0; font-size:14px; line-height:1.65; color:#111827;">{{ health.risk_register_summary }}</p>
+          </td>
+        </tr>
+      </table>
+      {% endif %}
+      {% if health.milestone_summary %}
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 10px 0; border:1px solid #E5E7EB; background-color:#F9FAFB;">
+        <tr>
+          <td style="padding:10px 12px;">
+            <p style="margin:0 0 6px 0; font-size:10px; line-height:1.4; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color:#6B7280;">Milestone Health</p>
+            <p style="margin:0; font-size:14px; line-height:1.65; color:#111827;">{{ health.milestone_summary }}</p>
+          </td>
+        </tr>
+      </table>
+      {% endif %}
+      {% if health.telemetry_summary %}
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 10px 0; border:1px solid #E5E7EB; background-color:#F9FAFB;">
+        <tr>
+          <td style="padding:10px 12px;">
+            <p style="margin:0 0 6px 0; font-size:10px; line-height:1.4; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color:#6B7280;">Telemetry</p>
+            <p style="margin:0; font-size:14px; line-height:1.65; color:#111827;">{{ health.telemetry_summary }}</p>
+          </td>
+        </tr>
+      </table>
+      {% endif %}
+      {% include "partials/milestone_rows.j2" %}
+      {% set summary_text = report.exec_summary_text | replace('\r\n', '\n') | replace('<!-- state -->', '\n\n') %}
+      {% for paragraph in summary_text.split('\n\n') %}
+      {% set paragraph_text = paragraph.strip() %}
+      {% if paragraph_text %}
+      {% set paragraph_parts = paragraph_text.split(':', 1) %}
+      {% set paragraph_label = paragraph_parts[0].strip() if paragraph_parts|length > 1 else '' %}
+      {% set paragraph_body = paragraph_parts[1].strip() if paragraph_parts|length > 1 else paragraph_text %}
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 {% if loop.last %}0{% else %}10px{% endif %} 0; border:1px solid #E5E7EB; background-color:#F9FAFB;">
+        <tr>
+          <td style="padding:10px 12px;">
+            {% if paragraph_label %}<p style="margin:0 0 6px 0; font-size:10px; line-height:1.4; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color:#6B7280;">{{ paragraph_label }}</p>{% endif %}
+            <p style="margin:0; font-size:14px; line-height:1.65; color:#111827;">{{ paragraph_body | e | replace('\n', ' ') }}</p>
+          </td>
+        </tr>
+      </table>
+      {% endif %}
+      {% endfor %}
+    </td>
+  </tr>
+</table>
+{% endif %}

@@ -1,0 +1,24 @@
+Morning Brief - acme
+Generated: 2026-05-21T09:00:00+00:00
+
+Now
+---
+- Catchup since 2026-05-20 09:00Z: 2 new signal(s), 4 discovered, 12 item(s) scanned.
+- Catchup detail: ADO#1234 target date changed from Jun 15 to Jun 22.
+- Catchup detail: Repair risk-up signal is contradicted by Kusto.
+- Contradiction WI:123 (deployment): Claim date disagrees with current ADO target date. Prefer workiq (high).
+- Low attention + known slip bias on deployment.
+- Incident learning WI:123 (deployment): Deployment capacity rollback exposed hidden coupling. Source: IcM 22001. (high confidence)
+- Decision ask d-1 is ready for nudge after 16 day(s) inactive: Need LT decision on contingency scope.
+- Claim c-1 (deployment) due 2026-05-24: Deployment ETA still needs leadership attention.
+
+Watch
+-----
+- Decision ask d-2 is in watch at 8 day(s) open: Confirm the rollout owner and date still look current.
+- Claim c-2 (repair) due 2026-06-01: Repair is on track for early June.
+
+Staged
+------
+- Id: contradiction-wi-123-review | Review contradiction on deployment | Evidence: WI:123 Claim date disagrees with current ADO target date. Prefer workiq. | Action: Refresh the contradiction report and decide whether the claim or narrative needs correction. | Apply: vertex reconcile --program acme --refresh --dry-run | Approve: vertex brief --program acme --approve contradiction-wi-123-review | Dismiss: vertex brief --program acme --dismiss contradiction-wi-123-review | Rollback: No state changes occur until you update the underlying claim or source of truth.
+- Id: incident-deployment-wi-123-readiness | Review readiness after incident learning on deployment | Evidence: WI:123: Deployment capacity rollback exposed hidden coupling. Source: IcM 22001. (high confidence) | Action: Refresh readiness and verify whether rollback, incident response ownership, or launch gating needs an update. | Apply: vertex readiness fetch --program acme | Approve: vertex brief --program acme --approve incident-deployment-wi-123-readiness | Dismiss: vertex brief --program acme --dismiss incident-deployment-wi-123-readiness | Rollback: Rerun readiness after updating local evidence or config; the snapshot is a local projection.
+- Id: decision-ask-d-1-nudge | Stage nudge for decision ask d-1 | Evidence: 16 day(s) inactive. Need LT decision on contingency scope. | Action: Stage a follow-up nudge draft so the owner can be reminded before the next publish cycle. | Apply: vertex decisions nudge --program acme --id d-1 --dry-run | Approve: vertex brief --program acme --approve decision-ask-d-1-nudge | Dismiss: vertex brief --program acme --dismiss decision-ask-d-1-nudge | Rollback: Do not send the draft and defer or resolve the ask if the follow-up is not needed.

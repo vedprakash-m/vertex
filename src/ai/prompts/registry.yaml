@@ -1,0 +1,33 @@
+# Prompt registry (D-22): the authoritative list of active prompt versions.
+#
+# Version selection is registered config, not convention: every prompt version
+# selected by code must appear here, and every registered version must have a
+# matching <version>.txt in this directory. Both directions are enforced by
+# tests/contracts/test_prompt_registry.py. Adding a new prompt version is a
+# one-line edit here plus the .txt file — no scattered constants to hunt down.
+registry_schema_version: "1"
+prompts:
+  - action_extractor.v1
+  - activation_judge.v1
+  - anticipation_question.v1
+  - backfill_extractor.v1
+  - claim_extractor.v1
+  - context_synthesizer.v1
+  - decision_brief_advisor.v1
+  - exec_summary_drafter.v1
+  - intent_router.v1
+  - learning_distiller.v1
+  - m365_topic_router.v1
+  - onboard_structure_assistant.v1
+  - onboard_style_assistant.v1
+  - prose_event_extractor.v1
+  - prose_event_extractor.v2
+  - prose_event_extractor.v3
+  - prose_event_extractor.v4
+  - rev_extractor.v1
+  - setup_discovery_assistant.v1
+  - setup_explainer.v1
+  - setup_ws_suggest.v1
+  - summary_generator.v1
+  - synthesizer.v1
+  - workstream_blurb.v1

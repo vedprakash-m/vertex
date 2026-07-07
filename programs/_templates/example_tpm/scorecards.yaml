@@ -1,0 +1,8 @@
+schema_version: "2.0"
+scorecards:
+  - name: Example Weekly Update
+    dimensions:
+      - name: Delivery Readiness
+        description: Tracks the main execution lane for the sample program.
+        ado_filter: "area_path contains 'Example'"
+        workstream_id: delivery

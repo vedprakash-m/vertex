@@ -1,0 +1,937 @@
+from __future__ import annotations
+
+from pathlib import Path
+import sqlite3
+from typing import Any
+
+from src.commands.doctor_checks.models import DoctorCheck, DoctorReport, directory_size, format_bytes
+from src.core.exceptions import StateError
+from src.core.archive_store import find_latest_confirmed_entry, read_archive_index
+from src.core.edition_resolver import (
+    get_program_output_dir,
+    resolve_edition,
+    PROGRAMS_ROOT,
+    _OUTPUT_SUBDIR_LEGACY,
+    _LAYOUT_MARKER_FILENAME,
+    _output_subdir,
+)
+from src.core.journal import (
+    get_program_journal_archive_dir,
+    get_program_journal_dir,
+    get_reviews_path,
+    get_signal_threads_path,
+    get_week_key,
+)
+from src.ai.cost_guard import load_latest_run_state
+from src.ai.edit_learner import get_edit_patterns_path
+from src.core.action_tracker import get_actions_path
+from src.core.ai_proposal_store import (
+    AI_PROPOSAL_TTL_DAYS,
+    get_ai_proposals_path,
+    load_ai_proposals,
+    oldest_pending_proposal_age_days,
+)
+from src.core.claim_tracker import claim_log_checksum_matches, get_claims_path, list_claim_quarantine_paths
+from src.core.decision_register import get_decisions_path
+from src.core.dependency_graph import get_dependencies_path
+from src.core.models_v2 import AIProposalStatus
+from src.core.jsonl_utils import jsonl_checksum_matches, list_jsonl_quarantine_paths
+from src.core.milestone_engine import get_milestones_path
+from src.core.program_fact_store import resolve_fact_sor_mode
+from src.core.reality_store import get_program_reality_db_path
+from src.core.risk_register_engine import get_risk_register_path, get_risk_updates_path
+from src.core.sqlite_stores import get_program_sqlite_store_path
+from src.core.store_factory import resolve_storage_backend
+from src.core.trajectory import get_program_trajectory_dir, list_trajectory_quarantine_paths, trajectory_checksum_matches
+from src.core.workstream_documents import get_workstreams_path
+from src.core.program_paths import (
+    ROOT_WHITELIST,
+    ROOT_T2_FILES,
+    RUNTIME_ARTIFACTS,
+    RUNTIME_ARTIFACTS_BY_NAME,
+    RUNTIME_SUBDIR,
+    get_runtime_dir,
+)
+
+
+def run_storage_doctor(
+    *,
+    edition_name: str,
+    editions_root: Path,
+    programs_root: Path,
+    archive_root: Path,
+    reality_db_root: Path | None,
+) -> DoctorReport:
+    resolved = resolve_edition(
+        edition_name,
+        editions_root=editions_root,
+        programs_root=programs_root,
+    )
+    if resolved is None:
+        return DoctorReport(edition=edition_name, checks=(DoctorCheck("Storage", "fail", f"Edition '{edition_name}' could not be resolved."),))
+
+    program_id = resolved.program.id
+    storage_backend = resolve_storage_backend(resolved.program.storage_backend)
+    archive_index = read_archive_index(edition_name, archive_root=archive_root)
+    confirmed_entries = tuple(entry for entry in archive_index.issues if entry.kind == "confirmed")
+    latest_confirmed = find_latest_confirmed_entry(archive_index)
+
+    checks = (
+        _edition_workspace_layout_check(program_id, programs_root=programs_root),
+        _storage_retention_check(
+            program_id,
+            confirmed_entries=confirmed_entries,
+            latest_confirmed=latest_confirmed,
+            programs_root=programs_root,
+        ),
+        _sidecar_health_check(program_id, programs_root=programs_root),
+        _trajectory_storage_check(program_id, programs_root=programs_root),
+        _program_sqlite_storage_check(
+            program_id,
+            storage_backend=storage_backend,
+            confirmed_issue_count=len(confirmed_entries),
+            programs_root=programs_root,
+        ),
+        _reality_db_storage_check(
+            program_id,
+            confirmed_issue_count=len(confirmed_entries),
+            db_root=reality_db_root,
+        ),
+        _fact_store_authority_check(program_id, programs_root=programs_root),
+        _cost_ledger_storage_check(edition_name, programs_root=programs_root),
+        _ai_proposal_queue_check(program_id, programs_root=programs_root),
+        _dc01_root_cleanliness_check(program_id, programs_root=programs_root),
+        _dc02_runtime_layout_check(program_id, programs_root=programs_root),
+        _dc03_docs_directory_check(program_id, programs_root=programs_root),
+    )
+    return DoctorReport(edition=edition_name, checks=checks)
+
+
+def _edition_workspace_layout_check(program_id: str, *, programs_root: Path) -> DoctorCheck:
+    """PO-01: Check that the edition workspace directory uses the canonical layout.
+
+    Multi-state severity (specs/move-output-newsletter.md §8.1):
+    - OK:    publications/<edition>/ only, marker says publications
+    - WARN:  output/<edition>/ only, marker absent (legacy layout, not yet migrated)
+    - ERROR: Both output/ and publications/ exist (split-brain)
+    - ERROR: output/ only but marker says publications (disk/marker mismatch)
+    - INFO:  Neither path exists (fresh program) or partial migration in progress
+    """
+    import json as _json
+
+    program_dir = programs_root / program_id
+    canonical_root = program_dir / _output_subdir()
+    legacy_root = program_dir / _OUTPUT_SUBDIR_LEGACY
+    marker_path = program_dir / _LAYOUT_MARKER_FILENAME
+
+    canonical_exists = canonical_root.exists()
+    legacy_exists = legacy_root.exists()
+
+    # Read marker state
+    marker_layout: str | None = None
+    if marker_path.exists():
+        try:
+            marker_data = _json.loads(marker_path.read_text(encoding="utf-8"))
+            marker_layout = marker_data.get("edition_workspace_layout")
+        except Exception:
+            marker_layout = None
+
+    # Split-brain: both exist simultaneously
+    if canonical_exists and legacy_exists and canonical_root != legacy_root:
+        return DoctorCheck(
+            "PO-01 Edition Layout",
+            "fail",
+            (
+                f"Split-brain: both '{canonical_root.name}/' and '{legacy_root.name}/' exist under "
+                f"programs/{program_id}/. Run: python scripts/migrate_edition_output.py "
+                f"--program {program_id} --verify"
+            ),
+            metadata={"program_id": program_id, "state": "split_brain"},
+        )
+
+    # Canonical layout is active
+    if canonical_exists and not legacy_exists:
+        if _output_subdir() == _OUTPUT_SUBDIR_LEGACY:
+            # Phase 2: canonical == legacy, disk has only one dir — pass
+            return DoctorCheck(
+                "PO-01 Edition Layout",
+                "ok",
+                f"Edition workspace layout is canonical ('{canonical_root.name}/').",
+                metadata={"program_id": program_id, "state": "canonical", "layout": _output_subdir()},
+            )
+        return DoctorCheck(
+            "PO-01 Edition Layout",
+            "ok",
+            f"Edition workspace layout is canonical ('{canonical_root.name}/').",
+            metadata={"program_id": program_id, "state": "canonical", "layout": _output_subdir()},
+        )
+
+    # Legacy only — check for marker mismatch
+    if legacy_exists and not canonical_exists:
+        if marker_layout == _output_subdir() and _output_subdir() != _OUTPUT_SUBDIR_LEGACY:
+            # Marker says canonical, disk has legacy — mismatch
+            return DoctorCheck(
+                "PO-01 Edition Layout",
+                "fail",
+                (
+                    f"Marker/disk mismatch: marker declares '{_output_subdir()}/' layout but only "
+                    f"'{legacy_root.name}/' exists. Re-run migration script: "
+                    f"python scripts/migrate_edition_output.py --program {program_id}"
+                ),
+                metadata={"program_id": program_id, "state": "mismatch", "marker_layout": marker_layout},
+            )
+        # Standard legacy warning — not yet migrated
+        return DoctorCheck(
+            "PO-01 Edition Layout",
+            "warn",
+            (
+                f"Legacy '{legacy_root.name}/' layout. Migrate with: "
+                f"python scripts/migrate_edition_output.py --program {program_id}"
+            ),
+            metadata={"program_id": program_id, "state": "legacy"},
+        )
+
+    # Neither path exists — fresh program or partial migration
+    return DoctorCheck(
+        "PO-01 Edition Layout",
+        "ok",
+        f"No edition workspace yet for programs/{program_id} (fresh program).",
+        metadata={"program_id": program_id, "state": "fresh"},
+    )
+
+
+def _storage_retention_check(
+    program_id: str,
+    *,
+    confirmed_entries: tuple[Any, ...],
+    latest_confirmed: Any | None,
+    programs_root: Path,
+) -> DoctorCheck:
+    journal_dir = get_program_journal_dir(program_id, programs_root)
+    archive_dir = get_program_journal_archive_dir(program_id, programs_root)
+    active_weekly_paths = tuple(sorted(path for path in journal_dir.glob("????-W??.jsonl") if path.is_file()))
+    archived_weekly_paths = tuple(sorted(path for path in archive_dir.glob("????-W??.jsonl") if path.is_file()))
+    active_size = sum(path.stat().st_size for path in active_weekly_paths)
+    archived_size = sum(path.stat().st_size for path in archived_weekly_paths)
+    auxiliary_paths = tuple(
+        path
+        for path in (
+            get_reviews_path(program_id, programs_root),
+            get_signal_threads_path(program_id, programs_root),
+        )
+        if path.exists()
+    )
+    auxiliary_size = sum(path.stat().st_size for path in auxiliary_paths)
+
+    detail = (
+        f"{len(active_weekly_paths)} active weekly partition(s) ({format_bytes(active_size)}), "
+        f"{len(archived_weekly_paths)} archived ({format_bytes(archived_size)}), "
+        f"aux logs {format_bytes(auxiliary_size)}, "
+        f"{len(confirmed_entries)} confirmed issue(s)."
+    )
+    if latest_confirmed is None:
+        return DoctorCheck("Storage Retention", "ok", detail)
+
+    latest_confirmed_week = get_week_key(latest_confirmed.generated_at)
+    archiveable_paths = tuple(path for path in active_weekly_paths if path.stem < latest_confirmed_week)
+    if len(confirmed_entries) >= 8 and archiveable_paths:
+        oldest = archiveable_paths[0].stem
+        newest = archiveable_paths[-1].stem
+        detail = (
+            f"{detail} {len(archiveable_paths)} active partition(s) predate the latest confirmed week "
+            f"{latest_confirmed_week} ({oldest}..{newest}); run "
+            f"`vertex archive-journals --program {program_id} --before {latest_confirmed_week}`."
+        )
+        return DoctorCheck(
+            "Storage Retention",
+            "warn",
+            detail,
+            metadata={
+                "archiveable_partition_count": len(archiveable_paths),
+                "confirmed_issue_count": len(confirmed_entries),
+                "latest_confirmed_week": latest_confirmed_week,
+                "program_id": program_id,
+            },
+        )
+
+    return DoctorCheck(
+        "Storage Retention",
+        "ok",
+        detail,
+        metadata={
+            "active_partition_count": len(active_weekly_paths),
+            "archived_partition_count": len(archived_weekly_paths),
+            "confirmed_issue_count": len(confirmed_entries),
+            "program_id": program_id,
+        },
+    )
+
+
+def _sidecar_health_check(program_id: str, *, programs_root: Path) -> DoctorCheck:
+    claim_quarantines = list_claim_quarantine_paths(program_id, programs_root=programs_root)
+    checksum_matches = claim_log_checksum_matches(program_id, programs_root=programs_root)
+    trajectory_dir = get_program_trajectory_dir(program_id, programs_root=programs_root)
+    trajectory_quarantines = list_trajectory_quarantine_paths(program_id, programs_root=programs_root)
+    trajectory_paths = tuple(sorted(path for path in trajectory_dir.glob("*.jsonl") if path.is_file()))
+    trajectory_checksum_failures = [
+        path.name
+        for path in trajectory_paths
+        if trajectory_checksum_matches(program_id, int(path.stem), programs_root=programs_root) is False
+    ]
+    if claim_quarantines:
+        latest = claim_quarantines[-1]
+        return DoctorCheck(
+            "Sidecar Health",
+            "warn",
+            f"{len(claim_quarantines)} quarantined claims log file(s); latest {latest.name} under programs/{program_id}/journal/quarantine.",
+            metadata={
+                "claim_quarantine_count": len(claim_quarantines),
+                "latest_claim_quarantine": str(latest),
+                "program_id": program_id,
+            },
+        )
+
+    if trajectory_quarantines:
+        latest = trajectory_quarantines[-1]
+        return DoctorCheck(
+            "Sidecar Health",
+            "warn",
+            f"{len(trajectory_quarantines)} quarantined trajectory file(s); latest {latest.name} under programs/{program_id}/trajectories/quarantine.",
+            metadata={
+                "claim_quarantine_count": 0,
+                "trajectory_quarantine_count": len(trajectory_quarantines),
+                "latest_trajectory_quarantine": str(latest),
+                "program_id": program_id,
+            },
+        )
+
+    if checksum_matches is False:
+        claims_path = get_claims_path(program_id, programs_root=programs_root)
+        return DoctorCheck(
+            "Sidecar Health",
+            "warn",
+            f"Claims log checksum is missing or mismatched for programs/{program_id}/journal/{claims_path.name}.",
+            metadata={"claim_quarantine_count": 0, "claims_checksum_ok": False, "program_id": program_id},
+        )
+
+    if trajectory_checksum_failures:
+        return DoctorCheck(
+            "Sidecar Health",
+            "warn",
+            f"{len(trajectory_checksum_failures)} trajectory checksum file(s) are missing or mismatched; latest {trajectory_checksum_failures[-1]}.",
+            metadata={
+                "claim_quarantine_count": 0,
+                "claims_checksum_ok": checksum_matches,
+                "trajectory_checksum_failures": tuple(trajectory_checksum_failures),
+                "program_id": program_id,
+            },
+        )
+
+    # Phase 5: extended sidecar health for actions, ai_proposals, edit_patterns, risk_updates
+    journal_quarantine_dir = get_program_journal_dir(program_id, programs_root) / "quarantine"
+    extended_quarantines: list[str] = []
+    extended_checksum_failures: list[str] = []
+    for label, path, checksum_path in (
+        ("actions", get_actions_path(program_id, programs_root), get_actions_path(program_id, programs_root).with_suffix(".sha256")),
+        ("ai_proposals", get_ai_proposals_path(program_id, programs_root), get_ai_proposals_path(program_id, programs_root).with_suffix(".sha256")),
+        ("edit_patterns", get_edit_patterns_path(program_id, programs_root), get_edit_patterns_path(program_id, programs_root).with_suffix(".sha256")),
+        ("risk_updates", get_risk_updates_path(program_id, programs_root), get_risk_updates_path(program_id, programs_root).with_suffix(".sha256")),
+    ):
+        quarantined = list_jsonl_quarantine_paths(journal_quarantine_dir, stem=path.stem)
+        if quarantined:
+            extended_quarantines.append(f"{label}:{len(quarantined)}")
+        if path.exists() and jsonl_checksum_matches(path, checksum_path) is False:
+            extended_checksum_failures.append(label)
+    if extended_quarantines:
+        return DoctorCheck(
+            "Sidecar Health",
+            "warn",
+            f"Quarantined sidecars detected: {', '.join(extended_quarantines)}.",
+            metadata={
+                "claim_quarantine_count": 0,
+                "claims_checksum_ok": checksum_matches,
+                "trajectory_checksum_failures": (),
+                "extended_quarantines": tuple(extended_quarantines),
+                "program_id": program_id,
+            },
+        )
+    if extended_checksum_failures:
+        return DoctorCheck(
+            "Sidecar Health",
+            "warn",
+            f"Checksum mismatch for: {', '.join(extended_checksum_failures)}.",
+            metadata={
+                "claim_quarantine_count": 0,
+                "claims_checksum_ok": checksum_matches,
+                "trajectory_checksum_failures": (),
+                "extended_checksum_failures": tuple(extended_checksum_failures),
+                "program_id": program_id,
+            },
+        )
+
+    return DoctorCheck(
+        "Sidecar Health",
+        "ok",
+        "No quarantined sidecar files detected.",
+        metadata={
+            "claim_quarantine_count": 0,
+            "claims_checksum_ok": checksum_matches,
+            "trajectory_checksum_failures": (),
+            "program_id": program_id,
+        },
+    )
+
+
+def _trajectory_storage_check(program_id: str, *, programs_root: Path) -> DoctorCheck:
+    trajectory_dir = get_program_trajectory_dir(program_id, programs_root=programs_root)
+    trajectory_paths = tuple(sorted(path for path in trajectory_dir.glob("*.jsonl") if path.is_file()))
+    if not trajectory_paths:
+        return DoctorCheck("Trajectory Storage", "ok", "No trajectory files are stored for this program yet.")
+
+    size_bytes = directory_size(trajectory_dir)
+    detail = (
+        f"{len(trajectory_paths)} work-item trajectory file(s), "
+        f"{format_bytes(size_bytes)} under programs/{program_id}/trajectories."
+    )
+    return DoctorCheck(
+        "Trajectory Storage",
+        "ok",
+        detail,
+        metadata={
+            "file_count": len(trajectory_paths),
+            "path": str(trajectory_dir),
+            "program_id": program_id,
+            "size_bytes": size_bytes,
+        },
+    )
+
+
+def _program_sqlite_storage_check(
+    program_id: str,
+    *,
+    storage_backend: str,
+    confirmed_issue_count: int,
+    programs_root: Path,
+) -> DoctorCheck:
+    db_path = get_program_sqlite_store_path(program_id, programs_root=programs_root)
+    if not db_path.exists():
+        status = "warn" if storage_backend == "sqlite" and confirmed_issue_count > 0 else "ok"
+        detail = (
+            f"storage_backend={storage_backend}; program SQLite store is not initialized at {db_path}."
+            if storage_backend == "sqlite"
+            else f"storage_backend={storage_backend}; no program SQLite store at {db_path}."
+        )
+        return DoctorCheck("Program SQLite", status, detail)
+    return _sqlite_storage_check(
+        "Program SQLite",
+        db_path,
+        expected_location=None,
+        prefix=f"storage_backend={storage_backend}; ",
+    )
+
+
+def _reality_db_storage_check(
+    program_id: str,
+    *,
+    confirmed_issue_count: int,
+    db_root: Path | None,
+) -> DoctorCheck:
+    db_path = get_program_reality_db_path(program_id, db_root=db_root)
+    expected_root = Path.home() / ".vertex"
+    if not db_path.exists():
+        status = "ok" if confirmed_issue_count == 0 else "warn"
+        return DoctorCheck(
+            "Reality DB",
+            status,
+            f"Program fact-store DB is not initialized at {db_path}.",
+            metadata={"expected_root": str(expected_root), "path": str(db_path), "program_id": program_id},
+        )
+    return _sqlite_storage_check(
+        "Reality DB",
+        db_path,
+        expected_location=expected_root,
+        prefix="Program fact-store DB. ",
+    )
+
+
+def _fact_store_authority_check(program_id: str, *, programs_root: Path) -> DoctorCheck:
+    sor_mode = resolve_fact_sor_mode(program_id=program_id, programs_root=programs_root)
+    legacy_mutable_paths = tuple(
+        path
+        for path in (
+            get_actions_path(program_id, programs_root),
+            get_claims_path(program_id, programs_root),
+            get_decisions_path(program_id, programs_root),
+            get_dependencies_path(program_id, programs_root),
+            get_milestones_path(program_id, programs_root),
+            get_risk_register_path(program_id, programs_root),
+            get_workstreams_path(program_id, programs_root),
+        )
+        if path.exists()
+    )
+    authority = "authoritative" if sor_mode == "primary" else "legacy"
+    shadow_write_retention = "enabled" if legacy_mutable_paths else "disabled"
+    status = "ok" if authority == "authoritative" else "warn"
+    return DoctorCheck(
+        "Fact Store Authority",
+        status,
+        (
+            f"fact_store_authority={authority}, sor_mode={sor_mode}, "
+            f"shadow_write_retention={shadow_write_retention}, legacy_mutable_paths={len(legacy_mutable_paths)}"
+        ),
+        metadata={
+            "fact_store_authority": authority,
+            "legacy_mutable_paths": tuple(str(path) for path in legacy_mutable_paths),
+            "program_id": program_id,
+            "shadow_write_retention": shadow_write_retention,
+            "sor_mode": sor_mode,
+        },
+    )
+
+
+def _sqlite_storage_check(
+    label: str,
+    db_path: Path,
+    *,
+    expected_location: Path | None,
+    prefix: str,
+) -> DoctorCheck:
+    wal_path = Path(str(db_path) + "-wal")
+    location_warning = expected_location is not None and not _path_is_within(db_path, expected_location)
+
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as connection:
+            journal_mode_row = connection.execute("PRAGMA journal_mode").fetchone()
+            journal_mode = str(journal_mode_row[0]).lower() if journal_mode_row else "unknown"
+            integrity_rows = connection.execute("PRAGMA integrity_check").fetchall()
+            integrity_result = str(integrity_rows[0][0]).lower() if integrity_rows else "unknown"
+    except sqlite3.DatabaseError as error:
+        return DoctorCheck(label, "fail", f"{prefix}Unable to read {db_path} ({error}).")
+
+    status = "ok"
+    findings: list[str] = []
+    if journal_mode != "wal":
+        status = "warn"
+        findings.append(f"journal_mode={journal_mode}")
+    if integrity_result != "ok":
+        status = "fail"
+        findings.append(f"integrity_check={integrity_result}")
+    if location_warning:
+        status = "warn" if status == "ok" else status
+        findings.append(f"path outside {expected_location}")
+
+    detail = f"{prefix}{db_path} ({format_bytes(db_path.stat().st_size)})"
+    if wal_path.exists():
+        detail = f"{detail}; WAL {format_bytes(wal_path.stat().st_size)}"
+    detail = f"{detail}; journal_mode={journal_mode}; integrity_check={integrity_result}"
+    if findings:
+        detail = f"{detail}; {'; '.join(findings)}"
+    return DoctorCheck(
+        label,
+        status,
+        detail,
+        metadata={
+            "db_path": str(db_path),
+            "integrity_check": integrity_result,
+            "journal_mode": journal_mode,
+            "location_warning": location_warning,
+            "size_bytes": db_path.stat().st_size,
+            "wal_size_bytes": wal_path.stat().st_size if wal_path.exists() else 0,
+        },
+    )
+
+
+def _cost_ledger_storage_check(edition_name: str, *, programs_root: Path = PROGRAMS_ROOT) -> DoctorCheck:
+    ai_dir = get_program_output_dir(edition_name, programs_root=programs_root) / "ai"
+    ledger_path = ai_dir / "cost_guard.sqlite3"
+    projection_path = ai_dir / "cost_guard.json"
+
+    if not ledger_path.exists() and not projection_path.exists():
+        return DoctorCheck(
+            "AI Cost Ledger",
+            "ok",
+            f"No AI cost ledger artifacts are present yet under {ai_dir}.",
+            metadata={"cost_ledger_dual_written": False, "edition": edition_name},
+        )
+
+    try:
+        state = load_latest_run_state(edition_name, programs_root=programs_root)
+    except StateError as error:
+        return DoctorCheck(
+            "AI Cost Ledger",
+            "fail",
+            f"AI cost ledger state invalid for {edition_name}: {error}",
+            metadata={
+                "cost_ledger_dual_written": ledger_path.exists() and projection_path.exists(),
+                "edition": edition_name,
+            },
+        )
+
+    dual_written = ledger_path.exists() and projection_path.exists()
+    if state is None:
+        status = "ok" if dual_written else "warn"
+        detail = (
+            f"AI cost ledger artifacts exist for {edition_name} but contain no run rows yet; "
+            f"ledger={'present' if ledger_path.exists() else 'missing'}, projection={'present' if projection_path.exists() else 'missing'}."
+        )
+        return DoctorCheck(
+            "AI Cost Ledger",
+            status,
+            detail,
+            metadata={"cost_ledger_dual_written": dual_written, "edition": edition_name},
+        )
+
+    status = "ok" if dual_written else "warn"
+    detail = (
+        f"AI cost ledger latest run {state.run_id}: ${state.spent_usd:.3f} / ${state.budget_usd:.2f} across {state.ai_calls} AI call(s); "
+        f"ledger={'present' if ledger_path.exists() else 'missing'}, projection={'present' if projection_path.exists() else 'missing'}."
+    )
+    return DoctorCheck(
+        "AI Cost Ledger",
+        status,
+        detail,
+        metadata={
+            "ai_calls": state.ai_calls,
+            "cost_ledger_dual_written": dual_written,
+            "edition": edition_name,
+            "latest_run_id": state.run_id,
+            "spent_usd": state.spent_usd,
+        },
+    )
+
+
+def _ai_proposal_queue_check(program_id: str, *, programs_root: Path) -> DoctorCheck:
+    age_days = oldest_pending_proposal_age_days(program_id, programs_root=programs_root)
+    pending_count = sum(
+        1
+        for _ in load_ai_proposals(
+            program_id,
+            status=AIProposalStatus.PENDING,
+            programs_root=programs_root,
+        )
+    )
+    if age_days is None:
+        return DoctorCheck(
+            "AI Proposal Queue",
+            "ok",
+            "No pending AI proposals.",
+            metadata={"pending_count": 0, "oldest_age_days": None, "program_id": program_id},
+        )
+    # D-30: warn at the same threshold as the TTL. The synthesize
+    # pipeline expires stale proposals on its next run, so this
+    # check is the operator's signal that the queue is "stuck".
+    if age_days >= AI_PROPOSAL_TTL_DAYS:
+        return DoctorCheck(
+            "AI Proposal Queue",
+            "warn",
+            (
+                f"Oldest pending AI proposal is {age_days} day(s) old; "
+                f"TTL is {AI_PROPOSAL_TTL_DAYS} day(s). The next synthesize "
+                f"run will expire it (resolved_by=system:ttl)."
+            ),
+            metadata={
+                "pending_count": pending_count,
+                "oldest_age_days": age_days,
+                "ttl_days": AI_PROPOSAL_TTL_DAYS,
+                "program_id": program_id,
+            },
+        )
+    return DoctorCheck(
+        "AI Proposal Queue",
+        "ok",
+        f"Oldest pending AI proposal is {age_days} day(s) old.",
+        metadata={
+            "pending_count": pending_count,
+            "oldest_age_days": age_days,
+            "ttl_days": AI_PROPOSAL_TTL_DAYS,
+            "program_id": program_id,
+        },
+    )
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Program-directory declutter doctor checks (specs/declutter.md §7).
+#
+# These checks emit a CANONICAL base status ("ok"/"warn"/"fail"/"info") in the
+# ``status`` field and carry the sub-state ("partial"/"missing"/"stale"/
+# "split-brain"/"pre_migration") in ``metadata.detail`` (§6 1-D / R-10). The
+# DoctorReport aggregators count by exact status string, so a blocking state
+# MUST be ``status="fail"`` — never ``status="error"`` (counted by the hardened
+# model) and never a compound string like ``"WARN-stale"`` (invisible to both).
+# ---------------------------------------------------------------------------
+
+_CLUTTER_SUFFIXES = (".bak", ".bak2", ".bak3", ".bak4", ".lock", ".cp1252bak")
+# A .lock file younger than this is considered active (portalocker); older is
+# stale clutter. Matches the inventory script's _CLUTTER_SUFFIXES policy.
+_STALE_LOCK_AGE_SECONDS = 5 * 60
+
+
+def _dc01_root_cleanliness_check(program_id: str, *, programs_root: Path) -> DoctorCheck:
+    """DC-01: program-root cleanliness (declutter.md §7).
+
+    Three sub-states combined into one check:
+    * DC-01-a: stale ``*.bak*``/``*.lock``/``*.cp1252bak`` at root → warn.
+    * DC-01-b: ``_spike/`` size → info if > 50 files (suggest prune).
+    * DC-01-c: unrecognized root-level entries (not in the registry-derived
+      ``ROOT_WHITELIST``) → warn, with ``metadata.t2_root_count`` feeding the
+      Phase 3 ``state/`` trigger.
+    """
+    program_dir = programs_root / program_id
+    if not program_dir.exists():
+        return DoctorCheck(
+            "DC-01 Root Cleanliness",
+            "ok",
+            f"programs/{program_id}/ absent (fresh).",
+            metadata={"program_id": program_id, "detail": "missing"},
+        )
+
+    import time as _time
+
+    now = _time.time()
+    stale_files: list[str] = []
+    for entry in program_dir.iterdir():
+        if not entry.is_file():
+            continue
+        name = entry.name
+        if not any(name.endswith(suffix) for suffix in _CLUTTER_SUFFIXES):
+            continue
+        # A recent .lock may be an active portalocker file; only flag stale ones.
+        if name.endswith(".lock"):
+            try:
+                age = now - entry.stat().st_mtime
+            except OSError:
+                age = 0.0
+            if age < _STALE_LOCK_AGE_SECONDS:
+                continue
+        stale_files.append(name)
+
+    # _spike/ size (DC-01-b).
+    spike_dir = program_dir / "_spike"
+    spike_count = 0
+    if spike_dir.exists():
+        spike_count = sum(1 for _ in spike_dir.rglob("*") if _.is_file())
+
+    # Unrecognized root entries (DC-01-c). The whitelist is the registry union
+    # (ROOT_WHITELIST); runtime-artifact legacy filenames are whitelisted during
+    # the transition so they do not show as unrecognized pre-migration.
+    unrecognized: list[str] = []
+    t2_root_count = 0
+    for entry in program_dir.iterdir():
+        name = entry.name
+        if name in ROOT_WHITELIST:
+            if name in ROOT_T2_FILES:
+                t2_root_count += 1
+            continue
+        # A clutter suffix is already covered by DC-01-a; don't double-report.
+        if any(name.endswith(suffix) for suffix in _CLUTTER_SUFFIXES) and name not in stale_files:
+            continue
+        unrecognized.append(name)
+
+    if stale_files:
+        return DoctorCheck(
+            "DC-01 Root Cleanliness",
+            "warn",
+            f"{len(stale_files)} stale backup/lock file(s) at root: {', '.join(sorted(stale_files))}. "
+            "Delete manually after lock verification (runtime clutter only; not .bak/.lock of config).",
+            metadata={
+                "program_id": program_id,
+                "detail": "stale_backup_lock",
+                "files": sorted(stale_files),
+                "unrecognized": sorted(unrecognized),
+                "t2_root_count": t2_root_count,
+            },
+        )
+    if unrecognized:
+        return DoctorCheck(
+            "DC-01 Root Cleanliness",
+            "warn",
+            f"{len(unrecognized)} unrecognized root entry(ies): {', '.join(sorted(unrecognized))}. "
+            "Review against the program-directory taxonomy (declutter.md §5).",
+            metadata={
+                "program_id": program_id,
+                "detail": "unrecognized",
+                "entries": sorted(unrecognized),
+                "t2_root_count": t2_root_count,
+            },
+        )
+    detail = f"Root clean (t2_root_count={t2_root_count})."
+    status = "ok"
+    meta_detail = "clean"
+    if spike_count > 50:
+        status = "info"
+        meta_detail = "spike_prune"
+        detail = f"Root clean; _spike/ has {spike_count} files — consider pruning."
+    return DoctorCheck(
+        "DC-01 Root Cleanliness",
+        status,
+        detail,
+        metadata={
+            "program_id": program_id,
+            "detail": meta_detail,
+            "spike_count": spike_count,
+            "t2_root_count": t2_root_count,
+        },
+    )
+
+
+def _dc02_runtime_layout_check(
+    program_id: str, *, programs_root: Path, strict: bool = False
+) -> DoctorCheck:
+    """DC-02: runtime-directory layout (declutter.md §6 1-D, §7).
+
+    Per-runtime-artifact layout classification aggregated into one check:
+    * clean      — all runtime files under ``runtime/``; no legacy at root → ok
+    * partial    — some migrated, others at root (transition) → info
+    * pre_migration — files at root, ``runtime/`` not yet in use → info
+    * missing    — file absent in both locations (fresh program) → info
+    * stale / split-brain — legacy AND canonical both present → warn
+      (non-strict) / fail (strict). A live ``-wal``/``-shm`` sidecar at root
+      while the canonical exists is split-brain evidence (R-2′).
+
+    ``strict`` escalates the both-present state from ``warn`` (stale, transition
+    window) to ``fail`` (split-brain, blocks). Default non-strict keeps the
+    documented transition window non-blocking.
+    """
+    program_dir = programs_root / program_id
+    if not program_dir.exists():
+        return DoctorCheck(
+            "DC-02 Runtime Layout",
+            "info",
+            f"programs/{program_id}/ absent (fresh).",
+            metadata={"program_id": program_id, "detail": "missing"},
+        )
+
+    runtime_dir = get_runtime_dir(program_id, programs_root=programs_root)
+    at_root: list[str] = []
+    at_runtime: list[str] = []
+    both: list[str] = []
+    missing: list[str] = []
+    live_sidecars: list[str] = []
+
+    for art in RUNTIME_ARTIFACTS:
+        legacy = program_dir / art.filename
+        canonical = runtime_dir / art.filename
+        l = legacy.exists()
+        c = canonical.exists()
+        if l and c:
+            both.append(art.name)
+        elif l and not c:
+            at_root.append(art.name)
+        elif c and not l:
+            at_runtime.append(art.name)
+        else:
+            missing.append(art.name)
+        # Live SQLite sidecar at root while canonical exists → split-brain evidence.
+        if art.filename.endswith(".sqlite3") and c:
+            for sidecar_suffix in ("-wal", "-shm"):
+                sidecar = legacy.with_name(legacy.name + sidecar_suffix)
+                if sidecar.exists():
+                    live_sidecars.append(sidecar.name)
+
+    total = len(RUNTIME_ARTIFACTS)
+    runtime_exists = runtime_dir.exists()
+
+    def _emit(status: str, detail_key: str, detail: str, **extra: object) -> DoctorCheck:
+        meta: dict[str, object] = {
+            "program_id": program_id,
+            "detail": detail_key,
+            "at_root": sorted(at_root),
+            "at_runtime": sorted(at_runtime),
+            "both": sorted(both),
+            "missing": sorted(missing),
+            "live_sidecars": sorted(live_sidecars),
+            "strict": strict,
+        }
+        meta.update(extra)
+        return DoctorCheck("DC-02 Runtime Layout", status, detail, metadata=meta)
+
+    if both or live_sidecars:
+        evidence = sorted(set(both) | set(live_sidecars))
+        if strict:
+            return _emit(
+                "fail",
+                "split-brain",
+                f"Split-brain: {len(evidence)} runtime artifact(s) present at BOTH root and "
+                f"runtime/ (or live sidecar): {', '.join(evidence)}. Run "
+                f"python scripts/migrate_runtime_dir.py --program {program_id} --verify",
+            )
+        return _emit(
+            "warn",
+            "stale",
+            f"Stale duplicate(s): {', '.join(evidence)} present at root and runtime/. "
+            "Transition window — run --cleanup-legacy after 2 clean DC-02 runs.",
+        )
+    if not at_root and at_runtime and not missing:
+        return _emit("ok", "clean", f"All {total} runtime artifact(s) under runtime/; no legacy at root.")
+    if at_root and at_runtime and not missing:
+        return _emit("info", "partial", f"Partial migration: {len(at_root)} at root, {len(at_runtime)} under runtime/.")
+    if at_root and not at_runtime and not runtime_exists:
+        return _emit(
+            "info",
+            "pre_migration",
+            f"Pre-migration: {len(at_root)} runtime file(s) at root; runtime/ not yet in use. "
+            f"Run: python scripts/migrate_runtime_dir.py --program {program_id} --all --execute",
+        )
+    if not at_root and not at_runtime and missing:
+        return _emit("info", "missing", f"No runtime artifacts yet (fresh program, {total} absent).")
+    # Mixed incl. missing (e.g. fresh program with one canonical file).
+    return _emit(
+        "info",
+        "partial",
+        f"Mixed layout: {len(at_root)} at root, {len(at_runtime)} under runtime/, {len(missing)} absent.",
+    )
+
+
+def _dc03_docs_directory_check(program_id: str, *, programs_root: Path) -> DoctorCheck:
+    """DC-03: docs/ directory health (declutter.md §7).
+
+    ``docs/`` is for one-time human documents (T-8). A file whose name matches a
+    platform runtime/state/registry pattern (``*.jsonl``, ``*_state.*``,
+    ``*_registry.*``) has likely been misplaced (operator dropped a platform
+    artifact into docs/) → warn. docs/ absent or present-and-clean are both ok.
+    """
+    docs_dir = programs_root / program_id / "docs"
+    if not docs_dir.exists():
+        return DoctorCheck(
+            "DC-03 Docs Directory",
+            "ok",
+            f"docs/ absent for programs/{program_id} (optional).",
+            metadata={"program_id": program_id, "detail": "absent"},
+        )
+    misplaced: list[str] = []
+    for path in docs_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        name = path.name
+        if name.endswith(".jsonl"):
+            misplaced.append(name)
+            continue
+        if "_state." in name or name.endswith("_state"):
+            misplaced.append(name)
+            continue
+        if "_registry." in name or name.endswith("_registry"):
+            misplaced.append(name)
+            continue
+    if misplaced:
+        return DoctorCheck(
+            "DC-03 Docs Directory",
+            "warn",
+            f"{len(misplaced)} docs/ file(s) match a platform filename pattern: "
+            f"{', '.join(sorted(set(misplaced)))}. docs/ is for one-time human documents, "
+            "not platform runtime/state/registry artifacts.",
+            metadata={"program_id": program_id, "detail": "platform_pattern", "files": sorted(set(misplaced))},
+        )
+    return DoctorCheck(
+        "DC-03 Docs Directory",
+        "ok",
+        f"docs/ present and clean ({sum(1 for _ in docs_dir.rglob('*') if _.is_file())} file(s)).",
+        metadata={"program_id": program_id, "detail": "clean"},
+    )

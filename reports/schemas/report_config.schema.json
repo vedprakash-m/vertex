@@ -1,0 +1,344 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "edition",
+    "ado",
+    "scorecards",
+    "archive"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "edition": {
+      "type": "object",
+      "required": ["name", "type", "title", "cadence"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9_]+$"
+        },
+        "type": {
+          "enum": ["detailed", "focused", "condensed", "narrative", "lookback"]
+        },
+        "title": {
+          "type": "string"
+        },
+        "cadence": {
+          "enum": ["daily", "weekly", "biweekly", "monthly"]
+        },
+        "send_day": {
+          "enum": [
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+            "saturday",
+            "sunday"
+          ]
+        },
+        "send_time_local": {
+          "type": "string"
+        },
+        "timezone": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "author": {
+      "type": "object",
+      "properties": {
+        "display_name": {
+          "type": "string"
+        },
+        "email": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "distribution": {
+      "type": "object",
+      "properties": {
+        "to": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "cc": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "channels": {
+          "type": "array",
+          "items": {
+            "enum": ["email", "teams"]
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "ado": {
+      "type": "object",
+      "required": [
+        "organization",
+        "project",
+        "area_paths",
+        "work_item_types",
+        "date_window_days"
+      ],
+      "properties": {
+        "organization": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "area_paths": {
+          "type": "array",
+          "items": {"type": "string"},
+          "minItems": 1
+        },
+        "work_item_types": {
+          "type": "array",
+          "items": {"type": "string"},
+          "minItems": 1
+        },
+        "excluded_states": {
+          "type": "array",
+          "items": {"type": "string"},
+          "default": []
+        },
+        "date_window_days": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 365
+        },
+        "api_timeout_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "proposal_ttl_hours": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "scorecards": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "dimensions"],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "dimensions": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["name"],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "ado_filter": {
+                  "type": "string",
+                  "default": ""
+                }
+              },
+              "additionalProperties": true
+            }
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "ai": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "budget_usd_per_run": {
+          "type": "number",
+          "default": 0.5
+        },
+        "blurb_deployment": {
+          "type": "string"
+        },
+        "blurb_backup_deployment": {
+          "type": "string"
+        },
+        "exec_summary_deployment": {
+          "type": "string"
+        },
+        "exec_summary_backup_deployment": {
+          "type": "string"
+        },
+        "temperature": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": true
+    },
+    "kusto": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "queries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "cluster", "database", "kql", "section", "render_as"],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "cluster": {
+                "type": "string"
+              },
+              "database": {
+                "type": "string"
+              },
+              "kql": {
+                "type": "string"
+              },
+              "section": {
+                "type": "string"
+              },
+              "render_as": {
+                "enum": ["table", "metric_highlight", "chart_image"]
+              },
+              "confidence": {
+                "enum": ["high", "medium", "low"]
+              },
+              "kusto_section_validates_slice": {
+                "type": "boolean",
+                "default": false
+              },
+              "caveats": {
+                "type": "array",
+                "items": {"type": "string"}
+              },
+              "reference_url": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "m365": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "prefer_agency": {
+          "type": "boolean",
+          "default": true
+        },
+        "workiq": {
+          "type": "object",
+          "properties": {
+            "newsletter_search": {
+              "type": "string"
+            },
+            "feedback_search": {
+              "type": "string"
+            },
+            "teams_search": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        },
+        "bluebird": {
+          "type": "object",
+          "properties": {
+            "teams_channels": {
+              "type": "array",
+              "items": {"type": "string"}
+            },
+            "lookback_days": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 365,
+              "default": 7
+            }
+          },
+          "additionalProperties": true
+        },
+        "offline": {
+          "type": "object",
+          "properties": {
+            "newsletter_dir": {
+              "type": "string"
+            },
+            "transcript_dir": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "ado_fetch_timeout_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 45
+    },
+    "forecast_enabled": {
+      "type": "boolean",
+      "default": false
+    },
+    "mobile_safe_scorecards": {
+      "enum": ["auto", "row"]
+    },
+    "archive": {
+      "type": "object",
+      "required": ["root"],
+      "properties": {
+        "root": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "logging": {
+      "type": "object",
+      "properties": {
+        "level": {
+          "type": "string"
+        },
+        "json": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true
+    },
+    "productivity_dividend_published": {
+      "type": "boolean",
+      "default": false
+    }
+  },
+  "additionalProperties": true
+}

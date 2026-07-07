@@ -1,0 +1,1596 @@
+schema_version: '1'
+commands:
+  actions:
+    callback:
+      flags: []
+      value_options:
+      - --format
+      - --program
+    subcommands:
+      list:
+        flags: []
+        value_options:
+        - --format
+        - --program
+        - --status
+      resolve:
+        flags: []
+        value_options:
+        - --id
+        - --note
+        - --program
+        - --resolver
+        - --status
+      review:
+        flags:
+        - --apply-ado
+        value_options:
+        - --program
+        - --reviewer
+  actuate:
+    subcommands:
+      execute:
+        flags:
+        - --dry-run
+        value_options:
+        - --program
+        - --proposal-id
+      review:
+        flags:
+        - --dry-run
+        value_options:
+        - --program
+  ado:
+    subcommands:
+      apply:
+        flags:
+        - --yes
+        value_options:
+        - --proposal
+      discover-repos:
+        flags: []
+        value_options:
+        - --format
+        - --program
+        - --workstream
+      propose:
+        flags:
+        - --dry-run
+        value_options:
+        - --edition
+        - --issue
+        - --program
+        - --type
+      reconcile:
+        flags: []
+        value_options:
+        - --format
+        - --program
+      set-repos:
+        flags:
+        - --clear
+        value_options:
+        - --program
+        - --repository-id
+        - --repository-name
+        - --workstream
+      status:
+        flags: []
+        value_options:
+        - --format
+        - --program
+  alerts:
+    subcommands:
+      append:
+        flags: []
+        value_options:
+        - --category
+        - --format
+        - --message
+        - --next-command
+        - --program
+        - --severity
+      banner:
+        flags: []
+        value_options:
+        - --program
+      resolve:
+        flags: []
+        value_options:
+        - --alert-id
+        - --format
+        - --program
+      show:
+        flags:
+        - --include-resolved
+        value_options:
+        - --format
+        - --program
+  apply-overrides:
+    callback:
+      flags: []
+      value_options:
+      - --edition
+  apply-proposals:
+    callback:
+      flags:
+      - --accept-all
+      - --dry-run
+      - --interactive
+      - --undo
+      - --yes
+      value_options:
+      - --accept
+      - --accept-modified
+      - --edition
+      - --issue
+      - --reject
+  archive-verify:
+    callback:
+      flags: []
+      value_options:
+      - --edition
+      - --issue
+      - --keyring-user
+  ask:
+    callback:
+      flags:
+      - --cluster-misses
+      value_options:
+      - --edition
+      - --program
+  assertion:
+    subcommands:
+      add:
+        flags: []
+        value_options:
+        - --assertion-id
+        - --baseline-captured-at
+        - --baseline-value
+        - --cooldown-hours
+        - --created-by
+        - --description
+        - --id
+        - --metric-id
+        - --operator
+        - --program
+        - --query-id
+        - --severity-override
+        - --sustain-min-observations
+        - --threshold
+        - --threshold-upper
+        - --tolerance-abs
+        - --tolerance-rel
+        - --window-days
+      add-evidence-url:
+        flags: []
+        value_options:
+        - --binding-id
+        - --program
+        - --template
+      composite:
+        flags: []
+        value_options: []
+      export:
+        flags:
+        - --include-history
+        value_options:
+        - --program
+      history:
+        flags:
+        - --include-evaluations
+        - --no-include-evaluations
+        value_options:
+        - --format
+        - --id
+        - --metric-id
+        - --program
+      list:
+        flags: []
+        value_options:
+        - --format
+        - --program
+      update:
+        flags:
+        - --clear-baseline
+        value_options:
+        - --baseline-captured-at
+        - --baseline-value
+        - --cooldown-hours
+        - --description
+        - --id
+        - --operator
+        - --program
+        - --severity-override
+        - --sustain-min-observations
+        - --threshold
+        - --threshold-upper
+        - --tolerance-abs
+        - --tolerance-rel
+        - --window-days
+  assumptions:
+    callback:
+      flags: []
+      value_options:
+      - --format
+      - --program
+    subcommands:
+      add:
+        flags: []
+        value_options:
+        - --entity-ref
+        - --identified-date
+        - --milestone
+        - --owner
+        - --program
+        - --text
+        - --validation-due
+        - --validation-method
+      invalidate:
+        flags:
+        - --force
+        - --no-prompt
+        value_options:
+        - --id
+        - --program
+      list:
+        flags: []
+        value_options:
+        - --format
+        - --program
+        - --status
+      validate:
+        flags: []
+        value_options:
+        - --id
+        - --program
+  audit:
+    callback:
+      flags:
+      - --prompt-learning-summary
+      value_options:
+      - --format
+      - --from
+      - --program
+      - --to
+      - --window-issues
+    subcommands:
+      archive:
+        flags:
+        - --retention
+        value_options:
+        - --before
+        - --format
+        - --program
+      excise:
+        flags:
+        - --dry-run
+        value_options:
+        - --excisor
+        - --format
+        - --line
+        - --program
+        - --reason
+      pause:
+        flags:
+        - --dry-run
+        value_options:
+        - --action-type
+        - --program
+        - --updated-by
+      query:
+        flags: []
+        value_options:
+        - --action-id
+        - --action-type
+        - --format
+        - --from
+        - --level
+        - --limit
+        - --program
+        - --to
+      rollback:
+        flags:
+        - --dry-run
+        value_options:
+        - --action
+        - --batch
+        - --program
+        - --updated-by
+      verify-chain:
+        flags: []
+        value_options:
+        - --format
+        - --program
+  backfill:
+    callback:
+      flags:
+      - --dry-run
+      value_options:
+      - --edition
+      - --since
+      - --source
+  brief:
+    callback:
+      flags:
+      - --dry-run
+      - --today
+      value_options:
+      - --approve
+      - --dismiss
+      - --program
+  calibration:
+    callback:
+      flags:
+      - --dry-run
+      value_options:
+      - --program
+      - --since
+    subcommands:
+      edit-distance-trend:
+        flags: []
+        value_options:
+        - --min-issues
+        - --program
+        - --window
+      report:
+        flags:
+        - --dry-run
+        value_options:
+        - --program
+        - --since
+  capture-lt-deck:
+    callback:
+      flags:
+      - --dry-run
+      value_options:
+      - --edition
+      - --file
+  catchup:
+    callback:
+      flags:
+      - --interactive
+      - --no-scan
+      - --notify
+      value_options:
+      - --program
+      - --reason
+      - --since
+      - --source
+  claims:
+    callback:
+      flags: []
+      value_options:
+      - --format
+      - --program
+    subcommands:
+      resolve:
+        flags: []
+        value_options:
+        - --id
+        - --note
+        - --program
+        - --reviewer
+        - --status
+  commitment:
+    subcommands:
+      add:
+        flags: []
+        value_options:
+        - --description
+        - --direction
+        - --dri
+        - --due-date
+        - --entity-ref
+        - --program
+        - --status
+        - --title
+      list:
+        flags: []
+        value_options:
+        - --direction
+        - --format
+        - --program
+        - --status
+      update:
+        flags: []
+        value_options:
+        - --id
+        - --program
+        - --reason
+        - --slip-to
+        - --status
+  confirm:
+    callback:
+      flags:
+      - --ack-forecast
+      - --ack-stale-approval
+      - --dry-run
+      - --force
+      - --legacy-regex-extractor
+      - --post-weekly-summary-card
+      - --skip-ncfl
+      - --untrusted
+      value_options:
+      - --edition
+      - --issue
+      - --reason
+  context:
+    subcommands:
+      apply:
+        flags:
+        - --dry-run
+        value_options:
+        - --actor
+        - --edition
+        - --issue
+        - --proposal-id
+      apply-batch:
+        flags:
+        - --dry-run
+        value_options:
+        - --actor
+        - --edition
+        - --issue
+      dismiss:
+        flags: []
+        value_options:
+        - --actor
+        - --edition
+        - --issue
+        - --proposal-id
+        - --reason
+      extract:
+        flags:
+        - --dry-run
+        value_options:
+        - --edition
+        - --issue
+      proposals:
+        flags: []
+        value_options:
+        - --edition
+        - --format
+        - --issue
+        - --status
+      synthesize:
+        flags:
+        - --dry-run
+        value_options:
+        - --actor
+        - --edition
+        - --issue
+        - --knowledge-doc
+  decision-brief:
+    callback:
+      flags:
+      - --ai
+      - --no-ai
+      - --no-open
+      - --open
+      value_options:
+      - --edition
+      - --issue
+  decisions:
+    callback:
+      flags: []
+      value_options:
+      - --format
+      - --program
+    subcommands:
+      add:
+        flags: []
+        value_options:
+        - --alternative
+        - --context
+        - --decided-by
+        - --decision
+        - --decision-date
+        - --entity-ref
+        - --linked-action
+        - --linked-claim
+        - --linked-risk
+        - --program
+        - --rationale
+        - --review-by
+        - --status
+        - --title
+        - --workstream
+      aging:
+        flags:
+        - --apply
+        - --dry-run
+        value_options:
+        - --format
+        - --min-age-days
+        - --program
+      governance:
+        flags: []
+        value_options: []
+      link-outcome:
+        flags: []
+        value_options:
+        - --assumption
+        - --decision-id
+        - --program
+      list:
+        flags: []
+        value_options:
+        - --format
+        - --program
+        - --status
+      nudge:
+        flags:
+        - --dry-run
+        value_options:
+        - --id
+        - --program
+      resolve:
+        flags: []
+        value_options:
+        - --decided-by
+        - --decision
+        - --decision-date
+        - --id
+        - --program
+        - --rationale
+        - --review-by
+      supersede:
+        flags: []
+        value_options:
+        - --id
+        - --program
+        - --superseded-by
+  deck-companion:
+    callback:
+      flags: []
+      value_options:
+      - --edition
+      - --format
+      - --issue
+  dependencies:
+    callback:
+      flags: []
+      value_options:
+      - --format
+      - --program
+      - --status
+    subcommands:
+      accept:
+        flags: []
+        value_options:
+        - --id
+        - --program
+        - --resolution-path
+        - --risk-if-broken
+        - --type
+      dismiss:
+        flags: []
+        value_options:
+        - --id
+        - --program
+      list:
+        flags: []
+        value_options:
+        - --format
+        - --program
+        - --status
+      scout:
+        flags:
+        - --dry-run
+        value_options:
+        - --edition
+        - --format
+        - --lookback-days
+        - --min-occurrences
+        - --program
+  discover:
+    subcommands:
+      candidates:
+        flags:
+        - --dry-run
+        - --heartbeat
+        - --no-heartbeat
+        - --record
+        value_options:
+        - --actor
+        - --batch-id
+        - --candidate-count
+        - --format
+        - --from
+        - --gap-json
+        - --input-jsonl
+        - --pipeline
+        - --program
+        - --recorded-at
+        - --result-json
+        - --source
+        - --source-dir
+        - --wave
+  doctor:
+    callback:
+      flags:
+      - --actions
+      - --adapter-cert
+      - --assumptions
+      - --cadence
+      - --catchup-log
+      - --channels
+      - --charts
+      - --check-auth
+      - --checkpoints
+      - --circuit-breakers
+      - --confirm-readiness
+      - --consistency
+      - --context
+      - --decisions
+      - --dependencies
+      - --escalations
+      - --fact-parity
+      - --fix
+      - --fix-hints
+      - --flip-parity
+      - --flip-status
+      - --ids
+      - --kb
+      - --kb-check-origins
+      - --kusto
+      - --metric-bindings
+      - --milestones
+      - --nudge
+      - --operator-gates
+      - --personas
+      - --platform-readiness
+      - --privacy
+      - --ranked
+      - --readiness
+      - --refactor-status
+      - --reset-circuit-breakers
+      - --rev-health
+      - --risks
+      - --semantic-index
+      - --sharepoint
+      - --source-waivers
+      - --storage
+      - --strict-lt-alignment
+      - --watch-sources
+      value_options:
+      - --edition
+      - --format
+      - --issue
+      - --rev-program
+      - --source
+  draft:
+    callback:
+      flags:
+      - --ai-review
+      - --diff
+      - --dry-run
+      - --no-ai
+      - --no-seed
+      - --offline
+      - --pipeline-v2
+      - --reseed
+      - --send-draft
+      - --stdout
+      - --verbose
+      value_options:
+      - --as-of
+      - --edition
+      - --edition-type
+      - --format
+      - --issue
+      - --range
+      - --sections
+  editor:
+    subcommands:
+      report:
+        flags: []
+        value_options:
+        - --edition
+        - --format
+        - --issue
+  enrich:
+    callback:
+      flags:
+      - --accept
+      - --batch
+      - --dry-run
+      - --no-batch
+      value_options:
+      - --edition
+      - --format
+      - --lane
+      - --since
+  entity-aliases:
+    subcommands:
+      pending:
+        flags: []
+        value_options:
+        - --program
+  evidence:
+    callback:
+      flags: []
+      value_options:
+      - --ado
+      - --claim
+      - --edition
+      - --format
+      - --issue
+      - --section
+  facts:
+    subcommands:
+      backfill-judgments:
+        flags:
+        - --dry-run
+        value_options:
+        - --program
+      backfill-observations:
+        flags:
+        - --dry-run
+        value_options:
+        - --limit
+        - --program
+      detect-drift:
+        flags: []
+        value_options:
+        - --program
+        - --snapshot-id
+      dual-read-log:
+        flags:
+        - --no-quarantine
+        - --quarantine
+        value_options:
+        - --cycles
+        - --interval
+        - --program
+      export:
+        flags: []
+        value_options:
+        - --output
+        - --program
+      import:
+        flags:
+        - --dry-run
+        value_options:
+        - --input
+        - --program
+      parity-check:
+        flags: []
+        value_options:
+        - --program
+      pin-snapshot:
+        flags: []
+        value_options:
+        - --issue-number
+        - --program
+      rebuild:
+        flags:
+        - --dry-run
+        value_options:
+        - --program
+  fleet:
+    callback:
+      flags: []
+      value_options:
+      - --format
+      - --programs
+  freshness:
+    callback:
+      flags:
+      - --allow-stale
+      - --dry-run
+      - --notify
+      - --teams-format
+      value_options:
+      - --by
+      - --edition
+      - --format
+      - --since
+  gather:
+    callback:
+      flags:
+      - --analytics
+      - --dependency-scout
+      - --engms
+      - --extract-evidence
+      - --facts-only
+      - --force-refresh
+      - --icm
+      - --kusto
+      - --lt-deck
+      - --pipelines
+      - --probe
+      - --sharepoint
+      - --sprints
+      - --verbose
+      - --workiq
+      value_options:
+      - --cadence
+      - --program
+  history:
+    callback:
+      flags: []
+      value_options:
+      - --diff
+      - --edition
+      - --format
+      - --issue
+      - --last
+      - --search
+      - --semantic
+  ingest-update:
+    callback:
+      flags:
+      - --dry-run
+      value_options:
+      - --edition
+      - --issue
+      - --source
+  inspect:
+    subcommands:
+      kusto:
+        flags: []
+        value_options:
+        - --format
+        - --program
+        - --query
+        - --since
+  investigate:
+    callback:
+      flags:
+      - --dry-run
+      value_options:
+      - --account
+      - --icm
+      - --program
+  kb:
+    subcommands:
+      changelog:
+        flags: []
+        value_options:
+        - --format
+        - --program
+        - --since
+      profiles:
+        flags: []
+        value_options: []
+      update:
+        flags:
+        - --ai
+        - --apply
+        - --no-ai
+        value_options:
+        - --program
+  knowledge:
+    subcommands:
+      assert:
+        flags: []
+        value_options:
+        - --actor
+        - --predicate
+        - --scope
+        - --subject
+        - --valid-from
+        - --valid-until
+        - --value
+        - --value-json
+      extract:
+        flags:
+        - --dry-run
+        value_options:
+        - --scope
+        - --source
+      gc:
+        flags:
+        - --dry-run
+        value_options:
+        - --format
+        - --older-than-days
+      ingest:
+        flags: []
+        value_options:
+        - --scope
+        - --source
+      predicates:
+        flags: []
+        value_options:
+        - --format
+      quarantine-batch:
+        flags: []
+        value_options:
+        - --actor
+        - --batch-id
+        - --reason
+      redact:
+        flags: []
+        value_options:
+        - --actor
+        - --backup-root
+        - --claim-id
+        - --reason
+      redact-vault:
+        flags: []
+        value_options:
+        - --actor
+        - --backup-root
+        - --reason
+        - --vault-hash
+      show:
+        flags: []
+        value_options:
+        - --as-of
+        - --entity
+        - --format
+        - --knowledge-as-of
+        - --program
+      status:
+        flags: []
+        value_options:
+        - --format
+      supersede:
+        flags: []
+        value_options:
+        - --actor
+        - --claim-id
+        - --predicate
+        - --reason
+        - --scope
+        - --subject
+        - --valid-from
+        - --valid-until
+        - --value
+        - --value-json
+      triage:
+        flags: []
+        value_options: []
+  ledger:
+    subcommands:
+      backfill:
+        flags:
+        - --dry-run
+        value_options:
+        - --actor
+        - --from
+        - --program
+        - --quarantine-batch
+        - --reason
+        - --sample-limit
+        - --source-dir
+      correct:
+        flags: []
+        value_options:
+        - --actor
+        - --corrected-payload-json
+        - --event-id
+        - --program
+        - --reason
+      diff:
+        flags: []
+        value_options:
+        - --format
+        - --from
+        - --program
+        - --to
+      export:
+        flags: []
+        value_options:
+        - --format
+        - --out
+        - --program
+      gaps:
+        flags:
+        - --all
+        - --unacknowledged-only
+        value_options:
+        - --ack
+        - --actor
+        - --format
+        - --program
+      history:
+        flags: []
+        value_options:
+        - --entity
+        - --format
+        - --program
+      import:
+        flags:
+        - --dry-run
+        value_options:
+        - --program
+        - --sample-limit
+        - --source
+      lock:
+        flags: []
+        value_options:
+        - --actor
+        - --entity-id
+        - --field
+        - --locked-value-json
+        - --override-session-id
+        - --program
+        - --reason
+        - --valid-until
+      quarantine-batch:
+        flags: []
+        value_options:
+        - --actor
+        - --batch-id
+        - --program
+        - --reason
+      redact:
+        flags: []
+        value_options:
+        - --actor
+        - --event-id
+        - --program
+        - --reason
+        - --scrub-field
+      redact-vault:
+        flags: []
+        value_options:
+        - --actor
+        - --program
+        - --reason
+        - --vault-hash
+      replay:
+        flags:
+        - --reindex
+        value_options:
+        - --as-of
+        - --family
+        - --format
+        - --knowledge-as-of
+        - --program
+      status:
+        flags: []
+        value_options:
+        - --batch-id
+        - --format
+        - --program
+      triage:
+        flags: []
+        value_options: []
+      unlock:
+        flags: []
+        value_options:
+        - --actor
+        - --entity-id
+        - --field
+        - --override-session-id
+        - --program
+        - --reason
+      verify:
+        flags:
+        - --deep
+        value_options:
+        - --format
+        - --program
+      write:
+        flags: []
+        value_options:
+        - --actor
+        - --confidence
+        - --corroborating-refs-json
+        - --event-type
+        - --occurred-at
+        - --payload-json
+        - --program
+        - --source-ref-json
+        - --temporal-confidence
+  list:
+    subcommands:
+      dris:
+        flags: []
+        value_options:
+        - --edition
+        - --format
+      editions:
+        flags: []
+        value_options:
+        - --format
+      workstreams:
+        flags: []
+        value_options:
+        - --edition
+        - --format
+  manifest:
+    callback:
+      flags: []
+      value_options:
+      - --edition
+      - --format
+      - --issue
+  maturity-check:
+    callback:
+      flags: []
+      value_options:
+      - --edition
+      - --format
+  meeting-close:
+    callback:
+      flags:
+      - --apply-ado
+      - --dry-run
+      - --html
+      - --promote-actions
+      - --teams
+      value_options:
+      - --approve-action
+      - --dismiss-action
+      - --edit-action
+      - --edit-due
+      - --edit-owner
+      - --edit-text
+      - --format
+      - --program
+      - --title
+      - --transcript
+  milestones:
+    callback:
+      flags: []
+      value_options:
+      - --format
+      - --program
+    subcommands:
+      assess:
+        flags: []
+        value_options:
+        - --as-of
+        - --format
+        - --program
+      list:
+        flags: []
+        value_options:
+        - --format
+        - --program
+      update:
+        flags:
+        - --clear-notes
+        value_options:
+        - --id
+        - --name
+        - --notes
+        - --owner
+        - --program
+        - --status
+        - --target-date
+  next:
+    callback:
+      flags: []
+      value_options:
+      - --edition
+      - --goal
+      - --program
+  observability:
+    subcommands:
+      bundle:
+        flags: []
+        value_options:
+        - --archive-root
+        - --format
+        - --program
+        - --to
+      diagnose:
+        flags: []
+        value_options:
+        - --format
+        - --program
+        - --window
+      perf:
+        flags: []
+        value_options:
+        - --format
+        - --program
+        - --window
+  owner-pack:
+    callback:
+      flags: []
+      value_options:
+      - --format
+      - --owner
+      - --program
+  prep:
+    callback:
+      flags: []
+      value_options:
+      - --edition
+      - --format
+  privacy:
+    subcommands:
+      check:
+        flags: []
+        value_options:
+        - --channel
+      show:
+        flags: []
+        value_options:
+        - --section
+  propose:
+    callback:
+      flags:
+      - --ai
+      - --dry-run
+      - --no-ai
+      - --no-offline
+      - --offline
+      value_options:
+      - --edition
+      - --steering
+  publish-gate:
+    callback:
+      flags:
+      - --force
+      value_options:
+      - --edition
+      - --format
+      - --issue
+  readiness:
+    callback:
+      flags: []
+      value_options:
+      - --format
+      - --program
+    subcommands:
+      fetch:
+        flags: []
+        value_options:
+        - --format
+        - --program
+      show:
+        flags: []
+        value_options:
+        - --format
+        - --program
+  reconcile:
+    callback:
+      flags:
+      - --dry-run
+      - --refresh
+      value_options:
+      - --program
+  registry:
+    subcommands:
+      confirm:
+        flags: []
+        value_options:
+        - --pm-alias
+        - --program
+        - --reason
+        - --topics
+        - --workstream-id
+      discover-ids:
+        flags:
+        - --apply
+        value_options:
+        - --format
+        - --limit
+        - --pm-alias
+        - --program
+      list:
+        flags: []
+        value_options:
+        - --format
+        - --program
+        - --source
+      promote:
+        flags: []
+        value_options:
+        - --pm-alias
+        - --program
+        - --reason
+      reassign:
+        flags: []
+        value_options:
+        - --pm-alias
+        - --program
+        - --reason
+        - --topics
+        - --workstream-id
+      reject:
+        flags: []
+        value_options:
+        - --pm-alias
+        - --program
+        - --reason
+      rename:
+        flags: []
+        value_options:
+        - --display-name
+        - --pm-alias
+        - --program
+        - --reason
+      set-id:
+        flags: []
+        value_options:
+        - --pm-alias
+        - --program
+        - --reason
+        - --series-id
+        - --thread-id
+  report:
+    callback:
+      flags:
+      - --ai-review
+      - --diff
+      - --dry-run
+      - --no-ai
+      - --no-seed
+      - --offline
+      - --pipeline-v2
+      - --reseed
+      - --send-draft
+      - --stdout
+      - --verbose
+      value_options:
+      - --as-of
+      - --edition
+      - --edition-type
+      - --format
+      - --issue
+      - --range
+      - --sections
+  rev:
+    subcommands:
+      export-corpus:
+        flags:
+        - --include-vault
+        - --no-include-vault
+        value_options:
+        - --output
+        - --program
+        - --programs-root
+      init-inbox:
+        flags: []
+        value_options:
+        - --eml-inbox
+        - --program
+      label-corpus:
+        flags:
+        - --bootstrap
+        - --no-bootstrap
+        value_options:
+        - --import
+        - --program
+        - --programs-root
+      rotate-processed:
+        flags: []
+        value_options:
+        - --eml-inbox
+        - --max-age-days
+        - --max-count
+        - --program
+        - --programs-root
+      run:
+        flags: []
+        value_options:
+        - --body
+        - --container
+        - --eml-inbox
+        - --extractor
+        - --ics-inbox
+        - --limit
+        - --mailbox
+        - --mock-fixture
+        - --profile
+        - --program
+        - --sender
+        - --subject
+        - --tenant-id
+  review-debrief:
+    callback:
+      flags:
+      - --dry-run
+      value_options:
+      - --action
+      - --alternative
+      - --context
+      - --decision
+      - --edition
+      - --entity-ref
+      - --issue
+      - --program
+      - --review-by
+      - --reviewer
+      - --title
+      - --workstream
+  review-full:
+    callback:
+      flags:
+      - --no-open
+      - --open
+      - --post-adaptive-cards
+      value_options:
+      - --edition
+      - --format
+      - --issue
+  review-proposals:
+    callback:
+      flags:
+      - --no-open
+      - --open
+      - --resolved-only
+      value_options:
+      - --edition
+      - --issue
+      - --section
+  review-sections:
+    subcommands:
+      clear:
+        flags: []
+        value_options:
+        - --edition
+        - --issue
+        - --section
+      export:
+        flags:
+        - --no-open
+        - --open
+        value_options:
+        - --edition
+        - --issue
+        - --section
+      set:
+        flags: []
+        value_options:
+        - --edition
+        - --issue
+        - --note
+        - --reviewer
+        - --section
+        - --state
+      show:
+        flags: []
+        value_options:
+        - --edition
+        - --format
+        - --issue
+  risks:
+    callback:
+      flags:
+      - --show-links
+      value_options:
+      - --format
+      - --program
+    subcommands:
+      add:
+        flags: []
+        value_options:
+        - --action
+        - --category
+        - --claim
+        - --description
+        - --entity-ref
+        - --identified-date
+        - --impact
+        - --issue
+        - --milestone
+        - --mitigation-due-date
+        - --mitigation-plan
+        - --owner
+        - --probability
+        - --program
+        - --title
+        - --work-item
+        - --workstream
+      link:
+        flags:
+        - --dry-run
+        value_options:
+        - --program
+      list:
+        flags:
+        - --show-links
+        value_options:
+        - --format
+        - --program
+        - --status
+      review:
+        flags:
+        - --mark-reviewed
+        value_options:
+        - --program
+        - --reviewer
+      update:
+        flags: []
+        value_options:
+        - --category
+        - --description
+        - --id
+        - --impact
+        - --mitigation-due-date
+        - --mitigation-plan
+        - --note
+        - --owner
+        - --probability
+        - --program
+        - --reviewed-date
+        - --reviewer
+        - --status
+  salience:
+    callback:
+      flags:
+      - --dry-run
+      - --no-refresh
+      value_options:
+      - --program
+    subcommands:
+      show:
+        flags:
+        - --dry-run
+        - --no-refresh
+        value_options:
+        - --program
+  signals:
+    callback:
+      flags: []
+      value_options:
+      - --format
+      - --program
+    subcommands:
+      add:
+        flags: []
+        value_options:
+        - --program
+        - --ref
+        - --workstream
+      link:
+        flags: []
+        value_options:
+        - --program
+        - --signal
+        - --thread
+      review:
+        flags: []
+        value_options:
+        - --program
+        - --reviewer
+  status:
+    callback:
+      flags: []
+      value_options:
+      - --edition
+      - --format
+  storage:
+    subcommands:
+      check:
+        flags: []
+        value_options:
+        - --program
+      stats:
+        flags: []
+        value_options:
+        - --program
+  triage:
+    callback:
+      flags: []
+      value_options:
+      - --edition
+      - --format
+  trust:
+    callback:
+      flags:
+      - --graduation-metrics
+      value_options:
+      - --action
+      - --format
+      - --program
+      - --slice
+      - --window
+      - --window-issues
+  trust-bootstrap:
+    callback:
+      flags:
+      - --dry-run
+      value_options:
+      - --format
+      - --granted-by
+      - --program
+  vitality:
+    callback:
+      flags: []
+      value_options:
+      - --format
+      - --owner
+      - --program
+      - --workstream

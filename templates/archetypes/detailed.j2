@@ -1,0 +1,37 @@
+{% extends "base.email.j2" %}
+
+{% block content %}
+{% if "nav-bar" not in hidden_render_sections %}
+{% include "partials/nav_bar.j2" %}
+{% endif %}
+{% for section in ordered_sections %}
+{% if section.kind == "health" %}
+{% include "partials/health_banner.j2" %}
+{% elif section.kind == "top_3" %}
+{% include "partials/top_3_now.j2" %}
+{% elif section.kind == "selected_changes" %}
+{% include "partials/what_changed.j2" %}
+{% elif section.kind == "scorecard" %}
+{% set sc = section.scorecard %}
+{% include "partials/scorecard.j2" %}
+{% elif section.kind == "kusto" %}
+{% set ks = section.kusto_section %}
+{% include "partials/kusto_section.j2" %}
+{% elif section.kind == "kusto_group" %}
+{% set kusto_group = section.kusto_group_sections %}
+{% include "partials/kusto_group_section.j2" %}
+{% elif section.kind == "ado_vitality" %}
+{% include "partials/ado_vitality.j2" %}
+{% elif section.kind == "exec_summary" %}
+{% include "partials/exec_summary.j2" %}
+{% elif section.kind == "workstream" %}
+{% set ws = section.workstream %}
+{% include "partials/workstream.j2" %}
+{% endif %}
+{% endfor %}
+{% endblock %}
+
+{% block footer %}
+{% include "partials/orientation_footer.j2" %}
+{% include "partials/provenance_footer.j2" %}
+{% endblock %}

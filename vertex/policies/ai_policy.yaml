@@ -1,0 +1,108 @@
+policy_schema_version: "1"
+ai_features:
+  action_extractor:
+    max_tokens: 500
+    temperature: 0.0
+    model_tier: standard
+    frontier_eligible: true
+  anticipation_engine:
+    max_tokens: 220
+    temperature: 0.2
+    model_tier: standard
+    frontier_eligible: true
+  backfill_extractor:
+    max_tokens: 1200
+    temperature: 0.2
+    model_tier: standard
+    frontier_eligible: true
+  blurb_generator:
+    max_tokens: 160
+    temperature: 0.4
+    model_tier: standard
+    frontier_eligible: true
+  claim_extractor:
+    max_tokens: 800
+    temperature: 0.0
+    model_tier: standard
+    frontier_eligible: true
+  context_synthesizer:
+    # NCFL Phase 5 Zone B knowledge-doc synthesis (§24.6). Output is always a
+    # proposal; never auto-applied. Bounded by accepted-proposal + narrative input.
+    max_tokens: 800
+    temperature: 0.1
+    model_tier: standard
+    frontier_eligible: true
+  decision_brief_advisor:
+    max_tokens: 450
+    temperature: 0.1
+    model_tier: standard
+    frontier_eligible: true
+  exec_summary_drafter:
+    max_tokens: 220
+    temperature: 0.3
+    model_tier: standard
+    frontier_eligible: true
+  intent_router:
+    max_tokens: 500
+    temperature: 0.1
+    model_tier: standard
+    frontier_eligible: true
+  learning_distiller:
+    max_tokens: 900
+    temperature: 0.2
+    model_tier: standard
+    frontier_eligible: true
+  m365_topic_router:
+    max_tokens: 400
+    temperature: 0.0
+    model_tier: standard
+    frontier_eligible: true
+  onboard_assistant:
+    structure_max_tokens: 600
+    style_max_tokens: 500
+    temperature: 0.2
+    model_tier: standard
+    frontier_eligible: true
+  summary_generator:
+    max_tokens: 420
+    temperature: 0.2
+    model_tier: standard
+    frontier_eligible: true
+  synthesizer:
+    max_tokens: 1000
+    temperature: 0.2
+    model_tier: standard
+    frontier_eligible: true
+  setup_assistant:
+    max_tokens: 400
+    temperature: 0.3
+    model_tier: standard
+    frontier_eligible: true
+  prose_event_extractor:
+    max_tokens: 1500
+    temperature: 0.0
+    model_tier: standard
+    frontier_eligible: true
+    deterministic_first: true
+    tier0_confidence_threshold: 0.9
+  rev_extractor:
+    max_tokens: 2048
+    temperature: 0.0
+    model_tier: standard
+    frontier_eligible: true
+    deterministic_first: false
+  rev_judge:
+    max_tokens: 2000
+    temperature: 0.0
+    model_tier: standard
+    frontier_eligible: true
+  activation_judge:
+    max_tokens: 4096
+    temperature: 0.0
+    model_tier: standard
+    frontier_eligible: true
+  default:
+    max_tokens: 500
+    temperature: 0.2
+    model_tier: standard
+    frontier_eligible: true

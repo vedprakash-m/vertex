@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Vertex Remediation Report",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "edition",
+    "issue_number",
+    "generated_at",
+    "summary",
+    "items"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "edition": {
+      "type": "string",
+      "minLength": 1
+    },
+    "issue_number": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "summary": {
+      "type": "object",
+      "required": ["total_items", "blocks_publication", "degrades_publication", "reduces_confidence"],
+      "properties": {
+        "total_items": {"type": "integer", "minimum": 0},
+        "blocks_publication": {"type": "integer", "minimum": 0},
+        "degrades_publication": {"type": "integer", "minimum": 0},
+        "reduces_confidence": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "slice_id",
+          "title",
+          "quality_state",
+          "status",
+          "owner",
+          "newsletter_surface",
+          "impact",
+          "problem",
+          "failing_condition",
+          "item_ids",
+          "query_refs",
+          "missing_fields",
+          "required_action"
+        ],
+        "properties": {
+          "slice_id": {"type": "string", "minLength": 1},
+          "title": {"type": "string", "minLength": 1},
+          "quality_state": {
+            "type": "string",
+            "enum": ["healthy", "degraded", "stale", "under_specified", "manual_only"]
+          },
+          "status": {
+            "type": "string",
+            "enum": ["green", "yellow", "red", "manual_only"]
+          },
+          "owner": {"type": "string", "minLength": 1},
+          "support_tpm": {"type": ["string", "null"]},
+          "newsletter_surface": {"type": "string", "minLength": 1},
+          "impact": {
+            "type": "string",
+            "enum": ["blocks_publication", "degrades_publication", "reduces_confidence"]
+          },
+          "problem": {"type": "string", "minLength": 1},
+          "failing_condition": {"type": "string", "minLength": 1},
+          "item_ids": {
+            "type": "array",
+            "items": {"type": "integer", "minimum": 1}
+          },
+          "query_refs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1}
+          },
+          "missing_fields": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {"type": "integer", "minimum": 1}
+            }
+          },
+          "stale_item_ids": {
+            "type": "array",
+            "items": {"type": "integer", "minimum": 1}
+          },
+          "required_action": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1}
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

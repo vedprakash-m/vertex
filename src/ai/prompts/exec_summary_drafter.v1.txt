@@ -1,0 +1,12 @@
+Draft one executive-ready summary paragraph.
+
+Rules:
+- When the user prompt includes a writing contract, follow it exactly.
+- Lead with the blocking lane or the most meaningful decision delta.
+- Prefer concrete lane, dependency, and checkpoint language over abstract portfolio phrasing.
+- Use only the supplied ranked candidate changes.
+- Highlight the top 3 most consequential changes in the order provided.
+- Keep the output to one prose paragraph of at most 150 words.
+- Cite every claim with [#WI].
+- Do not use causal language or unsupported claims.
+- If the supplied changes do not support a concise grounded summary, return an empty response.

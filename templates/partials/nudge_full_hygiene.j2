@@ -1,0 +1,193 @@
+{# Full Hygiene Heat-map — generic N-section ADO readiness #}
+{# Columns: ADO# · Title · Owner · 📅 Date? · 📌 Committed? · 🎯 Risk? · 📋 Reason? · 💬 Update? · 📰 Status? · Stale · ✨ Ready? #}
+
+{%- macro check(val) -%}
+  {%- if val is none -%}<span style="color:#9CA3AF;">—</span>
+  {%- elif val -%}<span style="color:#16A34A;font-weight:600;">✓</span>
+  {%- else -%}<span style="color:#DC2626;font-weight:600;">✗</span>
+  {%- endif -%}
+{%- endmacro -%}
+
+{%- macro stale_badge(days, threshold) -%}
+  {%- if days < threshold -%}
+    <span style="color:#16A34A;font-size:11px;">{{ days }}d</span>
+  {%- elif days <= (threshold * 2) -%}
+    <span style="color:#D97706;font-size:11px;font-weight:600;">{{ days }}d</span>
+  {%- else -%}
+    <span style="color:#DC2626;font-size:11px;font-weight:700;">{{ days }}d</span>
+  {%- endif -%}
+{%- endmacro -%}
+
+<!-- Call to action -->
+<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;border-collapse:collapse;">
+  <tr>
+    <td style="background:#EFF6FF;border:1px solid #BFDBFE;padding:12px 16px;border-radius:6px;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;font-size:12px;color:#1E3A5F;">
+      <p style="margin:0 0 8px 0;font-weight:700;font-size:13px;">What's in this nudge:</p>
+      <ol style="margin:0 0 10px 0;padding-left:20px;line-height:1.6;">
+        {% for section in sections %}
+        <li style="margin-bottom:6px;">
+          <strong>Section {{ section.letter }} — {{ section.title }}:</strong>
+          {% if section.description %}{{ section.description | e }}{% endif %}
+          Ensure each item has a current <strong>Target Date</strong>{% if section.deadline %} (by {% if section.deadline_uncertain %}~{% endif %}{{ section.deadline }}){% endif %},
+          a <strong>Risk Assessment</strong>, and a <strong>status comment within the last {{ comment_window_days }} days</strong>.
+        </li>
+        {% endfor %}
+      </ol>
+      <p style="margin:0;color:#374151;"><strong>Action needed from all assignees:</strong> For each item you own, (1) confirm or update the Target Date, (2) set Risk Assessment, (3) add a brief status comment. Items already green (<span style="color:#16A34A;font-weight:600;">✓</span> across all columns) need no action.</p>
+    </td>
+  </tr>
+</table>
+
+<!-- Legend -->
+<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;border-collapse:collapse;">
+  <tr>
+    <td style="background:#F3F4F6;padding:8px 12px;border-radius:4px;font-size:11px;color:#374151;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;">
+      <strong>Legend:</strong>&nbsp;
+      📅 Date?&nbsp;·&nbsp;📌 Committed?&nbsp;·&nbsp;🎯 Risk?&nbsp;·&nbsp;📋 Reason? (if ≠ On Track)&nbsp;·&nbsp;💬 Update? (comment within window)&nbsp;·&nbsp;📰 Status note? (keyword in comment)&nbsp;·&nbsp;Stale = business days since last update&nbsp;·&nbsp;✨ Ready? = all green
+      &nbsp;&nbsp;
+      <span style="color:#16A34A;font-weight:600;">✓</span> = present&nbsp;
+      <span style="color:#DC2626;font-weight:600;">✗</span> = missing&nbsp;
+      <span style="color:#9CA3AF;">—</span> = N/A or not evaluated
+    </td>
+  </tr>
+</table>
+
+{% for section in sections %}
+{% if section.query_error %}
+<!-- Section {{ section.letter }}: {{ section.title }} — DEGRADED -->
+<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:4px;border-collapse:collapse;">
+  <tr>
+    <td style="background:#7F1D1D;padding:8px 12px;border-radius:4px 4px 0 0;">
+      <span style="color:#FFFFFF;font-weight:700;font-size:13px;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;">
+        Section {{ section.letter }} — {{ section.title }} [DATA UNAVAILABLE]
+      </span>
+    </td>
+  </tr>
+</table>
+<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:20px;border-collapse:collapse;">
+  <tr>
+    <td style="background:#FEF2F2;padding:8px 12px;border:1px solid #FECACA;border-radius:0 0 4px 4px;font-size:11px;color:#991B1B;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;">
+      Query error: {{ section.error_details | default("data unavailable") | e }}. Retry or check ADO connectivity.
+    </td>
+  </tr>
+</table>
+{% else %}
+<!-- Section {{ section.letter }}: {{ section.title }} -->
+<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:4px;border-collapse:collapse;">
+  <tr>
+    <td style="background:#1E3A5F;padding:8px 12px;border-radius:4px 4px 0 0;">
+      <span style="color:#FFFFFF;font-weight:700;font-size:13px;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;">
+        Section {{ section.letter }} — {{ section.title }}
+      </span>
+      <span style="color:#93C5FD;font-size:11px;margin-left:12px;">
+        {{ section.total_count }} items&nbsp;·&nbsp;{{ section.stale_count }} stale (≥{{ section.stale_threshold_days }}d)&nbsp;·&nbsp;{{ section.ready_count }} ready
+        {%- if section.unknown_ready_count > 0 %}&nbsp;·&nbsp;{{ section.unknown_ready_count }} unknown{%- endif %}
+      </span>
+    </td>
+  </tr>
+</table>
+
+<!-- Section {{ section.letter }} summary stats -->
+<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:8px;border-collapse:collapse;">
+  <tr>
+    <td style="background:#F0F4FF;padding:6px 12px;border:1px solid #DBEAFE;border-radius:0 0 4px 4px;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;font-size:11px;color:#374151;">
+      <strong>Summary:</strong>&nbsp;
+      {% if section.no_date_count > 0 %}<span style="background:#FEE2E2;color:#DC2626;font-weight:600;padding:1px 6px;border-radius:3px;margin-right:4px;">📅 No date: {{ section.no_date_count }}</span>{% endif %}
+      {% if section.past_due_count > 0 %}<span style="background:#FEE2E2;color:#991B1B;font-weight:600;padding:1px 6px;border-radius:3px;margin-right:4px;">🚨 Past due: {{ section.past_due_count }}</span>{% endif %}
+      {% if section.beyond_deadline_count > 0 and section.deadline %}<span style="background:#FEF3C7;color:#92400E;font-weight:600;padding:1px 6px;border-radius:3px;margin-right:4px;">⏰ Beyond {% if section.deadline_uncertain %}~{% endif %}{{ section.deadline }}: {{ section.beyond_deadline_count }}</span>{% endif %}
+      {% if section.stale_summary_count > 0 %}<span style="background:#F3E8FF;color:#6B21A8;font-weight:600;padding:1px 6px;border-radius:3px;margin-right:4px;">🕒 Stale &gt;{{ section.stale_summary_threshold_days }}d: {{ section.stale_summary_count }}</span>{% endif %}
+      {% if section.comment_fetch_skipped > 0 %}<span style="background:#F3F4F6;color:#6B7280;padding:1px 6px;border-radius:3px;margin-right:4px;">💬 Budget: {{ section.comment_fetch_skipped }} not evaluated</span>{% endif %}
+      {% if section.no_date_count == 0 and section.past_due_count == 0 and section.beyond_deadline_count == 0 and section.stale_summary_count == 0 and section.total_count > 0 %}<span style="color:#16A34A;font-weight:600;">✓ All items have valid dates and are fresh</span>{% endif %}
+      {% if section.total_count == 0 and not section.query_error %}<span style="color:#6B7280;">No items in this section.</span>{% endif %}
+      {% if section.elevated_from_other_pools > 0 %}<span style="color:#6B7280;font-size:10px;margin-left:8px;">ℹ️ {{ section.elevated_from_other_pools }} item(s) here also appear in other section pools — they will move to lower sections once this section's cooldown expires.</span>{% endif %}
+    </td>
+  </tr>
+</table>
+
+{% if section.groups %}
+<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:20px;border-collapse:collapse;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;font-size:11px;">
+  <!-- Column header -->
+  <tr style="background:#E5E7EB;">
+    <td style="padding:4px 6px;color:#374151;font-weight:600;white-space:nowrap;">ADO#</td>
+    <td style="padding:4px 6px;color:#374151;font-weight:600;">Title</td>
+    <td style="padding:4px 6px;color:#374151;font-weight:600;white-space:nowrap;">Owner</td>
+    <td style="padding:4px 6px;color:#374151;font-weight:600;text-align:center;" title="target_date set and future">📅</td>
+    <td style="padding:4px 6px;color:#374151;font-weight:600;text-align:center;" title="Custom.CommitmentStatus starts with Committed">📌</td>
+    <td style="padding:4px 6px;color:#374151;font-weight:600;text-align:center;" title="risk_assessment field populated">🎯</td>
+    <td style="padding:4px 6px;color:#374151;font-weight:600;text-align:center;" title="if not On Track: has risk_assessment_comment?">📋</td>
+    <td style="padding:4px 6px;color:#374151;font-weight:600;text-align:center;" title="comment within window">💬</td>
+    <td style="padding:4px 6px;color:#374151;font-weight:600;text-align:center;" title="comment contains status keyword">📰</td>
+    <td style="padding:4px 6px;color:#374151;font-weight:600;text-align:center;">Stale</td>
+    <td style="padding:4px 6px;color:#374151;font-weight:600;text-align:center;" title="date+risk+update+status all green">✨</td>
+  </tr>
+
+  {% for group in section.groups %}
+  <!-- Workstream group header -->
+  <tr style="background:#DBEAFE;">
+    <td colspan="11" style="padding:5px 8px;font-size:11px;color:#1E3A8A;font-weight:600;">
+      ▶&nbsp;{{ group.workstream_name | e }}
+      {% if group.workstream_owners %}
+        <span style="color:#4B5563;font-weight:400;">&nbsp;·&nbsp;Owner:&nbsp;
+          {% for owner in group.workstream_owners %}
+            {%- if not loop.first %}&nbsp;/&nbsp;{% endif -%}
+            {% if owner.email %}
+              <a href="mailto:{{ owner.email }}" style="color:#2563EB;text-decoration:none;">@{{ owner.alias | e }}</a>
+            {% else %}
+              @{{ owner.alias | e }}
+            {% endif %}
+          {% endfor %}
+        </span>
+      {% endif %}
+    </td>
+  </tr>
+
+  {% for row in group.rows %}
+  <tr style="background:{% if loop.index is odd %}#FFFFFF{% else %}#F9FAFB{% endif %};">
+    <td style="padding:3px 6px;white-space:nowrap;">
+      <a href="{{ row.item_url }}" style="color:#2563EB;text-decoration:none;font-size:11px;">{{ row.work_item_id }}</a>
+      {% if row.is_overdue %}<span style="color:#DC2626;" title="OVERDUE in registry">⚠</span>{% endif %}
+    </td>
+    <td style="padding:3px 6px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{{ row.title_original | e }}">
+      {{ row.title | e }}
+    </td>
+    <td style="padding:3px 6px;white-space:nowrap;">
+      {% if row.owner_email %}
+        <a href="mailto:{{ row.owner_email }}" style="color:#2563EB;text-decoration:none;">@{{ row.owner_alias or row.owner_email | e }}</a>
+      {% elif row.owner_alias %}
+        @{{ row.owner_alias | e }}
+      {% else %}
+        <span style="color:#9CA3AF;">—</span>
+      {% endif %}
+    </td>
+    <td style="padding:3px 6px;text-align:center;">{{ check(row.has_valid_target_date) }}</td>
+    <td style="padding:3px 6px;text-align:center;">{{ check(row.has_committed) }}</td>
+    <td style="padding:3px 6px;text-align:center;">{{ check(row.has_risk_assessment) }}</td>
+    <td style="padding:3px 6px;text-align:center;">{{ check(row.has_risk_reason) }}</td>
+    <td style="padding:3px 6px;text-align:center;">{{ check(row.has_recent_comment) }}</td>
+    <td style="padding:3px 6px;text-align:center;">{{ check(row.comment_has_status_keyword) }}</td>
+    <td style="padding:3px 6px;text-align:center;">{{ stale_badge(row.stale_business_days, section.stale_threshold_days) }}</td>
+    <td style="padding:3px 6px;text-align:center;">{{ check(row.is_ready) }}</td>
+  </tr>
+  {% endfor %}
+
+  {% endfor %}
+</table>
+
+{% else %}
+<p style="color:#6B7280;font-size:12px;margin:4px 0 20px 0;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;">
+  No items in this section.
+</p>
+{% endif %}
+{% endif %}
+
+{% endfor %}
+
+{% if degraded_section_ids %}
+<p style="font-size:11px;color:#991B1B;margin-top:8px;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;">
+  ⚠ Degraded sections: {{ degraded_section_ids | join(", ") }}. Data may be incomplete.
+</p>
+{% endif %}
+
+<p style="font-size:10px;color:#9CA3AF;margin-top:8px;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;">
+  Generated {{ generated_at_iso }} by Vertex.
+</p>

@@ -1,0 +1,23 @@
+{% extends "base.email.j2" %}
+
+{% block content %}
+{% include "partials/nav_bar.j2" %}
+{% include "partials/health_banner.j2" %}
+{% if top_items %}
+{% include "partials/top_3_now.j2" %}
+{% endif %}
+{% if delta_rows %}
+{% include "partials/what_changed.j2" %}
+{% endif %}
+{% for ks in kusto_sections %}
+{% include "partials/kusto_section.j2" %}
+{% endfor %}
+{% for ws in workstreams %}
+{% include "partials/workstream.j2" %}
+{% endfor %}
+{% include "partials/exec_summary.j2" %}
+{% endblock %}
+
+{% block footer %}
+{% include "partials/provenance_footer.j2" %}
+{% endblock %}

@@ -1,0 +1,22 @@
+{% if calibration_rows %}
+<div class="section-card">
+  <h3>Claim Accuracy (Calibration)</h3>
+  <ul class="review-list">
+    {% for row in calibration_rows %}
+    <li>
+      <strong>{{ row.workstream_id }}</strong>
+      <span>
+        {% if row.claim_accuracy is not none %}
+          {{ "%.0f"|format(row.claim_accuracy * 100) }}% accuracy
+          &middot; {{ row.sample_size }} sampled
+          ({{ row.met }} met, {{ row.contradicted }} contradicted, {{ row.stale }} stale)
+        {% else %}
+          &lt; 5 samples &mdash; accuracy unavailable
+          ({{ row.sample_size }} sampled so far)
+        {% endif %}
+      </span>
+    </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}

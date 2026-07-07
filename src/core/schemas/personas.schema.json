@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vertex.local/schemas/personas.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "enforcement", "personas"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "enforcement": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "mode": { "enum": ["shadow", "warn", "enforce"] },
+        "staleness_threshold_days": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "personas": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/persona" }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{2,63}$"
+    },
+    "date": {
+      "type": ["string", "null"],
+      "format": "date"
+    },
+    "persona": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "priority"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "priority": { "enum": ["critical", "high", "normal"] },
+        "role": { "type": ["string", "null"] },
+        "owner": { "type": ["string", "null"] },
+        "frame": { "type": ["string", "null"] },
+        "always_active": { "type": "boolean" },
+        "checks": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/check" }
+        }
+      }
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "scope", "message", "severity"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "type": {
+          "enum": [
+            "keyword_present",
+            "keyword_absent",
+            "regex_present",
+            "regex_absent",
+            "sentence_length_max",
+            "structure_present",
+            "delegate_to_rule",
+            "format_matches",
+            "cross_scope_consistency",
+            "published_baseline_match",
+            "scorecard_alignment",
+            "terminology_consistency",
+            "count_range",
+            "section_structure"
+          ]
+        },
+        "scope": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 },
+        "severity": { "enum": ["warn", "block"] },
+        "keywords": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1
+        },
+        "pattern": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "regex_flags": { "enum": ["IGNORECASE", "MULTILINE", "DOTALL", null] },
+        "threshold": { "type": "integer", "minimum": 1 },
+        "element": { "type": "string", "minLength": 1 },
+        "rule_ref": { "type": "string", "minLength": 1 },
+        "enforce_after": { "$ref": "#/$defs/date" },
+        "updated_at": { "$ref": "#/$defs/date" },
+        "phase": { "enum": ["ramp_active", "steady_state", "legacy", null] },
+        "requires": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/id" }
+        },
+        "strict_scope": { "type": "boolean" },
+        "min": { "type": "integer", "minimum": 0 },
+        "max": { "type": "integer", "minimum": 0 },
+        "source_scope": { "type": "string", "minLength": 1 },
+        "source_extract": { "type": "string", "minLength": 1 },
+        "target_scope": { "type": "string", "minLength": 1 },
+        "require_all_in_target": { "type": "boolean" },
+        "require_none_in_target": { "type": "boolean" },
+        "baseline_scope": { "type": "string", "minLength": 1 },
+        "check_attributes": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "bullet_lines_count",
+              "bold_label_count",
+              "paragraph_count",
+              "wins_section_present"
+            ]
+          },
+          "minItems": 1
+        },
+        "tolerance": {
+          "type": "object",
+          "additionalProperties": {
+            "type": ["string", "integer"],
+            "pattern": "^[+-]?\\d+$"
+          }
+        },
+        "risk_keyword_map": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 },
+            "minItems": 1
+          }
+        },
+        "source_field": { "type": "string", "minLength": 1 },
+        "when_source_present": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "forbidden_patterns": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "required_pattern": { "type": "string", "minLength": 1 }
+          }
+        },
+        "extract_numerator_from": { "type": "string", "minLength": 1 },
+        "extract_denominator_from": { "type": "string", "minLength": 1 },
+        "count_tolerance": { "type": "integer", "minimum": 0 },
+        "rules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "pattern", "message"],
+            "properties": {
+              "id": { "$ref": "#/$defs/id" },
+              "pattern": { "type": "string", "minLength": 1 },
+              "message": { "type": "string", "minLength": 1 },
+              "require": { "type": "boolean" },
+              "min_matching_lines": { "type": "integer", "minimum": 0 }
+            }
+          },
+          "minItems": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "enum": ["keyword_present", "keyword_absent"] } }, "required": ["type"] },
+          "then": { "required": ["keywords"] }
+        },
+        {
+          "if": { "properties": { "type": { "enum": ["regex_present", "regex_absent"] } }, "required": ["type"] },
+          "then": { "required": ["pattern"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "sentence_length_max" } }, "required": ["type"] },
+          "then": { "required": ["threshold"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "structure_present" } }, "required": ["type"] },
+          "then": { "required": ["element"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "delegate_to_rule" } }, "required": ["type"] },
+          "then": { "required": ["rule_ref"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "format_matches" } }, "required": ["type"] },
+          "then": { "required": ["pattern"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "cross_scope_consistency" } }, "required": ["type"] },
+          "then": { "required": ["source_scope", "source_extract", "target_scope"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "published_baseline_match" } }, "required": ["type"] },
+          "then": { "required": ["check_attributes"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "terminology_consistency" } }, "required": ["type"] },
+          "then": { "required": ["source_field", "when_source_present"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "count_range" } }, "required": ["type"] },
+          "then": { "required": ["pattern", "extract_numerator_from", "extract_denominator_from"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "section_structure" } }, "required": ["type"] },
+          "then": { "required": ["rules"] }
+        }
+      ]
+    }
+  }
+}

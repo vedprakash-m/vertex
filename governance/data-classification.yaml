@@ -1,0 +1,149 @@
+# data-classification.yaml — Machine-readable data classification matrix (WS-15)
+# Canonical prose version: governance/privacy-matrix.md
+# This file is a structured mirror of §1–§3; §4–§6 remain prose-only in privacy-matrix.md.
+# Updated: 2026-06-16
+schema_version: '1.0'
+
+classifications:
+  - id: PUBLIC
+    description: Safe to publish; no confidentiality loss.
+    examples: ["Public roadmap", "public service status"]
+    default_retention_days: null  # indefinite
+
+  - id: INTERNAL
+    description: Internal to the operating org; not for external distribution.
+    examples: ["Engineering metrics", "internal team names"]
+    default_retention_days: 365
+
+  - id: CONFIDENTIAL
+    description: Restricted to need-to-know; a leak is a real incident.
+    examples: ["Work-item titles", "narrative drafts", "vital signs"]
+    default_retention_days: 365
+
+  - id: PII
+    description: Personally identifying data; subject to deletion rights.
+    examples: ["Email addresses", "person names", "manager hierarchy"]
+    default_retention_days: 365  # subject to DPA
+
+  - id: SECRET
+    description: Credentials and tokens; a leak is a security incident.
+    examples: ["ADO PAT", "Graph client secret", "keyring material"]
+    default_retention_days: 0  # ephemeral (rotated)
+
+channels:
+  - id: ado
+    read_class: CONFIDENTIAL
+    write_class: CONFIDENTIAL
+    retention_days: 365
+    consent: "operator PAT (vso.work_read / vso.work_write)"
+
+  - id: kusto
+    read_class: CONFIDENTIAL
+    write_class: null
+    retention_days: 365
+    consent: "AAD managed identity; cluster Viewer role"
+
+  - id: icm
+    read_class: CONFIDENTIAL
+    write_class: null
+    retention_days: 365
+    consent: "AAD app-only; IcMIncidentRead"
+
+  - id: teams
+    read_class: INTERNAL
+    write_class: INTERNAL
+    retention_days: 180
+    consent: "Graph ChannelMessage.Send + Channel.ReadBasic.All; tenant admin"
+
+  - id: workiq
+    read_class: CONFIDENTIAL
+    write_class: null
+    retention_days: 0  # ephemeral; not persisted
+    consent: "Graph Calendars.Read + Mail.Read; user-context"
+
+  - id: transcript
+    read_class: CONFIDENTIAL
+    write_class: null
+    retention_days: 0  # ephemeral; not persisted
+    consent: "Graph OnlineMeetings.Read + CallRecords.Read.All; tenant admin"
+
+artifacts:
+  - stem: "journal/signals.jsonl"
+    classes: [CONFIDENTIAL, PII]
+    retention_days: 365
+    excise: "[EXCISED] tombstone (WS-18)"
+
+  - stem: "journal/reviews.jsonl"
+    classes: [CONFIDENTIAL, PII]
+    retention_days: 365
+    excise: "[EXCISED] tombstone (WS-18)"
+
+  - stem: "journal/autonomy_audit.jsonl"
+    classes: [PII]
+    retention_days: 2555  # 7 years (audit-of-record)
+    excise: "[EXCISED] tombstone (WS-18)"
+
+  - stem: "journal/actions.jsonl"
+    classes: [CONFIDENTIAL]
+    retention_days: 365
+    excise: "[EXCISED] tombstone (WS-18)"
+
+  - stem: "journal/ai_proposals.jsonl"
+    classes: [CONFIDENTIAL, PII]
+    retention_days: 2555  # 7 years (audit-of-record)
+    excise: "[EXCISED] tombstone (WS-18)"
+
+  - stem: "people_profiles.yaml"
+    classes: [PII]
+    retention_days: null  # indefinite (per-person deletion right)
+    excise: "full-record deletion on per-person request"
+
+  - stem: "archive/*/snapshots/issue_*.snapshot.json"
+    classes: [CONFIDENTIAL]
+    retention_days: null  # indefinite (immutable audit-of-record)
+    excise: "[EXCISED] tombstone in metadata only"
+
+  - stem: "archive/*/manifests/issue_*.json"
+    classes: [CONFIDENTIAL]
+    retention_days: null
+    excise: "[EXCISED] tombstone in metadata only"
+
+  - stem: "archive/*/published/Issue_*.eml"
+    classes: [CONFIDENTIAL]
+    retention_days: null
+    excise: "operator must redact + re-publish"
+
+  - stem: "external_dependencies.jsonl"
+    classes: [CONFIDENTIAL]
+    retention_days: 365
+    excise: "n/a (no PII)"
+
+  - stem: "narrative/*.md"
+    classes: [CONFIDENTIAL]
+    retention_days: 365
+    excise: "operator edit; no in-place automated scrub"
+
+  - stem: "gather_state.json"
+    classes: [CONFIDENTIAL, PII]
+    retention_days: 365
+    excise: "n/a (operator-side)"
+
+  - stem: "migration_log.jsonl"
+    classes: [INTERNAL]
+    retention_days: null
+    excise: "n/a (no PII)"
+
+  - stem: "_feedback/*.jsonl"
+    classes: [CONFIDENTIAL, PII]
+    retention_days: 365
+    excise: "[EXCISED] tombstone (WS-18)"
+
+  - stem: "analytics.sqlite3"
+    classes: [CONFIDENTIAL]
+    retention_days: 365
+    excise: "rebuild from journal after [EXCISED] run (WS-18)"
+
+  - stem: "keyring"
+    classes: [SECRET]
+    retention_days: 0  # ephemeral (rotated)
+    excise: "immediate rotation"

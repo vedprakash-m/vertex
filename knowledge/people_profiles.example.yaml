@@ -1,0 +1,11 @@
+schema_version: "1.0"
+profiles:
+  - alias: sample_owner
+    comm_style: "Impact-first, one-slide maximum"
+    cares_about:
+      - clear risk framing
+      - concrete milestones
+      - decision-ready status
+    pet_peeves:
+      - vague owners
+      - status without dates

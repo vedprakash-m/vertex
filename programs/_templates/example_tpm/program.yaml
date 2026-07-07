@@ -1,0 +1,50 @@
+schema_version: "3.0"
+id: example_tpm
+name: Example TPM Program
+objective: Ship a representative weekly operating review without private source material.
+mission: Provide a clean-checkout Vertex sample that exercises the V2 config loader and onboarding path.
+current_phase: Example validation
+pillars:
+  - Reliability
+author_defaults:
+  display_name: Example TPM
+  email: tpm@example.com
+distribution_defaults:
+  to:
+    - team@example.com
+  cc: []
+ado:
+  organization: your-org
+  project: your-project
+  area_paths: []
+  work_item_types:
+    - Feature
+    - Risk
+  excluded_states:
+    - Removed
+  date_window_days: 14
+  api_timeout_seconds: 30
+ai:
+  enabled: false
+  budget_usd_per_run: 0.5
+kusto:
+  enabled: false
+m365:
+  enabled: false
+  prefer_agency: true
+  # FQ-01 stays opt-in until it meets the cross-program promotion gates.
+  retrieval:
+    discovery_mode: legacy_nl
+    discovery_union_runs: 1
+    discovery_lookback_days: 14
+    per_thread_extraction: false
+    per_thread_top_k: 3
+    per_thread_one_hop: false
+    max_calls_per_cycle: 40
+    max_wall_clock_seconds: 600
+gather:
+  min_completeness_pct: 60
+  backfill_max_days: 14
+logging:
+  level: INFO
+  json: false

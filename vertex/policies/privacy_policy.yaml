@@ -1,0 +1,43 @@
+policy_schema_version: "1"
+
+# ---------------------------------------------------------------------------
+# Default classification for unregistered fact types.
+# "default-deny": unclassified types are treated as internal, not public.
+# ---------------------------------------------------------------------------
+default_classification: internal
+
+# ---------------------------------------------------------------------------
+# Per-fact-type classifications
+# Classification levels: public | internal | sensitive
+# ---------------------------------------------------------------------------
+fact_type_classifications:
+  # Public: safe for export without restriction
+  entity.alias: public
+  fact.reconfirmation: public
+  fact.corroboration: public
+
+  # Internal: requires access-controlled channel (default)
+  signal.observation: internal
+  fact.conflict: internal
+  fact.conflict_resolved: internal
+  fact.source_sync: internal
+  trust.source_score: internal
+  trust.bootstrap_grant: internal
+  commitment.entry: internal
+  action.proposal: internal
+  action.executed: internal
+  action.failed: internal
+  action.item: internal
+  risk.entry: internal
+  decision.entry: internal
+  dependency.link: internal
+  milestone.entry: internal
+  assumption.entry: internal
+  workstream.entry: internal
+  claim.entry: internal
+
+  # Sensitive: restricted; not exported unless max_classification=sensitive
+  # Reserved for PII-bearing or confidential content (e.g. personnel decisions,
+  # financial commitments). Add fact types here when data sensitivity demands it.
+  # Example (add when needed):
+  # personnel.decision: sensitive

@@ -1,0 +1,542 @@
+from __future__ import annotations
+
+from datetime import date, datetime, timezone
+from pathlib import Path
+
+import yaml
+
+from typer.testing import CliRunner
+
+from cli import app
+from src.commands.nudge import (
+    FullHygieneArtifacts,
+    FullHygieneRow,
+    FullHygieneSection,
+    generate_full_hygiene_nudges,
+    _word_truncate_title,
+    _comment_has_keyword,
+)
+from src.core.models import RiskLevel, WorkItem
+from tests.support.report_test_setup import stage_v2_report_workspace
+
+runner = CliRunner()
+
+
+# ---------------------------------------------------------------------------
+# Fake ADO client for full hygiene tests
+# ---------------------------------------------------------------------------
+
+class _FullHygieneFakeADOClient:
+    """Returns RAMPP1 items from execute_wiql and hydrated fields from query_work_items_batch."""
+
+    RAMPP1_IDS = [801001, 801002]
+    POST_RAMP_IDS = [802001]
+
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+    def execute_wiql(self, wiql: str, top: int | None = None) -> list[int]:
+        if "RAMPP1" in wiql:
+            return self.RAMPP1_IDS
+        if "POST RAMP" in wiql:
+            return self.POST_RAMP_IDS
+        return []
+
+    def query_work_items_batch(self, work_item_ids: list[int], fields: tuple[str, ...]) -> list[dict[str, object]]:
+        del fields
+        rows = []
+        for wid in work_item_ids:
+            rows.append({
+                "id": wid,
+                "fields": {
+                    "System.Id": wid,
+                    "System.WorkItemType": "Feature",
+                    "System.Title": f"Work item {wid}",
+                    "System.State": "Active",
+                    "System.AssignedTo": {"displayName": "Test Owner", "uniqueName": "towner@example.com"},
+                    "System.AreaPath": "One\\Adventure\\Acme",
+                    "System.IterationPath": "FY26\\Sprint 20",
+                    "System.ChangedDate": "2026-05-01T18:00:00+00:00",
+                    "Microsoft.VSTS.Scheduling.TargetDate": "2026-06-30",
+                    "System.Tags": "RAMPP1",
+                    "Custom.RiskAssessment": "On Track",
+                    "Custom.RiskAssessmentComment": "",
+                    "System.Description": "Description for work item.",
+                },
+            })
+        return rows
+
+    def get_work_item_relations(self, work_item_ids: list[int]) -> list[dict[str, object]]:
+        return []
+
+    def list_work_item_comments(self, work_item_id: int) -> list[dict[str, object]]:
+        # Return a recent comment with status keyword for items ending in 1
+        if str(work_item_id).endswith("1"):
+            return [{"createdDate": "2026-05-20T18:00:00+00:00", "text": "on track, no blockers"}]
+        return []
+
+
+class _DeduplicationFakeADOClient(_FullHygieneFakeADOClient):
+    """Section B and C share work item 801002 — dedup should exclude it from C."""
+
+    POST_RAMP_IDS = [801002, 802001]  # 801002 already in B
+
+
+class _RegistryItemsFakeADOClient(_FullHygieneFakeADOClient):
+    """Returns a registry item from query_work_items_batch for section A testing."""
+
+    RAMPP1_IDS: list[int] = []
+    POST_RAMP_IDS: list[int] = []
+
+    def query_work_items_batch(self, work_item_ids: list[int], fields: tuple[str, ...]) -> list[dict[str, object]]:
+        del fields
+        return [{
+            "id": wid,
+            "fields": {
+                "System.Id": wid,
+                "System.WorkItemType": "Feature",
+                "System.Title": f"Registry item {wid}",
+                "System.State": "Active",
+                "System.AssignedTo": {"displayName": "Registry Owner", "uniqueName": "regowner@example.com"},
+                "System.AreaPath": "One\\Adventure\\Acme",
+                "System.IterationPath": "FY26\\Sprint 20",
+                "System.ChangedDate": "2026-05-10T18:00:00+00:00",
+                "Microsoft.VSTS.Scheduling.TargetDate": "2026-07-01",
+                "System.Tags": "RAMPP1",
+                "Custom.RiskAssessment": "On Track",
+                "Custom.RiskAssessmentComment": "",
+                "System.Description": "Registry item description.",
+            },
+        } for wid in work_item_ids]
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _seed_full_hygiene_config(programs_root: Path) -> None:
+    """Inject full_hygiene config block into the nova_nudge edition YAML."""
+    edition_path = programs_root / "acme" / "editions" / "nova_nudge.yaml"
+    doc = yaml.safe_load(edition_path.read_text(encoding="utf-8"))
+    doc["full_hygiene"] = {
+        "ramp_p1_tag": "RAMPP1",
+        "post_ramp_tag": "POST RAMP",
+        "area_paths": ["One\\Adventure\\Acme", "One\\Adventure\\Contoso"],
+        "recipient": "towner",
+        "comment_window_days": 7,
+        "compress_titles_with_ai": False,
+        "stale_business_days": {"section_a": 2, "section_b": 4, "section_c": 6},
+        "status_keywords": ["on track", "blocked", "ETA"],
+        "risk_on_track_values": ["On Track", "on track"],
+        "brand_label": "Program Hygiene",
+    }
+    edition_path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+
+
+def _seed_people(knowledge_root: Path) -> None:
+    people_path = knowledge_root / "people_directory.yaml"
+    doc = yaml.safe_load(people_path.read_text(encoding="utf-8"))
+    doc.setdefault("people", []).append({"alias": "towner", "email": "towner@example.com", "display_name": "Test Owner"})
+    people_path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+
+
+def _seed_registry(programs_root: Path, *, key_ado_items: list[int] | None = None) -> None:
+    """Write a minimal workstream_registry.yaml for the acme program."""
+    registry_path = programs_root / "acme" / "workstream_registry.yaml"
+    registry = {
+        "schema_version": "1.0",
+        "workstreams": [
+            {
+                "id": "acme.test_ws",
+                "name": "Test Workstream",
+                "lifecycle_state": "active",
+                "stakeholders": [{"name": "Test Owner", "role": "primary_owner"}],
+                "key_ado_items": key_ado_items or [],
+            }
+        ],
+    }
+    registry_path.write_text(yaml.safe_dump(registry, sort_keys=False), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Unit-level helper tests
+# ---------------------------------------------------------------------------
+
+def test_word_truncate_short_title() -> None:
+    assert _word_truncate_title("Short title") == "Short title"
+
+
+def test_word_truncate_long_title() -> None:
+    long = "This is a very long work item title that exceeds fifty characters"
+    result = _word_truncate_title(long, max_len=50)
+    assert len(result) <= 52  # "…" adds 1 char
+    assert result.endswith("\u2026")
+
+
+def test_word_truncate_exact_50() -> None:
+    title = "x" * 50
+    assert _word_truncate_title(title) == title
+
+
+def test_comment_has_keyword_match() -> None:
+    assert _comment_has_keyword("Status: on track, ETA next week", ("on track", "blocked"))
+
+
+def test_comment_has_keyword_no_match() -> None:
+    assert not _comment_has_keyword("No relevant words here", ("on track", "blocked"))
+
+
+def test_comment_has_keyword_none() -> None:
+    assert not _comment_has_keyword(None, ("on track",))
+
+
+# ---------------------------------------------------------------------------
+# generate_full_hygiene_nudges integration tests
+# ---------------------------------------------------------------------------
+
+def test_generate_full_hygiene_nudges_returns_three_sections(
+    monkeypatch,
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    stage_v2_report_workspace(repo_root, tmp_path, edition_names=("acme_weekly", "nova_nudge"))
+    programs_root = tmp_path / "programs"
+    _seed_full_hygiene_config(tmp_path / "programs")
+    _seed_people(tmp_path / "knowledge")
+    _seed_registry(programs_root)
+
+    monkeypatch.setattr("src.commands.nudge.ADOClient", _FullHygieneFakeADOClient)
+
+    artifacts = generate_full_hygiene_nudges(
+        program_id="acme",
+        dry_run=True,
+        as_of=datetime(2026, 5, 22, 18, 0, tzinfo=timezone.utc),
+        programs_root=programs_root,
+    )
+
+    assert isinstance(artifacts, FullHygieneArtifacts)
+    assert len(artifacts.sections) == 3
+    section_a, section_b, section_c = artifacts.sections
+    assert section_a.label == "A"
+    assert section_b.label == "B"
+    assert section_c.label == "C"
+    assert section_a.total_count == 0   # no registry items seeded
+    assert section_b.total_count == 2   # RAMPP1_IDS = [801001, 801002]
+    assert section_c.total_count == 1   # POST_RAMP_IDS = [802001]
+
+
+def test_generate_full_hygiene_nudges_deduplicates_b_from_c(
+    monkeypatch,
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    stage_v2_report_workspace(repo_root, tmp_path, edition_names=("acme_weekly", "nova_nudge"))
+    programs_root = tmp_path / "programs"
+    _seed_full_hygiene_config(tmp_path / "programs")
+    _seed_people(tmp_path / "knowledge")
+    _seed_registry(programs_root)
+
+    monkeypatch.setattr("src.commands.nudge.ADOClient", _DeduplicationFakeADOClient)
+
+    artifacts = generate_full_hygiene_nudges(
+        program_id="acme",
+        dry_run=True,
+        as_of=datetime(2026, 5, 22, 18, 0, tzinfo=timezone.utc),
+        programs_root=programs_root,
+    )
+
+    _, section_b, section_c = artifacts.sections
+    assert section_b.total_count == 2        # 801001, 801002
+    assert section_c.total_count == 1        # only 802001; 801002 deduped
+    c_ids = {r.work_item_id for g in section_c.groups for r in g.rows}
+    assert 801002 not in c_ids
+    assert 802001 in c_ids
+
+
+def test_generate_full_hygiene_nudges_deduplicates_a_from_b(
+    monkeypatch,
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    stage_v2_report_workspace(repo_root, tmp_path, edition_names=("acme_weekly", "nova_nudge"))
+    programs_root = tmp_path / "programs"
+    _seed_full_hygiene_config(tmp_path / "programs")
+    _seed_people(tmp_path / "knowledge")
+    # Seed registry with one of the RAMPP1 IDs so it appears in section A
+    _seed_registry(programs_root, key_ado_items=[801001])
+
+    monkeypatch.setattr("src.commands.nudge.ADOClient", _RegistryItemsFakeADOClient)
+
+    artifacts = generate_full_hygiene_nudges(
+        program_id="acme",
+        dry_run=True,
+        as_of=datetime(2026, 5, 22, 18, 0, tzinfo=timezone.utc),
+        programs_root=programs_root,
+    )
+
+    section_a, section_b, _ = artifacts.sections
+    assert section_a.total_count == 1  # registry item 801001
+    a_ids = {r.work_item_id for g in section_a.groups for r in g.rows}
+    b_ids = {r.work_item_id for g in section_b.groups for r in g.rows}
+    assert 801001 in a_ids
+    assert 801001 not in b_ids  # deduped from B
+
+
+def test_generate_full_hygiene_nudges_row_signals_set_correctly(
+    monkeypatch,
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    stage_v2_report_workspace(repo_root, tmp_path, edition_names=("acme_weekly", "nova_nudge"))
+    programs_root = tmp_path / "programs"
+    _seed_full_hygiene_config(tmp_path / "programs")
+    _seed_people(tmp_path / "knowledge")
+    _seed_registry(programs_root)
+
+    monkeypatch.setattr("src.commands.nudge.ADOClient", _FullHygieneFakeADOClient)
+
+    artifacts = generate_full_hygiene_nudges(
+        program_id="acme",
+        dry_run=True,
+        as_of=datetime(2026, 5, 22, 18, 0, tzinfo=timezone.utc),
+        programs_root=programs_root,
+    )
+
+    _, section_b, _ = artifacts.sections
+    # Item 801001 ends in 1 — has comment with "on track"
+    all_b_rows = [r for g in section_b.groups for r in g.rows]
+    row_1 = next(r for r in all_b_rows if r.work_item_id == 801001)
+    assert row_1.has_valid_target_date is True   # target_date 2026-06-30 > 2026-05-22
+    assert row_1.has_committed is True            # target_date set
+    assert row_1.has_risk_assessment is True      # "On Track"
+    assert row_1.risk_is_on_track is True
+    assert row_1.has_risk_reason is None          # N/A (on track)
+    assert row_1.has_recent_comment is True       # fake returns comment for ids ending in 1
+    assert row_1.comment_has_status_keyword is True  # "on track" in comment
+    assert row_1.is_ready is True                 # all green
+
+    # Item 801002 ends in 2 — no comment returned
+    row_2 = next(r for r in all_b_rows if r.work_item_id == 801002)
+    assert row_2.has_recent_comment is False
+    assert row_2.comment_has_status_keyword is False
+    assert row_2.is_ready is False
+
+
+def test_generate_full_hygiene_nudges_writes_eml_file(
+    monkeypatch,
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    stage_v2_report_workspace(repo_root, tmp_path, edition_names=("acme_weekly", "nova_nudge"))
+    programs_root = tmp_path / "programs"
+    _seed_full_hygiene_config(tmp_path / "programs")
+    _seed_people(tmp_path / "knowledge")
+    _seed_registry(programs_root)
+
+    monkeypatch.setattr("src.commands.nudge.ADOClient", _FullHygieneFakeADOClient)
+
+    artifacts = generate_full_hygiene_nudges(
+        program_id="acme",
+        dry_run=False,
+        as_of=datetime(2026, 5, 22, 18, 0, tzinfo=timezone.utc),
+        programs_root=programs_root,
+    )
+
+    assert len(artifacts.eml_paths) == 1
+    eml_path = artifacts.eml_paths[0]
+    assert eml_path.exists()
+    assert eml_path.name.endswith(".full.eml")
+    assert "nova_nudge/full" in eml_path.as_posix()
+    content = eml_path.read_text(encoding="utf-8")
+    assert "RAMPP1" in content
+
+
+def test_generate_full_hygiene_nudges_no_eml_when_no_items(
+    monkeypatch,
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    stage_v2_report_workspace(repo_root, tmp_path, edition_names=("acme_weekly", "nova_nudge"))
+    programs_root = tmp_path / "programs"
+    _seed_full_hygiene_config(tmp_path / "programs")
+    _seed_people(tmp_path / "knowledge")
+    _seed_registry(programs_root)
+
+    class _EmptyADOClient(_FullHygieneFakeADOClient):
+        def execute_wiql(self, wiql: str, top: int | None = None) -> list[int]:
+            return []
+
+    monkeypatch.setattr("src.commands.nudge.ADOClient", _EmptyADOClient)
+
+    artifacts = generate_full_hygiene_nudges(
+        program_id="acme",
+        dry_run=False,
+        as_of=datetime(2026, 5, 22, 18, 0, tzinfo=timezone.utc),
+        programs_root=programs_root,
+    )
+
+    assert artifacts.eml_paths == ()
+    assert all(s.total_count == 0 for s in artifacts.sections)
+
+
+def test_generate_full_hygiene_nudges_stale_threshold_flags(
+    monkeypatch,
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    stage_v2_report_workspace(repo_root, tmp_path, edition_names=("acme_weekly", "nova_nudge"))
+    programs_root = tmp_path / "programs"
+    _seed_full_hygiene_config(tmp_path / "programs")
+    _seed_people(tmp_path / "knowledge")
+    _seed_registry(programs_root)
+
+    monkeypatch.setattr("src.commands.nudge.ADOClient", _FullHygieneFakeADOClient)
+
+    artifacts = generate_full_hygiene_nudges(
+        program_id="acme",
+        dry_run=True,
+        stale_a=1,
+        stale_b=99,
+        stale_c=99,
+        as_of=datetime(2026, 5, 22, 18, 0, tzinfo=timezone.utc),
+        programs_root=programs_root,
+    )
+
+    assert artifacts.sections[0].stale_threshold_days == 1
+    assert artifacts.sections[1].stale_threshold_days == 99
+    assert artifacts.sections[2].stale_threshold_days == 99
+
+
+def test_generate_full_hygiene_nudges_workstream_grouping(
+    monkeypatch,
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    stage_v2_report_workspace(repo_root, tmp_path, edition_names=("acme_weekly", "nova_nudge"))
+    programs_root = tmp_path / "programs"
+    _seed_full_hygiene_config(tmp_path / "programs")
+    _seed_people(tmp_path / "knowledge")
+    # Registry maps 801001 to acme.test_ws — 801002 will be Unclassified
+    _seed_registry(programs_root, key_ado_items=[])
+
+    monkeypatch.setattr("src.commands.nudge.ADOClient", _FullHygieneFakeADOClient)
+
+    artifacts = generate_full_hygiene_nudges(
+        program_id="acme",
+        dry_run=True,
+        as_of=datetime(2026, 5, 22, 18, 0, tzinfo=timezone.utc),
+        programs_root=programs_root,
+    )
+
+    _, section_b, _ = artifacts.sections
+    # Since no key_ado_items in registry and area_path doesn't match workstream area_paths,
+    # items go to Unclassified group
+    group_names = {g.workstream_name for g in section_b.groups}
+    # At minimum there should be some group
+    assert len(section_b.groups) >= 1
+    assert section_b.total_count == 2
+
+
+def test_generate_full_hygiene_nudges_section_ready_count(
+    monkeypatch,
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    stage_v2_report_workspace(repo_root, tmp_path, edition_names=("acme_weekly", "nova_nudge"))
+    programs_root = tmp_path / "programs"
+    _seed_full_hygiene_config(tmp_path / "programs")
+    _seed_people(tmp_path / "knowledge")
+    _seed_registry(programs_root)
+
+    monkeypatch.setattr("src.commands.nudge.ADOClient", _FullHygieneFakeADOClient)
+
+    artifacts = generate_full_hygiene_nudges(
+        program_id="acme",
+        dry_run=True,
+        as_of=datetime(2026, 5, 22, 18, 0, tzinfo=timezone.utc),
+        programs_root=programs_root,
+    )
+
+    _, section_b, _ = artifacts.sections
+    # 801001 (ends in 1) has comment → is_ready=True; 801002 has no comment → is_ready=False
+    assert section_b.ready_count == 1
+    assert section_b.total_count == 2
+
+
+def test_generate_full_hygiene_nudges_multi_tag_ramp_p1(
+    monkeypatch,
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    """ramp_p1_tag as a list aggregates items from all tags and deduplicates."""
+    stage_v2_report_workspace(repo_root, tmp_path, edition_names=("acme_weekly", "nova_nudge"))
+    programs_root = tmp_path / "programs"
+    _seed_full_hygiene_config(tmp_path / "programs")
+    _seed_people(tmp_path / "knowledge")
+    _seed_registry(programs_root)
+
+    # Override ramp_p1_tag to be a list with two tags; 801001 appears in both (should deduplicate)
+    edition_path = tmp_path / "programs" / "acme" / "editions" / "nova_nudge.yaml"
+    doc = yaml.safe_load(edition_path.read_text(encoding="utf-8"))
+    doc["full_hygiene"]["ramp_p1_tag"] = ["RAMPP1", "Acme-P1"]
+    edition_path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+
+    class _MultiTagFakeADOClient(_FullHygieneFakeADOClient):
+        NOVA_P1_IDS = [801001, 803001]  # 801001 also in RAMPP1 — must be deduped
+
+        def execute_wiql(self, wiql: str, top: int | None = None) -> list[int]:
+            if "Acme-P1" in wiql:
+                return self.NOVA_P1_IDS
+            return super().execute_wiql(wiql)
+
+        def query_work_items_batch(self, work_item_ids: list[int], fields: tuple[str, ...]) -> list[dict[str, object]]:
+            rows = super().query_work_items_batch(work_item_ids, fields)
+            # Patch tag for 803001 to reflect Acme-P1
+            for row in rows:
+                if row.get("id") == 803001:
+                    row["fields"]["System.Tags"] = "Acme-P1"  # type: ignore[index]
+            return rows
+
+    monkeypatch.setattr("src.commands.nudge.ADOClient", _MultiTagFakeADOClient)
+
+    artifacts = generate_full_hygiene_nudges(
+        program_id="acme",
+        dry_run=True,
+        as_of=datetime(2026, 5, 22, 18, 0, tzinfo=timezone.utc),
+        programs_root=programs_root,
+    )
+
+    _, section_b, _ = artifacts.sections
+    b_ids = {r.work_item_id for g in section_b.groups for r in g.rows}
+    # Items from both RAMPP1 (801001, 801002) and Acme-P1 (803001) appear; 801001 not duplicated
+    assert 801001 in b_ids
+    assert 801002 in b_ids
+    assert 803001 in b_ids
+    assert section_b.total_count == 3  # 801001 deduplicated, so 3 unique items
+    # Section title reflects both tags joined by /
+    assert section_b.title == "Remaining RAMPP1/Acme-P1"
+
+
+# ---------------------------------------------------------------------------
+# CLI smoke test
+# ---------------------------------------------------------------------------
+
+def test_nudge_cli_dry_run_exits_zero(
+    monkeypatch,
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    """vertex nudge --program acme --dry-run completes with exit_code 0."""
+    stage_v2_report_workspace(repo_root, tmp_path, edition_names=("acme_weekly", "nova_nudge"))
+    programs_root = tmp_path / "programs"
+    _seed_full_hygiene_config(tmp_path / "programs")
+    _seed_people(tmp_path / "knowledge")
+    _seed_registry(programs_root)
+
+    monkeypatch.setattr("src.commands.nudge.PROGRAMS_ROOT", programs_root)
+    monkeypatch.setattr("src.commands.nudge.ADOClient", _FullHygieneFakeADOClient)
+
+    result = runner.invoke(app, ["nudge", "--program", "acme", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "Dry run:" in result.output

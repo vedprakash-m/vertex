@@ -1,0 +1,22 @@
+schema_version: "2.0"
+id: example_tpm_weekly
+program_id: template:example_tpm
+name: "Example TPM Weekly | Issue {issue_number} | {date}"
+type: detailed
+altitude: helicopter
+cadence: weekly
+send_day: monday
+send_time_local: "09:00"
+timezone: America/Los_Angeles
+author:
+  display_name: Example TPM
+  email: tpm@example.com
+distribution:
+  to:
+    - team@example.com
+  cc: []
+  channels:
+    - email
+layout_mode: dashboard
+scorecard_sort: risk_desc
+scorecard_plain_text_only: true

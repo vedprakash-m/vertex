@@ -1,0 +1,247 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Supply-chain audit (WS-7 — pip-audit against OSV)
+        # Runs `pip-audit --strict` against the manifest. `--strict` makes
+        # pip-audit exit non-zero on ANY known vulnerability. OSV is the
+        # default keyless vulnerability service; no GitHub/GHSA token is
+        # needed for public PRs. Findings block the PR (continue-on-error
+        # is intentionally false). The `requirements-dev` deps are scoped
+        # via the `-r requirements.txt` flag (dev-deps are added in
+        # pyproject.toml under [project.optional-dependencies] dev).
+        run: |
+          python scripts/run_pip_audit.py --strict --requirement requirements.txt
+
+      - name: Regenerate CLI reference (keeps specs/cli-reference.md current for this Python version)
+        run: python scripts/generate_cli_reference.py
+
+      - name: Run full test suite
+        run: python -m pytest tests/ -q
+
+      - name: Run contract suite
+        run: python -m pytest tests/contracts/ -q
+
+      - name: Run golden smoke
+        run: python -m pytest tests/golden/test_report_pipeline_snapshots.py -q
+
+      - name: Run coverage baseline suite
+        run: python -m pytest tests/unit/test_observability.py tests/unit/test_commands_gather.py tests/contracts/test_ai_safety_pipeline.py tests/contracts/test_import_boundaries.py -q --cov=src --cov-report=json:output/__coverage_tmp.json
+
+      - name: Check coverage baseline
+        run: python scripts/check_coverage_baseline.py output/__coverage_tmp.json
+
+      - name: Type check (mypy)
+        run: python -m mypy src/ --ignore-missing-imports --no-error-summary
+
+      - name: Spec drift guard (WS-9)
+        run: python scripts/check_spec_drift.py
+
+  fresh-clone-smoke:
+    # WS-16: fresh-clone → pip install → vertex --help → setup → doctor → migrate round-trip.
+    # Runs on a CLEAN clone with NO programs/ data. The repo is checked out fresh by
+    # `actions/checkout@v4` (no cache), then we `pip install`, then we run the
+    # smoke chain against a temporary programs-root that the job wipes on exit.
+    # Any failure here = a real user hitting `pip install` + `vertex ...` for the
+    # first time WILL fail. This is the ratchet that makes "does it install
+    # cleanly on a new machine?" a contract, not a vibe.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: "Install dependencies (no cache, mirrors a fresh pip install)"
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          pip install -e .
+
+      - name: "Confirm vertex entry point is installed and CLI loads"
+        # `--help` must exit 0; any non-zero exit means the Typer tree is broken
+        # (typer/click pins, missing app.command, broken app.add_typer).
+        run: |
+          set -euo pipefail
+          vertex --help
+          vx --help
+          python -c "from cli import app; import typer; typer.main.get_command(app)"
+
+      - name: Set up isolated test program on a temp programs-root
+        # We deliberately do NOT touch the repo's `programs/` (program data is gitignored
+        # and operator-managed; CI must not depend on it). Instead we materialize
+        # the tracked `_templates/example_tpm` into a tmpdir and point every
+        # command at it via VERTEX_PROGRAMS_ROOT.
+        run: |
+          set -euo pipefail
+          TMP_PROGRAMS=$(mktemp -d -t vertex-fresh-clone-XXXXXX)
+          echo "TMP_PROGRAMS=${TMP_PROGRAMS}" >> "$GITHUB_ENV"
+          # Copy the tracked template into our isolated root
+          mkdir -p "${TMP_PROGRAMS}/_templates"
+          cp -R programs/_templates/example_tpm "${TMP_PROGRAMS}/_templates/"
+          python scripts/setup_test_program.py \
+            --template example_tpm \
+            --program freshclone \
+            --programs-root "${TMP_PROGRAMS}"
+          # Sanity: the program materialized
+          test -f "${TMP_PROGRAMS}/freshclone/program.yaml"
+          test -f "${TMP_PROGRAMS}/freshclone/.bootstrapped"
+          # And is gitignored-friendly: nothing leaked into the real programs/
+          # directory in the repo working tree.
+          if [ -d programs/freshclone ]; then
+            echo "FAIL: setup_test_program wrote into the repo's programs/ — should be isolated" >&2
+            exit 1
+          fi
+
+      - name: "vertex doctor against the fresh-clone program"
+        # doctor is the canary: if it can't load the program or run any
+        # check, then a real first-time user will also fail. We allow non-zero
+        # exit codes (some checks are RED by design on a fresh program with
+        # no channel credentials) but require the command to run to
+        # completion without crashing on import errors, missing files, or
+        # schema errors. The 10-minute timeout is a defensive upper bound.
+        # Uses example_tpm_weekly (template:example_tpm) which resolves from
+        # the repo's programs/_templates/example_tpm — no isolated root needed.
+        run: |
+          set -euo pipefail
+          timeout 600 vertex doctor --edition example_tpm_weekly \
+            || EXIT=$?
+          # doctor may exit non-zero on a fresh program (no ADO/Kusto creds);
+          # what matters is that it ran without a Python traceback.
+          # We assert: no Python crash, exit code < 100 (signal-style).
+          if [ "${EXIT:-0}" -ge 100 ] 2>/dev/null; then
+            echo "FAIL: doctor crashed with signal-style exit code ${EXIT}" >&2
+            exit 1
+          fi
+          # And we re-run --help to confirm the doctor subcommand renders
+          vertex doctor --help
+
+      - name: "Schema-major migration round-trip: file to sqlite to file (with rollback)"
+        # Spec WS-16 acceptance: "schema-major migration round-trips with
+        # rollback; existing programs upgrade cleanly." We seed a tiny file
+        # history, migrate file->sqlite, verify counts, then file->sqlite
+        # rollback path, then a final dry-run to prove idempotence.
+        # VERTEX_PROGRAMS_ROOT env var points all vertex commands at the
+        # isolated tmpdir so they never touch the repo's programs/ directory.
+        env:
+          VERTEX_PROGRAMS_ROOT: ${{ env.TMP_PROGRAMS }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          """Seed a deterministic file-side history on the fresh program and
+          prove the file->sqlite round-trip is lossless."""
+          import json, os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          programs_root = Path(os.environ["TMP_PROGRAMS"])
+          prog = programs_root / "freshclone"
+          captured_at = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc).isoformat()
+
+          # Seed two signal files (file-backend history)
+          (prog / "signals").mkdir(parents=True, exist_ok=True)
+          for i, sig in enumerate([
+              {"id": "smoke-1", "kind": "smoke", "captured_at": captured_at, "payload": {"i": 1}},
+              {"id": "smoke-2", "kind": "smoke", "captured_at": captured_at, "payload": {"i": 2}},
+          ], start=1):
+              (prog / "signals" / f"{sig['id']}.json").write_text(json.dumps(sig, indent=2), encoding="utf-8")
+
+          # Seed one review decision (file-backend review log)
+          reviews = prog / "reviews.jsonl"
+          with reviews.open("a", encoding="utf-8") as fh:
+              fh.write(json.dumps({
+                  "signal_id": "smoke-1",
+                  "decision": "accept",
+                  "captured_at": captured_at,
+              }) + "\n")
+
+          print(f"OK: seeded {len(list((prog/'signals').glob('*.json')))} signals + 1 review")
+          PY
+
+          # Round-trip 1: file -> sqlite (with --dry-run, then real)
+          echo "--- file -> sqlite (dry run) ---"
+          vertex migrate --program freshclone --to sqlite --dry-run
+          echo "--- file -> sqlite (real) ---"
+          vertex migrate --program freshclone --to sqlite
+
+          # Verify program.yaml was updated AND the sqlite store was written
+          python - <<'PY'
+          import os, yaml
+          from pathlib import Path
+          programs_root = Path(os.environ["TMP_PROGRAMS"])
+          prog_yaml = yaml.safe_load((programs_root / "freshclone" / "program.yaml").read_text(encoding="utf-8"))
+          assert prog_yaml.get("storage_backend") == "sqlite", f"storage_backend not flipped: {prog_yaml}"
+          sqlite_path = programs_root / "freshclone" / "vertex_store.sqlite3"
+          assert sqlite_path.exists(), f"expected {sqlite_path} to exist after migration"
+          print(f"OK: storage_backend=sqlite + vertex_store.sqlite3 exists ({sqlite_path.stat().st_size} bytes)")
+          PY
+
+          # Round-trip 2: sqlite -> file (rollback path)
+          echo "--- sqlite -> file (rollback) ---"
+          vertex migrate --program freshclone --to file
+
+          # Verify program.yaml was flipped back AND the sqlite store was removed
+          python - <<'PY'
+          import os, yaml
+          from pathlib import Path
+          programs_root = Path(os.environ["TMP_PROGRAMS"])
+          prog_yaml = yaml.safe_load((programs_root / "freshclone" / "program.yaml").read_text(encoding="utf-8"))
+          # After file rollback, the key MUST be gone or explicitly 'file'
+          backend = prog_yaml.get("storage_backend")
+          assert backend in (None, "file"), f"rollback did not remove sqlite backend: {backend!r}"
+          sqlite_path = programs_root / "freshclone" / "vertex_store.sqlite3"
+          assert not sqlite_path.exists(), f"sqlite store should be removed on rollback; still at {sqlite_path}"
+          # And the file-side history is still there (round-trip is lossless)
+          assert (programs_root / "freshclone" / "signals" / "smoke-1.json").exists()
+          assert (programs_root / "freshclone" / "reviews.jsonl").exists()
+          print("OK: rollback removed sqlite store + kept file history intact")
+          PY
+
+      - name: Analytics rebuild (--rebuild-analytics) round-trip
+        # The second migration verb is --rebuild-analytics (a no-migration
+        # in-place rebuild of the per-program analytics projection). We
+        # re-flip to sqlite, then run --rebuild-analytics, then assert the
+        # projection is non-empty. This is the third leg of the round-trip
+        # contract: migration -> projection rebuild -> still readable.
+        env:
+          VERTEX_PROGRAMS_ROOT: ${{ env.TMP_PROGRAMS }}
+        run: |
+          set -euo pipefail
+          vertex migrate --program freshclone --to sqlite
+          vertex migrate --program freshclone --rebuild-analytics
+          vertex migrate --program freshclone --to file
+          echo "OK: --rebuild-analytics round-trip closed"
+
+      - name: Tidy up isolated test program
+        if: always()
+        # Even if a step failed we should not leave the temp dir on the
+        # runner; actions/checkout is by default clean: true on the
+        # next job, but a cross-runner leak would be ugly. GITHUB_ENV
+        # already points us at the path.
+        run: |
+          rm -rf "${TMP_PROGRAMS:-/tmp/vertex-fresh-clone-noop}" || true

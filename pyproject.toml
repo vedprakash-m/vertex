@@ -1,0 +1,73 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vertex"
+version = "0.1.0"
+description = "Governed TPM intelligence platform for evidence, decisions, and operational program reporting."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "azure-identity>=1.17.1",
+  "cryptography>=43.0.0",
+  "Jinja2>=3.1.4",
+  "jsonschema>=4.23.0",
+  "keyring>=25.3.0",
+  "beautifulsoup4>=4.12",
+  "icalendar>=5.0",
+  "portalocker>=3.1.1",
+  "pypdf>=5.7.0",
+  "python-docx>=1.1",
+  "PyYAML>=6.0.2",
+  "requests>=2.32.3",
+  "rich>=13.7.1",
+  "typer>=0.12.3",
+]
+
+[project.scripts]
+vx = "cli:app"
+vertex = "cli:app"
+
+[project.optional-dependencies]
+# Dev-only supply-chain assurance (WS-7). `pip install -e ".[dev]"` to enable.
+dev = [
+  "pip-audit>=2.7.0",
+]
+
+[tool.setuptools]
+py-modules = ["cli"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src"]
+explicit_package_bases = true
+warn_unused_configs = true
+
+# EnumParserMixin relies on Enum metaclass iteration/default-member patterns that
+# mypy currently mis-models here; we track these as ignore-with-rationale in H5.
+[[tool.mypy.overrides]]
+module = "src.core.models"
+disable_error_code = ["attr-defined", "misc"]
+
+[[tool.mypy.overrides]]
+module = ["jsonschema", "jsonschema.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["src.core.config_loader", "src.commands.doctor"]
+disable_error_code = ["import-untyped"]
+
+[tool.pytest.ini_options]
+addopts = "-n auto"
+# Do not set basetemp here — pytest temp dirs belong in the system %TEMP%, not output/.
+# If a basetemp override is needed (e.g. for CI artifact collection), use .pytest-tmp/
+# (gitignored). Never point basetemp at output/ — that directory is for program artifacts.
+tmp_path_retention_policy = "failed"
+markers = [
+    "slow: marks tests as slow (excluded from inner dev loop; run on CI or with -m slow)",
+]

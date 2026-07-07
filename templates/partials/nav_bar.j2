@@ -1,0 +1,17 @@
+{% if report.edition.value in ["detailed", "focused", "lookback"] %}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" data-vertex-block="jump-to-section" style="width:100%; border-collapse:collapse; margin:0 0 16px 0; background-color:#F9FAFB; border:1px solid #E5E7EB;">
+  <tr>
+    <td style="padding:8px 10px; font-size:12px; line-height:1.4; font-weight:600; color:#4B5563; text-align:center; white-space:nowrap;">Jump to section</td>
+    <td style="padding:8px 0; font-size:12px; line-height:1.4; color:#D1D5DB; text-align:center;">|</td>
+    <td style="padding:8px 10px; font-size:12px; line-height:1.4; color:#2563EB; text-align:center;"><a href="#health" aria-label="Jump to Health section" style="color:#2563EB; text-decoration:none;">Health</a></td>
+    <td style="padding:8px 0; font-size:12px; line-height:1.4; color:#D1D5DB; text-align:center;">|</td>
+    <td style="padding:8px 10px; font-size:12px; line-height:1.4; color:#2563EB; text-align:center;"><a href="#top-3" aria-label="Jump to Decisions section" style="color:#2563EB; text-decoration:none;">Decisions</a></td>
+    <td style="padding:8px 0; font-size:12px; line-height:1.4; color:#D1D5DB; text-align:center;">|</td>
+    <td style="padding:8px 10px; font-size:12px; line-height:1.4; color:#2563EB; text-align:center;">{% if scorecards %}<a href="#{{ scorecards[0].scorecard_name | build_anchor }}" aria-label="Jump to Scorecards section" style="color:#2563EB; text-decoration:none;">Scorecards</a>{% else %}Scorecards{% endif %}</td>
+    <td style="padding:8px 0; font-size:12px; line-height:1.4; color:#D1D5DB; text-align:center;">|</td>
+    <td style="padding:8px 10px; font-size:12px; line-height:1.4; color:#2563EB; text-align:center;">{% if delta_rows %}<a href="#changes" aria-label="Jump to Changes section" style="color:#2563EB; text-decoration:none;">Changes</a>{% else %}Changes{% endif %}</td>
+    <td style="padding:8px 0; font-size:12px; line-height:1.4; color:#D1D5DB; text-align:center;">|</td>
+    <td style="padding:8px 10px; font-size:12px; line-height:1.4; color:#2563EB; text-align:center;">{% if workstreams %}<a href="#{% if workstreams[0].edit_path and 'chapter_' in workstreams[0].edit_path %}chapter-{{ workstreams[0].section_id }}{% else %}{{ workstreams[0].section_id }}{% endif %}" aria-label="Jump to Details section" style="color:#2563EB; text-decoration:none;">Details</a>{% else %}Details{% endif %}</td>
+  </tr>
+</table>
+{% endif %}

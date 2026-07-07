@@ -1,0 +1,48 @@
+{% set tile_data = tile | kusto_tile_data %}
+{% set tile_variant = tile_data.variant %}
+{% set tile_border = "1px solid #E5E7EB" %}
+{% set tile_bg = "#F9FAFB" %}
+{% if tile_variant == "awaiting_data" %}
+{% set tile_border = "1px solid #E1E1E1" %}
+{% set tile_bg = "#FAFAFA" %}
+{% elif tile_variant == "awaiting_validation" %}
+{% set tile_border = "1px dashed #E1E1E1" %}
+{% set tile_bg = "#FAFAFA" %}
+{% elif tile_variant == "aggregate_clear" %}
+{% set tile_border = "1px solid #B7E1CD" %}
+{% set tile_bg = "#F0FFF4" %}
+{% endif %}
+<td width="{{ tile_width }}" style="width:{{ tile_width }}px; padding:10px 12px; border:{{ tile_border }}; border-radius:8px; background-color:{{ tile_bg }}; vertical-align:top;">
+  <div style="margin:0 0 4px 0; font-size:11px; line-height:1.4; font-weight:600; letter-spacing:0.04em; text-transform:uppercase; color:#6B7280;">{{ tile_data.label }}</div>
+  {% if tile_variant == "metric" %}
+  <div style="margin:0; font-size:18px; line-height:1.3; font-weight:700; color:#111827;">{{ tile_data.value }}</div>
+  <div style="margin:4px 0 0 0; font-size:11px; line-height:1.4; color:#6B7280;">Confidence {{ tile.confidence | upper }}</div>
+  {% if tile_data.as_of %}
+  <div style="margin:4px 0 0 0; font-size:11px; line-height:1.4; color:#6B7280;">As of {{ tile_data.as_of | format_date('%b %d') }}</div>
+  {% endif %}
+  {% elif tile_variant == "aggregate_badges" %}
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:separate; border-spacing:4px 0; margin:0 0 6px 0;">
+    <tr>
+      {% for badge in tile_data.badges %}
+      <td style="padding:4px 6px; border-radius:999px; background-color:{{ badge.bg }}; color:{{ badge.fg }}; font-size:11px; line-height:1.4; font-weight:700; text-align:center;">{{ badge.label }} {{ badge.value }}</td>
+      {% endfor %}
+    </tr>
+  </table>
+  {% if tile_data.footer %}
+  <div style="margin:0; font-size:11px; line-height:1.4; color:#6B7280;">{% if tile_data.footer_href %}<a href="{{ tile_data.footer_href }}" style="color:#2563EB; text-decoration:underline;">{{ tile_data.footer }}</a>{% else %}{{ tile_data.footer }}{% endif %}</div>
+  {% endif %}
+  {% else %}
+  <div style="margin:0; font-size:14px; line-height:1.5; color:{% if tile_variant == 'aggregate_clear' %}#166534{% else %}#6B7280{% endif %};">{{ tile_data.status }}</div>
+  <div style="margin:4px 0 0 0; font-size:11px; line-height:1.4; color:#6B7280;">Confidence {{ tile.confidence | upper }}</div>
+  {% if tile_variant == "awaiting_data" and tile_data.owner %}
+  <div style="margin:4px 0 0 0; font-size:11px; line-height:1.4; color:#6B7280;">Owner: {{ tile_data.owner }}</div>
+  {% endif %}
+  {% endif %}
+  {% if tile_data.reference_url %}
+  <div style="margin:6px 0 0 0; font-size:11px; line-height:1.4;"><a href="{{ tile_data.reference_url }}" style="color:#2563EB; text-decoration:underline;">Reference dashboard</a></div>
+  {% endif %}
+  {% set tier4 = tile_data.catalog_source | attribution_tier4 %}
+  {% if tier4 %}
+  <div style="margin:6px 0 0 0; font-size:11px; line-height:1.4; color:#6B7280;">{{ tier4 }}</div>
+  {% endif %}
+</td>

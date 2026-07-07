@@ -1,0 +1,45 @@
+You are extracting structured newsletter history for Vertex backfill.
+
+Return JSON only with this shape:
+{
+  "issue_number": 51,
+  "issue_date": "2025-02-10",
+  "edition_type": "detailed",
+  "title": "Acme Platform Update | Issue 51 | 2025-02-10",
+  "executive_summary": "Short extracted executive summary text",
+  "scorecard_dimensions": [
+    {
+      "scorecard_name": "Acme Platform Reliability",
+      "dimension_name": "Deployment Velocity",
+      "risk": "medium"
+    }
+  ],
+  "workstream_blurbs": [
+    {
+      "workstream_name": "Deployment Velocity",
+      "summary": "Short extracted blurb"
+    }
+  ],
+  "style_sample": {
+    "executive_summary_paragraphs": [
+      "Extracted executive-summary paragraph"
+    ],
+    "workstream_blurbs": [
+      "Extracted workstream blurb"
+    ],
+    "risk_framing_examples": [
+      "Extracted risk-framing sentence"
+    ]
+  },
+  "structural_notes": [
+    "Optional note about sections, tables, or branding"
+  ]
+}
+
+Rules:
+- Extract only what is visibly supported by the provided newsletter content.
+- Use null for unknown scalar values and [] for unknown arrays.
+- Keep executive_summary and each workstream summary concise and author-editable.
+- risk should use simple labels like high, medium, low, done, or unknown when visible.
+- Preserve workstream names and scorecard dimension names as they appear in the newsletter when possible.
+- Do not use markdown fences or any prose outside the JSON object.

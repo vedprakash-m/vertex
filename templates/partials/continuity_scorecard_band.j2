@@ -1,0 +1,17 @@
+<a id="{{ band.anchor_id }}"></a>
+{% set columns = band.cells | length %}
+{% set cell_width = (100 / columns) | round(2) %}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" data-vertex-block="scorecard-band-{{ band.band_id }}" style="width:100%; border-collapse:separate; border-spacing:0; margin:0 0 14px 0; border:1px solid #E5E7EB; background-color:#FFFFFF; table-layout:fixed;">
+  <tr>
+    <td colspan="{{ columns }}" style="padding:8px 10px 6px 10px; font-size:12px; line-height:1.4; font-weight:700; color:#374151;">{{ band.title }}</td>
+  </tr>
+  <tr>
+    {% for cell in band.cells %}
+    <td width="{{ cell_width }}%" style="width:{{ cell_width }}%; padding:6px 4px 8px 4px; border-top:1px solid #E5E7EB; border-right:{% if not loop.last %}1px solid #FFFFFF{% else %}0{% endif %}; background-color:{{ cell.risk | risk_bg }}; vertical-align:top; text-align:center;">
+      <p style="margin:0 0 4px 0; font-size:10px; line-height:1.2; font-weight:700; color:{{ cell.risk | risk_fg }}; text-transform:uppercase; letter-spacing:0.02em;">{% if cell.anchor_id %}<a href="#{{ cell.anchor_id }}" style="color:{{ cell.risk | risk_fg }}; text-decoration:none;">{{ cell.label | scorecard_short_label }}</a>{% else %}{{ cell.label | scorecard_short_label }}{% endif %}</p>
+      {% if cell.eta_label %}<p style="margin:0 0 4px 0; font-size:10px; line-height:1.2; color:{{ cell.risk | risk_fg }};">{{ cell.eta_label }}</p>{% endif %}
+      <p style="margin:0; font-size:12px; line-height:1.2; font-weight:800; color:{{ cell.risk | risk_fg }};">{{ cell.risk | risk_label }}</p>
+    </td>
+    {% endfor %}
+  </tr>
+</table>

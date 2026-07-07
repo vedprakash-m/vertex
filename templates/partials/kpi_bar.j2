@@ -1,0 +1,9 @@
+{% set tile_count = ws.kpi_tiles | length %}
+{% set tile_width = 150 if tile_count == 0 else [150, (640 // tile_count)] | max %}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:separate; border-spacing:8px 0; margin:0 0 12px 0;">
+  <tr>
+    {% for tile in ws.kpi_tiles %}
+    {% include "_kusto_tile.j2" %}
+    {% endfor %}
+  </tr>
+</table>

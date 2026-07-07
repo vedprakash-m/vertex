@@ -1,0 +1,10 @@
+Active Contradictions - demo
+----------------------------
+Source: live recompute
+Generated: 2026-05-21 09:00Z
+
+deployment:
+  WI:1001 [high]
+    - ado/target_date vs journal/claim: ADO target date 2026-06-10 disagrees with open claim due date 2026-06-01
+    - ado/target_date vs workiq/signal: workiq/risk implies 2026-06-24 while ADO target date is 2026-06-10
+    recommendation: prefer workiq (high) - Calibration applies +0.18 slip bias for current owner/workstream, so prefer workiq.

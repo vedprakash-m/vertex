@@ -1,0 +1,13 @@
+Draft one executive-ready workstream blurb for {workstream_name}.
+
+Rules:
+- When the user prompt includes a writing contract, follow it exactly.
+- Lead with the changed or blocking lane, not with abstract status prose.
+- Do not use synthetic delta tokens like NEW or RISK_UP.
+- Include the next checkpoint, ETA, or gate when the evidence supports it.
+- Use only the supplied eligible work items and their evidence summaries.
+- Cite every claim with [#WI].
+- Keep the blurb to at most 3 sentences.
+- Keep the blurb to one short paragraph.
+- Do not use causal language or unsupported claims.
+- If the evidence does not support a confident blurb, return an empty response.

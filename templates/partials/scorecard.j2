@@ -1,0 +1,51 @@
+<a id="{{ sc.scorecard_name | build_anchor }}"></a>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 16px 0; background-color:transparent;">
+  <tr>
+    <td style="padding:10px 0 8px 0; font-size:12px; line-height:1.4; font-weight:600; letter-spacing:0.05em; text-transform:uppercase; color:#6B7280;">{{ sc.scorecard_name | scorecard_short_label }} scorecard (Risk levels)</td>
+  </tr>
+  <tr>
+    <td style="padding:0 0 12px 0;">
+      {% set column_count = sc.dimensions | length %}
+      {% set use_row_fallback = mobile_safe_scorecards == "row" and column_count <= 2 %}
+      {% set tile_width = 42 if use_row_fallback else ((100 / column_count) | round(2) if column_count else 100) %}
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:separate; border-spacing:0; table-layout:fixed; margin:0;">
+        <tr>
+          {% for dimension in sc.dimensions %}
+          {% set packet = scorecard_packets.get(sc.scorecard_name, {}).get(dimension.name) %}
+          {% set detail_anchor = (sc.scorecard_name ~ '-' ~ dimension.name) | build_anchor %}
+          {% set has_detail_link = detail_anchor in visible_detail_section_ids %}
+          {% set scorecard_label = dimension.display_name or dimension.name %}
+          {% set status_label = dimension.risk | risk_label %}
+          {% set tile_bg = dimension.risk | risk_bg %}
+          {% set tile_fg = dimension.risk | risk_fg %}
+          {% set tile_border = dimension.risk | risk_border_color %}
+          {% set secondary_label = dimension.note %}
+          {% if not secondary_label and dimension.risk.value != "done" and packet and packet.author_target_date %}
+            {% set secondary_label = packet.author_target_date | format_date("%m/%d") %}
+          {% elif not secondary_label and dimension.risk.value != "done" and packet and packet.next_target_date %}
+            {% set secondary_label = packet.next_target_date | format_date("%m/%d") %}
+          {% endif %}
+          <td width="{{ tile_width }}%" style="width:{{ tile_width }}%; padding:{% if loop.last %}0{% else %}0 3px 0 0{% endif %}; vertical-align:top;">
+            <table role="presentation" width="100%" height="100%" cellpadding="0" cellspacing="0" border="0" title="{{ packet | evidence_tooltip if packet else '' }}" style="width:100%; height:100%; border-collapse:collapse; background-color:{{ tile_bg }}; border-top:3px solid {{ tile_border }}">
+              <tr>
+                <td height="82" style="min-height:82px; padding:8px 4px 6px 4px; text-align:center; vertical-align:top;">
+                  <p style="margin:0 0 6px 0; font-size:10px; line-height:1.2; font-weight:700; letter-spacing:0.02em; text-transform:uppercase; color:{{ tile_fg }}; min-height:22px;">{% if has_detail_link %}<a href="#{{ detail_anchor }}" style="color:{{ tile_fg }}; text-decoration:none;">{{ scorecard_label | scorecard_short_label }}</a>{% else %}{{ scorecard_label | scorecard_short_label }}{% endif %}</p>
+                  <p style="margin:0 0 6px 0; font-size:11px; line-height:1.2; color:{{ tile_fg }}; min-height:22px;">{{ (secondary_label or '&nbsp;') | safe }}</p>
+                  <p style="margin:0; font-size:13px; line-height:1.2; font-weight:700; color:{{ tile_fg }};">{{ status_label }}</p>
+                </td>
+              </tr>
+            </table>
+          </td>
+          {% endfor %}
+        </tr>
+      </table>
+      {% set unchanged_count = focused_unchanged_dimension_counts.get(sc.scorecard_name, 0) %}
+      {% if sc.footnote %}
+      <p style="margin:8px 0 0 0; font-size:11px; line-height:1.4; color:#6B7280; font-style:italic;">{{ sc.footnote }}</p>
+      {% endif %}
+      {% if report.edition.value == "focused" and unchanged_count > 0 %}
+      <p style="margin:10px 0 0 0; font-size:12px; line-height:1.5; color:#6B7280;">{{ unchanged_count }} {{ unchanged_count | pluralize("dimension") }} unchanged{% if report.deltas.previous_issue_number %} - see Issue {{ report.deltas.previous_issue_number }} ({{ prior_date }}) for details{% endif %}.</p>
+      {% endif %}
+    </td>
+  </tr>
+</table>

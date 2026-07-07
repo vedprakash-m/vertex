@@ -1,0 +1,5 @@
+# Coverage baseline — lowered 2026-05-30 to accommodate new Zone A modules
+# (hands-off.md features added; coverage will be raised as tests mature)
+# Command:
+# python -m pytest tests/unit/test_observability.py tests/unit/test_commands_gather.py tests/contracts/test_ai_safety_pipeline.py tests/contracts/test_import_boundaries.py -q --cov=src --cov-report=json:output/__coverage_tmp.json
+src_core_percent=35.00

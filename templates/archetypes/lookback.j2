@@ -1,0 +1,136 @@
+{% extends "base.email.j2" %}
+
+{% block content %}
+{% include "partials/nav_bar.j2" %}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 16px 0;">
+  <tr>
+    <td style="padding:16px; background-color:#F3F4F6; border:1px solid #E5E7EB;">
+      <p style="margin:0 0 6px 0; font-size:12px; line-height:1.4; font-weight:600; letter-spacing:0.06em; text-transform:uppercase; color:#6B7280;">Quarterly retrospective window</p>
+      <p style="margin:0; font-size:13px; line-height:1.6; color:#374151;">{{ preheader }}</p>
+    </td>
+  </tr>
+</table>
+{% for section in ordered_sections %}
+{% if section.kind == "health" %}
+{% include "partials/health_banner.j2" %}
+{% elif section.kind == "top_3" %}
+{% include "partials/top_3_now.j2" %}
+{% elif section.kind == "selected_changes" %}
+{% include "partials/what_changed.j2" %}
+{% elif section.kind == "scorecard" %}
+{% set sc = section.scorecard %}
+{% include "partials/scorecard.j2" %}
+{% elif section.kind == "kusto" %}
+{% set ks = section.kusto_section %}
+{% include "partials/kusto_section.j2" %}
+{% elif section.kind == "ado_vitality" %}
+{% include "partials/ado_vitality.j2" %}
+{% elif section.kind == "exec_summary" %}
+{% include "partials/exec_summary.j2" %}
+{% elif section.kind == "incident_learning" %}
+{% set incident_learning = section.incident_learning %}
+<table id="{{ section.anchor_id }}" role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 16px 0;">
+  <tr>
+    <td style="padding:16px; background-color:#FFFFFF; border:1px solid #E5E7EB;">
+      <h2 style="margin:0 0 8px 0; font-size:18px; line-height:1.3; color:#111827;">Incident Learnings</h2>
+      <p style="margin:0 0 12px 0; font-size:13px; line-height:1.6; color:#374151;">
+        Incidents in window: {{ incident_learning.incident_count }} | With explicit ADO refs: {{ incident_learning.attributed_incident_count }}
+      </p>
+      {% if incident_learning.attributed_patterns %}
+      <p style="margin:0 0 8px 0; font-size:13px; line-height:1.6; color:#374151;"><strong>Attribution-backed learnings</strong></p>
+      <ul style="margin:0 0 12px 0; padding-left:18px; color:#111827;">
+        {% for pattern in incident_learning.attributed_patterns %}
+        <li style="margin:0 0 8px 0; font-size:13px; line-height:1.6;">{{ pattern }}</li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+      <ul style="margin:0; padding-left:18px; color:#111827;">
+        {% for row in incident_learning.rows %}
+        <li style="margin:0 0 8px 0; font-size:13px; line-height:1.6;">
+          <strong>{{ row.title }}</strong> - {{ row.detail }}
+        </li>
+        {% endfor %}
+      </ul>
+    </td>
+  </tr>
+</table>
+{% elif section.kind == "retrospective_intelligence" %}
+{% set retrospective = section.retrospective_intelligence %}
+<table id="{{ section.anchor_id }}" role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 16px 0;">
+  <tr>
+    <td style="padding:16px; background-color:#FFFFFF; border:1px solid #E5E7EB;">
+      <h2 style="margin:0 0 8px 0; font-size:18px; line-height:1.3; color:#111827;">Retrospective Intelligence</h2>
+      <p style="margin:0 0 12px 0; font-size:13px; line-height:1.6; color:#374151;">
+        Chronic workstreams: {{ retrospective.chronic_workstream_count }} | Recovered chronic issues: {{ retrospective.recovered_workstream_count }} | Recurring drift items: {{ retrospective.recurring_drift_count }} | Claim accuracy signals: {{ retrospective.claim_accuracy_signal_count }} | Charter evaluation signals: {{ retrospective.charter_evaluation_signal_count }} | Workstream moves: {{ retrospective.worsened_workstream_count }} worsened, {{ retrospective.improved_workstream_count }} improved
+      </p>
+      <ul style="margin:0; padding-left:18px; color:#111827;">
+        {% for row in retrospective.rows %}
+        <li style="margin:0 0 8px 0; font-size:13px; line-height:1.6;">
+          <strong>{{ row.category }}</strong> - {{ row.title }} | {{ row.detail }}
+        </li>
+        {% endfor %}
+      </ul>
+    </td>
+  </tr>
+</table>
+{% elif section.kind == "charter_review" %}
+{% set charter_review = section.charter_review %}
+<table id="{{ section.anchor_id }}" role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 16px 0;">
+  <tr>
+    <td style="padding:16px; background-color:#FFFFFF; border:1px solid #E5E7EB;">
+      <h2 style="margin:0 0 8px 0; font-size:18px; line-height:1.3; color:#111827;">Charter Review</h2>
+      {% if charter_review.scope_statement %}
+      <p style="margin:0 0 8px 0; font-size:13px; line-height:1.6; color:#374151;"><strong>Scope:</strong> {{ charter_review.scope_statement }}</p>
+      {% endif %}
+      <p style="margin:0 0 12px 0; font-size:13px; line-height:1.6; color:#374151;">
+        Success criteria authored: {{ charter_review.success_criteria_count }} | Constraints authored: {{ charter_review.constraint_count }}
+      </p>
+      {% if charter_review.evaluated_success_criteria_count or charter_review.manual_review_success_criteria_count %}
+      <p style="margin:0 0 12px 0; font-size:13px; line-height:1.6; color:#374151;">
+        Archive-backed evaluation: evaluated {{ charter_review.evaluated_success_criteria_count }} | Met: {{ charter_review.met_success_criteria_count }} | Not met: {{ charter_review.not_met_success_criteria_count }} | Manual review: {{ charter_review.manual_review_success_criteria_count }}
+      </p>
+      {% endif %}
+      {% if charter_review.rows %}
+      <ul style="margin:0; padding-left:18px; color:#111827;">
+        {% for row in charter_review.rows %}
+        <li style="margin:0 0 8px 0; font-size:13px; line-height:1.6;">
+          <strong>{{ row.title }}</strong> - {{ row.detail }}{% if row.status %}<br><span style="font-size:12px; color:#374151;"><strong>Status:</strong> {{ row.status }}{% if row.evidence %} | {{ row.evidence }}{% endif %}</span>{% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p style="margin:0; font-size:13px; line-height:1.6; color:#374151;">No success criteria or constraints are currently authored for this charter.</p>
+      {% endif %}
+    </td>
+  </tr>
+</table>
+{% elif section.kind == "assumption_lifecycle" %}
+{% set assumption_summary = section.assumption_lifecycle %}
+<table id="{{ section.anchor_id }}" role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 16px 0;">
+  <tr>
+    <td style="padding:16px; background-color:#FFFFFF; border:1px solid #E5E7EB;">
+      <h2 style="margin:0 0 8px 0; font-size:18px; line-height:1.3; color:#111827;">Assumption Lifecycle</h2>
+      <p style="margin:0 0 12px 0; font-size:13px; line-height:1.6; color:#374151;">
+        Identified in window: {{ assumption_summary.identified_count }} | Confirmed in window: {{ assumption_summary.confirmed_count }} | Invalidated in window: {{ assumption_summary.invalidated_count }} | Still open: {{ assumption_summary.still_open_count }}
+      </p>
+      <ul style="margin:0; padding-left:18px; color:#111827;">
+        {% for row in assumption_summary.rows %}
+        <li style="margin:0 0 8px 0; font-size:13px; line-height:1.6;">
+          <strong>{{ row.title }}</strong> - {{ row.detail }}
+        </li>
+        {% endfor %}
+      </ul>
+    </td>
+  </tr>
+</table>
+{% elif section.kind == "workstream" %}
+{% set ws = section.workstream %}
+{% include "partials/workstream.j2" %}
+{% endif %}
+{% endfor %}
+{% endblock %}
+
+{% block footer %}
+{% include "partials/orientation_footer.j2" %}
+{% include "partials/provenance_footer.j2" %}
+{% endblock %}

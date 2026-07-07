@@ -1,0 +1,24 @@
+policy_schema_version: "1"
+
+# Default freshness TTLs by fact_type (days).
+# A fact older than its TTL is considered stale.
+# Per-program overrides live in programs/<id>/freshness_policy.yaml under fact_type_ttl_days.
+fact_type_ttl_days:
+  action.item: 7
+  risk.entry: 30
+  decision.entry: 90
+  dependency.link: 30
+  milestone.entry: 60
+  assumption.entry: 90
+  workstream.entry: 365
+  judgment.dimension: 90
+
+# Default expected gather cadence by source (hours).
+# Used for reality-status staleness warnings when no per-program cadence is configured.
+gather_cadence_hours:
+  ado: 24
+  kusto: 24
+  icm: 24
+  workiq: 168
+  teams: 168
+  default: 24

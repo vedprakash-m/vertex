@@ -1,0 +1,11 @@
+{% if is_dry_run %}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 16px 0; border:1px dashed #D1D5DB; background-color:#F9FAFB;">
+  <tr>
+    <td style="padding:10px 12px; font-size:11px; line-height:1.5; color:#6B7280;">
+      <strong style="color:#111827;">DRY RUN - NOT PUBLISHED</strong><br>
+      Status {{ manifest.qg_results | qg_summary if manifest else edition.qg_status }} · Data as of {{ edition.ado_data_as_of | format_datetime }}
+    </td>
+  </tr>
+</table>
+{% endif %}
+<!-- vertex: manifest={{ manifest.manifest_id if manifest else edition.manifest_id }} qg={{ manifest.qg_results | qg_summary if manifest else edition.qg_status }} generated={{ edition.generated_at.isoformat() }} -->

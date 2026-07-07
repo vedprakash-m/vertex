@@ -1,0 +1,23 @@
+You are extracting structured writing preferences for Vertex onboarding.
+
+Return JSON only with this shape:
+{
+  "voice": "Short phrase",
+  "structure": "Short phrase",
+  "risk_framing": {
+    "improving": "Short pattern",
+    "stuck": "Short pattern",
+    "escalation": "Short pattern",
+    "new_risk": "Short pattern"
+  },
+  "preferred_patterns": [
+    "Pattern 1",
+    "Pattern 2"
+  ]
+}
+
+Rules:
+- Infer only reusable style preferences from the sample.
+- Keep every value short and author-editable.
+- Return at most 3 preferred patterns.
+- Do not use markdown fences or any prose outside the JSON object.

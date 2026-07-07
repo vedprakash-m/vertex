@@ -1,0 +1,128 @@
+<p style="margin:0 0 20px 0; font-size:14px; line-height:1.7; color:#1F2937;">
+  The Program newsletter is built directly from ADO &mdash; when items are current and complete, progress shows up in the weekly leadership review automatically. The items below are in <strong>active workstreams</strong> and need a quick update by {{ deadline_label }}. Most take under two minutes: click the ADO link and fill in the listed fields.
+</p>
+{% if snapshot_fallback %}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 16px 0; background-color:#FFF7ED; border:1px solid #FB923C;">
+  <tr>
+    <td style="padding:10px 16px; font-size:12px; line-height:1.5; color:#7C2D12;">
+      <strong>Data note:</strong> Live ADO fetch returned no data today. Item data is from the last confirmed snapshot and may be a few days old. Comment freshness checks are paused for this run.
+    </td>
+  </tr>
+</table>
+{% endif %}
+{% if deadline_label %}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 24px 0; background-color:#FEF3C7; border:1px solid #FCD34D;">
+  <tr>
+    <td style="padding:12px 16px; font-size:13px; line-height:1.5; color:#92400E;">
+      <strong>Deadline: {{ deadline_label }}</strong> &mdash; refresh your items so the weekly newsletter reflects current state.
+    </td>
+  </tr>
+</table>
+{% endif %}
+{% for section in owner_sections %}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 4px 0; background-color:#F9FAFB; border-left:3px solid #6366F1;">
+  <tr>
+    <td style="padding:10px 14px; font-size:13px; color:#1F2937;">
+      <strong>{{ section.owner_name }}</strong><span style="color:#6B7280; margin-left:8px;">{{ section.item_count }} item{{ 's' if section.item_count != 1 else '' }} to update</span>
+    </td>
+  </tr>
+</table>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 24px 0;">
+  <tr>
+    <td style="padding:6px 12px 6px 0; border-bottom:2px solid #E5E7EB; font-size:11px; font-weight:700; color:#6B7280; text-transform:uppercase; letter-spacing:0.05em; white-space:nowrap; width:80px;">Item</td>
+    <td style="padding:6px 12px 6px 0; border-bottom:2px solid #E5E7EB; font-size:11px; font-weight:700; color:#6B7280; text-transform:uppercase; letter-spacing:0.05em;">Title &amp; workstream</td>
+    <td style="padding:6px 0; border-bottom:2px solid #E5E7EB; font-size:11px; font-weight:700; color:#6B7280; text-transform:uppercase; letter-spacing:0.05em;">What to update</td>
+  </tr>
+  {% for row in section.item_rows %}
+  <tr>
+    <td style="padding:10px 12px 10px 0; border-bottom:1px solid #F3F4F6; vertical-align:top; white-space:nowrap;">
+      <a href="{{ row.item_url }}" style="color:#4F46E5; font-weight:700; font-size:13px; text-decoration:none;">WI:{{ row.work_item_id }}</a>
+      {% if row.item_type and row.item_type != 'Feature' %}<br><span style="color:#9CA3AF; font-size:10px;">{{ row.item_type }}</span>{% endif %}
+    </td>
+    <td style="padding:10px 12px 10px 0; border-bottom:1px solid #F3F4F6; vertical-align:top; font-size:13px; color:#1F2937; max-width:280px;">
+      {{ row.title[:70] }}{% if row.title|length > 70 %}&hellip;{% endif %}
+      {% if row.workstream_name %}<br><span style="color:#9CA3AF; font-size:11px;">{{ row.workstream_name }}</span>{% endif %}
+    </td>
+    <td style="padding:10px 0; border-bottom:1px solid #F3F4F6; vertical-align:top; font-size:13px;">
+      {% if row.is_overdue %}
+        <span style="background:#FEF3C7; color:#92400E; font-size:10px; font-weight:700; padding:2px 6px; border-radius:3px; margin-right:6px; text-transform:uppercase; letter-spacing:0.04em;">OVERDUE</span>
+      {% endif %}
+      {% if row.quick_fix %}
+        <span style="color:#DC2626; font-weight:500;">{{ row.quick_fix }}</span><span style="color:#9CA3AF; font-size:11px; margin-left:6px;">({{ row.freshness_business_days }}d stale)</span>
+      {% else %}
+        <span style="color:#9CA3AF; font-size:12px;">{{ row.freshness_business_days }}d stale &mdash; add a status comment</span>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% endfor %}
+{% if unmapped_rows %}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 4px 0; background-color:#FEF2F2; border-left:3px solid #EF4444;">
+  <tr>
+    <td style="padding:10px 14px; font-size:13px; color:#1F2937;">
+      <strong>Unmapped items</strong><span style="color:#6B7280; margin-left:8px;">workstream not yet assigned &mdash; run <code style="font-family:monospace; font-size:11px;">vertex nudge --program &lt;program-id&gt; --hygiene-mode --resolve-gaps</code> to map</span>
+    </td>
+  </tr>
+</table>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 24px 0;">
+  <tr>
+    <td style="padding:6px 12px 6px 0; border-bottom:2px solid #E5E7EB; font-size:11px; font-weight:700; color:#6B7280; text-transform:uppercase; letter-spacing:0.05em; white-space:nowrap; width:80px;">Item</td>
+    <td style="padding:6px 12px 6px 0; border-bottom:2px solid #E5E7EB; font-size:11px; font-weight:700; color:#6B7280; text-transform:uppercase; letter-spacing:0.05em;">Title</td>
+    <td style="padding:6px 0; border-bottom:2px solid #E5E7EB; font-size:11px; font-weight:700; color:#6B7280; text-transform:uppercase; letter-spacing:0.05em;">What to update</td>
+  </tr>
+  {% for row in unmapped_rows %}
+  <tr>
+    <td style="padding:10px 12px 10px 0; border-bottom:1px solid #F3F4F6; vertical-align:top; white-space:nowrap;">
+      <a href="{{ row.item_url }}" style="color:#4F46E5; font-weight:700; font-size:13px; text-decoration:none;">WI:{{ row.work_item_id }}</a>
+      {% if row.item_type %}<br><span style="color:#9CA3AF; font-size:10px;">{{ row.item_type }}</span>{% endif %}
+    </td>
+    <td style="padding:10px 12px 10px 0; border-bottom:1px solid #F3F4F6; vertical-align:top; font-size:13px; color:#1F2937; max-width:320px;">
+      {{ row.title[:70] }}{% if row.title|length > 70 %}&hellip;{% endif %}
+    </td>
+    <td style="padding:10px 0; border-bottom:1px solid #F3F4F6; vertical-align:top; font-size:13px;">
+      {% if row.is_overdue %}
+        <span style="background:#FEF3C7; color:#92400E; font-size:10px; font-weight:700; padding:2px 6px; border-radius:3px; margin-right:6px; text-transform:uppercase; letter-spacing:0.04em;">OVERDUE</span>
+      {% endif %}
+      {% if row.quick_fix %}
+        <span style="color:#DC2626; font-weight:500;">{{ row.quick_fix }}</span><span style="color:#9CA3AF; font-size:11px; margin-left:6px;">({{ row.freshness_business_days }}d stale)</span>
+      {% else %}
+        <span style="color:#9CA3AF; font-size:12px;">{{ row.freshness_business_days }}d stale &mdash; add a status comment</span>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+{% if not owner_sections and not unmapped_rows %}
+<p style="margin:0; font-size:13px; color:#6B7280;">No hygiene findings for active workstreams in this draft.</p>
+{% endif %}
+{% if workstream_coverage_band %}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:24px 0 4px 0; background-color:#F9FAFB; border-left:3px solid #6B7280;">
+  <tr>
+    <td style="padding:10px 14px; font-size:12px; color:#374151; font-weight:600; text-transform:uppercase; letter-spacing:0.05em;">Workstream Coverage Summary</td>
+  </tr>
+</table>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 24px 0;">
+  <tr>
+    <td style="padding:6px 12px 6px 0; border-bottom:2px solid #E5E7EB; font-size:11px; font-weight:700; color:#6B7280; text-transform:uppercase; letter-spacing:0.05em;">Workstream</td>
+    <td style="padding:6px 12px 6px 0; border-bottom:2px solid #E5E7EB; font-size:11px; font-weight:700; color:#6B7280; text-transform:uppercase; letter-spacing:0.05em; width:60px; text-align:right;">Items</td>
+    <td style="padding:6px 0; border-bottom:2px solid #E5E7EB; font-size:11px; font-weight:700; color:#6B7280; text-transform:uppercase; letter-spacing:0.05em; width:100px; text-align:right;">Field Coverage</td>
+  </tr>
+  {% for ws in workstream_coverage_band %}
+  <tr>
+    <td style="padding:8px 12px 8px 0; border-bottom:1px solid #F3F4F6; font-size:13px; color:#1F2937;">{{ ws.workstream_name }}</td>
+    <td style="padding:8px 12px 8px 0; border-bottom:1px solid #F3F4F6; font-size:13px; color:#6B7280; text-align:right;">{{ ws.total_items }}</td>
+    <td style="padding:8px 0; border-bottom:1px solid #F3F4F6; font-size:13px; text-align:right;">
+      {% if ws.status == 'ok' %}
+        <span style="color:#059669; font-weight:600;">{{ ws.coverage_pct }}%</span>
+      {% elif ws.status == 'warn' %}
+        <span style="color:#D97706; font-weight:600;">{{ ws.coverage_pct }}%</span>
+      {% else %}
+        <span style="color:#DC2626; font-weight:600;">{{ ws.coverage_pct }}%</span>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}

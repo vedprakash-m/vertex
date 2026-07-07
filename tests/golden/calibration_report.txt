@@ -1,0 +1,19 @@
+Claim Accuracy (14 weeks, 6 terminal claims)
+--------------------------------------------
+Overall:     67% met (4/6)
+Trajectory:  Improving (+67 pp, last 8 weeks)
+
+Worst workstreams:
+  deployment: 33% met (1/3) - 1 contradicted, 1 stale
+  repair: 100% met (3/3) - 0 contradicted, 0 stale
+
+Best DRIs:
+  jamie: 100% met (3/3) - 0 contradicted, 0 stale
+  alex: 33% met (1/3) - 1 contradicted, 1 stale
+
+Worst DRIs:
+  alex: 33% met (1/3) - 1 contradicted, 1 stale
+  jamie: 100% met (3/3) - 0 contradicted, 0 stale
+
+Forecast Bias Applied:
+  None with >=5 samples

@@ -1,0 +1,72 @@
+<a id="{% if ws.edit_path and 'chapter_' in ws.edit_path %}chapter-{{ ws.section_id }}{% else %}{{ ws.section_id }}{% endif %}"></a>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 16px 0; background-color:transparent;">
+  <tr>
+    <td style="padding:10px 0 8px 0; border-top:1px solid #E5E7EB;">
+      {% if ws.scorecard_name %}
+      <p style="margin:0 0 6px 0; font-size:12px; line-height:1.4; font-weight:600; letter-spacing:0.05em; text-transform:uppercase; color:#6B7280;">{{ ws.scorecard_name }}</p>
+      {% endif %}
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse;">
+        <tr>
+          <td style="font-size:16px; line-height:1.4; font-weight:600; color:#111827; vertical-align:middle;">{{ ws.title }}</td>
+          <td width="1" style="text-align:right; vertical-align:middle; white-space:nowrap;">
+            {% if ws.risk %}
+            {% set level = ws.risk %}
+            {% include "partials/risk_chip.j2" %}
+            {% endif %}
+          </td>
+        </tr>
+      </table>
+      {% if ws.eta_label or ws.citations %}
+      <p style="margin:8px 0 0 0; font-size:13px; line-height:1.5; color:#6B7280;">
+        {% if ws.eta_label %}<span style="font-weight:600; color:#374151;">ETA {{ ws.eta_label }}</span>{% endif %}{% if ws.eta_label and ws.citations %} · {% endif %}{% if ws.citations %}{% for citation in ws.citations %}<a href="{{ citation.ado_url }}" style="color:#2563EB; text-decoration:underline;">{{ citation.display_label }}</a>{% if not loop.last %} · {% endif %}{% endfor %}{% endif %}
+      </p>
+      {% endif %}
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:0 0 12px 0; font-size:14px; line-height:1.6; color:#374151;">
+      {% if ws.narrative_empty and ws.risk and ws.risk.value == "medium" %}
+      <p style="margin:0 0 10px 0; padding:8px 10px; background-color:#FFFBEB; border:1px solid #F59E0B; font-size:13px; line-height:1.5; color:#92400E;">Narrative missing for this Medium-risk section. Confirm will proceed, but this section needs author context before sharing broadly.</p>
+      {% endif %}
+      {% if ws.blurb %}
+      {{ ws.blurb | rich_text_html }}
+      {% endif %}
+      {% if ws.kpi_tiles %}
+      {% include "partials/kpi_bar.j2" %}
+      {% endif %}
+      {% if ws.attached_charts %}
+      {% for ks in ws.attached_charts %}
+      {% include "partials/kusto_section.j2" %}
+      {% endfor %}
+      {% endif %}
+      {% if ws.significant_findings and "ado-findings" not in hidden_render_sections %}
+      <div style="margin:0 0 10px 0; padding:10px 12px; background-color:#F9FAFB; border:1px solid #E5E7EB; border-radius:8px;">
+        <p style="margin:0 0 6px 0; font-size:12px; line-height:1.4; font-weight:600; letter-spacing:0.04em; text-transform:uppercase; color:#4B5563;">ADO Findings</p>
+        {% for finding in ws.significant_findings[:2] %}
+        <div style="margin:0 0 6px 0; font-size:13px; line-height:1.5; color:#374151;">{{ finding | rich_text_html }}</div>
+        {% endfor %}
+        {% if ws.significant_findings | length > 2 %}
+        <div style="margin:0; font-size:12px; line-height:1.4; color:#6B7280;">+ {{ ws.significant_findings | length - 2 }} more findings. See linked ADOs above for details.</div>
+        {% endif %}
+      </div>
+      {% endif %}
+      {% if ws.dependency_cascades %}
+      <div style="margin:0 0 10px 0; padding:10px 12px; background-color:#FFFBEB; border:1px solid #F59E0B;">
+        <p style="margin:0 0 6px 0; font-size:12px; line-height:1.4; font-weight:600; letter-spacing:0.04em; text-transform:uppercase; color:#92400E;">Downstream Dependency Impact</p>
+        {% for cascade in ws.dependency_cascades %}
+        <p style="margin:0 0 6px 0;">
+          {% if cascade[:12] == "[Cross-org] " %}
+          <span style="display:inline-block; margin:0 6px 4px 0; padding:2px 8px; border-radius:999px; background-color:#7C2D12; color:#FFFFFF; font-size:11px; line-height:1.4; font-weight:600; text-transform:uppercase; letter-spacing:0.04em; vertical-align:middle;">Cross-org</span>{{ cascade[12:] | e }}
+          {% else %}
+          {{ cascade | e }}
+          {% endif %}
+        </p>
+        {% endfor %}
+      </div>
+      {% endif %}
+      {% if ws.source_footnote %}
+      <p style="margin:8px 0 0 0; font-size:11px; line-height:1.5; color:#6B7280; font-style:italic;">{{ ws.source_footnote }}</p>
+      {% endif %}
+    </td>
+  </tr>
+</table>

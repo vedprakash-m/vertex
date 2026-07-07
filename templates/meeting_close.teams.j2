@@ -1,0 +1,39 @@
+# {{ transcript_title }} follow-up
+
+**Program:** {{ program_id }}  
+**Transcript:** {{ meeting_id }}  
+**Captured:** {{ captured_at }}  
+**Extractor:** {{ extractor }}  
+**Suggested next checkpoint:** {{ next_checkpoint_date }}
+
+{% if web_url %}[Open transcript]({{ web_url }})
+{% endif %}
+
+## Mapped actions
+{% if mapped_actions %}
+{% for mapping in mapped_actions %}
+- **WI:{{ mapping.matched_items[0].work_item_id }} - {{ mapping.matched_items[0].title }}**
+  - Workstream: {{ mapping.resolved_workstream_id or mapping.matched_items[0].workstream_id or '-' }}
+  - Owner: {{ mapping.action.owner_alias if not mapping.needs_owner else 'needs_owner' }}
+  - Due: {{ mapping.action.due_date.isoformat() if mapping.action.due_date is not none else 'needs_date' }}
+  - Action: {{ mapping.action.text }}
+{% endfor %}
+{% else %}
+- none
+{% endif %}
+
+## Net-new or incomplete actions
+{% if net_new_actions %}
+{% for mapping in net_new_actions %}
+- Owner: {{ mapping.action.owner_alias if not mapping.needs_owner else 'needs_owner' }}
+  - Due: {{ mapping.action.due_date.isoformat() if mapping.action.due_date is not none else 'needs_date' }}
+  - Action: {{ mapping.action.text }}
+{% endfor %}
+{% else %}
+- none
+{% endif %}
+
+## Follow-up draft
+{% for line in follow_up_lines %}
+{{ line }}
+{% endfor %}

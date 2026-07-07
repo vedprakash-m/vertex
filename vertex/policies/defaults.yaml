@@ -1,0 +1,14 @@
+policy_schema_version: "1"
+ai:
+  request_router:
+    observe_only: false
+  models:
+    default:
+      input_cost_per_1k_tokens: 0.0002
+      output_cost_per_1k_tokens: 0.00125
+m365:
+  routing:
+    agreement_boost: 0.10
+    disagreement_cap: 0.79
+    confidence_ceiling: 0.95
+    deterministic_confidence_threshold: 0.90

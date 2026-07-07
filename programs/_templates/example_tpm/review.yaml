@@ -1,0 +1,6 @@
+reviewers:
+  - name: Example Reviewer
+    sections:
+      - exec_summary
+      - scorecard
+required: false

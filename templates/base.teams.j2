@@ -1,0 +1,207 @@
+# {{ title }}
+
+**Issue {{ edition.issue_number }}**  
+Data as of {{ edition.ado_data_as_of | format_datetime("%b %d %Y, %H:%M UTC") }}
+
+{% if health and health.high_count == 0 and health.medium_count == 0 and health.total_count > 0 %}
+{% set health_state = "HEALTHY" %}
+{% elif health and health.high_count >= 3 %}
+{% set health_state = "CRITICAL" %}
+{% elif health and health.high_count > 0 %}
+{% set health_state = "AT RISK" %}
+{% elif health and health.medium_count > 0 %}
+{% set health_state = "ON TRACK" %}
+{% else %}
+{% set health_state = "NEEDS INPUT" %}
+{% endif %}
+
+{% for section in ordered_sections %}
+{% if section.kind == "health" and health %}
+## Program Health
+**PROGRAM HEALTH: {{ health_state }}, {{ health.trajectory | upper }}**
+{% if health.bluf %}{{ health.bluf }}
+{% endif %}
+{% if health.risk_register_summary %}{{ health.risk_register_summary }}
+{% endif %}
+{% if health.milestone_summary %}{{ health.milestone_summary }}
+{% endif %}
+{% if health.telemetry_summary %}Telemetry: {{ health.telemetry_summary }}{% if health.telemetry_confidence %} ({{ health.telemetry_confidence | lower }} confidence){% endif %}
+{% endif %}
+{% if milestone_rows %}Tracked milestones:
+{% for row in milestone_rows %}- {{ row.name }} | {{ row.status }} | target {{ row.target_date_label }} | {{ row.detail }}{% if row.source_document_key %} | source {{ row.source_document_key }}{% if row.approval_event_id %} | approval {{ row.approval_event_id }}{% endif %}{% endif %}
+{% endfor %}{% endif %}
+{% if health.forecast_summary %}{{ health.forecast_summary }}{% if health.forecast_confidence %} ({{ health.forecast_confidence | lower }} confidence){% endif %}
+{% endif %}
+{{ health.leadership_ask }}
+High: {{ health.high_count }}{% if health.prior_counts %} ({% set high_delta = health.high_count - health.prior_counts.high %}{% if high_delta >= 0 %}+{% endif %}{{ high_delta }}){% endif %} | Med: {{ health.medium_count }}{% if health.prior_counts %} ({% set medium_delta = health.medium_count - health.prior_counts.medium %}{% if medium_delta >= 0 %}+{% endif %}{{ medium_delta }}){% endif %} | Low: {{ health.low_count }}{% if health.prior_counts %} ({% set low_delta = health.low_count - health.prior_counts.low %}{% if low_delta >= 0 %}+{% endif %}{{ low_delta }}){% endif %} | Done: {{ health.done_count }}
+Risk Load: {{ '%.1f' | format(health.risk_load) }}{% if health.prior_risk_load is not none %} (was {{ '%.1f' | format(health.prior_risk_load) }}){% endif %}
+
+{% elif section.kind == "top_3" %}
+{% set source_items = top_items if top_items else (auto_suggestions if is_dry_run else ()) %}
+## Decisions & Signals
+{% if forwarding_context %}Forwarding context: {{ forwarding_context }}
+{% endif %}
+{% if source_items %}
+{% for item in source_items %}- **{{ item.label or "DECISION" }}{% if item.suggested %} (Suggested){% endif %}** {{ item.text }}{% if item.owner %} ({{ item.owner }}){% endif %}{% if item.by_date %} by {{ item.by_date | format_date("%b %d") }}{% endif %}{% if item.ado_link %} [ADO]({{ item.ado_link }}){% endif %}
+{% endfor %}
+{% elif health.high_count > 0 %}No new decisions captured; {{ health.high_count }} items remain at High.
+{% else %}No leadership decisions needed this week.
+{% endif %}
+
+{% elif section.kind == "scorecard" %}
+{% set sc = section.scorecard %}
+## {{ sc.scorecard_name }}
+{% for dimension in sc.dimensions %}
+{% set packet = scorecard_packets.get(sc.scorecard_name, {}).get(dimension.name) %}
+{% set status_label = dimension.risk | risk_label %}
+- {{ dimension.risk | risk_icon }} **{{ dimension.display_name or dimension.name }}** — {{ status_label }}{% if dimension.note %} · {{ dimension.note }}{% elif dimension.risk.value != "done" and packet and packet.author_target_date %} · {{ packet.author_target_date | format_date("%m/%d") }}{% elif dimension.risk.value != "done" and packet and packet.next_target_date %} · {{ packet.next_target_date | format_date("%m/%d") }}{% endif %}
+{% endfor %}
+
+{% elif section.kind == "selected_changes" %}
+## What Changed
+{% for row in visible_delta_rows %}- **{{ row.label }}**: {{ row.title }}{% if row.detail %} — {{ row.detail }}{% endif %}{% if row.url %} [ADO#{{ row.work_item_id }}]({{ row.url }}){% endif %}
+{% endfor %}
+{% if delta_rows | length > visible_delta_rows | length %}{{ visible_delta_rows | length }} of {{ delta_rows | length }} changes shown{% if changes_url %} · [View all in ADO]({{ changes_url }}){% endif %}
+{% endif %}
+
+{% elif section.kind == "exec_summary" %}
+## Executive Summary
+{{ report.exec_summary_text }}
+
+{% elif section.kind == "incident_learning" %}
+{% set incident_learning = section.incident_learning %}
+## Incident Learnings
+Incidents in window: {{ incident_learning.incident_count }} | With explicit ADO refs: {{ incident_learning.attributed_incident_count }}
+{% if incident_learning.attributed_patterns %}
+Attribution-backed learnings:
+{% for pattern in incident_learning.attributed_patterns %}- {{ pattern }}
+{% endfor %}
+{% endif %}
+{% for row in incident_learning.rows %}- **{{ row.title }}** — {{ row.detail }}
+{% endfor %}
+
+{% elif section.kind == "retrospective_intelligence" %}
+{% set retrospective = section.retrospective_intelligence %}
+## Retrospective Intelligence
+Chronic workstreams: {{ retrospective.chronic_workstream_count }} | Recovered chronic issues: {{ retrospective.recovered_workstream_count }} | Recurring drift items: {{ retrospective.recurring_drift_count }} | Claim accuracy signals: {{ retrospective.claim_accuracy_signal_count }} | Charter evaluation signals: {{ retrospective.charter_evaluation_signal_count }} | Workstream moves: {{ retrospective.worsened_workstream_count }} worsened, {{ retrospective.improved_workstream_count }} improved
+{% for row in retrospective.rows %}- **{{ row.category }}** — {{ row.title }} | {{ row.detail }}
+{% endfor %}
+
+{% elif section.kind == "charter_review" %}
+{% set charter_review = section.charter_review %}
+## Charter Review
+{% if charter_review.scope_statement %}Scope: {{ charter_review.scope_statement }}
+{% endif %}Success criteria authored: {{ charter_review.success_criteria_count }} | Constraints authored: {{ charter_review.constraint_count }}
+{% if charter_review.evaluated_success_criteria_count or charter_review.manual_review_success_criteria_count %}Archive-backed evaluation: evaluated {{ charter_review.evaluated_success_criteria_count }} | Met: {{ charter_review.met_success_criteria_count }} | Not met: {{ charter_review.not_met_success_criteria_count }} | Manual review: {{ charter_review.manual_review_success_criteria_count }}
+{% endif %}
+{% if charter_review.rows %}
+{% for row in charter_review.rows %}- **{{ row.title }}** — {{ row.detail }}{% if row.status %} | Status: {{ row.status }}{% endif %}{% if row.evidence %} | Evidence: {{ row.evidence }}{% endif %}
+{% endfor %}
+{% else %}No success criteria or constraints are currently authored for this charter.
+{% endif %}
+
+{% elif section.kind == "assumption_lifecycle" %}
+{% set assumption_summary = section.assumption_lifecycle %}
+## Assumption Lifecycle
+Identified in window: {{ assumption_summary.identified_count }} | Confirmed in window: {{ assumption_summary.confirmed_count }} | Invalidated in window: {{ assumption_summary.invalidated_count }} | Still open: {{ assumption_summary.still_open_count }}
+{% for row in assumption_summary.rows %}- **{{ row.title }}** — {{ row.detail }}
+{% endfor %}
+
+{% elif section.kind == "kusto" %}
+{% set ks = section.kusto_section %}
+## {{ ks.title }}
+Query {{ ks.query_id }} · {{ ks.source_label }} · Confidence {{ ks.confidence | upper }}
+{% if ks.message %}{{ ks.message }}
+
+{% endif %}
+{% if ks.render_mode == "metric_highlight" and ks.metrics %}
+{% for metric in ks.metrics %}- **{{ metric.label }}**: {{ metric.value }}
+{% endfor %}
+{% elif ks.render_mode == "chart_image" and ks.image_data_url %}
+{% if ks.message %}{{ ks.title }}: {{ ks.message }}. [View chart →]({{ ks.reference_url if ks.reference_url else "#" }})
+{% else %}{{ ks.title }}. [View chart →]({{ ks.reference_url if ks.reference_url else "#" }})
+{% endif %}
+{% elif ks.render_mode == "chart" %}
+{% if ks.message %}{{ ks.title }}: {{ ks.message }}. [View chart →]({{ ks.reference_url if ks.reference_url else "#" }})
+{% else %}{{ ks.title }}. [View chart →]({{ ks.reference_url if ks.reference_url else "#" }})
+{% endif %}
+{% elif ks.rows %}
+| {% for column in ks.columns %}{{ column }} |{% endfor %}
+| {% for column in ks.columns %}--- |{% endfor %}
+{% for row in ks.rows %}| {% for cell in row %}{% if cell.href %}[{{ cell.text }}]({{ cell.href }}){% else %}{{ cell.text }}{% endif %} |{% endfor %}
+{% endfor %}
+{% endif %}
+{% if ks.reference_url %}Reference: [Dashboard]({{ ks.reference_url }})
+{% endif %}
+{% if ks.caveats %}Caveats: {{ ks.caveats | join("; ") }}
+{% endif %}
+
+{% elif section.kind == "kusto_group" %}
+{% set kusto_group = section.kusto_group_sections %}
+## {{ kusto_group[0].title }}
+{% for subgroup in kusto_group %}
+Query {{ subgroup.query_id }} · {{ subgroup.source_label }} · Confidence {{ subgroup.confidence | upper }}
+{% if subgroup.message %}{{ subgroup.message }}
+
+{% endif %}
+{% for metric in subgroup.metrics %}- **{{ metric.label }}**: {{ metric.value }}
+{% endfor %}
+{% if subgroup.rows %}
+### {{ subgroup.query_id }}
+| {% for column in subgroup.columns %}{{ column }} |{% endfor %}
+| {% for column in subgroup.columns %}--- |{% endfor %}
+{% for row in subgroup.rows %}| {% for cell in row %}{% if cell.href %}[{{ cell.text }}]({{ cell.href }}){% else %}{{ cell.text }}{% endif %} |{% endfor %}
+{% endfor %}
+{% endif %}
+{% if subgroup.reference_url %}Reference: [{{ subgroup.query_id }} dashboard]({{ subgroup.reference_url }})
+{% endif %}
+{% if subgroup.caveats %}Caveats: {{ subgroup.caveats | join("; ") }}
+{% endif %}
+{% endfor %}
+
+{% elif section.kind == "ado_vitality" and ado_vitality %}
+## {{ ado_vitality.title }}
+- Items updated in ADO: {{ ado_vitality.items_updated }} of {{ ado_vitality.items_total }} active ({{ ado_vitality.updated_percentage }}%)
+- Avg days since last update: {{ '%.1f' | format(ado_vitality.freshness_average_days) }} days
+- Items with leakage signals: {{ ado_vitality.leakage_events }} {{ ado_vitality.leakage_events | pluralize("item") }} discussed outside ADO without a later ADO update in the same 7-day window
+{% if ado_vitality.best_documented_label and ado_vitality.best_documented_detail %}- Best documented: {{ ado_vitality.best_documented_label }} — {{ ado_vitality.best_documented_detail }}
+{% endif %}- Trend: {{ ado_vitality.trend_summary }}
+{% if ado_vitality.accountability_rows %}
+
+| Workstream | Workstream Owner + ADO Assignee | Stale or Missing ADOs | What Field Needs Update |
+| --- | --- | --- | --- |
+{% for row in ado_vitality.accountability_rows %}| {{ row.workstream }} | {{ row.owners_and_assignee }} | {{ row.ado_label }} - {{ row.ado_title }} | {{ row.fields_to_update | join('; ') }} |
+{% endfor %}
+{% endif %}
+
+{% elif section.kind == "workstream" %}
+{% set ws = section.workstream %}
+## {{ ws.title }}
+{% if ws.scorecard_name %}_{{ ws.scorecard_name }}_{% endif %}
+{% set status_label = ws.risk | risk_label if ws.risk else "" %}
+{% if ws.risk %}{{ ws.risk | risk_icon }} **{{ status_label }}**
+{% endif %}
+{% if ws.eta_label or ws.citations %}{% if ws.eta_label %}ETA {{ ws.eta_label }}{% endif %}{% if ws.eta_label and ws.citations %} · {% endif %}{% if ws.citations %}{% for citation in ws.citations %}[{{ citation.display_label }}]({{ citation.ado_url }}){% if not loop.last %} · {% endif %}{% endfor %}{% endif %}
+{% endif %}
+{% if ws.narrative_empty and ws.risk and ws.risk.value == "medium" %}Warning: narrative missing for this Medium-risk section.
+{% endif %}
+{% if ws.blurb %}{{ ws.blurb | linkify_ado_tokens_markdown }}
+{% endif %}
+{% if ws.kpi_tiles %}KPIs:
+{% for tile in ws.kpi_tiles %}- **{{ tile.label }}**: {{ tile.value }}{% if tile.confidence %} ({{ tile.confidence | lower }} confidence){% endif %}{% if tile.as_of %} | as of {{ tile.as_of | format_date("%b %d") }}{% endif %}
+{% endfor %}{% endif %}
+{% if ws.significant_findings %}ADO findings:
+{% for finding in ws.significant_findings %}- {{ finding | linkify_ado_tokens_markdown }}
+{% endfor %}{% endif %}
+{% if ws.dependency_cascades %}Downstream dependency impact:
+{% for cascade in ws.dependency_cascades %}- {{ cascade }}
+{% endfor %}{% endif %}
+
+{% endif %}
+{% endfor %}
+
+{% if "provenance-status" not in hidden_render_sections %}
+---
+Manifest {{ (manifest.manifest_id if manifest else edition.manifest_id)[:8] }}
+Status {{ manifest.qg_results | qg_summary if manifest else edition.qg_status }}
+{% endif %}

@@ -1,0 +1,5 @@
+Dependency proposals for acme
+- dep-proposal-co-mention-101-202 [proposed] fabrikam:202 -> ud:101 (shares_resource, 3 approved signals, medium confidence)
+  Fabrikam buildouts -> UD chunking
+  evidence: sig-1, sig-2, sig-3
+  rationale: Fabrikam buildouts (WI#202) and UD chunking (WI#101) were co-mentioned in 3 approved signals during the last 30 days.

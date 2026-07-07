@@ -1,0 +1,122 @@
+[
+  {
+    "message_id": "AAMkNOVA001",
+    "subject": "NOVA Gen9 BIOS AP Rollout — deployment completed",
+    "sender": "eng-lead@example.com",
+    "received_at": "2026-06-20T14:23:00Z",
+    "unique_body": "Hi team,\n\nThe Gen9 BIOS AP rollout deployment completed successfully at 2:00 PM PT on 2026-06-20. All 1,247 devices in the pilot fleet are now on firmware v3.1.2. No rollback events observed in the first 4 hours. The IcM monitor is green.\n\nNext step: schedule the broad fleet push for 2026-06-30.\n\nThanks,\nAlex",
+    "body": "Hi team,\n\nThe Gen9 BIOS AP rollout deployment completed successfully at 2:00 PM PT on 2026-06-20. All 1,247 devices in the pilot fleet are now on firmware v3.1.2. No rollback events observed in the first 4 hours. The IcM monitor is green.\n\nNext step: schedule the broad fleet push for 2026-06-30.\n\nThanks,\nAlex",
+    "body_content_type": "text",
+    "unique_body_content_type": "text",
+    "conversation_id": "conv-001",
+    "immutable_id": "AQMkNOVA001"
+  },
+  {
+    "message_id": "AAMkNOVA002",
+    "subject": "RE: Gen8 KRDMA fleet — rollback required",
+    "sender": "on-call@example.com",
+    "received_at": "2026-06-19T08:45:00Z",
+    "unique_body": "All,\n\nWe rolled back the KRDMA driver update on the Gen8 fleet after Sev2 latency spikes were observed across 3 clusters at 08:30 UTC. The rollback is complete. Root cause investigation is in progress — early signals point to a NUMA affinity regression in the new driver version.\n\nNo customer impact reported. IcM #78-4421 opened.\n\n— On-call",
+    "body": "All,\n\nWe rolled back the KRDMA driver update on the Gen8 fleet after Sev2 latency spikes were observed across 3 clusters at 08:30 UTC. The rollback is complete. Root cause investigation is in progress — early signals point to a NUMA affinity regression in the new driver version.\n\nNo customer impact reported. IcM #78-4421 opened.\n\n— On-call",
+    "body_content_type": "text",
+    "unique_body_content_type": "text",
+    "conversation_id": "conv-002",
+    "immutable_id": "AQMkNOVA002"
+  },
+  {
+    "message_id": "AAMkNOVA003",
+    "subject": "NOVA weekly sync — decisions and next steps",
+    "sender": "program-manager@example.com",
+    "received_at": "2026-06-18T17:00:00Z",
+    "unique_body": "Team,\n\nSummary of today's NOVA weekly sync:\n\n1. We agreed to slip the Gen9 broad fleet target date to 2026-07-15. The dependency on the BIOS validation team was cited as the primary blocker. Priya will now own the Gen9 bringup coordination going forward.\n\n2. The Sev2 on KRDMA (IcM #78-4421) was escalated to Sev1 by the CAB at 16:45 today given the fleet-wide scope.\n\n3. Action item: Jordan will finalize the risk mitigation runbook for the Gen7 phase-out by 2026-06-25.\n\nRecording and notes in the team channel.\n\n— PM",
+    "body": "Team,\n\nSummary of today's NOVA weekly sync:\n\n1. We agreed to slip the Gen9 broad fleet target date to 2026-07-15. The dependency on the BIOS validation team was cited as the primary blocker. Priya will now own the Gen9 bringup coordination going forward.\n\n2. The Sev2 on KRDMA (IcM #78-4421) was escalated to Sev1 by the CAB at 16:45 today given the fleet-wide scope.\n\n3. Action item: Jordan will finalize the risk mitigation runbook for the Gen7 phase-out by 2026-06-25.\n\nRecording and notes in the team channel.\n\n— PM",
+    "body_content_type": "text",
+    "unique_body_content_type": "text",
+    "conversation_id": "conv-003",
+    "immutable_id": "AQMkNOVA003"
+  },
+  {
+    "message_id": "AAMkNOVA004",
+    "subject": "Gen7 BIOS AP phase-out — milestone complete",
+    "sender": "release-coord@example.com",
+    "received_at": "2026-06-17T11:30:00Z",
+    "unique_body": "Hi NOVA,\n\nThe Gen7 BIOS AP phase-out milestone is now complete. All 4,891 Gen7 devices have been migrated or decommissioned as planned. The final validation sign-off was obtained from Compliance at 11:00 AM today.\n\nThis closes out the Gen7 track in the NOVA roadmap. No further action required on Gen7.\n\nCheers,\nRelease Coord",
+    "body": "Hi NOVA,\n\nThe Gen7 BIOS AP phase-out milestone is now complete. All 4,891 Gen7 devices have been migrated or decommissioned as planned. The final validation sign-off was obtained from Compliance at 11:00 AM today.\n\nThis closes out the Gen7 track in the NOVA roadmap. No further action required on Gen7.\n\nCheers,\nRelease Coord",
+    "body_content_type": "text",
+    "unique_body_content_type": "text",
+    "conversation_id": "conv-004",
+    "immutable_id": "AQMkNOVA004"
+  },
+  {
+    "message_id": "AAMkNOVA005",
+    "subject": "Ownership change — BIOS AP shared service lead",
+    "sender": "engineering-director@example.com",
+    "received_at": "2026-06-16T09:00:00Z",
+    "unique_body": "Team,\n\nEffective immediately, Sam Chen will take over as lead for the BIOS AP shared service, replacing David Kim who is rotating to the Armada program. Sam has been briefed and is already in the loop on the Gen9 rollout status.\n\nPlease update your escalation paths accordingly.\n\n— Director",
+    "body": "Team,\n\nEffective immediately, Sam Chen will take over as lead for the BIOS AP shared service, replacing David Kim who is rotating to the Armada program. Sam has been briefed and is already in the loop on the Gen9 rollout status.\n\nPlease update your escalation paths accordingly.\n\n— Director",
+    "body_content_type": "text",
+    "unique_body_content_type": "text",
+    "conversation_id": "conv-005",
+    "immutable_id": "AQMkNOVA005"
+  },
+  {
+    "message_id": "AAMkNOVA006",
+    "subject": "RE: KRDMA IcM #78-4421 — severity mitigated",
+    "sender": "incident-commander@example.com",
+    "received_at": "2026-06-19T21:15:00Z",
+    "unique_body": "Update: the KRDMA Sev1 (IcM #78-4421) has been mitigated and downgraded to Sev3 at 21:00 UTC. The rolled-back driver version is stable across all affected clusters. A post-incident review is scheduled for 2026-06-23.\n\n— IC",
+    "body": "Update: the KRDMA Sev1 (IcM #78-4421) has been mitigated and downgraded to Sev3 at 21:00 UTC. The rolled-back driver version is stable across all affected clusters. A post-incident review is scheduled for 2026-06-23.\n\n— IC",
+    "body_content_type": "text",
+    "unique_body_content_type": "text",
+    "conversation_id": "conv-002",
+    "immutable_id": "AQMkNOVA006"
+  },
+  {
+    "message_id": "AAMkNOVA007",
+    "subject": "FYI: NOVA team offsite — July 8-9",
+    "sender": "admin-coordinator@example.com",
+    "received_at": "2026-06-15T13:45:00Z",
+    "unique_body": "Hi all,\n\nA reminder that the NOVA team offsite is scheduled for July 8-9 in Building 35. Lunch will be provided both days. Please confirm your attendance by replying to this email by June 20.\n\nAgenda will follow.\n\n— Admin",
+    "body": "Hi all,\n\nA reminder that the NOVA team offsite is scheduled for July 8-9 in Building 35. Lunch will be provided both days. Please confirm your attendance by replying to this email by June 20.\n\nAgenda will follow.\n\n— Admin",
+    "body_content_type": "text",
+    "unique_body_content_type": "text",
+    "conversation_id": "conv-006",
+    "immutable_id": "AQMkNOVA007"
+  },
+  {
+    "message_id": "AAMkNOVA008",
+    "subject": "RE: Office 365 license renewal reminder",
+    "sender": "it-operations@example.com",
+    "received_at": "2026-06-14T10:00:00Z",
+    "unique_body": "This is a reminder to review and confirm your O365 license assignments before June 30. No action required if your team roster is unchanged.\n\n— IT Ops",
+    "body": "This is a reminder to review and confirm your O365 license assignments before June 30. No action required if your team roster is unchanged.\n\n— IT Ops",
+    "body_content_type": "text",
+    "unique_body_content_type": "text",
+    "conversation_id": "conv-007",
+    "immutable_id": "AQMkNOVA008"
+  },
+  {
+    "message_id": "AAMkNOVA009",
+    "subject": "NOVA risk update — Gen9 partner dependency blocking P0",
+    "sender": "program-manager@example.com",
+    "received_at": "2026-06-21T15:30:00Z",
+    "unique_body": "Team,\n\nI want to flag a new risk to the Gen9 delivery timeline. The dependency on the partner silicon validation team is now blocking our P0 milestone. We had expected their sign-off by June 18, but they have pushed to no earlier than July 10 due to resource constraints on their side.\n\nThis puts our 2026-07-15 broad fleet target at risk. I am scheduling a triparty call with silicon validation, BIOS AP, and NOVA leads for 2026-06-24 to align on a path forward.\n\nI will plan to escalate to the VP level if we cannot resolve by 2026-06-25.\n\n— PM",
+    "body": "Team,\n\nI want to flag a new risk to the Gen9 delivery timeline. The dependency on the partner silicon validation team is now blocking our P0 milestone. We had expected their sign-off by June 18, but they have pushed to no earlier than July 10 due to resource constraints on their side.\n\nThis puts our 2026-07-15 broad fleet target at risk. I am scheduling a triparty call with silicon validation, BIOS AP, and NOVA leads for 2026-06-24 to align on a path forward.\n\nI will plan to escalate to the VP level if we cannot resolve by 2026-06-25.\n\n— PM",
+    "body_content_type": "text",
+    "unique_body_content_type": "text",
+    "conversation_id": "conv-008",
+    "immutable_id": "AQMkNOVA009"
+  },
+  {
+    "message_id": "AAMkNOVA010",
+    "subject": "NOVA Gen9 launch — the fleet is live!",
+    "sender": "eng-lead@example.com",
+    "received_at": "2026-06-22T18:00:00Z",
+    "unique_body": "Team,\n\nGreat news — the Gen9 broad fleet push went through without a hitch this afternoon. All 12,400 production devices are now on the new BIOS AP firmware. Monitoring dashboards are green. Thanks to everyone who made this happen — this was a months-long effort.\n\nChampagne emoji goes here.\n\n— Alex",
+    "body": "Team,\n\nGreat news — the Gen9 broad fleet push went through without a hitch this afternoon. All 12,400 production devices are now on the new BIOS AP firmware. Monitoring dashboards are green. Thanks to everyone who made this happen — this was a months-long effort.\n\nChampagne emoji goes here.\n\n— Alex",
+    "body_content_type": "text",
+    "unique_body_content_type": "text",
+    "conversation_id": "conv-001",
+    "immutable_id": "AQMkNOVA010"
+  }
+]

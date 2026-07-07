@@ -1,0 +1,18 @@
+<div class="section-card vitality-card">
+  <h3>Owner Vitality</h3>
+  <p>Last 14 days. Reviewer-only coaching view for current item freshness, richness, and leakage-backed vitality.</p>
+  <ul class="vitality-list">
+    {% for row in owner_vitality_rows %}
+    <li class="vitality-row">
+      <div class="vitality-header">
+        <strong>{{ row.owner_alias }}</strong>
+        <span class="vitality-score{% if row.perfect_score %} perfect{% endif %}">{{ row.composite_score }}%{% if row.perfect_score %} ★{% endif %}</span>
+      </div>
+      <div class="vitality-bar" aria-hidden="true">
+        <span class="vitality-fill" style="width: {{ row.bar_width }}%;"></span>
+      </div>
+      <p class="vitality-summary">{{ row.summary }}</p>
+    </li>
+    {% endfor %}
+  </ul>
+</div>
