@@ -1,5 +1,7 @@
 # Activation Annotation And Adjudication Plan
 
+> **Status note (2026-07-07):** This plan is currently **not actionable** for the XPF program — see `specs/backlog.md` §3 (BL-A2). Real extraction-sourced volume for the keystone family (`milestone.completed`) is 1 instance across the program's entire real history (vs. the 25-30 needed), a structural data-scarcity finding, not an annotation-labor gap. `recommended_v1_authoritative` has been accepted as the permanent practical bar for this single-program deployment. This template is retained for when/if fleet rollout (≥3 programs) makes pooled dual-annotation viable.
+
 **Scope:** P2 / §6.15.3 corpus certification for the selected keystone family.
 
 | Role | Assignment |
