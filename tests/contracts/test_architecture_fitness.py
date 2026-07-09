@@ -49,7 +49,12 @@ LINE_BUDGETS = {
     # honest ratchet.
     # +12 (2026-06-21): added --nudge sub-check per .archive/specs/fix-nudge.md §24.8.
     # +20 (2026-06-23): added --rev-health/--rev-program sub-check per specs/program-context-intelligence.md §5.13 (FR-PCI-12); _run_rev_health helper renders the REV subsystem health summary.
-    "src/commands/doctor.py": 1620,
+    # +26 (2026-07-07, fix-data-flow.md Track A / PR-5): added --fact-bridge sub-check
+    # (disabled-bridge WARN + bridge-failure-backlog, PS-2) mirroring the flip-status/
+    # flip-parity/fact-parity branch shape.
+    # +17 (2026-07-08, fix-data-flow.md Track L / PR-13): added --fact-deserialization
+    # sub-check (confirms persisted facts still deserialize against current schema).
+    "src/commands/doctor.py": 1663,
     "src/commands/confirm.py": 1650,  # +5: DECK edition type guard to skip HTMLRenderer (82e07c4); +105: GAP-9/23/33 (QG-DM surfacing + shim-persist SoR guard + baseline dual-write SoR guard) (2026-06-17)
     # D-31 → WI-6.2 (2026-06-15): report.py decomposed into report_pipeline/assemble_stage.py;
     # LOC ratchet satisfied (1,413 ≤ 1,500). Budget updated after report output path refactor (+1 issue_dir var).
@@ -59,7 +64,7 @@ LINE_BUDGETS = {
     # banner, and milestone source_document_key/approval_event_id lineage rendering
     # (specs/backlog.md; .archive/specs/activation.md).
     "src/commands/report.py": 1470,
-    "src/core/reality_store.py": 2311,  # +39: WI-2.5 owner_entity_ref + resolve_binding_owner (2026-06-15)
+    "src/core/reality_store.py": 2333,  # +61 total through 2026-07-08: prior owner_entity_ref/binding-owner additions plus follow-on reality-store hardening already on branch; no new reality_store edits in Track B
     "src/core/channel_registry_store.py": 1976,  # +79: discovery registration persistence helpers already present on branch (2026-06-02)
 }
 

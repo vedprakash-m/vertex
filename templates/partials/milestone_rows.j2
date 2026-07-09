@@ -1,11 +1,15 @@
+{% from "partials/truth_badge.j2" import disputed_badge, truth_badge, unconfirmed_sources_footer %}
 {% if milestone_rows %}
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 10px 0; border:1px solid #E5E7EB; background-color:#F9FAFB;">
   <tr>
     <td style="padding:10px 12px;">
       <p style="margin:0 0 6px 0; font-size:10px; line-height:1.4; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color:#6B7280;">Tracked Milestones</p>
+      {% set badge_state = namespace(has_unconfirmed_sources=false) %}
       {% for row in milestone_rows %}
-      <p style="margin:0 0 {% if loop.last %}0{% else %}8px{% endif %} 0; font-size:13px; line-height:1.55; color:#111827;">{{ row.name }} | {{ row.status }} | target {{ row.target_date_label }}<br>{{ row.detail }}{% if row.source_document_key %}<br><span style="font-size:11px; color:#6B7280;">Source: {{ row.source_document_key }}{% if row.approval_event_id %} | approval {{ row.approval_event_id }}{% endif %}</span>{% endif %}</p>
+      {% if row.evidence_truth_level == "raw_observed" %}{% set badge_state.has_unconfirmed_sources = true %}{% endif %}
+      <p style="margin:0 0 {% if loop.last %}0{% else %}8px{% endif %} 0; font-size:13px; line-height:1.55; color:#111827;">{{ row.name }} | {{ row.status }}{{ truth_badge(row.evidence_truth_level) }}{{ disputed_badge(row.evidence_disputed) }} | target {{ row.target_date_label }}<br>{{ row.detail }}{% if row.source_document_key %}<br><span style="font-size:11px; color:#6B7280;">Source: {{ row.source_document_key }}{% if row.approval_event_id %} | approval {{ row.approval_event_id }}{% endif %}</span>{% endif %}</p>
       {% endfor %}
+      {{ unconfirmed_sources_footer(badge_state.has_unconfirmed_sources) }}
     </td>
   </tr>
 </table>

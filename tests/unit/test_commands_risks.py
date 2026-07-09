@@ -76,6 +76,8 @@ def test_risks_list_cli_csv(monkeypatch, tmp_path: Path) -> None:
 
 def test_risks_list_uses_program_reality(monkeypatch) -> None:
     from unittest.mock import MagicMock
+    from src.core.program_reality import FactAssessment
+    from src.core.truth_levels import TruthLevel
     mock_risk = RiskEntry(
         id="risk-demo-1",
         program_id="demo",
@@ -98,8 +100,18 @@ def test_risks_list_uses_program_reality(monkeypatch) -> None:
         last_reviewed_date=date(2026, 5, 5),
         entity_refs=("WI:1001",),
     )
-    mock_assessment = MagicMock()
-    mock_assessment.record = mock_risk
+    # Track E follow-up: the risk board now consumes FactAssessment metadata
+    # (truth_level/disputed/stale/evidence), so the mock must be a real
+    # FactAssessment rather than a loose MagicMock — json.dumps serializes these.
+    mock_assessment = FactAssessment(
+        record=mock_risk,
+        fact_id="fact-demo-1",
+        truth_level=TruthLevel.SOURCE_VALIDATED,
+        disputed=True,
+        stale=False,
+        provisional_inputs=False,
+        evidence=("email:msg-1",),
+    )
     mock_reality = MagicMock()
     mock_reality.risks.return_value = (mock_assessment,)
     monkeypatch.setattr("src.commands.risks.ProgramReality.load", lambda program_id, **kwargs: mock_reality)
@@ -110,6 +122,9 @@ def test_risks_list_uses_program_reality(monkeypatch) -> None:
     assert result.exit_code == 0
     assert mock_reality.risks.called
     assert payload["risks"][0]["id"] == "risk-demo-1"
+    # Track E follow-up: truth-level metadata is now preserved through to JSON output.
+    assert payload["risks"][0]["truth_level"] == "source_validated"
+    assert payload["risks"][0]["disputed"] is True
 
 
 def test_risks_update_records_status_history(monkeypatch, tmp_path: Path) -> None:

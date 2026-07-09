@@ -55,6 +55,7 @@ from src.core.ledger.candidate_sqlite_store import (
 )
 from src.core.ledger.event_index import load_entity_event_ids, load_indexed_events, load_vault_refs, rebuild_event_index
 from src.core.ledger.event_log import ConfidenceTier, EventEnvelope, TemporalConfidence, build_event_envelope, canonical_json, compute_dedupe_core_hash, read_events, verify_event_log, write_event, write_events_atomic
+from src.core.jsonl_utils import append_jsonl_line
 from src.core.ledger.event_types import get_event_schema, validate_event_payload
 from src.core.ledger.verification_assertions import (
     assertions_for_candidate,
@@ -124,7 +125,6 @@ def write(
         typer.echo(f"Review with: vertex ledger triage list --program {program} --batch-id {diverted_candidate.batch_id}")
         return
     persisted = _persist_event(envelope, programs_root=programs_root)
-    project_program_events(program, programs_root=programs_root)
     typer.echo(f"Wrote {persisted.event_type} -> {persisted.event_id}")
 
 
@@ -161,7 +161,6 @@ def correct(
         typer.echo(f"Review with: vertex ledger triage list --program {program} --batch-id {diverted_candidate.batch_id}")
         return
     persisted = _persist_event(envelope, programs_root=programs_root)
-    project_program_events(program, programs_root=programs_root)
     typer.echo(f"Corrected {event_id} -> {persisted.event_id}")
 
 
@@ -202,7 +201,6 @@ def lock(
         dedupe_payload={key: payload[key] for key in ("entity_id", "field", "locked_value") if key in payload},
     )
     persisted = _persist_event(envelope, programs_root=programs_root)
-    project_program_events(program, programs_root=programs_root)
     typer.echo(f"Locked {entity_id}.{field} -> {persisted.event_id}")
 
 
@@ -235,7 +233,6 @@ def unlock(
         dedupe_payload={"entity_id": entity_id, "field": field},
     )
     persisted = _persist_event(envelope, programs_root=programs_root)
-    project_program_events(program, programs_root=programs_root)
     typer.echo(f"Unlocked {entity_id}.{field} -> {persisted.event_id}")
 
 
@@ -1641,7 +1638,6 @@ def triage_edit(
         program_id=program,
         programs_root=programs_root,
     )
-    project_program_events(program, programs_root=programs_root)
     typer.echo(f"Edited {candidate.candidate_id} -> {resulting_event.event_id}")
 
 
@@ -1746,7 +1742,6 @@ def triage_revoke(
         program_id=program,
         programs_root=programs_root,
     )
-    project_program_events(program, programs_root=programs_root)
     typer.echo(f"Revoked {candidate.candidate_id}: {target_event.event_id} -> {revocation_event.event_id}")
 
 
@@ -2135,6 +2130,35 @@ def _write_candidate_audit_event(
     return _persist_event(envelope, programs_root=programs_root)
 
 
+def _auto_projection_rebuild_enabled() -> bool:
+    return os.environ.get("VERTEX_DISABLE_AUTO_PROJECTION_REBUILD", "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _maybe_rebuild_program_projection(program_id: str, *, programs_root: Path) -> None:
+    if not _auto_projection_rebuild_enabled():
+        return
+    try:
+        events = read_events(program_id, programs_root=programs_root)
+        project_events_incremental_to_sqlite(
+            program_id,
+            events,
+            projection_path=get_current_projection_path(program_id, programs_root=programs_root),
+            programs_root=programs_root,
+        )
+    except Exception:
+        log.error(
+            "projection: incremental rebuild raised for program=%s after ledger write — "
+            "event is persisted; projection rebuild will be retried on the next ledger replay",
+            program_id,
+            exc_info=True,
+        )
+
+
 def _persist_event(envelope: EventEnvelope, *, programs_root: Path) -> EventEnvelope:
     persisted = write_event(
         envelope,
@@ -2142,6 +2166,7 @@ def _persist_event(envelope: EventEnvelope, *, programs_root: Path) -> EventEnve
         grounded_in_validator=lambda claim_id: _grounded_claim_exists(claim_id, programs_root=programs_root),
     ).envelope
     _maybe_bridge_event_to_fact_store(persisted, programs_root=programs_root)
+    _maybe_rebuild_program_projection(persisted.program_id, programs_root=programs_root)
     return persisted
 
 
@@ -2153,6 +2178,8 @@ def _persist_events(envelopes: tuple[EventEnvelope, ...], *, programs_root: Path
     ).envelopes
     for envelope in persisted:
         _maybe_bridge_event_to_fact_store(envelope, programs_root=programs_root)
+    if persisted:
+        _maybe_rebuild_program_projection(persisted[0].program_id, programs_root=programs_root)
     return persisted
 
 
@@ -2199,6 +2226,7 @@ def _projection_privacy_gate(envelope: EventEnvelope) -> bool:
 
 def _maybe_bridge_event_to_fact_store(envelope: EventEnvelope, *, programs_root: Path) -> None:
     if not _ledger_fact_bridge_enabled(program_id=envelope.program_id, programs_root=programs_root):
+        _warn_if_bridgeable_event_silenced_by_disabled_bridge(envelope, programs_root=programs_root)
         return
     db_root = _resolve_bridge_db_root(programs_root)
     spec = lookup_event_spec(envelope.event_type)
@@ -2212,6 +2240,18 @@ def _maybe_bridge_event_to_fact_store(envelope: EventEnvelope, *, programs_root:
         )
         return
     if spec.disposition == EventDisposition.PASSTHROUGH:
+        # PS-2 (fix-data-flow.md Track A, v1.1 addition): this early return was
+        # previously bare with zero logging, structurally identical to the
+        # disabled-bridge case above. Lifecycle/internal events are correctly
+        # ignored by design (see EventDisposition.PASSTHROUGH docstring), but
+        # a debug trace keeps this branch observable rather than silent.
+        log.debug(
+            "bridge: event type %r is PASSTHROUGH — intentionally not projected "
+            "(event_id=%s program=%s)",
+            envelope.event_type,
+            envelope.event_id,
+            envelope.program_id,
+        )
         return
     if spec.disposition == EventDisposition.KNOWN_UNPROJECTEABLE:
         log.warning(
@@ -2254,7 +2294,7 @@ def _maybe_bridge_event_to_fact_store(envelope: EventEnvelope, *, programs_root:
             appender(envelope, db_root=db_root)
         if spec.prefix == "risk.":
             sync_bridged_risk_corroboration(envelope, db_root=db_root, programs_root=programs_root)
-    except Exception:
+    except Exception as exc:
         # Bridge failure must never crash the ledger write path (the event is
         # already persisted).  Log at ERROR so operators see it; the next
         # `vertex ledger replay` will retry the projection.
@@ -2267,6 +2307,14 @@ def _maybe_bridge_event_to_fact_store(envelope: EventEnvelope, *, programs_root:
             envelope.event_type,
             exc_info=True,
         )
+        # PS-2 (Track A, v1.2 addition): durable record so the runtime
+        # bridge-failure-backlog doctor check has real, replayable data to
+        # count instead of relying on an operator noticing repeated ERROR log
+        # lines. Never let recording the failure itself raise.
+        try:
+            _record_bridge_failure(envelope, programs_root=programs_root, reason=repr(exc))
+        except Exception:  # pragma: no cover — defensive: never block on this
+            log.error("bridge: failed to record bridge failure to bridge_failures.jsonl", exc_info=True)
 
 
 def _replay_bridge_for_families(
@@ -2319,10 +2367,110 @@ def _ledger_fact_bridge_enabled(
     return False
 
 
+def ledger_fact_bridge_enabled(*, program_id: str, programs_root: Path) -> bool:
+    """Public wrapper around `_ledger_fact_bridge_enabled` for callers outside
+    this module (e.g. `doctor_checks/fact_store_flip_checks.py`'s PS-2 /
+    Track A proactive bridge-disabled check, §6.1). Same resolution order:
+    `VERTEX_LEDGER_FACT_BRIDGE` env var, then `program.m365.rev.fact_bridge_enabled`.
+    """
+    return _ledger_fact_bridge_enabled(program_id=program_id, programs_root=programs_root)
+
+
+def _warn_if_bridgeable_event_silenced_by_disabled_bridge(
+    envelope: EventEnvelope, *, programs_root: Path,
+) -> None:
+    """PS-2 (fix-data-flow.md Track A, §6.1 step 1): reactive, point-in-time
+    warning fired the moment an event that *would* have been bridged (a
+    PROJECTABLE event type — i.e. a real approval, not lifecycle noise) is
+    silently discarded because ``fact_bridge_enabled`` resolves to False for
+    a program that has REV configured at all.
+
+    This is distinct from — and a companion to — the proactive
+    ``vertex doctor`` check in ``doctor_checks/fact_store_flip_checks.py``:
+    that check catches a disabled bridge at any time, even before REV has
+    ever run; this one fires reactively, the first time a real approval is
+    actually silenced, which may happen well before an operator thinks to run
+    `vertex doctor`. Both signals are required per PS-2 — do not conflate them.
+
+    A no-op if REV isn't configured for this program at all (nothing was
+    silenced — there was never anything to bridge), or if the just-persisted
+    event isn't a PROJECTABLE type (lifecycle/lookup noise, not an approval).
+    """
+    try:
+        prog = load_program(envelope.program_id, programs_root=programs_root)
+    except Exception:  # pragma: no cover — defensive: never block the write path
+        return
+    if prog is None or prog.m365 is None or prog.m365.rev is None:
+        return  # REV isn't configured for this program — nothing was silenced
+    spec = lookup_event_spec(envelope.event_type)
+    if spec is None or spec.disposition != EventDisposition.PROJECTABLE:
+        return  # not an event that would have bridged anyway
+    message = (
+        f"[fact-bridge] DISABLED for program={envelope.program_id!r} but a bridgeable event "
+        f"(event_type={envelope.event_type!r}, event_id={envelope.event_id}) was just persisted "
+        f"and will NOT reach ProgramFactStore — the newsletter, `vertex ask`, and every other "
+        f"ProgramReality-reading surface will silently behave as if this was never approved. "
+        f"Set program.m365.rev.fact_bridge_enabled: true in program.yaml, or export "
+        f"VERTEX_LEDGER_FACT_BRIDGE=1, to stop silently discarding approved facts. "
+        f"`vertex doctor` also flags this as a standing WARN."
+    )
+    log.warning(message)
+    typer.echo(message, err=True)
+
+
 def _resolve_bridge_db_root(programs_root: Path) -> Path:
     if programs_root.name == "programs":
         return programs_root.parent
     return programs_root
+
+
+def _bridge_failures_path(program_id: str, *, programs_root: Path) -> Path:
+    """PS-2 (fix-data-flow.md Track A, §6.1 step 1 / PR-5): durable,
+    replayable location for bridge-appender failures, so the runtime
+    bridge-failure-backlog `vertex doctor` check has real data to count
+    instead of relying on an operator scraping repeated ERROR log lines.
+    One JSONL line appended per failed-bridge occurrence (a `programs_root`-
+    relative path, matching `event_log.py`'s `programs_root/<id>/ledger/...`
+    convention — not the bridge's own resolved `db_root`, which may point
+    one directory level up).
+    """
+    return programs_root / program_id / "ledger" / "bridge_failures.jsonl"
+
+
+def _record_bridge_failure(envelope: EventEnvelope, *, programs_root: Path, reason: str) -> None:
+    path = _bridge_failures_path(envelope.program_id, programs_root=programs_root)
+    record = {
+        "event_id": envelope.event_id,
+        "program_id": envelope.program_id,
+        "event_type": envelope.event_type,
+        "reason": reason,
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+    }
+    append_jsonl_line(path, json.dumps(record, sort_keys=True) + "\n")
+
+
+def load_bridge_failures(program_id: str, *, programs_root: Path) -> list[dict[str, object]]:
+    """Read the bridge-failure backlog written by `_record_bridge_failure`.
+
+    Public (no leading underscore) because `doctor_checks/fact_store_flip_checks.py`
+    (a different module) reads this as part of PR-5's bridge-failure-backlog
+    check. Returns `[]` if the program has never had a recorded bridge
+    failure. Tolerates blank/malformed trailing lines defensively rather than
+    raising, since this is a diagnostic read path, not a write path.
+    """
+    path = _bridge_failures_path(program_id, programs_root=programs_root)
+    if not path.exists():
+        return []
+    records: list[dict[str, object]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            records.append(json.loads(stripped))
+        except json.JSONDecodeError:
+            continue
+    return records
 
 
 def _grounded_claim_exists(claim_id: str, *, programs_root: Path) -> bool:

@@ -1,11 +1,13 @@
 # Vertex — UX Specification
 
 **Version:** 1.0  
-**Status:** Reflects implemented state as of 2026-07-07  
+**Status:** Reflects implemented state as of 2026-07-08  
 **Companion docs:** [vertex-prd.md](vertex-prd.md) (requirements), [vertex-tech-spec.md](vertex-tech-spec.md) (technical), `specs/backlog.md` (remaining real-data activation work)
 **Scope:** All visual surfaces for Vertex's currently supported Microsoft TPM-program archetypes — newsletter HTML, condensed daily, deck Markdown, reviewer HTML, Teams Markdown, Adaptive Card JSON draft surfaces, freshness report, CLI terminal output, EML files. Binding for layout, color, typography, spacing, and rendering behavior. Broader TPM/EM/global/non-ADO surface expansion is roadmap, not current scope.
 
 ## Changelog
+
+- Last updated: 2026-07-08 — Incorporated `specs/fix-data-flow.md` (v1.0→v1.13, archived to `.archive/specs/fix-data-flow.md`) findings and closure. **Correction to the 2026-06-10 entry below**: direct code investigation during that spec's work found no trust-badge rendering markup existed anywhere in the codebase (not for risk, not even for milestone) — the 2026-06-10 claim that §3.6b/§3.6c were "already implemented" was verified false. Trust badges are genuinely implemented for the first time as of 2026-07-08: `templates/partials/truth_badge.j2` renders the `[DISPUTED ⚠]` marker (§3.6b) and the 5-level truth vocabulary (§3.6c) for risk (`health_banner.j2`, `continuity_exec_summary.j2`), milestone (`milestone_rows.j2`), and assumption (`lookback.j2`) sections. §3.6b/§3.6c's rendering rule updated below to match the actual, verified implementation convention: inline `style="..."` attributes, not `<span class="...">` CSS classes — this codebase's HTML surfaces have no `<style>` blocks anywhere (Outlook-safe rendering constraint), so a literal CSS-class instruction was never implementable as written.
 
 - Last updated: 2026-07-07 — Incorporated `specs/activation.md` (archived to `.archive/specs/activation.md`) UX-relevant surfaces into §12.10: the REV triage queue's `why:` EXPLAIN-min sub-line (extraction rationale, so an operator can verify a claim without opening the source EML) and the milestone section's degraded-to-legacy banner (no silent fallback when the `ProgramReality` read path is rolled back). Both surfaces already existed structurally (rationale field, rollback env flag); this is the first time they are documented as binding UX contract. No newsletter-body layout changes — both surfaces are triage-CLI/section-banner only.
 
@@ -411,7 +413,7 @@ When a fact or dimension value is disputed (i.e., an unresolved `fact.conflict` 
 | Display | inline, after value with `4px` left gap |
 | Surfaces | newsletter HTML, reviewer HTML, triage CLI terminal output |
 
-Badge renders as a `<span class="disputed-badge">` in HTML surfaces; as literal text `[DISPUTED ⚠]` in CLI terminal output.
+Badge renders as an inline `<span style="...">` element (not a CSS class — see the 2026-07-08 changelog entry; this codebase's HTML surfaces have no `<style>` blocks, an Outlook-safe rendering constraint) in HTML surfaces, matching the property values above verbatim; as literal text `[DISPUTED ⚠]` in CLI terminal output. Implemented in `templates/partials/truth_badge.j2`.
 
 **"⚠ includes unconfirmed sources" footer line:**
 
@@ -445,11 +447,12 @@ Applies to: `vertex reality status`, triage CLI output, and any surface that ren
 | `RAW_OBSERVED` | `○ UNCONFIRMED` | `#B45309` | `#FEF3C7` | Raw ingestion; unvalidated; cite with ⚠ footer |
 
 **Rendering rules:**
-- In HTML surfaces, render as `<span class="truth-badge truth-badge--<level>">LABEL</span>` with the specified color/bg.
+- In HTML surfaces, render as an inline `<span style="...">LABEL</span>` element with the specified color/bg applied directly via the `style` attribute (not a CSS class — see the 2026-07-08 changelog entry). Implemented in `templates/partials/truth_badge.j2`.
 - In CLI terminal output, render as the plain label text in brackets (e.g., `[CONFIRMED]`).
 - Truth badges appear inline after the fact value, with `4px` left gap (same as `[DISPUTED ⚠]`).
 - `RAW_OBSERVED` facts always carry the `⚠ includes unconfirmed sources` section footer (§3.6b).
 - Truth level is computed by `derive_truth_level()` in `src/core/truth_model.py`; templates never recompute it.
+- Live surfaces as of 2026-07-08: newsletter risk (`health_banner.j2`, `continuity_exec_summary.j2`), milestone (`milestone_rows.j2`), and lookback assumption (`lookback.j2`) sections. Dependency, action, decision, commitment, and workstream carry no badge because direct investigation (`specs/fix-data-flow.md`, archived) found no current main-newsletter per-fact section to attach one to for those families.
 
 ### 3.7 Executive Summary (`partials/exec_summary.j2`) *(exec-narrative min-truth filter, WI-8.0)*
 

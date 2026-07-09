@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import datetime
 import importlib.util
 import json
 from pathlib import Path
 import sys
 import textwrap
+
+import pytest
 
 
 def _load_module():
@@ -34,6 +37,10 @@ def _build_good_repo(root: Path) -> None:
         Roadmap direction: broader TPM/EM adoption outside Microsoft is not part of the current supported V-11 bar.
         The ADO UIL gather path is now default-on; Kusto, Teams, and IcM remain env-gated.
         Migration status: the unified read API and shadow-write foundation are landed and the irreversible flip to system-of-record remains pending.
+
+        <!-- spec-posture
+          WS-1: complete (2026-06-29)
+        -->
         """,
     )
     _write_file(
@@ -90,6 +97,18 @@ def _build_good_repo(root: Path) -> None:
         """
         class KustoQuery:
             chapter: str | None = None
+        """,
+    )
+    _write_file(
+        root,
+        "src/core/html_renderer.py",
+        """
+        from __future__ import annotations
+
+        def render(name: str) -> str:
+            if name.endswith("digest.j2"):
+                pass  # deprecated: digest.j2 will be removed after 2026-12-31.
+            return name
         """,
     )
     _write_file(
@@ -280,5 +299,134 @@ def test_main_json_exits_nonzero_for_report_steering_drift(tmp_path: Path, capsy
     assert exit_code == 1
     assert payload["overall"] == "fail"
     assert any(result["check_id"] == "p7-steering-surface" for result in payload["results"])
+
+
+# ---------------------------------------------------------------------------
+# Adversarial tests (fix-data-flow.md Track G / PR-2 item 4): each of these
+# feeds a check the exact contradiction it exists to catch and asserts it
+# actually fails. A check that always returns "pass" would satisfy every
+# other test in this file without these — see the spec's own meta-lesson
+# that a checker's negative-space behavior needs its own test, not just
+# confirmation it passes against good input.
+# ---------------------------------------------------------------------------
+
+
+def test_check_fact_store_shadow_write_fails_when_prd_omits_migration_status(tmp_path: Path) -> None:
+    module = _load_module()
+    _build_good_repo(tmp_path)
+    _write_file(
+        tmp_path,
+        "specs/vertex-prd.md",
+        """
+        Vertex is for Microsoft TPM programs.
+        Current supported scope: Microsoft TPM programs using the declared supported archetypes and exclusions.
+        Roadmap direction: broader TPM/EM adoption outside Microsoft is not part of the current supported V-11 bar.
+        The ADO UIL gather path is now default-on; Kusto, Teams, and IcM remain env-gated.
+
+        <!-- spec-posture
+          WS-1: complete (2026-06-29)
+        -->
+        """,
+    )
+
+    results = module.run_checks(repo_root=tmp_path)
+    by_id = {result.check_id: result for result in results}
+    assert by_id["p7-fact-store"].status == "fail"
+    assert "does not describe shadow-write-landed" in by_id["p7-fact-store"].detail
+
+
+def test_check_posture_block_fails_when_block_missing(tmp_path: Path) -> None:
+    module = _load_module()
+    _build_good_repo(tmp_path)
+    _write_file(
+        tmp_path,
+        "specs/vertex-prd.md",
+        """
+        Vertex is for Microsoft TPM programs.
+        Current supported scope: Microsoft TPM programs using the declared supported archetypes and exclusions.
+        Roadmap direction: broader TPM/EM adoption outside Microsoft is not part of the current supported V-11 bar.
+        The ADO UIL gather path is now default-on; Kusto, Teams, and IcM remain env-gated.
+        Migration status: the unified read API and shadow-write foundation are landed and the irreversible flip to system-of-record remains pending.
+        """,
+    )
+
+    results = module.run_checks(repo_root=tmp_path)
+    by_id = {result.check_id: result for result in results}
+    assert by_id["p12-posture-block"].status == "fail"
+    assert "no `<!-- spec-posture" in by_id["p12-posture-block"].detail
+
+
+def test_check_posture_block_fails_on_ws1_contradiction(tmp_path: Path) -> None:
+    """The exact contradiction this check exists to catch (spec §6.7 PS-5):
+    the changelog says WS-1 is complete, but the posture block still says
+    deferred."""
+    module = _load_module()
+    _build_good_repo(tmp_path)
+    _write_file(
+        tmp_path,
+        "specs/vertex-prd.md",
+        """
+        Vertex is for Microsoft TPM programs.
+        Current supported scope: Microsoft TPM programs using the declared supported archetypes and exclusions.
+        Roadmap direction: broader TPM/EM adoption outside Microsoft is not part of the current supported V-11 bar.
+        The ADO UIL gather path is now default-on; Kusto, Teams, and IcM remain env-gated.
+        Migration status: the unified read API and shadow-write foundation are landed and the irreversible flip to system-of-record remains pending.
+
+        <!-- spec-posture
+          WS-1: deferred
+        -->
+        """,
+    )
+
+    results = module.run_checks(repo_root=tmp_path)
+    by_id = {result.check_id: result for result in results}
+    assert by_id["p12-posture-block"].status == "fail"
+    assert "contradiction this check exists to catch" in by_id["p12-posture-block"].detail
+
+
+def test_check_posture_block_fails_on_malformed_line(tmp_path: Path) -> None:
+    module = _load_module()
+    _build_good_repo(tmp_path)
+    _write_file(
+        tmp_path,
+        "specs/vertex-prd.md",
+        """
+        Vertex is for Microsoft TPM programs.
+        Current supported scope: Microsoft TPM programs using the declared supported archetypes and exclusions.
+        Roadmap direction: broader TPM/EM adoption outside Microsoft is not part of the current supported V-11 bar.
+        The ADO UIL gather path is now default-on; Kusto, Teams, and IcM remain env-gated.
+        Migration status: the unified read API and shadow-write foundation are landed and the irreversible flip to system-of-record remains pending.
+
+        <!-- spec-posture
+          WS-1: complete (2026-06-29)
+          this line is not a valid posture entry
+        -->
+        """,
+    )
+
+    results = module.run_checks(repo_root=tmp_path)
+    by_id = {result.check_id: result for result in results}
+    assert by_id["p12-posture-block"].status == "fail"
+    assert "unparseable posture line" in by_id["p12-posture-block"].detail
+
+
+def test_check_digest_sunset_fails_after_sunset_when_shim_still_present(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Proves the date-gated sunset enforcement actually fires: if
+    `digest.j2`'s deprecation shim is still present after the stated
+    2026-12-31 sunset, the check must fail, not silently pass forever."""
+    module = _load_module()
+    _build_good_repo(tmp_path)
+
+    class _FrozenDate(datetime.date):
+        @classmethod
+        def today(cls):
+            return cls(2027, 1, 15)
+
+    monkeypatch.setattr(datetime, "date", _FrozenDate)
+
+    results = module.run_checks(repo_root=tmp_path)
+    by_id = {result.check_id: result for result in results}
+    assert by_id["p13-digest-sunset"].status == "fail"
+    assert "still present after sunset" in by_id["p13-digest-sunset"].detail
 
 

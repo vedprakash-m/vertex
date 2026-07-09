@@ -10899,4 +10899,3 @@ def test_load_saved_query_item_ids_skips_failing_query_and_returns_rest() -> Non
     # bad-query skipped; good-query contributed IDs 101, 102
     assert ids == [101, 102]
     assert ado_calls == 4  # 2 get_saved_query + 2 execute_wiql attempts (1 failed, 1 ok)
-

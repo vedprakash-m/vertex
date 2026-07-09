@@ -1485,6 +1485,8 @@ def _generate_lookback_draft(
         snapshots=snapshots,
         as_of=data_as_of,
         programs_root=programs_root,
+        edition_name=edition_name,
+        archive_root=archive_root,
     )
     charter_review = _build_lookback_charter_review(
         raw_program=resolved_edition.raw_program if resolved_edition is not None else {},

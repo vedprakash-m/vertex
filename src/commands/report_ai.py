@@ -37,6 +37,11 @@ from src.core.models import DeltaSet, DimensionRisk, EditionType, EvidencePacket
 from src.core.models_v2 import PersonDirectory, Signal as JournalSignal, Workstream, WorkstreamEvidenceBundle
 from src.core.overrides_store import OverridesDocument
 from src.core.program_reality import ProgramReality
+from src.commands.reality_context import (
+    RealityAssessmentSummary,
+    build_reality_assessment_summary,
+    reality_context_lines,
+)
 from src.core.signal_ranking import sort_signals_for_ai_context, populate_top_3_now_candidates
 from src.core.signal_review import signal_is_approved_for_evidence, signal_needs_review
 from src.core.store_factory import build_program_trajectory_store, build_signal_store_for_program_id
@@ -111,6 +116,11 @@ class _DraftAIContext:
     people_directory: tuple[PersonDirectory, ...] = ()
     source_confidence_order: tuple[str, ...] = ()
     as_of: datetime | None = None
+    # Track J (PR-11b): condensed, token-budgeted reality-substrate summary so the
+    # AI exec-summary/blurb drafters cannot contradict the newsletter's structured
+    # trust badges. Built once per synthesis pass from ProgramReality; rendered to
+    # prompt lines via reality_context_lines() inside the context builders below.
+    reality_assessments: RealityAssessmentSummary | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +149,7 @@ class _ReportSignalContext:
     source_confidence_order: tuple[str, ...] = ()
     as_of: datetime | None = None
     top_3_now_candidates: tuple[JournalSignal, ...] = ()  # FR-SG-33: signal-priority candidates
+    reality_assessments: RealityAssessmentSummary | None = None  # Track J (PR-11b)
 
 
 @dataclass(frozen=True, slots=True)
@@ -432,19 +443,26 @@ def _load_report_signal_context(
         if points
     }
     drift_patterns = analyze_trajectories(populated_trajectories, as_of=as_of.date()) if populated_trajectories else ()
+    # Track J (PR-11b): load ProgramReality once and reuse it for both the
+    # dependency-cascade computation and the reality-substrate context summary
+    # fed to the AI drafters (avoids a redundant load; Track E discipline).
+    program_reality = ProgramReality.load(
+        resolved.program.id,
+        programs_root=programs_root,
+    )
     dependency_cascades = detect_dependency_cascades(
-        dependencies=tuple(
-            a.record for a in ProgramReality.load(
-                resolved.program.id,
-                programs_root=programs_root,
-            ).dependencies()
-        ),
+        # .record strip is intentional: cascade detection consumes only structural
+        # dependency fields (program/workstream ids, resolution path), never
+        # FactAssessment metadata. Truth/dispute signals for the AI drafters are
+        # surfaced separately via build_reality_assessment_summary() below.
+        dependencies=tuple(a.record for a in program_reality.dependencies()),
         signals=approved_signals,
         drift_patterns=drift_patterns,
         items=items,
         scorecards=resolved.scorecards,
         workstreams=active_workstreams,
     )
+    reality_assessments = build_reality_assessment_summary(program_reality)
     # FR-SG-33: compute signal-priority top_3_now candidates
     top_3_now_candidates = populate_top_3_now_candidates(approved_signals, {}, as_of=as_of)
     # Write candidates to disk so reviewers can inspect them
@@ -460,6 +478,7 @@ def _load_report_signal_context(
         source_confidence_order=getattr(resolved.program, "source_confidence_order", ()),
         as_of=as_of,
         top_3_now_candidates=top_3_now_candidates,
+        reality_assessments=reality_assessments,
     )
 
 
@@ -727,6 +746,7 @@ def _load_draft_ai_context(
         people_directory=signal_context.people_directory,
         source_confidence_order=signal_context.source_confidence_order,
         as_of=signal_context.as_of,
+        reality_assessments=signal_context.reality_assessments,
     )
 
 
@@ -942,6 +962,9 @@ def _section_ai_context_lines(
         if workstream_id in ai_context.rolling_summaries
     )
     lines.extend(_leadership_reader_context_lines(program_context))
+    # Track J (PR-11b): reality-substrate confidence so the workstream blurb does
+    # not contradict the structured tables' trust badges.
+    lines.extend(_reality_context_lines(ai_context.reality_assessments))
     lines.extend(
         _edit_pattern_context_lines(
             ai_context.program_id,
@@ -1308,6 +1331,9 @@ def _exec_ai_context_lines(
         for workstream_id, summary in sorted(ai_context.rolling_summaries.items())
         if summary.strip()
     ]
+    # Track J (PR-11b): reality-substrate confidence so the exec summary does not
+    # contradict the structured tables' trust badges. Surfaced early (high-signal).
+    lines.extend(_reality_context_lines(ai_context.reality_assessments))
     exec_summary = next(
         (
             summary
@@ -1564,6 +1590,19 @@ def _leadership_reader_context_lines(program_context: NarrativeProgramContext | 
         cares_about = ", ".join(reader.cares_about) if reader.cares_about else "general readiness"
         lines.append(f"Leadership reader {reader.name}: cares about {cares_about}.")
     return tuple(lines)
+
+
+def _reality_context_lines(summary: RealityAssessmentSummary | None) -> tuple[str, ...]:
+    """Track J (PR-11b): render the reality-substrate summary as prompt lines.
+
+    Returns nothing when no summary was built (AI disabled, offline, or a
+    pre-Track-J code path), preserving byte-identical behavior for callers that
+    never set ``reality_assessments``. The summary itself is token-bounded and
+    prioritised in ``src.commands.reality_context``.
+    """
+    if summary is None:
+        return ()
+    return reality_context_lines(summary)
 
 
 def _edit_pattern_context_lines(

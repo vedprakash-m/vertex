@@ -626,6 +626,8 @@ commands:
       - --decisions
       - --dependencies
       - --escalations
+      - --fact-bridge
+      - --fact-deserialization
       - --fact-parity
       - --fix
       - --fix-hints
@@ -669,7 +671,6 @@ commands:
       - --no-ai
       - --no-seed
       - --offline
-      - --pipeline-v2
       - --reseed
       - --send-draft
       - --stdout
@@ -1317,7 +1318,6 @@ commands:
       - --no-ai
       - --no-seed
       - --offline
-      - --pipeline-v2
       - --reseed
       - --send-draft
       - --stdout

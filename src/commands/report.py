@@ -480,7 +480,6 @@ def report_command(
     dry_run: bool = typer.Option(False, "--dry-run", help="Generate draft outputs without archive writes. Narrative seeding may still write draft narrative files for the current issue."),
     reseed: bool = typer.Option(False, "--reseed", help="Delete seedable draft narratives for the target issue before re-seeding from the trusted baseline. Dry-run only."),
     no_seed: bool = typer.Option(False, "--no-seed", help="Skip trusted-baseline narrative seeding for this run and render from scaffold templates or existing narratives instead."),
-    pipeline_v2: bool = typer.Option(False, "--pipeline-v2", help="Use the incremental staged report pipeline."),
     offline: bool = typer.Option(False, "--offline", help="Render from the newest cached snapshot without live ADO or Kusto calls."),
     diff_mode: bool = typer.Option(False, "--diff", help="Compare the current draft against the last dry-run and print a diff summary."),
     send_draft: bool = typer.Option(False, "--send-draft", help="Send the rendered draft to the author's mailbox for Outlook preview."),
@@ -577,8 +576,7 @@ def report_command(
             offline=offline,
             show_progress=not stdout,
         )
-        draft_generator = generate_report_draft_v2 if pipeline_v2 else generate_report_draft
-        artifacts = draft_generator(
+        artifacts = generate_report_draft(
             edition_name=edition,
             issue_number=issue,
             reseed=reseed,
@@ -853,32 +851,34 @@ def generate_report_draft_v2(
     show_progress: bool = False,
     trace_logger: RunLoggerAdapter | None = None,
 ) -> DraftArtifacts:
-    final_ctx = _execute_report_pipeline(
-        _build_stage_request_context(
-            edition_name=edition_name,
-            issue_number=issue_number,
-            reseed=reseed,
-            no_seed=no_seed,
-            dry_run=dry_run,
-            offline=offline,
-            diff_mode=diff_mode,
-            as_of=as_of,
-            edition_type_override=edition_type_override,
-            lookback_range=lookback_range,
-            section_filter_ids=section_filter_ids,
-            reports_root=reports_root,
-            archive_root=archive_root,
-            programs_root=programs_root,
-            work_item_loader=work_item_loader,
-            kusto_query_executor=kusto_query_executor,
-            open_browser=open_browser,
-        ),
+    """Deprecated alias for `generate_report_draft`.
+
+    Historically a separate "incremental staged pipeline" body, but it executed
+    the identical `_execute_report_pipeline(...)` call with no behavioral
+    difference (specs/fix-data-flow.md Track H / PS-6). Duplicate body removed;
+    retained under this name only because tests still call it by name.
+    """
+    return generate_report_draft(
+        edition_name=edition_name,
+        issue_number=issue_number,
+        reseed=reseed,
+        no_seed=no_seed,
+        dry_run=dry_run,
+        offline=offline,
+        diff_mode=diff_mode,
+        as_of=as_of,
+        edition_type_override=edition_type_override,
+        lookback_range=lookback_range,
+        section_filter_ids=section_filter_ids,
+        reports_root=reports_root,
+        archive_root=archive_root,
+        programs_root=programs_root,
+        work_item_loader=work_item_loader,
+        kusto_query_executor=kusto_query_executor,
+        open_browser=open_browser,
         show_progress=show_progress,
         trace_logger=trace_logger,
     )
-    if final_ctx.artifacts is None:
-        raise RuntimeError("Pipeline v2 completed without draft artifacts.")
-    return final_ctx.artifacts
 
 
 def _execute_report_pipeline(
@@ -979,6 +979,7 @@ def _format_report_pipeline_progress_detail(stage_name: str, ctx: StageContext) 
         if risk_count is not None:
             details.append(f"risks={risk_count}")
         details.append(f"stale={len(ctx.stale_risk_ids)}")
+        details.append(f"warnings={len(ctx.risk_warnings)}")
     elif stage_name == "action":
         action_count = _safe_length(ctx.actions)
         if action_count is not None:
@@ -1465,5 +1466,4 @@ def _next_issue_number(index: Any) -> int:
     if not index.issues:
         return 1
     return max(entry.issue_number for entry in index.issues) + 1
-
 

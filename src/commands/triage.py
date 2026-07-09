@@ -592,6 +592,11 @@ def generate_triage_report(
         drift_patterns = analyze_trajectories(populated_trajectories, as_of=current_time.date()) if populated_trajectories else ()
         _reality = ProgramReality.load(program_id, programs_root=programs_root)
         program_facts = _reality._snapshot
+        # .record strips are intentional here: triage's downstream consumers
+        # (cascade detection, critical-path graph, _build_*_triage_lines) consume
+        # only structural record fields, not FactAssessment metadata. Triage
+        # output is plain CLI text today; surfacing truth-level signals in triage
+        # would be a separate product decision (see fix-data-flow.md Track J audit).
         dependencies = tuple(a.record for a in _reality.dependencies())
         risk_entries = tuple(a.record for a in _reality.risks())
         active_actions = tuple(
@@ -691,6 +696,8 @@ def generate_triage_report(
             as_of=current_time,
         )
         decision_summaries, decision_attention = _build_decision_triage_lines(
+            # .record strip is intentional (see comment above): _build_decision_triage_lines
+            # renders plain CLI text from structural decision fields only.
             decisions=tuple(a.record for a in _reality.decisions()),
             as_of=current_time,
         )

@@ -615,6 +615,54 @@ def test_render_stage_deck_reads_sqlite_backed_icm_signals(repo_root: Path, tmp_
     assert "IcM 12345: Sev2 incident active for deployment readiness. — icm incident | BLOCK | high confidence | workstream deployment_readiness" in render_ctx.render_state.markdown_body
 
 
+def test_render_stage_deck_reuses_ctx_risks_when_available(
+    repo_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reports_root = stage_v2_report_workspace(repo_root, tmp_path)
+    archive_root = tmp_path / "archive"
+    disable_kusto_in_report_copy(reports_root)
+
+    request_ctx = report_module._build_stage_request_context(
+        edition_name=EDITION_NAME,
+        issue_number=None,
+        reseed=False,
+        no_seed=False,
+        dry_run=False,
+        offline=False,
+        diff_mode=False,
+        as_of=datetime(2026, 5, 5, 18, 0, tzinfo=timezone.utc),
+        edition_type_override=EditionType.DECK,
+        lookback_range=None,
+        reports_root=reports_root,
+        archive_root=archive_root,
+        programs_root=(tmp_path / "programs"),
+        work_item_loader=lambda bundle, timestamp: load_cassette_work_items("cold_start", timestamp),
+        kusto_query_executor=None,
+        section_filter_ids=(),
+        open_browser=False,
+    )
+
+    resolved_ctx = ResolutionStage().execute(request_ctx)
+    fetched_ctx = FetchStage().execute(resolved_ctx)
+    computed_ctx = ComputeStage().execute(fetched_ctx)
+    milestone_ctx = MilestoneStage().execute(computed_ctx)
+    risk_ctx = RiskStage().execute(milestone_ctx)
+    narrative_ctx = NarrativeStage().execute(risk_ctx)
+    ai_ctx = AIStage().execute(narrative_ctx)
+
+    monkeypatch.setattr(
+        render_stage_module,
+        "_load_current_risks",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("RenderStage should reuse ctx.risks")),
+    )
+
+    render_ctx = RenderStage().execute(ai_ctx)
+
+    assert render_ctx.render_state is not None
+
+
 def test_validation_stage_populates_manifest_and_warnings(repo_root: Path, tmp_path: Path) -> None:
     reports_root = stage_v2_report_workspace(repo_root, tmp_path)
     archive_root = tmp_path / "archive"
@@ -952,8 +1000,14 @@ def test_milestone_stage_uses_injected_reality_for_family_sor_flip(monkeypatch, 
                         source_document_key="email:sha256:milestone-source",
                         approval_event_id="evt-approval-1",
                     ),
+                    truth_level=SimpleNamespace(value="source_validated"),
+                    disputed=False,
+                    stale=False,
                 ),
             )
+
+        def dependencies(self):
+            return ()
 
     def _load_program_reality(program_id: str, **kwargs):
         calls.append({"program_id": program_id, **kwargs})
@@ -1003,6 +1057,9 @@ def test_milestone_stage_uses_injected_reality_for_family_sor_flip(monkeypatch, 
         "m-reality": {
             "source_document_key": "email:sha256:milestone-source",
             "approval_event_id": "evt-approval-1",
+            "truth_level": "source_validated",
+            "disputed": "false",
+            "stale": "false",
         }
     }
     assert result.milestone_assessments[0].milestone_id == "m-reality"
@@ -1171,4 +1228,3 @@ def _set_v2_program_storage_backend(programs_root: Path, *, program_id: str, sto
     assert isinstance(program_document, dict)
     program_document["storage_backend"] = storage_backend
     program_path.write_text(yaml.safe_dump(program_document, sort_keys=False), encoding="utf-8")
-

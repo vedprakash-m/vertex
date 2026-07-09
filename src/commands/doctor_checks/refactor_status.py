@@ -22,7 +22,7 @@ _GATHER_LOC_BUDGET = 5160  # +119: SharePoint/LT-deck gather integration (SP1-1/
 # ratchet.
 # +12 (2026-06-21): --nudge sub-check per .archive/specs/fix-nudge.md §24.8.
 # +20 (2026-06-23): --rev-health/--rev-program sub-check per specs/program-context-intelligence.md §5.13 (FR-PCI-12).
-_DOCTOR_LOC_BUDGET = 1620
+_DOCTOR_LOC_BUDGET = 1663
 _AI_ROUTER_ALLOWED_FILES = frozenset(
     {
         Path("src/ai/client.py"),

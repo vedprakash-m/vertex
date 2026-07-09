@@ -2968,7 +2968,7 @@ def test_ledger_correct_touching_locked_field_stages_candidate_instead_of_event(
 
 def test_ledger_write_paths_pass_grounded_in_validator(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("cli.maybe_run_scheduled_compaction", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr("src.commands.ledger.project_program_events", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("src.commands.ledger._maybe_rebuild_program_projection", lambda *_args, **_kwargs: None)
 
     observed: list[object] = []
 
@@ -4170,4 +4170,3 @@ def test_ledger_triage_batch_reject_rejects_all_active_candidates(monkeypatch, t
     events = read_events("acme", programs_root=programs_root)
     reject_events = [e for e in events if e.event_type == "discovery.candidate_rejected.v1"]
     assert len(reject_events) == 2
-

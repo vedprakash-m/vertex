@@ -405,6 +405,8 @@ Run vertex doctor --context to see the LT deck freshness status.
 | --flip-status | boolean | No | False | Report the current Fact Store source-of-record posture for the resolved edition (legacy, dual, or fact-store). |
 | --flip-parity | boolean | No | False | Compare legacy mutable-state projections against Fact Store projections for one confirmed issue. |
 | --fact-parity | boolean | No | False | Check whether enough dual-read parity cycles have been logged for the resolved program (reads fact_store.dual_read_cycles from platform_state.yaml, default 5). |
+| --fact-bridge | boolean | No | False | Check the ledger->fact-store bridge posture: whether it is enabled for a REV-configured program, and whether a persistent bridge-failure backlog exists (fix-data-flow.md Track A / PS-2). |
+| --fact-deserialization | boolean | No | False | Confirm existing persisted facts still deserialize against the current schema, not just newly-bridged ones (fix-data-flow.md Track L). |
 | --confirm-readiness | boolean | No | False | Enumerate exact live blockers that would prevent a non-forced confirm. Returns 0 only when confirm would succeed. |
 | --adapter-cert | boolean | No | False | Audit UIL adapter certification per WS-3: checks which channels are enabled/certified and probes WorkIQ verb availability. |
 | --issue INTEGER | integer | No |  | Issue number required by --flip-parity. |
@@ -876,7 +878,6 @@ Use --drill to run the rollback in a sandbox and record proof s7a_rollback_drill
 | --dry-run | boolean | No | False | Generate draft outputs without archive writes. Narrative seeding may still write draft narrative files for the current issue. |
 | --reseed | boolean | No | False | Delete seedable draft narratives for the target issue before re-seeding from the trusted baseline. Dry-run only. |
 | --no-seed | boolean | No | False | Skip trusted-baseline narrative seeding for this run and render from scaffold templates or existing narratives instead. |
-| --pipeline-v2 | boolean | No | False | Use the incremental staged report pipeline. |
 | --offline | boolean | No | False | Render from the newest cached snapshot without live ADO or Kusto calls. |
 | --diff | boolean | No | False | Compare the current draft against the last dry-run and print a diff summary. |
 | --send-draft | boolean | No | False | Send the rendered draft to the author's mailbox for Outlook preview. |
@@ -915,7 +916,6 @@ Use --drill to run the rollback in a sandbox and record proof s7a_rollback_drill
 | --dry-run | boolean | No | False | Generate draft outputs without archive writes. Narrative seeding may still write draft narrative files for the current issue. |
 | --reseed | boolean | No | False | Delete seedable draft narratives for the target issue before re-seeding from the trusted baseline. Dry-run only. |
 | --no-seed | boolean | No | False | Skip trusted-baseline narrative seeding for this run and render from scaffold templates or existing narratives instead. |
-| --pipeline-v2 | boolean | No | False | Use the incremental staged report pipeline. |
 | --offline | boolean | No | False | Render from the newest cached snapshot without live ADO or Kusto calls. |
 | --diff | boolean | No | False | Compare the current draft against the last dry-run and print a diff summary. |
 | --send-draft | boolean | No | False | Send the rendered draft to the author's mailbox for Outlook preview. |
@@ -1412,6 +1412,8 @@ Vertex operator and debug commands.
 | --flip-status | boolean | No | False | Report the current Fact Store source-of-record posture for the resolved edition (legacy, dual, or fact-store). |
 | --flip-parity | boolean | No | False | Compare legacy mutable-state projections against Fact Store projections for one confirmed issue. |
 | --fact-parity | boolean | No | False | Check whether enough dual-read parity cycles have been logged for the resolved program (reads fact_store.dual_read_cycles from platform_state.yaml, default 5). |
+| --fact-bridge | boolean | No | False | Check the ledger->fact-store bridge posture: whether it is enabled for a REV-configured program, and whether a persistent bridge-failure backlog exists (fix-data-flow.md Track A / PS-2). |
+| --fact-deserialization | boolean | No | False | Confirm existing persisted facts still deserialize against the current schema, not just newly-bridged ones (fix-data-flow.md Track L). |
 | --confirm-readiness | boolean | No | False | Enumerate exact live blockers that would prevent a non-forced confirm. Returns 0 only when confirm would succeed. |
 | --adapter-cert | boolean | No | False | Audit UIL adapter certification per WS-3: checks which channels are enabled/certified and probes WorkIQ verb availability. |
 | --issue INTEGER | integer | No |  | Issue number required by --flip-parity. |

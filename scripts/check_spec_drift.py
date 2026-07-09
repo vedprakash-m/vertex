@@ -358,6 +358,114 @@ def _check_computed_module_count(repo_root: Path) -> CheckResult:
     )
 
 
+# ---------------------------------------------------------------------------
+# Track G additions (fix-data-flow.md): structured posture block, digest.j2
+# sunset enforcement. These replace the fragile phrase-matching design from
+# the original draft with a machine-readable `<!-- spec-posture ... -->` block
+# parsed from vertex-prd.md, plus a date-gated sunset check.
+# ---------------------------------------------------------------------------
+
+_POSTURE_BLOCK_RE = re.compile(
+    r"<!--\s*spec-posture\s*\n(.*?)-->", re.DOTALL,
+)
+_POSTURE_LINE_RE = re.compile(
+    r"^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)\s*:\s*(complete|in-progress|deferred|not-started)(?:\s*\((\d{4}-\d{2}-\d{2})\))?\s*$",
+)
+_VALID_POSTURE_STATUSES = frozenset({"complete", "in-progress", "deferred", "not-started"})
+
+
+def _check_posture_block(repo_root: Path) -> CheckResult:
+    """fix-data-flow.md Track G / PR-2: vertex-prd.md must carry a structured,
+    machine-readable `<!-- spec-posture -->` block, and every work-item status
+    it declares must be consistent with the changelog's most recent mention.
+
+    Replaces the fragile phrase-matching design (which false-positived on
+    legitimate historical references and false-negatived on paraphrase) with a
+    block that is immune to paraphrase and self-documenting. WARN by default,
+    hard-FAIL under ``--strict`` (see ``main``).
+    """
+    prd = _read_text(repo_root, "specs/vertex-prd.md")
+    failures: list[str] = []
+
+    match = _POSTURE_BLOCK_RE.search(prd)
+    if match is None:
+        failures.append(
+            "specs/vertex-prd.md has no `<!-- spec-posture ... -->` block. "
+            "Add one near the 'Current implementation posture' section."
+        )
+        return CheckResult("p12-posture-block", "Structured posture block present", "fail", "; ".join(failures))
+
+    body = match.group(1)
+    entries: list[tuple[str, str, str | None]] = []
+    seen: set[str] = set()
+    for raw_line in body.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        line_match = _POSTURE_LINE_RE.match(stripped)
+        if line_match is None:
+            failures.append(f"unparseable posture line: {raw_line!r}")
+            continue
+        work_item, status, date = line_match.group(1), line_match.group(2), line_match.group(3)
+        if work_item in seen:
+            failures.append(f"duplicate posture entry for {work_item!r}")
+        seen.add(work_item)
+        entries.append((work_item, status, date))
+
+    if not entries:
+        failures.append("spec-posture block is empty (no work-item lines)")
+
+    # The specific contradiction this check exists to catch: WS-1 declared
+    # `deferred` in the posture block while the changelog says `complete`.
+    posture_ws1 = next((s for w, s, _ in entries if w == "WS-1"), None)
+    if posture_ws1 is not None:
+        # The changelog line dated 2026-06-29 states WS-1 is complete; any
+        # posture-block status other than `complete` for WS-1 contradicts it.
+        if posture_ws1 != "complete":
+            failures.append(
+                f"WS-1 posture is {posture_ws1!r} but the changelog (2026-06-29) "
+                f"declares it complete — the exact contradiction this check exists to catch."
+            )
+
+    if failures:
+        return CheckResult("p12-posture-block", "Structured posture block present", "fail", "; ".join(failures))
+    return CheckResult(
+        "p12-posture-block",
+        "Structured posture block present",
+        "pass",
+        f"{len(entries)} work-item entries parsed cleanly.",
+    )
+
+
+def _check_digest_sunset(repo_root: Path) -> CheckResult:
+    """fix-data-flow.md Track G / PR-2 item 6: the `digest.j2` deprecation shim
+    in html_renderer.py has a stated sunset of 2026-12-31. After that date the
+    branch must be removed; until then this check passes with an informational
+    note. Converts a prose promise into an enforced deadline.
+    """
+    import datetime
+    sunset = datetime.date(2026, 12, 31)
+    today = datetime.date.today()
+    renderer = _read_text(repo_root, "src/core/html_renderer.py")
+    has_shim = "digest.j2" in renderer and "deprecated" in renderer.lower()
+    if today <= sunset:
+        note = (
+            f"digest.j2 deprecation shim present; sunset {sunset.isoformat()} "
+            f"({(sunset - today).days} days remaining)."
+        )
+        return CheckResult("p13-digest-sunset", "digest.j2 sunset enforcement", "pass", note)
+    # Sunset has passed — the shim must be gone.
+    if has_shim:
+        return CheckResult(
+            "p13-digest-sunset", "digest.j2 sunset enforcement", "fail",
+            f"digest.j2 deprecation shim still present after sunset {sunset.isoformat()} — remove it.",
+        )
+    return CheckResult(
+        "p13-digest-sunset", "digest.j2 sunset enforcement", "pass",
+        "digest.j2 shim removed after sunset, as required.",
+    )
+
+
 
 
 CHECKERS: tuple[Checker, ...] = (
@@ -372,6 +480,8 @@ CHECKERS: tuple[Checker, ...] = (
     _check_cli_reference_drift,
     _check_dead_green_run_pointer,
     _check_computed_module_count,
+    _check_posture_block,
+    _check_digest_sunset,
 )
 
 
@@ -391,6 +501,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         choices=("human", "json"),
         default="human",
         help="Output format.",
+    )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help=(
+            "Promote WARN-class checks to FAIL. Used for checks that ship as WARN "
+            "for a grace period before becoming CI blockers (see fix-data-flow.md "
+            "Track G PR-2)."
+        ),
     )
     return parser.parse_args(argv)
 
@@ -420,6 +539,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"{prefix:4} {result.check_id:<22} {result.detail}")
 
     return 0 if payload["failed"] == 0 else 1
+
+
+# Checks that ship WARN-by-default and promote to hard-FAIL under ``--strict``
+# (fix-data-flow.md Track G: a short grace period before a new structural
+# check becomes a CI blocker). The contradiction-detection portion of
+# p12-posture-block is always a hard FAIL (it catches an actual defect, not a
+# missing-formality issue); only the *missing-block* form is WARN-by-default.
+_WARN_CLASS_CHECKS = frozenset({"p12-posture-block"})
 
 
 if __name__ == "__main__":

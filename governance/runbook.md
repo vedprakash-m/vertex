@@ -194,7 +194,74 @@ check from a degenerate state digest).
 
 ---
 
-## 9. Escalation / RACI
+## 9. Scenario: multiple candidate fact-store databases for one program (PS-14 split-brain)
+
+**Governing spec:** `specs/fix-data-flow.md` PS-14 / Track K (§6.11).
+
+**Signal:** `vertex doctor --storage` reports the "Fact Store Location" check
+as `warn`, listing one or more stray `vertex.sqlite3` files besides the
+canonical, `db_root`-resolved path — or `reality_store.py`'s
+`_resolve_reality_db_root` fallback logs a `CRITICAL` line
+(`"no db_root/VERTEX_DB_PATH supplied — falling back to ..."`) anywhere in
+recent logs.
+
+**Meaning:** More than one candidate SQLite database exists for a single
+program (typically: the canonical path production code always resolves via
+an explicit `programs_root`/`db_root`, plus a stray copy at
+`~/.vertex/<id>/vertex.sqlite3` created by some script, test, or ad-hoc
+session that omitted both). Which one gets read/written depends silently on
+which path arguments a caller supplies — a real operational hazard, not just
+housekeeping clutter, since work done through a stray database is invisible
+to every stage that uses the canonical path.
+
+**Action:**
+1. Run `vertex doctor --storage` and read the "Fact Store Location" check's
+   `stray_databases` metadata — it lists each stray path and its row count.
+2. **Confirm canonicality before touching anything.** The canonical path is
+   whichever one production code actually resolves for this program — for
+   the standard layout, that's `<programs_root>.parent/<program_id>/vertex.sqlite3`
+   (i.e., `programs_root.parent`, NOT `programs_root` itself — see
+   `program_fact_store.py`'s `resolved_db_root = programs_root.parent`). The
+   doctor check's `canonical_path` field already resolves this the same way
+   production code does — trust it over any manual guess.
+3. **For each stray database, before archiving or deleting it:**
+   - Confirm it is *not* read by any production call path (grep for any
+     script, cron job, or manual command that might construct
+     `ProgramFactStore`/call `load_program_facts()` with a `programs_root`/
+     `db_root` argument that resolves to the stray path specifically).
+   - If its row count is 0, it is very likely a dead artifact from a test run
+     or an aborted manual command — safe to delete outright.
+   - If its row count is non-zero, inspect its content
+     (`sqlite3 <stray-path> "SELECT fact_type, COUNT(*) FROM program_fact_revisions GROUP BY fact_type"`)
+     before deleting — a non-empty stray database may represent real work
+     that never reached the canonical store (e.g., a script that
+     accidentally wrote to the home-directory fallback). If so, consider
+     whether that data needs to be re-migrated into the canonical database
+     (via `vertex admin fact-store migrate-legacy-state`, if the content
+     maps back to a legacy source) before deleting it — do not silently
+     discard non-empty data.
+4. **Archive, don't delete outright, unless you're certain.** Move the stray
+   file to a clearly-labeled location (e.g.
+   `<stray-path>.stray-archived-<date>`) rather than `rm`-ing it immediately,
+   in case the investigation above was wrong.
+5. **Re-run `vertex doctor --storage`** to confirm the "Fact Store Location"
+   check now reports `ok`.
+6. **If the root cause was a script/test omitting `programs_root`/`db_root`**,
+   fix that call site to thread an explicit root — the loud `CRITICAL` log
+   from `_resolve_reality_db_root`'s fallback (Track K's root-cause fix) is
+   what should have surfaced this before it produced orphaned data; if it
+   didn't fire, check whether the call path bypassed `reality_store.py`
+   entirely (e.g. a raw `sqlite3.connect()` against a hand-constructed path).
+
+**Known follow-up (not blocking, tracked in `specs/fix-data-flow.md` §10 item
+15):** `xpf`'s own `~/.vertex/xpf/vertex.sqlite3` (a stray, non-canonical
+database discovered during this effort's PS-11/PS-14 verification work) has
+not yet been cleaned up as of this runbook's last update — apply the
+procedure above to it as a concrete first real application of this scenario.
+
+---
+
+## 10. Escalation / RACI
 
 | Scenario | First responder | Escalates to |
 |---|---|---|
@@ -204,6 +271,7 @@ check from a degenerate state digest).
 | Revoke / rollback (§5, §6) | on-call | eng (if supersession breaks) |
 | Delivered-issue correction (§7) | program DRI | — |
 | ADO schema drift (§8) | on-call | eng (contract update) |
+| Multi-database split-brain (§9) | on-call | eng (root-cause the omitted programs_root/db_root) |
 
 ---
 

@@ -10,7 +10,7 @@ from src.core.milestone_engine import describe_milestone_schedule_variance, load
 from src.core.models import Confidence, DimensionRisk, EditionType, RiskLevel, Snapshot, WorkItem
 from src.core.models_v2 import Milestone, MilestoneAssessment, MilestoneStatus, RiskEntry, RiskStatus
 from src.core.overrides_store import OverridesDocument
-from src.core.program_reality import ProgramReality
+from src.core.program_reality import FactAssessment, ProgramReality
 from src.core.risk_register_engine import assess_risk_staleness, compute_risk_score
 from src.core.signal_review import signal_is_approved_for_evidence
 from src.core.store_factory import build_signal_store_for_program_id, build_trajectory_store_for_program_id
@@ -133,10 +133,12 @@ def _build_health_summary(
     milestones: tuple[Milestone, ...] = (),
     milestone_assessments: tuple[MilestoneAssessment, ...] = (),
     risks: tuple[RiskEntry, ...] = (),
+    risk_assessments: tuple[FactAssessment, ...] = (),
     stale_risk_ids: tuple[str, ...] = (),
     program_id: str | None = None,
     programs_root: Path | None = None,
     as_of: datetime | None = None,
+    reality: ProgramReality | None = None,
     severe_ack_required: bool = False,
     is_dry_run: bool = True,
     read_time_minutes: int | None = None,
@@ -199,11 +201,12 @@ def _build_health_summary(
     risk_bar_width = int(round((max(0.0, min(risk_load / 3.0, 1.0))) * 80))
     resolved_risks = risks
     resolved_stale_risk_ids = stale_risk_ids
+    resolved_risk_assessments: tuple[FactAssessment, ...] = risk_assessments
     if not resolved_risks and program_id is not None and programs_root is not None:
         try:
-            resolved_risks = tuple(
-                a.record for a in ProgramReality.load(program_id, programs_root=programs_root).risks()
-            )
+            resolved_reality = reality or ProgramReality.load(program_id, programs_root=programs_root)
+            resolved_risk_assessments = tuple(resolved_reality.risks())
+            resolved_risks = tuple(assessment.record for assessment in resolved_risk_assessments)
         except ConfigError:
             resolved_risks = ()
         if not resolved_stale_risk_ids and as_of is not None:
@@ -212,6 +215,12 @@ def _build_health_summary(
                 for risk in resolved_risks
                 if assess_risk_staleness(risk, as_of.date())
             )
+    if resolved_risks and not resolved_risk_assessments:
+        resolved_risk_assessments = ()
+    highlighted_risk_assessment = _select_active_risk_assessment(
+        resolved_risk_assessments,
+        stale_risk_ids=resolved_stale_risk_ids,
+    )
 
     return HealthSummary(
         overall_risk=overall_risk,
@@ -265,7 +274,44 @@ def _build_health_summary(
             if program_id is not None and programs_root is not None and as_of is not None
             else None
         ),
+        risk_register_truth_level=(
+            highlighted_risk_assessment.truth_level.value if highlighted_risk_assessment is not None else None
+        ),
+        risk_register_disputed=(
+            highlighted_risk_assessment.disputed if highlighted_risk_assessment is not None else False
+        ),
+        risk_register_stale_evidence=(
+            highlighted_risk_assessment.stale if highlighted_risk_assessment is not None else False
+        ),
+        risk_register_includes_unconfirmed_sources=any(
+            assessment.truth_level.value == "raw_observed"
+            for assessment in resolved_risk_assessments
+        ),
     )
+
+
+def _select_active_risk_assessment(
+    assessments: tuple[FactAssessment, ...],
+    *,
+    stale_risk_ids: tuple[str, ...] = (),
+) -> FactAssessment | None:
+    active_assessments = tuple(
+        assessment
+        for assessment in assessments
+        if assessment.record.status in {RiskStatus.OPEN, RiskStatus.ESCALATED}
+    )
+    if not active_assessments:
+        return None
+    stale_risk_id_set = set(stale_risk_ids)
+    return sorted(
+        active_assessments,
+        key=lambda assessment: (
+            0 if assessment.record.status == RiskStatus.ESCALATED else 1,
+            -compute_risk_score(assessment.record),
+            0 if assessment.record.id in stale_risk_id_set else 1,
+            assessment.record.title.lower(),
+        ),
+    )[0]
 
 
 def _build_health_telemetry_confidence(

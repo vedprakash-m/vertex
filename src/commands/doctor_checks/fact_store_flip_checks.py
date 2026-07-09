@@ -514,3 +514,279 @@ def run_fact_parity_doctor(
             ),
         ),
     )
+
+
+# --------------------------------------------------------------------------
+# Track A (fix-data-flow.md PS-2 / §6.1 / PR-5): ledger -> fact-store bridge
+# fail-loud checks. Two independent signals, per the spec's own instruction
+# not to conflate them:
+#   1. `run_bridge_disabled_doctor` — proactive: WARNs for any REV-configured
+#      program whose fact_bridge_enabled resolves to False, regardless of
+#      whether REV has ever actually run (catches the gap at first `vertex
+#      doctor` run, even before any approval has been silenced).
+#   2. `run_bridge_failure_backlog_doctor` — reactive: surfaces a persistent
+#      backlog of bridge-appender failures recorded to `bridge_failures.jsonl`
+#      by `src.commands.ledger._record_bridge_failure`, so a bridge that is
+#      enabled but silently broken (e.g. a schema regression) doesn't require
+#      an operator to notice repeated ERROR log lines.
+# --------------------------------------------------------------------------
+
+_BRIDGE_FAILURE_BACKLOG_THRESHOLD = 3
+
+
+def run_bridge_disabled_doctor(
+    *,
+    edition_name: str,
+    program_id: str,
+    programs_root: Path,
+) -> DoctorReport:
+    """PS-2 / Track A step 1: WARN when a program has REV configured
+    (`program.m365.rev` is present at all) but the ledger fact-bridge
+    resolves to disabled — the exact silent-onboarding-gap PS-2 describes.
+    Fires regardless of whether REV has ever run, so an operator sees it the
+    first time they run `vertex doctor`, not only reactively on first
+    approval (see `src.commands.ledger._warn_if_bridgeable_event_silenced_by_disabled_bridge`
+    for that separate, reactive signal).
+    """
+    from src.commands.ledger import ledger_fact_bridge_enabled
+    from src.core.edition_resolver import load_program
+
+    program = load_program(program_id, programs_root=programs_root)
+    rev_configured = program is not None and program.m365 is not None and program.m365.rev is not None
+    if not rev_configured:
+        return DoctorReport(
+            edition=edition_name,
+            checks=(
+                DoctorCheck(
+                    label="Fact Bridge",
+                    status="ok",
+                    detail="REV is not configured for this program — fact-bridge posture not applicable.",
+                    metadata={"rev_configured": False, "fact_bridge_enabled": False},
+                ),
+            ),
+        )
+    enabled = ledger_fact_bridge_enabled(program_id=program_id, programs_root=programs_root)
+    if enabled:
+        return DoctorReport(
+            edition=edition_name,
+            checks=(
+                DoctorCheck(
+                    label="Fact Bridge",
+                    status="ok",
+                    detail="ledger fact-bridge is enabled; approved facts reach ProgramFactStore.",
+                    metadata={"rev_configured": True, "fact_bridge_enabled": True},
+                ),
+            ),
+        )
+    return DoctorReport(
+        edition=edition_name,
+        checks=(
+            DoctorCheck(
+                label="Fact Bridge",
+                status="warn",
+                detail=(
+                    "REV is configured but the ledger fact-bridge is disabled — approved "
+                    "facts will NOT reach ProgramFactStore, and the newsletter/ask/triage "
+                    "surfaces will silently disagree with what was actually approved. "
+                    "Set program.m365.rev.fact_bridge_enabled: true in program.yaml, or "
+                    "export VERTEX_LEDGER_FACT_BRIDGE=1."
+                ),
+                metadata={"rev_configured": True, "fact_bridge_enabled": False},
+            ),
+        ),
+    )
+
+
+def run_bridge_failure_backlog_doctor(
+    *,
+    edition_name: str,
+    program_id: str,
+    programs_root: Path,
+    threshold: int = _BRIDGE_FAILURE_BACKLOG_THRESHOLD,
+) -> DoctorReport:
+    """PS-2 / Track A step 1: surface a persistent bridge-failure backlog.
+
+    Reads `programs/<id>/ledger/bridge_failures.jsonl` (written by
+    `src.commands.ledger._record_bridge_failure` whenever a bridge appender
+    raises). WARNs when the number of distinct failed events at or above
+    `threshold` occurrences of any single event_id — a bridge that is enabled
+    but repeatedly failing for the same event across replays (e.g. a schema
+    regression an appender doesn't handle) — is the "enabled but silently
+    broken" gap this check exists to close, distinct from the disabled-bridge
+    check above.
+    """
+    from src.commands.ledger import load_bridge_failures
+
+    records = load_bridge_failures(program_id, programs_root=programs_root)
+    if not records:
+        return DoctorReport(
+            edition=edition_name,
+            checks=(
+                DoctorCheck(
+                    label="Fact Bridge Failure Backlog",
+                    status="ok",
+                    detail="no recorded bridge-appender failures.",
+                    metadata={"failure_count": 0, "repeatedly_failing_event_count": 0},
+                ),
+            ),
+        )
+    occurrences: dict[str, int] = {}
+    for record in records:
+        event_id = str(record.get("event_id", ""))
+        occurrences[event_id] = occurrences.get(event_id, 0) + 1
+    repeatedly_failing = {event_id: count for event_id, count in occurrences.items() if count >= threshold}
+    if repeatedly_failing:
+        status = "warn"
+        detail = (
+            f"{len(repeatedly_failing)} event(s) have failed bridging {threshold}+ times "
+            f"(of {len(records)} total recorded failures across {len(occurrences)} distinct events) — "
+            f"run `vertex ledger replay` to retry, or investigate the appender for a persistent regression."
+        )
+    else:
+        status = "ok"
+        detail = (
+            f"{len(records)} recorded bridge failure(s) across {len(occurrences)} distinct event(s), "
+            f"none at or above the {threshold}-occurrence backlog threshold."
+        )
+    return DoctorReport(
+        edition=edition_name,
+        checks=(
+            DoctorCheck(
+                label="Fact Bridge Failure Backlog",
+                status=status,
+                detail=detail,
+                metadata={
+                    "failure_count": len(records),
+                    "distinct_event_count": len(occurrences),
+                    "repeatedly_failing_event_count": len(repeatedly_failing),
+                    "threshold": threshold,
+                },
+            ),
+        ),
+    )
+
+
+# --------------------------------------------------------------------------
+# Track L (fix-data-flow.md §6.12 / PR-13): fact-schema deserialization
+# safety net. Distinct from Track K's fact-store *location* consistency
+# check (§6.11) — this catches the "wrong shape" failure mode (a persisted
+# fact's payload no longer deserializes cleanly against the *current*
+# domain-model schema), which Track K's location check cannot detect since
+# it only inspects which file gets opened, not whether its contents parse.
+#
+# Scoped to persisted-mirror rows only (per PS-11's v1.3 persisted-vs-transient
+# distinction, §6.12) — this check loads real rows via `load_program_facts()`
+# and runs them through the same projector functions the report pipeline
+# uses, so a transient shim fact (regenerated fresh from legacy YAML on every
+# call, never persisted) is exercised the same way a persisted-mirror row is;
+# neither category gets special-cased here, since both must round-trip
+# through the same projector to be usable by any consumer.
+# --------------------------------------------------------------------------
+
+_DESERIALIZATION_FAMILIES: tuple[tuple[str, Any], ...] = (
+    ("risk.entry", project_risk_entries),
+    ("decision.entry", project_decision_entries),
+    ("assumption.entry", project_assumptions),
+    ("dependency.link", project_dependencies),
+    ("milestone.entry", project_milestones),
+    ("workstream.entry", project_workstreams),
+    ("action.item", project_action_items),
+)
+
+# Lineage columns `ProgramReality`/`FactAssessment` depend on (S-3 provenance
+# envelope, `program_fact_store.py`'s `_s3_columns` + the earlier W2-6 pair) —
+# the exact set PS-14's stray 23-column pre-lineage database was missing.
+REQUIRED_LINEAGE_COLUMNS: tuple[str, ...] = (
+    "domain_event_id",
+    "candidate_id",
+    "source_document_key",
+    "approval_event_id",
+)
+
+
+def run_fact_deserialization_doctor(
+    *,
+    edition_name: str,
+    program_id: str,
+    programs_root: Path,
+) -> DoctorReport:
+    """Track L / PR-13: confirm existing persisted facts still deserialize
+    against the *current* schema — not just newly-bridged facts. Without
+    this, a future schema evolution (e.g. `RiskEntry` gains a new required
+    field) could silently break every `ProgramReality.risks()` call for
+    every program with no warning, since the six first-contact bugs (Track
+    F) already proved schema drift is exactly the class of bug that survives
+    undetected until the first real read.
+
+    Fails loudly (not silently) on a mismatch, pointing at
+    `admin_fact_store_migrate.py` (`vertex admin fact-store migrate-legacy-state`)
+    as the remediation path.
+    """
+    failures: list[str] = []
+    checked_types: list[str] = []
+    for fact_type, projector in _DESERIALIZATION_FAMILIES:
+        try:
+            snapshot = load_program_facts(program_id, programs_root=programs_root, fact_types=(fact_type,))
+            projector(snapshot)
+            checked_types.append(fact_type)
+        except Exception as exc:  # noqa: BLE001 — deliberately broad: any deserialization failure is reportable
+            failures.append(f"{fact_type}: {exc}")
+
+    if failures:
+        return DoctorReport(
+            edition=edition_name,
+            checks=(
+                DoctorCheck(
+                    label="Fact Deserialization",
+                    status="fail",
+                    detail=(
+                        f"{len(failures)} fact type(s) failed to deserialize against the current schema: "
+                        + "; ".join(failures)
+                        + ". Run `vertex admin fact-store migrate-legacy-state --program "
+                        + program_id
+                        + "` to remediate, or investigate the payload directly."
+                    ),
+                    metadata={"failed_fact_types": [f.split(":", 1)[0] for f in failures], "checked_fact_types": checked_types},
+                ),
+            ),
+        )
+    return DoctorReport(
+        edition=edition_name,
+        checks=(
+            DoctorCheck(
+                label="Fact Deserialization",
+                status="ok",
+                detail=f"{len(checked_types)} fact type(s) deserialize cleanly against the current schema.",
+                metadata={"checked_fact_types": checked_types},
+            ),
+        ),
+    )
+
+
+def check_fact_store_schema_has_lineage_columns(db_path: Path) -> tuple[str, ...]:
+    """Return the subset of `REQUIRED_LINEAGE_COLUMNS` MISSING from the live
+    `program_fact_revisions` table schema at `db_path`. Empty tuple means the
+    schema is fully lineage-capable. Returns all required columns as
+    "missing" if the database or table doesn't exist at all (nothing to read
+    lineage from yet — not itself a failure, just uninitialized).
+
+    This is precisely the check that would have caught PS-14's stray
+    23-column pre-lineage database automatically — see
+    `tests/unit/test_doctor_fact_deserialization.py`'s schema-precondition
+    test for a synthetic reproduction.
+    """
+    if not db_path.exists():
+        return REQUIRED_LINEAGE_COLUMNS
+    connection = sqlite3.connect(db_path)
+    try:
+        table_row = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'program_fact_revisions'",
+        ).fetchone()
+        if table_row is None:
+            return REQUIRED_LINEAGE_COLUMNS
+        existing_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(program_fact_revisions)").fetchall()
+        }
+    finally:
+        connection.close()
+    return tuple(column for column in REQUIRED_LINEAGE_COLUMNS if column not in existing_columns)

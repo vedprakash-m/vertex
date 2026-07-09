@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timedelta
 from pathlib import Path
 import re
@@ -17,9 +18,16 @@ from src.core.incident_journal_store import read_incident_entries
 from src.core.jinja_filters import risk_label
 from src.core.models import AttributionTier, Confidence, ConfirmedDimension, DeltaKind, DimensionRisk, EvidencePacket, RiskLevel, ScorecardDelta, ScorecardEvidencePacket, Snapshot, SnapshotItem, WorkItem
 from src.core.models_v2 import Assumption, AssumptionStatus
-from src.core.program_reality import ProgramReality
+from src.core.program_fact_store import load_current_assumptions
+from src.core.program_reality import FactAssessment, ProgramReality
+from src.core.stages.sor_gated_load import sor_gated_family_load
+from src.core.truth_levels import TruthLevel
 from src.core.snapshot_store import read_snapshot
 from src.core.view_models import AssumptionLifecycleRow, AssumptionLifecycleSummary, CharterReviewRow, CharterReviewSummary, IncidentLearningRow, IncidentLearningSummary, RetrospectiveIntelligenceRow, RetrospectiveIntelligenceSummary, ScorecardData
+
+log = logging.getLogger(__name__)
+
+_ALLOW_LEGACY_ASSUMPTION_ROLLBACK_ENV = "VERTEX_REPORT_ALLOW_LEGACY_ASSUMPTION_ROLLBACK"
 
 
 def _load_lookback_snapshots(
@@ -674,12 +682,17 @@ def _build_lookback_assumption_lifecycle(
     snapshots: tuple[Snapshot, ...],
     as_of: datetime,
     programs_root: Path,
+    edition_name: str | None = None,
+    archive_root: Path | None = None,
+    load_program_reality: Callable[..., ProgramReality] | None = None,
 ) -> AssumptionLifecycleSummary | None:
-    assumptions = tuple(
-        a.record for a in ProgramReality.load(
-            program_id,
-            programs_root=programs_root,
-        ).assumptions()
+    assumptions, assumption_assessments, _, _ = _load_lookback_assumptions(
+        program_id=program_id,
+        as_of=as_of,
+        programs_root=programs_root,
+        edition_name=edition_name,
+        archive_root=archive_root,
+        load_program_reality=load_program_reality,
     )
     if not assumptions:
         return None
@@ -695,6 +708,49 @@ def _build_lookback_assumption_lifecycle(
         return None
 
     overdue_ids = {entry.id for entry in check_validation_due(assumptions, as_of.date())}
+    render_warning: str | None = None
+    if not assumption_assessments:
+        rows = _build_lookback_assumption_rows_from_records(
+            _sort_lookback_assumption_rows_legacy(
+                relevant_entries,
+                overdue_ids=overdue_ids,
+            ),
+            overdue_ids=overdue_ids,
+        )
+        includes_unconfirmed_sources = False
+    else:
+        try:
+            rows = _build_lookback_assumption_rows_from_assessments(
+                _sort_lookback_assessment_rows(
+                    assumption_assessments,
+                    overdue_ids=overdue_ids,
+                    window_start=window_start,
+                    window_end=window_end,
+                ),
+                overdue_ids=overdue_ids,
+            )
+            includes_unconfirmed_sources = any(
+                row.evidence_truth_level == TruthLevel.RAW_OBSERVED.value
+                for row in rows
+            )
+        except Exception:  # noqa: BLE001 - visible fallback is the contract for render-shaping failures
+            log.critical(
+                "Assumption lifecycle render fallback activated for program %s",
+                program_id,
+                exc_info=True,
+            )
+            rows = _build_lookback_assumption_rows_from_records(
+                _sort_lookback_assumption_rows_legacy(
+                    relevant_entries,
+                    overdue_ids=overdue_ids,
+                ),
+                overdue_ids=overdue_ids,
+            )
+            includes_unconfirmed_sources = False
+            render_warning = (
+                "This section is temporarily rendering from the older assumption source "
+                "because live assumption metadata rendering failed."
+            )
     return AssumptionLifecycleSummary(
         window_start=window_start,
         window_end=window_end,
@@ -718,18 +774,148 @@ def _build_lookback_assumption_lifecycle(
             for entry in assumptions
             if entry.status is AssumptionStatus.UNVALIDATED and window_start <= entry.identified_date <= window_end
         ),
-        rows=tuple(
-            AssumptionLifecycleRow(
-                title=entry.text,
-                detail=_format_lookback_assumption_detail(entry, overdue=entry.id in overdue_ids),
-            )
-            for entry in _sort_lookback_assumptions(
-                relevant_entries,
-                window_start=window_start,
-                window_end=window_end,
-            )
+        rows=rows,
+        includes_unconfirmed_sources=includes_unconfirmed_sources,
+        render_warning=render_warning,
+    )
+
+
+def _load_lookback_assumptions(
+    *,
+    program_id: str,
+    as_of: datetime,
+    programs_root: Path,
+    edition_name: str | None = None,
+    archive_root: Path | None = None,
+    load_program_reality: Callable[..., ProgramReality] | None = None,
+) -> tuple[
+    tuple[Assumption, ...],
+    tuple[FactAssessment, ...] | None,
+    tuple[str, ...],
+    dict[str, dict[str, str | None]] | None,
+]:
+    return sor_gated_family_load(
+        program_id=program_id,
+        family="judgment",
+        programs_root=programs_root,
+        reality_accessor=lambda reality: reality.assumptions(),
+        legacy_loader=lambda: load_current_assumptions(program_id, programs_root=programs_root),
+        allow_legacy_rollback_env=_ALLOW_LEGACY_ASSUMPTION_ROLLBACK_ENV,
+        cross_check_label="assumption",
+        load_program_reality=load_program_reality,
+        as_of=as_of,
+        edition_name=edition_name,
+        archive_root=archive_root,
+    )
+
+
+def _build_lookback_assumption_rows_from_assessments(
+    assessments: tuple[FactAssessment, ...],
+    *,
+    overdue_ids: set[str],
+) -> tuple[AssumptionLifecycleRow, ...]:
+    return tuple(
+        _build_lookback_assumption_row_from_assessment(
+            assessment,
+            overdue=assessment.record.id in overdue_ids,
+        )
+        for assessment in assessments
+    )
+
+
+def _build_lookback_assumption_rows_from_records(
+    assumptions: tuple[Assumption, ...],
+    *,
+    overdue_ids: set[str],
+) -> tuple[AssumptionLifecycleRow, ...]:
+    return tuple(
+        _build_lookback_assumption_row_from_record(
+            assumption,
+            overdue=assumption.id in overdue_ids,
+        )
+        for assumption in assumptions
+    )
+
+
+def _build_lookback_assumption_row_from_assessment(
+    assessment: FactAssessment,
+    *,
+    overdue: bool,
+) -> AssumptionLifecycleRow:
+    return AssumptionLifecycleRow(
+        title=assessment.record.text,
+        detail=_format_lookback_assumption_detail(
+            assessment.record,
+            overdue=overdue,
+        ),
+        evidence_truth_level=_assessment_truth_level(assessment),
+        evidence_disputed=assessment.disputed,
+        evidence_stale=assessment.stale,
+    )
+
+
+def _build_lookback_assumption_row_from_record(
+    assumption: Assumption,
+    *,
+    overdue: bool,
+) -> AssumptionLifecycleRow:
+    return AssumptionLifecycleRow(
+        title=assumption.text,
+        detail=_format_lookback_assumption_detail(
+            assumption,
+            overdue=overdue,
         ),
     )
+
+
+def _sort_lookback_assumption_rows_legacy(
+    assumptions: tuple[Assumption, ...],
+    *,
+    overdue_ids: set[str],
+) -> tuple[Assumption, ...]:
+    return tuple(
+        sorted(
+            assumptions,
+            key=lambda assumption: (
+                0 if assumption.id in overdue_ids else 1,
+                0 if assumption.status is AssumptionStatus.UNVALIDATED else 1,
+                assumption.validation_due or date.max,
+                assumption.identified_date,
+                assumption.text.lower(),
+            ),
+        )
+    )
+
+
+def _sort_lookback_assessment_rows(
+    assessments: tuple[FactAssessment, ...],
+    *,
+    overdue_ids: set[str],
+    window_start: date,
+    window_end: date,
+) -> tuple[FactAssessment, ...]:
+    return tuple(
+        assessment
+        for assessment in sorted(
+            assessments,
+            key=lambda assessment: (
+                0 if assessment.record.id in overdue_ids else 1,
+                0 if assessment.record.status is AssumptionStatus.UNVALIDATED else 1,
+                assessment.record.validation_due or date.max,
+                assessment.record.identified_date,
+                assessment.record.text.lower(),
+            ),
+        )
+        if _assumption_is_in_lookback_window(
+            assessment.record,
+            window_start=window_start,
+            window_end=window_end,
+        )
+    )
+
+
+def _assessment_truth_level(assessment: FactAssessment) -> str:
+    return assessment.truth_level.value
 
 
 def _build_lookback_charter_review(

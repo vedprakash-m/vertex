@@ -41,6 +41,8 @@ _EXPECTED_BRANCH_RUNNERS = {
     "flip_parity": "_run_flip_parity_doctor",
     "source_waivers": "_run_source_waiver_doctor",
     "fact_parity": "_run_fact_parity_doctor",
+    "fact_bridge": "DoctorReport",
+    "fact_deserialization": "_run_fact_deserialization_doctor",
     "confirm_readiness": "_run_confirm_readiness_doctor",
     "adapter_cert": "_run_adapter_cert_doctor",
     "sharepoint": "_run_sharepoint_doctor",

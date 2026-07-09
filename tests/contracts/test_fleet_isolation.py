@@ -155,3 +155,66 @@ def test_fact_snapshots_are_scoped_to_program() -> None:
     assert ids_a.isdisjoint(ids_b), (
         f"Fleet isolation broken at snapshot level: shared milestone IDs: {ids_a & ids_b}"
     )
+
+
+def test_bridge_appender_isolates_facts_between_two_concurrent_programs(tmp_path: Path) -> None:
+    """fix-data-flow.md Track A / PR-6 (R9): a `program_id`-filtering bug in a
+    bridge appender could leak facts from one program into another's
+    `ProgramReality` snapshot once the bridge is default-on for every
+    REV-configured program, not just one explicitly opted-in program. This
+    runs the real `append_bridged_milestone_event` appender for two distinct
+    programs against a *shared* `db_root` (mirroring how a single fact-store
+    backend serves the whole fleet) and asserts each program's snapshot sees
+    only its own fact.
+    """
+    from src.core.ledger.event_log import ConfidenceTier, EventEnvelope, TemporalConfidence
+    from src.core.ledger.fact_bridge import append_bridged_milestone_event
+    from src.core.ledger.source_refs import EmailRef
+    from src.core.program_fact_store import ProgramFactStore
+
+    db_root = tmp_path / "vertex-db"
+
+    def _milestone_completed_event(*, program_id: str, event_id: str, milestone_id: str) -> "EventEnvelope":
+        return EventEnvelope(
+            event_id=event_id,
+            program_id=program_id,
+            event_type="milestone.completed.v1",
+            occurred_at=_NOW,
+            recorded_at=_NOW,
+            temporal_confidence=TemporalConfidence.EXACT,
+            confidence=ConfidenceTier.OPERATOR_CONFIRMED,
+            actor="rev-mail",
+            payload={"milestone_id": milestone_id, "completed_on": "2026-05-30"},
+            source_ref=EmailRef(
+                subject="Milestone complete",
+                sent_at=_NOW,
+                sender="pm@example.com",
+                message_id=f"{event_id}@example.com",
+                vault_hash=f"sha256:vault-{event_id}",
+            ),
+            prev_event_hash="sha256:prev",
+            content_hash=f"sha256:content-{event_id}",
+        )
+
+    append_bridged_milestone_event(
+        _milestone_completed_event(program_id="prog-a", event_id="evt-a1", milestone_id="milestone:shared-id"),
+        db_root=db_root,
+    )
+    append_bridged_milestone_event(
+        _milestone_completed_event(program_id="prog-b", event_id="evt-b1", milestone_id="milestone:shared-id"),
+        db_root=db_root,
+    )
+
+    snapshot_a = ProgramFactStore("prog-a", db_root=db_root).snapshot()
+    snapshot_b = ProgramFactStore("prog-b", db_root=db_root).snapshot()
+
+    assert all(fact.program_id == "prog-a" for fact in snapshot_a.facts), (
+        "Fleet isolation broken: prog-a's snapshot contains a fact from another program"
+    )
+    assert all(fact.program_id == "prog-b" for fact in snapshot_b.facts), (
+        "Fleet isolation broken: prog-b's snapshot contains a fact from another program"
+    )
+    milestones_a = project_milestones(snapshot_a)
+    milestones_b = project_milestones(snapshot_b)
+    assert len(milestones_a) == 1
+    assert len(milestones_b) == 1

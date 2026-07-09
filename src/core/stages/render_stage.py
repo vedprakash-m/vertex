@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass, replace
 from datetime import timedelta
@@ -26,9 +27,11 @@ from src.core.models import EditionType, ReportData, ReviewState, ReviewStatus, 
 from src.core.notification_state_store import load_latest_notification_state
 from src.core.pipeline import StageContext
 from src.core.program_fact_store import load_program_facts, project_risk_entries
+from src.core.program_reality import ProgramReality
 from src.core.quality_matrix_engine import QualityMatrix, build_quality_matrix
 from src.core.remediation_engine import RemediationReport, build_remediation_report
 from src.core.review_status_store import get_review_status_path
+from src.core.risk_register_engine import assess_risk_staleness
 from src.core.signal_review import signal_is_approved_for_evidence
 from src.core.signal_ranking import signal_source_family
 from src.core.store_factory import build_signal_store_for_program_id
@@ -36,6 +39,12 @@ from src.core.teams_renderer import TeamsRenderer
 from src.core.velocity_metrics import build_velocity_kusto_section
 from src.core.vitality_reporting import build_vitality_section
 from src.core.view_models import EditionMeta, WorkstreamData
+
+log = logging.getLogger(__name__)
+_RISK_RENDER_WARNING = (
+    "⚠ System error: this section is showing a stale, unmaintained data source because live risk rendering failed — see logs."
+)
+_RISK_RENDER_FALLBACK_EXCEPTIONS = (AttributeError, KeyError, TypeError, ValueError)
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,7 +295,9 @@ class RenderStage:
             ctx.dimension_risks,
             ctx.archive_root,
         )
-        health = support.build_health_summary(
+        health = _build_health_summary_with_risk_fallback(
+            ctx,
+            support,
             ctx.dimension_risks,
             ctx.continuity_snapshot,
             overrides_document=ctx.overrides_document,
@@ -296,6 +307,7 @@ class RenderStage:
             milestones=(ctx.milestones or ()),
             milestone_assessments=(ctx.milestone_assessments or ()),
             risks=(ctx.risks or ()),
+            risk_assessments=(ctx.risk_assessments or ()),
             stale_risk_ids=ctx.stale_risk_ids,
             program_id=(ctx.resolved_v2.program.id if ctx.resolved_v2 is not None else None),
             programs_root=ctx.programs_root,
@@ -499,6 +511,10 @@ class RenderStage:
             key_assumption_rows = ()
             issue_projections: tuple[IssueProjection, ...] = ()
             if ctx.resolved_v2 is not None:
+                deck_reality = ProgramReality.load(
+                    ctx.resolved_v2.program.id,
+                    programs_root=ctx.programs_root,
+                )
                 open_decision_asks = load_open_decision_asks(
                     ctx.resolved_v2.program.id,
                     programs_root=ctx.programs_root,
@@ -511,11 +527,13 @@ class RenderStage:
                     program_id=ctx.resolved_v2.program.id,
                     as_of=ctx.data_as_of,
                     programs_root=ctx.programs_root,
+                    reality=deck_reality,
                 )
                 key_decision_rows = support.build_deck_decision_rows(
                     program_id=ctx.resolved_v2.program.id,
                     as_of=ctx.data_as_of,
                     programs_root=ctx.programs_root,
+                    reality=deck_reality,
                 )
                 overdue_action_ids = set(ctx.overdue_action_ids or ())
                 overdue_actions = tuple(
@@ -543,7 +561,14 @@ class RenderStage:
                     open_asks=open_decision_asks,
                     overdue_actions=overdue_actions,
                     open_claims=open_claims,
-                    risk_entries=_load_current_risks(ctx.resolved_v2.program.id, programs_root=ctx.programs_root),
+                    risk_entries=(
+                        ctx.risks
+                        # Normal report runs already populate ctx.risks in
+                        # RiskStage; only isolated RenderStage tests/fallback
+                        # paths should hit the legacy loader below.
+                        if ctx.risks is not None
+                        else _load_current_risks(ctx.resolved_v2.program.id, programs_root=ctx.programs_root)
+                    ),
                     ado_item_base_url=support.ado_item_base_url(ctx.bundle),
                 )
                 open_ask_rows, closed_ask_rows = support.build_deck_ask_rows(
@@ -572,6 +597,7 @@ class RenderStage:
                     raw_program=ctx.resolved_v2.raw_program,
                     program_id=ctx.resolved_v2.program.id,
                     programs_root=ctx.programs_root,
+                    reality=deck_reality,
                     milestones=(ctx.milestones or ()),
                     milestone_assessments=(ctx.milestone_assessments or ()),
                     issue_projections=issue_projections,
@@ -628,6 +654,41 @@ def _load_current_risks(program_id: str, *, programs_root: Path):
             fact_types=("risk.entry",),
         )
     )
+
+
+def _build_health_summary_with_risk_fallback(
+    ctx: StageContext,
+    support: Any,
+    *args,
+    **kwargs,
+):
+    try:
+        return support.build_health_summary(*args, **kwargs)
+    except _RISK_RENDER_FALLBACK_EXCEPTIONS:
+        if ctx.risk_assessments is None or ctx.resolved_v2 is None or ctx.programs_root is None or ctx.data_as_of is None:
+            raise
+        log.critical(
+            "Risk render fallback activated for program %s issue %s",
+            ctx.resolved_v2.program.id,
+            ctx.resolved_issue_number,
+            exc_info=True,
+        )
+        legacy_risks = _load_current_risks(ctx.resolved_v2.program.id, programs_root=ctx.programs_root)
+        legacy_stale_risk_ids = tuple(
+            risk.id
+            for risk in legacy_risks
+            if assess_risk_staleness(risk, ctx.data_as_of.date())
+        )
+        fallback_health = support.build_health_summary(
+            *args,
+            **{
+                **kwargs,
+                "risks": legacy_risks,
+                "risk_assessments": (),
+                "stale_risk_ids": legacy_stale_risk_ids,
+            },
+        )
+        return replace(fallback_health, risk_render_warning=_RISK_RENDER_WARNING)
 
 
 def _append_carried_forward_workstreams(

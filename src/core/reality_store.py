@@ -5,6 +5,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -35,6 +36,8 @@ from src.core.source_models import IngestionRun, MaintenanceWindow, MetricBindin
 
 _DB_FILENAME = "vertex.sqlite3"
 
+log = logging.getLogger(__name__)
+
 
 def get_program_reality_db_path(
     program_id: str,
@@ -52,7 +55,26 @@ def _resolve_reality_db_root(*, home_root: Path | None = None) -> Path:
     configured_root = os.environ.get("VERTEX_DB_PATH")
     if configured_root:
         return Path(configured_root)
-    return (home_root or Path.home()) / ".vertex"
+    # PS-14 / Track K root-cause fix (fix-data-flow.md §6.11): this fallback
+    # previously chose ``~/.vertex`` with zero logging whenever a caller
+    # threaded neither ``db_root`` nor ``VERTEX_DB_PATH`` — the exact
+    # mechanism that produced a silent split-brain fact-store database for
+    # `xpf` (a stray home-directory DB, invisible to any caller that always
+    # supplies `programs_root`/`db_root` explicitly, per production code's
+    # real path). Any future script, test, or refactor that omits both now
+    # gets a loud, unmissable signal instead of silently reading/writing the
+    # wrong database.
+    resolved = (home_root or Path.home()) / ".vertex"
+    log.critical(
+        "reality_store: no db_root/VERTEX_DB_PATH supplied — falling back to "
+        "%s. This is very likely NOT the canonical fact-store location production "
+        "code uses (which threads an explicit programs_root/db_root). See "
+        "fix-data-flow.md PS-14/Track K — run `vertex doctor --fact-bridge` or "
+        "check for multiple vertex.sqlite3 files for this program before trusting "
+        "reads/writes through this path.",
+        resolved,
+    )
+    return resolved
 
 
 class RealityStore:

@@ -49,18 +49,27 @@ class DeckIssueRow:
 class DeckRiskRow:
     title: str
     detail: str
+    evidence_truth_level: str | None = None
+    evidence_disputed: bool = False
+    evidence_stale: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class DeckDecisionRow:
     title: str
     detail: str
+    evidence_truth_level: str | None = None
+    evidence_disputed: bool = False
+    evidence_stale: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class DeckAssumptionRow:
     title: str
     detail: str
+    evidence_truth_level: str | None = None
+    evidence_disputed: bool = False
+    evidence_stale: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +86,9 @@ class DeckMilestoneRow:
     detail: str
     source_document_key: str | None = None
     approval_event_id: str | None = None
+    evidence_truth_level: str | None = None
+    evidence_disputed: bool = False
+    evidence_stale: bool = False
 
 
 @dataclass(frozen=True, slots=True)

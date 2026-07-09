@@ -1,5 +1,7 @@
 {% extends "base.email.j2" %}
 
+{% from "partials/truth_badge.j2" import disputed_badge, truth_badge, unconfirmed_sources_footer %}
+
 {% block content %}
 {% include "partials/nav_bar.j2" %}
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 16px 0;">
@@ -113,13 +115,17 @@
       <p style="margin:0 0 12px 0; font-size:13px; line-height:1.6; color:#374151;">
         Identified in window: {{ assumption_summary.identified_count }} | Confirmed in window: {{ assumption_summary.confirmed_count }} | Invalidated in window: {{ assumption_summary.invalidated_count }} | Still open: {{ assumption_summary.still_open_count }}
       </p>
+      {% if assumption_summary.render_warning %}
+      <p style="margin:0 0 12px 0; padding:8px 10px; background-color:#FEE2E2; border:1px solid #DC2626; font-size:13px; line-height:1.5; color:#991B1B;">{{ assumption_summary.render_warning }}</p>
+      {% endif %}
       <ul style="margin:0; padding-left:18px; color:#111827;">
         {% for row in assumption_summary.rows %}
         <li style="margin:0 0 8px 0; font-size:13px; line-height:1.6;">
-          <strong>{{ row.title }}</strong> - {{ row.detail }}
+          <strong>{{ row.title }}</strong>{{ truth_badge(row.evidence_truth_level) }}{{ disputed_badge(row.evidence_disputed) }} - {{ row.detail }}
         </li>
         {% endfor %}
       </ul>
+      {{ unconfirmed_sources_footer(assumption_summary.includes_unconfirmed_sources) }}
     </td>
   </tr>
 </table>

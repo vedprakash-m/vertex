@@ -884,7 +884,7 @@ def _build_evidence_appendix_checks(
     label_counts = Counter(str(row.get("expected_event_type", "")) for row in labels)
     quality_metrics_path = programs_root / program / "_quality" / "rev_quality_metrics.json"
     quality_metrics = compute_quality_report(program_id=program, programs_root=programs_root).to_dict()
-    bridge_default = _count_text(repo_root / "src" / "core" / "models_v2.py", "fact_bridge_enabled: bool = False") > 0
+    bridge_default = _count_text(repo_root / "src" / "core" / "models_v2.py", "fact_bridge_enabled: bool = True") > 0
     bridge_env_set = os.environ.get("VERTEX_LEDGER_FACT_BRIDGE", "").strip().lower() in {"1", "true", "yes", "on"}
     triage_edit_present = _count_text(ledger_py, '@triage_app.command("edit")') > 0
     triage_revoke_present = _count_text(ledger_py, '@triage_app.command("revoke")') > 0
@@ -1337,11 +1337,12 @@ def _build_evidence_appendix_checks(
         ),
         CheckResult(
             "PS-2-BRIDGE-DEFAULT",
-            "pass" if bridge_default and not bridge_env_set else "fail",
-            "fact bridge default is off and env override is not enabled"
-            if bridge_default and not bridge_env_set
-            else "fact bridge default/env state is not the expected scoped-off baseline",
-            {"model_default_false": bridge_default, "env_enabled": bridge_env_set},
+            "pass" if bridge_default else "fail",
+            "fact bridge defaults on (fix-data-flow.md Track A step 2 / ADR-0011) — "
+            "any REV-configured program that doesn't explicitly opt out now bridges by default"
+            if bridge_default
+            else "fact bridge default is not the expected default-on baseline (ADR-0011)",
+            {"model_default_true": bridge_default, "env_enabled": bridge_env_set},
         ),
         CheckResult(
             "PS-3-LAST-CYCLE-SNAPSHOT",

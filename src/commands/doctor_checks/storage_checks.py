@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import json
 from pathlib import Path
 import sqlite3
 from typing import Any
@@ -97,6 +99,18 @@ def run_storage_doctor(
             confirmed_issue_count=len(confirmed_entries),
             db_root=reality_db_root,
         ),
+        _stray_fact_store_database_check(
+            program_id,
+            programs_root=programs_root,
+            db_root=reality_db_root,
+        ),
+        _render_manifest_sor_consistency_check(
+            program_id,
+            edition_name=edition_name,
+            programs_root=programs_root,
+            latest_confirmed_issue_number=(latest_confirmed.issue_number if latest_confirmed is not None else None),
+        ),
+        _gather_freshness_check(program_id, programs_root=programs_root),
         _fact_store_authority_check(program_id, programs_root=programs_root),
         _cost_ledger_storage_check(edition_name, programs_root=programs_root),
         _ai_proposal_queue_check(program_id, programs_root=programs_root),
@@ -452,6 +466,245 @@ def _reality_db_storage_check(
         expected_location=expected_root,
         prefix="Program fact-store DB. ",
     )
+
+
+def _stray_fact_store_database_check(
+    program_id: str,
+    *,
+    programs_root: Path,
+    db_root: Path | None,
+) -> DoctorCheck:
+    """Track K (fix-data-flow.md §6.11, resolves PS-14's symptom): detect
+    when more than one candidate ``vertex.sqlite3`` exists for a program.
+
+    Resolves the canonical database path the same way production code does
+    (``get_program_reality_db_path`` with the same ``db_root`` every report
+    stage threads), then checks the other plausible-but-non-canonical
+    locations a caller that omitted ``db_root``/``programs_root`` could have
+    silently created: the home-directory fallback (``~/.vertex/<id>/...``,
+    reachable via ``_resolve_reality_db_root``'s silent-fallback path before
+    this track's root-cause fix) and the ``programs_root``-relative location
+    (as opposed to ``programs_root.parent``-relative, the canonical
+    resolution — see ``program_fact_store.py:457``'s
+    ``resolved_db_root = programs_root.parent``). If a stray database is
+    found, WARNs with both paths and their row counts so an operator can
+    investigate and clean up (see the multi-DB cleanup procedure documented
+    in this track's design) before it causes silent confusion.
+    """
+    canonical_path = get_program_reality_db_path(program_id, db_root=db_root)
+    candidate_paths: dict[str, Path] = {
+        "home_fallback": Path.home() / ".vertex" / program_id / "vertex.sqlite3",
+        "programs_root_relative": programs_root / program_id / "vertex.sqlite3",
+    }
+    stray: dict[str, dict[str, object]] = {}
+    for label, candidate_path in candidate_paths.items():
+        if candidate_path == canonical_path:
+            continue
+        if not candidate_path.exists():
+            continue
+        stray[label] = {
+            "path": str(candidate_path),
+            "row_count": _count_fact_store_rows(candidate_path),
+        }
+
+    if not stray:
+        return DoctorCheck(
+            "Fact Store Location",
+            "ok",
+            f"canonical fact-store path is the only vertex.sqlite3 found for {program_id!r}: {canonical_path}",
+            metadata={"canonical_path": str(canonical_path), "stray_databases": {}},
+        )
+
+    canonical_row_count = _count_fact_store_rows(canonical_path) if canonical_path.exists() else 0
+    detail_parts = [
+        f"{label}={info['path']} ({info['row_count']} rows)"
+        for label, info in stray.items()
+    ]
+    return DoctorCheck(
+        "Fact Store Location",
+        "warn",
+        (
+            f"{len(stray)} stray vertex.sqlite3 file(s) found for {program_id!r} besides the canonical "
+            f"path ({canonical_path}, {canonical_row_count} rows): {'; '.join(detail_parts)}. "
+            "This is the PS-14 split-brain hazard — a caller that omits programs_root/db_root could "
+            "silently read/write one of these instead of the canonical database. Investigate and clean "
+            "up (archive or delete) once confirmed non-canonical and unread by any production call path."
+        ),
+        metadata={
+            "canonical_path": str(canonical_path),
+            "canonical_row_count": canonical_row_count,
+            "stray_databases": stray,
+        },
+    )
+
+
+# Family -> its real authority family (source_authority.yaml's family_map).
+# See docs/contributing/migrate-fact-family.md.
+_MANIFEST_FAMILY_TO_AUTHORITY: dict[str, str] = {
+    "milestone": "workitem.state",
+    "dependency": "workitem.state",
+    "risk": "judgment",
+    "assumption": "judgment",
+}
+
+
+def _render_manifest_sor_consistency_check(
+    program_id: str,
+    *,
+    edition_name: str,
+    programs_root: Path,
+    latest_confirmed_issue_number: int | None,
+) -> DoctorCheck:
+    """Track K (fix-data-flow.md §6.11): compares the per-issue render
+    manifest's recorded ``family_read_paths`` (which read path each family
+    actually used at render time, written by `validation_stage.py`'s
+    `_build_family_read_paths_metadata`) against what `resolve_family_sor_mode`
+    resolves to *right now* for the same families. A mismatch means either
+    the SoR config changed after that issue rendered (expected, informational)
+    or — more concerning — a family's stage silently isn't honoring the
+    declared SoR mode at all (the exact class of drift PS-11/PS-14's own
+    manual verification took hours to notice).
+    """
+    if latest_confirmed_issue_number is None:
+        return DoctorCheck(
+            "Render Manifest SoR Consistency",
+            "ok",
+            "no confirmed issue yet for this edition — nothing to cross-check.",
+            metadata={},
+        )
+
+    from src.core.manifest_writer import get_manifest_path
+
+    manifest_path = get_manifest_path(edition_name, latest_confirmed_issue_number, programs_root=programs_root)
+    if not manifest_path.exists():
+        return DoctorCheck(
+            "Render Manifest SoR Consistency",
+            "ok",
+            f"no render manifest found at {manifest_path} for issue {latest_confirmed_issue_number} — nothing to cross-check.",
+            metadata={"manifest_path": str(manifest_path)},
+        )
+
+    try:
+        manifest_doc = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return DoctorCheck(
+            "Render Manifest SoR Consistency",
+            "warn",
+            f"render manifest at {manifest_path} could not be parsed.",
+            metadata={"manifest_path": str(manifest_path)},
+        )
+
+    recorded_read_paths = ((manifest_doc.get("metadata") or {}).get("family_read_paths")) or {}
+    if not recorded_read_paths:
+        return DoctorCheck(
+            "Render Manifest SoR Consistency",
+            "ok",
+            f"render manifest for issue {latest_confirmed_issue_number} has no family_read_paths recorded (older manifest, predates this check).",
+            metadata={"manifest_path": str(manifest_path)},
+        )
+
+    mismatches: dict[str, dict[str, str]] = {}
+    for family, recorded_path in recorded_read_paths.items():
+        authority_family = _MANIFEST_FAMILY_TO_AUTHORITY.get(family)
+        if authority_family is None:
+            continue
+        try:
+            from src.core.fact_sor_state import resolve_family_sor_mode
+
+            current_family_mode = resolve_family_sor_mode(program_id, authority_family, programs_root=programs_root)
+        except Exception:  # noqa: BLE001 -- this check must never crash `vertex doctor`
+            continue
+        current_path = "legacy" if current_family_mode == "legacy" else "reality"
+        if current_path != recorded_path:
+            mismatches[family] = {"manifest_recorded": recorded_path, "current": current_path}
+
+    if mismatches:
+        return DoctorCheck(
+            "Render Manifest SoR Consistency",
+            "warn",
+            (
+                f"issue {latest_confirmed_issue_number}'s render manifest recorded a different read path than "
+                f"the current SoR config resolves to for {len(mismatches)} family/families: {mismatches}. "
+                "If the SoR config changed since that issue rendered, this is expected/informational; if not, "
+                "investigate whether the family's stage is honoring its declared SoR mode."
+            ),
+            metadata={"manifest_path": str(manifest_path), "mismatches": mismatches},
+        )
+    return DoctorCheck(
+        "Render Manifest SoR Consistency",
+        "ok",
+        f"issue {latest_confirmed_issue_number}'s render manifest read paths match the current SoR config for all recorded families.",
+        metadata={"manifest_path": str(manifest_path)},
+    )
+
+
+# Track K (fix-data-flow.md §6.11): surface when a program's reality hasn't
+# been refreshed via `vertex gather` in over this many hours.
+_GATHER_FRESHNESS_THRESHOLD_HOURS = 24
+
+
+def _gather_freshness_check(program_id: str, *, programs_root: Path) -> DoctorCheck:
+    """Track K (§6.11 item a): last-gather-timestamp freshness check.
+
+    Reads `run_telemetry.jsonl` (already populated by every `vertex gather`
+    run, per WS-17) and WARNs when the most recent recorded gather run
+    finished more than `_GATHER_FRESHNESS_THRESHOLD_HOURS` hours ago, or when
+    no gather run has ever been recorded at all.
+    """
+    from src.core.run_telemetry import read_run_telemetry
+
+    try:
+        records = read_run_telemetry(program_id, programs_root=programs_root, window=1)
+    except Exception:  # noqa: BLE001 -- this check must never crash `vertex doctor`
+        records = ()
+
+    if not records:
+        return DoctorCheck(
+            "Gather Freshness",
+            "warn",
+            f"no gather run has ever been recorded for {program_id!r} (run_telemetry.jsonl is absent or empty).",
+            metadata={"last_gather_finished_at": None},
+        )
+
+    last_record = records[-1]
+    now = datetime.now(timezone.utc)
+    finished_at = last_record.finished_at
+    if finished_at.tzinfo is None:
+        finished_at = finished_at.replace(tzinfo=timezone.utc)
+    age_hours = (now - finished_at).total_seconds() / 3600.0
+
+    if age_hours > _GATHER_FRESHNESS_THRESHOLD_HOURS:
+        return DoctorCheck(
+            "Gather Freshness",
+            "warn",
+            (
+                f"last gather run for {program_id!r} finished {age_hours:.1f}h ago "
+                f"(threshold {_GATHER_FRESHNESS_THRESHOLD_HOURS}h) — reality may be stale."
+            ),
+            metadata={"last_gather_finished_at": finished_at.isoformat(), "age_hours": round(age_hours, 1)},
+        )
+    return DoctorCheck(
+        "Gather Freshness",
+        "ok",
+        f"last gather run for {program_id!r} finished {age_hours:.1f}h ago (within {_GATHER_FRESHNESS_THRESHOLD_HOURS}h threshold).",
+        metadata={"last_gather_finished_at": finished_at.isoformat(), "age_hours": round(age_hours, 1)},
+    )
+
+
+def _count_fact_store_rows(db_path: Path) -> int:
+    if not db_path.exists():
+        return 0
+    try:
+        with sqlite3.connect(db_path) as connection:
+            table_row = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'program_fact_revisions'",
+            ).fetchone()
+            if table_row is None:
+                return 0
+            row = connection.execute("SELECT COUNT(*) FROM program_fact_revisions").fetchone()
+            return int(row[0]) if row is not None else 0
+    except sqlite3.DatabaseError:
+        return 0
 
 
 def _fact_store_authority_check(program_id: str, *, programs_root: Path) -> DoctorCheck:

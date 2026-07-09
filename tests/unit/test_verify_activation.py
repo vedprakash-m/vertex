@@ -364,7 +364,7 @@ def test_evidence_checks_include_p5_rollback_and_lineage_contracts(tmp_path: Pat
         '"discovery.candidate_revoked.v1"\n',
         encoding="utf-8",
     )
-    (repo_root / "src" / "core" / "models_v2.py").write_text("fact_bridge_enabled: bool = False\n", encoding="utf-8")
+    (repo_root / "src" / "core" / "models_v2.py").write_text("fact_bridge_enabled: bool = True\n", encoding="utf-8")
     (repo_root / "src" / "core" / "view_models.py").write_text(
         "source_document_key: str | None = None\napproval_event_id: str | None = None\n",
         encoding="utf-8",

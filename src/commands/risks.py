@@ -10,10 +10,11 @@ import os
 import typer
 
 from src.core.journal import PROGRAMS_ROOT
-from src.core.program_reality import ProgramReality
+from src.core.program_reality import FactAssessment, ProgramReality
 from src.core.raid_graph import RaidChainResult, build_raid_chain_index
 from src.core.models_v2 import RiskCategory, RiskEntry, RiskImpact, RiskProbability, RiskStatus
 from src.core.risk_register_engine import assess_risk_staleness, build_risk_id, compute_risk_score, link_risk_action, record_risk_update, save_risk_register
+from src.core.truth_levels import TruthLevel
 
 
 app = typer.Typer(help="Manage the program risk register.", invoke_without_command=True)
@@ -256,6 +257,9 @@ def link_risk_command(
         raise typer.BadParameter("action_id is required.")
 
     _reality = ProgramReality.load(program_id, programs_root=PROGRAMS_ROOT)
+    # .record strips are intentional: the link command validates ids and writes
+    # to the register via link_risk_action(); FactAssessment metadata is not
+    # needed for a write/validation operation.
     risks = tuple(a.record for a in _reality.risks())
     risk_entry = next((entry for entry in risks if entry.id == risk_key), None)
     if risk_entry is None:
@@ -283,11 +287,12 @@ def link_risk_command(
 
 
 def _print_risks(program_id: str, *, status_filter: RiskStatus | None, format: str, show_links: bool) -> None:
-    entries = _load_current_risks(program_id)
+    assessments = _load_current_risk_assessments(program_id)
     if status_filter is not None:
-        entries = tuple(entry for entry in entries if entry.status == status_filter)
+        assessments = tuple(a for a in assessments if a.record.status == status_filter)
     today = datetime.now(timezone.utc).date()
-    sorted_entries = _sort_risks(entries)
+    sorted_assessments = _sort_risk_assessments(assessments)
+    entries = tuple(a.record for a in sorted_assessments)
     chain_index = build_raid_chain_index(program_id, programs_root=PROGRAMS_ROOT) if show_links else {}
     if format == "json":
         typer.echo(
@@ -300,9 +305,15 @@ def _print_risks(program_id: str, *, status_filter: RiskStatus | None, format: s
                         | {
                             "risk_score": compute_risk_score(entry),
                             "staleness": ("stale" if assess_risk_staleness(entry, today) else "current"),
+                            # Track E follow-up: preserve FactAssessment metadata so the
+                            # risk board carries the same truth signal as ask/triage/newsletter.
+                            "truth_level": assessment.truth_level.value,
+                            "disputed": assessment.disputed,
+                            "fact_stale": assessment.stale,
+                            "evidence": list(assessment.evidence),
                             **(_raid_chain_payload(chain_index.get(entry.id)) if show_links else {}),
                         }
-                        for entry in sorted_entries
+                        for assessment, entry in zip(sorted_assessments, entries, strict=True)
                     ],
                 },
                 indent=2,
@@ -312,20 +323,25 @@ def _print_risks(program_id: str, *, status_filter: RiskStatus | None, format: s
         )
         return
     if format == "csv":
-        typer.echo(render_risks_csv(sorted_entries, as_of=today, chain_index=chain_index if show_links else None), nl=False)
+        typer.echo(
+            render_risks_csv(entries, as_of=today, chain_index=chain_index if show_links else None, assessments=sorted_assessments),
+            nl=False,
+        )
         return
     if format != "human":
         raise typer.BadParameter("--format must be 'human', 'json', or 'csv'.")
-    if not sorted_entries:
+    if not sorted_assessments:
         typer.echo(f"No risks found for {program_id}.")
         return
 
-    typer.echo(f"RISK REGISTER — {program_id} ({len(sorted_entries)})")
-    for entry in sorted_entries:
+    typer.echo(f"RISK REGISTER — {program_id} ({len(sorted_assessments)})")
+    for assessment in sorted_assessments:
+        entry = assessment.record
         stale_label = "stale" if assess_risk_staleness(entry, today) else "current"
         due_label = entry.mitigation_due_date.isoformat() if entry.mitigation_due_date is not None else "-"
+        truth_label = _format_risk_truth_label(assessment)
         typer.echo(
-            f"- {entry.id} | {entry.status.value} | score {compute_risk_score(entry)} | {stale_label} | due {due_label} | owner {entry.owner_alias}"
+            f"- {entry.id} | {entry.status.value} | score {compute_risk_score(entry)} | {stale_label} | due {due_label} | owner {entry.owner_alias}{truth_label}"
         )
         typer.echo(f"  {entry.title}")
         if show_links:
@@ -349,6 +365,66 @@ def _sort_risks(entries: tuple[RiskEntry, ...]) -> tuple[RiskEntry, ...]:
     )
 
 
+def _sort_risk_assessments(assessments: tuple[FactAssessment, ...]) -> tuple[FactAssessment, ...]:
+    """Sort FactAssessment-wrapped risks by the same precedence as ``_sort_risks``.
+
+    Disputed risks are promoted to the top of the board (a disputed risk is the
+    highest-priority item for a TPM/EM to look at), then the standard
+    open/escalated-first → score-desc → title precedence.
+    """
+    return tuple(
+        sorted(
+            assessments,
+            key=lambda a: (
+                0 if a.disputed else 1,
+                0 if a.record.status in {RiskStatus.OPEN, RiskStatus.ESCALATED} else 1,
+                -compute_risk_score(a.record),
+                a.record.title.lower(),
+            ),
+        )
+    )
+
+
+def _format_risk_truth_label(assessment: FactAssessment) -> str:
+    """Compact human-readable truth-signal suffix for the risk board (one line).
+
+    Surfaces ``truth_level`` (as the same glyph vocabulary the newsletter uses)
+    plus dispute/staleness/provisional flags, so the risk board reader sees the
+    same confidence signal the newsletter's trust badges carry. Returns an empty
+    string when the fact is human-confirmed or above with no flags (the common,
+    unremarkable case) to avoid noisy output.
+    """
+    if (
+        assessment.truth_level in {TruthLevel.HUMAN_CONFIRMED, TruthLevel.GOVERNANCE_LOCKED}
+        and not assessment.disputed
+        and not assessment.stale
+        and not assessment.provisional_inputs
+    ):
+        return ""
+    glyph = _TRUTH_GLYPH.get(assessment.truth_level, "")
+    flags: list[str] = []
+    if assessment.disputed:
+        flags.append("DISPUTED")
+    if assessment.stale:
+        flags.append("STALE")
+    if assessment.provisional_inputs:
+        flags.append("PROVISIONAL")
+    flag_text = f" [{'/'.join(flags)}]" if flags else ""
+    level_text = f" | {glyph} {assessment.truth_level.value}" if glyph else ""
+    return f"{level_text}{flag_text}"
+
+
+# Glyph vocabulary mirroring the newsletter's trust badges (UX spec §3.6b), so
+# the CLI risk board and the newsletter show the same signal for the same fact.
+_TRUTH_GLYPH: dict[TruthLevel, str] = {
+    TruthLevel.RAW_OBSERVED: "○",
+    TruthLevel.SOURCE_VALIDATED: "●",
+    TruthLevel.CORROBORATED: "◆",
+    TruthLevel.HUMAN_CONFIRMED: "✔",
+    TruthLevel.GOVERNANCE_LOCKED: "🔒",
+}
+
+
 def _default_actor(value: str | None) -> str:
     if value is not None and value.strip():
         return value.strip()
@@ -364,7 +440,21 @@ def _parse_optional_date(value: str | None) -> date | None:
     return date.fromisoformat(stripped)
 
 
-def render_risks_csv(entries: tuple[RiskEntry, ...], *, as_of: date, chain_index: dict[str, RaidChainResult] | None = None) -> str:
+def render_risks_csv(
+    entries: tuple[RiskEntry, ...],
+    *,
+    as_of: date,
+    chain_index: dict[str, RaidChainResult] | None = None,
+    assessments: tuple[FactAssessment, ...] | None = None,
+) -> str:
+    # ``assessments`` (Track E follow-up) optionally carries FactAssessment
+    # metadata so the CSV can emit truth_level/disputed/fact_stale columns. When
+    # omitted (e.g. callers that only have bare RiskEntry records), those columns
+    # are written empty, preserving backward compatibility for any external
+    # consumer of this renderer.
+    assessment_by_id: dict[str, FactAssessment] = {}
+    if assessments is not None:
+        assessment_by_id = {a.record.id: a for a in assessments}
     buffer = StringIO()
     writer = csv.writer(buffer)
     writer.writerow(
@@ -391,10 +481,14 @@ def render_risks_csv(entries: tuple[RiskEntry, ...], *, as_of: date, chain_index
             "raid_chain",
             "raid_has_mitigating_action",
             "raid_warnings",
+            "truth_level",
+            "disputed",
+            "fact_stale",
         )
     )
     for entry in entries:
         chain = chain_index.get(entry.id) if chain_index is not None else None
+        assessment = assessment_by_id.get(entry.id)
         writer.writerow(
             (
                 entry.id,
@@ -419,6 +513,9 @@ def render_risks_csv(entries: tuple[RiskEntry, ...], *, as_of: date, chain_index
                 _format_raid_chain_csv(chain),
                 _format_raid_bool(chain),
                 _format_raid_warnings(chain),
+                assessment.truth_level.value if assessment is not None else "",
+                str(assessment.disputed).lower() if assessment is not None else "",
+                str(assessment.stale).lower() if assessment is not None else "",
             )
         )
     return buffer.getvalue()
@@ -459,7 +556,28 @@ def _format_raid_bool(chain: RaidChainResult | None) -> str:
 
 
 def _load_current_risks(program_id: str) -> tuple[RiskEntry, ...]:
+    # Returns bare ``RiskEntry`` records (FactAssessment metadata stripped) for the
+    # write/CRUD path (add/update/review), which manipulates records and persists
+    # them back to the legacy risk register. Truth-level metadata is irrelevant to
+    # a write/manipulate operation. The read/display path (``_print_risks``) uses
+    # ``_load_current_risk_assessments`` instead, which preserves FactAssessment
+    # metadata so the risk board can surface truth/dispute/staleness signals
+    # (Track E follow-up — the same FactAssessment-preservation fix the newsletter
+    # render pipeline got, applied to this user-facing CLI surface).
     return tuple(a.record for a in ProgramReality.load(program_id, programs_root=PROGRAMS_ROOT).risks())
+
+
+def _load_current_risk_assessments(program_id: str) -> tuple[FactAssessment, ...]:
+    """Load risks with full ``FactAssessment`` metadata for the read/display path.
+
+    Distinct from ``_load_current_risks`` (which strips to ``RiskEntry`` for the
+    write path): the ``vertex risks`` list/board is a user-facing surface, and
+    the spec's Vision (§1) names "risk board" as one of the projections that
+    should carry the same truth guarantees as ``vertex ask``/``vertex triage``.
+    Returning ``FactAssessment`` here lets the JSON/human/CSV renderers surface
+    ``truth_level``/``disputed``/``stale`` alongside each risk.
+    """
+    return ProgramReality.load(program_id, programs_root=PROGRAMS_ROOT).risks()
 
 
 def _format_raid_warnings(chain: RaidChainResult | None) -> str:

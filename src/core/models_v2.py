@@ -296,7 +296,13 @@ class RevRetrievalProfile:
     orphan_ttl_days: int = 7
     rejected_review_retention_days: int = 30
     pending_grace_days: int = 14
-    fact_bridge_enabled: bool = False
+    # fix-data-flow.md Track A step 2 / ADR-0011 (2026-07-07): default flipped
+    # from False to True. Any REV-configured program that never explicitly set
+    # this key now bridges approved facts to ProgramFactStore by default,
+    # closing PS-2's silent-onboarding-gap. Programs that explicitly set
+    # `fact_bridge_enabled: false` in program.yaml are unaffected — their
+    # explicit choice still wins over this default.
+    fact_bridge_enabled: bool = True
 
     @property
     def is_rev_verified(self) -> bool:
