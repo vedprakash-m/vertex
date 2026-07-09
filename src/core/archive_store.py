@@ -109,6 +109,25 @@ def find_latest_confirmed_entry(
     return max(candidates, key=lambda entry: entry.issue_number)
 
 
+def is_issue_confirmed(
+    edition: str,
+    issue_number: int,
+    *,
+    archive_root: Path = ARCHIVE_ROOT,
+) -> bool:
+    """Return True if ``issue_number`` is already a confirmed (published) archive entry.
+
+    A published issue is immutable: its narrative source, overrides, and
+    publication artifacts must never be rewritten by later commands (``vertex
+    edit``, ``vertex apply-proposals``, etc.) — the confirmed EML/HTML is the
+    permanent record of what was actually sent. Callers that write to
+    ``narratives/issue_NNN/`` or ``overrides/issue_NNN.yaml`` should check this
+    first and refuse (not silently allow) writes for already-confirmed issues.
+    """
+    index = read_archive_index(edition, archive_root=archive_root)
+    return any(entry.issue_number == issue_number and entry.kind == "confirmed" for entry in index.issues)
+
+
 def load_previous_confirmed_snapshot(
     edition: str,
     issue_number: int,

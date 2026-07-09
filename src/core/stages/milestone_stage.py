@@ -132,8 +132,8 @@ def _load_milestones_via_reality(
         milestone_assessments = tuple(reality.milestones())
         milestones = tuple(fa.record for fa in milestone_assessments)
         lineage = _milestone_lineage_map(milestone_assessments)
-        # Dependencies still come from the legacy path (S-8a scope is milestones only)
-        dependencies = _load_current_dependencies(program_id, programs_root=programs_root)
+        dependency_assessments = tuple(reality.dependencies())
+        dependencies = tuple(assessment.record for assessment in dependency_assessments)
         return milestones, dependencies, (), lineage
     except ConfigError as exc:
         return (), (), (f"Milestones skipped (reality): {exc}",), {}
@@ -169,6 +169,9 @@ def _milestone_lineage_map(milestone_assessments: tuple[Any, ...]) -> dict[str, 
         lineage_by_id[str(milestone_id)] = {
             "source_document_key": getattr(lineage, "source_document_key", None),
             "approval_event_id": getattr(lineage, "approval_event_id", None),
+            "truth_level": getattr(getattr(assessment, "truth_level", None), "value", None),
+            "disputed": "true" if getattr(assessment, "disputed", False) else "false",
+            "stale": "true" if getattr(assessment, "stale", False) else "false",
         }
     return lineage_by_id
 

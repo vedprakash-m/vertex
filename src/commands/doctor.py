@@ -129,6 +129,9 @@ from src.commands.doctor_checks.adapter_cert_checks import run_adapter_cert_doct
 from src.commands.doctor_checks.refactor_status import build_refactor_status_report, render_refactor_status_output
 from src.commands.doctor_checks.confirm_readiness_checks import run_confirm_readiness_doctor as _run_confirm_readiness_doctor
 from src.commands.doctor_checks.fact_store_flip_checks import run_fact_parity_doctor as _run_fact_parity_doctor
+from src.commands.doctor_checks.fact_store_flip_checks import run_bridge_disabled_doctor as _run_bridge_disabled_doctor
+from src.commands.doctor_checks.fact_store_flip_checks import run_bridge_failure_backlog_doctor as _run_bridge_failure_backlog_doctor
+from src.commands.doctor_checks.fact_store_flip_checks import run_fact_deserialization_doctor as _run_fact_deserialization_doctor
 from src.commands.doctor_checks.fact_store_flip_checks import run_flip_parity_doctor as _run_flip_parity_doctor
 from src.commands.doctor_checks.fact_store_flip_checks import run_flip_status_doctor as _run_flip_status_doctor
 from src.commands.doctor_checks.storage_checks import (
@@ -242,6 +245,8 @@ def doctor_command(
     flip_status: bool = typer.Option(False, "--flip-status", help="Report the current Fact Store source-of-record posture for the resolved edition (legacy, dual, or fact-store)."),
     flip_parity: bool = typer.Option(False, "--flip-parity", help="Compare legacy mutable-state projections against Fact Store projections for one confirmed issue."),
     fact_parity: bool = typer.Option(False, "--fact-parity", help="Check whether enough dual-read parity cycles have been logged for the resolved program (reads fact_store.dual_read_cycles from platform_state.yaml, default 5)."),
+    fact_bridge: bool = typer.Option(False, "--fact-bridge", help="Check the ledger->fact-store bridge posture: whether it is enabled for a REV-configured program, and whether a persistent bridge-failure backlog exists (fix-data-flow.md Track A / PS-2)."),
+    fact_deserialization: bool = typer.Option(False, "--fact-deserialization", help="Confirm existing persisted facts still deserialize against the current schema, not just newly-bridged ones (fix-data-flow.md Track L)."),
     confirm_readiness: bool = typer.Option(False, "--confirm-readiness", help="Enumerate exact live blockers that would prevent a non-forced confirm. Returns 0 only when confirm would succeed."),
     adapter_cert: bool = typer.Option(False, "--adapter-cert", help="Audit UIL adapter certification per WS-3: checks which channels are enabled/certified and probes WorkIQ verb availability."),
     issue: int | None = typer.Option(None, "--issue", help="Issue number required by --flip-parity."),
@@ -349,6 +354,8 @@ def doctor_command(
         flip_status=flip_status,
         flip_parity=flip_parity,
         fact_parity=fact_parity,
+        fact_bridge=fact_bridge,
+        fact_deserialization=fact_deserialization,
         confirm_readiness=confirm_readiness,
         adapter_cert=adapter_cert,
         issue_number=issue,
@@ -468,6 +475,8 @@ def run_doctor(
     flip_status: bool = False,
     flip_parity: bool = False,
     fact_parity: bool = False,
+    fact_bridge: bool = False,
+    fact_deserialization: bool = False,
     confirm_readiness: bool = False,
     adapter_cert: bool = False,
     issue_number: int | None = None,
@@ -500,9 +509,9 @@ def run_doctor(
     resolved_reports_root = reports_root or REPORTS_ROOT
     resolved_programs_root = programs_root or (resolved_reports_root.parent / "programs")
     resolved_reality_db_root = reality_db_root or (resolved_programs_root.parent / "vertex-db")
-    if sum(1 for option in (check_auth, operator_gates, platform_readiness, kb, context, ids, cadence, channels, privacy, kusto, milestones, dependencies, actions, risks, escalations, decisions, assumptions, readiness, semantic_index, personas, metric_bindings, consistency, checkpoints, storage, flip_status, flip_parity, fact_parity, confirm_readiness, adapter_cert, charts, source_waivers, watch_sources, catchup_log, nudge, circuit_breakers, sharepoint) if option) > 1:
+    if sum(1 for option in (check_auth, operator_gates, platform_readiness, kb, context, ids, cadence, channels, privacy, kusto, milestones, dependencies, actions, risks, escalations, decisions, assumptions, readiness, semantic_index, personas, metric_bindings, consistency, checkpoints, storage, flip_status, flip_parity, fact_parity, fact_bridge, fact_deserialization, confirm_readiness, adapter_cert, charts, source_waivers, watch_sources, catchup_log, nudge, circuit_breakers, sharepoint) if option) > 1:
         raise typer.BadParameter(
-            "Choose only one of --check-auth, --operator-gates, --platform-readiness, --kb, --context, --ids, --cadence, --channels, --privacy, --kusto, --milestones, --dependencies, --actions, --risks, --escalations, --decisions, --assumptions, --readiness, --semantic-index, --personas, --metric-bindings, --consistency, --checkpoints, --storage, --flip-status, --flip-parity, --fact-parity, --confirm-readiness, --adapter-cert, --charts, --source-waivers, --watch-sources, --catchup-log, --nudge, --circuit-breakers, or --sharepoint."
+            "Choose only one of --check-auth, --operator-gates, --platform-readiness, --kb, --context, --ids, --cadence, --channels, --privacy, --kusto, --milestones, --dependencies, --actions, --risks, --escalations, --decisions, --assumptions, --readiness, --semantic-index, --personas, --metric-bindings, --consistency, --checkpoints, --storage, --flip-status, --flip-parity, --fact-parity, --fact-bridge, --fact-deserialization, --confirm-readiness, --adapter-cert, --charts, --source-waivers, --watch-sources, --catchup-log, --nudge, --circuit-breakers, or --sharepoint."
         )
     if watch_source_values and not watch_sources:
         raise typer.BadParameter("--source requires --watch-sources.")
@@ -735,6 +744,41 @@ def run_doctor(
         if resolved is None:
             raise typer.BadParameter(f"Unknown edition '{resolved_edition}'.")
         return _run_fact_parity_doctor(
+            edition_name=resolved_edition,
+            program_id=resolved.program.id,
+            programs_root=resolved_programs_root,
+        )
+    if fact_bridge:
+        resolved = resolve_edition(
+            resolved_edition,
+            editions_root=resolved_editions_root,
+            programs_root=resolved_programs_root,
+        )
+        if resolved is None:
+            raise typer.BadParameter(f"Unknown edition '{resolved_edition}'.")
+        disabled_report = _run_bridge_disabled_doctor(
+            edition_name=resolved_edition,
+            program_id=resolved.program.id,
+            programs_root=resolved_programs_root,
+        )
+        backlog_report = _run_bridge_failure_backlog_doctor(
+            edition_name=resolved_edition,
+            program_id=resolved.program.id,
+            programs_root=resolved_programs_root,
+        )
+        return DoctorReport(
+            edition=resolved_edition,
+            checks=disabled_report.checks + backlog_report.checks,
+        )
+    if fact_deserialization:
+        resolved = resolve_edition(
+            resolved_edition,
+            editions_root=resolved_editions_root,
+            programs_root=resolved_programs_root,
+        )
+        if resolved is None:
+            raise typer.BadParameter(f"Unknown edition '{resolved_edition}'.")
+        return _run_fact_deserialization_doctor(
             edition_name=resolved_edition,
             program_id=resolved.program.id,
             programs_root=resolved_programs_root,

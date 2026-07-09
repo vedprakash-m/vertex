@@ -392,6 +392,13 @@ def _load_reachable_dependency_network(program_id: str, *, programs_root: Path) 
         visited_program_ids.add(current_program_id)
 
         try:
+            # Deliberately not consolidated: this BFS discovers additional
+            # program_ids as it traverses the graph, so correctness requires one
+            # ProgramReality load per newly visited program. The .record strip is
+            # also intentional: blast-radius computation consumes only structural
+            # dependency fields (program ids, resolution path), never FactAssessment
+            # metadata — truth-level signals are surfaced in the newsletter's
+            # structured tables, not in this cross-program risk-uplift graph.
             loaded_dependencies = tuple(
                 a.record for a in ProgramReality.load(
                     current_program_id,

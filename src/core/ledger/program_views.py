@@ -1545,6 +1545,8 @@ def _entity_family(entity_id: str) -> str | None:
 
 
 def _entity_id_from_event(event: EventEnvelope) -> str | None:
+    if event.event_type in {"operator.field_lock.v1", "operator.field_unlock.v1"}:
+        return event.payload.get("entity_id")
     if event.event_type.startswith("risk."):
         return event.payload.get("risk_id")
     if event.event_type.startswith("milestone."):

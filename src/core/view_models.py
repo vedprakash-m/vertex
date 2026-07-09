@@ -35,6 +35,11 @@ class HealthSummary:
     risk_register_summary: str | None = None
     telemetry_summary: str | None = None
     telemetry_confidence: str | None = None
+    risk_register_truth_level: str | None = None
+    risk_register_disputed: bool = False
+    risk_register_stale_evidence: bool = False
+    risk_register_includes_unconfirmed_sources: bool = False
+    risk_render_warning: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,12 +50,18 @@ class MilestoneSummaryRow:
     detail: str
     source_document_key: str | None = None
     approval_event_id: str | None = None
+    evidence_truth_level: str | None = None
+    evidence_disputed: bool = False
+    evidence_stale: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class AssumptionLifecycleRow:
     title: str
     detail: str
+    evidence_truth_level: str | None = None
+    evidence_disputed: bool = False
+    evidence_stale: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +73,8 @@ class AssumptionLifecycleSummary:
     invalidated_count: int
     still_open_count: int
     rows: tuple[AssumptionLifecycleRow, ...]
+    includes_unconfirmed_sources: bool = False
+    render_warning: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -8,6 +8,7 @@ from src.core.archive_store import find_archive_index_inconsistencies
 from src.core.ban_list_validator import find_ban_list_violations, find_structural_rule_violations
 from src.core.continuation_contract import build_continuation_contract
 from src.core.edition_resolver import get_program_output_dir
+from src.core.fact_sor_state import resolve_family_sor_mode
 from src.core.hygiene_engine import evaluate_hygiene
 from src.core.manifest_writer import build_run_manifest
 from src.core.models import ReportData, RunManifest
@@ -356,6 +357,7 @@ class ValidationStage:
             + render_state.narrative_warnings
             + ctx.ai_synthesis.warnings
             + ctx.milestone_warnings
+            + ctx.risk_warnings
             + gate_warnings
             + tuple(_format_persona_result(result) for result in (persona_coverage.warnings if persona_coverage is not None else ()))
         )
@@ -461,7 +463,41 @@ def _build_manifest_metadata(ctx: StageContext, render_state: Any) -> dict[str, 
         "forecast_sources": (list(render_state.forecast.source_item_ids) if render_state.forecast is not None else []),
         "milestone_assessments": _serialize_milestone_assessments(ctx),
         "ai_safety": _build_ai_safety_metadata(ctx),
+        "family_read_paths": _build_family_read_paths_metadata(ctx),
     }
+
+
+def _build_family_read_paths_metadata(ctx: StageContext) -> dict[str, str]:
+    """Track K (fix-data-flow.md §6.11): per-issue render manifest recording
+    which read path each migrated fact family actually used for this render
+    -- ``"reality"`` when its authority family's SoR mode was non-legacy,
+    ``"legacy"`` otherwise (or when the program/programs_root couldn't be
+    resolved for this render pass). Makes the SoR-mode-vs-actual-read-path
+    consistency check concretely queryable (a doctor check compares this
+    against `fact_store_sor.yaml`'s declared state) rather than requiring the
+    kind of manual code-reading exercise PS-11/PS-14's own verification
+    needed this session.
+    """
+    if ctx.resolved_v2 is None or ctx.programs_root is None:
+        return {}
+    program_id = ctx.resolved_v2.paths.program_id
+    # Family -> its real authority family (source_authority.yaml's family_map;
+    # see docs/contributing/migrate-fact-family.md -- never the invented,
+    # human-readable fact-type name).
+    family_to_authority = {
+        "milestone": "workitem.state",
+        "dependency": "workitem.state",
+        "risk": "judgment",
+        "assumption": "judgment",
+    }
+    read_paths: dict[str, str] = {}
+    for family, authority_family in family_to_authority.items():
+        try:
+            mode = resolve_family_sor_mode(program_id, authority_family, programs_root=ctx.programs_root)
+        except Exception:  # noqa: BLE001 -- manifest metadata must never block a render
+            continue
+        read_paths[family] = "legacy" if mode == "legacy" else "reality"
+    return read_paths
 
 
 def _build_ai_safety_metadata(ctx: StageContext) -> dict[str, Any]:

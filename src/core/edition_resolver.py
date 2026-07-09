@@ -1083,7 +1083,7 @@ def _parse_rev_profile(value: Any, *, path: Path | None = None) -> RevRetrievalP
         pending_grace_days=_parse_optional_bounded_int(
             value.get("pending_grace_days", defaults.pending_grace_days),
             field_name="m365.rev.pending_grace_days", minimum=0, maximum=365, path=path) or defaults.pending_grace_days,
-        fact_bridge_enabled=bool(value.get("fact_bridge_enabled", False)),
+        fact_bridge_enabled=bool(value.get("fact_bridge_enabled", True)),
     )
 
 

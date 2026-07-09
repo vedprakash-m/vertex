@@ -13,6 +13,7 @@ import typer
 from src.commands.diff import _latest_draft_issue_number, _resolve_section
 from src.commands.report import _build_chapter_templates, _build_exec_summary_template, _is_continuity_layout, _visible_continuity_chapters
 from src.commands.report import generate_report_draft
+from src.core.archive_store import is_issue_confirmed
 from src.core.config_loader import REPORTS_ROOT, load_bundle
 from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.models import EditionType
@@ -75,13 +76,21 @@ def run_edit(
 ) -> EditResult:
     latest_issue_number = _latest_draft_issue_number(edition_name, programs_root=programs_root)
     resolved_issue_number = issue_number or latest_issue_number
-    read_only = resolved_issue_number < latest_issue_number
+    # A confirmed (published) issue is a permanent record — its narrative source
+    # must never be reopened for editing, even if it happens to also be the
+    # "latest draft" on disk (e.g. right after confirming). Check the archive
+    # index, not just draft recency.
+    read_only = (
+        resolved_issue_number < latest_issue_number
+        or is_issue_confirmed(edition_name, resolved_issue_number, archive_root=archive_root)
+    )
 
     target_path, section_id, created = _prepare_edit_target(
         edition_name=edition_name,
         section=section,
         issue_number=resolved_issue_number,
         reports_root=reports_root,
+        read_only=read_only,
     )
 
     opened_in_editor = False
@@ -110,6 +119,7 @@ def _prepare_edit_target(
     section: str,
     issue_number: int,
     reports_root: Path,
+    read_only: bool = False,
 ) -> tuple[Path, str, bool]:
     narratives_dir = get_narratives_dir(edition_name, issue_number, reports_root=reports_root)
     narratives_dir.mkdir(parents=True, exist_ok=True)
@@ -121,7 +131,7 @@ def _prepare_edit_target(
     )
     target_path = narratives_dir / filename
     created = False
-    if not target_path.exists():
+    if not target_path.exists() and not read_only:
         target_path.write_text(
             _scaffold_content(
                 issue_number,

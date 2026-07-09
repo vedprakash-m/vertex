@@ -1,0 +1,27 @@
+{%- macro truth_badge(level) -%}
+{%- if level -%}
+{%- set level_key = level|string|upper -%}
+{%- set badge = {
+  "GOVERNANCE_LOCKED": {"label": "🔒 LOCKED", "color": "#1E3A8A", "background": "#DBEAFE"},
+  "HUMAN_CONFIRMED": {"label": "✔ CONFIRMED", "color": "#15803D", "background": "#DCFCE7"},
+  "CORROBORATED": {"label": "◆ CORROBORATED", "color": "#0D9488", "background": "#CCFBF1"},
+  "SOURCE_VALIDATED": {"label": "● VALIDATED", "color": "#4B5563", "background": "#F3F4F6"},
+  "RAW_OBSERVED": {"label": "○ UNCONFIRMED", "color": "#B45309", "background": "#FEF3C7"},
+}.get(level_key) -%}
+{%- if badge -%}
+<span style="display:inline-block; margin-left:4px; padding:1px 4px; border-radius:2px; font-size:10px; line-height:1.4; font-weight:700; color:{{ badge.color }}; background-color:{{ badge.background }}; vertical-align:middle;">{{ badge.label }}</span>
+{%- endif -%}
+{%- endif -%}
+{%- endmacro -%}
+
+{%- macro disputed_badge(disputed) -%}
+{%- if disputed -%}
+<span style="display:inline-block; margin-left:4px; padding:1px 4px; border-radius:2px; font-size:10px; line-height:1.4; font-weight:700; color:#B91C1C; background-color:#FEE2E2; vertical-align:middle;">[DISPUTED ⚠]</span>
+{%- endif -%}
+{%- endmacro -%}
+
+{%- macro unconfirmed_sources_footer(has_unconfirmed_sources) -%}
+{%- if has_unconfirmed_sources -%}
+<p style="margin:8px 0 0 0; font-size:11px; line-height:1.5; color:#92400E;">⚠ includes unconfirmed sources</p>
+{%- endif -%}
+{%- endmacro -%}

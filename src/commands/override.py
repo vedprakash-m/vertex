@@ -12,6 +12,7 @@ from src.commands.confirm import _deserialize_items, _load_draft_state
 from src.commands.report import _build_scorecard_packets
 from src.core.config_loader import REPORTS_ROOT, load_bundle
 from src.core.ai_proposal_store import load_ai_proposals, update_ai_proposal_status
+from src.core.archive_store import is_issue_confirmed
 from src.core.edition_resolver import resolve_edition
 from src.core.models_v2 import AIProposal, AIProposalStatus
 from src.core.overrides_store import DimensionOverride, OverridesDocument, ScorecardOverrides, get_overrides_path, load_overrides, save_overrides
@@ -80,6 +81,11 @@ def run_override(
     overrides_document = load_overrides(edition_name, reports_root=resolved_reports_root)
     if overrides_document is None or overrides_document.issue_number is None:
         raise typer.BadParameter("overrides.yaml is missing. Run `vertex report --dry-run` first.")
+    if is_issue_confirmed(edition_name, overrides_document.issue_number, archive_root=resolved_archive_root):
+        raise typer.BadParameter(
+            f"Issue {overrides_document.issue_number:03d} is already confirmed (published) and its overrides "
+            "are locked — run `vertex report --dry-run` to start the next issue before overriding."
+        )
 
     draft_state = _load_draft_state(edition_name, overrides_document.issue_number, programs_root=resolved_reports_root.parent / "programs")
     items = _deserialize_items(tuple(draft_state.get("items", [])))

@@ -70,6 +70,8 @@ class StageContext:
     milestone_lineage: dict[str, dict[str, str | None]] | None = None
     milestone_warnings: tuple[str, ...] = ()
     risks: Any = None
+    risk_assessments: Any = None
+    risk_lineage: dict[str, dict[str, str | None]] | None = None
     stale_risk_ids: tuple[str, ...] = ()
     risk_warnings: tuple[str, ...] = ()
     actions: Any = None

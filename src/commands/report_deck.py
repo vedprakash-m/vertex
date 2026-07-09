@@ -23,7 +23,7 @@ from src.core.milestone_engine import (
 )
 from src.core.models import DeltaKind, DeltaSet, DimensionRisk, ItemDelta, RiskLevel, ScorecardDelta, WorkItem
 from src.core.models_v2 import Assumption, AssumptionStatus, DecisionEntry, DecisionStatus, Milestone, MilestoneAssessment, MilestoneStatus, RiskEntry, RiskStatus
-from src.core.program_reality import ProgramReality
+from src.core.program_reality import FactAssessment, ProgramReality
 from src.core.risk_register_engine import assess_risk_staleness, compute_risk_score
 from src.core.signal_review import signal_is_approved_for_evidence
 from src.core.store_factory import build_signal_store_for_program_id, build_trajectory_store_for_program_id
@@ -92,6 +92,7 @@ def _build_deck_render_context(
     raw_program: dict[str, object],
     program_id: str,
     programs_root: Path,
+    reality: ProgramReality | None = None,
     milestones: tuple[Milestone, ...] = (),
     milestone_assessments: tuple[MilestoneAssessment, ...] = (),
     issue_projections: tuple[IssueProjection, ...] = (),
@@ -145,6 +146,7 @@ def _build_deck_render_context(
             program_id=program_id,
             as_of=data_as_of,
             programs_root=programs_root,
+            reality=reality,
         ),
         dependency_proposal_rows=_build_deck_dependency_proposal_rows(
             program_id=program_id,
@@ -235,26 +237,31 @@ def _build_deck_risk_rows(
     program_id: str,
     as_of: datetime,
     programs_root: Path,
+    reality: ProgramReality | None = None,
 ) -> tuple[DeckRiskRow, ...]:
-    risks = tuple(
-        a.record
-        for a in ProgramReality.load(program_id, programs_root=programs_root).risks()
-        if a.record.status in {RiskStatus.OPEN, RiskStatus.ESCALATED}
+    resolved_reality = reality or ProgramReality.load(program_id, programs_root=programs_root)
+    risk_assessments = tuple(
+        assessment
+        for assessment in resolved_reality.risks()
+        if assessment.record.status in {RiskStatus.OPEN, RiskStatus.ESCALATED}
     )
-    ordered_risks = sorted(
-        risks,
-        key=lambda risk: (
-            0 if risk.status == RiskStatus.ESCALATED else 1,
-            -compute_risk_score(risk),
-            risk.title.lower(),
+    ordered_risk_assessments = sorted(
+        risk_assessments,
+        key=lambda assessment: (
+            0 if assessment.record.status == RiskStatus.ESCALATED else 1,
+            -compute_risk_score(assessment.record),
+            assessment.record.title.lower(),
         ),
     )
     return tuple(
         DeckRiskRow(
-            title=risk.title,
-            detail=_format_deck_risk_detail(risk, as_of=as_of),
+            title=assessment.record.title,
+            detail=_format_deck_risk_detail(assessment.record, as_of=as_of),
+            evidence_truth_level=_assessment_truth_level(assessment),
+            evidence_disputed=assessment.disputed,
+            evidence_stale=assessment.stale,
         )
-        for risk in ordered_risks
+        for assessment in ordered_risk_assessments
     )
 
 
@@ -312,16 +319,29 @@ def _build_deck_decision_rows(
     program_id: str,
     as_of: datetime,
     programs_root: Path,
+    reality: ProgramReality | None = None,
 ) -> tuple[DeckDecisionRow, ...]:
-    decisions = tuple(
-        a.record for a in ProgramReality.load(program_id, programs_root=programs_root).decisions()
+    resolved_reality = reality or ProgramReality.load(program_id, programs_root=programs_root)
+    ordered_decision_assessments = tuple(
+        sorted(
+            resolved_reality.decisions(),
+            key=lambda assessment: (
+                0 if assessment.record.status is DecisionStatus.PROPOSED else 1,
+                0 if assess_proposed_decision_staleness(assessment.record, as_of.date()) else 1,
+                -(assessment.record.decision_date.toordinal() if assessment.record.decision_date is not None else 0),
+                assessment.record.title.lower(),
+            ),
+        )
     )
     return tuple(
         DeckDecisionRow(
-            title=entry.title,
-            detail=_format_deck_decision_detail(entry, as_of=as_of),
+            title=assessment.record.title,
+            detail=_format_deck_decision_detail(assessment.record, as_of=as_of),
+            evidence_truth_level=_assessment_truth_level(assessment),
+            evidence_disputed=assessment.disputed,
+            evidence_stale=assessment.stale,
         )
-        for entry in _sort_deck_decisions(decisions, as_of=as_of)
+        for assessment in ordered_decision_assessments
     )
 
 
@@ -330,18 +350,41 @@ def _build_deck_assumption_rows(
     program_id: str,
     as_of: datetime,
     programs_root: Path,
+    reality: ProgramReality | None = None,
 ) -> tuple[DeckAssumptionRow, ...]:
-    assumptions = tuple(
-        a.record for a in ProgramReality.load(program_id, programs_root=programs_root).assumptions()
-    )
+    resolved_reality = reality or ProgramReality.load(program_id, programs_root=programs_root)
+    assumption_assessments = tuple(resolved_reality.assumptions())
+    assumptions = tuple(assessment.record for assessment in assumption_assessments)
     overdue_ids = {entry.id for entry in check_validation_due(assumptions, as_of.date())}
+    ordered_assumption_assessments = tuple(
+        sorted(
+            assumption_assessments,
+            key=lambda assessment: (
+                0 if assessment.record.id in overdue_ids else 1,
+                0 if assessment.record.status is AssumptionStatus.UNVALIDATED else 1,
+                assessment.record.validation_due or date.max,
+                assessment.record.identified_date,
+                assessment.record.text.lower(),
+            ),
+        )
+    )
     return tuple(
         DeckAssumptionRow(
-            title=entry.text,
-            detail=_format_deck_assumption_detail(entry, overdue=entry.id in overdue_ids),
+            title=assessment.record.text,
+            detail=_format_deck_assumption_detail(
+                assessment.record,
+                overdue=assessment.record.id in overdue_ids,
+            ),
+            evidence_truth_level=_assessment_truth_level(assessment),
+            evidence_disputed=assessment.disputed,
+            evidence_stale=assessment.stale,
         )
-        for entry in _sort_deck_assumptions(assumptions, overdue_ids=overdue_ids)
+        for assessment in ordered_assumption_assessments
     )
+
+
+def _assessment_truth_level(assessment: FactAssessment) -> str:
+    return assessment.truth_level.value
 
 
 def _sort_deck_decisions(entries: tuple[DecisionEntry, ...], *, as_of: datetime) -> tuple[DecisionEntry, ...]:
@@ -477,6 +520,9 @@ def _build_deck_milestone_rows(
                 ),
                 source_document_key=lineage.get("source_document_key"),
                 approval_event_id=lineage.get("approval_event_id"),
+                evidence_truth_level=lineage.get("truth_level"),
+                evidence_disputed=lineage.get("disputed") == "true",
+                evidence_stale=lineage.get("stale") == "true",
             )
         )
     return tuple(rows)
@@ -500,6 +546,9 @@ def _build_report_milestone_rows(
             detail=row.detail,
             source_document_key=row.source_document_key,
             approval_event_id=row.approval_event_id,
+            evidence_truth_level=row.evidence_truth_level,
+            evidence_disputed=row.evidence_disputed,
+            evidence_stale=row.evidence_stale,
         )
         for row in _build_deck_milestone_rows(
             milestones,

@@ -10,7 +10,7 @@ import shutil
 import typer
 
 from src.core.ban_list_validator import find_ban_list_violations
-from src.core.archive_store import find_latest_confirmed_entry, read_archive_index
+from src.core.archive_store import find_latest_confirmed_entry, is_issue_confirmed, read_archive_index
 from src.core.models import ArchiveIndex
 from src.core.config_loader import REPORTS_ROOT, load_bundle
 from src.core.edition_resolver import resolve_edition_paths
@@ -220,6 +220,12 @@ def undo_section_revision_proposals(
         archive_root=archive_root,
     )
     resolved_reports_root = reports_root or REPORTS_ROOT
+    resolved_archive_root = archive_root or ARCHIVE_ROOT
+    if is_issue_confirmed(edition_name, artifacts.issue_number, archive_root=resolved_archive_root):
+        raise typer.BadParameter(
+            f"Issue {artifacts.issue_number:03d} is already confirmed (published) and its narrative is locked — "
+            "the proposal-apply cannot be undone for a published issue."
+        )
     target_dir = get_narratives_dir(edition_name, artifacts.issue_number, reports_root=resolved_reports_root)
     if target_dir.exists():
         shutil.rmtree(target_dir)
@@ -367,6 +373,11 @@ def apply_section_revision_proposals(
         reports_root=resolved_reports_root,
         archive_root=resolved_archive_root,
     )
+    if is_issue_confirmed(edition_name, resolved_issue_number, archive_root=resolved_archive_root):
+        raise typer.BadParameter(
+            f"Issue {resolved_issue_number:03d} is already confirmed (published) and its narrative is locked — "
+            "proposals cannot be applied to a published issue."
+        )
     pending_proposals = load_proposals(
         resolved_paths.program_id,
         resolved_issue_number,
