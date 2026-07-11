@@ -54,21 +54,71 @@ known_limitations:
 | Feature | model_id | deployment_id | Last recert | Deprecation review | Owner |
 |---|---|---|---|---|---|
 | action_extractor | gpt-4o | gpt-4o | 2026-06-09 | 2026-09-09 | platform-sre |
+| activation_judge | gpt-4o | env: `VERTEX_AI_JUDGE_DEPLOYMENT` | 2026-07-09 | 2026-10-07 | platform-sre |
 | anticipation_engine | gpt-4o | gpt-4o | 2026-06-09 | 2026-09-09 | platform-sre |
 | backfill_extractor | gpt-4o | gpt-4o | 2026-06-09 | 2026-09-09 | platform-sre |
 | blurb_generator | gpt-4o | gpt-4o | 2026-06-09 | 2026-09-09 | platform-sre |
 | claim_extractor | gpt-4o | gpt-4o | 2026-06-09 | 2026-09-09 | platform-sre |
+| context_synthesizer | gpt-4o | gpt-4o | 2026-07-09 | 2026-10-07 | platform-sre |
 | decision_brief_advisor | gpt-4o | gpt-4o | 2026-06-09 | 2026-09-09 | platform-sre |
 | exec_summary_drafter | gpt-4o | gpt-4o | 2026-06-09 | 2026-09-09 | platform-sre |
 | intent_router | gpt-4o-mini | gpt-4o-mini | 2026-06-09 | 2026-09-09 | platform-sre |
 | learning_distiller | gpt-4o | gpt-4o | 2026-06-09 | 2026-09-09 | platform-sre |
 | m365_topic_router | gpt-4o-mini | gpt-4o-mini | 2026-06-09 | 2026-09-09 | platform-sre |
 | onboard_assistant | gpt-4o | gpt-4o | 2026-06-09 | 2026-09-09 | platform-sre |
+| prose_event_extractor | gpt-4o | gpt-4o | 2026-07-09 | 2026-10-07 | platform-sre |
+| rev_extractor | gpt-4o | gpt-4o | 2026-07-09 | 2026-10-07 | platform-sre |
+| rev_judge | gpt-4o | gpt-4o | 2026-07-09 | 2026-10-07 | platform-sre |
+| setup_assistant | gpt-4o | gpt-4o | 2026-07-09 | 2026-10-07 | platform-sre |
 | summary_generator | gpt-4o | gpt-4o | 2026-06-09 | 2026-09-09 | platform-sre |
 | synthesizer | gpt-4o | gpt-4o | 2026-06-09 | 2026-09-09 | platform-sre |
 
 `intent_router` and `m365_topic_router` use `gpt-4o-mini` (cheaper,
-sufficient for the routing task). All other features use `gpt-4o`.
+sufficient for the routing task). `activation_judge` resolves its
+deployment from `VERTEX_AI_JUDGE_DEPLOYMENT` at call time rather than a
+fixed pin, because judge-independence (it must differ from whatever
+extractor deployment it is grading) is enforced at construction
+(`src/ai/activation_judge.py::verify_judge_independence`); if the env var
+is unset the judge fails closed to `JUDGE_UNAVAILABLE` rather than
+silently reusing the extractor's deployment. All other new/existing
+features use `gpt-4o`.
+
+### 3.1 Notes on the six cards added under arch-fix.md Phase 0 (2026-07-09)
+
+These six features had `ai_policy.yaml` entries and prompt-registry
+entries (where applicable) but no card, prior to arch-fix.md's
+Phase 0 model-card reconciliation (§0.4; spec archived to
+`.archive/specs/arch-fix.md`, remaining scope tracked in
+`specs/backlog.md` §7):
+
+- **activation_judge** — `src/ai/activation_judge.py`, prompt
+  `activation_judge.v1`. LLM-as-judge over real activation evidence
+  (`activation.md` v1.25 §6.16); fail-closed when no judge deployment is
+  configured; verdicts are evidence-grounded and never auto-execute an
+  authority flip (human-gate only, per AG-4/AG-18).
+- **context_synthesizer** — `src/ai/context_synthesizer.py`, prompt
+  `context_synthesizer.v1`. NCFL Phase 5 Zone B knowledge-doc synthesis;
+  output is always a proposal, never auto-applied.
+- **prose_event_extractor** — `src/ai/discovery/prose_event_extractor.py`,
+  prompts `prose_event_extractor.v1`–`v4` (wave-selected). The only card
+  entry with `deterministic_first: true` — a local/deterministic tier is
+  attempted before frontier at `tier0_confidence_threshold: 0.9`, so
+  eval/κ-gating for this feature must cover both tiers (relevant to
+  arch-fix.md AF-4, `specs/backlog.md` §7 BL-C2).
+- **rev_extractor** — `src/ai/rev/rev_extractor.py`, prompt
+  `rev_extractor.v1`. REV pipeline evidence extraction; always frontier
+  (`deterministic_first: false`).
+- **rev_judge** — `src/ai/rev/judge.py` (imported for compatibility via
+  the now-thin `src/ai/rev/rev_judge.py` shim). Scores extractor output
+  (correct/partial/hallucinated claim counts) for the REV pipeline.
+  **Known gap, tracked by arch-fix.md AF-2 (`specs/backlog.md` §7 BL-C2)**: its system prompt
+  (`_JUDGE_SYSTEM_PROMPT`) is still a raw Python string constant, not a
+  `prompt_registry.py`-managed version — it is the one provider-bound
+  prompt AF-2 explicitly calls out for migration into the registry.
+- **setup_assistant** — `src/ai/setup_assistant.py`, prompt
+  `setup_ws_suggest.v1`. Workstream-suggestion assistant used during the
+  onboarding wizard; distinct from `onboard_assistant` (structure/style
+  drafting prompts) despite the similar name.
 
 ## 4. Re-certification workflow
 

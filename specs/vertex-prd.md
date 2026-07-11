@@ -114,7 +114,7 @@ Vertex does not replace TPM/EM judgment. Human-confirmed facts outrank machine i
 
 **Current implementation posture (2026-07-08):**
 
-- Codebase shape: **321** Zone A core modules, 35 Zone B AI modules, 26 Zone C M365 modules, and 235 command modules. (Zone A count derived at CI time by `scripts/derive_spec_counts.py`; PRD figures are re-derived quarterly.)
+- Codebase shape: **393** Zone A core modules, 57 Zone B AI modules, 49 Zone C M365 modules, and 254 command modules (re-derived 2026-07-09 via `scripts/derive_spec_counts.py`, whose `collected_tests`/`top_level_cli_*` metrics arch-fix.md Phase 0 fixed — see its changelog). These figures are probe-derived, not hand-maintained; re-run the script rather than editing this line by hand.
 - Full test-suite evidence: see `governance/test-evidence.md` (the canonical evidence log; `output/__green_run.txt` is a stale local artifact — see `scripts/check_spec_drift.py` `p9-dead-green-run`). Counts in this section are computed by `scripts/derive_spec_counts.py` (WS-9 step 2).
 - Acme Phases 0-2 are code-complete for deterministic operation; remaining issue-078 work is PM/operator execution: approve 20 pending sections, run `review-full`, confirm issue 078 with `--untrusted`, and resolve external ADO/Kusto/M365 data-plane gaps.
 - Ingestion is approximately 94% implemented. The remaining gap is primarily live configuration and authenticated validation: ADO PR repository IDs, meeting `series_id` / Teams `thread_id`, Kusto query validation/RBAC, IcM provisioning, L1 metric rollout, and multi-session operational proof.
@@ -123,6 +123,7 @@ Vertex does not replace TPM/EM judgment. Human-confirmed facts outrank machine i
 - **Reality substrate (Phases 1–7.4 complete):** `ProgramReality` is the single read facade for all projections (G-1 contract). The 5-level truth ladder (GOVERNANCE_LOCKED→RAW_OBSERVED), `disputed` flag, and `provisional_inputs` flag are all wired at read time via `derive_truth_level` + snapshot-indexed conflict and signal sets (GAP-5 complete as of 2026-06-16). Entity registry (exact/fuzzy/casefold), trust ledger, signal normalizer, fact schema registry, commitment store with slip history, and the `vertex ask` named-intent surface (10 intents, zero-frontier O-14) are implemented and contract-tested. `vertex reality export` (§6.12.2) with timeseries replay, per-program cursor manifest, audit log, `sor_flip_boundary` frames, and `NullProjection` O-15 proof are live. The WS-1 read-path migration landed on 2026-06-29: `ProgramReality` read-path overlays exist for the three v1-authoritative families (`commitment.date_set`, `ownership.changed`, plus `milestone.completed`); `deployment.completed` rides the same `workitem.state` family. **The newsletter read-path closure (formerly `specs/fix-data-flow.md`, now archived to `.archive/specs/fix-data-flow.md`) is fully closed as of 2026-07-08**: `risk_stage.py` and the dependency read path inside `milestone_stage.py` now route through `ProgramReality` when a program's SoR mode is non-legacy; the platform's first-ever trust-badge rendering markup (`templates/partials/truth_badge.j2`) now renders for risk, milestone, and assumption facts (correcting [vertex-ux-spec.md](vertex-ux-spec.md)'s 2026-06-15 changelog claim that badges were "already implemented" — direct code investigation found no trust-badge rendering markup existed anywhere until this closure); `assumption` was also migrated (`report_lookback.py`); direct per-family investigation found **action, decision, and commitment have no current main-newsletter read path to migrate**, and **workstream's newsletter content is narrative/dimension-driven prose, not a per-fact section** — reported honestly as a verified finding rather than force-migrated. `fact_bridge_enabled` now defaults to `true` platform-wide (ADR-0011) with a visible `vertex doctor` warning + durable failure backlog when a program's bridge is disabled or failing. The incremental event-projection fold is wired as an automatic post-write hook under WAL-mode concurrency (ADR-0010), removing the need for a manual rebuild step. A substrate health monitor (gather-freshness, bridge backlog, SoR-vs-actual-read-path consistency via a per-issue render manifest, fact-store location/schema-version consistency) is live in `vertex doctor --storage`. The AI-generated executive summary and workstream blurbs now draw on a token-budgeted reality-substrate summary (`src/commands/reality_context.py`) instead of the narrative-only `bundle.program_context`, so AI prose can no longer silently contradict a structured trust badge. Remaining epistemic surfaces: corroboration/conflict E2E proofs (GAP-36), EXPLAIN drill-down (GAP-37), and workstream's larger render-model migration (deferred — no current per-fact section to migrate onto).
 - **REV pipeline (Waves 1–7 plus deterministic authority slices complete, 2026-06-27):** Program-Context Intelligence (REV) coding waves W1–W7 are substantially complete. Key deliverables: normalizer data-loss fix + PII wiring (W1); acceptance as review-state transition + shadow isolation + typed lineage + unified event-type registry + selective family replay + gap lifecycle (W2); `RealityCompletenessVector` + `vertex doctor --rev-health` (W3); ICS/docs wired into `rev run` (W6-1); SQLite candidate/decision store replacing JSONL operational state (W7-1); real incremental projection fold via `_incremental_fold` (W7-2); PII pseudonymization with `PseudonymTable` + display-name extraction from email headers (W5-3). ADR-0006 accepts the v1 authority boundary: REV `human_comms` can become secondary input for `workitem.state` and `commitment` after clean-cycle gates, not for `judgment`; v1 authoritative REV event types are `deployment.completed`, `milestone.completed`, `commitment.date_set`, and `ownership.changed`. Remaining: S-9 corpus proof before production LLM extraction, UX/privacy/operator proof cycles, and any Phase 2 deliverable/incident authority work.
 - **Remaining work (operator / human gates):** All coding-implementable re-debt Phases 0–8, the newsletter read-path closure, and accepted ADR-0006 deterministic gates are code-complete. Remaining items are OPERATOR gates documented in local-only archives/governance evidence and `specs/backlog.md`: production corpus proof for LLM extraction, live multi-program and multi-cycle operational proof, UX certification, privacy DPA review, the known stray `~/.vertex/xpf/vertex.sqlite3` database cleanup (BL-B1), and Track D Step 2's conditional production-observation gate (BL-B2).
+- **Architecture remediation (`arch-fix`, formerly `specs/arch-fix.md`, archived 2026-07-10):** a 12-audit-reconciled program closing the gap between promised and enforced AI-safety/persistence/actuation guarantees. **Phase 0 (Contract & Evidence Freeze) is fully code-complete**: count-probe repair, model-card reconciliation (all 19 `ai_policy.yaml` features carded), the composed authority-registry view, an opt-in sanitized AI I/O capture prerequisite, and an NFR/OpEx budget freeze scaffold. **Phase 1 (Common Persistence Kernel) is ~65% complete**: event-log append hardened to O(1), and five new reusable persistence primitives (monotonic sequence allocator, workspace leasing with fencing tokens, projection checkpoints, cross-database `UnitOfWork`, a generic durable outbox engine, and a content-addressed program checkpoint manifest) are built and unit-tested but not yet wired into any AI-safety or actuation path. **Not yet built**: the AI Safety Boundary (per-feature semantic validation — the mechanism that would actually prevent a hallucinated fact from reaching a published newsletter), the fail-closed AI audit trail, and approval-anchored actuation with an idempotent outbox — see `specs/backlog.md` §7 (BL-C1 through BL-C6) for the full remaining scope, which is substantial and requires a live-canary observation window before its own Part B convergence phase can even be authorized.
 
 <!--
   spec-posture (machine-readable; parsed by scripts/check_spec_drift.py `p12-posture-block`).
@@ -139,6 +140,8 @@ T0-4-trust-badges: complete (2026-07-08)
 BL-A1: deferred
 BL-A2: deferred
 data-flow-v1: complete (2026-07-08)
+arch-fix-phase0: complete (2026-07-09)
+arch-fix-phase1-cpk: in-progress (2026-07-10)
 -->
 
 ---
@@ -340,24 +343,24 @@ Each row names a TPM/EM grunt job, the Vertex capability that absorbs it, and th
 ```
 ┌─────────────────────────────────────────────────────┐
 │  Zone A — Deterministic Core (src/core/)             │
-│  321 modules. No AI imports. No M365 imports.        │
+│  393 modules. No AI imports. No M365 imports.        │
 │  Models, engines, stores, renderers, validators,     │
 │  reality substrate. ADO/Kusto data acquisition is    │
 │  the controlled external I/O exception.              │
 ├─────────────────────────────────────────────────────┤
 │  Zone B — AI Layer (src/ai/)                         │
-│  35 modules + prompt assets.                         │
+│  57 modules + prompt assets.                         │
 │  Blurb generation, exec summary, anticipation,       │
 │  rolling summaries, draft review, safety pipeline,   │
 │  tiered router, local tier.                          │
 ├─────────────────────────────────────────────────────┤
 │  Zone C — M365 Integration (src/m365/)               │
-│  26 modules. ADO writer, Agency bridge, Graph mail,  │
+│  49 modules. ADO writer, Agency bridge, Graph mail,  │
 │  Graph calendar, Teams reader, transcript reader,    │
 │  enricher, discovery adapters, backfill.             │
 ├─────────────────────────────────────────────────────┤
 │  Orchestrator (src/commands/)                        │
-│  235 command modules. Wires zones together.          │
+│  254 command modules. Wires zones together.          │
 │  CLI entry point: cli.py → Typer app → commands.     │
 └─────────────────────────────────────────────────────┘
 ```

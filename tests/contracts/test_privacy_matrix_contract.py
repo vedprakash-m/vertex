@@ -54,6 +54,7 @@ SPEC_SIDECAR_PATHS: tuple[str, ...] = (
     "archive/<edition>/manifests/issue_NNN.json",
     "runtime/gather_state.json",
     "external_dependencies.jsonl",
+    "ai/llm_trace_full_io.jsonl",
 )
 
 

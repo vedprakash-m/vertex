@@ -327,6 +327,8 @@ Vertex ships a tracked `governance/` directory with the following compliance art
 | `governance/test-evidence.md` | Canonical test-evidence log (use this, not `output/__green_run.txt`) |
 | `governance/decisions/` | Architectural Decision Records (ADR) templates and signed decisions |
 | `governance/graduations/` | AI feature graduation records (co-signed before a feature is promoted to `frontier_eligible: true`) |
+| `governance/nfr-budgets.yaml` | Non-functional/cost budget candidates pending ratification (latency, capacity, reliability, OpEx ceilings) |
+| `governance/runbooks/` | Tracked, generic operator runbooks (SoR cutover rehearsal, ledger backfill) |
 
 ---
 

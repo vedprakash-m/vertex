@@ -1,0 +1,204 @@
+# NFR / OpEx budget candidates (arch-fix.md Phase 0, §8 / §A.0).
+#
+# Every row starts life as `status: candidate` (a proposed contract, not yet
+# enforced). Ratification (candidate -> ratified) is a human/PM decision —
+# not something a coding pass can perform on its own — and is recorded here
+# with `ratified_at` + `ratified_by` once it happens. The companion contract
+# test (`tests/contracts/test_nfr_budget_freeze_contract.py`) enforces that a
+# ratified budget's numeric value can never be loosened by a later edit
+# ("no later phase may lower a budget to pass" — arch-fix.md §A.0).
+#
+# `direction` tells the freeze test which way is "tighter":
+#   ceiling      - the value is a maximum; a ratified ceiling may only move down or stay.
+#   floor        - the value is a minimum; a ratified floor may only move up or stay.
+#   qualitative  - no single number to ratchet; the contract is a procedure/policy,
+#                  evidenced by the stated budget_class (e.g. a restore drill).
+schema_version: "1"
+
+budgets:
+  - id: audit-write-latency-local
+    area: "Audit write"
+    description: "released write p95, local disk"
+    budget_class: microbenchmark
+    direction: ceiling
+    unit: ms
+    value: 25
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: audit-write-latency-network-lease
+    area: "Audit write"
+    description: "released write p95, network-via-lease"
+    budget_class: microbenchmark
+    direction: ceiling
+    unit: ms
+    value: 150
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: context-compile-latency
+    area: "Context compile"
+    description: "p95 at a fixed candidate count + max evidence bytes (bounds stated at ratification)"
+    budget_class: microbenchmark
+    direction: ceiling
+    unit: ms
+    value: 300
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: local-encode-latency
+    area: "Local encode"
+    description: "p95 warm, at pinned model/runtime/batch"
+    budget_class: microbenchmark
+    direction: ceiling
+    unit: ms
+    value: 80
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: startup-regression
+    area: "Startup"
+    description: "no-AI CLI startup regression"
+    budget_class: microbenchmark
+    direction: ceiling
+    unit: ms
+    value: 150
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: capacity-snapshot-cadence-events
+    area: "Capacity"
+    description: "event snapshot cadence — every N events"
+    budget_class: integration
+    direction: ceiling
+    unit: events
+    value: 5000
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: capacity-trace-metadata-retention
+    area: "Capacity"
+    description: "AI trace metadata retention"
+    budget_class: periodic-governance-review
+    direction: ceiling
+    unit: days
+    value: 90
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: capacity-sanitized-excerpt-retention
+    area: "Capacity"
+    description: "sanitized AI I/O excerpt retention (ai/llm_trace_full_io.jsonl)"
+    budget_class: periodic-governance-review
+    direction: ceiling
+    unit: days
+    value: 90
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: concurrency-sqlite-busy-backoff-cap
+    area: "Concurrency"
+    description: "SQLITE_BUSY backoff cap + total-elapsed ceiling"
+    budget_class: fault-injection
+    direction: ceiling
+    unit: ms
+    value: null  # numeric bound not yet proposed; needs a Phase-1 CPK measurement spike
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: reliability-rpo-authorization-execution
+    area: "Reliability"
+    description: "RPO for committed authorization/execution records (approval, outbox intent, receipts, terminal AI audit)"
+    budget_class: restore-drill
+    direction: qualitative
+    unit: null
+    value: 0  # RPO = 0 (zero data loss tolerance), not a tunable number
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: security-encryption-at-rest
+    area: "Security"
+    description: "encryption-at-rest for PII/confidential excerpts; key storage/rotation; ACLs; tamper-evident audit"
+    budget_class: periodic-governance-review
+    direction: qualitative
+    unit: null
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: privacy-retention-rtbf
+    area: "Privacy"
+    description: "classification+retention per artifact; RTBF crypto-tombstone"
+    budget_class: periodic-governance-review
+    direction: qualitative
+    unit: null
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: observability-push-alerting
+    area: "Observability"
+    description: "push alerting for ai_audit_degraded, DLQ>0, parity drift, frontier-spend, projection-lag"
+    budget_class: integration
+    direction: qualitative
+    unit: null
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: opex-max-cost-per-call-usd
+    area: "OpEx"
+    description: "max_cost_per_call_usd (ai_policy.yaml)"
+    budget_class: production-SLO
+    direction: ceiling
+    unit: usd
+    value: null  # per-feature; ratified per entry once AF-4 lands, not a single fleet-wide number
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: opex-frontier-cost-per-cycle-reduction
+    area: "OpEx"
+    description: "measured frontier $/cycle reduction target (OM-3)"
+    budget_class: production-SLO
+    direction: floor
+    unit: percent
+    value: null  # ratified in Phase 0 per arch-fix.md §1 Goals (G3)
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: compatibility-schema-version-window
+    area: "Compatibility"
+    description: "schema-version window >= N-2; rolling/mixed-version migration + interop test"
+    budget_class: integration
+    direction: floor
+    unit: versions
+    value: 2
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: operations-accountable-role
+    area: "Operations"
+    description: "named accountable role (pilot DRI / Platform SRE) for live-cadence sequencing"
+    budget_class: periodic-governance-review
+    direction: qualitative
+    unit: null
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null

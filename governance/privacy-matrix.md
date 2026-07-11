@@ -57,6 +57,7 @@ Every field in every payload Vertex handles falls into exactly one of these clas
 | `_feedback/*.jsonl` (edit_patterns, brief_interventions, context_gaps) | CONFIDENTIAL + PII (operator edits) | 1 year | `[EXCISED]` tombstone (WS-18) |
 | `runtime/vertex_analytics.sqlite3` | CONFIDENTIAL | 1 year | rebuild from journal after `[EXCISED]` run (WS-18) |
 | `keyring entries` | SECRET | ephemeral (rotated on personnel change) | immediate rotation |
+| `ai/llm_trace_full_io.jsonl` (arch-fix.md Phase 0 corpus prerequisite; opt-in via `VERTEX_AI_TRACE_FULL_IO`, off by default) | CONFIDENTIAL (sanitized excerpts only — never raw prompt/response text) | 90 days | `[EXCISED]` tombstone (WS-18); exists only to bake the AF-1/AF-4 eval corpus, not as a long-term audit-of-record |
 
 ## 4. RBAC / consent matrix
 

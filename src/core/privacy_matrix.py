@@ -34,6 +34,7 @@ class DataClassification(str, Enum):
 
 class RetentionClass(str, Enum):
     EPHEMERAL = "ephemeral"
+    NINETY_DAYS = "90d"
     ONE_YEAR = "1y"
     SEVEN_YEARS = "7y"
     INDEFINITE = "indefinite"
@@ -226,6 +227,17 @@ SIDECAR_RETENTION: tuple[SidecarRetentionRule, ...] = (
         retention=RetentionClass.ONE_YEAR,
         supports_excise=False,
     ),
+    SidecarRetentionRule(
+        # arch-fix.md Phase 0 corpus prerequisite (§A.0): opt-in, sanitized,
+        # size-bounded AI prompt/response excerpts (src/ai/safety/ai_trace_capture.py).
+        # Short TTL because it exists only to bake the AF-1/AF-4 eval corpus,
+        # not as a long-term audit-of-record (that's the AF-3 fail-closed
+        # audit trail, a separate durable store landing in Phase 2b).
+        artifact_path="ai/llm_trace_full_io.jsonl",
+        classification=DataClassification.CONFIDENTIAL,
+        retention=RetentionClass.NINETY_DAYS,
+        supports_excise=True,
+    ),
 )
 
 
@@ -233,6 +245,7 @@ SIDECAR_RETENTION: tuple[SidecarRetentionRule, ...] = (
 # the WS-18 retention cutoff enforcer.
 RETENTION_DAYS: dict[RetentionClass, int | None] = {
     RetentionClass.EPHEMERAL: 0,  # 0 days = do not persist beyond live gather
+    RetentionClass.NINETY_DAYS: 90,
     RetentionClass.ONE_YEAR: 365,
     RetentionClass.SEVEN_YEARS: 365 * 7,
     RetentionClass.INDEFINITE: None,  # never auto-delete

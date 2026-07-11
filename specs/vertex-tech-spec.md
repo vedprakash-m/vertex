@@ -86,10 +86,12 @@
 
 | Zone | Location | Purpose | AI/M365 Imports | External I/O |
 |------|----------|---------|-----------------|-------------|
-| **A — Deterministic Core** | `src/core/` (295 modules) | Models, engines, stores, renderers, validators | Forbidden | ADO/Kusto data acquisition only |
-| **B — AI Layer** | `src/ai/` (35 modules + prompt assets) | Content generation, review, safety pipeline, M365 topic routing | Native | Via Zone A stores |
-| **C — M365 Integration** | `src/m365/` (26 modules) | ADO writer, Agency bridge, Graph mail, discovery adapters, enricher | Forbidden | Native |
-| **Orchestrator** | `src/commands/` (235 command modules) | CLI commands wiring all zones | Allowed | Allowed |
+| **A — Deterministic Core** | `src/core/` (384 modules) | Models, engines, stores, renderers, validators | Forbidden | ADO/Kusto data acquisition only |
+| **B — AI Layer** | `src/ai/` (55 modules + prompt assets) | Content generation, review, safety pipeline, M365 topic routing | Native | Via Zone A stores |
+| **C — M365 Integration** | `src/m365/` (49 modules) | ADO writer, Agency bridge, Graph mail, discovery adapters, enricher | Forbidden | Native |
+| **Orchestrator** | `src/commands/` (254 command modules) | CLI commands wiring all zones | Allowed | Allowed |
+
+*Module counts are probe-derived (`scripts/derive_spec_counts.py`), re-derived 2026-07-09 as part of arch-fix.md Phase 0's count-probe repair — re-run the script rather than hand-editing these numbers.*
 
 **Sacred invariant:** `src/core/` must not import from `src/ai/` or `src/m365/`. Enforced by `tests/contracts/test_import_boundaries.py` — AST-level scan of every `*.py` under `src/core/`. Any `import` or `from ... import` referencing `src.ai` or `src.m365` is a test failure.
 
@@ -152,10 +154,10 @@ The deterministic implementation is materially ahead of the old feature backlog 
 - **re-debt Phases 0–8 code-complete:** All coding-implementable workstreams (WS-1–WS-25) are done. Remaining items are OPERATOR gates, HUMAN GATE blockers, and CALENDAR-gated proofs documented in `.archive/specs/gaps.md` (local-only gap register).
 - `gather.py` owns ADO work items/revisions/comments, freshness, trajectories, Kusto, IcM fallback, ADO analytics, sprint, pipeline, PR (via `ado_pr_client.py`), dependency, M365 WorkIQ, channel telemetry, and L1 observation projection.
 - `doctor.py` surfaces channel completeness, degraded optional sources, ADO PR repository coverage, M365 discovery debt, metric-binding rollout, readiness, assumptions, decisions, dependencies, circuit breakers, knowledge health, fact-store parity, adapter certs, confirm-readiness (B-1–B-5), operator gates, and platform readiness. `--context` mode validates all 20 Plane 1 files against 21 cross-file invariants and reports context maturity level (L0–L4); `--fix-hints` appends per-invariant remediation guidance.
-- `quality_gates.py` implements QG-1 through QG-28 (including QG-26 external-dependency state gate, QG-27 truth-level/material-dispute gate, QG-28 KPI degradation gate, and QG-WS5B AI budget gate) plus bridge gates, with forceable vs hard-block behavior enforced by `confirm.py`.
+- `quality_gates.py` implements QG-1 through QG-28 (including QG-26 external-dependency state gate, QG-27 truth-level/material-dispute gate, QG-28 KPI degradation gate, and QG-WS5B AI budget gate) plus bridge gates, with forceable vs hard-block behavior enforced by `confirm.py`. QG-29 is formally reserved (not yet implemented) for the arch-fix.md AF-3 fail-closed AI audit gate — `src/core/quality_gates/gate_registry.py` prevents unrelated work from claiming it (see §9.17.1).
 - UIL (Unified Integration Layer) phases 0–5 are code-complete: 16 new Zone A modules, 14 `vertex integration` CLI subcommands, 160+ targeted UIL tests. The ADO UIL gather path is now default-on; Kusto, Teams, and IcM remain env-gated (`VERTEX_UIL_KUSTO=1`, `VERTEX_UIL_TEAMS=1`, `VERTEX_UIL_ICM=1`). Full migration design at `.archive/specs/unify.md`.
 - **Reality substrate** (`ProgramReality` facade, 5 truth levels, entity registry, trust ledger, signal normalizer, fact schema registry, commitment store, per-family SoR mode, clean-cycle flip gates, actuation engine, ask named intents, reality export, null projection) is fully implemented and contract-tested for the deterministic/accepted policy slice.
-- **Governance artifacts:** `governance/threat-model.md` (STRIDE analysis), `governance/privacy-matrix.md` (data-classification + DPA checklist), `governance/model-cards.md` (AI model version lifecycle), `governance/test-evidence.md` (canonical test-evidence log), `governance/decisions/` (ADR templates), `governance/graduations/` (AI feature graduation records).
+- **Governance artifacts:** `governance/threat-model.md` (STRIDE analysis), `governance/privacy-matrix.md` (data-classification + DPA checklist), `governance/model-cards.md` (AI model version lifecycle, all 19 `ai_policy.yaml` features carded), `governance/test-evidence.md` (canonical test-evidence log), `governance/decisions/` (ADR templates), `governance/graduations/` (AI feature graduation records), `governance/nfr-budgets.yaml` (NFR/OpEx budget candidates pending ratification — see §9.17.1), `governance/runbooks/` (tracked, generic operator runbooks — SoR cutover rehearsal, ledger backfill).
 - Full test-suite execution evidence is recorded in `governance/test-evidence.md` (the canonical evidence log); `output/__green_run.txt` is a stale local artifact — see `scripts/check_spec_drift.py` `p9-dead-green-run`. The current suite collection count is computed at CI time by `scripts/derive_spec_counts.py` (WS-9 step 2 deliverable).
 
 ### 1.4 Data Flow
@@ -1876,8 +1878,28 @@ All 13 data-model quality gates are registered and enforced. Hard-block gates en
 - JSONL is authoritative; SQLite artifacts (`<id>-index.sqlite3`, `current.sqlite3`) are rebuildable caches/projections.
 - `vertex ledger replay` and `vertex ledger verify` operate over the append-only log, not the projection database.
 - `vertex backup` captures the full ledger tree implicitly via recursive backup of `programs/`, including event logs, candidate audit, projections, snapshots, and evidence-vault artifacts.
-- Backfill procedure for Tier A (LT decks), Tier B (newsletters), and Tier C (KB/Artha): see `docs/ledger-backfill-runbook.md`.
+- Backfill procedure for Tier A (LT decks), Tier B (newsletters), and Tier C (KB/Artha): see `governance/runbooks/ledger-backfill-runbook.md` (tracked, generic) or a workspace's own `docs/ledger-backfill-runbook.md` (gitignored, program-specific detail).
 - NFR-3 (50K replay budget): `project_program_events()` for 50K events must complete in < 60 seconds. Validated by `tests/unit/test_ledger_perf.py::test_replay_perf_50k` (`@pytest.mark.slow`); actual measured time is ~14s.
+
+### 9.17.1 Common Persistence Kernel (CPK) — arch-fix.md Part A, Phases 0–1
+
+Foundational persistence primitives closing the architecture-remediation program's Phase 0/1 (see `.archive/specs/arch-fix.md` for the full audit trail and `specs/backlog.md` §7 for remaining Phase 2/2b/3 work). These exist as reusable Zone A infrastructure — they are not yet wired into any AI-safety or actuation call path (that wiring is the remaining `arch-fix` work).
+
+**Event-log hardening.** `event_log.py`'s append path was O(n) per write (a full `read_events()` re-scan for the hash chain plus a full-file `_count_lines()` for the index line number). It now maintains a small, self-healing O(1) tail cache (`programs/<id>/ledger/events/_tail.json` — last event hash, last `recorded_at`, active file name/size/line-count) that falls back to the exact prior full-scan behavior whenever the cache is missing, stale, or doesn't name the currently-resolved target file (rotation, cross-process drift, first-ever write). The cache is a pure write-path optimization; every reader (`read_events`, `verify_event_log`, projections) still derives truth from the JSONL files, never the cache. `event_index.py` now opens through `open_program_db()` (network-aware WAL/DELETE journal-mode selection) instead of hardcoding `PRAGMA journal_mode=WAL`.
+
+**New primitives (`src/core/ledger/` unless noted):**
+- `program_sequence.py` — monotonic per-program sequence allocator (`next_sequence()`/`current_sequence()`), atomic via SQLite `UPDATE ... RETURNING`.
+- `src/core/workspace_lease.py` — coarse-grained pessimistic workspace lease (owner + TTL + fencing token; `acquire_lease()`/`renew_lease()`/`release_lease()`), atomic via `BEGIN IMMEDIATE`. Resolves the multi-host single-writer paradox: a local queue can't serialize writers on other hosts against a shared network workspace. Not yet wired into any mutating command's write path. Uses `open_program_db_with_retry()` (`src/core/_db.py`) rather than `open_program_db()` directly: `PRAGMA busy_timeout` doesn't reliably cover the brief exclusive lock a brand-new database file's WAL-mode conversion needs, so many hosts racing to acquire a lease against a not-yet-existing lease file can otherwise hit `sqlite3.OperationalError: database is locked` — a real failure surfaced by `test_workspace_lease.py`'s 8-thread concurrent-acquisition test, fixed with bounded jittered-backoff retry on the connect+PRAGMA phase specifically (not a blanket retry-everything). `program_sequence.py` and `durable_outbox_store.py` use the same retry wrapper for the same reason.
+- `projection_checkpoint_store.py` — per-projection watermark (event id + `recorded_at`) plus projector/policy version and an optional checksum, for future replay/drift detection.
+- `src/core/unit_of_work.py` — `open_unit_of_work({alias: path, ...})` commits correlated writes across multiple separate SQLite files as one atomic transaction, via SQLite's transactional `ATTACH` (each attached database still gets its own network-aware journal mode, matching `open_program_db()`'s per-store behavior rather than forcing one mode connection-wide).
+- `durable_outbox_store.py` — generic, table-agnostic lease/attempt/dead-letter engine: `pending→leased→dispatched→succeeded→audited→completed`, with `failed_retryable` (re-leasable once due) and true terminals `uncertain_remote_state`/`failed_terminal`/`compensation_required`/`dead_letter` requiring an explicit `mark_manually_resolved()`. Stale leases (expired TTL) are reclaimed by a different owner via a bumped fencing token; a caller presenting a superseded fencing token gets `LeaseNoLongerCurrent`, never a silent overwrite.
+- `program_checkpoint_manifest.py` — `ProgramCheckpointManifest` composes event-log position + `program_sequence` + `projection_checkpoint_store` + caller-supplied outbox watermarks/tracked-file hashes/schema versions into one content-addressed (self-hashing) checkpoint; `verify_manifest_against_disk()` detects drift between a captured manifest and current on-disk store state (the restore-drill check).
+- `src/core/quality_gates/gate_registry.py` — central `RESERVED_GATE_IDS` map + a code scanner (`scan_defined_gate_ids()`) so a new gate ID can be checked for collision before it's claimed (QG-29 is reserved for the not-yet-built AF-3 fail-closed audit gate).
+- `src/core/authority_registry.py` — composed, read-only view over `source_authority.yaml`, the ledger event registry, `fact_sor_state.py`, and `state_reader_registry.py`; answers, per authority family, which source is primary, which fact types/event prefixes back it, and its SoR-flip configuration.
+
+**AI-safety groundwork (`src/ai/safety/`):** `ai_trace_sanitizer.py` (`sanitize_ai_io()` — credential redaction via `src/core/rev/privacy.py::scan_credentials`, then PII scrub via `pii_scrubber.scan_text`, then a size bound — never returns raw text) and `ai_trace_capture.py` (`capture_ai_io()` — opt-in via `VERTEX_AI_TRACE_FULL_IO`, off by default; writes sanitized excerpts to `ai/llm_trace_full_io.jsonl`, a 90-day-TTL sidecar registered in `governance/data-classification.yaml`/`privacy_matrix.py`). This exists to bake a real-I/O corpus for the not-yet-built AI Safety Boundary's (`AF-1`/`AF-2`) semantic-validator eval harness — `llm_trace.py` itself remains metadata-only.
+
+**Test coverage:** `tests/unit/test_program_sequence.py`, `test_workspace_lease.py` (includes a multi-thread concurrent-acquisition test), `test_projection_checkpoint_store.py`, `test_unit_of_work.py` (cross-database commit/rollback atomicity), `test_durable_outbox_store.py` (full lifecycle + stale-fencing-token rejection), `test_program_checkpoint_manifest.py`, `test_ai_trace_sanitizer.py`, `test_ai_trace_capture.py`; contract tests `test_qg_gate_reservation_contract.py`, `test_authority_registry_contract.py`, `test_nfr_budget_freeze_contract.py`.
 
 ---
 
@@ -2395,6 +2417,8 @@ def process_generated_text(
 
 **Mandatory enforcement:** Every `src/ai/` generation path must call `process_generated_text()`. Direct re-implementation of any pipeline stage inline is prohibited. `tests/contracts/test_ai_safety_pipeline.py` enforces this via AST scan of all `src/ai/` modules — any AI output path that bypasses the wrapper fails the contract test. There is no opt-out path.
 
+**Related, additive, not-yet-wired mechanism:** `src/ai/safety/ai_trace_sanitizer.py` + `ai_trace_capture.py` (§9.17.1) sanitize and optionally (opt-in only) durably capture prompt/response text for corpus-building — a different concern from this pipeline's output-shaping, and not a substitute for it. The full AI Safety Boundary (per-feature `SemanticValidator[T]`, `AISchemaGateway`, fail-closed audit) described in `.archive/specs/arch-fix.md` has not been built yet; this section describes what runs in production today.
+
 ### 12.2 AIClient (`src/ai/client.py`)
 
 ```python
@@ -2819,6 +2843,8 @@ def evaluate_chart_gates(kusto_sections, chart_enabled=True) -> QualityGateRepor
 | **QG-25** | Email signal yield zero across 3+ consecutive gather cycles for active workstreams (circuit breaker) | Yes | 2 |
 
 **`--force` overrides QG-1, QG-2, QG-3, QG-7, QG-9, QG-10, QG-11, QG-12, QG-14, QG-15, QG-16, QG-17, QG-18, QG-19, QG-23, QG-24, QG-25, QG-B1, QG-B2, and QG-B3. QG-4, QG-5, QG-6, QG-8, and QG-13 are never overridable. Bridge gates (QG-B1, QG-B2, QG-B3) evaluate only when a trusted baseline exists.**
+
+This table predates QG-26 (external-dependency state), QG-27 (truth-level/material-dispute), QG-28 (KPI degradation), and QG-WS5B (AI budget) — see §1.3 for their one-line descriptions and `src/core/quality_gates/` for implementation. **QG-29 is reserved, not implemented**: `src/core/quality_gates/gate_registry.py` holds it for the not-yet-built arch-fix.md AF-3 fail-closed AI audit gate (`.archive/specs/arch-fix.md`; `specs/backlog.md` §7 BL-C3).
 
 ### 14.2 Ban-List Validator (`src/core/ban_list_validator.py`)
 

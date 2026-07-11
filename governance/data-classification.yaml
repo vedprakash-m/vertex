@@ -147,3 +147,8 @@ artifacts:
     classes: [SECRET]
     retention_days: 0  # ephemeral (rotated)
     excise: "immediate rotation"
+
+  - stem: "ai/llm_trace_full_io.jsonl"
+    classes: [CONFIDENTIAL]
+    retention_days: 90  # short TTL; corpus-bake only, not audit-of-record
+    excise: "[EXCISED] tombstone (WS-18); opt-in via VERTEX_AI_TRACE_FULL_IO, sanitized excerpts only"

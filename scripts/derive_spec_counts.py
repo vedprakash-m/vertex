@@ -47,30 +47,38 @@ def _count_collected_tests(tests_root: Path) -> int:
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return -1
-    # pytest --co output ends with "collected N items" or "no tests ran".
+    # pytest's collection summary wording has changed across major versions:
+    #   pytest < 8:  "collected N items"
+    #   pytest 9.x:  "N tests collected in X.XXs"
+    # Match either so an upstream pytest bump doesn't silently regress this to -1.
     match = re.search(r"collected\s+(\d+)\s+items", result.stdout)
+    if match is None:
+        match = re.search(r"(\d+)\s+tests?\s+collected", result.stdout)
     if match is None:
         return -1
     return int(match.group(1))
 
 
-def _count_commands_in_cli() -> int:
-    """Best-effort: count top-level commands by parsing cli.py's Typer app."""
-    cli = REPO_ROOT / "src" / "vertex" / "cli.py"
+def _count_commands_in_cli() -> tuple[int, int]:
+    """Best-effort: count top-level Typer commands/groups registered on `app`.
+
+    Returns (leaf_commands, command_groups). The CLI entrypoint is the
+    repo-root cli.py Typer `app`; commands are registered either as
+    `app.command("name")(func)` (functional form) or `app.add_typer(sub_app,
+    name="name")` (a subcommand group). Both forms are counted separately
+    since neither alone reflects the full `vertex <verb>` surface.
+    """
+    cli = REPO_ROOT / "cli.py"
     if not cli.exists():
-        # The spec hints the entry is cli.py — try the original location.
-        for candidate in ("src/vertex/cli.py", "src/cli.py"):
-            p = REPO_ROOT / candidate
-            if p.exists():
-                cli = p
-                break
-    if not cli.exists():
-        return -1
+        return -1, -1
     text = cli.read_text(encoding="utf-8")
-    # Heuristic: top-level commands are registered via @app.command("name")
-    # or app.add_typer(sub_app, name="name"). Count distinct command names.
-    commands = set(re.findall(r'@app\.command\("([^"]+)"', text))
-    return len(commands)
+    leaf_commands = set(
+        re.findall(r'^app\.command\("([^"]+)"\)', text, re.MULTILINE)
+    )
+    command_groups = set(
+        re.findall(r'^app\.add_typer\([^,]+,\s*name="([^"]+)"\)', text, re.MULTILINE)
+    )
+    return len(leaf_commands), len(command_groups)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -85,6 +93,8 @@ def main(argv: list[str] | None = None) -> int:
     commands = src / "commands"
     tests = REPO_ROOT / "tests"
 
+    leaf_commands, command_groups = _count_commands_in_cli()
+
     counts = {
         "zone_a_modules": _count_py_files(zone_a) if zone_a.exists() else 0,
         "zone_b_modules": _count_py_files(zone_b) if zone_b.exists() else 0,
@@ -92,7 +102,8 @@ def main(argv: list[str] | None = None) -> int:
         "command_modules": _count_py_files(commands) if commands.exists() else 0,
         "test_files": _count_test_files(tests),
         "collected_tests": _count_collected_tests(tests),
-        "top_level_cli_commands": _count_commands_in_cli(),
+        "top_level_cli_leaf_commands": leaf_commands,
+        "top_level_cli_command_groups": command_groups,
     }
 
     failed = [k for k, v in counts.items() if v == -1]
