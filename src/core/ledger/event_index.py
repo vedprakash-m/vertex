@@ -6,6 +6,7 @@ from pathlib import Path
 import sqlite3
 from typing import Any, Iterator
 
+from src.core._db import open_program_db
 from src.core.ledger.event_types import get_event_schema
 from src.core.ledger.source_refs import SourceRef, source_document_key
 
@@ -40,17 +41,21 @@ def get_event_index_path(program_id: str, *, programs_root: Path = PROGRAMS_ROOT
 
 @contextmanager
 def connect_event_index(program_id: str, *, programs_root: Path = PROGRAMS_ROOT) -> Iterator[sqlite3.Connection]:
+    """Yield a connection to this program's event index.
+
+    arch-fix.md Phase 1 (INV-AF-13): routed through ``open_program_db()``
+    instead of a hand-rolled ``sqlite3.connect`` + hardcoded
+    ``PRAGMA journal_mode=WAL``, so the event index picks WAL/DELETE by
+    filesystem like every other store (network drives were previously
+    forced into WAL, which is unsafe there). ``durability="strict"``
+    preserves this store's prior always-``synchronous=FULL`` behavior
+    (unlike the "balanced" default, which relaxes to NORMAL off network
+    paths).
+    """
     path = get_event_index_path(program_id, programs_root=programs_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(path)
-    try:
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA synchronous=FULL")
+    with open_program_db(path, durability="strict") as connection:
         _ensure_schema(connection)
         yield connection
-        connection.commit()
-    finally:
-        connection.close()
 
 
 def index_event(
@@ -225,7 +230,11 @@ def load_vault_refs(program_id: str, *, programs_root: Path = PROGRAMS_ROOT) -> 
         rows = connection.execute(
             "SELECT vault_hash, ref_owner_id, ref_owner_type, ref_role FROM vault_refs ORDER BY vault_hash, ref_owner_id, ref_role"
         ).fetchall()
-    return tuple(rows)
+    # open_program_db() sets row_factory=sqlite3.Row, which does NOT compare
+    # equal to a plain tuple (`Row(...) == (...)` is False even with identical
+    # values) — materialize plain tuples so callers' tuple-equality checks
+    # keep working exactly as before this store was routed through it.
+    return tuple(tuple(row) for row in rows)
 
 
 def _extract_entity_refs(payload: dict[str, Any], entity_ref_fields: frozenset[str]) -> set[str]:

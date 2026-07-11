@@ -1,0 +1,353 @@
+# Public NFR / OpEx candidate template, not deployment authority or evidence.
+#
+# No operational measurements, selected deployment values, or actual
+# ratifications belong here. Candidate values remain unset until an authorized
+# owner measures and ratifies them in a separate private registry.
+#
+# The existing load_nfr_budgets(path) / ratified_budgets(path) APIs accept that
+# explicit private registry path. Their default is this public template; it
+# must not be used as evidence of deployment approval or qualification.
+# Separating this template does not revoke any private ratification.
+#
+# Freeze each private ratified ceiling/floor against its approved baseline:
+# ceilings may only decrease; floors may only increase. Qualitative rows
+# describe a policy/procedure rather than a numeric ratchet. Public tests use
+# deliberately synthetic registries to exercise this contract.
+schema_version: "1"
+
+budgets:
+  - id: audit-write-latency-local
+    area: "Audit write"
+    description: "released write p95, local disk"
+    budget_class: microbenchmark
+    direction: ceiling
+    unit: ms
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: audit-write-latency-network-lease
+    area: "Audit write"
+    description: "released write p95, network-via-lease"
+    budget_class: microbenchmark
+    direction: ceiling
+    unit: ms
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: context-compile-latency
+    area: "Context compile"
+    description: "p95 at a fixed candidate count and maximum evidence size, declared at ratification"
+    budget_class: microbenchmark
+    direction: ceiling
+    unit: ms
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: local-encode-latency
+    area: "Local encode"
+    description: "warm p95 at a pinned model, runtime, and batch size"
+    budget_class: microbenchmark
+    direction: ceiling
+    unit: ms
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: startup-regression
+    area: "Startup"
+    description: "no-AI CLI startup regression"
+    budget_class: microbenchmark
+    direction: ceiling
+    unit: ms
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: kusto-required-set-gather-latency
+    area: "Kusto"
+    description: "required-set gather p95 and maximum, under a declared execution mode"
+    budget_class: production-SLO
+    direction: ceiling
+    unit: s
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: capacity-snapshot-cadence-events
+    area: "Capacity"
+    description: "event snapshot cadence, every N events"
+    budget_class: integration
+    direction: ceiling
+    unit: events
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: capacity-trace-metadata-retention
+    area: "Capacity"
+    description: "AI trace metadata retention"
+    budget_class: periodic-governance-review
+    direction: ceiling
+    unit: days
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: capacity-sanitized-excerpt-retention
+    area: "Capacity"
+    description: "sanitized AI I/O excerpt retention"
+    budget_class: periodic-governance-review
+    direction: ceiling
+    unit: days
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: concurrency-sqlite-busy-backoff-cap
+    area: "Concurrency"
+    description: "SQLITE_BUSY backoff cap and total-elapsed ceiling"
+    budget_class: fault-injection
+    direction: ceiling
+    unit: ms
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: reliability-rpo-authorization-execution
+    area: "Reliability"
+    description: "committed authorization/execution records require zero data loss; deployment drill evidence is separate"
+    budget_class: restore-drill
+    direction: qualitative
+    unit: null
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: security-encryption-at-rest
+    area: "Security"
+    description: "encryption-at-rest for PII/confidential excerpts, key storage/rotation, ACLs, and tamper-evident audit"
+    budget_class: periodic-governance-review
+    direction: qualitative
+    unit: null
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: privacy-retention-rtbf
+    area: "Privacy"
+    description: "classification and retention per artifact; purge uses the existing [EXCISED] tombstone mechanism"
+    budget_class: periodic-governance-review
+    direction: qualitative
+    unit: days
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: observability-push-alerting
+    area: "Observability"
+    description: "push alerting for audit degradation, dead letters, parity drift, frontier spend, and projection lag"
+    budget_class: integration
+    direction: qualitative
+    unit: null
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: opex-max-cost-per-call-usd
+    area: "OpEx"
+    description: "per-feature max_cost_per_call_usd"
+    budget_class: production-SLO
+    direction: ceiling
+    unit: usd
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: opex-frontier-cost-per-cycle-reduction
+    area: "OpEx"
+    description: "frontier cost-per-cycle reduction against a measured private baseline"
+    budget_class: production-SLO
+    direction: floor
+    unit: percent
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: compatibility-schema-version-window
+    area: "Compatibility"
+    description: "schema-version window >= N-2, with rolling/mixed-version migration and interop tests"
+    budget_class: integration
+    direction: floor
+    unit: versions
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: operations-accountable-role
+    area: "Operations"
+    description: "named accountable role for live-cadence sequencing"
+    budget_class: periodic-governance-review
+    direction: qualitative
+    unit: null
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: relo-source-ado-gather-latency-general
+    area: "Gather"
+    description: "ADO-channel gather wall time from gather-run.v1 channel outcomes"
+    budget_class: production-SLO
+    direction: ceiling
+    unit: s
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: relo-source-icm-gather-latency
+    area: "Gather"
+    description: "IcM-channel gather wall time from gather-run.v1 channel outcomes; completeness obligation is separately configured"
+    budget_class: production-SLO
+    direction: ceiling
+    unit: s
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: relo-source-analytics-gather-latency
+    area: "Gather"
+    description: "ADO Analytics-snapshot channel gather wall time from gather-run.v1 channel outcomes"
+    budget_class: production-SLO
+    direction: ceiling
+    unit: s
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: relo-concurrent-program-gather
+    area: "Concurrency"
+    description: "concurrent-program gather capacity under a declared source mix and execution mode"
+    budget_class: production-SLO
+    direction: floor
+    unit: "concurrent programs"
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: relo-reliability-rto-restore-drill
+    area: "Reliability"
+    description: "full program-state backup, verification, and restore RTO under a declared scale, without touching live state"
+    budget_class: restore-drill
+    direction: ceiling
+    unit: s
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: relo-storage-growth-projection
+    area: "Storage"
+    description: "storage-growth projection; a capacity tripwire also requires a separately allocated absolute capacity"
+    budget_class: periodic-governance-review
+    direction: qualitative
+    unit: "GB/program-year"
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: relo-ci-functional-suite-runtime
+    area: "CI"
+    description: "default non-performance CI functional-suite wall time"
+    budget_class: production-SLO
+    direction: ceiling
+    unit: min
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: relo-ci-perf-benchmark-lane-runtime
+    area: "CI"
+    description: "opt-in performance benchmark lane wall time"
+    budget_class: production-SLO
+    direction: ceiling
+    unit: min
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: relo-spec-line-count-budget
+    area: "Specification"
+    description: "maximum specification line count; growth requires a named removal after ratification"
+    budget_class: periodic-governance-review
+    direction: ceiling
+    unit: lines
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: relo-spec-obligation-count-budget
+    area: "Specification"
+    description: "maximum specification obligation-ID count; growth requires a named removal after ratification"
+    budget_class: periodic-governance-review
+    direction: ceiling
+    unit: obligation-IDs
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
+  - id: durability-profile
+    area: "Reliability"
+    description: >-
+      SQLite/lease/outbox durability contracts: local WAL and network-path
+      DELETE journal modes; synchronous=NORMAL locally and FULL for network
+      paths or explicit durability="strict"; busy_timeout=5000ms with an
+      8-attempt jittered exponential backoff for initial WAL-file contention.
+      Workspace leases use wall-clock time without explicit clock-rollback
+      handling; monotonically increasing DB-authoritative fencing tokens are
+      checked on renew/release to prevent unfenced dual-writer access.
+      Clock assumptions and deployment suitability require separate review.
+      Outbox schema initialization is additive CREATE-TABLE-IF-NOT-EXISTS,
+      without ALTER-based migration; outstanding intents must survive schema
+      reestablishment. Revisit this contract if ALTER migrations are added.
+      Storage-backend migration rebuilds from the authoritative file journal
+      in an isolated directory, swaps via os.replace, and preserves the prior
+      state as a backup; interruption before the final swap leaves the target
+      untouched, and rerunning rebuilds rather than resumes partial state.
+      Backup consistency requires an isolated backup/verify/restore drill;
+      no actual drill result or deployment approval is asserted here.
+    budget_class: fault-injection
+    direction: qualitative
+    unit: null
+    value: null
+    status: candidate
+    ratified_at: null
+    ratified_by: null
