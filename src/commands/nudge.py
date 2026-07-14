@@ -592,13 +592,19 @@ def _orchestrate(
 
     for idx, (sec, result) in enumerate(zip(active_sections, fetch_results)):
         stale_days = resolved_overrides.get(sec.id, sec.stale_business_days)
+        # G-8: resolve the deadline actually used for display/beyond-deadline math.
+        # sec.deadline is only populated for operator-authored explicit deadlines;
+        # sections using deadline_milestone_id must pull the assessed date instead,
+        # otherwise milestone-resolved deadlines never surface in the rendered email.
+        _rs = resolved_meta_by_id.get(sec.id)
+        resolved_deadline = _rs.target_date_ceiling.date if _rs is not None else sec.deadline
 
         if result.query_error:
             sections.append(FullHygieneSection(
                 section_id=sec.id, letter=sec.letter, title=sec.title,
                 description=sec.description, stale_threshold_days=stale_days,
                 stale_summary_threshold_days=sec.stale_summary_threshold_days,
-                deadline=sec.deadline, groups=(), total_count=0, stale_count=0,
+                deadline=resolved_deadline, groups=(), total_count=0, stale_count=0,
                 ready_count=0, unknown_ready_count=0, no_date_count=0,
                 past_due_count=0, beyond_deadline_count=0, stale_summary_count=0,
                 comment_fetch_skipped=0, comment_fetch_errors=0,
@@ -671,7 +677,7 @@ def _orchestrate(
         )
 
         today = now_utc.date()
-        deadline = sec.deadline
+        deadline = resolved_deadline
         beyond_deadline = sum(1 for r in rows if r.target_date is not None and deadline is not None and r.target_date > deadline)
         stale_summary = sum(1 for r in rows if r.stale_business_days >= sec.stale_summary_threshold_days)
         # Per-section comment stats
@@ -680,7 +686,6 @@ def _orchestrate(
         sec_err = 0  # errors are counted globally; degrade only when > 0
 
         # G-8: deadline uncertainty from resolved section metadata
-        _rs = resolved_meta_by_id.get(sec.id)
         if _rs is not None:
             _dl = _rs.target_date_ceiling
             deadline_uncertain = _dl.provisional_inputs or _dl.resolution_status in ("unconfirmed", "unavailable", "none")
