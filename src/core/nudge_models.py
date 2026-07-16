@@ -483,6 +483,13 @@ class FullHygieneSection:
     # wording never hardcodes one program's tag vocabulary (e.g. Armada's
     # "ArmadaM1") for programs that don't use required-tag scoping at all.
     scope_tags: tuple[str, ...] = ()
+    # Program-configured selection tags (NudgeSectionCriteria.tags) for
+    # source=tag sections -- the ADO tag(s) that already define this section's
+    # membership. Distinct from scope_tags above (which is only for
+    # source=registry sections and disallowed for source=tag per config
+    # validation). Lets the template ask readers to keep tagging accurate for
+    # whichever tag actually drives this section, per program.
+    selection_tags: tuple[str, ...] = ()
     # groups bucketed by leadership_rollup leader, for body rendering. Derived
     # from `groups` via aggregate_groups_by_leader() below — lets a leader
     # whose whole portfolio has zero open items collapse to one line instead

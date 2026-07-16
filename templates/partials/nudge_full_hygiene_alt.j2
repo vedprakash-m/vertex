@@ -1,5 +1,7 @@
 {# Full Hygiene Heat-map — single-section program ADO readiness (alt layout) #}
-{# Columns: ADO# · Title · Owner · 📅 Date? · 📌 Committed? · 🎯 Risk? · 📋 Reason? · 💬 Update? · 📰 Status? · Stale · ✨ Ready? #}
+{# Columns: ADO# · Title · Owner · Hygiene (📅 Date · 📌 Committed · 🎯 Risk · 📋 Reason · 💬 Update · 📰 Status, packed as one icon strip; order documented in the visible Legend above the sections) · Stale · ✨ Ready? #}
+{# Column header row repeats after every workstream sub-header (so it stays nearby during long scrolls), except immediately under a section's own top header, to avoid a redundant back-to-back repeat for the first group. #}
+{# Within each section: all leader portfolios' active (non-empty) workstream groups render first, then a single consolidated "no open items" block for fully-quiet portfolios at the end — rather than interleaving active tables with empty-portfolio one-liners leader by leader. #}
 
 {%- macro check(val) -%}
   {%- if val is none -%}<span style="color:#9CA3AF;">—</span>
@@ -18,9 +20,33 @@
   {%- endif -%}
 {%- endmacro -%}
 
-{%- macro group_header_and_rows(group, section) -%}
+{%- macro hygiene_strip(cells, size) -%}
+  <table cellpadding="0" cellspacing="0" style="margin:0 auto;border-collapse:collapse;">
+    <tr>
+      {%- for cell in cells %}
+      <td style="width:18px;text-align:center;font-size:{{ size }};line-height:1;">{{ cell }}</td>
+      {%- endfor %}
+    </tr>
+  </table>
+{%- endmacro -%}
+
+{%- macro column_header_row() -%}
+  <tr style="background:#E5E7EB;">
+    <td style="padding:4px 6px;color:#374151;font-weight:600;white-space:nowrap;">ADO#</td>
+    <td style="padding:4px 6px;color:#374151;font-weight:600;">Title</td>
+    <td style="padding:4px 6px;color:#374151;font-weight:600;white-space:nowrap;">Owner</td>
+    <td style="padding:4px 6px;color:#374151;font-weight:600;text-align:center;white-space:nowrap;" title="Left to right: 📅 Date set &amp; future · 📌 Committed · 🎯 Risk assessment · 📋 Risk reason (if not On Track) · 💬 Recent comment · 📰 Status keyword in comment">
+      Hygiene
+      {{ hygiene_strip(["📅", "📌", "🎯", "📋", "💬", "📰"], "10px") }}
+    </td>
+    <td style="padding:4px 6px;color:#374151;font-weight:600;text-align:center;">Stale</td>
+    <td style="padding:4px 6px;color:#374151;font-weight:600;text-align:center;" title="date+committed+risk+reason+update+status all green">✨</td>
+  </tr>
+{%- endmacro -%}
+
+{%- macro group_header_and_rows(group, section, skip_header=false) -%}
   <tr style="background:#DBEAFE;">
-    <td colspan="11" style="padding:5px 8px;font-size:11px;color:#1E3A8A;font-weight:600;">
+    <td colspan="6" style="padding:5px 8px;font-size:11px;color:#1E3A8A;font-weight:600;">
       ▶&nbsp;{{ group.workstream_name | e }}
       {% if group.workstream_owners %}
         <span style="color:#4B5563;font-weight:400;">&nbsp;·&nbsp;Owner:&nbsp;
@@ -36,6 +62,7 @@
       {% endif %}
     </td>
   </tr>
+  {% if not skip_header %}{{ column_header_row() }}{% endif %}
   {% for row in group.rows %}
   <tr style="background:{% if loop.index is odd %}#FFFFFF{% else %}#F9FAFB{% endif %};">
     <td style="padding:3px 6px;white-space:nowrap;">
@@ -54,12 +81,9 @@
         <span style="color:#9CA3AF;">—</span>
       {% endif %}
     </td>
-    <td style="padding:3px 6px;text-align:center;">{{ check(row.has_valid_target_date) }}</td>
-    <td style="padding:3px 6px;text-align:center;">{{ check(row.has_committed) }}</td>
-    <td style="padding:3px 6px;text-align:center;">{{ check(row.has_risk_assessment) }}</td>
-    <td style="padding:3px 6px;text-align:center;">{{ check(row.has_risk_reason) }}</td>
-    <td style="padding:3px 6px;text-align:center;">{{ check(row.has_recent_comment) }}</td>
-    <td style="padding:3px 6px;text-align:center;">{{ check(row.comment_has_status_keyword) }}</td>
+    <td style="padding:3px 6px;text-align:center;white-space:nowrap;">
+      {{ hygiene_strip([check(row.has_valid_target_date), check(row.has_committed), check(row.has_risk_assessment), check(row.has_risk_reason), check(row.has_recent_comment), check(row.comment_has_status_keyword)], "11px") }}
+    </td>
     <td style="padding:3px 6px;text-align:center;">{{ stale_badge(row.stale_business_days, section.stale_threshold_days) }}</td>
     <td style="padding:3px 6px;text-align:center;">{{ check(row.is_ready) }}</td>
   </tr>
@@ -92,12 +116,24 @@
         {% endfor %}
       </ol>
       <p style="margin:0 0 8px 0;color:#374151;"><strong>Action needed from all assignees:</strong> For each item you own, (1) confirm or update the Target Date, (2) set Risk Assessment, (3) add a brief status comment. Items already green (<span style="color:#16A34A;font-weight:600;">✓</span> across all columns) need no action.</p>
-      {%- set _tagged_sections = sections | selectattr('scope_tags') | list %}
-      {%- if _tagged_sections %}
-      {%- set _scope_tags = [] %}
-      {%- for _s in _tagged_sections %}{% for _t in _s.scope_tags %}{% if _t not in _scope_tags %}{{ _scope_tags.append(_t) or "" }}{% endif %}{% endfor %}{% endfor %}
-      <p style="margin:0;color:#374151;"><strong>Action needed from workstream leads:</strong> Ensure the right items are scoped with the <strong>{{ _scope_tags | join(" / ") | e }}</strong> tag — nothing missing, nothing extra — so this report accurately reflects your team's commitments.</p>
+      {#- A section's tag vocabulary comes from either scope_tags (source=registry
+          sections with an aspirational required tag, e.g. Armada's ArmadaM1) or
+          selection_tags (source=tag sections, where the tag(s) already define
+          membership, e.g. XPF's RAMPP1/RAMP P1). Never hardcode a program's tag
+          name here -- read whichever one this section actually has. #}
+      {%- set _tag_sections = sections | selectattr('scope_tags') | list %}
+      {%- set _sel_tag_sections = sections | rejectattr('scope_tags') | selectattr('selection_tags') | list %}
+      {%- set _all_tag_sections = _tag_sections + _sel_tag_sections %}
+      {%- if _all_tag_sections %}
+      <p style="margin:0 0 4px 0;color:#374151;"><strong>Action needed from workstream leads:</strong></p>
+      <ul style="margin:0 0 8px 0;padding-left:20px;line-height:1.6;color:#374151;">
+        {%- for _s in _all_tag_sections %}
+        {%- set _etags = _s.scope_tags if _s.scope_tags else _s.selection_tags %}
+        <li><strong>{{ _s.title }}:</strong> ensure the right items carry the <strong>{{ _etags | join(" / ") | e }}</strong> tag — nothing missing, nothing extra.</li>
+        {%- endfor %}
+      </ul>
       {%- endif %}
+      <p style="margin:0;color:#374151;font-style:italic;">Don't see a team, workstream, or item that should be here — or does a workstream below say "no items tracked" when it shouldn't? Contact the program manager (see footer) so we can correct the registry.</p>
     </td>
   </tr>
 </table>
@@ -120,7 +156,7 @@
   </tr>
   <tr>
     <td style="background:{{ overall_bg }};padding:8px 12px;border:1px solid #DBEAFE;border-top:none;font-size:12px;color:{{ overall_fg }};">
-      <strong>Org-wide compliance: {{ overall_pct }}%</strong>
+      <strong>Program-wide ADO hygiene compliance: {{ overall_pct }}%</strong>
       <span style="opacity:0.85;margin-left:6px;">— {{ total_compliant }} of {{ total_items }} items compliant across {{ tile_count }} teams</span>
     </td>
   </tr>
@@ -175,12 +211,14 @@
 <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;border-collapse:collapse;">
   <tr>
     <td style="background:#F3F4F6;padding:8px 12px;border-radius:4px;font-size:11px;color:#374151;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;">
-      <strong>Legend:</strong>&nbsp;
-      📅 Date?&nbsp;·&nbsp;📌 Committed?&nbsp;·&nbsp;🎯 Risk?&nbsp;·&nbsp;📋 Reason? (if ≠ On Track)&nbsp;·&nbsp;💬 Update? (comment within window)&nbsp;·&nbsp;📰 Status note? (keyword in comment)&nbsp;·&nbsp;Stale = business days since last update&nbsp;·&nbsp;✨ Ready? = all green
-      &nbsp;&nbsp;
-      <span style="color:#16A34A;font-weight:600;">✓</span> = present&nbsp;
-      <span style="color:#DC2626;font-weight:600;">✗</span> = missing&nbsp;
-      <span style="color:#9CA3AF;">—</span> = N/A or not evaluated
+      <strong>Hygiene column key (left to right):</strong>&nbsp;
+      1) 📅 Date set &amp; future&nbsp;&nbsp;2) 📌 Committed&nbsp;&nbsp;3) 🎯 Risk assessment&nbsp;&nbsp;4) 📋 Risk reason (if ≠ On Track)&nbsp;&nbsp;5) 💬 Recent comment (within window)&nbsp;&nbsp;6) 📰 Status keyword in comment
+      <br>
+      <span style="color:#16A34A;font-weight:600;">✓</span> = present&nbsp;&nbsp;
+      <span style="color:#DC2626;font-weight:600;">✗</span> = missing&nbsp;&nbsp;
+      <span style="color:#9CA3AF;">—</span> = N/A or not evaluated&nbsp;&nbsp;&nbsp;&nbsp;
+      <strong>Stale</strong> = business days since last update&nbsp;&nbsp;
+      <strong>✨</strong> = all 6 green
     </td>
   </tr>
 </table>
@@ -231,32 +269,41 @@
 
 {% if section.leader_portfolios %}
 <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:20px;border-collapse:collapse;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;font-size:11px;">
-  <!-- Column header -->
-  <tr style="background:#E5E7EB;">
-    <td style="padding:4px 6px;color:#374151;font-weight:600;white-space:nowrap;">ADO#</td>
-    <td style="padding:4px 6px;color:#374151;font-weight:600;">Title</td>
-    <td style="padding:4px 6px;color:#374151;font-weight:600;white-space:nowrap;">Owner</td>
-    <td style="padding:4px 6px;color:#374151;font-weight:600;text-align:center;" title="target_date set and future">📅</td>
-    <td style="padding:4px 6px;color:#374151;font-weight:600;text-align:center;" title="target_date set (committed proxy)">📌</td>
-    <td style="padding:4px 6px;color:#374151;font-weight:600;text-align:center;" title="risk_assessment field populated">🎯</td>
-    <td style="padding:4px 6px;color:#374151;font-weight:600;text-align:center;" title="if not On Track: has risk_assessment_comment?">📋</td>
-    <td style="padding:4px 6px;color:#374151;font-weight:600;text-align:center;" title="comment within window">💬</td>
-    <td style="padding:4px 6px;color:#374151;font-weight:600;text-align:center;" title="comment contains status keyword">📰</td>
-    <td style="padding:4px 6px;color:#374151;font-weight:600;text-align:center;">Stale</td>
-    <td style="padding:4px 6px;color:#374151;font-weight:600;text-align:center;" title="date+risk+update+status all green">✨</td>
-  </tr>
+  {{ column_header_row() }}
 
+  {%- set ns = namespace(first_group_rendered=false) %}
   {% for portfolio in section.leader_portfolios %}
   {% for group in portfolio.active_groups %}
-    {{ group_header_and_rows(group, section) }}
+    {{ group_header_and_rows(group, section, skip_header=not ns.first_group_rendered) }}
+    {%- set ns.first_group_rendered = true %}
   {% endfor %}
 
-  {% if portfolio.empty_groups %}
-    {% if portfolio.is_fully_empty %}
-    {%- set _all_delivered = (portfolio.empty_groups | selectattr('closed_count', 'equalto', 0) | list | length) == 0 %}
-    <!-- Fully-quiet leader portfolio: one compact line instead of one banner per empty workstream -->
+  {% if portfolio.empty_groups and not portfolio.is_fully_empty %}
+    <!-- Partially-active leader: small trailing note for the quiet remainder, de-escalated vs. the active rows above -->
     <tr>
-      <td colspan="11" style="padding:6px 8px;background:{{ '#F0FDF4' if _all_delivered else '#FFFBEB' }};color:{{ '#065F46' if _all_delivered else '#92400E' }};font-size:11px;">
+      <td colspan="6" style="padding:4px 8px;background:#F9FAFB;color:#6B7280;font-size:10px;font-style:italic;">
+        Also tracked{% if portfolio.leader %} under {{ portfolio.leader.display_name | e }}{% endif %}, currently clear:
+        {% for g in portfolio.empty_groups %}
+          {%- if not loop.first %}, {% endif -%}
+          {{ empty_descriptor(g, section) }}
+        {%- endfor %}
+      </td>
+    </tr>
+  {% endif %}
+  {% endfor %}
+
+  {%- set _fully_empty_portfolios = section.leader_portfolios | selectattr('is_fully_empty') | selectattr('empty_groups') | list %}
+  {% if _fully_empty_portfolios %}
+  <!-- All fully-quiet leader portfolios grouped together at the end, instead of interleaved between active tables -->
+  <tr>
+    <td colspan="6" style="padding:5px 8px;background:#F3F4F6;color:#374151;font-size:10px;font-weight:700;">
+      No open items to review this week — workstreams verified clear:
+    </td>
+  </tr>
+  {% for portfolio in _fully_empty_portfolios %}
+    {%- set _all_delivered = (portfolio.empty_groups | selectattr('closed_count', 'equalto', 0) | list | length) == 0 %}
+    <tr>
+      <td colspan="6" style="padding:6px 8px;background:{{ '#F0FDF4' if _all_delivered else '#FFFBEB' }};color:{{ '#065F46' if _all_delivered else '#92400E' }};font-size:11px;">
         {{ '✓' if _all_delivered else '⚠' }}&nbsp;
         {%- if portfolio.leader %}<strong>{{ portfolio.leader.display_name | e }}</strong>&nbsp;—&nbsp;{% endif -%}
         no open items across {{ portfolio.empty_groups | length }} workstream{{ 's' if portfolio.empty_groups | length != 1 else '' }}:
@@ -266,20 +313,8 @@
         {%- endfor %}
       </td>
     </tr>
-    {% else %}
-    <!-- Partially-active leader: small trailing note for the quiet remainder, de-escalated vs. the active rows above -->
-    <tr>
-      <td colspan="11" style="padding:4px 8px;background:#F9FAFB;color:#6B7280;font-size:10px;font-style:italic;">
-        Also tracked{% if portfolio.leader %} under {{ portfolio.leader.display_name | e }}{% endif %}, currently clear:
-        {% for g in portfolio.empty_groups %}
-          {%- if not loop.first %}, {% endif -%}
-          {{ empty_descriptor(g, section) }}
-        {%- endfor %}
-      </td>
-    </tr>
-    {% endif %}
-  {% endif %}
   {% endfor %}
+  {% endif %}
 </table>
 
 {% else %}

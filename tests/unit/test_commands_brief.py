@@ -10,7 +10,7 @@ import yaml
 
 import cli
 from src.ai.cost_guard import CostGuard
-from src.commands.brief import _build_incident_learning_brief_lines, build_brief, render_brief
+from src.commands.brief import _build_incident_learning_brief_lines, _build_program_narrative_lines, build_brief, render_brief
 from src.core.analytics_store import get_program_autonomy_audit_path
 from src.core.analytics_store import replace_contradiction_state
 from src.core.brief_intervention_store import BriefInterventionStatus, append_brief_intervention_resolution, load_brief_intervention_resolutions
@@ -79,6 +79,76 @@ def test_build_brief_matches_golden_fixture(tmp_path: Path) -> None:
     fixture_path = Path(__file__).resolve().parents[1] / "golden" / "brief_now_section.txt"
 
     assert rendered == fixture_path.read_text(encoding="utf-8").rstrip("\n")
+
+
+def test_build_brief_surfaces_program_narrative_when_synthesis_released(tmp_path: Path) -> None:
+    # ADF-W2.9: a new, always-last "Program Narrative" section surfacing
+    # the latest QG-29-released ProgramSynthesis's through-line/long-poles,
+    # mirroring cockpit_builder.py's own release-gated read.
+    from src.core.program_synthesis import ProgramSynthesis, persist_program_synthesis
+    from src.core.quality_gates.ai_release_audit import ReleaseTerminal, record_ai_release_decision
+
+    programs_root = tmp_path / "programs"
+    _seed_brief_workspace(programs_root, "acme")
+    synthesis = ProgramSynthesis(
+        program_id="acme",
+        ai_run_id="run-1",
+        through_line="Deployment workstream is the program's critical path this cycle.",
+        long_poles=("Vendor delivery risk remains open.",),
+        facts=(),
+        inferences=(),
+        recommendations=(),
+        generated_at=datetime(2026, 5, 20, tzinfo=timezone.utc),
+        prompt_version="program_synthesis.v1",
+        source_item_count=3,
+    )
+    persist_program_synthesis(synthesis, programs_root=programs_root)
+    record_ai_release_decision(
+        program_id="acme",
+        ai_run_id="run-1",
+        terminal=ReleaseTerminal.RELEASED,
+        reason="test",
+        validator_finding_count=0,
+        programs_root=programs_root,
+    )
+
+    report = build_brief(
+        "acme",
+        programs_root=programs_root,
+        as_of=datetime(2026, 5, 21, 9, 0, tzinfo=timezone.utc),
+    )
+    rendered = render_brief(report)
+
+    assert "Program Narrative" in rendered
+    assert "- Deployment workstream is the program's critical path this cycle." in rendered
+    assert "- Long pole: Vendor delivery risk remains open." in rendered
+    # The section must render after (not instead of) the existing sections.
+    assert rendered.index("Program Narrative") > rendered.index("Staged")
+
+
+def test_build_brief_omits_program_narrative_section_when_no_synthesis_released(tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    _seed_brief_workspace(programs_root, "acme")
+
+    report = build_brief(
+        "acme",
+        programs_root=programs_root,
+        as_of=datetime(2026, 5, 21, 9, 0, tzinfo=timezone.utc),
+    )
+
+    assert report.program_narrative_lines == ()
+    assert "Program Narrative" not in render_brief(report)
+
+
+def test_build_program_narrative_lines_degrades_on_failure(monkeypatch, tmp_path: Path) -> None:
+    def _raise(program_id, **kwargs):
+        raise RuntimeError("fact store unavailable")
+
+    monkeypatch.setattr("src.core.program_synthesis.load_latest_released_program_synthesis", _raise)
+
+    lines = _build_program_narrative_lines("acme", programs_root=tmp_path / "programs")
+
+    assert lines == ()
 
 
 def test_build_brief_incident_learning_lines_include_higher_order_class_patterns() -> None:

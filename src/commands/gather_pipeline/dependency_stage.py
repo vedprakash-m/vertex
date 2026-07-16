@@ -269,5 +269,11 @@ def _build_dependency_odata_filter(ado: Any, area_path: str, since: datetime | N
     if excluded_states:
         excluded = " and ".join(f"not ( State eq '{state}' )" for state in excluded_states)
         clauses.append(excluded)
+    required_tags = tuple(getattr(ado, "required_tags", ()) or ())
+    if required_tags:
+        tag_clauses = [
+            f"Tags/any(t: t/TagName eq '{tag.replace(chr(39), chr(39) * 2)}')" for tag in required_tags
+        ]
+        clauses.append("(" + " or ".join(tag_clauses) + ")")
     return " and ".join(f"( {clause} )" for clause in clauses)
 

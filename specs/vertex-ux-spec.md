@@ -1317,6 +1317,8 @@ No MSO conditional branches for charts. No client-side script. No dark-mode CSS 
 
 The `#9CA3AF` faint color is used only for provenance/timestamps at ≥11px (meets AA-Large 3:1 threshold).
 
+**Cockpit HTML target (reconciled from `.archive/specs/arch-data-fix.md` §10.3):** the standalone `vertex cockpit` HTML output (§18.5) targets **WCAG 2.2 AA**, an intentional upgrade over this section's platform-wide 2.1 AA baseline — cockpit is a newer, self-contained surface (no external JS/CSS, skip-link + semantic landmarks already implemented) where the tighter bar was adopted from the start rather than retrofitted. No independent automated WCAG audit has been run yet (no accessibility-testing tool is wired into CI); this is tracked in `specs/backlog.md`, not a blocker for cockpit's current advisory-mode use.
+
 ### 15.2 Screen Reader Support
 
 - `<th scope="col">` on all table header cells
@@ -1468,8 +1470,9 @@ Pass condition: the generated nudge EML renders within the standard email width,
 - Maximum section budget: `1,200` characters per major section (`Now`, `Next`, `Later`, intervention lists), with intervention lines staying single-paragraph and command-oriented.
 - Condensation rule: inline attribution chains are collapsed into short evidence phrases rather than repeated source lists.
 - Teams delivery compatibility is mandatory: if a brief is reposted into Teams or chat surfaces, it must remain legible as wrapped plain text with no dependency on HTML tables, color, or hover affordances.
+- **Program Narrative section (added `.archive/specs/arch-data-fix.md` v1.77):** a new, always-last section surfaces the latest QG-29-released `ProgramSynthesis` through-line plus its long-pole lines, when one exists for the program — same plain-text-first rendering as every other section, appended after `Now`/`Watch`/`Staged`/`Reference Docs`. Degrades to fully omitted (not an empty header) when no synthesis has been released yet, preserving today's exact output for every program that hasn't wired the synthesis pipeline in.
 - Acceptance mapping: §17 C-11, C-12, C-16, C-27.
-Pass condition: the brief stays within section budgets, reads cleanly as wrapped plaintext, and does not rely on HTML-only formatting for operator comprehension.
+Pass condition: the brief stays within section budgets, reads cleanly as wrapped plaintext, does not rely on HTML-only formatting for operator comprehension, and the Program Narrative section (when present) reads as one more plain-text section, not a formatting exception.
 
 ### 18.3 Fleet
 
@@ -1489,6 +1492,18 @@ Pass condition: each program renders as a single scannable unit with canonical h
 - Card copy should mirror the primary local artifact summary, but the card is a transport preview surface, not the full-fidelity review pane.
 - Acceptance mapping: §17 C-9, C-21, C-30.
 Pass condition: generated cards stay within body/action limits, preserve risk emphasis without custom HTML/CSS assumptions, and remain readable in Teams-native rendering.
+
+### 18.5 Cockpit (added from `.archive/specs/arch-data-fix.md`, ADF-F01/ADF-W5.5)
+
+- Terminal (`vertex cockpit show`) and standalone HTML (`vertex cockpit show --format html` / `build`) are the two supported renders; the HTML output is one self-contained document (inline `<style>` only, no external JS/CSS, no network requests — safe to open via `file://`).
+- **System-health labels are distinct from program-risk colors**: system/source-health state (`[OK]` / `[Degraded]`) renders as text labels or neutral icons, never the canonical risk-color palette (`RISK_COLORS`) — program risk continues to be the only concept color is reserved for, per §1.2's platform-wide "Color = Risk. Always. Only." rule.
+- Accessibility: skip-link + semantic landmarks (`<header>`/`<main>`/`<section aria-labelledby>`) for keyboard navigation; targets WCAG 2.2 AA (§15.1's reconciled note) rather than the platform-wide 2.1 AA baseline.
+- Every evidence-derived string is escaped; an evidence ref renders as a real clickable link only when it parses as an allowlisted `http`/`https` URL — anything else (`javascript:`, `file:`, a bare id) renders as plain escaped text, never a clickable link.
+- `explain <finding_id>` renders every explainability field a `CockpitFinding` actually carries (why, detail, owner, source-age, evidence, next-command) and honestly labels the fields it doesn't yet have data for (calculation/rule, confidence, what-Vertex-did-not-do) rather than fabricating content.
+- `compare <earlier> <later>` operates only on retained history snapshots — never a live recompute — so a comparison is always reproducible from the same two points in time.
+- Value/time-savings figures always render their confidence tier (`measured`/`calibrated`/`proxy`/`unavailable`) alongside the number — a figure is never presented as a bare percentage without its evidence tier visible.
+- No formal §17 acceptance-mapping ID exists for this surface yet; an independent WCAG audit and golden-snapshot goldens are tracked in `specs/backlog.md`, not yet attempted.
+Pass condition: the HTML render opens safely from a local file with no external requests, risk color is never reused for system-health state, every finding's explanation is either real data or an honest "not yet available" label, and no evidence-derived string can inject markup.
 
 ---
 

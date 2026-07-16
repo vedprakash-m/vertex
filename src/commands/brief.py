@@ -45,6 +45,7 @@ class BriefReport:
     staged_lines: tuple[str, ...]
     reference_lines: tuple[str, ...] = ()
     staged_interventions: tuple[InterventionProposal, ...] = ()
+    program_narrative_lines: tuple[str, ...] = ()
 
 
 def brief_command(
@@ -284,7 +285,33 @@ def build_brief(
         staged_lines=staged_lines,
         reference_lines=reference_lines,
         staged_interventions=staged_interventions,
+        program_narrative_lines=_build_program_narrative_lines(program_id, programs_root=programs_root),
     )
+
+
+def _build_program_narrative_lines(program_id: str, *, programs_root: Path) -> tuple[str, ...]:
+    """ADF-W2.9: surfaces the latest QG-29-*released* ``ProgramSynthesis``
+    through-line (and its long poles, since those are the most directly
+    action-relevant field for a TPM scanning this list) as a new, always-
+    last "Program Narrative" section -- mirrors ``cockpit_builder.py``'s
+    own additive, best-effort read of the same accessor
+    (`_latest_released_program_synthesis_kwargs`): a deterministic,
+    Zone-A-only read that never surfaces an unreleased draft, and degrades
+    to an empty section (rather than breaking brief generation) if no
+    synthesis has ever been released for this program or the read fails
+    for any reason."""
+    try:
+        from src.core.program_synthesis import load_latest_released_program_synthesis
+
+        synthesis = load_latest_released_program_synthesis(program_id, programs_root=programs_root)
+    except Exception:
+        return ()
+    if synthesis is None:
+        return ()
+
+    lines = [synthesis.through_line]
+    lines.extend(f"Long pole: {pole}" for pole in synthesis.long_poles)
+    return tuple(lines)
 
 
 def _build_cost_guard_brief_lines(program_id: str, *, programs_root: Path = PROGRAMS_ROOT) -> tuple[BriefLine, ...]:
@@ -349,6 +376,9 @@ def render_brief(report: BriefReport) -> str:
     if report.reference_lines:
         lines.extend(("", "Reference Docs", "--------------"))
         lines.extend(report.reference_lines)
+    if report.program_narrative_lines:
+        lines.extend(("", "Program Narrative", "-----------------"))
+        lines.extend(f"- {line}" for line in report.program_narrative_lines)
     return "\n".join(lines)
 
 

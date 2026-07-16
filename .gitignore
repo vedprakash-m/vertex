@@ -199,6 +199,14 @@ tests/contracts/test_workstream_kusto_registry.py
 temp_*.txt
 temp_*.md
 *_scratch.*
+scratch_*.py
+scratch_*.json
+/parse_out.txt
+# Any leading-underscore scratch dump left in the repo root (e.g.
+# _armada_body.html, _xpf_review.html) — real program-data previews
+# sometimes redirected here by hand; never legitimate tracked content.
+/_*.html
+/_*.txt
 .staged_list.tmp
 fix_dates.py
 program_facts_backup.json

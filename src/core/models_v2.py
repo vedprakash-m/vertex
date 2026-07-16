@@ -134,6 +134,13 @@ class ADOConfig:
     date_window_days: int
     api_timeout_seconds: int = 30
     proposal_ttl_hours: int = 72
+    # Optional System.Tags scope (e.g. "ArmadaM1") ANDed onto area_paths in the
+    # analytics-snapshot and dependency-query OData filters. Without this, a
+    # program whose area_paths include broad parent-org trees (containing but
+    # not limited to the program's own scope) pulls every work item under those
+    # trees, not just the program's -- empty by default, so existing programs
+    # keep their current (area-path-only) scope unless they opt in.
+    required_tags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

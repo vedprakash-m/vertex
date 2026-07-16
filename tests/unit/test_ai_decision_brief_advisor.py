@@ -6,8 +6,10 @@ from typing import Any, Callable
 from src.ai.decision_brief_advisor import (
     _FALLBACK_PROMPT,
     _build_evidence_spans,
+    _build_user_prompt,
     _load_prompt_template,
     _parse_advice,
+    _program_synthesis_context_lines,
     advise_on_decision_brief,
     advise_on_decision_brief_via_context_gateway,
 )
@@ -138,6 +140,85 @@ def test_build_evidence_spans_separates_required_from_optional() -> None:
     # Signals decay in salience by arrival order (approximates the old [:6] truncation intent).
     signal_spans = sorted((s for s in optional if s.source_family == "signal"), key=lambda s: s.evidence_id)
     assert signal_spans[0].salience_inputs["recency"] > signal_spans[1].salience_inputs["recency"]
+
+
+def test_build_evidence_spans_includes_program_synthesis_context() -> None:
+    required, optional = _build_evidence_spans(
+        _item(), supplemental_context=("Open strategic risk: Vendor delay risk.",),
+    )
+
+    assert all(span.evidence_id != "program_synthesis_0" for span in required)
+    context_spans = [span for span in optional if span.source_family == "program_synthesis"]
+    assert len(context_spans) == 1
+    assert context_spans[0].text == "Open strategic risk: Vendor delay risk."
+    assert context_spans[0].required is False
+
+
+def test_build_user_prompt_renders_program_context_section() -> None:
+    prompt = _build_user_prompt(_item(), supplemental_context=("Unresolved contradiction: Milestone date disagreement.",))
+
+    assert "PROGRAM CONTEXT:" in prompt
+    assert "Milestone date disagreement." in prompt
+
+
+def test_build_user_prompt_omits_program_context_section_when_empty() -> None:
+    prompt = _build_user_prompt(_item())
+
+    assert "PROGRAM CONTEXT:" not in prompt
+
+
+def test_program_synthesis_context_lines_covers_three_categories(monkeypatch, tmp_path: Path) -> None:
+    # ADF-W2.9: program-wide analog of report_ai's exec-summary enrichment
+    # -- DecisionItem carries no workstream field, so this stays unscoped.
+    from datetime import datetime, timezone
+
+    from src.core.program_synthesis import ProgramSynthesisRequest, SynthesisInputItem
+
+    request = ProgramSynthesisRequest(
+        program_id="demo",
+        as_of=datetime(2026, 5, 31, 12, 0, tzinfo=timezone.utc),
+        items=(
+            SynthesisInputItem(category="strategic_risk", item_id="risk-1", summary="Vendor delay risk.", severity="high"),
+            SynthesisInputItem(category="contradiction", item_id="conf-1", summary="Milestone date disagreement."),
+            SynthesisInputItem(category="critical_path_milestone", item_id="ms-1", summary="M1 code complete | status=at_risk"),
+            SynthesisInputItem(category="kusto_slo_breach", item_id="slo-1", summary="Latency SLO breached."),
+        ),
+    )
+    monkeypatch.setattr(
+        "src.core.program_synthesis.assemble_program_synthesis_request",
+        lambda program_id, **kwargs: request,
+    )
+
+    lines = _program_synthesis_context_lines("demo", tmp_path)
+
+    assert any("Vendor delay risk." in line and "[high]" in line for line in lines)
+    assert any("Milestone date disagreement." in line for line in lines)
+    assert any("M1 code complete" in line for line in lines)
+    assert not any("Latency SLO breached." in line for line in lines)
+
+
+def test_program_synthesis_context_lines_degrades_on_failure(monkeypatch, tmp_path: Path) -> None:
+    def _raise(program_id, **kwargs):
+        raise RuntimeError("fact store unavailable")
+
+    monkeypatch.setattr("src.core.program_synthesis.assemble_program_synthesis_request", _raise)
+
+    lines = _program_synthesis_context_lines("demo", tmp_path)
+
+    assert lines == ()
+
+
+def test_advise_on_decision_brief_baseline_prompt_includes_program_synthesis_context(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "src.ai.decision_brief_advisor._program_synthesis_context_lines",
+        lambda program_id, programs_root, **kwargs: ("Open strategic risk: Vendor delay risk.",),
+    )
+    client = _FakeClient(response=_valid_response())
+
+    advise_on_decision_brief(client=client, brief=_brief(_item()), program_id="acme", programs_root=tmp_path)
+
+    assert client.last_user is not None
+    assert "Vendor delay risk." in client.last_user
 
 
 def test_context_gateway_happy_path_populates_advice(tmp_path: Path) -> None:

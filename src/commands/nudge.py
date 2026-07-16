@@ -607,6 +607,7 @@ def _orchestrate(
                 query_error=True, error_details=result.error_details,
                 include_in_leadership_rollup=sec.include_in_leadership_rollup,
                 scope_tags=sec.criteria.required_tags,
+                selection_tags=sec.criteria.tags,
             ))
             audit_sections.append(NudgeAuditSection(
                 section_id=sec.id, letter=sec.letter, candidate_count=0,
@@ -721,6 +722,7 @@ def _orchestrate(
             elevated_from_other_pools=elevated_from_other_pools,
             include_in_leadership_rollup=sec.include_in_leadership_rollup,
             scope_tags=sec.criteria.required_tags,
+            selection_tags=sec.criteria.tags,
             leader_portfolios=leader_portfolios,
         ))
         candidate_ids_for_section = tuple(sorted(

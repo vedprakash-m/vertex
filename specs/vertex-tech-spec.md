@@ -156,7 +156,7 @@ The deterministic implementation is materially ahead of the old feature backlog 
 - **re-debt Phases 0–8 code-complete:** All coding-implementable workstreams (WS-1–WS-25) are done. Remaining items are OPERATOR gates, HUMAN GATE blockers, and CALENDAR-gated proofs documented in `.archive/specs/gaps.md` (local-only gap register).
 - `gather.py` owns ADO work items/revisions/comments, freshness, trajectories, Kusto, IcM fallback, ADO analytics, sprint, pipeline, PR (via `ado_pr_client.py`), dependency, M365 WorkIQ, channel telemetry, and L1 observation projection.
 - `doctor.py` surfaces channel completeness, degraded optional sources, ADO PR repository coverage, M365 discovery debt, metric-binding rollout, readiness, assumptions, decisions, dependencies, circuit breakers, knowledge health, fact-store parity, adapter certs, confirm-readiness (B-1–B-5), operator gates, and platform readiness. `--context` mode validates all 20 Plane 1 files against 21 cross-file invariants and reports context maturity level (L0–L4); `--fix-hints` appends per-invariant remediation guidance.
-- `quality_gates.py` implements QG-1 through QG-28 (including QG-26 external-dependency state gate, QG-27 truth-level/material-dispute gate, QG-28 KPI degradation gate, and QG-WS5B AI budget gate) plus bridge gates, with forceable vs hard-block behavior enforced by `confirm.py`. QG-29 is formally reserved (not yet implemented) for the arch-fix.md AF-3 fail-closed AI audit gate — `src/core/quality_gates/gate_registry.py` prevents unrelated work from claiming it (see §9.17.1).
+- `quality_gates.py` implements QG-1 through QG-28 (including QG-26 external-dependency state gate, QG-27 truth-level/material-dispute gate, QG-28 KPI degradation gate, and QG-WS5B AI budget gate) plus bridge gates, with forceable vs hard-block behavior enforced by `confirm.py`. QG-29 is the fail-closed AI release-audit gate (§12.1a), live and enforced across every structured AI generator — `src/core/quality_gates/gate_registry.py` prevented unrelated work from claiming it while it was reserved (see §9.17.1).
 - UIL (Unified Integration Layer) phases 0–5 are code-complete: 16 new Zone A modules, 14 `vertex integration` CLI subcommands, 160+ targeted UIL tests. The ADO UIL gather path is now default-on; Kusto, Teams, and IcM remain env-gated (`VERTEX_UIL_KUSTO=1`, `VERTEX_UIL_TEAMS=1`, `VERTEX_UIL_ICM=1`). Full migration design at `.archive/specs/unify.md`.
 - **Reality substrate** (`ProgramReality` facade, 5 truth levels, entity registry, trust ledger, signal normalizer, fact schema registry, commitment store, per-family SoR mode, clean-cycle flip gates, actuation engine, ask named intents, reality export, null projection) is fully implemented and contract-tested for the deterministic/accepted policy slice.
 - **Governance artifacts:** `governance/threat-model.md` (STRIDE analysis), `governance/privacy-matrix.md` (data-classification + DPA checklist), `governance/model-cards.md` (AI model version lifecycle, all 19 `ai_policy.yaml` features carded), `governance/test-evidence.md` (canonical test-evidence log), `governance/decisions/` (ADR templates), `governance/graduations/` (AI feature graduation records), `governance/nfr-budgets.yaml` (NFR/OpEx budget candidates pending ratification — see §9.17.1), `governance/runbooks/` (tracked, generic operator runbooks — SoR cutover rehearsal, ledger backfill).
@@ -1816,6 +1816,13 @@ CREATE TABLE program_fact_snapshot_pins (
 | F3 Flip to SoR | Policy accepted / gated by evidence | ADR-0006 accepts the `source_authority.yaml` family map and `sor_flip` defaults. `evaluate_family_flip_gate()` runs only on complete cycles and requires clean-cycle evidence (`clean_cycles_to_flip=5`, `critical_zero=true`, bounded divergence tolerance, rollback posture). YAML/JSONL remain authoritative until the family gate passes. |
 | F4 Override→fact | Pending | `Judgment` fact type; Issue 78 backfill; `❓ Needs input` treadmill eliminated |
 
+**9.16.1 Fact Lineage Coverage (`src/core/fact_lineage_coverage.py`)**: measures, across a program's active fact-store revisions, what fraction are fully lineaged (carry `source_signal_ids`), explicitly waived (`fact_lineage_waiver_store.py`, individual `natural_key` granularity — owner/reason/expiry), or unlineaged (`defect`):
+```python
+def has_fact_provenance(revision: ProgramFactRevision) -> bool
+def compute_lineage_coverage(program_id: str, *, programs_root: Path) -> LineageCoverageReport
+```
+A `warn`-severity `vertex cockpit`/`vertex doctor` finding, not a publish-blocking gate. Human-authored fact types with no provenance concept (milestones, claims, commitments, decision asks, entity aliases, trust bootstraps/scores, plane1 snapshot facts) count as `defect` under the current literal/conservative classifier by design — an explicit decision (`.archive/specs/arch-data-fix.md` §11.10) to keep the ratio honestly conservative rather than add a fact-type-level exemption that could later mask a real regression.
+
 ### 9.17 Program Event Ledger (`src/core/ledger/`)
 
 Append-only event-sourced ledger for per-program reality capture, operator triage, replayable projections, and discovery governance. This substrate is separate from the Program Fact Store: the ledger is the event/candidate/projection system under `programs/<id>/ledger/`, while the Program Fact Store remains the synthesized belief SoR in the shared per-program SQLite database.
@@ -1896,10 +1903,10 @@ Foundational persistence primitives closing the architecture-remediation program
 - `src/core/unit_of_work.py` — `open_unit_of_work({alias: path, ...})` commits correlated writes across multiple separate SQLite files as one atomic transaction, via SQLite's transactional `ATTACH` (each attached database still gets its own network-aware journal mode, matching `open_program_db()`'s per-store behavior rather than forcing one mode connection-wide).
 - `durable_outbox_store.py` — generic, table-agnostic lease/attempt/dead-letter engine: `pending→leased→dispatched→succeeded→audited→completed`, with `failed_retryable` (re-leasable once due) and true terminals `uncertain_remote_state`/`failed_terminal`/`compensation_required`/`dead_letter` requiring an explicit `mark_manually_resolved()`. Stale leases (expired TTL) are reclaimed by a different owner via a bumped fencing token; a caller presenting a superseded fencing token gets `LeaseNoLongerCurrent`, never a silent overwrite.
 - `program_checkpoint_manifest.py` — `ProgramCheckpointManifest` composes event-log position + `program_sequence` + `projection_checkpoint_store` + caller-supplied outbox watermarks/tracked-file hashes/schema versions into one content-addressed (self-hashing) checkpoint; `verify_manifest_against_disk()` detects drift between a captured manifest and current on-disk store state (the restore-drill check).
-- `src/core/quality_gates/gate_registry.py` — central `RESERVED_GATE_IDS` map + a code scanner (`scan_defined_gate_ids()`) so a new gate ID can be checked for collision before it's claimed (QG-29 is reserved for the not-yet-built AF-3 fail-closed audit gate).
+- `src/core/quality_gates/gate_registry.py` — central `RESERVED_GATE_IDS` map + a code scanner (`scan_defined_gate_ids()`) so a new gate ID can be checked for collision before it's claimed. QG-29 is the fail-closed AI release-audit gate, live and enforced — see §12.1a.
 - `src/core/authority_registry.py` — composed, read-only view over `source_authority.yaml`, the ledger event registry, `fact_sor_state.py`, and `state_reader_registry.py`; answers, per authority family, which source is primary, which fact types/event prefixes back it, and its SoR-flip configuration.
 
-**AI-safety groundwork (`src/ai/safety/`):** `ai_trace_sanitizer.py` (`sanitize_ai_io()` — credential redaction via `src/core/rev/privacy.py::scan_credentials`, then PII scrub via `pii_scrubber.scan_text`, then a size bound — never returns raw text) and `ai_trace_capture.py` (`capture_ai_io()` — opt-in via `VERTEX_AI_TRACE_FULL_IO`, off by default; writes sanitized excerpts to `ai/llm_trace_full_io.jsonl`, a 90-day-TTL sidecar registered in `governance/data-classification.yaml`/`privacy_matrix.py`). This exists to bake a real-I/O corpus for the not-yet-built AI Safety Boundary's (`AF-1`/`AF-2`) semantic-validator eval harness — `llm_trace.py` itself remains metadata-only.
+**AI-safety groundwork (`src/ai/safety/`):** `ai_trace_sanitizer.py` (`sanitize_ai_io()` — credential redaction via `src/core/rev/privacy.py::scan_credentials`, then PII scrub via `pii_scrubber.scan_text`, then a size bound — never returns raw text) and `ai_trace_capture.py` (`capture_ai_io()` — opt-in via `VERTEX_AI_TRACE_FULL_IO`, off by default; writes sanitized excerpts to `ai/llm_trace_full_io.jsonl`, a 90-day-TTL sidecar registered in `governance/data-classification.yaml`/`privacy_matrix.py`). This bakes a real-I/O corpus for the AI Safety Boundary's semantic-validator eval harness (§12.1a, live) — `llm_trace.py` itself remains metadata-only, a deliberately separate concern from the durable release-audit trail.
 
 **Test coverage:** `tests/unit/test_program_sequence.py`, `test_workspace_lease.py` (includes a multi-thread concurrent-acquisition test), `test_projection_checkpoint_store.py`, `test_unit_of_work.py` (cross-database commit/rollback atomicity), `test_durable_outbox_store.py` (full lifecycle + stale-fencing-token rejection), `test_program_checkpoint_manifest.py`, `test_ai_trace_sanitizer.py`, `test_ai_trace_capture.py`; contract tests `test_qg_gate_reservation_contract.py`, `test_authority_registry_contract.py`, `test_nfr_budget_freeze_contract.py`.
 
@@ -2419,7 +2426,49 @@ def process_generated_text(
 
 **Mandatory enforcement:** Every `src/ai/` generation path must call `process_generated_text()`. Direct re-implementation of any pipeline stage inline is prohibited. `tests/contracts/test_ai_safety_pipeline.py` enforces this via AST scan of all `src/ai/` modules — any AI output path that bypasses the wrapper fails the contract test. There is no opt-out path.
 
-**Related, additive, not-yet-wired mechanism:** `src/ai/safety/ai_trace_sanitizer.py` + `ai_trace_capture.py` (§9.17.1) sanitize and optionally (opt-in only) durably capture prompt/response text for corpus-building — a different concern from this pipeline's output-shaping, and not a substitute for it. The full AI Safety Boundary (per-feature `SemanticValidator[T]`, `AISchemaGateway`, fail-closed audit) described in `.archive/specs/arch-fix.md` has not been built yet; this section describes what runs in production today.
+**Related, additive mechanism:** `src/ai/safety/ai_trace_sanitizer.py` + `ai_trace_capture.py` (§9.17.1) sanitize and optionally (opt-in only) durably capture prompt/response text for corpus-building — a different concern from this pipeline's output-shaping, and not a substitute for it.
+
+### 12.1a AI Safety Boundary — schema gateway, semantic validation, fail-closed release audit (`src/core/ai_schema_gateway.py`, `src/core/quality_gates/ai_release_audit.py`)
+
+The per-feature AI Safety Boundary named in `.archive/specs/arch-fix.md` (originally `AF-1`/`AF-2`/`AF-3`) was built and shipped as part of the `arch-data-fix` program (see `.archive/specs/arch-data-fix.md` ADF-F09/ADF-W2.8) and is live across every structured AI generator in the codebase — `risk_proposal_generator`, `decision_brief_advisor` (both baseline and pilot paths), `program_synthesizer`, `top_three_candidate_generator`, `governance_decision_brief_generator`, `dependency_blast_radius_generator`. No structured AI output reaches a consumer without passing through this boundary; QG-29 enforces the invariant.
+
+**AISchemaGateway (`src/core/ai_schema_gateway.py`)** — schema-only bounds checking (deliberately never queries the Fact Store, keeping it a pure structural gate):
+```python
+def validate_bounded_payload(payload: Any, *, bounds: BoundsPolicy = BoundsPolicy()) -> None  # raises SchemaGatewayError
+class SemanticValidator(Protocol): ...  # per-feature domain validation, e.g. RiskProposalSemanticValidator
+```
+Called on both the outbound request payload (before the provider call) and the inbound response (before parsing) at every call site. A feature may supply its own `SemanticValidator[T]` implementation for domain-specific checks beyond bounds (e.g. `program_synthesizer`'s validator enforces "every recommendation must cite an `item_id` actually present in the assembled request").
+
+**Release-audit lifecycle (`src/core/quality_gates/ai_release_audit.py`, QG-29)** — a durable, immutable event trail every AI-generated output must pass through before consumption:
+```python
+class AIRunState(str, Enum):  # PLANNED -> REQUESTED -> RESPONDED -> SCHEMA_VALIDATED -> SEMANTICALLY_VALIDATED
+class ReleaseTerminal(str, Enum):  # RELEASED | REJECTED | FALLBACK | DISCARDED
+class ApplicationReceipt(str, Enum):  # RENDERED | PROPOSED | APPLIED | NOT_APPLIED | FAILED
+
+def record_ai_run_lifecycle(*, program_id, ai_run_id, feature, state, prompt_version, policy_version, programs_root) -> None
+def record_ai_release_decision(*, program_id, ai_run_id, terminal, reason, validator_finding_count, programs_root) -> None
+def record_ai_application_receipt(...) -> None
+def is_ai_output_released(ai_run_id, *, program_id, programs_root) -> bool  # the only Zone-A-safe consumer read
+```
+Three separated concerns, matching the original arch-fix design: run lifecycle (five states, each a ledger event), a consumption-authorization terminal (`RELEASED` required before any consumer may read the output — `is_ai_output_released()` is the sole check a Zone A read path may call), and an application receipt recorded strictly after consumption. A run that fails schema or semantic validation is discarded/rejected before ever reaching `RELEASED`; nothing bypasses this to force-consume an unreleased output.
+
+**Pilot dual-path pattern:** two features (`decision_brief_advisor`, `program_synthesizer`) additionally route through `DeterministicContextCompiler` (§12.1b) on an opt-in pilot path, compared blind against the existing baseline path via `vertex decision-brief-pilot compare`/`vertex program-synthesizer-pilot compare` and `... summary` — real human A/B judgments accumulate in `src/core/blind_ab_comparison.py` before any production swap decision is made. Both paths run the full AISchemaGateway/QG-29 lifecycle identically; the pilot only changes how evidence is assembled into the prompt, not the safety boundary around it.
+
+### 12.1b Deterministic ContextCompiler (`src/core/context_compiler.py`)
+
+The mandatory evidence-assembly stage every AI feature's context must be compiled through before prompting — replacing ad hoc context-building with one auditable, deterministic pipeline:
+
+```python
+class ContextCompiler(Protocol): ...
+@dataclass(frozen=True, slots=True)
+class EvidenceSpan:  # evidence_id, source_family, text, required, origin, trust_level, verification_state, injection_screen, salience_inputs, token_estimate
+@dataclass(frozen=True, slots=True)
+class ContextCompileRequest:  # program_id, edition_id, feature, prompt_version, system_instructions, output_schema_text, required_evidence, optional_evidence, max_input_tokens, reserved_output_tokens
+class DeterministicContextCompiler:
+    def compile(self, request: ContextCompileRequest, *, validation_context: ValidationContext) -> CompiledContext  # raises ContextCompileRejected
+```
+
+Ordered stages: privacy filter → injection screening → required-evidence reservation (a required span that can't fit raises `ContextCompileRejected` rather than silently dropping it) → entity/authority filtering → dedup → deterministic salience ranking → per-source quotas → token-budget packing → manifest emission. The emitted `ContextManifest` records exactly what evidence was included/excluded and why, giving every compiled prompt an audit trail. `decision_brief_advisor`'s pilot path (§12.1a) is the reference caller: required spans (current text, evidence delta, prior AI proposal, stale claims) plus optional spans (ranked signals with decaying recency salience, KPI/vitality summaries) — the compiler's own quota/token-budget logic replaces what used to be a hardcoded `[:6]` truncation.
 
 ### 12.2 AIClient (`src/ai/client.py`)
 
@@ -2437,6 +2486,66 @@ class AIClient:
 Budget guard: `_spent_usd >= _budget_usd` → raises `BudgetExceeded`. Cost computed per-call from token counts.
 
 Retry: up to 2 retries with exponential backoff (`0.5 × 2^attempt`). Retryable: `RateLimitError`, HTTP 429, 5xx.
+
+### 12.2a Tiered Routing, Result Caching, and Correlation Telemetry (`src/ai/tiered_router.py`, `src/core/ai_result_cache.py`, `src/core/operation_trace.py`)
+
+Every AI feature call is routed through one centralized function rather than calling a provider directly:
+
+```python
+def route_through_tiers(
+    feature: str, *,
+    deterministic_fn: Callable[[], TierResult[T] | None] | None = None,
+    local_fn: Callable[[], TierResult[T] | None] | None = None,
+    frontier_fn: Callable[[], T],
+    policy: FeaturePolicy,
+    cache_lookup_fn: Callable[[], T | None] | None = None,
+    cache_store_fn: Callable[[T], None] | None = None,
+) -> RouteResult[T]
+```
+
+**Routing order**: `CACHE → DETERMINISTIC (Tier 0) → LOCAL (Tier 1, economy) → FRONTIER (Tier 2)`, first tier to produce a value wins. Every route is recorded as a `TierDecision` (`feature`, `tier`, `outcome`, `confidence`, `frontier_called`, trace id) via a registrable decision-sink (`register_decision_sink`); `RouteOutcome` is a closed vocabulary (`deterministic_hit | local_hit | frontier_call | frontier_blocked | frontier_disabled | cache_hit | skipped`) — `CACHE_HIT` is a first-class outcome, not a bypass of the audit trail. A feature may only route through `LOCAL` (Tier 1, economy-lane) after clearing the local-tier graduation gate (§1.3's changelog: signed model artifact, model card, holdout evaluation, Wilson lower-bound ≥0.95, abstention behavior, kill switch) — `local_tier.py` was deleted 2026-07-13 for never clearing this gate; the `local_fn` extensibility seam remains available to a future implementation that does.
+
+**Result cache (`src/core/ai_result_cache.py`)**: a generalized, content-hash-keyed cache any `route_through_tiers` caller may opt into via `cache_lookup_fn`/`cache_store_fn`:
+```python
+@dataclass(frozen=True, slots=True)
+class AIResultCacheKey:
+    program_id: str; feature: str; canonical_input_hash: str
+    prompt_version: str; policy_version: str; model_deployment: str
+    context_manifest_hash: str; output_schema_version: str
+
+def get_ai_result(key: AIResultCacheKey, *, programs_root: Path) -> CachedAIResult | None
+def put_ai_result(key: AIResultCacheKey, value: Any, *, programs_root: Path) -> None
+```
+An identical request (same program, feature, canonical input, prompt/policy version, model, compiled-context manifest hash, and output schema version) is served from cache rather than re-calling the provider — the key's breadth means any of those seven dimensions changing invalidates the entry, so a prompt-version bump or a context-compile difference can never silently serve a stale result.
+
+**Correlation telemetry (`src/core/operation_trace.py`)**: a purely internal, Vertex-generated `correlation_id` (a `uuid.uuid4().hex`, never touching any external system) links every artifact one logical run produces — source acquisition, fact write, context manifest, AI release decision, rendered output, actuation intent/receipt — into one queryable `OperationTrace`:
+```python
+def record_trace_link(*, program_id, correlation_id, workflow_id, run_id, stage, ref_type, ref_id, programs_root) -> None
+def load_operation_trace(program_id, correlation_id, *, programs_root) -> OperationTrace  # aggregates all events sharing the id
+```
+Minted once per pipeline run (`report_command`, `gather_program`, the rev pipeline) and threaded through that run's stages; standalone single-item CLI mutations and pilot-only commands do not mint one today (recorded as an open Class B question in `.archive/specs/arch-data-fix.md` §11.10, not yet decided). Every call is best-effort (`if correlation_id:` guard, wrapped in a broad `except Exception: pass`) — a trace link is observability, never a write blocker.
+
+### 12.2b ProgramSynthesis — Shared Program-Level Synthesis Contract (`src/core/program_synthesis.py`, `src/ai/program_synthesizer.py`)
+
+One normalized, program-wide synthesis (through-line, long poles, facts, inferences, source-backed recommendations) replaces N independent per-surface narrative-generation paths:
+
+```python
+@dataclass(frozen=True, slots=True)
+class SynthesisInputItem:
+    category: str; item_id: str; summary: str; evidence_refs: tuple[str, ...] = (); severity: str | None = None
+@dataclass(frozen=True, slots=True)
+class ProgramSynthesis:
+    program_id: str; ai_run_id: str; through_line: str; long_poles: tuple[str, ...]
+    facts: tuple[str, ...]; inferences: tuple[str, ...]
+    recommendations: tuple[ProgramSynthesisRecommendation, ...]; generated_at: datetime
+
+def assemble_program_synthesis_request(program_id: str, *, programs_root: Path, as_of: datetime) -> ProgramSynthesisRequest
+def load_latest_released_program_synthesis(program_id: str, *, programs_root: Path) -> ProgramSynthesis | None
+```
+
+`assemble_program_synthesis_request()` deterministically assembles six input categories from already-existing accessors — `strategic_risk` (risk register), `contradiction` (`ProgramReality.conflicts(open_only=True)`), `critical_path_milestone` (`ProgramReality.milestones()`, non-terminal status), `kusto_slo_breach`, `verified_workstream_synthesis`, `source_degradation`; three further categories (dependency blast radius, decisions/overdue asks, learned slip bias) are left empty and reported in `coverage_notes` because no standalone program_id-keyed accessor exists for them yet. `src/ai/program_synthesizer.py::generate_program_synthesis` runs the full AISchemaGateway/QG-29 lifecycle (§12.1a) over the assembled request, with a concrete `SemanticValidator` enforcing that every recommendation cites an `item_id` actually present in the request. `load_latest_released_program_synthesis()` is the sole Zone-A-safe consumer read — it checks `is_ai_output_released()` and never returns an unreleased draft.
+
+**Consumers** (each folds the synthesis's through-line/long-poles into an *existing* narrative surface via that surface's own extension point, not a new render path): the cockpit's `IntelligenceCockpitSummary` (§16.5, first consumer, read-only); the newsletter exec summary (`report_ai.py::_program_synthesis_exec_summary_context_lines`, via `draft_exec_summary`'s `supplemental_context` parameter); per-workstream blurbs (`report_ai.py::_program_synthesis_blurb_context_lines`, workstream-scoped by each risk/milestone record's own `linked_workstream_ids` since `SynthesisInputItem` itself carries no workstream field); `decision_brief_advisor.py`'s AI verdict generation (`_program_synthesis_context_lines`, both the baseline prompt path and the `ContextCompiler`-based pilot path); and `vertex brief`'s always-last "Program Narrative" section (`brief.py::_build_program_narrative_lines`). A production-swap decision for `decision_brief_advisor`/`program_synthesizer`'s own `ContextCompiler`-piloted generation path (as opposed to consuming the synthesis) remains open pending real blind-comparison data — see `specs/backlog.md`.
 
 ### 12.3 Content Generators
 
@@ -2846,7 +2955,7 @@ def evaluate_chart_gates(kusto_sections, chart_enabled=True) -> QualityGateRepor
 
 **`--force` overrides QG-1, QG-2, QG-3, QG-7, QG-9, QG-10, QG-11, QG-12, QG-14, QG-15, QG-16, QG-17, QG-18, QG-19, QG-23, QG-24, QG-25, QG-B1, QG-B2, and QG-B3. QG-4, QG-5, QG-6, QG-8, and QG-13 are never overridable. Bridge gates (QG-B1, QG-B2, QG-B3) evaluate only when a trusted baseline exists.**
 
-This table predates QG-26 (external-dependency state), QG-27 (truth-level/material-dispute), QG-28 (KPI degradation), and QG-WS5B (AI budget) — see §1.3 for their one-line descriptions and `src/core/quality_gates/` for implementation. **QG-29 is reserved, not implemented**: `src/core/quality_gates/gate_registry.py` holds it for the not-yet-built arch-fix.md AF-3 fail-closed AI audit gate (`.archive/specs/arch-fix.md`; `specs/backlog.md` §7 BL-C3).
+This table predates QG-26 (external-dependency state), QG-27 (truth-level/material-dispute), QG-28 (KPI degradation), and QG-WS5B (AI budget) — see §1.3 for their one-line descriptions and `src/core/quality_gates/` for implementation. **QG-29 is the fail-closed AI release-audit gate** (§12.1a) — `src/core/quality_gates/ai_release_audit.py` implements it, live across every structured AI generator; `gate_registry.py` reserved the ID from unrelated work while it was being built.
 
 ### 14.2 Ban-List Validator (`src/core/ban_list_validator.py`)
 
@@ -2936,6 +3045,34 @@ Every AI call logged to JSONL: edition, run_id, caller module, model, prompt ver
 ### 16.4 Cost Guard (`src/ai/cost_guard.py`)
 
 Per-edition, per-run budget tracking. Persists state across calls within a run. Enforces ceiling from `ai.budget_usd_per_run` config.
+
+### 16.5 Cockpit — Unified Observability & Value Surface (`src/core/cockpit_models.py`, `src/core/cockpit_builder.py`, `src/commands/cockpit.py`)
+
+A single read-only projection (`CockpitSnapshot`) answering, at three depths (glance/scan/deep) for three audiences (TPM/EM/operator): what changed, what can be trusted, what did Vertex automate, what needs a human, what value was delivered, what's next.
+
+```python
+@dataclass(frozen=True, slots=True)
+class CockpitSnapshot:
+    program: ProgramCockpitSummary
+    sources: SourceCockpitSummary
+    intelligence: IntelligenceCockpitSummary
+    economics: EconomicsCockpitSummary
+    value: ValueCockpitSummary
+    reliability: ReliabilityCockpitSummary
+    trust: TrustCockpitSummary
+    findings: tuple[CockpitFinding, ...]
+    # ... generated_at, input_hash, next_action, etc.
+
+def build_cockpit_snapshot(program_id: str, *, programs_root: Path, observed_at: datetime) -> CockpitSnapshot
+```
+
+Each summary sub-model is built by its own best-effort, Zone-A-only reader (`_build_program_summary`, `_build_source_summary`, `_build_intelligence_summary`, `_build_economics_summary`, `_build_reliability_summary`, `_build_trust_summary`) — a failure in any one degrades that sub-model to an empty/default state rather than failing the whole snapshot. `IntelligenceCockpitSummary` includes a release-gated read of the latest QG-29-*released* `ProgramSynthesis` (§12.1a) through-line, never an unreleased draft. `TrustCockpitSummary` surfaces, per `(program_id, proposal_class)`, the current autonomy level, precision/acceptance rates, and promotion evidence (§15.x-adjacent autonomy-ladder material) via `ProposalClassTrustSummary`.
+
+**Value measurement contract**: `ValueMetric`/`ValueConfidence` (`measured | calibrated | proxy | unavailable`) replace the retired count-based `productivity_dividend_hours` metric with timer-based baseline capture. `TimeSavingsCertification` requires 8+ matched before/after `WorkflowMeasurement` pairs and a bootstrap confidence interval before a workflow may claim a certified "&gt;80% saved" figure — below that evidence bar, the value is reported as `proxy` or `unavailable`, never silently inflated to `measured`.
+
+**Persistence**: `programs/<id>/runtime/cockpit/latest.json` (current snapshot), `runtime/cockpit/history/<timestamp>.json` (rolling history, retained per §9.7-equivalent rotation), `runtime/cockpit/latest.html` (typed local HTML render, no server). Content-addressed via `compute_cockpit_input_hash()`.
+
+**Commands** (`vertex cockpit ...`): `show` (render latest, terminal or `--format html`), `build` (recompute + persist a fresh snapshot), `explain <finding_id>` (drill into one finding's evidence), `tui` (interactive terminal cockpit — review/launch flows for all six human-reviewable AISchemaGateway proposal types plus risk review), `compare <earlier> <later>` (delta between two history snapshots), `measure` (`WorkflowMeasurementReport` — before/after timer-based value measurement), `adoption` / `adoption-skip` (golden-workflow adoption telemetry), `autonomy-evaluate` / `autonomy-promote` / `autonomy-demote` (per-proposal-class autonomy-ladder state transitions, §18.1-equivalent). A separate, pre-existing `vertex fleet` command (`src/commands/fleet.py`) reports a lighter-weight multi-program summary today; a fuller multi-program cockpit fleet view remains not-yet-built, gated on a second active program existing (see `specs/backlog.md`).
 
 ---
 

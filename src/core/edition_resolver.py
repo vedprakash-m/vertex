@@ -819,6 +819,7 @@ def _parse_ado(value: Any) -> ADOConfig | None:
         date_window_days=int(value.get("date_window_days", 14)),
         api_timeout_seconds=int(value.get("api_timeout_seconds", 30)),
         proposal_ttl_hours=int(value.get("proposal_ttl_hours", 72)),
+        required_tags=_string_tuple(value.get("required_tags", [])),
     )
 
 

@@ -55,6 +55,37 @@ class DecisionAdvice:
     suggested_text: str | None
 
 
+def _program_synthesis_context_lines(
+    program_id: str, programs_root: Path, *, limit: int = 3,
+) -> tuple[str, ...]:
+    """ADF-W2.9: program-level risk/contradiction/critical-path-milestone
+    context, mirroring ``report_ai._program_synthesis_exec_summary_context_
+    lines`` (same three ``assemble_program_synthesis_request`` categories,
+    same formatting). Unlike that helper's workstream-scoped blurb sibling,
+    ``DecisionItem`` carries no workstream field
+    (``decision_brief_engine.py``), so this stays program-wide -- every item
+    in a brief gets the same handful of lines, same reasoning as the exec
+    summary (which is also program-wide, not per-item). Best-effort: any
+    accessor failure degrades to today's item-only advice, never blocks
+    generation."""
+    try:
+        from src.core.program_synthesis import assemble_program_synthesis_request
+
+        request = assemble_program_synthesis_request(program_id, programs_root=programs_root)
+    except Exception:
+        return ()
+
+    lines: list[str] = []
+    for item in [item for item in request.items if item.category == "strategic_risk"][:limit]:
+        severity = f" [{item.severity}]" if item.severity else ""
+        lines.append(f"Open strategic risk{severity}: {item.summary}")
+    for item in [item for item in request.items if item.category == "contradiction"][:limit]:
+        lines.append(f"Unresolved contradiction: {item.summary}")
+    for item in [item for item in request.items if item.category == "critical_path_milestone"][:limit]:
+        lines.append(f"Critical-path milestone: {item.summary}")
+    return tuple(lines)
+
+
 def advise_on_decision_brief(
     *,
     client: LLMProvider,
@@ -135,6 +166,7 @@ def _advise_on_item(
     try:
         _lifecycle(AIRunState.PLANNED)
 
+        supplemental_context = _program_synthesis_context_lines(program_id, programs_root)
         request_payload = {
             "program_id": program_id,
             "section_id": item.section_id,
@@ -145,6 +177,7 @@ def _advise_on_item(
             "vitality_summary": item.vitality_summary,
             "stale_claims": list(item.stale_claims),
             "proposed_text": item.proposed_text or "",
+            "supplemental_context": list(supplemental_context),
         }
         try:
             validate_bounded_payload(request_payload)
@@ -154,7 +187,7 @@ def _advise_on_item(
 
         _lifecycle(AIRunState.REQUESTED)
 
-        user_prompt = _build_user_prompt(item)
+        user_prompt = _build_user_prompt(item, supplemental_context=supplemental_context)
         policy = load_ai_feature_policy(_FEATURE)
         cache_key = AIResultCacheKey(
             program_id=program_id,
@@ -247,7 +280,8 @@ def _advise_on_item_via_context_gateway(
     edition_id: str | None,
     programs_root: Path,
 ) -> DecisionAdvice | None:
-    required, optional = _build_evidence_spans(item)
+    supplemental_context = _program_synthesis_context_lines(program_id, programs_root)
+    required, optional = _build_evidence_spans(item, supplemental_context=supplemental_context)
     request = ContextCompileRequest(
         program_id=program_id,
         edition_id=edition_id,
@@ -300,13 +334,16 @@ def _parse_advice_with_gateway(raw: dict[str, Any]) -> DecisionAdvice | None:
     return _parse_advice(raw)
 
 
-def _build_evidence_spans(item: DecisionItem) -> tuple[tuple[EvidenceSpan, ...], tuple[EvidenceSpan, ...]]:
+def _build_evidence_spans(
+    item: DecisionItem, *, supplemental_context: tuple[str, ...] = (),
+) -> tuple[tuple[EvidenceSpan, ...], tuple[EvidenceSpan, ...]]:
     """Section 8.7.3's required-evidence list -- "evidence referenced by an
     authoritative proposed claim" and "conflict/counter-evidence for a
     disputed fact" -- maps onto this item's own text/delta/prior-proposal/
-    stale-claims; everything else (ranked signals, KPI/vitality summaries)
-    is optional and subject to the compiler's salience ranking, quotas, and
-    token-budget packing rather than the old hardcoded ``[:6]`` truncation."""
+    stale-claims; everything else (ranked signals, KPI/vitality summaries,
+    program-level synthesis context) is optional and subject to the
+    compiler's salience ranking, quotas, and token-budget packing rather
+    than the old hardcoded ``[:6]`` truncation."""
     required: list[EvidenceSpan] = []
     if item.current_text:
         required.append(_span("current_text", item.current_text, required=True))
@@ -326,6 +363,21 @@ def _build_evidence_spans(item: DecisionItem) -> tuple[tuple[EvidenceSpan, ...],
         optional.append(_span("kpi_summary", item.kpi_summary, salience_inputs={"materiality": 0.6}))
     if item.vitality_summary:
         optional.append(_span("vitality_summary", item.vitality_summary, salience_inputs={"materiality": 0.5}))
+    for index, line in enumerate(supplemental_context):
+        optional.append(
+            EvidenceSpan(
+                evidence_id=f"program_synthesis_{index}",
+                source_family="program_synthesis",
+                text=line,
+                required=False,
+                origin=ContentOrigin.SYSTEM,
+                trust_level="medium",
+                verification_state="unverified",
+                injection_screen="pass",
+                salience_inputs={"materiality": 0.5},
+                token_estimate=estimate_tokens(line),
+            )
+        )
     return tuple(required), tuple(optional)
 
 
@@ -370,7 +422,7 @@ def _signal_span(index: int, signal: DecisionSignal) -> EvidenceSpan:
     )
 
 
-def _build_user_prompt(item: DecisionItem) -> str:
+def _build_user_prompt(item: DecisionItem, *, supplemental_context: tuple[str, ...] = ()) -> str:
     parts = [
         f"SECTION: {item.section_title}",
         "",
@@ -381,6 +433,11 @@ def _build_user_prompt(item: DecisionItem) -> str:
     ]
     for line in item.evidence_delta_lines:
         parts.append(f"  - {line}")
+    if supplemental_context:
+        parts += ["", "PROGRAM CONTEXT:"]
+        for line in supplemental_context:
+            if line.strip():
+                parts.append(f"  - {line}")
     if item.top_signals:
         parts += ["", "TOP SIGNALS:"]
         for sig in item.top_signals[:6]:
