@@ -38,7 +38,8 @@ LINE_BUDGETS = {
     # run_telemetry.jsonl sidecar is populated by gather runs.
     # WS-3 / v1.14 (2026-06-10): +21 for _emit_credential_expired_banner helper
     # + CredentialExpired import + 3 banner call sites (WorkIQ/Kusto/IcM).
-    "src/commands/gather.py": 5182,  # +11 (2026-07-15): ADF-W1.4 remainder -- overall WorkIQ phase (all query plans combined) bounded by program.m365.retrieval.max_wall_clock_seconds, threaded into _build_workiq_signals
+    "src/commands/gather.py": 5187,  # +11 (2026-07-15): ADF-W1.4 remainder -- overall WorkIQ phase (all query plans combined) bounded by program.m365.retrieval.max_wall_clock_seconds, threaded into _build_workiq_signals
+    # +5 (2026-07-15): ADF-W1.4 remainder cont'd -- each individual WorkIQ query plan capped at AgencyBridge.WORKIQ_TIMEOUT via timeout_seconds, so the first plan can't consume the whole total_budget_seconds alone.
     # +5 (2026-07-15, ADF-W2.10 P7): risk/milestone/action status contradiction wiring -- load_current_risk_entries/load_current_action_items imports + risks/milestones/actions kwargs at the build_contradiction_packets call site.
     # Phase 6 reviewed exception (2026-06-07): doctor.py added flip-status and
     # flip-parity sub-checks per specs/debt.md §11 Phase 6 Step 1. The branch

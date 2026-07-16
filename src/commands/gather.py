@@ -783,6 +783,11 @@ def gather_program(
                         m365_topic_router=m365_topic_router,
                         programs_root=resolved_programs_root,
                         integration_error_sink=integration_error_details,
+                        # Cap each individual plan at AgencyBridge's own designed
+                        # per-call ceiling so the *first* plan can't silently
+                        # consume the entire total_budget_seconds as its own
+                        # timeout (leaving nothing for the remaining plans).
+                        timeout_seconds=AgencyBridge.WORKIQ_TIMEOUT,
                         total_budget_seconds=workiq_total_budget_seconds,
                     ),
                 )

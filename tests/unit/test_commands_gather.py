@@ -45,7 +45,7 @@ from src.core.reality_store import RealityStore
 from src.core.sqlite_stores import SQLiteSignalStore, SQLiteTrajectoryStore
 from src.core.source_candidate_store import SourceCandidateStore, candidate_evidence_json
 from src.core.trajectory import read_trajectory
-from src.m365.agency_bridge import AgencyCapabilities
+from src.m365.agency_bridge import AgencyBridge, AgencyCapabilities
 
 
 runner = CliRunner()
@@ -4674,6 +4674,7 @@ def test_gather_program_threads_configured_workiq_total_budget_seconds(monkeypat
     )
 
     assert captured_kwargs["total_budget_seconds"] == 120
+    assert captured_kwargs["timeout_seconds"] == AgencyBridge.WORKIQ_TIMEOUT
 
 
 def test_gather_program_workiq_total_budget_defaults_to_600_when_program_has_no_retrieval_config(
