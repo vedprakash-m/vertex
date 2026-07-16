@@ -43,6 +43,7 @@ def emit_entity_alias_facts(
     programs_root: Path = PROGRAMS_ROOT,
     emitted_by: str = "entity_registry",
     dry_run: bool = False,
+    correlation_id: str = "",
 ) -> AliasEmissionResult:
     """Emit entity.alias facts for all entities in the registry.
 
@@ -115,6 +116,22 @@ def emit_entity_alias_facts(
                 )
                 store.append_fact(fact_input, recorded_at=now)
                 emitted += 1
+                if correlation_id:
+                    try:
+                        from src.core.operation_trace import REF_TYPE_FACT, record_trace_link
+
+                        record_trace_link(
+                            program_id=program_id,
+                            correlation_id=correlation_id,
+                            workflow_id=correlation_id,
+                            run_id=correlation_id,
+                            stage="fact",
+                            ref_type=REF_TYPE_FACT,
+                            ref_id=f"entity.alias:{entity.entity_type}:{entity.entity_id}@{now.isoformat()}",
+                            programs_root=programs_root,
+                        )
+                    except Exception:  # noqa: BLE001 -- a trace link is observability, never a write blocker.
+                        pass
             except Exception:
                 skipped += 1
         else:

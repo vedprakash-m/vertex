@@ -4,6 +4,7 @@ import os
 from dataclasses import replace
 from typing import Any
 
+from src.core.context_gap_store import append_context_gap
 from src.core.exceptions import ConfigError
 from src.core.fact_sor_state import resolve_family_sor_mode
 from src.core.milestone_engine import assess_milestone_health, build_critical_path
@@ -85,6 +86,7 @@ class MilestoneStage:
             )
             for milestone in milestones
         )
+        _emit_coverage_gap_findings(program_id, assessments, programs_root=ctx.programs_root)
         return replace(
             ctx,
             milestones=milestones,
@@ -174,6 +176,31 @@ def _milestone_lineage_map(milestone_assessments: tuple[Any, ...]) -> dict[str, 
             "stale": "true" if getattr(assessment, "stale", False) else "false",
         }
     return lineage_by_id
+
+
+def _emit_coverage_gap_findings(program_id: str, assessments: tuple[Any, ...], *, programs_root) -> None:
+    """ADF-W1.7: surface each no-evidence milestone assessment as a context gap.
+
+    Best-effort: a gap-store write failure must never break report assembly.
+    """
+    for assessment in assessments:
+        if not getattr(assessment, "coverage_gap", False):
+            continue
+        try:
+            append_context_gap(
+                feature="milestone_engine",
+                program=program_id,
+                field="linked_work_item_ids",
+                severity="quality_degraded",
+                message=(
+                    f"Milestone {assessment.milestone_id} is past target with zero linked work items; "
+                    f"computed_health={assessment.computed_health.value} (never on_track, ADF-W1.7)."
+                ),
+                impact_estimate="high",
+                programs_root=programs_root,
+            )
+        except Exception:  # pragma: no cover - gap emission must never break the report
+            pass
 
 
 def _legacy_milestone_rollback_enabled() -> bool:

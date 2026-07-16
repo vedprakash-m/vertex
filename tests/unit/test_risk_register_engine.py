@@ -197,6 +197,26 @@ def test_save_risk_register_dual_writes_current_fact_store_projection(tmp_path: 
     assert tuple(replace(risk, fact_id=None, last_validated_at=None) for risk in project_risk_entries(snapshot)) == (entry,)
 
 
+def test_save_risk_register_threads_source_signal_ids_onto_the_fact_revision(tmp_path: Path) -> None:
+    # ADF-W2.4/W2.5: a signal-derived risk's source_signal_ids must land on
+    # the ProgramFactRevision's own top-level field (what fact_lineage_
+    # coverage.py's classifier actually inspects), not just inside the
+    # payload dict RiskEntry projection round-trips through.
+    programs_root = tmp_path / "programs"
+    entry = _risk_entry_with_source_signal_ids(("sig-abc-123",))
+
+    save_risk_register("acme", (entry,), programs_root=programs_root)
+
+    snapshot = load_program_facts("acme", as_of=datetime.now(timezone.utc), db_root=programs_root.parent)
+    risk_facts = [fact for fact in snapshot.facts if fact.fact_type == "risk.entry"]
+
+    assert len(risk_facts) == 1
+    assert risk_facts[0].source_signal_ids == ("sig-abc-123",)
+
+    from src.core.fact_lineage_coverage import has_fact_provenance
+    assert has_fact_provenance(risk_facts[0]) is True
+
+
 def test_save_risk_register_closes_removed_fact_entries(tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     entry = _risk_entry()
@@ -280,6 +300,10 @@ def _risk_entry(
         last_reviewed_date=last_reviewed_date,
         entity_refs=("WI:900001",),
     )
+
+
+def _risk_entry_with_source_signal_ids(source_signal_ids: tuple[str, ...]) -> RiskEntry:
+    return replace(_risk_entry(), source_signal_ids=source_signal_ids)
 
 
 # ---------------------------------------------------------------------------

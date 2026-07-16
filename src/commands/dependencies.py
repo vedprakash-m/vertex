@@ -8,6 +8,7 @@ from typing import cast
 
 import typer
 
+from src.core.adoption_telemetry import GoldenWorkflow, record_adoption
 from src.core.archive_store import find_latest_confirmed_entry, read_archive_index
 from src.core.dependency_graph import save_dependencies
 from src.core.dependency_scout import (
@@ -124,6 +125,12 @@ def accept_dependency_proposal_command(
         status=DependencyProposalStatus.ACCEPTED,
     )
     save_dependency_proposals(program_id, updated_proposals, programs_root=PROGRAMS_ROOT)
+    # ADF-W5.14: accepting a dependency proposal is a real completed action on
+    # the dependency half of the risk_dependency_review golden workflow.
+    try:
+        record_adoption(program_id, GoldenWorkflow.RISK_DEPENDENCY_REVIEW, programs_root=PROGRAMS_ROOT)
+    except Exception:
+        pass
     typer.echo(f"Accepted dependency proposal {proposal.id} into programs/{program_id}/dependencies.yaml.")
     raise typer.Exit(code=0)
 
@@ -143,6 +150,12 @@ def dismiss_dependency_proposal_command(
         status=DependencyProposalStatus.DISMISSED,
     )
     save_dependency_proposals(program_id, updated, programs_root=PROGRAMS_ROOT)
+    # ADF-W5.14: dismissing a dependency proposal is also a real completed
+    # review action on the dependency half of risk_dependency_review.
+    try:
+        record_adoption(program_id, GoldenWorkflow.RISK_DEPENDENCY_REVIEW, programs_root=PROGRAMS_ROOT)
+    except Exception:
+        pass
     typer.echo(f"Dismissed dependency proposal {proposal_id.strip()} in {program_id}.")
     raise typer.Exit(code=0)
 

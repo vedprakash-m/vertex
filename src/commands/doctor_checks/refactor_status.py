@@ -12,7 +12,8 @@ from pathlib import Path
 # ceiling downward per specs/debt.md §21.3.
 # WS-17 (2026-06-09): +19 for the run_telemetry wire-in (see
 # tests/contracts/test_architecture_fitness.py::LINE_BUDGETS).
-_GATHER_LOC_BUDGET = 5160  # +119: SharePoint/LT-deck gather integration (SP1-1/SP1-2/SP1-3) pending next extraction pass
+_GATHER_LOC_BUDGET = 5171  # +6 (2026-07-15): ADF-W2.12 gather-cycle correlation_id minting + threading
+# +5 (2026-07-15, ADF-W2.10 P7): risk/milestone/action status contradiction wiring (load_current_risk_entries/load_current_action_items + risks/milestones/actions kwargs at build_contradiction_packets call site).
 # Phase 6 reviewed exception (2026-06-07): flip-status + flip-parity sub-checks
 # added per specs/debt.md §11 Phase 6 Step 1. Branch extraction scheduled after
 # parity-check command is proven.
@@ -22,7 +23,9 @@ _GATHER_LOC_BUDGET = 5160  # +119: SharePoint/LT-deck gather integration (SP1-1/
 # ratchet.
 # +12 (2026-06-21): --nudge sub-check per .archive/specs/fix-nudge.md §24.8.
 # +20 (2026-06-23): --rev-health/--rev-program sub-check per specs/program-context-intelligence.md §5.13 (FR-PCI-12).
-_DOCTOR_LOC_BUDGET = 1663
+# +18 (2026-07-14, ADF-W5.10): --schedule-health sub-check wiring
+# src/core/schedule_health.py (the primitive) into doctor's flag dispatch.
+_DOCTOR_LOC_BUDGET = 1681
 _AI_ROUTER_ALLOWED_FILES = frozenset(
     {
         Path("src/ai/client.py"),

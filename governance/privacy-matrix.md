@@ -58,6 +58,16 @@ Every field in every payload Vertex handles falls into exactly one of these clas
 | `runtime/vertex_analytics.sqlite3` | CONFIDENTIAL | 1 year | rebuild from journal after `[EXCISED]` run (WS-18) |
 | `keyring entries` | SECRET | ephemeral (rotated on personnel change) | immediate rotation |
 | `ai/llm_trace_full_io.jsonl` (arch-fix.md Phase 0 corpus prerequisite; opt-in via `VERTEX_AI_TRACE_FULL_IO`, off by default) | CONFIDENTIAL (sanitized excerpts only — never raw prompt/response text) | 90 days | `[EXCISED]` tombstone (WS-18); exists only to bake the AF-1/AF-4 eval corpus, not as a long-term audit-of-record |
+| `nudge/drafts/<solicitation_id>.eml` *(ADF-W0.16, ADR-0015)* | PII (recipient email/alias + gap text) | 1 year | `[EXCISED]` tombstone (WS-18) |
+| `nudge/replies/<message_id>.eml` *(ADF-W0.16, ADR-0015)* | PII (raw, unfiltered stakeholder reply sender + body) | 1 year | `[EXCISED]` tombstone (WS-18) |
+| `_feedback/context_gap_solicitations.jsonl` (cooldown log) *(ADF-W0.16, ADR-0015)* | INTERNAL (id/fingerprint/timestamp only, no PII) | 1 year | n/a (no PII) |
+| `runtime/program_synthesis/<ai_run_id>.json` *(ADF-W0.16, ADR-0015)* | CONFIDENTIAL (aggregated business content, no PII) | 1 year | n/a (no PII) |
+| `workstream_registry.yaml` *(ADF-W0.16, ADR-0015)* | PII (live config; `deep_context` fields can now carry verbatim stakeholder reply text via `context_gap_reply.py`) | indefinite | operator edits/redacts the field directly (overwrite-in-place config, not a rotating audit log) |
+| `runtime/tier_decisions.jsonl` *(ADF-W5.9)* | INTERNAL (routing-decision telemetry, no PII) | 45 days | n/a (no PII) |
+| `_state/ai_telemetry.jsonl` *(ADF-W5.9)* | INTERNAL (provider/latency/cost telemetry, no PII) | 90 days | n/a (no PII) |
+| `runtime/run_telemetry.jsonl` *(ADF-W5.9)* | INTERNAL (per-gather channel performance telemetry, no PII) | 90 days | n/a (no PII) |
+| `_alerts/alerts.jsonl` *(ADF-W5.9)* | INTERNAL (no PII) | open-forever; 90 days after `resolved_at` | n/a (no PII); eligibility keyed on `resolved_at`, not `created_at` |
+| `runtime/context_manifests/` *(ADF-W5.9)* | INTERNAL (evidence ids/token counts/classification labels, no PII or raw content) | 90 days | n/a (no PII); content-addressed directory (one `<hash>.json` per compile), age-checked per-file via `compiled_at` inside each file, not filename |
 
 ## 4. RBAC / consent matrix
 

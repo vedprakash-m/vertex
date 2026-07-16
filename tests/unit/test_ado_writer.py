@@ -338,6 +338,10 @@ class _FakeADOClient:
         self.timeout = 30
         self._rest_base_url = "https://dev.azure.com/your-org/One/_apis/wit/"
         self._session = _FakeSession(self, fail_patch_for=fail_patch_for or set())
+        # ADF-W1.1: ADOWriter._request_json now routes mutations through the
+        # dedicated non-retrying session; alias it to the same fake so every
+        # existing assertion against `_FakeSession.calls` keeps working.
+        self._mutation_session = self._session
 
     @property
     def session(self) -> _FakeSession:

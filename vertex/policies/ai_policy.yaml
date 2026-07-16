@@ -37,9 +37,24 @@ ai_features:
     temperature: 0.1
     model_tier: standard
     frontier_eligible: true
+  dependency_blast_radius_generator:
+    # ADF-W4.5 remainder: Section 8.10.2 next-proving-event + blast-radius
+    # narrative generation. QG-29-gated before any caller may apply it.
+    max_tokens: 700
+    temperature: 0.1
+    model_tier: standard
+    frontier_eligible: true
   exec_summary_drafter:
     max_tokens: 220
     temperature: 0.3
+    model_tier: standard
+    frontier_eligible: true
+  governance_decision_brief_generator:
+    # ADF-W4.7 remainder: Section 8.10.7 governance decision brief
+    # generation. Distinct from decision_brief_advisor (editorial proposal
+    # review). QG-29-gated before any caller may apply it.
+    max_tokens: 1000
+    temperature: 0.1
     model_tier: standard
     frontier_eligible: true
   intent_router:
@@ -55,6 +70,15 @@ ai_features:
   m365_topic_router:
     max_tokens: 400
     temperature: 0.0
+    model_tier: standard
+    frontier_eligible: true
+  meeting_action_extractor:
+    # ADF-W3.3: Section 8.10.4 step 2 -- LLM extraction on residual
+    # transcript content only (the deterministic marker tier runs
+    # separately in src/core/meeting_action.py). Every output is
+    # QG-29-gated (ai_release_audit) before any caller may consume it.
+    max_tokens: 1200
+    temperature: 0.1
     model_tier: standard
     frontier_eligible: true
   onboard_assistant:
@@ -73,9 +97,33 @@ ai_features:
     temperature: 0.2
     model_tier: standard
     frontier_eligible: true
+  risk_proposal_generator:
+    # ADF-W4.5: Section 8.10.1 risk proposal generation for CANDIDATE-kind
+    # risks only. Every output is QG-29-gated before any caller may apply
+    # it, and apply_risk_proposal only ever fires on human approval.
+    max_tokens: 800
+    temperature: 0.1
+    model_tier: standard
+    frontier_eligible: true
+  top_three_candidate_generator:
+    # ADF-W4.7: Section 8.10.6 top-three candidate selection + write-up,
+    # reusing ADF-W2.9's assembled ProgramSynthesisRequest as the candidate
+    # pool. QG-29-gated before any caller may consume the result.
+    max_tokens: 900
+    temperature: 0.1
+    model_tier: standard
+    frontier_eligible: true
   setup_assistant:
     max_tokens: 400
     temperature: 0.3
+    model_tier: standard
+    frontier_eligible: true
+  program_synthesizer:
+    # ADF-W2.9: shared program-synthesis contract (Section 8.10.5). Bounded by
+    # assemble_program_synthesis_request's assembled input items; every output
+    # is QG-29-gated before any consumer (cockpit today) may read it.
+    max_tokens: 1200
+    temperature: 0.1
     model_tier: standard
     frontier_eligible: true
   prose_event_extractor:

@@ -38,7 +38,8 @@ LINE_BUDGETS = {
     # run_telemetry.jsonl sidecar is populated by gather runs.
     # WS-3 / v1.14 (2026-06-10): +21 for _emit_credential_expired_banner helper
     # + CredentialExpired import + 3 banner call sites (WorkIQ/Kusto/IcM).
-    "src/commands/gather.py": 5160,  # +119: SharePoint/LT-deck gather integration (SP1-1/SP1-2/SP1-3) pending next extraction pass
+    "src/commands/gather.py": 5171,  # +6 (2026-07-15): ADF-W2.12 gather-cycle correlation_id minting + threading
+    # +5 (2026-07-15, ADF-W2.10 P7): risk/milestone/action status contradiction wiring -- load_current_risk_entries/load_current_action_items imports + risks/milestones/actions kwargs at the build_contradiction_packets call site.
     # Phase 6 reviewed exception (2026-06-07): doctor.py added flip-status and
     # flip-parity sub-checks per specs/debt.md §11 Phase 6 Step 1. The branch
     # extraction is scheduled after the parity-check command is proven.
@@ -54,7 +55,9 @@ LINE_BUDGETS = {
     # flip-parity/fact-parity branch shape.
     # +17 (2026-07-08, fix-data-flow.md Track L / PR-13): added --fact-deserialization
     # sub-check (confirms persisted facts still deserialize against current schema).
-    "src/commands/doctor.py": 1663,
+    # +18 (2026-07-14, ADF-W5.10): added --schedule-health sub-check wiring the already-built
+    # src/core/schedule_health.py primitive into doctor's flag dispatch (closes the deferred item).
+    "src/commands/doctor.py": 1681,
     "src/commands/confirm.py": 1650,  # +5: DECK edition type guard to skip HTMLRenderer (82e07c4); +105: GAP-9/23/33 (QG-DM surfacing + shim-persist SoR guard + baseline dual-write SoR guard) (2026-06-17)
     # D-31 → WI-6.2 (2026-06-15): report.py decomposed into report_pipeline/assemble_stage.py;
     # LOC ratchet satisfied (1,413 ≤ 1,500). Budget updated after report output path refactor (+1 issue_dir var).
@@ -63,8 +66,14 @@ LINE_BUDGETS = {
     # workitem.state SoR honoring, audited VERTEX_REPORT_ALLOW_LEGACY_MILESTONE_ROLLBACK
     # banner, and milestone source_document_key/approval_event_id lineage rendering
     # (specs/backlog.md; .archive/specs/activation.md).
-    "src/commands/report.py": 1470,
-    "src/core/reality_store.py": 2333,  # +61 total through 2026-07-08: prior owner_entity_ref/binding-owner additions plus follow-on reality-store hardening already on branch; no new reality_store edits in Track B
+    # +7 (2026-07-14, ADF-W5.8): entity-scoped alert on WorkIQ inline-invocation-attempted detection.
+    # +7 (2026-07-14, ADF-W5.14): weekly_report golden-workflow adoption telemetry on a real completed run.
+    # +22 (2026-07-14, ADF-W2.12): first production OperationTrace writer -- render-stage trace link.
+    # +24 (2026-07-15, ADF-W2.12): thread correlation_id/run_id/workflow_id once at report_command entry
+    # through StageContext so each artifact-producing stage can record a trace link sharing one id
+    # (closes the half-finished _build_stage_request_context regression the substrate pass left open).
+    "src/commands/report.py": 1533,
+    "src/core/reality_store.py": 2339,  # +6 (2026-07-13): ADF root-cause fix for the PS-14 split-brain -- _resolve_reality_db_root now defaults to programs_root.parent/"vertex-db" instead of ~/.vertex
     "src/core/channel_registry_store.py": 1976,  # +79: discovery registration persistence helpers already present on branch (2026-06-02)
 }
 

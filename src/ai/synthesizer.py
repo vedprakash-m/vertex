@@ -2,20 +2,33 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, cast
 
 from src.ai._pipeline import AIPipelineError, process_generated_text
 from src.ai.client import AIClientError
 from src.ai.provider import LLMProvider
 from src.ai.tiered_router import TierResult, route_through_tiers
+from src.core.ai_result_cache import AIResultCacheKey, canonical_input_hash, get_ai_result, put_ai_result
+from src.core.ai_schema_gateway import SchemaGatewayError, validate_bounded_payload
+from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.models import Confidence, RiskLevel
 from src.core.models_v2 import ActionItem, ContradictionPacket, Program, RiskEntry, Signal, Workstream, WorkstreamSynthesis
+from src.core.quality_gates.ai_release_audit import (
+    AIRunState,
+    ReleaseTerminal,
+    new_ai_run_id,
+    record_ai_release_decision,
+    record_ai_run_lifecycle,
+)
 from src.core.trajectory_analyzer import DriftPattern
 from src.core.policy_loader import load_ai_feature_policy
 
 
 PROMPT_VERSION = "synthesizer.v1"
 from src.ai.prompt_registry import load_prompt
+POLICY_VERSION = "synthesizer.v1"
 _FEATURE = "synthesizer"
+_OUTPUT_SCHEMA_VERSION = "1"
 
 
 class SynthesizerError(Exception):
@@ -42,40 +55,141 @@ class WorkstreamSynthesizer:
         open_risks: tuple[RiskEntry, ...] = (),
         open_actions: tuple[ActionItem, ...] = (),
         contradictions: tuple[ContradictionPacket, ...] = (),
+        programs_root: Path = PROGRAMS_ROOT,
     ) -> SynthesizedProposalDraft | None:
+        """Runs the same AISchemaGateway/QG-29 safety lifecycle established
+        by ``risk_proposal_generator.py`` (ADF-W5.1, P7): bounds-checked
+        request/response payloads, the five ``AIRunState`` transitions, and
+        a durable QG-29 terminal release decision recorded before any
+        caller may consume the result. ``_parse_synthesis_payload``'s
+        existing field-by-field checks already combine schema-shape and
+        semantic/grounding validation (e.g. "evidence_refs must cite only
+        approved signal ids") in a single raise-on-first-violation pass --
+        unlike a feature with a clean schema/semantic split, this one
+        records ``SCHEMA_VALIDATED``/``SEMANTICALLY_VALIDATED`` back to
+        back around that single pass rather than forcing an artificial
+        two-phase split of tightly-coupled checks. Preserves this
+        feature's existing raise-on-rejection contract
+        (``SynthesizerError``) rather than switching to the newer
+        generators' return-``None``-on-rejection convention, matching the
+        same reasoning as ``summary_generator.py``'s migration."""
         if not signals:
             return None
 
+        ai_run_id = new_ai_run_id()
+        program_id = program.id
+
+        def _lifecycle(state: AIRunState) -> None:
+            record_ai_run_lifecycle(
+                program_id=program_id,
+                ai_run_id=ai_run_id,
+                feature=_FEATURE,
+                state=state,
+                prompt_version=PROMPT_VERSION,
+                policy_version=POLICY_VERSION,
+                programs_root=programs_root,
+            )
+
+        def _discard(terminal: ReleaseTerminal, reason: str, finding_count: int = 0) -> None:
+            record_ai_release_decision(
+                program_id=program_id,
+                ai_run_id=ai_run_id,
+                terminal=terminal,
+                reason=reason,
+                validator_finding_count=finding_count,
+                programs_root=programs_root,
+            )
+
+        _lifecycle(AIRunState.PLANNED)
+
+        valid_signal_ids = tuple(signal.id for signal in signals)
+        request_payload = {
+            "program_id": program.id,
+            "workstream_id": workstream.id,
+            "signal_ids": list(valid_signal_ids),
+            "signal_texts": [signal.text for signal in signals],
+            "drift_pattern_ids": [pattern.work_item_id for pattern in drift_patterns],
+            "open_risk_ids": [risk.id for risk in open_risks],
+            "open_action_ids": [action.id for action in open_actions],
+        }
         try:
-            outcome = route_through_tiers(
+            validate_bounded_payload(request_payload)
+        except SchemaGatewayError as error:
+            reason = f"AISchemaGateway rejected the outbound request: {error}"
+            _discard(ReleaseTerminal.DISCARDED, reason)
+            raise SynthesizerError(reason) from error
+
+        _lifecycle(AIRunState.REQUESTED)
+
+        user_prompt = _build_user_prompt(
+            program=program,
+            workstream=workstream,
+            signals=signals,
+            drift_patterns=drift_patterns,
+            open_risks=open_risks,
+            open_actions=open_actions,
+            contradictions=contradictions,
+        )
+        policy = load_ai_feature_policy(_FEATURE)
+        cache_key = AIResultCacheKey(
+            program_id=program_id,
+            feature=_FEATURE,
+            canonical_input_hash=canonical_input_hash(user_prompt),
+            prompt_version=PROMPT_VERSION,
+            policy_version=POLICY_VERSION,
+            model_deployment=_resolve_model_deployment(self._client),
+            context_manifest_hash=canonical_input_hash("|".join(valid_signal_ids)),
+            output_schema_version=_OUTPUT_SCHEMA_VERSION,
+        )
+        try:
+            client = self._client
+            raw = route_through_tiers(
                 _FEATURE,
                 deterministic_fn=lambda: None,
-                frontier_fn=lambda: self._client.structured(
+                frontier_fn=lambda: client.structured(
                     _load_prompt(),
-                    _build_user_prompt(
-                        program=program,
-                        workstream=workstream,
-                        signals=signals,
-                        drift_patterns=drift_patterns,
-                        open_risks=open_risks,
-                        open_actions=open_actions,
-                        contradictions=contradictions,
-                    ),
-                    parser=lambda payload: _parse_synthesis_payload(
-                        payload,
-                        workstream_id=workstream.id,
-                        valid_signal_ids=tuple(signal.id for signal in signals),
-                    ),
-                    max_tokens=load_ai_feature_policy(_FEATURE).max_tokens,
+                    user_prompt,
+                    parser=lambda payload: payload,
+                    max_tokens=policy.max_tokens,
                     prompt_version=PROMPT_VERSION,
                 ),
-                policy=load_ai_feature_policy(_FEATURE),
-            )
+                policy=policy,
+                cache_lookup_fn=lambda: _cached_response(cache_key, programs_root=programs_root),
+                cache_store_fn=lambda value: put_ai_result(cache_key, value, programs_root=programs_root),
+            ).value
         except AIClientError as error:
-            raise SynthesizerError(f"Workstream synthesis failed for {workstream.id}: {error}") from error
-        if outcome.value is None:
-            return None
-        return SynthesizedProposalDraft(synthesis=outcome.value, prompt_version=PROMPT_VERSION)
+            reason = f"Workstream synthesis failed for {workstream.id}: {error}"
+            _discard(ReleaseTerminal.DISCARDED, reason)
+            raise SynthesizerError(reason) from error
+
+        _lifecycle(AIRunState.RESPONDED)
+
+        try:
+            validate_bounded_payload(raw)
+        except SchemaGatewayError as error:
+            reason = f"AISchemaGateway rejected the response: {error}"
+            _discard(ReleaseTerminal.REJECTED, reason)
+            raise SynthesizerError(reason) from error
+
+        try:
+            synthesis = _parse_synthesis_payload(
+                cast(dict[str, object], raw),
+                workstream_id=workstream.id,
+                valid_signal_ids=valid_signal_ids,
+            )
+        except SynthesizerError as error:
+            _lifecycle(AIRunState.SCHEMA_VALIDATED)
+            _lifecycle(AIRunState.SEMANTICALLY_VALIDATED)
+            _discard(ReleaseTerminal.REJECTED, str(error))
+            raise
+
+        _lifecycle(AIRunState.SCHEMA_VALIDATED)
+        _lifecycle(AIRunState.SEMANTICALLY_VALIDATED)
+        _discard(
+            ReleaseTerminal.RELEASED,
+            "passed AISchemaGateway bounds and workstream-synthesis field validation",
+        )
+        return SynthesizedProposalDraft(synthesis=synthesis, prompt_version=PROMPT_VERSION)
 
 
 def build_synthesizer_from_client(client: LLMProvider) -> WorkstreamSynthesizer:
@@ -272,3 +386,21 @@ def _require_supported_enum_string(
             f"{field_name} must be one of: {', '.join(allowed_values)}."
         )
     return value
+
+
+def _resolve_model_deployment(client: LLMProvider) -> str:
+    """Best-effort model/deployment identifier for the cache key (Section
+    8.8.3), mirroring ``risk_proposal_generator._resolve_model_deployment``.
+    A wrong/missing id only under-shares the cache (never over-shares,
+    since program_id/feature/input hash are still exact-matched), so this
+    degrades safely rather than raising."""
+    for attr in ("deployment", "primary_deployment", "model", "deployment_id"):
+        value = getattr(client, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    return "unknown"
+
+
+def _cached_response(key: AIResultCacheKey, *, programs_root: Path) -> dict[str, Any] | None:
+    hit = get_ai_result(key, programs_root=programs_root)
+    return hit.value if hit is not None else None

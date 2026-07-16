@@ -140,6 +140,21 @@ def test_entity_returns_none_when_not_found():
     assert result is None
 
 
+def test_entity_returns_none_when_ambiguous():
+    """ADF-W2.6: entity() returns None (not a silently-guessed pick) when the
+    fuzzy tier finds a genuinely ambiguous near-tie between two candidates."""
+    from src.core.entity_registry import EntityRegistry
+    from src.core.program_reality import CanonicalEntity
+
+    entity_a = CanonicalEntity(entity_id="t1", entity_type="person", canonical_name="Jordan Rivers", aliases=(), scope="program")
+    entity_b = CanonicalEntity(entity_id="t2", entity_type="person", canonical_name="Jordan Rivera", aliases=(), scope="program")
+    registry = EntityRegistry(program_entities=(entity_a, entity_b), org_entities=())
+    pr = _mock_program_reality()
+    with patch("src.core.entity_registry.EntityRegistry.load", return_value=registry):
+        result = pr.entity("Jordan River")
+    assert result is None
+
+
 # ---------------------------------------------------------------------------
 # 3. Static truth derivation (Phase 1 rules)
 # ---------------------------------------------------------------------------

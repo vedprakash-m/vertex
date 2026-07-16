@@ -9,7 +9,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import random
 import sqlite3
+import time
 from typing import Any, Iterator, TypedDict
 from uuid import uuid4
 
@@ -39,6 +41,7 @@ from src.core.models_v2 import (
     SkippedIssueEntry,
     Dependency,
     DependencyADOQuery,
+    DependencyEvidenceTier,
     DependencyScheduleStatus,
     DependencyStatus,
     DependencyType,
@@ -66,6 +69,28 @@ from src.core.workstream_documents import _parse_workstreams
 PROGRAMS_ROOT = Path(__file__).resolve().parents[2] / "programs"
 
 _LOG = logging.getLogger(__name__)
+
+
+def _resolve_fact_db_root(programs_root: Path | None) -> Path | None:
+    """Resolve the ``db_root`` to pass to ``ProgramFactStore``/``get_program_reality_db_path``.
+
+    Mirrors ``milestone_engine._resolve_fact_db_root``: when ``programs_root``
+    is the default production root, defer to ``None`` so
+    ``get_program_reality_db_path`` applies its own canonical resolution
+    (``programs_root.parent / "vertex-db"``) instead of the bare
+    ``programs_root.parent`` used here previously -- a mismatch that caused
+    fact-store reads and writes to silently target two different SQLite
+    files (see specs/arch-data-fix.md; the PS-14 class of split-brain bug).
+    A caller-supplied sandboxed ``programs_root`` (e.g. a test tmp dir ending
+    in "programs") still resolves to its parent, preserving prior behavior.
+    """
+    if programs_root is None:
+        return None
+    if programs_root == PROGRAMS_ROOT:
+        return None
+    if programs_root.name == "programs":
+        return programs_root.parent
+    return programs_root
 
 
 class FactReviewState(StrEnum):
@@ -453,8 +478,8 @@ def load_program_facts(
     sor_state: FactSorState | None = None,
 ) -> ProgramFactSnapshot:
     resolved_db_root = db_root
-    if resolved_db_root is None and programs_root is not None:
-        resolved_db_root = programs_root.parent
+    if resolved_db_root is None:
+        resolved_db_root = _resolve_fact_db_root(programs_root)
     snapshot = ProgramFactStore(program_id, home_root=home_root, db_root=resolved_db_root).snapshot(as_of=as_of)
     if as_of is not None:
         return snapshot
@@ -1041,9 +1066,7 @@ def append_workstream_association_fact(
     of the same transaction) WILL dedupe to ``noop`` and that's the intended
     idempotency guarantee for the fact-store side.
     """
-    resolved_db_root: Path | None = None
-    if programs_root is not None:
-        resolved_db_root = programs_root.parent
+    resolved_db_root = _resolve_fact_db_root(programs_root)
     store = ProgramFactStore(program_id, db_root=resolved_db_root)
     natural_key = (
         f"workstream_assoc:{record.edition}:{record.issue_number}:"
@@ -1587,14 +1610,8 @@ class ProgramFactStore:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(self._db_path)
-        connection.row_factory = sqlite3.Row
+        connection = self._open_connection_with_retry()
         try:
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute("PRAGMA foreign_keys=ON")
-            connection.execute("PRAGMA busy_timeout = 5000")
-            self._initialize_schema(connection)
             yield connection
             connection.commit()
         except Exception:
@@ -1602,6 +1619,48 @@ class ProgramFactStore:
             raise
         finally:
             connection.close()
+
+    def _open_connection_with_retry(
+        self, *, max_attempts: int = 8, base_delay_s: float = 0.02
+    ) -> sqlite3.Connection:
+        """Open a connection and initialize schema, retrying the whole
+        connect+pragma+schema-init sequence on ``sqlite3.OperationalError:
+        database is locked``/``database is busy``.
+
+        ADF-W5.9 (multi-program concurrency testing): ``PRAGMA busy_timeout``
+        only covers lock contention on statements issued *after* it takes
+        effect. Converting a brand-new database file to WAL mode (the very
+        next statement) needs a brief exclusive lock, so multiple
+        threads/processes racing to open the SAME not-yet-existing
+        fact-store db for the first time (reproduced by
+        ``tests/contracts/test_multi_program_concurrency.py``'s concurrent
+        fact-store write stress test) can hit "database is locked" on that
+        one statement even with a generous busy_timeout -- the same failure
+        mode ``src.core._db.open_program_db_with_retry`` was built to
+        absorb for ``workspace_lease.py``. Bounded, jittered exponential
+        backoff; re-raises any non-lock/busy ``OperationalError``
+        immediately, and the last error after ``max_attempts`` is exhausted.
+        """
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        last_error: sqlite3.OperationalError | None = None
+        for attempt in range(max_attempts):
+            connection = sqlite3.connect(self._db_path)
+            connection.row_factory = sqlite3.Row
+            try:
+                connection.execute("PRAGMA journal_mode=WAL")
+                connection.execute("PRAGMA foreign_keys=ON")
+                connection.execute("PRAGMA busy_timeout = 5000")
+                self._initialize_schema(connection)
+                return connection
+            except sqlite3.OperationalError as error:
+                connection.close()
+                message = str(error).lower()
+                if "locked" not in message and "busy" not in message:
+                    raise
+                last_error = error
+                time.sleep(base_delay_s * (2**attempt) + random.uniform(0, base_delay_s))
+        assert last_error is not None
+        raise last_error
 
     def _initialize_schema(self, connection: sqlite3.Connection) -> None:
         connection.execute(
@@ -2579,6 +2638,23 @@ def _risk_entry_from_fact(fact: ProgramFactRevision) -> RiskEntry:
     )
 
 
+def _dependency_evidence_tier_from_payload(payload: dict[str, object]) -> DependencyEvidenceTier:
+    """Read ``evidence_tier`` off a dependency fact payload, defaulting to
+    AUTHORED for legacy facts persisted before ADF-W4.4 added the field.
+
+    An unrecognized value also falls back to AUTHORED rather than raising --
+    a forward-compat tolerant read matching every other optional enum on this
+    projection (schedule_status, DependencyStatus.from_string in the parser).
+    """
+    raw_tier = payload.get("evidence_tier")
+    if not isinstance(raw_tier, str) or not raw_tier:
+        return DependencyEvidenceTier.AUTHORED
+    try:
+        return DependencyEvidenceTier.from_string(raw_tier)
+    except ValueError:
+        return DependencyEvidenceTier.AUTHORED
+
+
 def _dependency_from_fact(fact: ProgramFactRevision) -> Dependency:
     payload = fact.payload
     schedule_status = _deserialize_optional_string(payload.get("schedule_status"))
@@ -2605,6 +2681,8 @@ def _dependency_from_fact(fact: ProgramFactRevision) -> Dependency:
             else None
         ),
         linked_risk_ids=tuple(str(value) for value in payload.get("linked_risk_ids") or ()),
+        evidence_tier=_dependency_evidence_tier_from_payload(payload),
+        evidence_refs=tuple(str(value) for value in payload.get("evidence_refs") or ()),
     )
 
 

@@ -108,6 +108,49 @@ def test_meeting_close_review_layout_collapses_for_narrow_terminal(tmp_path: Pat
     assert "dry-run (not written)" in rendered
 
 
+def test_meeting_close_promote_actions_records_trace_link_under_one_correlation_id(tmp_path: Path, monkeypatch) -> None:
+    # ADF-W2.12: one meeting-close run can queue several extracted actions --
+    # a real multi-fact chain worth tracing under one correlation id.
+    from types import SimpleNamespace
+
+    from src.core.operation_trace import load_operation_trace
+
+    repo_root = _seed_repo(tmp_path)
+    programs_root = repo_root / "programs"
+    monkeypatch.setattr(meeting_close_command, "PROGRAMS_ROOT", programs_root)
+    monkeypatch.setattr(
+        meeting_close_command,
+        "_build_transcript_reader",
+        lambda: _StubTranscriptReader(
+            TranscriptRecord(
+                meeting_id="lt-sync-123",
+                title="LT Sync",
+                captured_at="2026-05-21T12:00:00+00:00",
+                web_url="https://contoso/meetings/lt-sync-123",
+                content="Review WI:101 and confirm next steps.",
+            )
+        ),
+    )
+    monkeypatch.setattr(meeting_close_command, "_extract_actions_from_transcript", _stub_extract_actions)
+    monkeypatch.setattr(meeting_close_command, "_build_ado_client", lambda program: _StubADOClient())
+    monkeypatch.setattr(meeting_close_command.uuid, "uuid4", lambda: SimpleNamespace(hex="fixed-meeting-close-corr"))
+
+    meeting_close_command.generate_meeting_close_artifacts(
+        program_id="acme",
+        meeting_id="lt-sync-123",
+        title_override=None,
+        emit_html=False,
+        emit_teams=False,
+        promote_actions=True,
+        dry_run=False,
+        programs_root=programs_root,
+    )
+
+    trace = load_operation_trace("acme", "fixed-meeting-close-corr", programs_root=programs_root)
+    assert trace is not None
+    assert len(trace.fact_refs) == 2  # both stub-extracted actions queued
+
+
 def test_meeting_close_json_output_reports_teams_artifact(tmp_path: Path, monkeypatch) -> None:
     repo_root = _seed_repo(tmp_path)
     monkeypatch.setattr(meeting_close_command, "PROGRAMS_ROOT", repo_root / "programs")

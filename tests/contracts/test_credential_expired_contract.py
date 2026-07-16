@@ -173,6 +173,8 @@ def test_ado_writer_raises_credential_expired_on_401(monkeypatch) -> None:
     session_mock = mock.MagicMock()
     session_mock.request.return_value = mock_resp
     ado_client._session = session_mock
+    # ADF-W1.1: ADOWriter._request_json now uses the dedicated mutation session.
+    ado_client._mutation_session = session_mock
 
     writer = ADOWriter.__new__(ADOWriter)
     writer._client = ado_client

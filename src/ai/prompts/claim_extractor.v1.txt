@@ -8,7 +8,9 @@ Return JSON only with this shape:
       "entity_refs": ["WI:123"],
       "due_date": "YYYY-MM-DD" or null,
       "owner_alias": "alias" or null,
-      "workstream_id": "workstream_id" or null
+      "workstream_id": "workstream_id" or null,
+      "claimed_status_family": "dependency" or "risk" or "milestone" or "action" or null,
+      "claimed_status_value": "active" or "resolved" or "broken" or null
     }
   ],
   "decision_asks": [
@@ -27,3 +29,8 @@ Rules:
 - Leave owner_alias null when the narrative does not name a credible owner.
 - Leave due_date null when no date is grounded in the text.
 - Do not emit duplicate claims or duplicate decision asks.
+- If a claim explicitly asserts a cross-team/cross-program dependency's status, set claimed_status_family to "dependency", set claimed_status_value to exactly one of "active", "resolved", or "broken" (map the narrative's wording to the closest of these three), and add a "DEP:<dependency-id>" entry to entity_refs using the dependency id exactly as it appears in the narrative. Leave both fields null otherwise.
+- If a claim explicitly asserts a risk's status, set claimed_status_family to "risk", set claimed_status_value to exactly one of "open", "mitigated", "accepted", "closed", or "escalated", and add a "RISK:<risk-id>" entry to entity_refs using the risk id exactly as it appears in the risk register.
+- If a claim explicitly asserts a milestone's status, set claimed_status_family to "milestone", set claimed_status_value to exactly one of "on_track", "at_risk", "missed", "completed", "deferred", or "unknown", and add a "MS:<milestone-id>" entry to entity_refs using the milestone id exactly as it appears.
+- If a claim explicitly asserts an action's status, set claimed_status_family to "action", set claimed_status_value to exactly one of "proposed", "open", "in_progress", "done", or "cancelled", and add an "ACTION:<action-id>" entry to entity_refs using the action id exactly as it appears.
+- Leave claimed_status_family and claimed_status_value null when the claim makes no explicit status assertion.

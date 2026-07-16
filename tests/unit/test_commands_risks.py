@@ -12,6 +12,7 @@ from src.core.action_tracker import append_action
 from src.core.assumption_tracker import save_assumptions
 from src.core.decision_register import save_decisions
 from src.core.models_v2 import ActionItem, ActionSourceType, ActionStatus, Assumption, AssumptionStatus, DecisionEntry, DecisionStatus, RiskCategory, RiskEntry, RiskImpact, RiskProbability, RiskStatus
+from src.core.adoption_telemetry import GoldenWorkflow, read_adoption_events
 from src.core.risk_register_engine import load_risk_history, load_risk_register, save_risk_register
 
 
@@ -170,6 +171,23 @@ def test_risks_review_mark_reviewed_updates_stale_entries(monkeypatch, tmp_path:
     assert result.exit_code == 0
     assert "Reviewed 1 stale risk" in result.stdout
     assert entries[0].last_reviewed_date == datetime.now(timezone.utc).date()
+
+    # ADF-W5.14: a completed risk review records risk_dependency_review adoption.
+    adoption_events = read_adoption_events("demo", programs_root=programs_root)
+    assert len(adoption_events) == 1
+    assert adoption_events[0].workflow == GoldenWorkflow.RISK_DEPENDENCY_REVIEW
+
+
+def test_risks_review_no_stale_entries_does_not_record_adoption(monkeypatch, tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    monkeypatch.setattr("src.commands.risks.PROGRAMS_ROOT", programs_root)
+    _seed_risk_register(programs_root, last_reviewed_date=datetime.now(timezone.utc).date())
+
+    result = runner.invoke(app, ["risks", "review", "--program", "demo", "--mark-reviewed"])
+
+    assert result.exit_code == 0
+    assert "No stale risks" in result.stdout
+    assert read_adoption_events("demo", programs_root=programs_root) == ()
 
 
 def test_risks_list_show_links_renders_raid_chain(monkeypatch, tmp_path: Path) -> None:

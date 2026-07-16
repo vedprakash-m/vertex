@@ -76,6 +76,60 @@ kpis:
     assert queries[1].metric_id == "acme.deployment_velocity"
 
 
+def test_load_kpi_queries_parses_slo_semantic_fields(monkeypatch, tmp_path: Path) -> None:
+    """ADF-W2.3 (Section 8.5.1): unit/slo_target/comparison are additive
+    kpis.yaml fields, all optional."""
+    programs_root = tmp_path / "programs"
+    program_dir = programs_root / "acme"
+    program_dir.mkdir(parents=True)
+    (program_dir / "kpis.yaml").write_text(
+        """
+schema_version: "1.0"
+kpis:
+  - id: acme-safety-pass-rate
+    metric_id: acme.safety_pass_rate
+    workstream_ids: [acme]
+    cluster: https://adventure.kusto.windows.net
+    database: xdataanalytics
+    kql: Metrics | take 1
+    section: Safety
+    render_as: metric_highlight
+    confidence: high
+    result_column: PassRate
+    unit: "%"
+    slo_target: 95.0
+    comparison: ">="
+  - id: acme-no-slo
+    metric_id: acme.no_slo_metric
+    cluster: https://adventure.kusto.windows.net
+    database: xdataanalytics
+    kql: Metrics | take 1
+    section: Other
+    render_as: table
+    confidence: medium
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "src.core.kusto_query_loader.load_program_knowledge",
+        lambda program_id, programs_root: KnowledgeStore(
+            people_directory=(), people_profiles=(), teams=(), products=(), golden_queries=(),
+        ),
+    )
+
+    queries = {query.id: query for query in load_kpi_queries("acme", programs_root=programs_root)}
+
+    slo_query = queries["acme-safety-pass-rate"]
+    assert slo_query.unit == "%"
+    assert slo_query.slo_target == 95.0
+    assert slo_query.comparison == ">="
+
+    no_slo_query = queries["acme-no-slo"]
+    assert no_slo_query.unit is None
+    assert no_slo_query.slo_target is None
+    assert no_slo_query.comparison is None
+
+
 def test_load_kpi_queries_raises_for_duplicate_ids(monkeypatch, tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     program_dir = programs_root / "acme"

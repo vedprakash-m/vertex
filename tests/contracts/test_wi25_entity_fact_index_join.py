@@ -169,6 +169,32 @@ class TestEntityFactIndexJoin:
             )
         assert reality._entity_fact_index == {}
 
+    def test_fallback_to_fact_id_when_ref_ambiguous(self, tmp_path: Path) -> None:
+        """ADF-W2.6: when entity_ref matches two near-tied fuzzy candidates,
+        the index falls back to fact_id -- the same as an unresolvable ref --
+        rather than silently joining under whichever candidate scored
+        marginally higher."""
+        fact_id = "pf_ambiguous01"
+        ambiguous_ref = "Jordan River"
+
+        entity_a = CanonicalEntity(entity_id="t1", entity_type="person", canonical_name="Jordan Rivers", aliases=(), scope="program")
+        entity_b = CanonicalEntity(entity_id="t2", entity_type="person", canonical_name="Jordan Rivera", aliases=(), scope="program")
+        registry = EntityRegistry(program_entities=(entity_a, entity_b), org_entities=())
+        fact = _make_fact_revision(fact_id, "workstream.entry", (ambiguous_ref,))
+        snapshot = _make_snapshot([fact])
+
+        with _apply_base_patches([MagicMock(id=ambiguous_ref, fact_id=fact_id, name="WS Ambiguous")], snapshot):
+            reality = ProgramReality.load(
+                "test_program",
+                programs_root=tmp_path,
+                entity_registry=registry,
+            )
+
+        index = reality._entity_fact_index
+        assert fact_id in index, f"Expected fallback fact_id '{fact_id}' in index for ambiguous ref"
+        assert "t1" not in index
+        assert "t2" not in index
+
     def test_two_facts_same_entity_grouped_in_index(self, tmp_path: Path) -> None:
         """Two facts with different aliases for the same entity are grouped in the index."""
         canonical_id = "entity_group_001"

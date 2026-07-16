@@ -23,9 +23,9 @@ budgets:
     direction: ceiling
     unit: ms
     value: 25
-    status: candidate
-    ratified_at: null
-    ratified_by: null
+    status: ratified
+    ratified_at: "2026-07-13"
+    ratified_by: "the Platform DRI (per ADR-0014)"
 
   - id: audit-write-latency-network-lease
     area: "Audit write"
@@ -34,9 +34,9 @@ budgets:
     direction: ceiling
     unit: ms
     value: 150
-    status: candidate
-    ratified_at: null
-    ratified_by: null
+    status: ratified
+    ratified_at: "2026-07-13"
+    ratified_by: "the Platform DRI (per ADR-0014)"
 
   - id: context-compile-latency
     area: "Context compile"
@@ -45,9 +45,9 @@ budgets:
     direction: ceiling
     unit: ms
     value: 300
-    status: candidate
-    ratified_at: null
-    ratified_by: null
+    status: ratified
+    ratified_at: "2026-07-13"
+    ratified_by: "the Platform DRI (per ADR-0014)"
 
   - id: local-encode-latency
     area: "Local encode"
@@ -56,9 +56,9 @@ budgets:
     direction: ceiling
     unit: ms
     value: 80
-    status: candidate
-    ratified_at: null
-    ratified_by: null
+    status: ratified
+    ratified_at: "2026-07-13"
+    ratified_by: "the Platform DRI (per ADR-0014)"
 
   - id: startup-regression
     area: "Startup"
@@ -67,9 +67,20 @@ budgets:
     direction: ceiling
     unit: ms
     value: 150
-    status: candidate
-    ratified_at: null
-    ratified_by: null
+    status: ratified
+    ratified_at: "2026-07-13"
+    ratified_by: "the Platform DRI (per ADR-0014)"
+
+  - id: kusto-required-set-gather-latency
+    area: "Kusto"
+    description: "required-set gather p95/max (sequential-realistic; ADF-W0.6/W1.6)"
+    budget_class: production-SLO
+    direction: ceiling
+    unit: s
+    value: 450  # rounds up from observed 430.9s max (20-sample baseline) with headroom; sequential-realistic per ADR-0014 Decision 1
+    status: ratified
+    ratified_at: "2026-07-13"
+    ratified_by: "the Platform DRI (per ADR-0014, Decision 1)"
 
   - id: capacity-snapshot-cadence-events
     area: "Capacity"
@@ -78,9 +89,9 @@ budgets:
     direction: ceiling
     unit: events
     value: 5000
-    status: candidate
-    ratified_at: null
-    ratified_by: null
+    status: ratified
+    ratified_at: "2026-07-13"
+    ratified_by: "the Platform DRI (per ADR-0014)"
 
   - id: capacity-trace-metadata-retention
     area: "Capacity"
@@ -89,9 +100,9 @@ budgets:
     direction: ceiling
     unit: days
     value: 90
-    status: candidate
-    ratified_at: null
-    ratified_by: null
+    status: ratified
+    ratified_at: "2026-07-13"
+    ratified_by: "the Platform DRI (per ADR-0014)"
 
   - id: capacity-sanitized-excerpt-retention
     area: "Capacity"
@@ -100,9 +111,9 @@ budgets:
     direction: ceiling
     unit: days
     value: 90
-    status: candidate
-    ratified_at: null
-    ratified_by: null
+    status: ratified
+    ratified_at: "2026-07-13"
+    ratified_by: "the Platform DRI (per ADR-0014)"
 
   - id: concurrency-sqlite-busy-backoff-cap
     area: "Concurrency"
@@ -122,9 +133,9 @@ budgets:
     direction: qualitative
     unit: null
     value: 0  # RPO = 0 (zero data loss tolerance), not a tunable number
-    status: candidate
-    ratified_at: null
-    ratified_by: null
+    status: ratified
+    ratified_at: "2026-07-13"
+    ratified_by: "the Platform DRI (per ADR-0014)"
 
   - id: security-encryption-at-rest
     area: "Security"
@@ -132,21 +143,21 @@ budgets:
     budget_class: periodic-governance-review
     direction: qualitative
     unit: null
-    value: null
-    status: candidate
-    ratified_at: null
-    ratified_by: null
+    value: null  # Option A: rely on OS/disk-level encryption (BitLocker or platform-equivalent); no additional application-level encryption-at-rest for the current single-operator/single-machine deployment shape
+    status: ratified
+    ratified_at: "2026-07-13"
+    ratified_by: "the Platform DRI (per ADR-0014, Decision 2)"
 
   - id: privacy-retention-rtbf
     area: "Privacy"
     description: "classification+retention per artifact; RTBF crypto-tombstone"
     budget_class: periodic-governance-review
     direction: qualitative
-    unit: null
-    value: null
-    status: candidate
-    ratified_at: null
-    ratified_by: null
+    unit: days
+    value: 365  # matches the platform's existing PII default (DataClassification.PII -> RetentionClass.ONE_YEAR); purge via the existing [EXCISED] tombstone mechanism, not a new mechanism
+    status: ratified
+    ratified_at: "2026-07-13"
+    ratified_by: "the Platform DRI (per ADR-0015, correcting ADR-0014 Decision 3)"
 
   - id: observability-push-alerting
     area: "Observability"
@@ -154,7 +165,7 @@ budgets:
     budget_class: integration
     direction: qualitative
     unit: null
-    value: null
+    value: null  # deferred pending >=3-program fleet certification (ADF-W5.7); single/dual-program operation is adequately served by doctor/cockpit self-review today
     status: candidate
     ratified_at: null
     ratified_by: null
@@ -176,7 +187,7 @@ budgets:
     budget_class: production-SLO
     direction: floor
     unit: percent
-    value: null  # ratified in Phase 0 per arch-fix.md §1 Goals (G3)
+    value: null  # stale comment corrected by ADR-0014: the prior "ratified in Phase 0 per arch-fix.md §1 Goals (G3)" note referenced the superseded arch-fix.md; deferred until ADF-W5.1-W5.3 tier-routing graduation produces a real measured baseline to set a floor against
     status: candidate
     ratified_at: null
     ratified_by: null
@@ -188,9 +199,9 @@ budgets:
     direction: floor
     unit: versions
     value: 2
-    status: candidate
-    ratified_at: null
-    ratified_by: null
+    status: ratified
+    ratified_at: "2026-07-13"
+    ratified_by: "the Platform DRI (per ADR-0014)"
 
   - id: operations-accountable-role
     area: "Operations"
@@ -198,7 +209,7 @@ budgets:
     budget_class: periodic-governance-review
     direction: qualitative
     unit: null
-    value: null
-    status: candidate
-    ratified_at: null
-    ratified_by: null
+    value: null  # resolved by ADR-0013: single operator holds the Platform DRI role
+    status: ratified
+    ratified_at: "2026-07-13"
+    ratified_by: "the Platform DRI (per ADR-0013/ADR-0014)"

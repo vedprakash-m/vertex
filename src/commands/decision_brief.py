@@ -54,6 +54,65 @@ def decision_brief_command(
     raise typer.Exit(code=0)
 
 
+def load_pending_decision_brief(
+    *,
+    edition_name: str,
+    issue_number: int | None,
+    reports_root: Path,
+    archive_root: Path,
+) -> tuple[DecisionBrief, str]:
+    """Shared loading logic for a pending (non-AI-enriched) decision brief
+    -- the half of ``generate_decision_brief`` before ``--ai``/rendering
+    kicks in. Extracted for ADF-W2.9 P5's blind A/B comparison harness
+    (``src/commands/decision_brief_pilot.py``), which needs the exact same
+    brief/program_id but neither renders HTML nor writes any artifact.
+    Returns ``(brief, program_id)``."""
+    resolved_paths = resolve_edition_paths(
+        edition_name,
+        programs_root=reports_root.parent / "programs",
+    )
+    if resolved_paths is None:
+        raise typer.BadParameter(f"Unknown edition '{edition_name}'.")
+
+    resolved_issue_number = (
+        issue_number
+        if issue_number is not None
+        else _resolve_default_issue_number(
+            edition_name=edition_name,
+            program_id=resolved_paths.program_id,
+            reports_root=reports_root,
+            archive_root=archive_root,
+        )
+    )
+
+    all_proposals = load_proposals(
+        resolved_paths.program_id,
+        resolved_issue_number,
+        programs_root=reports_root.parent / "programs",
+    )
+    pending = tuple(p for p in all_proposals if p.status == SectionRevisionStatus.PENDING)
+    if not pending:
+        raise typer.BadParameter(
+            f"No pending proposals for Issue {resolved_issue_number:03d}. "
+            f"Run `vertex propose --edition {edition_name}` first."
+        )
+
+    signal_store = build_signal_store_for_program_id(
+        resolved_paths.program_id,
+        programs_root=reports_root.parent / "programs",
+    )
+    signal_map = {s.id: s for s in signal_store.read(resolved_paths.program_id)}
+
+    brief = build_decision_brief(
+        proposals=tuple(all_proposals),
+        signal_map=signal_map,
+        edition_name=edition_name,
+        issue_number=resolved_issue_number,
+        generated_at=datetime.now(),
+    )
+    return brief, resolved_paths.program_id
+
+
 def generate_decision_brief(
     *,
     edition_name: str,
@@ -73,52 +132,15 @@ def generate_decision_brief(
         reports_root=resolved_reports_root,
         programs_root=resolved_reports_root.parent / "programs",
     )
-    resolved_paths = resolve_edition_paths(
-        edition_name,
-        programs_root=resolved_reports_root.parent / "programs",
-    )
-    if resolved_paths is None:
-        raise typer.BadParameter(f"Unknown edition '{edition_name}'.")
-
-    resolved_issue_number = (
-        issue_number
-        if issue_number is not None
-        else _resolve_default_issue_number(
-            edition_name=edition_name,
-            program_id=resolved_paths.program_id,
-            reports_root=resolved_reports_root,
-            archive_root=resolved_archive_root,
-        )
-    )
-
-    all_proposals = load_proposals(
-        resolved_paths.program_id,
-        resolved_issue_number,
-        programs_root=resolved_reports_root.parent / "programs",
-    )
-    pending = tuple(p for p in all_proposals if p.status == SectionRevisionStatus.PENDING)
-    if not pending:
-        raise typer.BadParameter(
-            f"No pending proposals for Issue {resolved_issue_number:03d}. "
-            f"Run `vertex propose --edition {edition_name}` first."
-        )
-
-    signal_store = build_signal_store_for_program_id(
-        resolved_paths.program_id,
-        programs_root=resolved_reports_root.parent / "programs",
-    )
-    signal_map = {s.id: s for s in signal_store.read(resolved_paths.program_id)}
-
-    brief = build_decision_brief(
-        proposals=tuple(all_proposals),
-        signal_map=signal_map,
+    brief, resolved_program_id = load_pending_decision_brief(
         edition_name=edition_name,
-        issue_number=resolved_issue_number,
-        generated_at=datetime.now(),
+        issue_number=issue_number,
+        reports_root=resolved_reports_root,
+        archive_root=resolved_archive_root,
     )
 
     if ai:
-        brief = _enrich_with_ai(brief=brief, bundle=bundle, create_ai_client=create_ai_client)
+        brief = _enrich_with_ai(brief=brief, bundle=bundle, program_id=resolved_program_id, create_ai_client=create_ai_client)
 
     html = _render_decision_brief_html(brief=brief, edition_name=edition_name)
     target_path = _write_output_text(
@@ -128,7 +150,7 @@ def generate_decision_brief(
     if open_browser:
         webbrowser.open(target_path.resolve().as_uri())
     return DecisionBriefArtifacts(
-        issue_number=resolved_issue_number,
+        issue_number=brief.issue_number,
         html_path=target_path,
         item_count=len(brief.items),
         ai_enriched=brief.ai_enriched,
@@ -139,6 +161,7 @@ def _enrich_with_ai(
     *,
     brief: DecisionBrief,
     bundle: object,
+    program_id: str,
     create_ai_client: object,
 ) -> DecisionBrief:
     if get_ai_mode() == AIMode.DISABLED:
@@ -154,7 +177,7 @@ def _enrich_with_ai(
     if client is None:
         return brief
     try:
-        return advise_on_decision_brief(client=client, brief=brief)
+        return advise_on_decision_brief(client=client, brief=brief, program_id=program_id)
     except Exception:
         return brief
 

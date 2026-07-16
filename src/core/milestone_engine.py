@@ -215,16 +215,35 @@ def assess_milestone_health(
     slip_count = sum(_count_target_date_slips(trajectories.get(item.id, ())) for item in linked_items)
     days_to_target = (milestone.target_date - as_of.date()).days
 
+    # ADF-W1.7 (Section 8.10.3): a past-target milestone with zero linked work
+    # items has no computable evidence at all. Falling through to the ON_TRACK
+    # default below would render false optimism (Issue-079). It must never be
+    # ON_TRACK: MISSED unless the milestone record itself declares complete
+    # (status == COMPLETED), in which case there is a claim but no linked-item
+    # evidence to verify it, so it is UNKNOWN rather than a confident MISSED.
+    no_evidence_past_due = (
+        milestone.target_date < as_of.date() and not milestone.linked_work_item_ids
+    )
+
     if milestone.status == MilestoneStatus.DEFERRED:
         computed_health = MilestoneStatus.DEFERRED
     elif milestone.linked_work_item_ids and not unresolved_items and not missing_item_ids:
         computed_health = MilestoneStatus.COMPLETED
     elif milestone.target_date < as_of.date() and (unresolved_items or missing_item_ids):
         computed_health = MilestoneStatus.MISSED
+    elif no_evidence_past_due:
+        computed_health = (
+            MilestoneStatus.UNKNOWN if milestone.status == MilestoneStatus.COMPLETED else MilestoneStatus.MISSED
+        )
     elif blocked_criteria or (days_to_target <= 14 and unresolved_items) or slip_count >= 2:
         computed_health = MilestoneStatus.AT_RISK
     else:
         computed_health = MilestoneStatus.ON_TRACK
+
+    # DEFERRED always takes priority over the no-evidence branch above, so
+    # exclude it here too -- an explicitly deferred milestone is a known,
+    # intentional state, not a coverage gap.
+    coverage_gap = no_evidence_past_due and computed_health != MilestoneStatus.DEFERRED
 
     if computed_health == MilestoneStatus.COMPLETED:
         slip_probability = 0.0
@@ -232,6 +251,11 @@ def assess_milestone_health(
         slip_probability = 1.0
     elif computed_health == MilestoneStatus.DEFERRED:
         slip_probability = 0.0
+    elif computed_health == MilestoneStatus.UNKNOWN:
+        # No linked-item evidence exists to compute a slip probability from;
+        # 0.5 is the documented maximum-uncertainty placeholder, never a
+        # confident number (INV-ADF-11 spirit: a proxy is never measured).
+        slip_probability = 0.5
     else:
         slip_probability = 0.15
         if unresolved_items and days_to_target <= 14:
@@ -263,6 +287,7 @@ def assess_milestone_health(
         confidence=confidence,
         reasoning=reasoning,
         completion_date=completion_date,
+        coverage_gap=coverage_gap,
     )
 
 
@@ -675,6 +700,13 @@ def _build_reasoning(
     if computed_health == MilestoneStatus.DEFERRED:
         return "Milestone is author-deferred."
     days_label = f"{days_to_target} days to target" if days_to_target >= 0 else f"{-days_to_target} days past target"
+    if computed_health == MilestoneStatus.UNKNOWN:
+        return (
+            f"Declared complete but {-days_to_target if days_to_target < 0 else 0} days past target with zero "
+            "linked work items to verify against; no computed evidence either way (ADF-W1.7 coverage gap)."
+        )
+    if linked_item_count == 0 and computed_health == MilestoneStatus.MISSED:
+        return f"Past target with zero linked work items and no declared completion; no evidence of progress ({days_label})."
     return (
         f"{linked_item_count} linked items, {unresolved_count} unresolved, {blocked_count} blocked signals, "
         f"{slip_count} target-date slips observed, {days_label}."

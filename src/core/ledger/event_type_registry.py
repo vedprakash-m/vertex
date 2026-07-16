@@ -147,6 +147,13 @@ class LedgerEventSpec:
     failure_mode:
         What breaks if the update-event precondition is missing.  Used
         for documentation and future gate contracts.
+    owner_module:
+        ADF-W0.18: the Zone-A package namespace authorized to construct and
+        write events of this prefix (e.g. ``"src.core"``). ``None`` for
+        entries registered before ADF-W0.18 (ownership was implicit; not
+        retrofitted here to keep this change additive). A contract test
+        (``test_ledger_event_registration.py``) asserts every populated
+        value stays inside ``src.core`` (INV-ADF-17: no Zone B/C writer).
     """
 
     prefix: str
@@ -157,6 +164,7 @@ class LedgerEventSpec:
     accessor: str | None
     consumers: tuple[str, ...]
     failure_mode: str
+    owner_module: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +172,26 @@ class LedgerEventSpec:
 # ---------------------------------------------------------------------------
 
 LEDGER_EVENT_REGISTRY: tuple[LedgerEventSpec, ...] = (
+    # ── ADF-W0.18 prefix override (must precede the generic "decision." row
+    # below) ────────────────────────────────────────────────────────────────
+    # decision.outcome_recorded.v1 (specs/arch-data-fix.md Appendix A.2) is a
+    # value/measurement event, not a TPM decision-record fact. Its prefix
+    # collides with the pre-existing "decision." PROJECTABLE family below;
+    # lookup_event_spec matches registry rows in order, so this longer,
+    # more-specific prefix must be listed first to intercept it and keep it
+    # PASSTHROUGH, leaving decision.raised/decision.made/etc. routed to the
+    # TPM decision fact bridge unchanged.
+    LedgerEventSpec(
+        prefix="decision.outcome_recorded.",
+        fact_family="value",
+        authority_family=None,
+        disposition=EventDisposition.PASSTHROUGH,
+        bridge_appender_name=None,
+        accessor=None,
+        consumers=(),
+        failure_mode="",
+        owner_module="src.core",
+    ),
     # ── PROJECTABLE ─────────────────────────────────────────────────────────
     LedgerEventSpec(
         prefix="risk.",
@@ -342,6 +370,89 @@ LEDGER_EVENT_REGISTRY: tuple[LedgerEventSpec, ...] = (
         accessor=None,
         consumers=(),
         failure_mode="",
+    ),
+    # ── ADF-W0.18: specs/arch-data-fix.md Appendix A.2 (Section 9.6) ────────
+    # None of these are TPM business facts; all are measurement/AI-lifecycle/
+    # actuation-audit events, so all eight prefixes are PASSTHROUGH. Payload
+    # schema validation for the sixteen A.2 event types lives in
+    # event_types.py (exact event_type string keys -- no prefix-collision risk
+    # there; the collision below is specific to this prefix-based table).
+    LedgerEventSpec(
+        prefix="value.",
+        fact_family="value",
+        authority_family=None,
+        disposition=EventDisposition.PASSTHROUGH,
+        bridge_appender_name=None,
+        accessor=None,
+        consumers=("cockpit",),
+        failure_mode="",
+        owner_module="src.core",
+    ),
+    LedgerEventSpec(
+        prefix="quality.",
+        fact_family="quality",
+        authority_family=None,
+        disposition=EventDisposition.PASSTHROUGH,
+        bridge_appender_name=None,
+        accessor=None,
+        consumers=("cockpit",),
+        failure_mode="",
+        owner_module="src.core",
+    ),
+    LedgerEventSpec(
+        prefix="source.",
+        fact_family="source",
+        authority_family=None,
+        disposition=EventDisposition.PASSTHROUGH,
+        bridge_appender_name=None,
+        accessor=None,
+        consumers=("cockpit",),
+        failure_mode="",
+        owner_module="src.core",
+    ),
+    LedgerEventSpec(
+        prefix="operation.",
+        fact_family="operation",
+        authority_family=None,
+        disposition=EventDisposition.PASSTHROUGH,
+        bridge_appender_name=None,
+        accessor=None,
+        consumers=("cockpit",),
+        failure_mode="",
+        owner_module="src.core",
+    ),
+    LedgerEventSpec(
+        prefix="action.",
+        fact_family="action",
+        authority_family=None,
+        disposition=EventDisposition.PASSTHROUGH,
+        bridge_appender_name=None,
+        accessor=None,
+        consumers=("cockpit",),
+        failure_mode="",
+        owner_module="src.core",
+    ),
+    LedgerEventSpec(
+        prefix="ai.",
+        fact_family="ai",
+        authority_family=None,
+        disposition=EventDisposition.PASSTHROUGH,
+        bridge_appender_name=None,
+        accessor=None,
+        consumers=("cockpit",),
+        failure_mode="",
+        owner_module="src.core",
+    ),
+    LedgerEventSpec(
+        prefix="actuation.",
+        fact_family="actuation",
+        authority_family=None,
+        disposition=EventDisposition.PASSTHROUGH,
+        bridge_appender_name=None,
+        accessor=None,
+        consumers=("cockpit",),
+        failure_mode="",
+        owner_module="src.core",
     ),
 )
 

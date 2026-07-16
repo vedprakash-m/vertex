@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import csv
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timezone
 from io import StringIO
 import json
 import os
+from pathlib import Path
+from typing import Callable
 
 import typer
 
+from src.core.adoption_telemetry import GoldenWorkflow, record_adoption
 from src.core.journal import PROGRAMS_ROOT
 from src.core.program_reality import FactAssessment, ProgramReality
 from src.core.raid_graph import RaidChainResult, build_raid_chain_index
@@ -97,7 +100,7 @@ def add_risk_command(
         entity_refs=tuple(item.strip() for item in entity_ref or [] if item.strip()),
     )
 
-    entries = list(_load_current_risks(program_id))
+    entries = list(_load_current_risks(program_id, programs_root=PROGRAMS_ROOT))
     if any(entry.id == risk_entry.id for entry in entries):
         raise typer.BadParameter(
             f"Risk '{risk_entry.title}' already exists as {risk_entry.id}. Use `vertex risks update` or choose a more specific title/description."
@@ -125,7 +128,7 @@ def update_risk_command(
     reviewer: str | None = typer.Option(None, "--reviewer", help="Reviewer alias for status changes. Defaults to current OS user."),
 ) -> None:
     program_id = program.strip()
-    entries = list(_load_current_risks(program_id))
+    entries = list(_load_current_risks(program_id, programs_root=PROGRAMS_ROOT))
     match_index = next((index for index, entry in enumerate(entries) if entry.id == risk_id.strip()), None)
     if match_index is None:
         raise typer.BadParameter(f"Risk '{risk_id}' was not found in {program_id}.")
@@ -187,37 +190,55 @@ def update_risk_command(
     raise typer.Exit(code=0)
 
 
-@app.command("review")
-def review_risks_command(
-    program: str = typer.Option(..., "--program", help="Program id, e.g. myprogram."),
-    reviewer: str | None = typer.Option(None, "--reviewer", help="Reviewer alias. Defaults to current OS user."),
-    mark_reviewed: bool = typer.Option(False, "--mark-reviewed", help="Mark all stale risks reviewed today without prompting."),
-) -> None:
-    program_id = program.strip()
-    entries = list(_load_current_risks(program_id))
+@dataclass(frozen=True, slots=True)
+class RiskReviewIO:
+    """ADF-W5.11 (Section 10.3a): the injectable I/O seam that makes
+    ``run_risk_review_session`` a shared typed command service -- callable
+    identically from the ``risks review`` CLI (typer I/O) and ``cockpit
+    tui``'s launch action (injected I/O), never a copy of the review logic."""
+
+    confirm: Callable[[str], bool]
+    prompt: Callable[[str], str]
+    echo: Callable[[str], None]
+
+
+def run_risk_review_session(
+    program_id: str,
+    *,
+    mark_reviewed: bool,
+    review_actor: str,
+    io: RiskReviewIO,
+    programs_root: Path = PROGRAMS_ROOT,
+) -> int:
+    """The stale-risk review loop itself, independent of which surface is
+    driving it. Returns the number of risks reviewed. Writes through the
+    exact same real paths regardless of caller: ``record_risk_update`` for
+    each status change, ``save_risk_register`` for the persisted register
+    (dual-writes the fact-store projection), and a best-effort
+    ``record_adoption`` -- no mutation-path bypass, no shortcut store write."""
+    entries = list(_load_current_risks(program_id, programs_root=programs_root))
     stale_entries = [entry for entry in _sort_risks(tuple(entries)) if assess_risk_staleness(entry, datetime.now(timezone.utc).date())]
     if not stale_entries:
-        typer.echo(f"No stale risks for {program_id}.")
-        raise typer.Exit(code=0)
+        io.echo(f"No stale risks for {program_id}.")
+        return 0
 
-    review_actor = _default_actor(reviewer)
     today = datetime.now(timezone.utc).date()
     reviewed_count = 0
     changed = False
 
     for stale_entry in stale_entries:
-        typer.echo(f"{stale_entry.id} | {stale_entry.status.value} | score {compute_risk_score(stale_entry)} | {stale_entry.title}")
-        should_review = mark_reviewed or typer.confirm("Mark reviewed today?", default=True)
+        io.echo(f"{stale_entry.id} | {stale_entry.status.value} | score {compute_risk_score(stale_entry)} | {stale_entry.title}")
+        should_review = mark_reviewed or io.confirm("Mark reviewed today?")
         if not should_review:
             continue
 
         next_status = stale_entry.status
         note: str | None = None
         if not mark_reviewed:
-            status_override = typer.prompt("Status override (blank to keep)", default="", show_default=False).strip()
+            status_override = io.prompt("Status override (blank to keep)").strip()
             if status_override:
                 next_status = RiskStatus.from_string(status_override)
-            note_value = typer.prompt("Review note (blank for none)", default="", show_default=False).strip()
+            note_value = io.prompt("Review note (blank for none)").strip()
             note = note_value or None
 
         updated = replace(stale_entry, status=next_status, last_reviewed_date=today)
@@ -232,11 +253,39 @@ def review_risks_command(
                 updated.status.value,
                 review_actor,
                 note,
-                programs_root=PROGRAMS_ROOT,
+                programs_root=programs_root,
             )
 
     if changed:
-        save_risk_register(program_id, _sort_risks(tuple(entries)), programs_root=PROGRAMS_ROOT)
+        save_risk_register(program_id, _sort_risks(tuple(entries)), programs_root=programs_root)
+        # ADF-W5.14: a completed risk review (at least one stale risk actually
+        # reviewed) is the risk_dependency_review golden workflow's adoption moment.
+        try:
+            record_adoption(program_id, GoldenWorkflow.RISK_DEPENDENCY_REVIEW, programs_root=programs_root)
+        except Exception:
+            pass
+    return reviewed_count
+
+
+@app.command("review")
+def review_risks_command(
+    program: str = typer.Option(..., "--program", help="Program id, e.g. myprogram."),
+    reviewer: str | None = typer.Option(None, "--reviewer", help="Reviewer alias. Defaults to current OS user."),
+    mark_reviewed: bool = typer.Option(False, "--mark-reviewed", help="Mark all stale risks reviewed today without prompting."),
+) -> None:
+    program_id = program.strip()
+    io = RiskReviewIO(
+        confirm=lambda message: typer.confirm(message, default=True),
+        prompt=lambda message: typer.prompt(message, default="", show_default=False),
+        echo=typer.echo,
+    )
+    reviewed_count = run_risk_review_session(
+        program_id,
+        mark_reviewed=mark_reviewed,
+        review_actor=_default_actor(reviewer),
+        io=io,
+        programs_root=PROGRAMS_ROOT,
+    )
     typer.echo(f"Reviewed {reviewed_count} stale risk{'s' if reviewed_count != 1 else ''} in {program_id}.")
     raise typer.Exit(code=0)
 
@@ -555,7 +604,7 @@ def _format_raid_bool(chain: RaidChainResult | None) -> str:
     return "true" if chain.has_mitigating_action else "false"
 
 
-def _load_current_risks(program_id: str) -> tuple[RiskEntry, ...]:
+def _load_current_risks(program_id: str, *, programs_root: Path = PROGRAMS_ROOT) -> tuple[RiskEntry, ...]:
     # Returns bare ``RiskEntry`` records (FactAssessment metadata stripped) for the
     # write/CRUD path (add/update/review), which manipulates records and persists
     # them back to the legacy risk register. Truth-level metadata is irrelevant to
@@ -564,7 +613,7 @@ def _load_current_risks(program_id: str) -> tuple[RiskEntry, ...]:
     # metadata so the risk board can surface truth/dispute/staleness signals
     # (Track E follow-up — the same FactAssessment-preservation fix the newsletter
     # render pipeline got, applied to this user-facing CLI surface).
-    return tuple(a.record for a in ProgramReality.load(program_id, programs_root=PROGRAMS_ROOT).risks())
+    return tuple(a.record for a in ProgramReality.load(program_id, programs_root=programs_root).risks())
 
 
 def _load_current_risk_assessments(program_id: str) -> tuple[FactAssessment, ...]:

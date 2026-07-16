@@ -1050,6 +1050,100 @@ def test_refresh_dependency_scout_state_reads_dependencies_from_program_facts(
     }
 
 
+def test_refresh_contradiction_state_wires_dependencies_into_contradiction_packets(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """ADF-W2.10 P6: `_refresh_contradiction_state` must load the program's
+    dependencies and pass them into `build_contradiction_packets` so a
+    dependency-status claim can actually surface a contradiction (built but
+    never wired is the failure mode this guards against)."""
+    from src.core.models_v2 import Dependency, DependencyStatus, DependencyType
+
+    programs_root = tmp_path / "programs"
+    item = WorkItem(
+        id=3001,
+        type="Feature",
+        title="Dependency wiring case",
+        state="Active",
+        assigned_to="Priya",
+        assigned_to_email="priya@example.com",
+        area_path="One\\Demo\\Deployment",
+        iteration_path="Sprint 1",
+        target_date=None,
+        risk_level=RiskLevel.MEDIUM,
+        tags=[],
+        custom_fields={},
+    )
+    workstream = Workstream(
+        id="deployment",
+        name="Deployment",
+        area_paths=("One\\Demo\\Deployment",),
+        signal_sources=WorkstreamSignalSources(),
+    )
+    append_claim_entry(
+        ClaimEntry(
+            id="claim-dep-1",
+            program_id="demo",
+            edition_id="demo_weekly",
+            issue_number=77,
+            workstream_id="deployment",
+            text="The dependency on team Rome is now broken.",
+            entity_refs=("DEP:dep-rome",),
+            claim_date=date(2026, 5, 20),
+            owner_alias=None,
+            due_date=None,
+            claimed_status_family="dependency",
+            claimed_status_value="broken",
+        ),
+        programs_root=programs_root,
+    )
+    dependency = Dependency(
+        id="dep-rome",
+        from_program_id="demo",
+        from_workstream_id=None,
+        from_item_id=3001,
+        from_milestone_id=None,
+        to_program_id="demo",
+        to_workstream_id=None,
+        to_item_id=None,
+        to_milestone_id=None,
+        dependency_type=DependencyType.BLOCKS,
+        risk_if_broken="Downstream execution slips.",
+        mitigation=None,
+        status=DependencyStatus.ACTIVE,
+        owner_alias=None,
+    )
+    monkeypatch.setattr(
+        "src.commands.gather.load_current_dependencies",
+        lambda program_id, *, programs_root: (dependency,) if program_id == "demo" else (),
+    )
+
+    class _SignalStore:
+        def read(self, program_id: str, *, start, end):
+            return ()
+
+        def read_reviews(self, program_id: str):
+            return {}
+
+    as_of = datetime(2026, 5, 21, 9, 0, tzinfo=timezone.utc)
+    gather._refresh_contradiction_state(
+        "demo",
+        items=(item,),
+        workstreams=(workstream,),
+        signal_store=_SignalStore(),
+        signal_window_start=as_of - timedelta(days=30),
+        as_of=as_of,
+        programs_root=programs_root,
+    )
+
+    packets = load_contradiction_state("demo", programs_root=programs_root)
+    assert len(packets) == 1
+    assert packets[0].work_item_id == 3001
+    dependency_contradictions = [c for c in packets[0].contradictions if c.field == "dependency_status"]
+    assert len(dependency_contradictions) == 1
+
+
 def test_compute_and_persist_plane1_changes_reads_plane1_state_from_program_facts(
     monkeypatch,
     tmp_path: Path,
@@ -1141,7 +1235,7 @@ def test_compute_and_persist_plane1_changes_reads_plane1_state_from_program_fact
     monkeypatch.setattr(
         gather,
         "shadow_write_plane1_snapshot",
-        lambda program_id, snapshot, *, recorded_at, db_root=None: captured.setdefault(
+        lambda program_id, snapshot, *, recorded_at, db_root=None, **_kwargs: captured.setdefault(
             "shadow_args",
             {"program_id": program_id, "snapshot": snapshot, "recorded_at": recorded_at, "db_root": db_root},
         ),

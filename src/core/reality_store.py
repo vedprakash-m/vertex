@@ -12,6 +12,7 @@ import re
 import sqlite3
 
 from src.core.digest_cache import compute_digest_sha256, serialize_digest_model
+from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.hypothesis_models import (
     AssertionOperator,
     AssertionEvaluation,
@@ -44,34 +45,39 @@ def get_program_reality_db_path(
     *,
     home_root: Path | None = None,
     db_root: Path | None = None,
+    programs_root: Path = PROGRAMS_ROOT,
 ) -> Path:
-    base_root = db_root or _resolve_reality_db_root(home_root=home_root)
+    base_root = db_root or _resolve_reality_db_root(home_root=home_root, programs_root=programs_root)
     if base_root.suffix.lower() == ".sqlite3":
         return base_root
     return base_root / program_id / _DB_FILENAME
 
 
-def _resolve_reality_db_root(*, home_root: Path | None = None) -> Path:
+def _resolve_reality_db_root(*, home_root: Path | None = None, programs_root: Path = PROGRAMS_ROOT) -> Path:
     configured_root = os.environ.get("VERTEX_DB_PATH")
     if configured_root:
         return Path(configured_root)
-    # PS-14 / Track K root-cause fix (fix-data-flow.md §6.11): this fallback
-    # previously chose ``~/.vertex`` with zero logging whenever a caller
-    # threaded neither ``db_root`` nor ``VERTEX_DB_PATH`` — the exact
-    # mechanism that produced a silent split-brain fact-store database for
-    # `xpf` (a stray home-directory DB, invisible to any caller that always
-    # supplies `programs_root`/`db_root` explicitly, per production code's
-    # real path). Any future script, test, or refactor that omits both now
-    # gets a loud, unmissable signal instead of silently reading/writing the
-    # wrong database.
-    resolved = (home_root or Path.home()) / ".vertex"
-    log.critical(
-        "reality_store: no db_root/VERTEX_DB_PATH supplied — falling back to "
-        "%s. This is very likely NOT the canonical fact-store location production "
-        "code uses (which threads an explicit programs_root/db_root). See "
-        "fix-data-flow.md PS-14/Track K — run `vertex doctor --fact-bridge` or "
-        "check for multiple vertex.sqlite3 files for this program before trusting "
-        "reads/writes through this path.",
+    if home_root is not None:
+        # Caller explicitly asked for home-relative resolution (test
+        # sandboxing / an intentional legacy override) -- honor it exactly.
+        resolved = home_root / ".vertex"
+        log.warning("reality_store: resolving via explicit home_root override -> %s", resolved)
+        return resolved
+    # ADF root-cause fix (specs/arch-data-fix.md; PS-14 / Track K,
+    # fix-data-flow.md §6.11): a caller that supplied neither db_root nor
+    # VERTEX_DB_PATH nor an explicit home_root previously landed on
+    # ``~/.vertex`` -- a location no production caller actually treats as
+    # canonical (doctor.py's storage check has always resolved canonical as
+    # ``programs_root.parent / "vertex-db"``). That mismatch produced a real
+    # PS-14 split-brain for XPF (11,224 stray rows in the home-directory
+    # copy, invisible to every properly-configured caller, archived
+    # 2026-07-13). The fallback now computes the SAME convention doctor.py
+    # already uses, so an under-configured caller reads/writes the real
+    # canonical database instead of silently diverging from it.
+    resolved = programs_root.parent / "vertex-db"
+    log.warning(
+        "reality_store: no db_root/VERTEX_DB_PATH/home_root supplied — resolving to the canonical "
+        "%s (programs_root.parent/'vertex-db') instead of ~/.vertex.",
         resolved,
     )
     return resolved

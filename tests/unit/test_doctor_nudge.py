@@ -184,6 +184,41 @@ def test_nq5_valid_state_file_passes(tmp_path: Path) -> None:
     assert nq5.status == "ok"
 
 
+def test_nq5_valid_schema_1_2_dict_state_passes(tmp_path: Path) -> None:
+    """Schema 1.2 stores dict values ({triggered_at, origin, run_id}) per D-5;
+    NQ-5 must not flag these as invalid timestamps."""
+    programs_root, tpl_root = _make_edition(tmp_path, "nova")
+    now_ts = datetime(2026, 6, 21, tzinfo=timezone.utc).isoformat()
+    state_path = programs_root / "nova" / "nudge_state.json"
+    state_path.write_text(
+        json.dumps({
+            "schema_version": "1.2",
+            "item:1001": {"origin": "mark_sent", "run_id": "run_1", "triggered_at": now_ts},
+        }),
+        encoding="utf-8",
+    )
+    checks = run_nudge_doctor("nova", programs_root=programs_root, templates_root=tpl_root)
+    nq5 = next(c for c in checks if "NQ-5" in c.label)
+    assert nq5.status == "ok"
+    assert "1 cooldown record" in nq5.detail
+
+
+def test_nq5_schema_1_2_bad_triggered_at_flagged(tmp_path: Path) -> None:
+    programs_root, tpl_root = _make_edition(tmp_path, "nova")
+    state_path = programs_root / "nova" / "nudge_state.json"
+    state_path.write_text(
+        json.dumps({
+            "schema_version": "1.2",
+            "item:1001": {"origin": "mark_sent", "run_id": "run_1", "triggered_at": "not-a-date"},
+        }),
+        encoding="utf-8",
+    )
+    checks = run_nudge_doctor("nova", programs_root=programs_root, templates_root=tpl_root)
+    nq5 = next(c for c in checks if "NQ-5" in c.label)
+    assert nq5.status == "warn"
+    assert "1 invalid timestamp" in nq5.detail
+
+
 def test_nq5_corrupt_state_file_fails(tmp_path: Path) -> None:
     programs_root, tpl_root = _make_edition(tmp_path, "nova")
     state_path = programs_root / "nova" / "nudge_state.json"

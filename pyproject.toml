@@ -70,4 +70,5 @@ addopts = "-n auto"
 tmp_path_retention_policy = "failed"
 markers = [
     "slow: marks tests as slow (excluded from inner dev loop; run on CI or with -m slow)",
+    "eval_ci: ADF-W0.15 CI regression evaluation lane (synthetic fixtures + Issue-079 regression corpus; deterministic, no LLM calls)",
 ]

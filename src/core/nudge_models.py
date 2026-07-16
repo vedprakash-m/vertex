@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import uuid
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Literal, Union
@@ -92,6 +93,10 @@ class NudgeSectionSpec:
     # Workstream classification hints for tag/area_path sourced sections.
     # Maps item IDs to their workstream so they appear grouped with owners.
     workstream_hints: tuple[WorkstreamHint, ...] = ()
+    # Whether this section's items count toward the leadership rollup scorecard.
+    # Default True; set False for sections (e.g. post-ramp/future-scoped work)
+    # that shouldn't drive leader accountability yet.
+    include_in_leadership_rollup: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +266,15 @@ class NudgeDeliveryConfig:
     # Stakeholder roles considered "workstream owner" for display and email expansion.
     # Matches against the `role` field in workstream_registry stakeholders.
     owner_roles: tuple[str, ...] = ("tpm_lead", "eng_lead")
+    # When True: To = resolved `leadership_rollup` stakeholders (the publisher/author
+    # is intentionally excluded); Cc = workstream owners (owner_roles) + item assignees.
+    # When False (default), all resolved recipients (owners + assignees) go into a
+    # single To list as before.
+    to_leadership_rollup: bool = False
+    # Standing Cc addresses always added on top of the resolved workstream owners/
+    # item assignees when to_leadership_rollup=True (e.g. leadership stakeholders
+    # not derivable from ADO/workstream data).
+    additional_cc: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -373,6 +387,11 @@ class NudgeSectionFetchResult:
     candidates: tuple[NudgeCandidate, ...]
     query_error: bool = False
     error_details: str | None = None
+    # Registry-source only: count of scope-matching (required_tags) items per
+    # workstream_id that were excluded from `candidates` solely because they are
+    # in a terminal/closed state. Lets the report distinguish "no open items
+    # because everything shipped" from "no items tracked at all" (a hygiene gap).
+    closed_counts_by_workstream: tuple[tuple[str | None, int], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -405,6 +424,33 @@ class FullHygieneWorkstreamGroup:
     workstream_name: str
     workstream_owners: tuple[ResolvedRecipient, ...]
     rows: tuple[FullHygieneRow, ...]
+    leadership_rollup: ResolvedRecipient | None = None
+    # Registry-source only: scope-matching items excluded because they're closed/
+    # terminal. Distinguishes "0 open, N closed" (fully delivered) from "0 open,
+    # 0 closed" (nothing tracked at all — a hygiene gap, not a clean pass).
+    closed_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class FullHygieneLeaderPortfolio:
+    """One accountable leader's workstream groups within a section body.
+
+    Buckets FullHygieneWorkstreamGroup entries that share the same
+    leadership_rollup leader so the report can render active work in full
+    detail while collapsing a leader's fully-quiet portfolio (or the quiet
+    remainder of a partially-active one) into a single compact line instead
+    of one alarm-style banner per empty workstream. Groups with no
+    leadership_rollup leader (e.g. the "Unclassified" catch-all) each get
+    their own single-group portfolio with ``leader=None``, unchanged from
+    today's per-group rendering.
+    """
+    leader: ResolvedRecipient | None
+    active_groups: tuple[FullHygieneWorkstreamGroup, ...]
+    empty_groups: tuple[FullHygieneWorkstreamGroup, ...]
+
+    @property
+    def is_fully_empty(self) -> bool:
+        return not self.active_groups
 
 
 @dataclass(frozen=True, slots=True)
@@ -431,6 +477,59 @@ class FullHygieneSection:
     error_details: str | None = None
     deadline_uncertain: bool = False
     elevated_from_other_pools: int = 0
+    include_in_leadership_rollup: bool = True
+    # Program-configured required tags (NudgeSectionCriteria.required_tags) for
+    # this section, if any. Drives scope-verification copy in the template so
+    # wording never hardcodes one program's tag vocabulary (e.g. Armada's
+    # "ArmadaM1") for programs that don't use required-tag scoping at all.
+    scope_tags: tuple[str, ...] = ()
+    # groups bucketed by leadership_rollup leader, for body rendering. Derived
+    # from `groups` via aggregate_groups_by_leader() below — lets a leader
+    # whose whole portfolio has zero open items collapse to one line instead
+    # of one banner per empty workstream.
+    leader_portfolios: tuple[FullHygieneLeaderPortfolio, ...] = ()
+
+
+def aggregate_groups_by_leader(
+    groups: tuple[FullHygieneWorkstreamGroup, ...],
+) -> tuple[FullHygieneLeaderPortfolio, ...]:
+    """Bucket workstream groups by their leadership_rollup leader.
+
+    Groups without a leadership_rollup leader (e.g. the "Unclassified"
+    catch-all) each become their own single-group portfolio, unchanged from
+    today's per-group rendering. Groups that share a leader are bucketed
+    together so a leader whose entire portfolio has zero open items can
+    collapse to one compact line instead of one alarm banner per empty
+    workstream.
+    """
+    order: list[str] = []
+    buckets: dict[str, list[FullHygieneWorkstreamGroup]] = defaultdict(list)
+    leader_by_key: dict[str, ResolvedRecipient | None] = {}
+    no_leader_counter = 0
+
+    for group in groups:
+        leader = group.leadership_rollup
+        if leader is not None and leader.email:
+            key = f"leader:{leader.email.strip().lower()}"
+        else:
+            no_leader_counter += 1
+            key = f"none:{no_leader_counter}"
+        if key not in leader_by_key:
+            order.append(key)
+            leader_by_key[key] = leader
+        buckets[key].append(group)
+
+    portfolios: list[FullHygieneLeaderPortfolio] = []
+    for key in order:
+        bucket = buckets[key]
+        active = tuple(g for g in bucket if g.rows)
+        empty = tuple(g for g in bucket if not g.rows)
+        portfolios.append(FullHygieneLeaderPortfolio(
+            leader=leader_by_key[key],
+            active_groups=active,
+            empty_groups=empty,
+        ))
+    return tuple(portfolios)
 
 
 @dataclass(frozen=True, slots=True)
@@ -444,6 +543,20 @@ class FullHygieneArtifacts:
     using_snapshot_fallback: bool
     ai_titles_compressed: int
     degraded_section_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class LeadershipRollupRow:
+    """Per-leader ADO hygiene compliance rollup for accountability reporting."""
+
+    leader_alias: str
+    leader_email: str | None
+    leader_display_name: str
+    workstream_names: tuple[str, ...]
+    total_count: int
+    compliant_count: int
+    percent_compliant: int
+    closed_count: int = 0
 
 
 # ---------------------------------------------------------------------------

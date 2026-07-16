@@ -110,6 +110,7 @@ from src.commands.gather_pipeline.m365_workstream_profile_stage import augment_m
 from src.commands.gather_pipeline.channel_runtime import run_channel as _run_channel_impl
 from src.commands.gather_pipeline.channel_runtime import run_channel_with_extraction as _run_channel_with_extraction_impl
 from src.commands.gather_pipeline.uil_binding_stage import resolve_uil_channel_binding_for_gather as _resolve_uil_channel_binding_for_gather_impl
+from src.commands.gather_pipeline.workiq_prefetch_stage import resolve_workiq_signals as _resolve_workiq_signals
 from src.commands.gather_workiq_helpers import WorkIQQueryPlan as _WorkIQQueryPlan, _truncate_signal_text, apply_structured_workiq_discovery as _apply_structured_workiq_discovery, build_workiq_fragment_signal_text as _build_workiq_fragment_signal_text, build_workiq_signal_text as _build_workiq_signal_text, extract_work_item_refs as _extract_work_item_refs, workiq_fragment_message_id as _workiq_fragment_message_id, workiq_message_id as _workiq_message_id, workiq_signal_fragments as _workiq_signal_fragments, workiq_source_type as _workiq_source_type, workiq_timestamp as _workiq_timestamp
 from src.ai.m365_topic_router import M365TopicRouter, M365TopicRouterError
 from src.ai.safety.pii_scrubber import filter_text
@@ -196,7 +197,9 @@ from src.core.metric_models import MetricObservation
 from src.core.integration_types import ChannelRegistration, DiscoveredRef, HydrationMode, RegistrationBinding, RegistrationStatus, RunContext
 from src.core.models import Comment, Confidence, Revision, RiskLevel, SnapshotItem, WorkItem
 from src.core.program_fact_store import (
-    load_current_milestones,
+    load_current_action_items,
+    load_current_dependencies, load_current_milestones,
+    load_current_risk_entries,
     load_current_workstreams,
     load_program_facts,
     persist_program_fact_snapshot,
@@ -565,6 +568,10 @@ def gather_program(
     progress_callback: GatherProgressCallback | None = None,
 ) -> GatherArtifacts:
     resolved_programs_root = programs_root or PROGRAMS_ROOT
+    # ADF-W2.12: one correlation id per gather cycle (mirrors report.py's
+    # StageContext threading), so this run's fact writes can be traced back
+    # to the cycle that produced them via OperationTrace.
+    correlation_id = uuid.uuid4().hex
     program, workstreams = _load_program_context(program_id, resolved_programs_root)
     m365_workstream_profiles = _augment_m365_workstream_profiles(
         program_id,
@@ -751,16 +758,22 @@ def gather_program(
             # Per-program match aliases (sourced from workstreams.yaml) canonicalize
             # program-specific abbreviations during discovery matching; core stays generic.
             with use_match_aliases(build_workstream_match_aliases(m365_workstream_profiles)):
-                workiq_signals = _build_workiq_signals(
-                    program=program,
+                # ADF-W1.5/W1.10 remainder (Section 10.6): prefer an unexpired
+                # committed `vertex prefetch` snapshot over a live WorkIQ call.
+                workiq_signals = _resolve_workiq_signals(
                     program_id=program_id,
-                    as_of=current_time,
-                    items=items,
-                    workstreams=m365_workstream_profiles,
-                    bridge=(bridge_factory or AgencyBridge),
-                    m365_topic_router=m365_topic_router,
                     programs_root=resolved_programs_root,
-                    integration_error_sink=integration_error_details,
+                    live_fetch_fn=lambda: _build_workiq_signals(
+                        program=program,
+                        program_id=program_id,
+                        as_of=current_time,
+                        items=items,
+                        workstreams=m365_workstream_profiles,
+                        bridge=(bridge_factory or AgencyBridge),
+                        m365_topic_router=m365_topic_router,
+                        programs_root=resolved_programs_root,
+                        integration_error_sink=integration_error_details,
+                    ),
                 )
         except (AuthError, QueryError, TimeoutError, typer.BadParameter) as exc:
             _emit_credential_expired_banner(exc, "workiq")
@@ -1141,6 +1154,7 @@ def gather_program(
             current_time=current_time,
             programs_root=resolved_programs_root,
             ai_action_extractor=ai_action_extractor,
+            correlation_id=correlation_id,
         )
     )
     new_signals = persistence_result.new_signals
@@ -1315,6 +1329,7 @@ def gather_program(
             promotion_blocked_artifacts=m365_discovery_result.promotion_blocked_artifacts,
             chart_results=chart_gather_results,
             hypothesis_count=len(proposed_hypotheses),
+            correlation_id=correlation_id,
         )
     )
     _complete_progress_step(
@@ -1358,6 +1373,10 @@ def _refresh_contradiction_state(
         workstreams=workstreams,
         as_of=as_of,
         calibration_modifier=load_forecast_calibration_modifier(program_id, programs_root=programs_root),
+        dependencies=load_current_dependencies(program_id, programs_root=programs_root),
+        risks=load_current_risk_entries(program_id, programs_root=programs_root),
+        milestones=load_current_milestones(program_id, programs_root=programs_root),
+        actions=load_current_action_items(program_id, programs_root=programs_root),
     )
     replace_contradiction_state(program_id, packets, programs_root=programs_root)
 
@@ -1813,7 +1832,7 @@ def _run_channel(
     since: datetime,
     verified_at: datetime,
     run_ctx: RunContext,
-    integration_error_sink: list[IntegrationError] | None = None,
+    integration_error_sink: list[IntegrationError] | None = None, programs_root: Path = PROGRAMS_ROOT,
 ) -> tuple[Any | None, Any | None]:
     return _run_channel_impl(
         binding,
@@ -1834,7 +1853,7 @@ def _run_channel_with_extraction(
     since: datetime,
     verified_at: datetime,
     run_ctx: RunContext,
-    integration_error_sink: list[IntegrationError] | None = None,
+    integration_error_sink: list[IntegrationError] | None = None, programs_root: Path = PROGRAMS_ROOT,
 ) -> tuple[Any | None, Any | None, Any | None]:
     return _run_channel_with_extraction_impl(
         binding,

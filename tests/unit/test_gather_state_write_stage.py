@@ -70,7 +70,7 @@ def test_run_state_write_stage_writes_state_and_returns_artifacts(monkeypatch, t
 
     monkeypatch.setattr(
         "src.commands.gather_pipeline.state_write_stage.compute_and_persist_plane1_changes",
-        lambda program_id, programs_root, gathered_at: (
+        lambda program_id, programs_root, gathered_at, **_kwargs: (
             calls.append("plane1"),
             captured.setdefault("plane1", (program_id, programs_root, gathered_at)),
         )[-1],

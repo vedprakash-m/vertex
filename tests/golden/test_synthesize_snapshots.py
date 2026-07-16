@@ -28,7 +28,7 @@ class _FakeAIClient:
         return parser(json.loads(self.response_text))
 
 
-def test_workstream_synthesis_snapshot(update_golden: bool) -> None:
+def test_workstream_synthesis_snapshot(update_golden: bool, tmp_path: Path) -> None:
     result = WorkstreamSynthesizer(
         client=_FakeAIClient(
             json.dumps(
@@ -51,6 +51,7 @@ def test_workstream_synthesis_snapshot(update_golden: bool) -> None:
         workstream=Workstream(id="networking", name="Networking", description="Networking lane"),
         signals=(_signal("sig-1"), _signal("sig-2")),
         drift_patterns=(),
+        programs_root=tmp_path,
     )
 
     assert result is not None

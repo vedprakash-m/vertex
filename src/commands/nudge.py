@@ -17,6 +17,7 @@ from email.parser import BytesParser
 import hashlib
 from pathlib import Path
 from typing import Any, Callable, IO, Iterable, Mapping, cast
+from zoneinfo import ZoneInfo
 
 import portalocker
 import typer
@@ -52,12 +53,14 @@ from src.core.nudge_models import (
     FullHygieneRow,
     FullHygieneSection,
     FullHygieneWorkstreamGroup,
+    LeadershipRollupRow,
     NudgeAuditEvent,
     NudgeAuditSection,
     NudgeConfig,
     NudgeSectionFetchResult,
     NudgeSectionSpec,
     ResolvedRecipient,
+    aggregate_groups_by_leader,
     build_audit_line,
     make_run_id,
 )
@@ -84,12 +87,11 @@ __all__ = [
     "FullHygieneRow",
     "FullHygieneSection",
     "FullHygieneWorkstreamGroup",
+    "LeadershipRollupRow",
     "ResolvedRecipient",
     "generate_full_hygiene_nudges",
     "_word_truncate_title",
     "_comment_has_keyword",
-    "_ai_batch_compress_titles",
-    "_compress_titles_batch",
 ]
 
 
@@ -292,7 +294,6 @@ def generate_full_hygiene_nudges(
     audit_path = _nudge_read_path(_np.audit_path, _legacy_output / "nudge_audit.jsonl")
     audit_lock_path = audit_path.with_suffix(audit_path.suffix + ".lock")
     run_lock_path = _np.run_lock_path
-    title_cache_path = _nudge_read_path(_np.title_cache_path, _legacy_output / "title_cache.json")
 
     # Resolve section stale overrides
     resolved_overrides: dict[str, int] = dict(stale_overrides or {})
@@ -356,7 +357,6 @@ def generate_full_hygiene_nudges(
             state_path=state_path,
             audit_path=audit_path,
             audit_lock_path=audit_lock_path,
-            title_cache_path=title_cache_path,
             tpl_root=tpl_root,
             client_factory=client_factory,
             candidate_workers=candidate_workers,
@@ -389,7 +389,6 @@ def _orchestrate(
     state_path: Path,
     audit_path: Path,
     audit_lock_path: Path,
-    title_cache_path: Path,
     tpl_root: Path,
     client_factory: Callable[[Any], NudgeADOClient] | None,
     candidate_workers: int,
@@ -566,17 +565,14 @@ def _orchestrate(
             f"{comment_fetch_skipped_total} item(s) skipped (unknown comment status)."
         )
 
-    # Title compression
-    compress_ai = config.presentation.compress_titles_with_ai
+    # Title compression -- ADF-W5.4: deterministic word-boundary shortening only.
+    # The AI title-compression path and its bespoke cache were removed (Section
+    # 8.8.4); the deterministic ``_word_truncate_title`` is now the sole path.
     title_items = [(getattr(c.item, "id", 0), getattr(c.item, "title", "")) for c in (
         cand for idx in range(len(config.sections)) for cand in filtered_candidates.get(idx, [])
     )]
-    title_map, ai_count = _compress_titles_batch(
-        title_items,
-        cache_path=title_cache_path,
-        enabled=compress_ai,
-        program=program if compress_ai else None,
-    )
+    title_map = {wid: _word_truncate_title(title) for wid, title in title_items}
+    ai_count = 0  # retained for FullHygieneArtifacts compatibility; always 0 now
 
     # Build workstream_by_id from registry for grouping
     workstream_by_id: dict[str, Any] = {}
@@ -609,6 +605,8 @@ def _orchestrate(
                 past_due_count=0, beyond_deadline_count=0, stale_summary_count=0,
                 comment_fetch_skipped=0, comment_fetch_errors=0,
                 query_error=True, error_details=result.error_details,
+                include_in_leadership_rollup=sec.include_in_leadership_rollup,
+                scope_tags=sec.criteria.required_tags,
             ))
             audit_sections.append(NudgeAuditSection(
                 section_id=sec.id, letter=sec.letter, candidate_count=0,
@@ -674,7 +672,9 @@ def _orchestrate(
             rows, workstream_by_id=workstream_by_id,
             people=knowledge.people_directory, program_id=program_id,
             owner_roles=config.delivery.owner_roles,
+            closed_counts=dict(result.closed_counts_by_workstream),
         )
+        leader_portfolios = aggregate_groups_by_leader(groups)
 
         today = now_utc.date()
         deadline = resolved_deadline
@@ -719,6 +719,9 @@ def _orchestrate(
             comment_fetch_errors=0,
             deadline_uncertain=deadline_uncertain,
             elevated_from_other_pools=elevated_from_other_pools,
+            include_in_leadership_rollup=sec.include_in_leadership_rollup,
+            scope_tags=sec.criteria.required_tags,
+            leader_portfolios=leader_portfolios,
         ))
         candidate_ids_for_section = tuple(sorted(
             getattr(c.item, "id", 0)
@@ -740,14 +743,21 @@ def _orchestrate(
         ))
 
     # Resolve recipient list
-    to_recipients = _build_recipient_list(
-        primary_recipient=primary_recipient,
-        sections=sections,
-        workstream_by_id=workstream_by_id,
-        people=knowledge.people_directory,
-        config=config,
-        optional_failures=optional_failures,
-    )
+    leadership_cc_recipients: list[ResolvedRecipient] = []
+    if config.delivery.to_leadership_rollup:
+        to_recipients, leadership_cc_recipients = _build_leadership_recipient_lists(
+            sections=sections,
+            config=config,
+        )
+    else:
+        to_recipients = _build_recipient_list(
+            primary_recipient=primary_recipient,
+            sections=sections,
+            workstream_by_id=workstream_by_id,
+            people=knowledge.people_directory,
+            config=config,
+            optional_failures=optional_failures,
+        )
 
     degraded_ids = tuple(
         sec.section_id for sec in sections
@@ -795,10 +805,11 @@ def _orchestrate(
 
         brand = config.presentation.brand_label
         subject_label = config.presentation.email_subject_label
-        date_label = now_utc.strftime("%Y-%m-%d")
+        now_pt = now_utc.astimezone(ZoneInfo("America/Los_Angeles"))
+        date_label = now_pt.strftime("%Y-%m-%d")
         subject_label = subject_label.replace("{date}", date_label)
         subject_prefix = build_subject_prefix(
-            resolved_sections_meta, config, now_date=now_utc.date()
+            resolved_sections_meta, config, now_date=now_pt.date()
         )
         base_subject = f"{brand} | {subject_label} | {date_label}"
         subject = f"{subject_prefix} {base_subject}".strip() if subject_prefix else base_subject
@@ -813,13 +824,24 @@ def _orchestrate(
             recipients=to_recipients,
             optional_failures=optional_failures,
         )
+        leadership_cc_recipients = _filter_cc_recipients(
+            leadership_cc_recipients,
+            program_id=program_id,
+            policy=config.presentation.audience_policy,
+        )
 
         # From address
         from_email = program.author_defaults.email if program.author_defaults else None
         from_display = program.author_defaults.display_name if program.author_defaults else None
-        cc_emails: tuple[str, ...] = ()
-        if from_email and from_email.lower() not in {r.email.lower() for r in to_recipients + bcc_recipients}:
-            cc_emails = (from_email,)
+        already_addressed = {r.email.lower() for r in to_recipients + bcc_recipients}
+        cc_email_list: list[str] = []
+        for r in leadership_cc_recipients:
+            if r.email.lower() not in already_addressed:
+                cc_email_list.append(r.email)
+                already_addressed.add(r.email.lower())
+        if from_email and from_email.lower() not in already_addressed:
+            cc_email_list.append(from_email)
+        cc_emails: tuple[str, ...] = tuple(cc_email_list)
 
         artifacts_for_render = FullHygieneArtifacts(
             run_id=run_id, sections=tuple(sections), recipient=primary_recipient,
@@ -866,16 +888,8 @@ def _orchestrate(
         else:
             event_type = "nudge_generated"
 
-        # Non-fatal title cache write (live + EML success only)
-        if not dry_run and eml_paths:
-            try:
-                _write_title_cache(
-                    title_cache_path,
-                    current_rows=[(r.work_item_id, r.title_original, r.title) for sec in sections for grp in sec.groups for r in grp.rows],
-                    old_cache=_load_title_cache(title_cache_path),
-                )
-            except Exception as exc:
-                warnings_list.append(f"Title cache write failed (non-fatal): {exc}")
+        # ADF-W5.4: the bespoke title cache write was removed with the AI title
+        # compression path (Section 8.8.4). Deterministic compression needs no cache.
 
         if not dry_run and eml_paths:
             try:
@@ -1712,6 +1726,104 @@ def _build_recipient_list(
     return list(seen.values())
 
 
+def _build_leadership_recipient_lists(
+    *,
+    sections: list[FullHygieneSection],
+    config: NudgeConfig,
+) -> tuple[list[ResolvedRecipient], list[ResolvedRecipient]]:
+    """Split recipients into (To, Cc) for delivery.to_leadership_rollup=True.
+
+    To = resolved `leadership_rollup` stakeholders (deduped by email) — the
+    accountable leaders this nudge is escalating to. The publisher/author is
+    intentionally excluded from To in this mode.
+    Cc = workstream owners (owner_roles, e.g. primary_owner) + item assignees
+    (respecting include_workstream_owners/include_item_assignees), excluding anyone
+    already in To.
+    """
+    to_seen: dict[str, ResolvedRecipient] = {}
+
+    def _add_to(r: ResolvedRecipient) -> None:
+        key = r.email.lower()
+        if key not in to_seen:
+            to_seen[key] = r
+
+    for sec in sections:
+        for grp in sec.groups:
+            if grp.leadership_rollup is not None:
+                _add_to(grp.leadership_rollup)
+
+    cc_seen: dict[str, ResolvedRecipient] = {}
+
+    def _add_cc(r: ResolvedRecipient) -> None:
+        key = r.email.lower()
+        if key not in to_seen and key not in cc_seen:
+            cc_seen[key] = r
+
+    if config.delivery.include_workstream_owners:
+        for sec in sections:
+            for grp in sec.groups:
+                for owner in grp.workstream_owners:
+                    _add_cc(owner)
+
+    if config.delivery.include_item_assignees:
+        for sec in sections:
+            for grp in sec.groups:
+                for row in grp.rows:
+                    if row.owner_email and _is_valid_email(row.owner_email):
+                        r = ResolvedRecipient(
+                            alias=row.owner_alias or row.owner_email.split("@")[0],
+                            email=row.owner_email.lower(),
+                            display_name=row.owner_alias or "",
+                        )
+                        _add_cc(r)
+
+    for email in config.delivery.additional_cc:
+        if _is_valid_email(email):
+            _add_cc(ResolvedRecipient(
+                alias=email.split("@")[0],
+                email=email.lower(),
+                display_name="",
+            ))
+
+    return list(to_seen.values()), list(cc_seen.values())
+
+
+def _filter_cc_recipients(
+    recipients: list[ResolvedRecipient],
+    *,
+    program_id: str,
+    policy: Any,
+) -> list[ResolvedRecipient]:
+    """Apply domain-allowlist and opt-out filtering to a Cc-bound recipient list.
+
+    Mirrors the domain/opt-out checks in _apply_audience_policy, without the
+    delivery_mode/bcc/max_recipients/unresolved_owner semantics that are specific
+    to the primary To list.
+    """
+    if policy is None:
+        return recipients
+    allowed_domains = {d.strip().lower() for d in policy.allowed_domains if d.strip()}
+    opt_out = {o.strip().lower() for o in policy.opt_out}
+    filtered: list[ResolvedRecipient] = []
+    blocked_domains: list[str] = []
+    for recipient in recipients:
+        email_lower = recipient.email.lower()
+        alias_lower = recipient.alias.lower()
+        domain = email_lower.split("@", 1)[1] if "@" in email_lower else ""
+        if allowed_domains and domain not in allowed_domains:
+            blocked_domains.append(recipient.email)
+            continue
+        if email_lower in opt_out or alias_lower in opt_out:
+            continue
+        filtered.append(recipient)
+    if blocked_domains:
+        raise ConfigError(
+            f"Audience policy blocked Cc recipient domain(s) for program {program_id!r}: "
+            + ", ".join(sorted(blocked_domains))
+        )
+    return filtered
+
+
 def _apply_audience_policy(
     *,
     program_id: str,
@@ -1870,16 +1982,25 @@ def _group_rows_by_workstream(
     people: tuple[Any, ...],
     program_id: str | None = None,
     owner_roles: tuple[str, ...] = ("tpm_lead", "eng_lead"),
+    closed_counts: dict[str | None, int] | None = None,
 ) -> tuple[FullHygieneWorkstreamGroup, ...]:
     groups_map: dict[str | None, list[FullHygieneRow]] = defaultdict(list)
     for row in rows:
         groups_map[row.workstream_id].append(row)
+    closed_counts = closed_counts or {}
 
     result: list[FullHygieneWorkstreamGroup] = []
     seen: set[str | None] = set()
 
     for ws_id, ws_entry in workstream_by_id.items():
-        if ws_id in groups_map:
+        rollup_leaders = _workstream_owners_from_registry(
+            ws_entry, people, program_id=program_id, owner_roles=("leadership_rollup",)
+        )
+        closed_count = closed_counts.get(ws_id, 0)
+        # Always surface workstreams with a leadership_rollup leader, even when
+        # they have zero in-scope open items — a silent absence would read as a
+        # clean pass, when it may really mean nothing is being tracked at all.
+        if ws_id in groups_map or rollup_leaders:
             ws_name = getattr(ws_entry, "name", None) or ws_id
             owners = _workstream_owners_from_registry(
                 ws_entry, people, program_id=program_id, owner_roles=owner_roles
@@ -1888,7 +2009,9 @@ def _group_rows_by_workstream(
                 workstream_id=ws_id,
                 workstream_name=ws_name,
                 workstream_owners=tuple(owners),
-                rows=tuple(groups_map[ws_id]),
+                rows=tuple(groups_map.get(ws_id, [])),
+                leadership_rollup=rollup_leaders[0] if rollup_leaders else None,
+                closed_count=closed_count,
             ))
             seen.add(ws_id)
 
@@ -1967,14 +2090,71 @@ def _workstream_owners_from_registry(
                     ws_id_str = str(getattr(ws_entry, "id", "") or "")
                     append_context_gap(
                         feature="nudge", program=program_id, lane=ws_id_str or None,
-                        field="roles.primary_owner.email", severity="quality_degraded",
-                        message=f"primary_owner '{name or alias}' not resolved; no email in directory",
+                        field=f"roles.{role}.email", severity="quality_degraded",
+                        message=f"{role} '{name or alias}' not resolved; no email in directory",
                         impact_estimate="medium",
                     )
                 except Exception as _gap_exc:
                     typer.echo(f"WARNING: nudge context-gap append failed: {_gap_exc}", err=True)
 
     return owners
+
+
+def _build_leadership_rollup(
+    sections: tuple[FullHygieneSection, ...],
+) -> tuple[LeadershipRollupRow, ...]:
+    """Aggregate per-item is_ready compliance by leadership_rollup leader.
+
+    Groups every workstream group, across sections flagged
+    ``include_in_leadership_rollup`` (Sections A/B — priority and
+    remaining-ramp; post-ramp/Section C is excluded from executive
+    accountability since that work isn't due yet), by its resolved
+    leadership_rollup stakeholder, summing item counts and is_ready==True
+    counts. Workstreams with no leadership_rollup stakeholder are excluded
+    (not every workstream needs a rollup owner). Leaders whose aggregated
+    workstreams carry zero items (open or closed) are dropped -- an empty
+    tile has no signal to act on. Sorted alphabetically by leader display name.
+    """
+    by_leader: dict[str, dict[str, Any]] = {}
+    for section in sections:
+        if not section.include_in_leadership_rollup:
+            continue
+        for group in section.groups:
+            leader = group.leadership_rollup
+            if leader is None:
+                continue
+            bucket = by_leader.setdefault(leader.alias, {
+                "leader": leader,
+                "workstream_names": [],
+                "total_count": 0,
+                "compliant_count": 0,
+                "closed_count": 0,
+            })
+            if group.workstream_name not in bucket["workstream_names"]:
+                bucket["workstream_names"].append(group.workstream_name)
+            bucket["total_count"] += len(group.rows)
+            bucket["compliant_count"] += sum(1 for row in group.rows if row.is_ready is True)
+            bucket["closed_count"] += group.closed_count
+
+    rollup_rows = [
+        LeadershipRollupRow(
+            leader_alias=data["leader"].alias,
+            leader_email=data["leader"].email,
+            leader_display_name=data["leader"].display_name,
+            workstream_names=tuple(data["workstream_names"]),
+            total_count=data["total_count"],
+            compliant_count=data["compliant_count"],
+            percent_compliant=(
+                round(100 * data["compliant_count"] / data["total_count"])
+                if data["total_count"] > 0 else 0
+            ),
+            closed_count=data["closed_count"],
+        )
+        for data in by_leader.values()
+        if data["total_count"] > 0 or data["closed_count"] > 0
+    ]
+    rollup_rows.sort(key=lambda r: r.leader_display_name.lower())
+    return tuple(rollup_rows)
 
 
 # ---------------------------------------------------------------------------
@@ -2011,19 +2191,21 @@ def _render_full_hygiene_html(
     try:
         content_html = partial.render(
             sections=artifacts.sections,
-            generated_at_iso=artifacts.generated_at.strftime("%Y-%m-%d %H:%M UTC"),
             comment_window_days=comment_window_days,
             degraded_section_ids=list(artifacts.degraded_section_ids),
+            leadership_rollup=_build_leadership_rollup(artifacts.sections),
         )
     except Exception as exc:
         raise RenderError(f"Template render error in {template_name}: {exc}") from exc
     resolved_preheader = preheader or f"{brand_label} — ADO hygiene readiness sweep"
+    generated_at_pt = artifacts.generated_at.astimezone(ZoneInfo("America/Los_Angeles"))
+    generated_at_pt_str = generated_at_pt.strftime("%Y-%m-%d %H:%M %Z")
     return base.render(
         title=subject,
         preheader=resolved_preheader,
         header_label=None,
         subtitle=f"Generated {artifacts.generated_at.strftime('%Y-%m-%d')}",
-        footer_text="Generated by Vertex. Send questions to the program manager.",
+        footer_text=f"Generated {generated_at_pt_str} by Vertex. Send questions to the program manager.",
         show_footer=True,
         content_html=content_html,
     )
@@ -2139,136 +2321,6 @@ def _word_truncate_title(title: str, max_len: int = 50) -> str:
         return title
     truncated = title[:max_len].rsplit(None, 1)[0]
     return truncated.rstrip("., ") + "…"
-
-
-def _load_title_cache(cache_path: Path) -> dict[str, str]:
-    if not cache_path.exists():
-        return {}
-    try:
-        return json.loads(cache_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
-
-
-def _write_title_cache(
-    cache_path: Path,
-    current_rows: list[tuple[int, str, str]],
-    old_cache: dict[str, str],
-) -> None:
-    import hashlib  # noqa: PLC0415
-    next_cache: dict[str, str] = {}
-    for wid, orig_title, compressed in current_rows:
-        if len(next_cache) >= NUDGE_TITLE_CACHE_MAX_ENTRIES:
-            break
-        sha = hashlib.sha256(orig_title.encode()).hexdigest()[:16]
-        key = f"item:{wid}:{sha}"
-        next_cache[key] = compressed
-
-    for old_key, old_val in reversed(list(old_cache.items())):
-        if len(next_cache) >= NUDGE_TITLE_CACHE_MAX_ENTRIES:
-            break
-        if old_key not in next_cache:
-            next_cache[old_key] = old_val
-
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    pid = os.getpid()
-    unique = uuid.uuid4().hex[:8]
-    temp_path = cache_path.parent / f".title_cache_{pid}_{unique}.tmp"
-    try:
-        with temp_path.open("w", encoding="utf-8") as fh:
-            json.dump(next_cache, fh, ensure_ascii=False, indent=2)
-            fh.write("\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(temp_path, cache_path)
-    finally:
-        if temp_path.exists():
-            try:
-                temp_path.unlink()
-            except OSError:
-                pass
-
-
-def _compress_titles_batch(
-    items: list[tuple[int, str]],
-    *,
-    cache_path: Path,
-    enabled: bool,
-    program: Any | None = None,
-) -> tuple[dict[int, str], int]:
-    import hashlib  # noqa: PLC0415
-    cache = _load_title_cache(cache_path)
-    result: dict[int, str] = {}
-    needs_ai: list[tuple[int, str]] = []
-    ai_count = 0
-    for wid, title in items:
-        if len(title) <= 50:
-            result[wid] = title
-            continue
-        # Try canonical sha256 key first, then legacy prefix key
-        sha = hashlib.sha256(title.encode()).hexdigest()[:16]
-        canonical_key = f"item:{wid}:{sha}"
-        legacy_key = f"{wid}:{title[:50]}"
-        if canonical_key in cache:
-            result[wid] = cache[canonical_key]
-        elif legacy_key in cache:
-            result[wid] = cache[legacy_key]
-            cache[canonical_key] = cache[legacy_key]
-        elif enabled and program is not None:
-            needs_ai.append((wid, title))
-        else:
-            result[wid] = _word_truncate_title(title)
-    if needs_ai:
-        try:
-            compressed = _ai_batch_compress_titles(needs_ai, program=program)
-            for wid, orig_title in needs_ai:
-                compressed_title = compressed.get(wid) or _word_truncate_title(orig_title)
-                result[wid] = compressed_title
-                if wid in compressed:
-                    ai_count += 1
-        except Exception:
-            for wid, orig_title in needs_ai:
-                result[wid] = _word_truncate_title(orig_title)
-    return result, ai_count
-
-
-def _ai_batch_compress_titles(items: list[tuple[int, str]], *, program: Any) -> dict[int, str]:
-    if get_ai_mode() == AIMode.DISABLED:
-        return {}
-    from src.ai.deployment_fallback import FallbackStructuredClient, resolve_ai_deployments_for_feature  # noqa: PLC0415
-    deployments = resolve_ai_deployments_for_feature(
-        feature_name="default",
-        primary_candidates=(program.ai.blurb_deployment if program.ai is not None else None,),
-        backup_candidates=(None,),
-        primary_fallback_envs=("VERTEX_AI_DEPLOYMENT", "AZURE_OPENAI_DEPLOYMENT"),
-        backup_fallback_envs=(),
-    )
-    if not deployments:
-        raise RuntimeError("No AI deployment configured for title compression.")
-    client = FallbackStructuredClient(deployments=deployments, temperature=0.0, budget_usd=0.10)
-    lines = "\n".join(f"{wid}: {title}" for wid, title in items)
-    system_prompt = (
-        "You are a technical editor. Compress each work item title to ≤50 characters "
-        "while preserving the core technical meaning. Respond with one line per item "
-        "in the format: '<id>: <compressed title>'. No preamble."
-    )
-    user_prompt = f"Compress these ADO work item titles to ≤50 characters:\n{lines}"
-
-    def _parse(payload: dict[str, Any]) -> dict[int, str]:
-        parsed: dict[int, str] = {}
-        content = str(payload.get("content") or payload.get("text") or "")
-        for line in content.strip().splitlines():
-            if ":" in line:
-                id_part, _, title_part = line.partition(":")
-                try:
-                    safe_title = process_generated_text(title_part.strip()).text
-                    if safe_title:
-                        parsed[int(id_part.strip())] = safe_title[:55]
-                except ValueError:
-                    pass
-        return parsed
-
-    return client.structured(system_prompt, user_prompt, parser=_parse, max_tokens=800, prompt_version="title_compress.v1")
 
 
 # ---------------------------------------------------------------------------

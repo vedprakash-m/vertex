@@ -16,7 +16,7 @@ from src.core.exceptions import ConfigError
 from src.core.journal import PROGRAMS_ROOT
 from src.core.jsonl_utils import append_jsonl_line, read_jsonl_records
 from src.core.models import RiskLevel, WorkItem
-from src.core.models_v2 import RiskCategory, RiskDerivedLevel, RiskEntry, RiskImpact, RiskProbability, RiskStatus
+from src.core.models_v2 import RiskCategory, RiskDerivedLevel, RiskEntry, RiskImpact, RiskKind, RiskProbability, RiskStatus
 
 
 _STALE_REVIEW_DAYS = 30
@@ -156,6 +156,7 @@ def _sync_risk_facts(
                 scope="program",
                 entity_refs=entity_refs,
                 payload=_risk_fact_payload(entry),
+                source_signal_ids=entry.source_signal_ids,
                 precedence=FactPrecedence.ACTIVE_PM_JUDGMENT,
                 natural_key=natural_key,
                 created_by="vertex.risk_register",
@@ -251,6 +252,12 @@ def assess_risk_staleness(entry: RiskEntry, as_of: date) -> bool:
 
 
 def compute_risk_score(entry: RiskEntry) -> int:
+    # ADF-W4.2: an unassessed candidate (kind=CANDIDATE, probability/impact
+    # UNASSESSED) has no meaningful score. Return 0 so it never outranks a
+    # human-assessed strategic risk in severity-sorted rendering; it surfaces
+    # for review on its own merits, not on false-precision arithmetic.
+    if entry.probability is RiskProbability.UNASSESSED or entry.impact is RiskImpact.UNASSESSED:
+        return 0
     return _PROBABILITY_ORDINAL[entry.probability] * _IMPACT_ORDINAL[entry.impact]
 
 
@@ -334,8 +341,12 @@ def upsert_risk_from_signal(
         program_id=program_id,
         title=title,
         description=signal_text[:500],
-        probability=RiskProbability.POSSIBLE,
-        impact=RiskImpact.MEDIUM,
+        # ADF-W4.2 / INV-ADF-13: machine-derived risks are CANDIDATEs with
+        # UNASSESSED probability/impact -- never the rejected POSSIBLE/MEDIUM
+        # false-precision defaults. A human review establishes the assessed
+        # judgment (Section 8.10.1: "Human acceptance establishes judgment").
+        probability=RiskProbability.UNASSESSED,
+        impact=RiskImpact.UNASSESSED,
         category=RiskCategory.SCHEDULE,
         owner_alias="unassigned",
         mitigation_plan=None,
@@ -351,6 +362,7 @@ def upsert_risk_from_signal(
         last_reviewed_date=today,
         entity_refs=signal_entity_refs,
         source_signal_ids=(signal_id,),
+        kind=RiskKind.CANDIDATE.value,
     )
     entries.append(new_entry)
     save_risk_register(program_id, tuple(entries), programs_root=programs_root)
@@ -398,6 +410,10 @@ def _parse_risk_entry(program_id: str, raw_entry: dict[str, Any]) -> RiskEntry:
         last_reviewed_date=_parse_optional_date(raw_entry.get("last_reviewed_date"), field_name="last_reviewed_date"),
         entity_refs=_parse_string_tuple(raw_entry.get("entity_refs"), field_name="entity_refs"),
         source_signal_ids=_parse_string_tuple(raw_entry.get("source_signal_ids"), field_name="source_signal_ids"),
+        # ADF-W4.2: parse the three-way kind; absent -> "strategic" default
+        # (existing human-curated rows are strategic by convention). Unknown
+        # values fall back to the enum's from_string tolerance.
+        kind=_parse_risk_kind(raw_entry.get("kind")),
     )
 
 
@@ -424,6 +440,9 @@ def _risk_entry_to_record(entry: RiskEntry) -> dict[str, Any]:
         "last_reviewed_date": entry.last_reviewed_date.isoformat() if entry.last_reviewed_date is not None else None,
         "entity_refs": list(entry.entity_refs),
         "source_signal_ids": list(entry.source_signal_ids),
+        # ADF-W4.2: persist the three-way kind so candidates/hygiene survive a
+        # save/load round-trip instead of silently defaulting to "strategic".
+        "kind": entry.kind,
     }
 
 
@@ -432,6 +451,23 @@ def _parse_required_date(value: object, *, field_name: str) -> date:
     if parsed is None:
         raise ValueError(f"missing {field_name}")
     return parsed
+
+
+def _parse_risk_kind(value: object) -> str:
+    """ADF-W4.2: parse the ``kind`` field with a safe strategic default.
+
+    Absent/empty -> ``strategic`` (existing human-curated rows are strategic by
+    convention). A recognized ``RiskKind`` value is validated; an unrecognized
+    string is passed through unchanged rather than crashing the whole register
+    load (honest degradation -- the row still loads with its raw kind).
+    """
+    if value in (None, ""):
+        return RiskKind.STRATEGIC.value
+    kind_str = str(value).strip().lower()
+    try:
+        return RiskKind.from_string(kind_str).value
+    except ValueError:
+        return kind_str
 
 
 def _parse_optional_date(value: object, *, field_name: str) -> date | None:

@@ -149,6 +149,29 @@ class TestEntityResolutionHelpers:
         assert resolutions[0].match_kind == "resolved"
         assert resolutions[0].resolved_entity_id == "annotator1"
 
+    def test_registry_ambiguous_match_is_not_silently_resolved(self) -> None:
+        """ADF-W2.6 (Section 8.14.3): a near-tied fuzzy match between two
+        candidate person entities must be recorded as its own
+        ``match_kind="ambiguous"`` (resolved_entity_id still None) -- never
+        silently bound to whichever candidate scored marginally higher, and
+        never collapsed into the ordinary "unresolved" no-match-at-all case
+        the docstring's "orphaned/ambiguous facts are visible at triage"
+        promises."""
+        from src.core.entity_registry import EntityRegistry
+        from src.core.program_reality import CanonicalEntity
+
+        entity_a = CanonicalEntity(entity_id="t1", entity_type="person", canonical_name="Jordan Rivers", aliases=(), scope="program")
+        entity_b = CanonicalEntity(entity_id="t2", entity_type="person", canonical_name="Jordan Rivera", aliases=(), scope="program")
+        registry = EntityRegistry(program_entities=(entity_a, entity_b), org_entities=())
+        resolutions = _resolve_candidate_entities(
+            payload={"owner_person_id": "Jordan River"},
+            event_type="commitment.made.v1",
+            registry=registry,
+        )
+        assert len(resolutions) == 1
+        assert resolutions[0].match_kind == "ambiguous"
+        assert resolutions[0].resolved_entity_id is None
+
 
 class TestEntityResolutionWiredIntoCycle:
     """End-to-end: a real REV cycle populates entity_resolution (AG-15)."""

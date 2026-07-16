@@ -5,7 +5,10 @@ Covers:
    split-brain hazard (a stray ``vertex.sqlite3`` at a plausible-but-wrong
    location besides the canonical, `db_root`-resolved path).
 2. The root-cause fix to `reality_store._resolve_reality_db_root`'s silent
-   fallback — now logs CRITICAL when triggered.
+   fallback — the no-config case now resolves to the same canonical
+   `programs_root.parent/"vertex-db"` convention doctor.py already uses
+   (see test_reality_store.py) instead of `~/.vertex`; an explicit
+   `home_root=` override still resolves there, logged at WARNING.
 3. Path-resolution-determinism: every public fact-store entry point resolves
    to the *same* database path for a fixed `program_id` + `programs_root`.
 """
@@ -93,21 +96,27 @@ def test_stray_database_check_detects_home_fallback_stray(tmp_path: Path, monkey
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_reality_db_root_logs_critical_on_silent_fallback(
+def test_resolve_reality_db_root_logs_on_explicit_home_root_override(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path,
 ) -> None:
-    """PS-14 / Track K root-cause fix: previously a bare, unlogged fallback
-    to `~/.vertex` whenever VERTEX_DB_PATH was unset and no db_root was
-    threaded. Must now log at CRITICAL so the hazard is visible without
-    requiring a `vertex doctor` run to notice."""
+    """ADF root-cause fix (2026-07-13, resolving the real PS-14 incident --
+    11,224 stray XPF rows archived): a caller that supplies neither
+    db_root nor VERTEX_DB_PATH nor home_root no longer silently lands on
+    ``~/.vertex`` at all -- see
+    ``test_get_program_reality_db_path_with_no_config_resolves_to_vertex_db_convention``
+    in test_reality_store.py for that case. This test covers the
+    remaining, now-intentional path: a caller that explicitly passes
+    ``home_root=`` (test sandboxing or a deliberate legacy override) still
+    resolves under that home directory, logged at WARNING (no longer
+    CRITICAL, since this is an intentional choice, not a silent hazard)."""
     monkeypatch.delenv("VERTEX_DB_PATH", raising=False)
 
-    with caplog.at_level(logging.CRITICAL):
+    with caplog.at_level(logging.WARNING):
         resolved = _resolve_reality_db_root(home_root=tmp_path)
 
     assert resolved == tmp_path / ".vertex"
-    assert any(record.levelno == logging.CRITICAL for record in caplog.records)
-    assert any("db_root/VERTEX_DB_PATH" in record.message for record in caplog.records)
+    assert any(record.levelno == logging.WARNING for record in caplog.records)
+    assert any("home_root override" in record.message for record in caplog.records)
 
 
 def test_resolve_reality_db_root_does_not_log_when_env_var_set(

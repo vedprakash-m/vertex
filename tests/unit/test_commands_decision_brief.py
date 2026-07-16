@@ -19,6 +19,7 @@ def test_enrich_with_ai_returns_original_brief_when_invocation_ai_disabled() -> 
         enriched = _enrich_with_ai(
             brief=brief,
             bundle=object(),
+            program_id="acme",
             create_ai_client=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("AI client should not be created when AIMode.DISABLED")),
         )
     finally:

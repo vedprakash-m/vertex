@@ -34,6 +34,7 @@ class DataClassification(str, Enum):
 
 class RetentionClass(str, Enum):
     EPHEMERAL = "ephemeral"
+    FORTY_FIVE_DAYS = "45d"
     NINETY_DAYS = "90d"
     ONE_YEAR = "1y"
     SEVEN_YEARS = "7y"
@@ -135,6 +136,21 @@ class SidecarRetentionRule:
     classification: DataClassification
     retention: RetentionClass
     supports_excise: bool  # True if `[EXCISED]` tombstone is supported for PII scrub
+    #: ADF-W5.9: when set, `privacy_purge.py` checks THIS field's timestamp
+    #: instead of the generic created_at/recorded_at/timestamp/ts/sent_at
+    #: priority list, and treats a row where the field is absent/null as
+    #: never-eligible (kept forever) rather than falling through to another
+    #: field. Needed for alerts.jsonl's "open-forever/90d-resolved" policy:
+    #: eligibility_field="resolved_at" means an open alert (resolved_at=None)
+    #: is never purged regardless of its created_at age.
+    eligibility_field: str | None = None
+    #: ADF-W5.9: when set, `artifact_path` names a DIRECTORY of individual
+    #: content-addressed JSON files (not one JSONL file of many rows) --
+    #: e.g. `runtime/context_manifests/` holding one `<hash>.json` per
+    #: compile. This glob (e.g. "*.json") selects which files to age-check;
+    #: `eligibility_field` names the timestamp field READ FROM INSIDE each
+    #: matched file (not the row itself, since there is no "row" here).
+    directory_glob: str | None = None
 
 
 # Canonical sidecar retention rules. Source of truth for the journal
@@ -238,6 +254,100 @@ SIDECAR_RETENTION: tuple[SidecarRetentionRule, ...] = (
         retention=RetentionClass.NINETY_DAYS,
         supports_excise=True,
     ),
+    # ADF-W0.16 (ADR-0015, 2026-07-13): the following five entries cover
+    # artifacts introduced by specs/arch-data-fix.md this session that had
+    # no privacy-matrix coverage before this pass.
+    SidecarRetentionRule(
+        # context_gap_solicitation.py: outbound solicitation draft, human-
+        # reviewed/sent via the existing nudge drafts pipeline (never auto-sent).
+        artifact_path="nudge/drafts/<solicitation_id>.eml",
+        classification=DataClassification.PII,
+        retention=RetentionClass.ONE_YEAR,
+        supports_excise=True,
+    ),
+    SidecarRetentionRule(
+        # context_gap_reply_import.py: raw, unfiltered inbound stakeholder
+        # reply .eml, manually dropped by the operator. Highest-sensitivity
+        # new artifact this pass -- unredacted sender + body.
+        artifact_path="nudge/replies/<message_id>.eml",
+        classification=DataClassification.PII,
+        retention=RetentionClass.ONE_YEAR,
+        supports_excise=True,
+    ),
+    SidecarRetentionRule(
+        # context_gap_solicitation.py cooldown log: id/fingerprint/timestamp
+        # only, no PII (verified against the module's own write call).
+        artifact_path="_feedback/context_gap_solicitations.jsonl",
+        classification=DataClassification.INTERNAL,
+        retention=RetentionClass.ONE_YEAR,
+        supports_excise=False,
+    ),
+    SidecarRetentionRule(
+        # program_synthesis.py: one file per ai_run_id, aggregated CONFIDENTIAL
+        # business content only (no person-identifying fields).
+        artifact_path="runtime/program_synthesis/<ai_run_id>.json",
+        classification=DataClassification.CONFIDENTIAL,
+        retention=RetentionClass.ONE_YEAR,
+        supports_excise=False,
+    ),
+    SidecarRetentionRule(
+        # workstream_registry.yaml: live, operator-authored config file (like
+        # program.yaml/editions/*.yaml, not a sidecar), but context_gap_reply.py
+        # (Decision 3b, 2026-07-13) can now write verbatim stakeholder reply
+        # text into its deep_context fields, which may incidentally carry PII
+        # (e.g. a signature block). Full-document overwrite-in-place with a
+        # single non-rotating .bak backup -- not a rotating audit log, so the
+        # rotating [EXCISED] tombstone mechanism does not apply; the operator
+        # can directly edit/redact the field in place instead (same rationale
+        # as runtime/gather_state.json below).
+        artifact_path="workstream_registry.yaml",
+        classification=DataClassification.PII,
+        retention=RetentionClass.INDEFINITE,
+        supports_excise=False,
+    ),
+    # ADF-W5.9 (Section 9.7, 2026-07-14): the four raw-telemetry JSONL
+    # sidecars this session's ADF work introduced, previously unregistered.
+    SidecarRetentionRule(
+        # measurement_store.py: routing-decision telemetry, no PII.
+        artifact_path="runtime/tier_decisions.jsonl",
+        classification=DataClassification.INTERNAL,
+        retention=RetentionClass.FORTY_FIVE_DAYS,
+        supports_excise=False,
+    ),
+    SidecarRetentionRule(
+        # ai_telemetry.py: provider/latency/cost telemetry, no PII.
+        artifact_path="_state/ai_telemetry.jsonl",
+        classification=DataClassification.INTERNAL,
+        retention=RetentionClass.NINETY_DAYS,
+        supports_excise=False,
+    ),
+    SidecarRetentionRule(
+        # run_telemetry.py: per-gather-run channel performance telemetry, no PII.
+        artifact_path="runtime/run_telemetry.jsonl",
+        classification=DataClassification.INTERNAL,
+        retention=RetentionClass.NINETY_DAYS,
+        supports_excise=False,
+    ),
+    SidecarRetentionRule(
+        # alerts.py: open alerts never expire regardless of age -- only a
+        # RESOLVED alert becomes purge-eligible, 90 days after resolution.
+        artifact_path="_alerts/alerts.jsonl",
+        classification=DataClassification.INTERNAL,
+        retention=RetentionClass.NINETY_DAYS,
+        supports_excise=False,
+        eligibility_field="resolved_at",
+    ),
+    SidecarRetentionRule(
+        # context_compiler.py: one content-addressed JSON file per compile
+        # (runtime/context_manifests/<hash>.json), no PII (evidence ids,
+        # token counts, classification labels -- not raw content).
+        artifact_path="runtime/context_manifests",
+        classification=DataClassification.INTERNAL,
+        retention=RetentionClass.NINETY_DAYS,
+        supports_excise=False,
+        eligibility_field="compiled_at",
+        directory_glob="*.json",
+    ),
 )
 
 
@@ -245,6 +355,7 @@ SIDECAR_RETENTION: tuple[SidecarRetentionRule, ...] = (
 # the WS-18 retention cutoff enforcer.
 RETENTION_DAYS: dict[RetentionClass, int | None] = {
     RetentionClass.EPHEMERAL: 0,  # 0 days = do not persist beyond live gather
+    RetentionClass.FORTY_FIVE_DAYS: 45,
     RetentionClass.NINETY_DAYS: 90,
     RetentionClass.ONE_YEAR: 365,
     RetentionClass.SEVEN_YEARS: 365 * 7,

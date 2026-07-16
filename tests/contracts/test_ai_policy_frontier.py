@@ -46,17 +46,23 @@ KNOWN_FEATURES: frozenset[str] = frozenset(
         "claim_extractor",
         "context_synthesizer",
         "decision_brief_advisor",
+        "dependency_blast_radius_generator",
         "exec_summary_drafter",
+        "governance_decision_brief_generator",
         "intent_router",
         "learning_distiller",
         "m365_topic_router",
+        "meeting_action_extractor",
         "onboard_assistant",
+        "program_synthesizer",
         "prose_event_extractor",
         "rev_extractor",
+        "risk_proposal_generator",
         "rev_judge",
         "setup_assistant",
         "summary_generator",
         "synthesizer",
+        "top_three_candidate_generator",
     }
 )
 

@@ -155,6 +155,40 @@ class TestRotateProcessedCli:
         assert result.exit_code == 0, result.output
         assert (processed / "archive" / "old.eml").is_file()
 
+    def test_cli_accepts_ics_inbox_override(self, tmp_path: Path) -> None:
+        """ADF-W3.2 (Section 8.6.4): CLI parity -- ``rotate-processed`` must
+        accept the same ``--ics-inbox`` override ``rev run``/``init-inbox``
+        already accept; rotation itself is format-agnostic."""
+        inbox = tmp_path / "cal_inbox"
+        processed = inbox / "processed"
+        processed.mkdir(parents=True)
+        _touch(processed, "old.ics", age_days=DEFAULT_PROCESSED_MAX_AGE_DAYS + 5)
+        result = runner.invoke(
+            rev_app,
+            ["rotate-processed", "--program", "p-ics", "--ics-inbox", str(inbox),
+             "--max-age-days", "1", "--programs-root", str(tmp_path)],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Rotated 1" in result.output
+        assert (processed / "archive" / "old.ics").is_file()
+
+    def test_cli_accepts_docs_inbox_override(self, tmp_path: Path) -> None:
+        """ADF-W3.2 (Section 8.6.4): CLI parity -- ``rotate-processed`` must
+        accept the same ``--docs-inbox`` override ``rev run``/``init-inbox``
+        already accept."""
+        inbox = tmp_path / "docs_inbox"
+        processed = inbox / "processed"
+        processed.mkdir(parents=True)
+        _touch(processed, "old.docx", age_days=DEFAULT_PROCESSED_MAX_AGE_DAYS + 5)
+        result = runner.invoke(
+            rev_app,
+            ["rotate-processed", "--program", "p-docs", "--docs-inbox", str(inbox),
+             "--max-age-days", "1", "--programs-root", str(tmp_path)],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Rotated 1" in result.output
+        assert (processed / "archive" / "old.docx").is_file()
+
 
 class TestAutoRotationInCycle:
     """The pipeline rotates processed/ automatically at the end of each cycle."""

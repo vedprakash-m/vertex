@@ -115,6 +115,59 @@ def test_program_fact_drift_gate_blocks_confirm_when_live_store_changes(tmp_path
     assert "State Drift Warning" in gate.results[0].message
 
 
+# ---------------------------------------------------------------------------
+# ADF-W1.9 / QG-37: _assert_state_authority_for_confirm (the mutation-blocking
+# half, wired into confirm_issue 2026-07-13). Isolated from confirm_issue's
+# full pipeline on purpose -- this repo's acme fixture workspace is broken
+# in this environment ("program.yaml absent after copy", unrelated to this
+# change), which skips most of confirm_issue's own tests here.
+# ---------------------------------------------------------------------------
+
+
+def test_assert_state_authority_passes_when_unambiguous(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # find_stray_fact_store_databases always checks the *real* Path.home() for
+    # a home_fallback candidate (matching test_state_authority_gate.py's own
+    # isolation convention) -- without this, a real ~/.vertex/acme/vertex.sqlite3
+    # on the machine running the test would make this test non-hermetic.
+    fake_home = tmp_path / "fake-home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+    programs_root = tmp_path / "programs"
+    (programs_root / "acme").mkdir(parents=True)
+    # No stray databases exist under this tmp_path/fake_home -> unambiguous.
+    confirm_module._assert_state_authority_for_confirm("acme", programs_root=programs_root)
+
+
+def test_assert_state_authority_raises_confirm_error_when_ambiguous(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Isolated from the real gate logic: any StateAuthorityAmbiguousError
+    must be converted to ConfirmError, regardless of what triggered it."""
+
+    def _raise_ambiguous(program_id: str, *, programs_root: Path) -> None:
+        raise confirm_module.StateAuthorityAmbiguousError(f"ambiguous fact-store authority for {program_id!r}")
+
+    monkeypatch.setattr("src.commands.confirm.assert_state_authority_or_raise", _raise_ambiguous)
+
+    with pytest.raises(confirm_module.ConfirmError, match="ambiguous fact-store authority"):
+        confirm_module._assert_state_authority_for_confirm("acme", programs_root=tmp_path / "programs")
+
+
+def test_assert_state_authority_real_ambiguity_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No mocking of the gate itself -- a real stray database triggers a
+    real StateAuthorityAmbiguousError, converted to ConfirmError."""
+    monkeypatch.delenv("VERTEX_DB_PATH", raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    programs_root = tmp_path / "programs"
+    programs_root.mkdir(parents=True)
+    canonical_dir = programs_root.parent / "vertex-db" / "acme"
+    canonical_dir.mkdir(parents=True)
+    sqlite3.connect(str(canonical_dir / "vertex.sqlite3")).close()
+    stray_dir = programs_root / "acme"
+    stray_dir.mkdir(parents=True)
+    sqlite3.connect(str(stray_dir / "vertex.sqlite3")).close()
+
+    with pytest.raises(confirm_module.ConfirmError, match="ambiguous fact-store authority"):
+        confirm_module._assert_state_authority_for_confirm("acme", programs_root=programs_root)
+
+
 def test_confirm_records_context_gap_when_ncfl_hook_fails(
     repo_root: Path,
     tmp_path: Path,

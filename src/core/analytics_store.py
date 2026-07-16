@@ -4,7 +4,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 import json
-from src.core.jsonl_utils import append_jsonl_line, parse_jsonl_line
+import logging
+from src.core.jsonl_utils import append_jsonl_line, parse_jsonl_line, quarantine_and_rewrite_jsonl
 import os
 from pathlib import Path
 import sqlite3
@@ -25,6 +26,8 @@ from src.core.program_paths import get_program_analytics_store_path
 from src.core.snapshot_store import read_snapshot
 from src.core.vitality_reporting import parse_vitality_archive_entry
 
+
+_log = logging.getLogger(__name__)
 
 _DIRTY_MARKER = ".analytics_dirty"
 _DEFAULT_LOAD_DECISIONS = load_decisions
@@ -1132,31 +1135,65 @@ def _load_autonomy_audit_records(program_id: str, *, programs_root: Path) -> tup
     return _load_autonomy_audit_records_from_path(path, program_id=program_id)
 
 
+def _parse_autonomy_audit_row(payload: Any, *, program_id: str) -> AutonomyAuditRecord:
+    if not isinstance(payload, dict):
+        raise ValueError("autonomy_audit row must be a JSON object")
+    return AutonomyAuditRecord(
+        program_id=program_id,
+        action_id=str(payload["action_id"]),
+        level=str(payload["level"]),
+        author_alias=str(payload["author_alias"]),
+        subject_alias=_optional_string(payload.get("subject_alias")),
+        action_type=_optional_string(payload.get("action_type")),
+        evidence_refs=tuple(str(value) for value in payload.get("evidence_refs") or ()),
+        policy_rule=_optional_string(payload.get("policy_rule")),
+        accepted=bool(payload.get("accepted")),
+        applied_at=_parse_datetime(payload["applied_at"]),
+        blast_radius=_optional_string(payload.get("blast_radius")),
+        rollback_mechanism=_optional_string(payload.get("rollback_mechanism")),
+        prior_acceptance_rate=_optional_float(payload.get("prior_acceptance_rate")),
+    )
+
+
 def _load_autonomy_audit_records_from_path(path: Path, *, program_id: str) -> tuple[AutonomyAuditRecord, ...]:
+    """ADF-W1.8: never crash on a foreign/mixed-schema row.
+
+    A row that isn't shaped like an ``AutonomyAuditRecord`` (wrong event
+    type, missing required field, bad type) is quarantined via the shared
+    ``jsonl_utils`` full-file-backup pattern rather than raising -- the
+    original file (valid rows included) is preserved verbatim under
+    ``journal/quarantine/``, and ``path`` is rewritten with only the rows
+    that parsed. One warning is logged per read that finds bad rows, not
+    per row.
+    """
     if not path.exists():
         return ()
+    raw_lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
     records: list[AutonomyAuditRecord] = []
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
+    valid_lines: list[str] = []
+    quarantined_count = 0
+    for raw_line in raw_lines:
         if not raw_line.strip():
+            valid_lines.append(raw_line)
             continue
-        payload = parse_jsonl_line(raw_line)
-        records.append(
-            AutonomyAuditRecord(
-                program_id=program_id,
-                action_id=str(payload["action_id"]),
-                level=str(payload["level"]),
-                author_alias=str(payload["author_alias"]),
-                subject_alias=_optional_string(payload.get("subject_alias")),
-                action_type=_optional_string(payload.get("action_type")),
-                evidence_refs=tuple(str(value) for value in payload.get("evidence_refs") or ()),
-                policy_rule=_optional_string(payload.get("policy_rule")),
-                accepted=bool(payload.get("accepted")),
-                applied_at=_parse_datetime(payload["applied_at"]),
-                blast_radius=_optional_string(payload.get("blast_radius")),
-                rollback_mechanism=_optional_string(payload.get("rollback_mechanism")),
-                prior_acceptance_rate=_optional_float(payload.get("prior_acceptance_rate")),
-            )
+        try:
+            payload = parse_jsonl_line(raw_line)
+            record = _parse_autonomy_audit_row(payload, program_id=program_id)
+        except Exception:
+            quarantined_count += 1
+            continue
+        records.append(record)
+        valid_lines.append(raw_line)
+
+    if quarantined_count:
+        quarantine_and_rewrite_jsonl(path, valid_lines)
+        _log.warning(
+            "Quarantined %d unrecognized row(s) from %s (mixed-schema autonomy_audit.jsonl, ADF-W1.8); "
+            "original file preserved under journal/quarantine/",
+            quarantined_count,
+            path,
         )
+
     return tuple(records)
 
 

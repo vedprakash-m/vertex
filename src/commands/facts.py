@@ -11,6 +11,7 @@ from enum import Enum
 from pathlib import Path
 import portalocker
 from typing import Any
+import uuid
 
 import typer
 
@@ -22,6 +23,7 @@ from src.core.decision_register import load_decisions
 from src.core.edition_resolver import EDITIONS_ROOT, PROGRAMS_ROOT, load_program
 from src.core.dependency_graph import load_dependencies
 from src.core.milestone_engine import load_milestones
+from src.core.operation_trace import REF_TYPE_FACT, record_trace_link
 from src.core.program_fact_store import (
     ProgramFactEnvelope,
     ProgramFactInput,
@@ -146,6 +148,10 @@ def facts_import(
     imported = 0
     skipped = 0
     now = datetime.now(timezone.utc)
+    # ADF-W2.12: one correlation id for this whole import -- a single
+    # invocation can write dozens/hundreds of facts from one file, a real
+    # multi-fact chain worth tracing (unlike a single-item CLI mutation).
+    correlation_id = uuid.uuid4().hex
     for item in facts_raw:
         try:
             fact_input = ProgramFactInput(
@@ -166,8 +172,22 @@ def facts_import(
                 privacy_classification=str(item.get("privacy_classification") or "internal"),
                 accepted_by=item.get("accepted_by"),
             )
-            store.append_fact(fact_input, recorded_at=now)
+            write_result = store.append_fact(fact_input, recorded_at=now)
             imported += 1
+            if write_result.action != "noop":
+                try:
+                    record_trace_link(
+                        program_id=program,
+                        correlation_id=correlation_id,
+                        workflow_id=correlation_id,
+                        run_id=correlation_id,
+                        stage="fact",
+                        ref_type=REF_TYPE_FACT,
+                        ref_id=f"{fact_input.fact_type}:{write_result.revision.fact_id}@{now.isoformat()}",
+                        programs_root=PROGRAMS_ROOT,
+                    )
+                except Exception:  # noqa: BLE001 -- a trace link is observability, never a write blocker.
+                    pass
         except (KeyError, ValueError, TypeError):
             skipped += 1
     typer.echo(f"Imported {imported} facts for {program} ({skipped} skipped).")

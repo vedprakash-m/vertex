@@ -72,3 +72,136 @@ def test_kusto_hydration_tracks_missing_queries_as_failures(tmp_path: Path) -> N
 
     assert result.failed_ref_ids == (("missing", "kusto_query"),)
     assert result.errors[0].ref_id == "missing"
+
+
+def test_kusto_hydration_populates_semantic_fields_and_computes_breach(tmp_path: Path) -> None:
+    """ADF-W2.3 (Section 8.5.1): a query with semantic config gets a fully
+    populated KustoResultSet, not just raw rows."""
+    query = KustoQuery(
+        id="xpf-safety-pass-rate",
+        cluster="https://cluster",
+        database="db",
+        kql="SafetyPassRate | take 1",
+        section="A",
+        render_as="table",
+        confidence="high",
+        validated=True,
+        metric_id="Safety pass rate",
+        result_column="PassRate",
+        unit="%",
+        slo_target=95.0,
+        comparison=">=",
+    )
+    provider = KustoHydrationProvider(
+        executor=lambda rendered_query: [{"PassRate": 92.3}],
+        query_loader=lambda program_id, programs_root: (query,),
+    )
+    registration = ChannelRegistration(
+        channel="kusto",
+        program_id="demo",
+        provider_instance_id="default",
+        ref_id="xpf-safety-pass-rate",
+        ref_kind="kusto_query",
+        status=RegistrationStatus.ACTIVE,
+        first_discovered_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        last_seen_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+    )
+
+    result = provider.hydrate(
+        (registration,),
+        datetime(2026, 5, 24, tzinfo=timezone.utc),
+        "demo",
+        KustoHydrationConfig(programs_root=tmp_path),
+    )
+
+    result_set = result.resources.result_sets[0]
+    assert result_set.metric_id == "Safety pass rate"
+    assert result_set.result_column == "PassRate"
+    assert result_set.unit == "%"
+    assert result_set.slo_target == 95.0
+    assert result_set.comparison == ">="
+    assert result_set.observed_value == 92.3
+    assert result_set.is_breach is True
+    assert result_set.row_count == 1
+
+
+def test_kusto_hydration_observed_value_none_when_result_column_missing(tmp_path: Path) -> None:
+    query = KustoQuery(
+        id="xpf-safety-pass-rate",
+        cluster="https://cluster",
+        database="db",
+        kql="SafetyPassRate | take 1",
+        section="A",
+        render_as="table",
+        confidence="high",
+        validated=True,
+        metric_id="Safety pass rate",
+        result_column="PassRate",
+        slo_target=95.0,
+        comparison=">=",
+    )
+    provider = KustoHydrationProvider(
+        executor=lambda rendered_query: [{"SomeOtherColumn": 1}],
+        query_loader=lambda program_id, programs_root: (query,),
+    )
+    registration = ChannelRegistration(
+        channel="kusto",
+        program_id="demo",
+        provider_instance_id="default",
+        ref_id="xpf-safety-pass-rate",
+        ref_kind="kusto_query",
+        status=RegistrationStatus.ACTIVE,
+        first_discovered_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        last_seen_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+    )
+
+    result = provider.hydrate(
+        (registration,),
+        datetime(2026, 5, 24, tzinfo=timezone.utc),
+        "demo",
+        KustoHydrationConfig(programs_root=tmp_path),
+    )
+
+    result_set = result.resources.result_sets[0]
+    assert result_set.observed_value is None
+    assert result_set.is_breach is None  # no observed value -> no verdict, not a false "OK"
+
+
+def test_kusto_hydration_unconfigured_query_leaves_semantic_fields_none(tmp_path: Path) -> None:
+    query = KustoQuery(
+        id="legacy-query",
+        cluster="https://cluster",
+        database="db",
+        kql="StormEvents | take 1",
+        section="A",
+        render_as="table",
+        confidence="high",
+        validated=True,
+    )
+    provider = KustoHydrationProvider(
+        executor=lambda rendered_query: [{"Value": 1}],
+        query_loader=lambda program_id, programs_root: (query,),
+    )
+    registration = ChannelRegistration(
+        channel="kusto",
+        program_id="demo",
+        provider_instance_id="default",
+        ref_id="legacy-query",
+        ref_kind="kusto_query",
+        status=RegistrationStatus.ACTIVE,
+        first_discovered_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        last_seen_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+    )
+
+    result = provider.hydrate(
+        (registration,),
+        datetime(2026, 5, 24, tzinfo=timezone.utc),
+        "demo",
+        KustoHydrationConfig(programs_root=tmp_path),
+    )
+
+    result_set = result.resources.result_sets[0]
+    assert result_set.metric_id is None
+    assert result_set.observed_value is None
+    assert result_set.is_breach is None
+    assert result_set.row_count == 1

@@ -211,6 +211,8 @@ def _fetch_registry_candidates(
     # Collect unique key_ado_items from registry in authored order (first workstream wins)
     item_to_ws: dict[int, str | None] = {}
     for entry in authored_registry:
+        if getattr(entry, "lifecycle_state", "active") != "active":
+            continue  # e.g. "paused" — kept in registry but suppressed from nudge output
         for item_id in getattr(entry, "key_ado_items", ()):
             if isinstance(item_id, int) and item_id > 0 and item_id not in item_to_ws:
                 item_to_ws[item_id] = getattr(entry, "id", None)
@@ -230,19 +232,18 @@ def _fetch_registry_candidates(
         filter_areas = None  # no area filter for registry
 
     candidates: list[NudgeCandidate] = []
+    closed_counts: dict[str | None, int] = {}
     for row in rows:
         item = _work_item_from_batch_row(row, revision_rows=[], comment_rows=[], fetched_at=as_of)
         if item.id <= 0:
-            continue
-        state_lower = item.state.strip().lower()
-        if state_lower in _terminal_states_lower():
             continue
         # Post-filter area for legacy scope
         if filter_areas is not None:
             item_area = (item.area_path or "").lower()
             if not any(item_area.startswith(fa) or item_area == fa for fa in filter_areas):
                 continue
-        # required_tags filter (registry ∩ tag)
+        # required_tags filter (registry ∩ tag) — applies uniformly to open and
+        # closed items, so the closed tally below reflects the same scope.
         if crit.required_tags:
             item_tags_lower = frozenset(t.strip().lower() for t in item.tags)
             required_lower = frozenset(t.strip().lower() for t in crit.required_tags)
@@ -252,11 +253,19 @@ def _fetch_registry_candidates(
                     continue
 
         ws_id = item_to_ws.get(item.id)
+        state_lower = item.state.strip().lower()
+        if state_lower in _terminal_states_lower():
+            closed_counts[ws_id] = closed_counts.get(ws_id, 0) + 1
+            continue
         candidates.append(NudgeCandidate(item=item, workstream_id=ws_id))
 
     # Sort by item ID
     candidates.sort(key=lambda c: getattr(c.item, "id", 0))
-    return NudgeSectionFetchResult(section_id=section.id, candidates=tuple(candidates))
+    return NudgeSectionFetchResult(
+        section_id=section.id,
+        candidates=tuple(candidates),
+        closed_counts_by_workstream=tuple(closed_counts.items()),
+    )
 
 
 def _fetch_wiql_candidates(

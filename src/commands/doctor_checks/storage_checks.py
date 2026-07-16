@@ -104,6 +104,12 @@ def run_storage_doctor(
             programs_root=programs_root,
             db_root=reality_db_root,
         ),
+        _state_authority_gate_check(
+            program_id,
+            programs_root=programs_root,
+            db_root=reality_db_root,
+        ),
+        _fact_lineage_coverage_check(program_id, programs_root=programs_root),
         _render_manifest_sor_consistency_check(
             program_id,
             edition_name=edition_name,
@@ -535,6 +541,94 @@ def _stray_fact_store_database_check(
             "canonical_row_count": canonical_row_count,
             "stray_databases": stray,
         },
+    )
+
+
+def _state_authority_gate_check(
+    program_id: str,
+    *,
+    programs_root: Path,
+    db_root: Path | None,
+) -> DoctorCheck:
+    """ADF-W1.9: QG-37 as a hard-fail doctor check (Section 12.1's "...and
+    fails doctor"), distinct from the pre-existing "Fact Store Location"
+    check above (which stays informational/warn -- this one carries the
+    gate's actual pass/fail verdict). Delegates its detection to
+    ``state_authority.py`` so the two never define stray-database candidates
+    differently.
+    """
+    from src.core.quality_gates.state_authority import evaluate_state_authority_gate
+
+    evaluation = evaluate_state_authority_gate(program_id, programs_root=programs_root, db_root=db_root)
+    return DoctorCheck(
+        "QG-37 State Authority",
+        "ok" if evaluation.passed else "fail",
+        evaluation.message,
+        metadata={"gate_id": evaluation.gate_id, "passed": evaluation.passed, "program_id": program_id},
+    )
+
+
+#: ADF-W2.4/W2.5: matches cockpit_builder.py's _LINEAGE_DEFECT_WARN_RATIO --
+#: kept as a separate constant (not imported) since doctor_checks/ and
+#: cockpit_builder.py are independent consumers of the same underlying
+#: fact_lineage_coverage.py measurement, not coupled to each other.
+_LINEAGE_DEFECT_WARN_RATIO = 0.10
+
+
+def _fact_lineage_coverage_check(program_id: str, *, programs_root: Path) -> DoctorCheck:
+    """ADF-W2.4/W2.5 (Section 8.14.2): "surface all waivers in cockpit and
+    quality gates" -- the doctor half of the same measurement
+    cockpit_builder.py's intelligence summary uses."""
+    from src.core.fact_lineage_coverage import compute_lineage_coverage
+
+    try:
+        report = compute_lineage_coverage(program_id, programs_root=programs_root)
+    except Exception as error:  # noqa: BLE001 -- this check must never crash `vertex doctor`
+        return DoctorCheck(
+            "Fact Lineage Coverage",
+            "warn",
+            f"could not compute fact lineage coverage for {program_id!r}: {error}",
+            metadata={"program_id": program_id},
+        )
+
+    if report.total_count == 0:
+        return DoctorCheck(
+            "Fact Lineage Coverage",
+            "ok",
+            f"no facts recorded yet for {program_id!r}; nothing to measure.",
+            metadata={"program_id": program_id, "total_count": 0},
+        )
+
+    metadata = {
+        "program_id": program_id,
+        "total_count": report.total_count,
+        "lineaged_count": report.lineaged_count,
+        "waived_count": report.waived_count,
+        "defect_count": report.defect_count,
+        "sample_defect_natural_keys": report.sample_defect_natural_keys,
+        "coverage_ratio": report.coverage_ratio,
+    }
+    if report.defect_count == 0:
+        return DoctorCheck(
+            "Fact Lineage Coverage",
+            "ok",
+            f"all {report.total_count} fact(s) for {program_id!r} are lineaged or explicitly waived "
+            f"({report.lineaged_count} lineaged, {report.waived_count} waived).",
+            metadata=metadata,
+        )
+
+    defect_ratio = report.defect_count / report.total_count
+    status = "warn" if defect_ratio > _LINEAGE_DEFECT_WARN_RATIO else "ok"
+    return DoctorCheck(
+        "Fact Lineage Coverage",
+        status,
+        (
+            f"{report.defect_count}/{report.total_count} fact(s) for {program_id!r} have no traceable "
+            f"provenance and no active waiver ({report.lineaged_count} lineaged, {report.waived_count} waived). "
+            f"Sample: {', '.join(report.sample_defect_natural_keys) or 'none'}. "
+            "Backfill lineage or grant a waiver via programs/<id>/fact_lineage_waivers.yaml."
+        ),
+        metadata=metadata,
     )
 
 

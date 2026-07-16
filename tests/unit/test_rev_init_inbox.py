@@ -81,3 +81,41 @@ def test_init_inbox_readme_mentions_export_workflow(tmp_path: Path) -> None:
     assert ".eml" in text
     assert "90 days" in text or "90-day" in text.lower() or "purged" in text.lower()
     assert "ACL" in text or "account" in text.lower()
+
+
+def test_init_inbox_accepts_ics_inbox_override(tmp_path: Path) -> None:
+    """ADF-W3.2 (Section 8.6.4): CLI parity -- ``init-inbox`` must accept the
+    same ``--ics-inbox`` override ``rev run`` already accepts, since the
+    3-directory atomicity mechanics are format-agnostic."""
+    inbox = tmp_path / "cal_inbox"
+    result = runner.invoke(
+        rev_app,
+        ["init-inbox", "--program", "prog-ics", "--ics-inbox", str(inbox),
+         "--programs-root", str(tmp_path)],
+    )
+    assert result.exit_code == 0, result.output
+    assert (inbox / "claimed").is_dir()
+    assert (inbox / "processed").is_dir()
+    assert (inbox / "quarantine").is_dir()
+    text = (inbox / "README.md").read_text(encoding="utf-8")
+    assert "--ics-inbox" in text
+
+
+def test_init_inbox_accepts_docs_inbox_override(tmp_path: Path) -> None:
+    """ADF-W3.2 (Section 8.6.4): CLI parity -- ``init-inbox`` must accept the
+    same ``--docs-inbox`` override ``rev run`` already accepts."""
+    inbox = tmp_path / "docs_inbox"
+    result = runner.invoke(
+        rev_app,
+        ["init-inbox", "--program", "prog-docs", "--docs-inbox", str(inbox),
+         "--programs-root", str(tmp_path)],
+    )
+    assert result.exit_code == 0, result.output
+    assert (inbox / "claimed").is_dir()
+    assert (inbox / "processed").is_dir()
+    assert (inbox / "quarantine").is_dir()
+    text = (inbox / "README.md").read_text(encoding="utf-8")
+    assert "--docs-inbox" in text
+    # The printed "next step" command must reference the flag actually used,
+    # not silently default back to --eml-inbox.
+    assert "--docs-inbox" in result.output

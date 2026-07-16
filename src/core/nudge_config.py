@@ -379,6 +379,8 @@ def _parse_new_format(
         include_item_assignees=include_assignees,
         send_day=send_day,
         owner_roles=owner_roles,
+        to_leadership_rollup=bool(fh.get("to_leadership_rollup", False)),
+        additional_cc=tuple(_str_list(fh.get("additional_cc"))),
     )
     evaluation = NudgeEvaluationConfig(
         comment_window_days=comment_window,
@@ -446,6 +448,7 @@ def _parse_sections(raw_sections: list[Any], global_cooldown: int) -> list[Nudge
         required = bool(raw.get("required", False))
         retire_when_milestone_done = str(raw.get("retire_when_milestone_done") or "").strip() or None
         nudge_participating_lanes = tuple(_str_list(raw.get("nudge_participating_lanes")))
+        include_in_leadership_rollup = bool(raw.get("include_in_leadership_rollup", True))
 
         # Workstream hints: map ADO item IDs to workstream IDs for tag/area_path sections
         hints_raw = raw.get("workstream_hints") or []
@@ -476,6 +479,7 @@ def _parse_sections(raw_sections: list[Any], global_cooldown: int) -> list[Nudge
             retire_when_milestone_done=retire_when_milestone_done,
             nudge_participating_lanes=nudge_participating_lanes,
             workstream_hints=tuple(workstream_hints),
+            include_in_leadership_rollup=include_in_leadership_rollup,
         ))
     return sections
 

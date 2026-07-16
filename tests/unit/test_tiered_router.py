@@ -8,6 +8,7 @@ from src.ai.tiered_router import (
     RouteOutcome,
     Tier,
     TierResult,
+    cache_hit_stats,
     recorded_decisions,
     register_decision_sink,
     reset_recorded_decisions,
@@ -217,3 +218,111 @@ def test_decision_carries_trace_run_id():
             policy=_policy(),
         )
     assert recorded_decisions()[-1].trace_id == "run-123"
+
+
+# --- ADF-W5.2: shared result cache + CACHE_HIT (Section 8.8.3) ---
+
+
+def test_cache_hit_short_circuits_everything_else():
+    calls = {"det": 0, "local": 0, "frontier": 0}
+
+    def det():
+        calls["det"] += 1
+        return TierResult(value="det", confidence=1.0)
+
+    def local():
+        calls["local"] += 1
+        return TierResult(value="local", confidence=1.0)
+
+    def frontier():
+        calls["frontier"] += 1
+        return "frontier"
+
+    result = route_through_tiers(
+        "claim_extractor",
+        deterministic_fn=det,
+        local_fn=local,
+        frontier_fn=frontier,
+        policy=_policy(),
+        cache_lookup_fn=lambda: "cached-value",
+    )
+
+    assert result.value == "cached-value"
+    assert calls == {"det": 0, "local": 0, "frontier": 0}
+    decision = recorded_decisions()[-1]
+    assert decision.outcome is RouteOutcome.CACHE_HIT
+    assert decision.tier is Tier.CACHE
+
+
+def test_cache_miss_falls_through_to_normal_ordering():
+    result = route_through_tiers(
+        "claim_extractor",
+        deterministic_fn=lambda: TierResult(value="det", confidence=1.0),
+        frontier_fn=lambda: "frontier",
+        policy=_policy(),
+        cache_lookup_fn=lambda: None,
+    )
+    assert result.value == "det"
+    assert recorded_decisions()[-1].outcome is RouteOutcome.DETERMINISTIC_HIT
+
+
+def test_cache_store_called_only_after_a_real_frontier_call():
+    stored = []
+    result = route_through_tiers(
+        "claim_extractor",
+        frontier_fn=lambda: "fresh-frontier-value",
+        policy=_policy(deterministic_first=False),
+        cache_lookup_fn=lambda: None,
+        cache_store_fn=lambda value: stored.append(value),
+    )
+    assert result.value == "fresh-frontier-value"
+    assert stored == ["fresh-frontier-value"]
+
+
+def test_cache_store_not_called_on_deterministic_hit():
+    stored = []
+    route_through_tiers(
+        "claim_extractor",
+        deterministic_fn=lambda: TierResult(value="det", confidence=1.0),
+        frontier_fn=lambda: "frontier",
+        policy=_policy(),
+        cache_lookup_fn=lambda: None,
+        cache_store_fn=lambda value: stored.append(value),
+    )
+    assert stored == []
+
+
+def test_cache_store_not_called_on_cache_hit_itself():
+    stored = []
+    route_through_tiers(
+        "claim_extractor",
+        frontier_fn=lambda: "frontier",
+        policy=_policy(),
+        cache_lookup_fn=lambda: "cached",
+        cache_store_fn=lambda value: stored.append(value),
+    )
+    assert stored == []
+
+
+def test_cache_hit_stats_counts_hits_and_avoided_calls():
+    route_through_tiers(
+        "feature_a", frontier_fn=lambda: "x", policy=_policy(), cache_lookup_fn=lambda: "cached"
+    )
+    route_through_tiers(
+        "feature_b", frontier_fn=lambda: "y", policy=_policy(), cache_lookup_fn=lambda: None
+    )
+    stats = cache_hit_stats()
+    assert stats["cache_hits"] == 1
+    assert stats["frontier_calls_avoided_by_cache"] == 1
+    assert stats["actual_frontier_calls"] == 1
+
+
+def test_cache_hit_stats_accepts_explicit_decisions_snapshot():
+    route_through_tiers(
+        "feature_a", frontier_fn=lambda: "x", policy=_policy(), cache_lookup_fn=lambda: "cached"
+    )
+    snapshot = recorded_decisions()
+    reset_recorded_decisions()
+    # The live log is now empty, but the explicit snapshot still counts.
+    assert cache_hit_stats()["cache_hits"] == 0
+    assert cache_hit_stats(snapshot)["cache_hits"] == 1

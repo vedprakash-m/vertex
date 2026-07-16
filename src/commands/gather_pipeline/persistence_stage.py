@@ -66,12 +66,18 @@ def run_persistence_stage(stage_input: PersistenceStageInput) -> PersistenceStag
         for action in extracted_actions:
             if action.id in existing_action_ids:
                 continue
-            append_action(stage_input.program_id, action, programs_root=stage_input.programs_root)
+            append_action(
+                stage_input.program_id, action,
+                programs_root=stage_input.programs_root, correlation_id=stage_input.correlation_id,
+            )
             existing_action_ids.add(action.id)
 
         extracted_decisions = extract_decisions_from_signals(new_signals, program_id=stage_input.program_id)
         if extracted_decisions:
-            upsert_decisions(stage_input.program_id, extracted_decisions, programs_root=stage_input.programs_root)
+            upsert_decisions(
+                stage_input.program_id, extracted_decisions,
+                programs_root=stage_input.programs_root, correlation_id=stage_input.correlation_id,
+            )
 
     auto_reviews_written = 0
     pending_review = 0

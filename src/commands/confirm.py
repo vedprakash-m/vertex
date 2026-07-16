@@ -58,7 +58,7 @@ from src.core.attribution_engine import build_inline_citations
 from src.core.analytics_store import record_gate_failures_from_report
 from src.core.ban_list_validator import find_ban_list_violations
 from src.core.claim_tracker import ClaimExtractionResult
-from src.core.alerts import surface_alert_banner as _surface_alert_banner
+from src.core.alerts import append_or_suppress_alert, surface_alert_banner as _surface_alert_banner
 from src.core.config_loader import EDITIONS_ROOT as _CONFIRM_EDITIONS_ROOT, EditorialRules, PROGRAMS_ROOT as _CONFIRM_PROGRAMS_ROOT, REPORTS_ROOT, load_bundle
 from src.core.continuation_contract import build_bridge_section_roster_ids, build_continuation_contract
 from src.core.delta_engine import build_deltas
@@ -79,6 +79,7 @@ from src.core.overrides_store import OverridesDocument, get_overrides_path, rese
 from src.core.quality_gates import QualityGateReport, combine_gate_reports, evaluate_bridge_gates, evaluate_continuity_gates, evaluate_context_integrity_gates, evaluate_phase_1a_gates
 from src.core.quality_gates import evaluate_phase_1b_gates, evaluate_phase_1c_gates, evaluate_contradiction_gate, evaluate_program_fact_drift_from_draft, evaluate_readiness_gates, evaluate_source_health_gates
 from src.core.quality_gates import evaluate_workiq_confirm_gates
+from src.core.quality_gates.state_authority import StateAuthorityAmbiguousError, assert_state_authority_or_raise
 from src.core.review_status_store import get_review_status_path, reset_review_status
 from src.core.section_proposal_store import load_proposals
 from src.core.section_proposal_store import load_stale_claim_ids
@@ -335,6 +336,43 @@ def confirm_command(
     raise typer.Exit(code=result.exit_code)
 
 
+def _assert_state_authority_for_confirm(program_id: str, *, programs_root: Path) -> None:
+    """ADF-W1.9 / QG-37 (Section 12.1, 8.12.3): the mutation-blocking half,
+    activated 2026-07-13 after live operator reconciliation cleared the
+    real ambiguity it originally found (see specs/arch-data-fix.md
+    ADF-W1.9). Only called for a real (non-dry-run) confirm, since a
+    dry-run never mutates. A separate, tiny function so it is unit-testable
+    without needing ``confirm_issue``'s full pipeline (this repo's
+    acme-fixture test workspace is unrelated-ly broken in this environment
+    -- "program.yaml absent after copy" -- so most of `confirm_issue`'s own
+    tests are skipped here; this function's own test does not depend on it)."""
+    try:
+        assert_state_authority_or_raise(program_id, programs_root=programs_root)
+    except StateAuthorityAmbiguousError as exc:
+        raise ConfirmError(str(exc)) from exc
+
+
+def _emit_source_health_alerts_best_effort(
+    source_health_qg: QualityGateReport, *, program_id: str, edition_name: str, programs_root: Path
+) -> None:
+    """ADF-W5.8 (Section 8.2.5's "required-source stale or zero-yield"
+    category). A separate, tiny function so it is unit-testable without
+    ``confirm_issue``'s full pipeline, same rationale as
+    ``_assert_state_authority_for_confirm`` above."""
+    for result in source_health_qg.results:
+        if result.passed:
+            continue
+        try:
+            append_or_suppress_alert(
+                program_id=program_id, category="required_source_unhealthy",
+                entity_type="edition", entity_id=f"{edition_name}:{result.gate_id}", severity="warn",
+                message=result.message, next_command=f"vertex gather --edition {edition_name}",
+                programs_root=programs_root,
+            )
+        except (OSError, _AlertStateError):
+            pass
+
+
 def confirm_issue(
     edition_name: str,
     issue_number: int,
@@ -362,6 +400,8 @@ def confirm_issue(
         reports_root=resolved_reports_root,
         programs_root=programs_root,
     )
+    if not dry_run:
+        _assert_state_authority_for_confirm(bundle.program.id, programs_root=programs_root)
     draft_state = _load_draft_state(edition_name, issue_number, programs_root=programs_root)
     if post_weekly_summary_card:
         _validate_weekly_summary_card_request(bundle=bundle, draft_state=draft_state)
@@ -1188,8 +1228,6 @@ def _build_confirm_artifacts(
     subject_signal = _subject_signal(dimension_risks, top_items, auto_suggestions, scorecard_deltas)
     email_subject = _build_email_subject(title, health, subject_signal)
     email_preheader = _build_email_preheader(health, health.bluf, top_items or auto_suggestions)
-    _productivity_raw = round((len(workstream_data) * 0.25) + (len(items) * 0.08) + (len(review_status.sections) * 0.10), 1)
-    productivity_dividend: float | None = _productivity_raw if _productivity_raw >= 1.0 else None
     confirmed_depth = sum(1 for entry in archive_index.issues if entry.kind == "confirmed")
     resolved_v2 = resolve_edition(edition_name, editions_root=editions_root, programs_root=programs_root)
     ado_vitality = None
@@ -1225,9 +1263,7 @@ def _build_confirm_artifacts(
             email_subject=email_subject,
             email_preheader=email_preheader,
             subject_signal=subject_signal,
-            productivity_dividend_hours=productivity_dividend,
             show_orientation=overrides_document.show_orientation or confirmed_depth < 2,
-            productivity_dividend_published=bundle.config.productivity_dividend_published,
         ),
         layout_mode=bundle.config.layout_mode,
         health=health,
@@ -1340,7 +1376,6 @@ def _build_confirm_artifacts(
             "suggested_subject": email_subject,
             "suggested_preheader": email_preheader,
             "subject_signal": subject_signal,
-            "productivity_dividend_hours": productivity_dividend,
             "forecast_summary": (forecast.summary if forecast is not None else None),
             "forecast_confidence": (forecast.confidence.value if forecast is not None else None),
             "forecast_sources": (list(forecast.source_item_ids) if forecast is not None else []),
@@ -1498,6 +1533,10 @@ def _build_confirm_artifacts(
         waivers=source_waivers,
         function_name=source_health_function_name_for_edition(str(draft_state.get("edition_type", bundle.config.edition.type))),
     )
+    if program_id is not None:
+        _emit_source_health_alerts_best_effort(
+            source_health_qg, program_id=program_id, edition_name=edition_name, programs_root=programs_root,
+        )
     qg_report = combine_gate_reports(qg_report, source_health_qg)
     qg_program_fact_drift = evaluate_program_fact_drift_from_draft(
         draft_state=draft_state,
@@ -1538,7 +1577,6 @@ def _build_confirm_artifacts(
             "suggested_subject": email_subject,
             "suggested_preheader": email_preheader,
             "subject_signal": subject_signal,
-            "productivity_dividend_hours": productivity_dividend,
             "forecast_summary": (forecast.summary if forecast is not None else None),
             "forecast_confidence": (forecast.confidence.value if forecast is not None else None),
             "forecast_sources": (list(forecast.source_item_ids) if forecast is not None else []),

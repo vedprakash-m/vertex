@@ -5,6 +5,7 @@ from pathlib import Path
 
 from src.core.decision_register import assess_decision_review_staleness, assess_proposed_decision_staleness, load_decisions, read_governance_decisions_from_overrides, save_decisions, upsert_decisions
 from src.core.models_v2 import DecisionEntry, DecisionStatus
+from src.core.operation_trace import load_operation_trace
 from src.core.overrides_store import DecisionRecord, OverridesDocument
 from src.core.program_fact_store import load_program_facts, project_decision_entries
 
@@ -168,6 +169,38 @@ def test_upsert_decisions_keeps_existing_entry_when_duplicate_id_reappears(tmp_p
     upsert_decisions("demo", (duplicate,), programs_root=programs_root)
 
     assert load_decisions("demo", programs_root=programs_root) == (existing,)
+
+
+def test_upsert_decisions_records_trace_link_when_correlation_id_present(tmp_path: Path) -> None:
+    # ADF-W2.12: a gather-cycle correlation id threaded down to
+    # upsert_decisions must produce a real stage="fact" OperationTrace link,
+    # no-op when absent (the pre-existing default).
+    programs_root = tmp_path / "programs"
+    entry = DecisionEntry(
+        id="decision-trace-1",
+        program_id="demo",
+        title="Adopt guarded rollout",
+        context="Two rollout options remain.",
+        decision="Proceed with the guarded rollout.",
+        rationale=None,
+        alternatives_considered=(),
+        decided_by="auto-extracted",
+        decision_date=date(2026, 5, 1),
+        status=DecisionStatus.PROPOSED,
+        superseded_by=None,
+        linked_claim_id=None,
+        linked_risk_id=None,
+        linked_action_ids=(),
+        workstream_id="ws_demo",
+        entity_refs=("WI:1001",),
+    )
+
+    upsert_decisions("demo", (entry,), programs_root=programs_root, correlation_id="gather-corr-2")
+
+    trace = load_operation_trace("demo", "gather-corr-2", programs_root=programs_root)
+    assert trace is not None
+    assert len(trace.fact_refs) == 1
+    assert "decision.entry:decision-trace-1" in trace.fact_refs[0]
 
 
 def test_read_governance_decisions_from_overrides_preserves_work_item_refs_from_source_ref() -> None:

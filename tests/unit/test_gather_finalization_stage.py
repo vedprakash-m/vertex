@@ -27,7 +27,7 @@ def test_compute_and_persist_plane1_changes_passes_db_root_to_snapshot_writers(t
         compute_plane1_changes=lambda *args, **kwargs: (),
         append_plane1_changes=lambda *args, **kwargs: None,
         build_plane1_snapshot=lambda *args, **kwargs: current_snapshot,
-        shadow_write_plane1_snapshot=lambda program_id, snapshot, *, recorded_at, db_root=None: captured.setdefault(
+        shadow_write_plane1_snapshot=lambda program_id, snapshot, *, recorded_at, db_root=None, **_kwargs: captured.setdefault(
             "shadow_args",
             {
                 "program_id": program_id,

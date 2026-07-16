@@ -29,6 +29,8 @@ def compute_and_persist_plane1_changes(
     program_id: str,
     programs_root: Path,
     gathered_at: datetime,
+    *,
+    correlation_id: str = "",
 ) -> None:
     _compute_and_persist_plane1_changes(
         program_id,
@@ -47,6 +49,7 @@ def compute_and_persist_plane1_changes(
         shadow_write_plane1_snapshot=shadow_write_plane1_snapshot,
         persist_program_fact_snapshot=persist_program_fact_snapshot,
         write_plane1_last_seen=write_plane1_last_seen,
+        correlation_id=correlation_id,
     )
 
 
@@ -55,6 +58,7 @@ def run_state_write_stage(stage_input: StateWriteStageInput) -> StateWriteStageR
         stage_input.program_id,
         stage_input.programs_root,
         stage_input.gathered_at,
+        correlation_id=stage_input.correlation_id,
     )
 
     write_gather_state(

@@ -5,7 +5,9 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from src.core.dependency_scout import (
+    DependencyProposal,
     DependencyProposalStatus,
+    dependency_proposal_to_dependency,
     load_dependency_proposals,
     merge_dependency_proposals,
     save_dependency_proposals,
@@ -13,6 +15,25 @@ from src.core.dependency_scout import (
 )
 from src.core.models import Confidence, RiskLevel, SnapshotItem
 from src.core.models_v2 import Dependency, DependencyStatus, DependencyType, Signal, SignalReviewDecision, TrajectoryPoint, Workstream
+
+
+def test_dependency_proposal_to_dependency_carries_evidence_refs_forward() -> None:
+    # ADF-W2.4/W2.5: a real bug -- evidence_refs (the scout-derived lineage
+    # this proposal was built from) was being silently dropped at accept
+    # time, meaning every accepted scout-derived dependency looked exactly
+    # like a hand-authored one (evidence_refs=()) with no traceability back
+    # to the signals that justified it.
+    proposal = DependencyProposal(
+        id="dep-proposal-1", program_id="acme", from_workstream_id="ws-1", to_workstream_id="ws-2",
+        from_item_id=101, to_item_id=202, from_item_title="Item A", to_item_title="Item B",
+        suggested_dependency_type=DependencyType.BLOCKS, rationale="Repeated co-mention.",
+        evidence_refs=("sig-1", "sig-2"), detection_method="co_mention", occurrence_count=3,
+        first_seen_at=datetime(2026, 7, 1, tzinfo=timezone.utc), last_seen_at=datetime(2026, 7, 10, tzinfo=timezone.utc),
+    )
+
+    dependency = dependency_proposal_to_dependency(proposal)
+
+    assert dependency.evidence_refs == ("sig-1", "sig-2")
 
 
 def test_scout_dependency_proposals_detects_repeated_cross_workstream_co_mentions() -> None:

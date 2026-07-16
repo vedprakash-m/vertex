@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import html
+import re
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -7,6 +9,7 @@ from typing import Any
 
 from src.core.ado_client import ADOClient
 from src.core.ado_enrichment import ADO_RISK_ASSESSMENT_COMMENT_FIELD, ADO_RISK_ASSESSMENT_FIELD, normalize_risk_assessment
+from src.core.ado_relations import parse_relations_payload, traverse_relations
 from src.core.ado_schema_drift import assert_row_shape
 from src.core.config_loader import PROGRAMS_ROOT
 from src.core.exceptions import QueryError
@@ -19,6 +22,7 @@ from src.core.integration_types import (
     IntegrationError,
     ProviderCapability,
     DiscoveryCompleteness,
+    WorkItemRelation,
 )
 from src.core.models import Comment, Revision, RiskLevel, WorkItem
 from src.core.models_v2 import Program, Workstream
@@ -86,6 +90,8 @@ class ADOHydrationProvider:
             retry_backoff_seconds=0.5,
             privacy_class="internal_content",
             timeout_seconds=45,
+            # ADF-W4.1 (Section 8.4.3): the ADO provider hydrates typed relations.
+            supports_relations=True,
         )
 
     def hydrate(
@@ -155,9 +161,36 @@ class ADOHydrationProvider:
                 if row is None:
                     failed_ref_ids.append((str(work_item_id), "work_item"))
                     continue
+                registration = registrations_by_id.get(work_item_id)
                 revision_rows: list[dict[str, Any]] = []
                 comment_rows: list[dict[str, Any]] = []
-                if mode is HydrationMode.FULL and _row_changed_since(row, since):
+                # ADF-W2.2 (Section 8.4.1): "use the last verified watermark,
+                # not only a rolling lookback" -- an item already verified
+                # more recently than the caller's `since` window only needs
+                # re-detailing if it changed after ITS OWN last verification,
+                # not merely within the broader window. On a fully-stable
+                # program (nothing changed since last gather) this collapses
+                # the revision/comment fetch to zero on a repeat run, instead
+                # of re-fetching detail for every item touched within the
+                # rolling lookback every single time.
+                effective_since = since
+                if (
+                    registration is not None
+                    and registration.last_verified_at is not None
+                    and registration.last_verified_at > since
+                ):
+                    effective_since = registration.last_verified_at
+                # ADF-W2.2 (Section 8.4.1): "on first registration ... fetch
+                # complete bounded revisions and comments" -- a registration
+                # that has never been verified before (brand new this cycle,
+                # or never successfully hydrated) must get a full detail
+                # fetch regardless of the changed-since check: the item's own
+                # ChangedDate may predate the gather's rolling `since` window
+                # (e.g. a work item created months ago, untouched recently),
+                # in which case `_row_changed_since` would otherwise report
+                # "unchanged" and silently skip its very first hydration.
+                never_verified = registration is None or registration.last_verified_at is None
+                if mode is HydrationMode.FULL and (never_verified or _row_changed_since(row, effective_since)):
                     try:
                         revision_rows = self._client.list_work_item_revisions(work_item_id)
                         api_calls += 1
@@ -179,7 +212,6 @@ class ADOHydrationProvider:
                         failed_ref_ids.append((str(work_item_id), "work_item"))
                         continue
                 item = _work_item_from_batch_row(row, revision_rows=revision_rows, comment_rows=comment_rows, fetched_at=fetched_at)
-                registration = registrations_by_id.get(work_item_id)
                 if registration is not None:
                     item.custom_fields["workstream_ids"] = tuple(registration.workstream_ids)
                 items.append(item)
@@ -218,6 +250,36 @@ class ADOHydrationProvider:
             freshness_items=tuple(items),
             pull_requests=tuple(pull_requests_list),
         )
+        # ADF-W4.1 (Section 8.4.3): hydrate typed relations in FULL mode only.
+        # Depth 1 is the normal-gather budget; deeper investigation is a separate
+        # targeted call. A failed relations fetch never blocks the work items
+        # already hydrated -- it surfaces as a non-fatal error and empty relations.
+        relations: tuple[WorkItemRelation, ...] = ()
+        relation_truncation = None
+        if mode is HydrationMode.FULL and work_item_ids:
+            relation_loader = getattr(self._client, "get_work_item_relations", None)
+            if callable(relation_loader):
+                try:
+                    raw_relations = relation_loader(list(work_item_ids))
+                    api_calls += 1
+                    parsed = parse_relations_payload(raw_relations)
+                    traversal = traverse_relations(
+                        parsed,
+                        start_ids=list(work_item_ids),
+                        max_depth=1,
+                    )
+                    relations = traversal.edges
+                    relation_truncation = traversal.truncation
+                except QueryError as error:
+                    errors.append(
+                        IntegrationError(
+                            source="ado",
+                            stage="hydration",
+                            message=f"Failed to hydrate work item relations: {error}",
+                            retryable=True,
+                        )
+                    )
+        output = replace(output, relations=relations, relation_truncation=relation_truncation)
         return HydrationResult(
             channel="ado",
             resources=output,
@@ -340,10 +402,41 @@ def _parse_comments(work_item_id: int, rows: list[dict[str, Any]]) -> list[Comme
                 created_by=created_by or "Unknown",
                 created_by_email=created_by_email or "",
                 created_date=created_at,
-                text=str(row.get("text") or row.get("renderedText") or ""),
+                text=_normalize_ado_comment_html(str(row.get("text") or row.get("renderedText") or "")),
             )
         )
     return comments
+
+
+_HTML_SCRIPT_STYLE_RE = re.compile(r"<(script|style)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
+_HTML_LINK_RE = re.compile(r'<a\b[^>]*\bhref\s*=\s*"([^"]*)"[^>]*>(.*?)</a>', re.IGNORECASE | re.DOTALL)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _normalize_ado_comment_html(raw: str) -> str:
+    """ADF-W2.1 (Section 8.4.5): strip HTML/presentation markup ADO comments
+    carry (``<div>``, ``<span>``, ``<a href>``, ...) before signal
+    extraction, while preserving plain-text work-item references, mentions,
+    dates, and links -- an ``<a href="URL">text</a>`` becomes
+    ``"text (URL)"`` so the link target survives as plain text instead of
+    being silently discarded along with the tag.
+    """
+    if not raw:
+        return raw
+
+    without_script_style = _HTML_SCRIPT_STYLE_RE.sub(" ", raw)
+
+    def _link_replacement(match: re.Match[str]) -> str:
+        href = html.unescape(match.group(1)).strip()
+        link_text = html.unescape(_HTML_TAG_RE.sub("", match.group(2))).strip()
+        if not link_text or link_text == href:
+            return href
+        return f"{link_text} ({href})"
+
+    with_links_preserved = _HTML_LINK_RE.sub(_link_replacement, without_script_style)
+    without_tags = _HTML_TAG_RE.sub(" ", with_links_preserved)
+    unescaped = html.unescape(without_tags)
+    return " ".join(unescaped.split())
 
 
 def _parse_identity(raw_value: Any) -> tuple[str | None, str | None]:

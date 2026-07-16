@@ -7,6 +7,7 @@ import pytest
 import yaml
 
 from src.core.dependency_graph import load_dependencies, save_dependencies
+from src.core.fact_lineage_coverage import has_fact_provenance
 from src.core.models_v2 import Dependency, DependencyScheduleStatus, DependencyStatus, DependencyType
 from src.core.program_fact_store import load_program_facts, project_dependencies
 
@@ -167,6 +168,30 @@ def test_save_dependencies_dual_writes_current_fact_store_projection(tmp_path: P
     snapshot = load_program_facts("acme", as_of=datetime.now(timezone.utc), db_root=programs_root.parent)
 
     assert project_dependencies(snapshot) == (dependency,)
+
+
+def test_save_dependencies_threads_evidence_refs_onto_the_fact_revision(tmp_path: Path) -> None:
+    # ADF-W2.4/W2.5: a scout-derived dependency's evidence_refs must land on
+    # the ProgramFactRevision's own top-level source_signal_ids field (what
+    # fact_lineage_coverage.py's classifier actually inspects), not just
+    # inside the payload dict the Dependency projection round-trips through.
+    programs_root = tmp_path / "programs"
+    dependency = Dependency(
+        id="dep-1", from_program_id="acme", from_workstream_id="ws-launch", from_item_id=12345,
+        from_milestone_id=None, to_program_id="fabrikam", to_workstream_id="ws-buildouts", to_item_id=67890,
+        to_milestone_id=None, dependency_type=DependencyType.BLOCKS, risk_if_broken="Launch slips.",
+        mitigation=None, status=DependencyStatus.ACTIVE, owner_alias="operator",
+        evidence_refs=("sig-abc-123",),
+    )
+
+    save_dependencies("acme", (dependency,), programs_root=programs_root)
+
+    snapshot = load_program_facts("acme", as_of=datetime.now(timezone.utc), db_root=programs_root.parent)
+    dependency_facts = [fact for fact in snapshot.facts if fact.fact_type == "dependency.link"]
+
+    assert len(dependency_facts) == 1
+    assert dependency_facts[0].source_signal_ids == ("sig-abc-123",)
+    assert has_fact_provenance(dependency_facts[0]) is True
 
 
 def test_save_dependencies_closes_removed_fact_entries(tmp_path: Path) -> None:

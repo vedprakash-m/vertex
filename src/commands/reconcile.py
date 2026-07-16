@@ -12,10 +12,16 @@ from src.commands import gather as gather_helpers
 from src.core.analytics_store import load_contradiction_state, replace_contradiction_state
 from src.core.claim_tracker import load_open_claims
 from src.core.contradiction_engine import build_contradiction_packets
+from src.core.dependency_graph import load_dependencies
 from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.feedback.calibration_router import load_forecast_calibration_modifier
 from src.core.models import WorkItem
-from src.core.models_v2 import ClaimEntry, ContradictionPacket, ForecastCalibrationModifier, Signal, Workstream
+from src.core.models_v2 import ClaimEntry, ContradictionPacket, Dependency, ForecastCalibrationModifier, Signal, Workstream
+from src.core.program_fact_store import (
+    load_current_action_items,
+    load_current_milestones,
+    load_current_risk_entries,
+)
 from src.core.signal_review import signal_is_approved_for_evidence
 from src.core.store_factory import build_signal_store_for_program_id
 
@@ -25,6 +31,7 @@ ItemLoader = Callable[[object, tuple[Workstream, ...], datetime], tuple[tuple[Wo
 SignalLoader = Callable[[str, datetime, int, Path], tuple[Signal, ...]]
 ClaimLoader = Callable[[str, Path], tuple[ClaimEntry, ...]]
 CalibrationLoader = Callable[[str, Path], ForecastCalibrationModifier | None]
+DependencyLoader = Callable[[str, Path], tuple[Dependency, ...]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +71,7 @@ def generate_reconcile_report(
     signal_loader: SignalLoader | None = None,
     claim_loader: ClaimLoader | None = None,
     calibration_loader: CalibrationLoader | None = None,
+    dependency_loader: DependencyLoader | None = None,
 ) -> ReconcileCommandArtifacts:
     current_time = _ensure_utc(as_of or datetime.now(timezone.utc))
     cached_packets = () if refresh else load_contradiction_state(program_id, programs_root=programs_root)
@@ -86,6 +94,7 @@ def generate_reconcile_report(
     )
     open_claims = (claim_loader or load_open_claims)(program_id, programs_root)
     calibration_modifier = (calibration_loader or _load_calibration_modifier)(program_id, programs_root)
+    dependencies = (dependency_loader or load_dependencies)(program_id, programs_root)
     packets = build_contradiction_packets(
         items=items,
         claims=open_claims,
@@ -93,6 +102,10 @@ def generate_reconcile_report(
         workstreams=workstreams,
         as_of=current_time,
         calibration_modifier=calibration_modifier,
+        dependencies=dependencies,
+        risks=load_current_risk_entries(program_id, programs_root=programs_root),
+        milestones=load_current_milestones(program_id, programs_root=programs_root),
+        actions=load_current_action_items(program_id, programs_root=programs_root),
     )
     if not dry_run:
         replace_contradiction_state(program_id, packets, programs_root=programs_root)

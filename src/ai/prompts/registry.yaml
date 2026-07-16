@@ -14,20 +14,26 @@ prompts:
   - claim_extractor.v1
   - context_synthesizer.v1
   - decision_brief_advisor.v1
+  - dependency_blast_radius_generator.v1
   - exec_summary_drafter.v1
+  - governance_decision_brief_generator.v1
   - intent_router.v1
   - learning_distiller.v1
   - m365_topic_router.v1
+  - meeting_action_extractor.v1
   - onboard_structure_assistant.v1
   - onboard_style_assistant.v1
+  - program_synthesis.v1
   - prose_event_extractor.v1
   - prose_event_extractor.v2
   - prose_event_extractor.v3
   - prose_event_extractor.v4
   - rev_extractor.v1
+  - risk_proposal_generator.v1
   - setup_discovery_assistant.v1
   - setup_explainer.v1
   - setup_ws_suggest.v1
   - summary_generator.v1
   - synthesizer.v1
+  - top_three_candidate_generator.v1
   - workstream_blurb.v1

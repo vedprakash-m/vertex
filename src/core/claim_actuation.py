@@ -81,15 +81,23 @@ def infer_commitment_direction(
     Returns:
         "outbound" — owner resolves to an internal entity (our team commits).
         "inbound"  — owner resolves to an external entity (they commit to us).
-        "ambiguous" — owner is unresolvable or entity_type is unknown.
+        "ambiguous" — owner is unresolvable, ambiguous (ADF-W2.6: two
+            close-scoring candidates), or entity_type is unknown.
 
     ``registry`` is typed as Any to avoid circular imports; it must implement
-    ``resolve(raw: str) -> CanonicalEntity | None``.
+    ``resolve(raw: str) -> CanonicalEntity | None``. When it also implements
+    ``resolve_with_binding`` (ADF-W2.6's Section 8.14.3 record), that is
+    preferred -- a near-tie between two candidates now correctly returns
+    "ambiguous" instead of silently picking whichever scored marginally
+    higher and reporting that pick's direction with false confidence.
     """
     if not owner_alias or registry is None:
         return "ambiguous"
 
-    entity = registry.resolve(owner_alias)
+    if hasattr(registry, "resolve_with_binding"):
+        entity = registry.resolve_with_binding(owner_alias).resolved_entity
+    else:
+        entity = registry.resolve(owner_alias)
     if entity is None:
         return "ambiguous"
 

@@ -2,15 +2,26 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from src.ai._pipeline import AIPipelineError, process_generated_text
 from src.ai.provider import LLMProvider
 from src.ai.tiered_router import TierResult, route_through_tiers
+from src.core.ai_result_cache import AIResultCacheKey, canonical_input_hash, get_ai_result, put_ai_result
+from src.core.ai_schema_gateway import SchemaGatewayError, validate_bounded_payload
 from src.core.ban_list_validator import find_ban_list_violations
 from src.core.config_loader import EditorialRules, NarrativeProgramContext
+from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.evidence_models import SourceRef, extract_icm_ids
 from src.core.models import Confidence, DeltaKind, EditionType, EvidencePacket, ItemDelta, WorkItem
 from src.core.models_v2 import Signal, WorkstreamEvidenceBundle
+from src.core.quality_gates.ai_release_audit import (
+    AIRunState,
+    ReleaseTerminal,
+    new_ai_run_id,
+    record_ai_release_decision,
+    record_ai_run_lifecycle,
+)
 from src.core.telemetry_summary import build_approved_telemetry_summary
 from src.core.verbosity_enforcer import enforce_verbosity, split_sentences
 from src.core.voice_validator import build_writing_contract_prompt_lines, has_decision_or_delta_lead
@@ -19,8 +30,10 @@ from src.core.policy_loader import load_ai_feature_policy
 
 
 PROMPT_VERSION = "workstream_blurb.v1"
+POLICY_VERSION = "workstream_blurb.v1"
 from src.ai.prompt_registry import load_prompt
 _FEATURE = "blurb_generator"
+_OUTPUT_SCHEMA_VERSION = "1"
 _DELTA_PREFIXES = ("NEW", "CLOSED", "RISK_UP", "RISK_DOWN", "ETA", "OWNER")
 _MAX_ELIGIBLE_ITEM_LINES = 8
 _MAX_ELIGIBLE_ITEM_LINE_CHARS = 260
@@ -53,11 +66,24 @@ def generate_workstream_blurb(
     evidence_by_item: dict[int, EvidencePacket],
     deltas: tuple[ItemDelta, ...] | list[ItemDelta],
     editorial_rules: EditorialRules,
+    program_id: str,
     edition_type: EditionType | None = None,
     program_context: NarrativeProgramContext | None = None,
     supplemental_context: tuple[str, ...] = (),
     workstream_evidence_bundle: WorkstreamEvidenceBundle | None = None,
+    programs_root: Path = PROGRAMS_ROOT,
 ) -> WorkstreamBlurb | None:
+    """Runs the same AISchemaGateway/QG-29 safety lifecycle established by
+    ``risk_proposal_generator.py`` (ADF-W5.1, P7): bounds-checked
+    request/response payloads, the five ``AIRunState`` transitions, cache
+    wiring via ``AIResultCacheKey``, and a durable QG-29 terminal release
+    decision recorded before any caller may consume the result. Preserves
+    this feature's existing raise-on-rejection contract
+    (``BlurbGenerationError``) rather than switching to a
+    return-``None``-on-rejection convention, since ``report_ai.py``'s
+    deployment-fallback loop already depends on ``BlurbGenerationError``
+    propagating -- same reasoning as ``exec_summary_drafter.py``'s
+    migration."""
     missing_item_ids = tuple(item.id for item in items if evidence_by_item.get(item.id) is None)
     if missing_item_ids:
         raise BlurbGenerationError(
@@ -80,6 +106,7 @@ def generate_workstream_blurb(
 
     prompt_template = _load_prompt_template()
     system_prompt = prompt_template.format(workstream_name=workstream_name)
+    max_words = editorial_rules.verbosity.workstream_blurb_max_words_for(edition_type)
     user_prompt = _build_user_prompt(
         workstream_name=workstream_name,
         eligible_items=eligible_items,
@@ -88,43 +115,132 @@ def generate_workstream_blurb(
         editorial_rules=editorial_rules,
         program_context=program_context,
         supplemental_context=supplemental_context,
-        max_words=editorial_rules.verbosity.workstream_blurb_max_words_for(edition_type),
+        max_words=max_words,
         workstream_evidence_bundle=workstream_evidence_bundle,
     )
-    raw_text = route_through_tiers(
+
+    ai_run_id = new_ai_run_id()
+
+    def _lifecycle(state: AIRunState) -> None:
+        record_ai_run_lifecycle(
+            program_id=program_id,
+            ai_run_id=ai_run_id,
+            feature=_FEATURE,
+            state=state,
+            prompt_version=PROMPT_VERSION,
+            policy_version=POLICY_VERSION,
+            programs_root=programs_root,
+        )
+
+    def _discard(terminal: ReleaseTerminal, reason: str, finding_count: int = 0) -> None:
+        record_ai_release_decision(
+            program_id=program_id,
+            ai_run_id=ai_run_id,
+            terminal=terminal,
+            reason=reason,
+            validator_finding_count=finding_count,
+            programs_root=programs_root,
+        )
+
+    _lifecycle(AIRunState.PLANNED)
+
+    request_payload = {
+        "program_id": program_id,
+        "workstream_name": workstream_name,
+        "eligible_item_ids": [item.id for item in eligible_items],
+        "supplemental_context": list(supplemental_context),
+        "max_words": max_words,
+    }
+    try:
+        validate_bounded_payload(request_payload)
+    except SchemaGatewayError as error:
+        reason = f"AISchemaGateway rejected the outbound request: {error}"
+        _discard(ReleaseTerminal.DISCARDED, reason)
+        raise BlurbGenerationError(reason) from error
+
+    _lifecycle(AIRunState.REQUESTED)
+
+    policy = load_ai_feature_policy(_FEATURE)
+    cache_key = AIResultCacheKey(
+        program_id=program_id,
+        feature=_FEATURE,
+        canonical_input_hash=canonical_input_hash(user_prompt),
+        prompt_version=PROMPT_VERSION,
+        policy_version=POLICY_VERSION,
+        model_deployment=_resolve_model_deployment(client),
+        context_manifest_hash=canonical_input_hash(
+            "|".join(str(item.id) for item in eligible_items)
+        ),
+        output_schema_version=_OUTPUT_SCHEMA_VERSION,
+    )
+    raw = route_through_tiers(
         _FEATURE,
         deterministic_fn=lambda: None,
         frontier_fn=lambda: client.structured(
             system_prompt,
             user_prompt,
-            parser=_parse_generated_blurb_text,
-            max_tokens=load_ai_feature_policy(_FEATURE).max_tokens,
+            parser=lambda payload: payload,
+            max_tokens=policy.max_tokens,
             prompt_version=PROMPT_VERSION,
         ),
-        policy=load_ai_feature_policy(_FEATURE),
+        policy=policy,
+        cache_lookup_fn=lambda: _cached_response(cache_key, programs_root=programs_root),
+        cache_store_fn=lambda value: put_ai_result(cache_key, value, programs_root=programs_root),
     ).value
+
+    _lifecycle(AIRunState.RESPONDED)
+
+    try:
+        validate_bounded_payload(raw)
+    except SchemaGatewayError as error:
+        reason = f"AISchemaGateway rejected the response: {error}"
+        _discard(ReleaseTerminal.REJECTED, reason)
+        raise BlurbGenerationError(reason) from error
+
+    _lifecycle(AIRunState.SCHEMA_VALIDATED)
+
+    try:
+        raw_text = _parse_generated_blurb_text(cast(dict[str, object], raw))
+    except BlurbGenerationError as error:
+        _lifecycle(AIRunState.SEMANTICALLY_VALIDATED)
+        _discard(ReleaseTerminal.REJECTED, str(error))
+        raise
     if not raw_text:
+        _lifecycle(AIRunState.SEMANTICALLY_VALIDATED)
+        _discard(ReleaseTerminal.REJECTED, "generated workstream blurb text was empty.")
         return None
 
     try:
         grounded = process_generated_text(raw_text, allowed_items=eligible_items)
     except AIPipelineError as error:
+        _lifecycle(AIRunState.SEMANTICALLY_VALIDATED)
+        _discard(ReleaseTerminal.REJECTED, str(error))
         raise BlurbGenerationError(str(error)) from error
 
     if not grounded.text:
+        _lifecycle(AIRunState.SEMANTICALLY_VALIDATED)
+        _discard(ReleaseTerminal.REJECTED, "processed text pipeline produced empty output.")
         return None
 
-    _validate_delta_lead(
-        grounded.text,
-        program_context=program_context,
-        editorial_rules=editorial_rules,
-    )
-    _validate_editorial_rules(
-        grounded.text,
-        workstream_name,
-        editorial_rules,
-        edition_type=edition_type,
-    )
+    try:
+        _validate_delta_lead(
+            grounded.text,
+            program_context=program_context,
+            editorial_rules=editorial_rules,
+        )
+        _validate_editorial_rules(
+            grounded.text,
+            workstream_name,
+            editorial_rules,
+            edition_type=edition_type,
+        )
+    except BlurbGenerationError as error:
+        _lifecycle(AIRunState.SEMANTICALLY_VALIDATED)
+        _discard(ReleaseTerminal.REJECTED, str(error))
+        raise
+
+    _lifecycle(AIRunState.SEMANTICALLY_VALIDATED)
+    _discard(ReleaseTerminal.RELEASED, "passed AISchemaGateway bounds and editorial-rules validation")
 
     return WorkstreamBlurb(
         text=grounded.text,
@@ -422,3 +538,12 @@ def _parse_generated_blurb_text(payload: dict[str, object]) -> str:
     if not normalized:
         raise BlurbGenerationError("Generated workstream blurb payload text must be non-empty.")
     return normalized
+
+
+def _resolve_model_deployment(client: LLMProvider) -> str:
+    return getattr(client, "deployment", None) or getattr(client, "model", None) or type(client).__name__
+
+
+def _cached_response(key: AIResultCacheKey, *, programs_root: Path) -> dict[str, object] | None:
+    hit = get_ai_result(key, programs_root=programs_root)
+    return hit.value if hit is not None else None

@@ -80,6 +80,18 @@ class TestCollectUnresolvedEntityRefs:
         result = collect_unresolved_entity_refs(snapshot, registry)
         assert result == frozenset({"unknown-ref", "also-unknown"})
 
+    def test_ambiguous_ref_counts_as_unresolved(self) -> None:
+        """ADF-W2.6: a near-tied fuzzy match (registry.resolve_with_binding's
+        ambiguous=True) must count as unresolved too -- Section 8.14.3's
+        "ambiguous entities remain unresolved" -- rather than being silently
+        picked by the old resolve() ladder and undercounted here."""
+        entity_a = CanonicalEntity(entity_id="t1", entity_type="person", canonical_name="Jordan Rivers", aliases=(), scope="program")
+        entity_b = CanonicalEntity(entity_id="t2", entity_type="person", canonical_name="Jordan Rivera", aliases=(), scope="program")
+        registry = EntityRegistry(program_entities=(entity_a, entity_b), org_entities=())
+        snapshot = _make_facts_snapshot([("Jordan River",)])
+        result = collect_unresolved_entity_refs(snapshot, registry)
+        assert result == frozenset({"Jordan River"})
+
 
 # ---------------------------------------------------------------------------
 # emit_entity_alias_facts round-trip
@@ -128,6 +140,26 @@ class TestAliasEmitRoundTrip:
         result2 = emit_entity_alias_facts(program_id, (entity,), programs_root=tmp_path)
         assert result2.emitted == 0
         assert result2.skipped_duplicates == 1
+
+    def test_records_trace_link_when_correlation_id_present(self, tmp_path: Path) -> None:
+        # ADF-W2.12: a triage-run correlation id threaded down must produce
+        # a real stage="fact" OperationTrace link per newly-emitted alias,
+        # no-op when absent (the pre-existing default).
+        from src.core.operation_trace import load_operation_trace
+
+        program_id = "test-prog-wi26-trace"
+        entity = CanonicalEntity(
+            entity_id="person:dana", entity_type="person", canonical_name="Dana", aliases=(), scope="program",
+        )
+        result = emit_entity_alias_facts(
+            program_id, (entity,), programs_root=tmp_path, correlation_id="triage-corr-1",
+        )
+        assert result.emitted == 1
+
+        trace = load_operation_trace(program_id, "triage-corr-1", programs_root=tmp_path)
+        assert trace is not None
+        assert len(trace.fact_refs) == 1
+        assert "entity.alias:person:person:dana" in trace.fact_refs[0]
 
 
 # ---------------------------------------------------------------------------

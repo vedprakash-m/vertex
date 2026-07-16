@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, cast
 
 from src.commands.gather_pipeline import ado_kpi_stage
+from src.core.ado_client import ADO_WIQL_DEFAULT_TOP
 from src.core.models import Confidence
 from src.core.models_v2 import ADOConfig, KustoConfig, KustoQuery, Program, Signal, Workstream
 
@@ -310,3 +311,99 @@ def test_build_kusto_kpi_signals_records_kusto_errors_via_callback() -> None:
             "previous_state": {"value_last_4": [4.2]},
         }
     ]
+
+
+def test_build_kusto_kpi_signals_marks_capped_wiql_result_degraded() -> None:
+    """ADF-W2.1 (Section 8.4.2): the KPI stage's WIQL call path now applies the
+    same cap_reached treatment the production gather WIQL path already had -- a
+    WIQL result at exactly ADO_WIQL_DEFAULT_TOP surfaces as cap_reached=True /
+    is_degraded=True through the query-state sink, not just a log line."""
+    workstreams = (Workstream(id="acme", name="Acme", area_paths=("One\\Adventure\\Acme",)),)
+    query_state_sink: dict[str, dict[str, Any]] = {}
+
+    capped_ids = list(range(1, ADO_WIQL_DEFAULT_TOP + 1))
+
+    class _CappedADOClient:
+        def __init__(self, *args, **kwargs) -> None:
+            del args, kwargs
+
+        def list_team_iterations(self, timeframe: str | None = None, team: str | None = None) -> list[dict[str, object]]:
+            del timeframe, team
+            return [{"path": "One\\Sprint 24"}]
+
+        def execute_wiql(self, wiql: str, top: int | None = None) -> list[int]:
+            del wiql, top
+            return capped_ids
+
+        def query_work_items_batch(self, work_item_ids: list[int], fields: tuple[str, ...]) -> list[dict[str, object]]:
+            return [
+                {"id": wid, "fields": {"System.Id": wid, "System.Title": f"Item {wid}", "System.State": "Active"}}
+                for wid in work_item_ids
+            ]
+
+    ado_kpi_stage.build_kusto_kpi_signals(
+        queries=(_wiql_query(query_id="capped-kpi"),),
+        program=_program(),
+        program_id="acme",
+        as_of=datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc),
+        workstreams=workstreams,
+        executor=lambda query: [],
+        ado_client_factory=cast(Any, _CappedADOClient),
+        normalize_ado_team_name_fn=lambda value: None if value is None else value.strip() or None,
+        record_kusto_query_state_fn=lambda *args, **kwargs: None,
+        build_kusto_kpi_signal_fn=_build_signal,
+        summarize_pull_requests_fn=lambda **kwargs: None,
+        pull_request_provider_ref_fn=lambda pull_request, repository_name: None,
+        pull_request_entity_refs_fn=lambda pull_request, repository_name: (),
+        query_state_sink=query_state_sink,
+    )
+
+    state = query_state_sink["capped-kpi"]
+    assert state["cap_reached"] is True
+    assert state["is_degraded"] is True
+    assert state["row_count"] == ADO_WIQL_DEFAULT_TOP
+
+
+def test_build_kusto_kpi_signals_under_cap_is_not_degraded() -> None:
+    """A WIQL result under the cap must NOT set cap_reached."""
+    workstreams = (Workstream(id="acme", name="Acme", area_paths=("One\\Adventure\\Acme",)),)
+    query_state_sink: dict[str, dict[str, Any]] = {}
+
+    class _UnderCapADOClient:
+        def __init__(self, *args, **kwargs) -> None:
+            del args, kwargs
+
+        def list_team_iterations(self, timeframe: str | None = None, team: str | None = None) -> list[dict[str, object]]:
+            del timeframe, team
+            return [{"path": "One\\Sprint 24"}]
+
+        def execute_wiql(self, wiql: str, top: int | None = None) -> list[int]:
+            del wiql, top
+            return [5001, 5002, 5003]
+
+        def query_work_items_batch(self, work_item_ids: list[int], fields: tuple[str, ...]) -> list[dict[str, object]]:
+            return [
+                {"id": wid, "fields": {"System.Id": wid, "System.Title": f"Item {wid}", "System.State": "Active"}}
+                for wid in work_item_ids
+            ]
+
+    ado_kpi_stage.build_kusto_kpi_signals(
+        queries=(_wiql_query(query_id="under-cap-kpi"),),
+        program=_program(),
+        program_id="acme",
+        as_of=datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc),
+        workstreams=workstreams,
+        executor=lambda query: [],
+        ado_client_factory=cast(Any, _UnderCapADOClient),
+        normalize_ado_team_name_fn=lambda value: None if value is None else value.strip() or None,
+        record_kusto_query_state_fn=lambda *args, **kwargs: None,
+        build_kusto_kpi_signal_fn=_build_signal,
+        summarize_pull_requests_fn=lambda **kwargs: None,
+        pull_request_provider_ref_fn=lambda pull_request, repository_name: None,
+        pull_request_entity_refs_fn=lambda pull_request, repository_name: (),
+        query_state_sink=query_state_sink,
+    )
+
+    state = query_state_sink["under-cap-kpi"]
+    assert state["cap_reached"] is False
+    assert state["row_count"] == 3

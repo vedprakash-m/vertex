@@ -7,8 +7,11 @@ acceptance check that the matrix is tracked + the runtime reflects it.
 """
 from __future__ import annotations
 
+import json
+
 import typer
 
+from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.privacy_matrix import (
     CHANNEL_POSTURE,
     RETENTION_DAYS,
@@ -17,6 +20,7 @@ from src.core.privacy_matrix import (
     channels,
     sidecar_rules,
 )
+from src.core.privacy_purge import run_purge
 
 
 privacy_app = typer.Typer(help="Privacy & data governance matrix (WS-15).")
@@ -111,4 +115,42 @@ def privacy_check_command(
         f"days={_format_retention_days(RETENTION_DAYS[p.retention])} "
         f"rbac={p.rbac_model} "
         f"scopes={','.join(p.least_privilege_scopes)}"
+    )
+
+
+@privacy_app.command("purge")
+def privacy_purge_command(
+    program: str = typer.Option(..., "--program", help="Program id, e.g. xpf."),
+    apply: bool = typer.Option(False, "--apply", help="Actually mutate sidecars. Default is dry-run (report only)."),
+    format: str = typer.Option("human", "--format", help="Output format: human or json."),
+) -> None:
+    """WS-18/ADF-W5.9: run the unified retention purge (`src/core/privacy_purge.py`)
+    for one program against every registered `SIDECAR_RETENTION` rule.
+    Dry-run by default -- pass --apply to actually rewrite sidecars.
+    Rules with INDEFINITE retention are skipped (never auto-purged);
+    non-JSONL sidecars (SQLite, YAML config, immutable archive files) are
+    recorded as no-op (governed by their own rotation/migration paths)."""
+    report = run_purge(program, programs_root=PROGRAMS_ROOT, apply=apply)
+
+    if format == "json":
+        typer.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+        return
+    if format != "human":
+        raise typer.BadParameter(f"Unsupported --format {format!r}; use human or json.")
+
+    mode = "APPLIED" if apply else "DRY-RUN (pass --apply to mutate)"
+    typer.echo(f"Privacy purge for {program!r} [{mode}], cutoff reference: {report.cutoff.isoformat()}")
+    for record in report.records:
+        if record.rows_examined == 0 and record.rows_purged == 0 and record.rows_tombstoned == 0:
+            continue
+        typer.echo(
+            f"  {record.artifact_path}: examined={record.rows_examined} "
+            f"purged={record.rows_purged} tombstoned={record.rows_tombstoned} "
+            f"bytes_freed={record.bytes_freed}"
+        )
+    if report.skipped:
+        typer.echo(f"  Skipped (indefinite retention / unresolved path): {len(report.skipped)}")
+    typer.echo(
+        f"Totals: rows_purged={report.total_rows_purged} "
+        f"rows_tombstoned={report.total_rows_tombstoned} bytes_freed={report.total_bytes_freed}"
     )

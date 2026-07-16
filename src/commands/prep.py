@@ -198,6 +198,8 @@ def generate_prep_brief(
         workstreams=workstreams,
         dependencies=dependencies,
         client=anticipation_client,
+        program_id=resolved_v2.program.id,
+        programs_root=programs_root,
     )
     dependency_cascades = detect_dependency_cascades(
         dependencies=dependencies,

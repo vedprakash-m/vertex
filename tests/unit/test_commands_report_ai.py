@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 from src.commands import report_ai
@@ -184,6 +185,139 @@ def test_exec_ai_context_lines_include_feedback_context_for_next_issue(tmp_path)
 
     assert any(line.startswith("Approved feedback thread thread-feedback") for line in lines)
     assert any("Please acknowledge the blocker question in the next issue." in line for line in lines)
+
+
+def test_program_synthesis_exec_summary_context_lines_covers_three_categories(monkeypatch, tmp_path) -> None:
+    # ADF-W2.9: supplements the exec summary's narrow WorkItem-delta view
+    # with strategic risk / contradiction / critical-path milestone lines
+    # already assembled by assemble_program_synthesis_request.
+    from src.core.program_synthesis import ProgramSynthesisRequest, SynthesisInputItem
+
+    request = ProgramSynthesisRequest(
+        program_id="demo",
+        as_of=datetime(2026, 5, 31, 12, 0, tzinfo=timezone.utc),
+        items=(
+            SynthesisInputItem(category="strategic_risk", item_id="risk-1", summary="Vendor delay risk.", severity="high"),
+            SynthesisInputItem(category="contradiction", item_id="conf-1", summary="Milestone date disagreement."),
+            SynthesisInputItem(category="critical_path_milestone", item_id="ms-1", summary="M1 code complete | status=at_risk"),
+            SynthesisInputItem(category="kusto_slo_breach", item_id="slo-1", summary="Latency SLO breached."),
+        ),
+    )
+    monkeypatch.setattr(
+        "src.core.program_synthesis.assemble_program_synthesis_request",
+        lambda program_id, **kwargs: request,
+    )
+
+    lines = report_ai._program_synthesis_exec_summary_context_lines("demo", tmp_path)
+
+    assert any("Vendor delay risk." in line and "[high]" in line for line in lines)
+    assert any("Milestone date disagreement." in line for line in lines)
+    assert any("M1 code complete" in line for line in lines)
+    # kusto_slo_breach is deliberately not surfaced in this pass.
+    assert not any("Latency SLO breached." in line for line in lines)
+
+
+def test_program_synthesis_exec_summary_context_lines_caps_per_category(monkeypatch, tmp_path) -> None:
+    from src.core.program_synthesis import ProgramSynthesisRequest, SynthesisInputItem
+
+    request = ProgramSynthesisRequest(
+        program_id="demo",
+        as_of=datetime(2026, 5, 31, 12, 0, tzinfo=timezone.utc),
+        items=tuple(
+            SynthesisInputItem(category="strategic_risk", item_id=f"risk-{i}", summary=f"Risk {i}.")
+            for i in range(10)
+        ),
+    )
+    monkeypatch.setattr(
+        "src.core.program_synthesis.assemble_program_synthesis_request",
+        lambda program_id, **kwargs: request,
+    )
+
+    lines = report_ai._program_synthesis_exec_summary_context_lines("demo", tmp_path, limit=4)
+
+    assert len(lines) == 4
+
+
+def test_program_synthesis_exec_summary_context_lines_degrades_on_failure(monkeypatch, tmp_path) -> None:
+    # Best-effort: a failure in the underlying accessor must never break
+    # exec-summary generation, only degrade to no supplemental lines.
+    def _raise(program_id, **kwargs):
+        raise RuntimeError("fact store unavailable")
+
+    monkeypatch.setattr("src.core.program_synthesis.assemble_program_synthesis_request", _raise)
+
+    lines = report_ai._program_synthesis_exec_summary_context_lines("demo", tmp_path)
+
+    assert lines == ()
+
+
+def test_program_synthesis_blurb_context_lines_scopes_by_workstream(monkeypatch) -> None:
+    # ADF-W2.9: workstream-scoped analog of the exec-summary enrichment --
+    # a risk/milestone linked to a DIFFERENT workstream must not leak into
+    # this section's blurb context.
+    from src.core.models_v2 import RiskCategory, RiskEntry, RiskImpact, RiskProbability, RiskStatus
+    from src.core.program_reality import ProgramReality, RealityConflict
+
+    def _risk(risk_id: str, *, workstream_ids: tuple[str, ...]) -> RiskEntry:
+        return RiskEntry(
+            id=risk_id, program_id="demo", title=f"Risk {risk_id}", description="Something at risk.",
+            probability=RiskProbability.LIKELY, impact=RiskImpact.HIGH, category=RiskCategory.EXTERNAL,
+            owner_alias="alice", mitigation_plan=None, mitigation_due_date=None,
+            linked_workstream_ids=workstream_ids, linked_work_item_ids=(), linked_milestone_ids=(),
+            linked_claim_ids=(), linked_action_ids=(), status=RiskStatus.OPEN,
+            identified_date=date(2026, 1, 1), identified_in_vertex_issue=None, last_reviewed_date=None, entity_refs=(),
+        )
+
+    matched_risk = SimpleNamespace(record=_risk("risk-in-scope", workstream_ids=("ws-deployment",)), fact_id="fact-risk-1")
+    unmatched_risk = SimpleNamespace(record=_risk("risk-out-of-scope", workstream_ids=("ws-other",)), fact_id="fact-risk-2")
+
+    matched_milestone = SimpleNamespace(
+        record=SimpleNamespace(name="M1", status="at_risk", target_date=None, linked_workstream_ids=("ws-deployment",)),
+        fact_id="fact-1",
+    )
+    unmatched_milestone = SimpleNamespace(
+        record=SimpleNamespace(name="M2", status="on_track", target_date=None, linked_workstream_ids=("ws-other",)),
+        fact_id="fact-2",
+    )
+    matched_conflict = RealityConflict(
+        conflict_id="conf-1", entity_refs=("WI:101",), family="icm_vs_evidence_risk", open=True, description="In-scope disagreement.",
+    )
+    unmatched_conflict = RealityConflict(
+        conflict_id="conf-2", entity_refs=("WI:999",), family="icm_vs_evidence_risk", open=True, description="Out-of-scope disagreement.",
+    )
+    mock_reality = SimpleNamespace(
+        risks=lambda: (matched_risk, unmatched_risk),
+        milestones=lambda: (matched_milestone, unmatched_milestone),
+        conflicts=lambda open_only=True: (matched_conflict, unmatched_conflict),
+    )
+    monkeypatch.setattr(ProgramReality, "load", lambda program_id, **kwargs: mock_reality)
+
+    lines = report_ai._program_synthesis_blurb_context_lines(
+        "demo", Path("unused"), workstream_ids=("ws-deployment",), item_ids={101},
+    )
+
+    assert any("risk-in-scope" in line or "Risk risk-in-scope" in line for line in lines)
+    assert not any("risk-out-of-scope" in line for line in lines)
+    assert any("M1" in line for line in lines)
+    assert not any("M2" in line for line in lines)
+    assert any("In-scope disagreement." in line for line in lines)
+    assert not any("Out-of-scope disagreement." in line for line in lines)
+
+
+def test_program_synthesis_blurb_context_lines_degrades_on_failure() -> None:
+    lines = report_ai._program_synthesis_blurb_context_lines(
+        "demo", Path("/does/not/exist"), workstream_ids=("ws-1",), item_ids={101},
+    )
+    assert lines == ()
+
+
+def test_program_synthesis_blurb_context_lines_empty_scope_short_circuits() -> None:
+    # No workstream_ids AND no item_ids -- nothing could ever match, so skip
+    # the accessor calls entirely rather than doing pointless work.
+    lines = report_ai._program_synthesis_blurb_context_lines(
+        "demo", Path("unused"), workstream_ids=(), item_ids=set(),
+    )
+    assert lines == ()
 
 
 def test_build_workstream_source_footnote_renders_source_dates_and_dedups() -> None:

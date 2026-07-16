@@ -9,7 +9,7 @@ import typer
 
 from src.commands.gather_pipeline.ado_pipeline_stage import _parse_datetime, _roll_query_value_history
 from src.commands.gather_workiq_helpers import _truncate_signal_text
-from src.core.ado_client import ADOClient
+from src.core.ado_client import ADO_WIQL_DEFAULT_TOP, ADOClient
 from src.core.ado_discovery import expand_with_linked_items as _expand_with_linked_items
 from src.core.exceptions import AuthError, QueryError
 from src.core.m365_payload_support import optional_string as _optional_string
@@ -79,6 +79,14 @@ def load_wiql_golden_query_signals(
             )
             raise
         ado_calls += 1
+        # ADF-W2.1 (Section 8.4.2): a capped WIQL result is a completeness
+        # finding, not just a log line -- is_degraded/cap_reached ride the
+        # existing query-state sink already consumed by report/doctor/scorecard.
+        # Compares against ADO_WIQL_DEFAULT_TOP (the cap this call site
+        # relies on client.execute_wiql's default for) rather than passing a
+        # new on_pagination callback, so every pre-existing fake ADO client
+        # in the test suite keeps working unchanged.
+        cap_reached = len(work_item_ids) >= ADO_WIQL_DEFAULT_TOP
         record_ado_wiql_query_state(
             query_state_sink,
             query,
@@ -86,6 +94,7 @@ def load_wiql_golden_query_signals(
             as_of=as_of,
             duration_ms=int(round((perf_counter() - started_at) * 1000)),
             previous_state=(previous_query_states or {}).get(query.id),
+            cap_reached=cap_reached,
         )
         all_seed_ids.update(work_item_ids)
         preview_refs = tuple(f"WI:{work_item_id}" for work_item_id in work_item_ids[:10])
@@ -207,6 +216,7 @@ def record_ado_wiql_query_state(
     duration_ms: int,
     error: str | None = None,
     previous_state: dict[str, Any] | None = None,
+    cap_reached: bool = False,
 ) -> None:
     if query_state_sink is None:
         return
@@ -225,7 +235,11 @@ def record_ado_wiql_query_state(
         # set is_degraded=True so downstream readers (report, doctor,
         # scorecard) can render the data as degraded rather than as
         # `work_item_count=0` (which is misleadingly normal-looking).
-        "is_degraded": error is not None,
+        # ADF-W2.1: a capped WIQL result is the same kind of "don't trust
+        # this number at face value" situation, so it degrades the query
+        # state too, with its own explicit reason distinct from an error.
+        "is_degraded": error is not None or cap_reached,
+        "cap_reached": cap_reached,
     }
     if value_last_4:
         state["value_last_4"] = value_last_4

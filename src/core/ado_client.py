@@ -10,7 +10,7 @@ import sys
 import threading
 import time
 from datetime import date, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any, Callable
 from urllib.parse import quote
 
 import requests
@@ -21,10 +21,29 @@ from src.adapters.microsoft.ado_runtime import load_ado_credential_types
 from src.core.exceptions import AuthError, CredentialExpired, QueryError, QueryTimeoutError
 from src.core.work_item_states import TERMINAL_WORK_ITEM_STATES_ADO
 
+if TYPE_CHECKING:
+    # ADF-W2.1: type-only import. A module-level runtime import here would
+    # create a real circular import (integration_types.py imports
+    # PullRequestSummary from ado_pr_client.py, which imports ADOClient from
+    # this module) -- each pagination method does its own local import of
+    # PaginationOutcome instead, at the point it actually constructs one.
+    from src.core.integration_types import PaginationOutcome
+
 AZURE_IDENTITY_AVAILABLE, AZURE_CREDENTIAL_TYPES = load_ado_credential_types()
 
 
 ADO_RESOURCE = "499b84ac-1321-427f-aa17-267ca6975798/.default"
+
+#: ADF-W2.1 (Section 8.4.2): default WIQL result cap, made an explicit,
+#: importable constant so callers that need to detect "the result was
+#: capped, not just naturally small" can compare against the exact value
+#: actually used rather than guessing.
+ADO_WIQL_DEFAULT_TOP = 2000
+
+#: Safety bound on multi-page fetch loops (revisions/comments/PRs) -- distinct
+#: from each provider's per-page size. Reached only for a work item with an
+#: implausibly large history; see PaginationOutcome.is_truncated.
+_DEFAULT_MAX_PAGES = 10
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +71,11 @@ class ADOClient:
         self.auth_method = "unknown"
         self._credential: Any | None = None
         self._session = self._build_session()
+        # ADF-W1.1: a separate, non-retrying session for mutations. Retrying a
+        # POST/PATCH whose response was lost (timeout, connection reset) can
+        # duplicate or double-apply a write; reads keep automatic retry via
+        # ``_session``, mutations never do (INV-ADF-9).
+        self._mutation_session = self._build_mutation_session()
         self._odata_base_url = (
             f"https://analytics.dev.azure.com/{organization}/{project}/_odata/v4.0-preview/"
         )
@@ -259,15 +283,75 @@ class ADOClient:
             select_fields=select_fields,
         )
 
-    def list_work_item_revisions(self, work_item_id: int) -> list[dict[str, Any]]:
+    def list_work_item_revisions(
+        self,
+        work_item_id: int,
+        *,
+        page_size: int = 200,
+        max_pages: int = _DEFAULT_MAX_PAGES,
+        on_pagination: Callable[[PaginationOutcome], None] | None = None,
+    ) -> list[dict[str, Any]]:
+        """ADF-W2.1 (Section 8.4.2): pages via ``$top``/``$skip`` rather than
+        a single request. ``on_pagination``, if given, fires once with the
+        fetch's completeness outcome -- callers that don't care about
+        truncation (most of them; a work item rarely has >2000 revisions)
+        can omit it and simply receive the fully-paged result."""
         url = f"{self._rest_base_url}workItems/{work_item_id}/revisions?api-version=7.1"
-        response = self._request_json("GET", url)
-        return response.get("value", [])
+        all_rows: list[dict[str, Any]] = []
+        page_count = 0
+        is_truncated = False
+        skip = 0
+        while page_count < max_pages:
+            response = self._request_json("GET", url, params={"$top": str(page_size), "$skip": str(skip)})
+            page_rows = response.get("value", [])
+            all_rows.extend(page_rows)
+            page_count += 1
+            if len(page_rows) < page_size:
+                break
+            skip += page_size
+        else:
+            is_truncated = True
+        if on_pagination is not None:
+            from src.core.integration_types import PaginationOutcome
 
-    def list_work_item_comments(self, work_item_id: int) -> list[dict[str, Any]]:
-        url = f"{self._rest_base_url}workItems/{work_item_id}/comments?api-version=7.1-preview.4"
-        response = self._request_json("GET", url)
-        return response.get("comments", [])
+            on_pagination(PaginationOutcome(total_fetched=len(all_rows), page_count=page_count, is_truncated=is_truncated))
+        return all_rows
+
+    def list_work_item_comments(
+        self,
+        work_item_id: int,
+        *,
+        max_pages: int = _DEFAULT_MAX_PAGES,
+        on_pagination: Callable[[PaginationOutcome], None] | None = None,
+    ) -> list[dict[str, Any]]:
+        """ADF-W2.1 (Section 8.4.2): follows the comments API's
+        ``continuationToken`` response header across pages, rather than
+        returning only the first page. ``on_pagination`` is the same
+        optional completeness callback as ``list_work_item_revisions``."""
+        all_comments: list[dict[str, Any]] = []
+        page_count = 0
+        is_truncated = False
+        continuation_token: str | None = None
+        while page_count < max_pages:
+            url = f"{self._rest_base_url}workItems/{work_item_id}/comments?api-version=7.1-preview.4"
+            params = {"continuationToken": continuation_token} if continuation_token else None
+            response = self._request_response("GET", url, params=params)
+            body = response.json()
+            page_comments = body.get("comments", [])
+            all_comments.extend(page_comments)
+            page_count += 1
+            continuation_token = response.headers.get("x-ms-continuationtoken")
+            if not continuation_token:
+                break
+        else:
+            is_truncated = True
+        if on_pagination is not None:
+            from src.core.integration_types import PaginationOutcome
+
+            on_pagination(
+                PaginationOutcome(total_fetched=len(all_comments), page_count=page_count, is_truncated=is_truncated)
+            )
+        return all_comments
 
     def get_saved_query(self, query_id: str) -> dict[str, Any]:
         encoded_query = quote(query_id, safe="/")
@@ -315,7 +399,19 @@ class ADOClient:
         payload = self._request_json("GET", f"{self._odata_base_url}WorkItems", params=params)
         return int(payload.get("@odata.count", 0))
 
-    def execute_wiql(self, wiql: str, top: int = 2000) -> list[int]:
+    def execute_wiql(
+        self,
+        wiql: str,
+        top: int = ADO_WIQL_DEFAULT_TOP,
+        *,
+        on_pagination: Callable[[PaginationOutcome], None] | None = None,
+    ) -> list[int]:
+        """WIQL's endpoint has no ``$skip``/continuation mechanism -- unlike
+        revisions/comments/PRs, a result at the cap cannot be paged further
+        without a different querying strategy (date/ID-range splitting).
+        ``on_pagination``, if given, still fires so a cap hit is a
+        structured, actionable signal (ADF-W2.1, Section 8.4.2) rather than
+        only the pre-existing log line below."""
         url = f"{self._rest_base_url}wiql?api-version=7.1&$top={top}"
         response = self._request_json("POST", url, json={"query": wiql})
         ordered_ids: list[int] = []
@@ -343,12 +439,17 @@ class ADOClient:
                 seen_ids.add(work_item_id)
                 ordered_ids.append(work_item_id)
 
-        if len(ordered_ids) >= top:
+        is_capped = len(ordered_ids) >= top
+        if is_capped:
             logging.getLogger(__name__).warning(
                 "WIQL query returned %d IDs at cap %d — results are likely truncated; review query scope",
                 len(ordered_ids),
                 top,
             )
+        if on_pagination is not None:
+            from src.core.integration_types import PaginationOutcome
+
+            on_pagination(PaginationOutcome(total_fetched=len(ordered_ids), page_count=1, is_truncated=is_capped))
         return ordered_ids
 
     def list_team_iterations(self, timeframe: str | None = None, team: str | None = None) -> list[dict[str, Any]]:
@@ -385,21 +486,55 @@ class ADOClient:
         values = response.get("value")
         return [value for value in values if isinstance(value, dict)] if isinstance(values, list) else []
 
-    def list_pull_requests(self, repository_id: str, *, status: str = "active", top: int = 100) -> list[dict[str, Any]]:
+    def list_pull_requests(
+        self,
+        repository_id: str,
+        *,
+        status: str = "active",
+        top: int = 100,
+        max_pages: int = _DEFAULT_MAX_PAGES,
+        on_pagination: Callable[[PaginationOutcome], None] | None = None,
+    ) -> list[dict[str, Any]]:
+        """ADF-W2.1 (Section 8.4.2): pages via ``$top``/``$skip`` across the
+        full result set rather than returning only the first ``top`` PRs --
+        the same pagination loop ``list_work_item_revisions`` and
+        ``ADOPRClient.list_pull_requests`` already use. ``top`` is the page
+        size; ``max_pages`` is the safety cap (distinct from each provider's
+        per-page size). ``on_pagination``, if given, fires once with the
+        fetch's completeness outcome. Callers that don't care about truncation
+        can omit it and simply receive the fully-paged result."""
         url = (
             f"https://dev.azure.com/{self.organization}/{self.project}"
             f"/_apis/git/repositories/{quote(str(repository_id), safe='')}/pullrequests?api-version=7.1"
         )
-        response = self._request_json(
-            "GET",
-            url,
-            params={
-                "searchCriteria.status": status,
-                "$top": str(top),
-            },
-        )
-        values = response.get("value")
-        return [value for value in values if isinstance(value, dict)] if isinstance(values, list) else []
+        all_rows: list[dict[str, Any]] = []
+        page_count = 0
+        is_truncated = False
+        skip = 0
+        while page_count < max_pages:
+            response = self._request_json(
+                "GET",
+                url,
+                params={
+                    "searchCriteria.status": status,
+                    "$top": str(top),
+                    "$skip": str(skip),
+                },
+            )
+            page_rows = response.get("value", [])
+            if isinstance(page_rows, list):
+                all_rows.extend(row for row in page_rows if isinstance(row, dict))
+            page_count += 1
+            if len(page_rows) < top:
+                break
+            skip += top
+        else:
+            is_truncated = True
+        if on_pagination is not None:
+            from src.core.integration_types import PaginationOutcome
+
+            on_pagination(PaginationOutcome(total_fetched=len(all_rows), page_count=page_count, is_truncated=is_truncated))
+        return all_rows
 
     def list_repositories(self) -> list[dict[str, Any]]:
         url = f"https://dev.azure.com/{self.organization}/{self.project}/_apis/git/repositories?api-version=7.1"
@@ -481,6 +616,7 @@ class ADOClient:
         return result
 
     def _build_session(self) -> requests.Session:
+        """Read session: safe to retry (GET, and the read-only WIQL/batch POSTs)."""
         session = requests.Session()
         retry = Retry(
             total=5,
@@ -490,6 +626,21 @@ class ADOClient:
             respect_retry_after_header=True,
         )
         adapter = HTTPAdapter(max_retries=retry)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        return session
+
+    def _build_mutation_session(self) -> requests.Session:
+        """ADF-W1.1 (INV-ADF-9): mutation session with no automatic retry.
+
+        A lost response after a committed server-side write must never be
+        silently retried by the transport layer -- that is exactly how a
+        duplicate work item gets created. Rate-limit courtesy (429) is
+        handled once, explicitly, by the caller (``ADOWriter._request_json``)
+        rather than via a transparent retry loop here.
+        """
+        session = requests.Session()
+        adapter = HTTPAdapter(max_retries=0)
         session.mount("https://", adapter)
         session.mount("http://", adapter)
         return session
@@ -542,6 +693,12 @@ class ADOClient:
         }
 
     def _request_json(self, method: str, url: str, **kwargs: Any) -> dict[str, Any]:
+        return self._request_response(method, url, **kwargs).json()
+
+    def _request_response(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+        """ADF-W2.1: split out from ``_request_json`` so pagination loops that
+        need response HEADERS (e.g. comments' ``continuationToken``), not just
+        the parsed body, can share the same auth/error handling."""
         response = self._request_with_progress(method, url, **kwargs)
         if response.status_code == 401:
             www_auth = response.headers.get("WWW-Authenticate", "")
@@ -556,7 +713,7 @@ class ADOClient:
             raise QueryError(
                 f"ADO request failed with status {response.status_code}: {response.text[:500]}"
             )
-        return response.json()
+        return response
 
     def _request_with_progress(self, method: str, url: str, **kwargs: Any):
         if not self.show_progress:

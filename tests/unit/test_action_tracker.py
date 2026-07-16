@@ -6,7 +6,9 @@ from pathlib import Path
 import pytest
 
 from src.core.action_tracker import assess_action_staleness, append_action, associate_action_with_work_item, build_action_id, load_actions, match_action_to_ado_update, update_action_status
+from src.core.fact_lineage_coverage import has_fact_provenance
 from src.core.models_v2 import ActionItem, ActionSourceType, ActionStatus, TrajectoryPoint
+from src.core.operation_trace import load_operation_trace
 from src.core.program_fact_store import load_program_facts, project_action_items
 
 
@@ -50,6 +52,35 @@ def test_update_action_status_applies_latest_status_and_resolution_note(tmp_path
     assert loaded[0].resolution_note == "Owner confirmed completion."
     assert project_action_items(snapshot)[0].status is ActionStatus.DONE
     assert project_action_items(snapshot)[0].resolution_note == "Owner confirmed completion."
+
+
+def test_append_action_threads_source_signal_id_onto_the_fact_revision(tmp_path: Path) -> None:
+    # ADF-W2.4/W2.5: a signal-derived action's source_signal_id must land on
+    # the ProgramFactRevision's own top-level source_signal_ids field (what
+    # fact_lineage_coverage.py's classifier actually inspects), not just
+    # inside the payload dict the ActionItem projection round-trips through.
+    action = _sample_action()
+    append_action("demo", action, programs_root=tmp_path)
+
+    snapshot = load_program_facts("demo", as_of=datetime.now(timezone.utc), db_root=tmp_path)
+    action_facts = [fact for fact in snapshot.facts if fact.fact_type == "action.item"]
+
+    assert len(action_facts) == 1
+    assert action_facts[0].source_signal_ids == ("signal-1",)
+    assert has_fact_provenance(action_facts[0]) is True
+
+
+def test_append_action_records_trace_link_when_correlation_id_present(tmp_path: Path) -> None:
+    # ADF-W2.12: a gather-cycle correlation id threaded down to append_action
+    # must produce a real stage="fact" OperationTrace link, no-op when absent
+    # (the pre-existing default, so no other call site's behavior changes).
+    action = _sample_action()
+    append_action("demo", action, programs_root=tmp_path, correlation_id="gather-corr-1")
+
+    trace = load_operation_trace("demo", "gather-corr-1", programs_root=tmp_path)
+    assert trace is not None
+    assert len(trace.fact_refs) == 1
+    assert f"action.item:{action.id}" in trace.fact_refs[0]
 
 
 def test_associate_action_with_work_item_updates_fact_store_projection(tmp_path: Path) -> None:

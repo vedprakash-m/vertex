@@ -777,12 +777,21 @@ def generate_triage_report(
         # Emit alias facts for all resolvable entity_refs (idempotent)
         try:
             _all_refs: set[str] = {ref for fact in program_facts.facts for ref in getattr(fact, "entity_refs", ())}
+            # ADF-W2.6: resolve_with_binding() so a near-tied ambiguous fuzzy
+            # match is never silently aliased to whichever candidate scored
+            # marginally higher -- ambiguous.resolved_entity is already None.
             _resolved_entities = tuple(
                 e for ref in _all_refs
-                if (e := _entity_registry.resolve(ref)) is not None
+                if (e := _entity_registry.resolve_with_binding(ref).resolved_entity) is not None
             )
             if _resolved_entities:
-                _emit_alias_facts(program_id, _resolved_entities, programs_root=programs_root, emitted_by="triage_alias_learning")
+                # ADF-W2.12: one correlation id for this triage run's alias
+                # emission burst -- can write many new entity.alias facts in
+                # one invocation, a real multi-fact chain worth tracing.
+                _emit_alias_facts(
+                    program_id, _resolved_entities, programs_root=programs_root, emitted_by="triage_alias_learning",
+                    correlation_id=uuid.uuid4().hex,
+                )
         except Exception:
             pass  # Alias emission must never block triage
         # Write unresolved refs to alias_curation.yaml for human review (config floor preserved)
@@ -1401,7 +1410,7 @@ def _build_milestone_triage_lines(
     attention_count = sum(
         1
         for assessment in assessments
-        if assessment.computed_health in {MilestoneStatus.AT_RISK, MilestoneStatus.MISSED}
+        if assessment.computed_health in {MilestoneStatus.AT_RISK, MilestoneStatus.MISSED, MilestoneStatus.UNKNOWN}
     )
     attention: tuple[str, ...] = ()
     if attention_count:

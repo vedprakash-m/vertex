@@ -75,9 +75,11 @@ def _compare_with_golden(name: str, actual: str, update: bool) -> None:
         )
 
 
-def test_ai_workstream_blurb_snapshot(update_golden: bool) -> None:
+def test_ai_workstream_blurb_snapshot(update_golden: bool, tmp_path: Path) -> None:
     result = generate_workstream_blurb(
         client=_FakeAIClient("NEW Cache warmup safeguard is ready."),
+        program_id="acme",
+        programs_root=tmp_path,
         workstream_name="Deployment",
         items=(
             _item(101, "Cache warmup safeguard"),
@@ -107,11 +109,13 @@ def test_ai_workstream_blurb_snapshot(update_golden: bool) -> None:
     _compare_with_golden("ai_workstream_blurb", actual, update_golden)
 
 
-def test_ai_exec_summary_snapshot(update_golden: bool) -> None:
+def test_ai_exec_summary_snapshot(update_golden: bool, tmp_path: Path) -> None:
     result = draft_exec_summary(
         client=_FakeAIClient(
             "Risk rose for Cache warmup safeguard. Deployment blocker entered scope. Repairs incident closed after mitigation."
         ),
+        program_id="acme",
+        programs_root=tmp_path,
         items=(
             _item(101, "Cache warmup safeguard", risk_level=RiskLevel.HIGH),
             _item(102, "Deployment blocker", risk_level=RiskLevel.HIGH),

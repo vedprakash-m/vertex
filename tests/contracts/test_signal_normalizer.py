@@ -197,6 +197,20 @@ class TestBackfillEntityRefs:
         result = backfill_entity_refs(sig, registry)
         assert result.entity_refs == ("existing-ref",)
 
+    def test_backfill_ambiguous_ref_is_not_added(self):
+        """ADF-W2.6: a near-tied fuzzy match must not be backfilled as if it
+        were a confident resolution -- Section 8.14.3's "ambiguous entities
+        remain unresolved" applies here too."""
+        from src.core.entity_registry import EntityRegistry
+        from src.core.program_reality import CanonicalEntity
+
+        entity_a = CanonicalEntity(entity_id="t1", entity_type="person", canonical_name="Jordan Rivers", aliases=(), scope="program")
+        entity_b = CanonicalEntity(entity_id="t2", entity_type="person", canonical_name="Jordan Rivera", aliases=(), scope="program")
+        registry = EntityRegistry(program_entities=(entity_a, entity_b), org_entities=())
+        sig = _make_signal(raw_ref="Jordan River", entity_refs=())
+        result = backfill_entity_refs(sig, registry)
+        assert result.entity_refs == ()
+
 
 # ---------------------------------------------------------------------------
 # Batch normalization

@@ -22,6 +22,7 @@ it is unit-tested without touching real programs.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -195,6 +196,7 @@ def _process_jsonl_sidecar(
     retention: RetentionClass,
     supports_excise: bool,
     apply: bool,
+    eligibility_field: str | None = None,
 ) -> PurgeRecord:
     """Walk a single JSONL sidecar, purging or tombstoning expired rows."""
     rows_examined = 0
@@ -231,7 +233,7 @@ def _process_jsonl_sidecar(
             if not isinstance(row, dict):
                 kept.append(line)
                 continue
-            ts = _row_timestamp(row)
+            ts = _parse_iso(row.get(eligibility_field)) if eligibility_field else _row_timestamp(row)
             if ts is None or ts >= cutoff:
                 kept.append(line)
                 continue
@@ -256,6 +258,58 @@ def _process_jsonl_sidecar(
         rows_tombstoned=rows_tombstoned,
         bytes_freed=bytes_freed,
         applied=apply,
+    )
+
+
+def _process_content_addressed_directory(
+    directory: Path,
+    *,
+    glob_pattern: str,
+    cutoff: datetime,
+    retention: RetentionClass,
+    timestamp_field: str,
+    apply: bool,
+) -> PurgeRecord:
+    """Walk a directory of individual content-addressed JSON files (one
+    file per hash, e.g. ``runtime/context_manifests/<hash>.json``), age-
+    checking each file's own ``timestamp_field`` value and deleting the
+    file outright when eligible. Genuinely different shape from
+    ``_process_jsonl_sidecar``'s single-file-of-many-rows model -- there is
+    no tombstone concept here (a content-addressed file is either present
+    or gone, matching every other content-addressed artifact in this
+    codebase, e.g. ``ai_result_cache.py``)."""
+    rows_examined = 0
+    rows_purged = 0
+    bytes_freed = 0
+
+    if not directory.is_dir():
+        return PurgeRecord(
+            artifact_path=str(directory), retention=retention, rows_examined=0,
+            rows_purged=0, rows_tombstoned=0, bytes_freed=0, applied=apply,
+        )
+
+    for file_path in sorted(directory.glob(glob_pattern)):
+        if not file_path.is_file():
+            continue
+        rows_examined += 1
+        try:
+            payload = json.loads(file_path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        ts = _parse_iso(payload.get(timestamp_field))
+        if ts is None or ts >= cutoff:
+            continue
+        size = file_path.stat().st_size
+        if apply:
+            file_path.unlink()
+        bytes_freed += size
+        rows_purged += 1
+
+    return PurgeRecord(
+        artifact_path=str(directory), retention=retention, rows_examined=rows_examined,
+        rows_purged=rows_purged, rows_tombstoned=0, bytes_freed=bytes_freed, applied=apply,
     )
 
 
@@ -292,13 +346,23 @@ def run_purge(
             skipped.append(f"{rule.artifact_path}=<unresolved>")
             continue
         for path in paths:
-            if path.suffix == ".jsonl":
+            if rule.directory_glob is not None:
+                record = _process_content_addressed_directory(
+                    path,
+                    glob_pattern=rule.directory_glob,
+                    cutoff=cutoff,
+                    retention=rule.retention,
+                    timestamp_field=rule.eligibility_field or "compiled_at",
+                    apply=apply,
+                )
+            elif path.suffix == ".jsonl":
                 record = _process_jsonl_sidecar(
                     path,
                     cutoff=cutoff,
                     retention=rule.retention,
                     supports_excise=rule.supports_excise,
                     apply=apply,
+                    eligibility_field=rule.eligibility_field,
                 )
             else:
                 # Non-JSONL sidecars (SQLite, YAML config) are NOT purged

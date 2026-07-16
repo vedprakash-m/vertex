@@ -84,7 +84,7 @@ def outcome_category(result: object) -> str:
     if isinstance(result, Success):
         return "complete"
     if isinstance(result, Incomplete):
-        if result.reason in ("budget_stop", "page_cut", "item_over_ceiling"):
+        if result.reason.startswith(("budget_stop", "page_cut", "item_over_ceiling")):
             return "truncated_by_budget"
         return "provider_limited"
     if isinstance(result, RateLimited):

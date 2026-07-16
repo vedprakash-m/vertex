@@ -1,7 +1,18 @@
 from __future__ import annotations
 
-from src.ai.decision_brief_advisor import _FALLBACK_PROMPT, _load_prompt_template, _parse_advice
+from pathlib import Path
+from typing import Any, Callable
+
+from src.ai.decision_brief_advisor import (
+    _FALLBACK_PROMPT,
+    _build_evidence_spans,
+    _load_prompt_template,
+    _parse_advice,
+    advise_on_decision_brief,
+    advise_on_decision_brief_via_context_gateway,
+)
 from src.ai.prompt_registry import PromptRegistryError
+from src.core.decision_brief_engine import DecisionBrief, DecisionItem, DecisionSignal
 
 
 def test_parse_advice_scrubs_pii_from_reasoning_and_suggested_text() -> None:
@@ -42,3 +53,207 @@ def test_load_prompt_template_falls_back_when_registry_resolution_fails(monkeypa
     )
 
     assert _load_prompt_template() == _FALLBACK_PROMPT
+
+
+class _FakeClient:
+    """ADF-W2.9 P5: minimal LLMProvider double for the context-gateway pilot path."""
+
+    def __init__(self, *, response: dict[str, Any] | None = None, error: Exception | None = None) -> None:
+        self.response = response
+        self.error = error
+        self.calls = 0
+        self.last_user: str | None = None
+
+    def chat(self, system: str, user: str, *, max_tokens: int = 800, prompt_version: str | None = None) -> str:
+        raise NotImplementedError
+
+    def structured(
+        self,
+        system: str,
+        user: str,
+        *,
+        parser: Callable[[dict[str, Any]], Any],
+        max_tokens: int = 800,
+        prompt_version: str | None = None,
+    ) -> Any:
+        self.calls += 1
+        self.last_user = user
+        if self.error is not None:
+            raise self.error
+        return parser(self.response)
+
+
+def _item(**overrides: Any) -> DecisionItem:
+    defaults: dict[str, Any] = dict(
+        section_id="risks",
+        section_title="Risks",
+        current_text="The vendor delivery risk remains open.",
+        proposed_text="Escalate the vendor delivery risk to leadership.",
+        evidence_delta_lines=("Vendor confirmed a two-week slip.",),
+        top_signals=(
+            DecisionSignal(signal_id="sig-1", text="Vendor email confirms slip.", timestamp="2026-06-01", source="email"),
+            DecisionSignal(signal_id="sig-2", text="Standup note: vendor blocked.", timestamp="2026-06-02", source="meeting"),
+        ),
+        vitality_summary="declining",
+        confidence="medium",
+        kpi_summary="On-time delivery: 62% (down from 80%).",
+        stale_claims=("Vendor said delivery was on track (superseded).",),
+        accept_command="vertex accept --id risks",
+        reject_command="vertex reject --id risks",
+        accept_modified_command="vertex accept --id risks --modified",
+    )
+    defaults.update(overrides)
+    return DecisionItem(**defaults)
+
+
+def _brief(*items: DecisionItem) -> DecisionBrief:
+    return DecisionBrief(
+        issue_number=12,
+        edition_name="acme_weekly",
+        generated_at="2026-06-06 12:00",
+        items=tuple(items),
+        total_pending=len(items),
+        ai_enriched=False,
+    )
+
+
+def _valid_response() -> dict[str, Any]:
+    return {
+        "verdict": "ACCEPT",
+        "reasoning": "Evidence and stale-claim resolution support acceptance.",
+        "suggested_text": None,
+    }
+
+
+def test_build_evidence_spans_separates_required_from_optional() -> None:
+    required, optional = _build_evidence_spans(_item())
+
+    required_ids = {span.evidence_id for span in required}
+    assert required_ids == {"current_text", "evidence_delta", "prior_ai_proposal", "stale_claims"}
+    assert all(span.required for span in required)
+
+    optional_ids = {span.evidence_id for span in optional}
+    assert optional_ids == {"signal_sig-1", "signal_sig-2", "kpi_summary", "vitality_summary"}
+    assert all(not span.required for span in optional)
+    # Signals decay in salience by arrival order (approximates the old [:6] truncation intent).
+    signal_spans = sorted((s for s in optional if s.source_family == "signal"), key=lambda s: s.evidence_id)
+    assert signal_spans[0].salience_inputs["recency"] > signal_spans[1].salience_inputs["recency"]
+
+
+def test_context_gateway_happy_path_populates_advice(tmp_path: Path) -> None:
+    client = _FakeClient(response=_valid_response())
+
+    result = advise_on_decision_brief_via_context_gateway(
+        client=client, brief=_brief(_item()), program_id="xpf", programs_root=tmp_path / "programs",
+    )
+
+    assert result.ai_enriched is True
+    assert client.calls == 1
+    enriched = result.items[0]
+    assert enriched.verdict == "ACCEPT"
+    assert "acceptance" in enriched.verdict_reasoning
+    # The compiled prompt (not the old ad hoc builder) was sent to the client.
+    assert client.last_user is not None
+    assert "REQUIRED current_text" in client.last_user or "current_text" in client.last_user
+
+
+def test_context_gateway_degrades_gracefully_when_reserved_tokens_exceed_budget(tmp_path: Path) -> None:
+    client = _FakeClient(response=_valid_response())
+    # Varied words (not a single repeated char) so the tokenizer can't
+    # collapse the run into a handful of tokens -- this must genuinely
+    # blow the 6000-token input budget.
+    words = " ".join(f"word{i}" for i in range(20_000))
+    huge_item = _item(current_text=words)
+
+    result = advise_on_decision_brief_via_context_gateway(
+        client=client, brief=_brief(huge_item), program_id="xpf", programs_root=tmp_path / "programs",
+    )
+
+    assert result.ai_enriched is True  # brief-level flag still flips even if this item degrades
+    assert client.calls == 0  # ContextCompileRejected short-circuits before any provider call
+    assert result.items[0].verdict is None
+
+
+def test_context_gateway_rejects_response_via_schema_gateway(tmp_path: Path) -> None:
+    oversized_response = {
+        "verdict": "ACCEPT",
+        "reasoning": "x" * 200_001,
+        "suggested_text": None,
+    }
+    client = _FakeClient(response=oversized_response)
+
+    result = advise_on_decision_brief_via_context_gateway(
+        client=client, brief=_brief(_item()), program_id="xpf", programs_root=tmp_path / "programs",
+    )
+
+    assert client.calls == 1
+    assert result.items[0].verdict is None
+
+
+def test_advise_on_decision_brief_records_released_terminal_on_success(tmp_path: Path) -> None:
+    # ADF-W5.1/P7: decision_brief_advisor's baseline (production) path must
+    # record a durable QG-29 "released" terminal per item, same as
+    # risk_proposal_generator's release-audit contract.
+    from src.core.ledger.event_log import read_events
+
+    client = _FakeClient(response=_valid_response())
+
+    result = advise_on_decision_brief(
+        client=client, brief=_brief(_item()), program_id="acme", programs_root=tmp_path,
+    )
+
+    assert result.items[0].verdict == "ACCEPT"
+    events = read_events("acme", programs_root=tmp_path)
+    release_decisions = [event for event in events if event.event_type == "ai.release_decision.v1"]
+    assert release_decisions
+    assert release_decisions[-1].payload["terminal"] == "released"
+
+
+def test_advise_on_decision_brief_repeat_identical_request_hits_the_cache(tmp_path: Path) -> None:
+    # ADF-W5.1/P7: identical item content should be served from the AI
+    # result cache on the second call -- only the audit trail (ai_run_id,
+    # lifecycle events, release decision) is fresh per call.
+    client = _FakeClient(response=_valid_response())
+    brief = _brief(_item())
+
+    first = advise_on_decision_brief(client=client, brief=brief, program_id="acme", programs_root=tmp_path)
+    second = advise_on_decision_brief(client=client, brief=brief, program_id="acme", programs_root=tmp_path)
+
+    assert first.items[0].verdict == "ACCEPT"
+    assert second.items[0].verdict == "ACCEPT"
+    assert client.calls == 1
+
+
+def test_advise_on_decision_brief_different_items_do_not_hit_the_cache(tmp_path: Path) -> None:
+    client = _FakeClient(response=_valid_response())
+
+    advise_on_decision_brief(
+        client=client,
+        brief=_brief(_item(section_id="risks", current_text="The vendor delivery risk remains open.")),
+        program_id="acme",
+        programs_root=tmp_path,
+    )
+    advise_on_decision_brief(
+        client=client,
+        brief=_brief(_item(section_id="dependencies", current_text="A completely different section body.")),
+        program_id="acme",
+        programs_root=tmp_path,
+    )
+
+    assert client.calls == 2
+
+
+def test_advise_on_decision_brief_oversized_request_is_discarded_gracefully(tmp_path: Path) -> None:
+    # ADF-W5.1/P7: AISchemaGateway bounds must reject an oversized request
+    # payload before ever invoking the frontier provider -- and since this
+    # feature's existing contract is a graceful per-item degrade (never
+    # raises), the discard shows up as an unchanged item, not an exception.
+    client = _FakeClient(response=_valid_response())
+    oversized_item = _item(current_text="x" * 200_001)
+
+    result = advise_on_decision_brief(
+        client=client, brief=_brief(oversized_item), program_id="acme", programs_root=tmp_path,
+    )
+
+    assert client.calls == 0
+    assert result.items[0].verdict is None

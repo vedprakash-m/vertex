@@ -6,6 +6,7 @@ from src.core.ado_saved_query_helpers import (
     append_wiql_clause,
     bound_saved_query_wiql,
     load_saved_query_item_ids,
+    query_work_item_batch_rows,
     query_work_item_snapshot_history_rows,
 )
 from src.core.exceptions import QueryError
@@ -93,3 +94,63 @@ def test_query_work_item_snapshot_history_rows_batches_calls() -> None:
         ([1, 2], ("WorkItemId",), "2026-01-01"),
         ([3], ("WorkItemId",), "2026-01-01"),
     ]
+
+
+def test_query_work_item_batch_rows_happy_path_makes_one_call_per_batch() -> None:
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.calls: list[list[int]] = []
+
+        def query_work_items_batch(self, work_item_ids: list[int], fields: tuple[str, ...]) -> list[dict[str, object]]:
+            self.calls.append(list(work_item_ids))
+            return [{"id": i} for i in work_item_ids]
+
+    client = _FakeClient()
+    rows, ado_calls = query_work_item_batch_rows(client, [1, 2, 3], ("System.Id",), batch_size=2)
+
+    assert ado_calls == 2
+    assert rows == [{"id": 1}, {"id": 2}, {"id": 3}]
+    assert client.calls == [[1, 2], [3]]
+
+
+def test_query_work_item_batch_rows_isolates_a_single_bad_id_via_per_item_fallback() -> None:
+    """ADF-OM6: a single deleted/inaccessible id in a batch (Azure DevOps
+    raises for permission-denied ids rather than silently omitting them)
+    must not poison the rest of that batch -- reproduces the real Armada
+    onboarding failure (work item 17177322: 404 WorkItemUnauthorizedAccessException)."""
+    class _FakeClient:
+        def __init__(self, bad_id: int) -> None:
+            self.bad_id = bad_id
+            self.calls: list[list[int]] = []
+
+        def query_work_items_batch(self, work_item_ids: list[int], fields: tuple[str, ...]) -> list[dict[str, object]]:
+            self.calls.append(list(work_item_ids))
+            if self.bad_id in work_item_ids:
+                raise QueryError(
+                    f"ADO request failed with status 404: work item {self.bad_id} does not exist, "
+                    "or you do not have permissions to read it."
+                )
+            return [{"id": i} for i in work_item_ids]
+
+    client = _FakeClient(bad_id=17177322)
+    rows, ado_calls = query_work_item_batch_rows(
+        client, [36621625, 35156095, 17177322], ("System.Id",), batch_size=200
+    )
+
+    # The bad id is skipped; every good id in the same chunk still comes back.
+    assert {row["id"] for row in rows} == {36621625, 35156095}
+    # First call is the whole chunk (fails); then 3 individual retries.
+    assert client.calls[0] == [36621625, 35156095, 17177322]
+    assert client.calls[1:] == [[36621625], [35156095], [17177322]]
+    assert ado_calls == 4  # 1 failed batch call + 3 individual retries
+
+
+def test_query_work_item_batch_rows_all_ids_bad_returns_empty_not_raise() -> None:
+    class _FakeClient:
+        def query_work_items_batch(self, work_item_ids: list[int], fields: tuple[str, ...]) -> list[dict[str, object]]:
+            raise QueryError("ADO request failed with status 404: not found")
+
+    rows, ado_calls = query_work_item_batch_rows(_FakeClient(), [1, 2], ("System.Id",), batch_size=200)
+
+    assert rows == []
+    assert ado_calls == 3  # 1 failed batch + 2 individual retries, both fail

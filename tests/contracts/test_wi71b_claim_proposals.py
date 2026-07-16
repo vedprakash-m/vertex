@@ -53,14 +53,23 @@ def _make_registry(
     *,
     entity_type: str | None = None,
 ) -> MagicMock:
-    """Return a registry mock that resolves any alias to an entity of given type."""
+    """Return a registry mock that resolves any alias to an entity of given type.
+
+    Configures both ``resolve`` (legacy) and ``resolve_with_binding`` (ADF-W2.6,
+    the preferred path ``infer_commitment_direction`` now uses) so callers
+    exercise the same real code path production hits.
+    """
     registry = MagicMock()
+    binding = MagicMock()
     if entity_type is None:
         registry.resolve.return_value = None
+        binding.resolved_entity = None
     else:
         entity = MagicMock()
         entity.entity_type = entity_type
         registry.resolve.return_value = entity
+        binding.resolved_entity = entity
+    registry.resolve_with_binding.return_value = binding
     return registry
 
 
@@ -331,6 +340,36 @@ class TestDirectionInference:
     @pytest.mark.parametrize("entity_type", ["external_team", "external_person", "vendor", "partner", "customer"])
     def test_external_types_inbound(self, entity_type: str) -> None:
         assert infer_commitment_direction("x", _make_registry(entity_type=entity_type)) == "inbound"
+
+    def test_ambiguous_binding_against_a_real_registry_is_ambiguous_not_a_silent_pick(self) -> None:
+        """ADF-W2.6: two near-tied candidates must resolve to 'ambiguous',
+        not silently report whichever scored marginally higher's direction
+        with false confidence. Uses a real EntityRegistry (not a mock) --
+        the same close-alias ambiguity fixture shape as
+        test_entity_binding_holdout.py."""
+        from src.core.entity_registry import EntityRegistry
+        from src.core.program_reality import CanonicalEntity
+
+        registry = EntityRegistry(
+            program_entities=(
+                CanonicalEntity(entity_id="t1", entity_type="person", canonical_name="Jordan Rivers", aliases=(), scope="program"),
+                CanonicalEntity(entity_id="t2", entity_type="external_person", canonical_name="Jordan Rivera", aliases=(), scope="program"),
+            ),
+            org_entities=(),
+        )
+        assert infer_commitment_direction("Jordan River", registry) == "ambiguous"
+
+    def test_unambiguous_fuzzy_match_against_a_real_registry_resolves(self) -> None:
+        from src.core.entity_registry import EntityRegistry
+        from src.core.program_reality import CanonicalEntity
+
+        registry = EntityRegistry(
+            program_entities=(
+                CanonicalEntity(entity_id="p1", entity_type="person", canonical_name="Bob Builder", aliases=(), scope="program"),
+            ),
+            org_entities=(),
+        )
+        assert infer_commitment_direction("Bob Buildar", registry) == "outbound"
 
 
 # ---------------------------------------------------------------------------

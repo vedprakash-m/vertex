@@ -1322,6 +1322,47 @@ def test_knowledge_triage_refreshes_entity_resolution_from_current_registry(monk
     assert claim_payload["subject"] == "sku_generation:gen9"
 
 
+def test_effective_candidate_entity_resolution_surfaces_ambiguity(monkeypatch, tmp_path: Path) -> None:
+    """ADF-W2.6: when the current registry finds a genuine near-tied
+    ambiguous match for a candidate's raw_name, `_effective_candidate_entity_resolution`
+    surfaces that as its own `match_kind="ambiguous"` entry (resolved_entity_id
+    still None) instead of silently keeping the previously-recorded
+    (unresolved) resolution as if the registry state hadn't changed."""
+    from unittest.mock import patch
+
+    from src.commands.knowledge import _effective_candidate_entity_resolution
+    from src.core.entity_registry import EntityRegistry
+    from src.core.program_reality import CanonicalEntity
+
+    entity_a = CanonicalEntity(entity_id="t1", entity_type="person", canonical_name="Jordan Rivers", aliases=(), scope="program")
+    entity_b = CanonicalEntity(entity_id="t2", entity_type="person", canonical_name="Jordan Rivera", aliases=(), scope="program")
+    ambiguous_registry = EntityRegistry(program_entities=(entity_a, entity_b), org_entities=())
+
+    candidate = build_candidate(
+        candidate_id="cand-ambiguous",
+        scope="domain:storage-platform",
+        subject="Jordan River",
+        predicate="first_deployment",
+        value="2025-H2",
+        valid_from=datetime(2025, 7, 1, tzinfo=timezone.utc),
+        valid_until=None,
+        proposed_confidence=ConfidenceTier.AI_EXTRACTED,
+        source_ref=OperatorAssertionRef(asserted_by="operator", asserted_at=datetime(2026, 1, 1, tzinfo=timezone.utc)),
+        pipeline="extract",
+        extraction_confidence=0.95,
+        entity_resolution=(KnowledgeCandidateEntityResolution(raw_name="Jordan River", resolved_entity_id=None, match_kind="unresolved", score=0.0),),
+        corroborating_refs=(),
+        batch_id="batch-1",
+    )
+
+    with patch("src.commands.knowledge.EntityRegistry.load", return_value=ambiguous_registry):
+        effective = _effective_candidate_entity_resolution(candidate, programs_root=tmp_path / "programs")
+
+    assert len(effective) == 1
+    assert effective[0].match_kind == "ambiguous"
+    assert effective[0].resolved_entity_id is None
+
+
 def test_knowledge_triage_approve_allows_unexpired_skipped_candidate(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("cli.maybe_run_scheduled_compaction", lambda *_args, **_kwargs: None)
     programs_root = tmp_path / "programs"

@@ -3,7 +3,14 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from src.core.checkpoint_store import checkpoint_missing_relpaths, create_checkpoint_snapshot, list_checkpoints, restore_checkpoint
+from src.core.checkpoint_store import (
+    CHECKPOINT_DIR_PATHS,
+    CHECKPOINT_FILE_PATHS,
+    checkpoint_missing_relpaths,
+    create_checkpoint_snapshot,
+    list_checkpoints,
+    restore_checkpoint,
+)
 
 
 def test_create_and_restore_checkpoint_snapshot_round_trips_mutable_stores(tmp_path: Path) -> None:
@@ -52,6 +59,49 @@ def test_create_and_restore_checkpoint_snapshot_round_trips_mutable_stores(tmp_p
     assert (program_dir / "journal" / "workstream_associations.jsonl").read_text(encoding="utf-8") == '{"workstream":"baseline"}\n'
     assert (program_dir / "chronicle.jsonl").read_text(encoding="utf-8") == '{"event":"baseline"}\n'
     assert (program_dir / "overrides" / "issue_001.yaml").read_text(encoding="utf-8") == "top_3_now: []\n"
+
+
+def test_adf_w59_new_artifact_types_round_trip(tmp_path: Path) -> None:
+    # ADF-W5.9 (Section 15.2): tier measurements, workflow/value events,
+    # cockpit history, and outbox state must be included in checkpoint/
+    # restore drills.
+    assert "runtime/tier_decisions.jsonl" in CHECKPOINT_FILE_PATHS
+    assert "runtime/actuation/outbox.db" in CHECKPOINT_FILE_PATHS
+    assert "journal/proposal_audit.jsonl" in CHECKPOINT_FILE_PATHS
+    assert "_alerts/alerts.jsonl" in CHECKPOINT_FILE_PATHS
+    assert "runtime/cockpit" in CHECKPOINT_DIR_PATHS
+    assert "runtime/prefetch" in CHECKPOINT_DIR_PATHS
+    # The ledger itself is deliberately excluded (append-only/hash-chained;
+    # restoring an old snapshot over it would break chain continuity).
+    assert not any("ledger" in path for path in CHECKPOINT_FILE_PATHS)
+    assert not any("ledger" in path for path in CHECKPOINT_DIR_PATHS)
+
+    programs_root = tmp_path / "programs"
+    program_dir = programs_root / "demo"
+    (program_dir / "runtime" / "actuation").mkdir(parents=True, exist_ok=True)
+    (program_dir / "runtime" / "cockpit" / "history").mkdir(parents=True, exist_ok=True)
+    (program_dir / "runtime" / "prefetch").mkdir(parents=True, exist_ok=True)
+    (program_dir / "journal").mkdir(parents=True, exist_ok=True)
+    (program_dir / "_alerts").mkdir(parents=True, exist_ok=True)
+
+    (program_dir / "runtime" / "tier_decisions.jsonl").write_text('{"tier":"baseline"}\n', encoding="utf-8")
+    (program_dir / "journal" / "proposal_audit.jsonl").write_text('{"event":"baseline"}\n', encoding="utf-8")
+    (program_dir / "_alerts" / "alerts.jsonl").write_text('{"alert":"baseline"}\n', encoding="utf-8")
+    (program_dir / "runtime" / "cockpit" / "latest.json").write_text('{"program_id":"baseline"}\n', encoding="utf-8")
+
+    checkpoint_path = create_checkpoint_snapshot("demo", 1, programs_root=programs_root)
+
+    (program_dir / "runtime" / "tier_decisions.jsonl").write_text('{"tier":"mutated"}\n', encoding="utf-8")
+    (program_dir / "journal" / "proposal_audit.jsonl").write_text('{"event":"mutated"}\n', encoding="utf-8")
+    (program_dir / "_alerts" / "alerts.jsonl").write_text('{"alert":"mutated"}\n', encoding="utf-8")
+    (program_dir / "runtime" / "cockpit" / "latest.json").write_text('{"program_id":"mutated"}\n', encoding="utf-8")
+
+    restore_checkpoint("demo", checkpoint_path, programs_root=programs_root)
+
+    assert (program_dir / "runtime" / "tier_decisions.jsonl").read_text(encoding="utf-8") == '{"tier":"baseline"}\n'
+    assert (program_dir / "journal" / "proposal_audit.jsonl").read_text(encoding="utf-8") == '{"event":"baseline"}\n'
+    assert (program_dir / "_alerts" / "alerts.jsonl").read_text(encoding="utf-8") == '{"alert":"baseline"}\n'
+    assert (program_dir / "runtime" / "cockpit" / "latest.json").read_text(encoding="utf-8") == '{"program_id":"baseline"}\n'
 
 
 def test_checkpoint_snapshot_copies_channel_registry_sqlite_via_backup_api(tmp_path: Path) -> None:

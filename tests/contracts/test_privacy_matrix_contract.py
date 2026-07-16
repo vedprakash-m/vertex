@@ -36,7 +36,7 @@ from src.core.privacy_matrix import (
 
 # ----- Spec ↔ code sync -----
 
-# The 14 known sidecar paths in the markdown matrix (Section 3 of
+# The 25 known sidecar paths in the markdown matrix (Section 3 of
 # `governance/privacy-matrix.md`). If you add a sidecar to either, you must
 # update the other AND this list.
 SPEC_SIDECAR_PATHS: tuple[str, ...] = (
@@ -55,6 +55,18 @@ SPEC_SIDECAR_PATHS: tuple[str, ...] = (
     "runtime/gather_state.json",
     "external_dependencies.jsonl",
     "ai/llm_trace_full_io.jsonl",
+    # ADF-W0.16 (ADR-0015, 2026-07-13):
+    "nudge/drafts/<solicitation_id>.eml",
+    "nudge/replies/<message_id>.eml",
+    "_feedback/context_gap_solicitations.jsonl",
+    "runtime/program_synthesis/<ai_run_id>.json",
+    "workstream_registry.yaml",
+    # ADF-W5.9 (2026-07-14):
+    "runtime/tier_decisions.jsonl",
+    "_state/ai_telemetry.jsonl",
+    "runtime/run_telemetry.jsonl",
+    "_alerts/alerts.jsonl",
+    "runtime/context_manifests",
 )
 
 
@@ -145,6 +157,35 @@ def test_every_sidecar_rule_has_excise_consistency() -> None:
             continue
         # external_dependencies has no PII; excise is unnecessary.
         if rule.artifact_path == "external_dependencies.jsonl":
+            assert not rule.supports_excise
+            continue
+        # ADF-W0.16 (ADR-0015): cooldown log has no PII (id/fingerprint/timestamp only).
+        if rule.artifact_path == "_feedback/context_gap_solicitations.jsonl":
+            assert not rule.supports_excise
+            continue
+        # ADF-W0.16 (ADR-0015): aggregated business content only, no PII.
+        if rule.artifact_path == "runtime/program_synthesis/<ai_run_id>.json":
+            assert not rule.supports_excise
+            continue
+        # ADF-W0.16 (ADR-0015): live overwrite-in-place config file (like
+        # program.yaml), not a rotating audit log — operator edits/redacts
+        # the field directly instead of a tombstone; same rationale as
+        # runtime/gather_state.json above.
+        if rule.artifact_path == "workstream_registry.yaml":
+            continue
+        # ADF-W5.9: the four raw-telemetry JSONL sidecars this session's ADF
+        # work introduced hold no PII (routing decisions, provider/latency/
+        # cost metrics, channel performance, alert metadata) — purge is
+        # outright deletion, no tombstone needed, same rationale as
+        # migration_log.jsonl/external_dependencies.jsonl above.
+        if rule.artifact_path in (
+            "runtime/tier_decisions.jsonl",
+            "_state/ai_telemetry.jsonl",
+            "runtime/run_telemetry.jsonl",
+            "_alerts/alerts.jsonl",
+            "runtime/context_manifests",
+        ):
+            assert rule.classification == DataClassification.INTERNAL
             assert not rule.supports_excise
             continue
         # All other sidecars (CONFIDENTIAL + PII holding append-only audit

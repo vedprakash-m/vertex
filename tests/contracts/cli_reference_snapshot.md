@@ -50,6 +50,7 @@ Vertex hybrid journal automation CLI.
 | `freshness` |  |
 | `fleet` |  |
 | `gather` |  |
+| `prefetch` |  |
 | `history` |  |
 | `investigate` |  |
 | `ingest-update` | Parse a compact-update EML and stage ContextUpdateProposals (γ-Read Phase 3). |
@@ -90,14 +91,18 @@ Vertex hybrid journal automation CLI.
 | `actions` | List and review extracted actions. |
 | `actuate` | Governed actuation — review proposals and execute approved ones. |
 | `ado` | ADO diagnostics and update workflows. |
+| `ai-proposals` | Review AI-generated proposals: risk, meeting action, top-three, governance decision brief, dependency blast radius. |
 | `admin` | Vertex operator and debug commands. |
 | `assertion` | Author telemetry assertions for L1 reality evaluation. |
 | `assumptions` | Manage the program assumptions register. |
 | `claims` | List and resolve tracked claims and decision asks. |
+| `cockpit` | Program/platform/economics/value cockpit (read-only projection). |
 | `calibration` | Inspect historical claim calibration. |
 | `commitment` | Manage program commitments (inbound/outbound). |
 | `context` | NCFL context proposal extraction and review. |
 | `config` | Inspect and update governed program configuration. |
+| `decision-brief-pilot` | ADF-W2.9 P5: blind A/B comparison of decision-brief-advisor's ContextCompiler/AISchemaGateway-wired pilot path against the current baseline. |
+| `program-synthesizer-pilot` | ADF-W2.9: blind A/B comparison of program_synthesizer's ContextCompiler/AISchemaGateway-wired pilot path against the current baseline. |
 | `connectors` | External connector management (FR-SG-48). |
 | `audit` | Inspect audit history and autonomy governance state. |
 | `decisions` | Manage the program decision register. |
@@ -412,6 +417,7 @@ Run vertex doctor --context to see the LT deck freshness status.
 | --issue INTEGER | integer | No |  | Issue number required by --flip-parity. |
 | --charts | boolean | No | False | Validate chart cache TTL vs edition cadence, attachment targets, exec-summary uniqueness, and renderer IDs. |
 | --source-waivers | boolean | No | False | Audit programs/<id>/source_waivers.yaml against vertex/policies/source_waivers.schema.yaml (D-32). |
+| --schedule-health | boolean | No | False | Check whether scheduled prefetch/cockpit-build artifacts are present and fresh (ADF-W5.10). |
 | --watch-sources | boolean | No | False | Validate selected vertex watch signal sources without starting the polling loop. |
 | --source TEXT | text | No |  | Watch signal source to validate with --watch-sources. Repeat or use comma-separated values: ado, workiq, kusto, analytics, sprints, icm. |
 | --catchup-log | boolean | No | False | Show recent catchup failures or truncation events from _feedback/usage_log.jsonl. |
@@ -540,6 +546,19 @@ Extract structured evidence from emails and transcripts via WorkIQ.
 | --verbose | boolean | No | False | Write structured gather traces under publications/<program>/observability/. |
 | --facts-only | boolean | No | False | Skip full gather; only mirror current program facts into the fact store (FR-SG-61). |
 | --extract-evidence | boolean | No | False | Run ContentExtractionAgent on transcript signals to populate WorkstreamEvidence. Requires --workiq. Off by default until validated. |
+
+### `vertex prefetch`
+
+**Usage:** `vertex prefetch [OPTIONS]`
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | Yes |  | Program id, e.g. xpf. |
+| --edition TEXT | text | No |  | Edition id to resolve item context from (defaults to the program's first edition). |
+| --channel TEXT | text | No | workiq | Prefetch channel (only 'workiq' is implemented). |
+| --ttl-seconds INTEGER | integer | No | 3600 | Snapshot freshness window. |
 
 ### `vertex history`
 
@@ -1349,6 +1368,168 @@ ADO diagnostics and update workflows.
 | --repository-name TEXT | text | No |  | Exact repository name to resolve and attach. Repeat for multiple repos. |
 | --clear | boolean | No | False | Clear all configured ado_repository_ids for the target workstream. |
 
+### `vertex ai-proposals`
+
+**Usage:** `vertex ai-proposals [OPTIONS] COMMAND [ARGS]...`
+
+Review AI-generated proposals: risk, meeting action, top-three, governance decision brief, dependency blast radius.
+
+**Subcommands**
+
+| Command | Description |
+|---|---|
+| `list` |  |
+| `generate` |  |
+| `accept` |  |
+| `reject` |  |
+| `review-batch` | ADF-W5.12 P4 (Section 8.15.2): sampled/batch review for a proposal |
+| `flag-regression` | ADF-W5.12 P4 (Section 8.15.1's 'zero material downstream regressions' |
+| `review` | Interactive one-by-one review of every staged proposal of --type: |
+
+#### `vertex ai-proposals list`
+
+**Usage:** `vertex ai-proposals list [OPTIONS]`
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | Yes |  | Program id, e.g. myprogram. |
+| --type TEXT | text | No |  | Optional filter, one of: risk, meeting_action, top_three, governance_decision_brief, dependency_blast_radius. |
+| --status TEXT | text | No | staged | Filter by status: staged\|approved\|rejected\|all. |
+
+#### `vertex ai-proposals generate`
+
+**Usage:** `vertex ai-proposals generate [OPTIONS]`
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | Yes |  | Program id, e.g. myprogram. |
+| --type TEXT | text | Yes |  | One of: risk, meeting_action, top_three, governance_decision_brief, dependency_blast_radius. |
+| --candidate-risk-id TEXT | text | No |  | [risk] Candidate risk id being escalated. |
+| --title TEXT | text | No |  | [risk] Candidate risk title. |
+| --description TEXT | text | No |  | [risk] Candidate risk description. |
+| --evidence-text TEXT | text | No |  | [risk] Evidence text snippet. Repeat for multiple. |
+| --evidence-ref TEXT | text | No |  | [risk] Evidence reference id (e.g. signal id). Repeat for multiple. |
+| --meeting-ref TEXT | text | No |  | [meeting_action] Meeting reference id. |
+| --transcript-file PATH | path | No |  | [meeting_action] Path to a plain-text transcript file. |
+| --work-item-id INTEGER | integer | No |  | [meeting_action] Allowed work item id the extractor may link actions to. Repeat for multiple. |
+| --candidates-file PATH | path | No |  | [top_three] JSON file: {"items": [{"category": str, "item_id": str, "summary": str, "severity": str\|null, "evidence_refs": [str, ...]}, ...]}. |
+| --decision-ask-id TEXT | text | No |  | [governance_decision_brief] Decision ask id being resolved. |
+| --decision-text TEXT | text | No |  | [governance_decision_brief] The open decision ask's text. |
+| --dependency-id TEXT | text | No |  | [dependency_blast_radius] Dependency id being assessed. |
+| --from-summary TEXT | text | No |  | [dependency_blast_radius] Upstream (from) side summary. |
+| --to-summary TEXT | text | No |  | [dependency_blast_radius] Downstream (to) side summary. |
+| --risk-if-broken TEXT | text | No |  | [dependency_blast_radius] Risk if this dependency breaks. |
+| --current-status TEXT | text | No |  | [dependency_blast_radius] Current dependency status. |
+| --deployment TEXT | text | No |  | Override Azure OpenAI deployment name; defaults to VERTEX_AI_DEPLOYMENT/VERTEX_EXEC_DEPLOYMENT/AZURE_OPENAI_DEPLOYMENT. |
+| --dry-run | boolean | No | False | Run the AI generation but do not stage the result for review. |
+
+#### `vertex ai-proposals accept`
+
+**Usage:** `vertex ai-proposals accept [OPTIONS]`
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | Yes |  | Program id, e.g. myprogram. |
+| --type TEXT | text | Yes |  | One of: risk, meeting_action, top_three, governance_decision_brief, dependency_blast_radius. |
+| --id TEXT | text | Yes |  | Proposal id to accept. |
+| --actor TEXT | text | No |  | Reviewer identity. Defaults to the current OS user. |
+| --org TEXT | text | No |  | ADO organization (meeting_action routing only). |
+| --project TEXT | text | No |  | ADO project (meeting_action routing only). |
+| --area-path TEXT | text | No |  | Optional ADO area path (meeting_action routing only). |
+| --iteration-path TEXT | text | No |  | Optional ADO iteration path (meeting_action routing only). |
+| --edition TEXT | text | No |  | Edition to publish into top_3_now (top_three only). |
+| --by-date TEXT | text | No |  | Optional YYYY-MM-DD due date for the published top_3_now entry (top_three only). |
+| --ado-link TEXT | text | No |  | Optional ADO link for the published top_3_now entry (top_three only). |
+| --anchor TEXT | text | No |  | Optional report anchor for the published top_3_now entry (top_three only). |
+| --dry-run | boolean | No | False | Preview the accept without persisting any change. |
+
+#### `vertex ai-proposals reject`
+
+**Usage:** `vertex ai-proposals reject [OPTIONS]`
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | Yes |  | Program id, e.g. myprogram. |
+| --type TEXT | text | Yes |  | One of: risk, meeting_action, top_three, governance_decision_brief, dependency_blast_radius. |
+| --id TEXT | text | Yes |  | Proposal id to reject. |
+| --reason TEXT | text | Yes |  | Why this proposal was rejected. |
+| --dry-run | boolean | No | False | Preview the reject without persisting any change. |
+
+#### `vertex ai-proposals review-batch`
+
+**Usage:** `vertex ai-proposals review-batch [OPTIONS]`
+
+ADF-W5.12 P4 (Section 8.15.2): sampled/batch review for a proposal
+class at L3+ autonomy. A human individually reviews only a sample of
+the currently-staged batch (random + materiality-weighted); the rest
+are auto-approved by extension of that sample's trust. Requires L3+
+(promote via `vertex cockpit autonomy-promote --to l3 --sample-rate ...`
+first) -- below L3, use `list`/`accept`/`reject` for full review.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | Yes |  | Program id, e.g. myprogram. |
+| --type TEXT | text | Yes |  | One of: risk, meeting_action, top_three, governance_decision_brief, dependency_blast_radius (sampled review is piloted for these two types). |
+| --sample-size INTEGER | integer | No |  | Override the computed sample size (operator control/testing). |
+| --seed INTEGER | integer | No |  | Deterministic RNG seed for sample selection (mainly for testing). |
+| --actor TEXT | text | No |  | Reviewer identity for the sampled subset. Defaults to the current OS user. |
+| --org TEXT | text | No |  | ADO organization (meeting_action routing only). |
+| --project TEXT | text | No |  | ADO project (meeting_action routing only). |
+| --area-path TEXT | text | No |  | Optional ADO area path (meeting_action routing only). |
+| --iteration-path TEXT | text | No |  | Optional ADO iteration path (meeting_action routing only). |
+| --dry-run | boolean | No | False | Preview the sample/auto-approve split without deciding or applying anything. |
+
+#### `vertex ai-proposals flag-regression`
+
+**Usage:** `vertex ai-proposals flag-regression [OPTIONS]`
+
+ADF-W5.12 P4 (Section 8.15.1's 'zero material downstream regressions'
+L3/L4 floor): records that an already-approved proposal (whether
+individually reviewed or auto-approved via `review-batch`'s sampled
+trust extension) turned out to be a material downstream regression --
+the human-facing entry point for the "material regression" signal the
+autonomy ladder's L3/L4 evidence needs and that no code path could ever
+detect on its own (a CLI cannot observe the downstream consequences of
+its own past effects). Feeds `vertex cockpit autonomy-evaluate`'s next
+run: any flagged regression at L3+ immediately demotes the class one
+level (see `proposal_autonomy_ladder.evaluate_promotion`).
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | Yes |  | Program id, e.g. myprogram. |
+| --type TEXT | text | Yes |  | One of: risk, meeting_action, top_three, governance_decision_brief, dependency_blast_radius. |
+| --id TEXT | text | Yes |  | Proposal id to flag as a material regression. |
+| --reason TEXT | text | Yes |  | Why this approved proposal's effect turned out to be a material downstream regression. |
+
+#### `vertex ai-proposals review`
+
+**Usage:** `vertex ai-proposals review [OPTIONS]`
+
+Interactive one-by-one review of every staged proposal of --type:
+preview, confirm accept/reject, prompt for a rejection reason. For
+per-type follow-on options (ADO routing, edition publish), use
+`ai-proposals accept --id <id> ...` directly after accepting here.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | Yes |  | Program id, e.g. myprogram. |
+| --type TEXT | text | Yes |  | One of: risk, meeting_action, top_three, governance_decision_brief, dependency_blast_radius. |
+| --actor TEXT | text | No |  | Reviewer identity. Defaults to the current OS user. |
+
 ### `vertex admin`
 
 **Usage:** `vertex admin [OPTIONS] COMMAND [ARGS]...`
@@ -1369,6 +1550,7 @@ Vertex operator and debug commands.
 | `fact-store-flip` |  |
 | `archive-signing` | Manage the HMAC key used to sign archive manifests. |
 | `upgrade-state` |  |
+| `metrics-rollup` | Computes and appends one ISO week's aggregate for one or all raw |
 | `assertion` | Author telemetry assertions for L1 reality evaluation. |
 | `auth` | Authentication setup commands. |
 | `db` | Inspect and validate the L1 reality database. |
@@ -1419,6 +1601,7 @@ Vertex operator and debug commands.
 | --issue INTEGER | integer | No |  | Issue number required by --flip-parity. |
 | --charts | boolean | No | False | Validate chart cache TTL vs edition cadence, attachment targets, exec-summary uniqueness, and renderer IDs. |
 | --source-waivers | boolean | No | False | Audit programs/<id>/source_waivers.yaml against vertex/policies/source_waivers.schema.yaml (D-32). |
+| --schedule-health | boolean | No | False | Check whether scheduled prefetch/cockpit-build artifacts are present and fresh (ADF-W5.10). |
 | --watch-sources | boolean | No | False | Validate selected vertex watch signal sources without starting the polling loop. |
 | --source TEXT | text | No |  | Watch signal source to validate with --watch-sources. Repeat or use comma-separated values: ado, workiq, kusto, analytics, sprints, icm. |
 | --catchup-log | boolean | No | False | Show recent catchup failures or truncation events from _feedback/usage_log.jsonl. |
@@ -1564,6 +1747,25 @@ written to disk.
 | --dry-run | boolean | No | False | Preview the evolution steps without writing program.yaml or migration_log.jsonl. |
 | --apply | boolean | No | False | Apply the evolution: rewrite program.yaml and append migration_log.jsonl rows. Mutually exclusive with --dry-run. |
 | --operator TEXT | text | No | vertex.admin | Operator identity recorded in the migration log. |
+
+#### `vertex admin metrics-rollup`
+
+**Usage:** `vertex admin metrics-rollup [OPTIONS]`
+
+Computes and appends one ISO week's aggregate for one or all raw
+measurement families (Section 9.7's 13-month weekly rollup). Intended
+to run on a weekly schedule (see the scheduled-tasks runbook) alongside
+`vertex prefetch`/`vertex cockpit build` -- rolling up the prior
+complete week is the natural cadence, but any week may be named
+explicitly (e.g. to backfill a missed run).
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | Yes |  | Program id, e.g. xpf. |
+| --family TEXT | text | No |  | Restrict to one family: tier_decisions, ai_telemetry, run_telemetry. Default: all. |
+| --iso-week TEXT | text | No |  | ISO week to roll up, e.g. 2026-W28. Default: the current ISO week. |
 
 #### `vertex admin assertion`
 
@@ -2187,6 +2389,210 @@ List and resolve tracked claims and decision asks.
 | --note TEXT | text | No |  | Optional resolution note. |
 | --reviewer TEXT | text | No |  | Reviewer alias. Defaults to the current OS user. |
 
+### `vertex cockpit`
+
+**Usage:** `vertex cockpit [OPTIONS] COMMAND [ARGS]...`
+
+Program/platform/economics/value cockpit (read-only projection).
+
+**Subcommands**
+
+| Command | Description |
+|---|---|
+| `show` |  |
+| `build` | Section 10.1: the local HTML dashboard. Never a live time-travel |
+| `explain` | Section 10.4: full explainability for one finding. Renders every |
+| `tui` | Section 10.3a: the optional interactive terminal cockpit. Read-only |
+| `compare` | Section 9.1/10.1: diffs two retained cockpit history snapshots. |
+| `measure` | ADF-W2.11/W3.8/W4.8 (ADR-0017): review-latency/proposal-volume report |
+| `adoption-skip` | ADF-W5.14 (ADF-OM15): explicit non-adoption reason capture. A CLI |
+| `adoption` | ADF-OM15 dashboard: adoption rate + non-adoption reason breakdown |
+| `autonomy-evaluate` | ADF-W5.12 (Section 8.15.1): runs the automatic evidence-based L0/L1/L2 |
+| `autonomy-promote` | The explicit, human-gated path -- required for L3/L4 (Section 8.15.1's |
+| `autonomy-demote` | Manual one-level demotion for a material contradiction, duplicate |
+
+#### `vertex cockpit show`
+
+**Usage:** `vertex cockpit show [OPTIONS]`
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | Yes |  | Program id, e.g. xpf. |
+| --edition TEXT | text | No |  | Optional edition id to scope this snapshot to. |
+| --format TEXT | text | No | human | Output format: human or json. |
+| --no-persist | boolean | No | False | Build and print the snapshot without writing latest.json/history (read-only preview). |
+
+#### `vertex cockpit build`
+
+**Usage:** `vertex cockpit build [OPTIONS]`
+
+Section 10.1: the local HTML dashboard. Never a live time-travel
+reconstruction -- ``--as-of`` reads a retained history snapshot.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | Yes |  | Program id, e.g. xpf. |
+| --edition TEXT | text | No |  | Optional edition id to scope this snapshot to. |
+| --open | boolean | No | False | Open the rendered HTML in the default browser. |
+| --as-of TEXT | text | No |  | ISO timestamp: render the nearest retained history snapshot at or before this time, instead of building a fresh one. |
+
+#### `vertex cockpit explain`
+
+**Usage:** `vertex cockpit explain [OPTIONS]`
+
+Section 10.4: full explainability for one finding. Renders every
+field ``CockpitFinding`` structurally carries; explicitly labels the
+two Section 10.4 fields it has no dedicated data for yet (calculation/
+rule, and what-Vertex-did-not-do) rather than fabricating content.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | Yes |  | Program id, e.g. xpf. |
+| --edition TEXT | text | No |  | Optional edition id to scope this snapshot to. |
+| --finding TEXT | text | Yes |  | finding_id to explain. |
+
+#### `vertex cockpit tui`
+
+**Usage:** `vertex cockpit tui [OPTIONS]`
+
+Section 10.3a: the optional interactive terminal cockpit. Read-only
+navigation this pass (findings list + explain detail + refresh) --
+never binds a port, never writes to a store, never bypasses any
+mutation path (there is none in this command).
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | Yes |  | Program id, e.g. xpf. |
+| --edition TEXT | text | No |  | Optional edition id to scope this snapshot to. |
+
+#### `vertex cockpit compare`
+
+**Usage:** `vertex cockpit compare [OPTIONS]`
+
+Section 9.1/10.1: diffs two retained cockpit history snapshots.
+Operates ONLY on retained history (never recomputed from current
+mutable state) -- if a requested time has no retained snapshot at or
+before it, the comparison is unavailable, not silently substituted.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | Yes |  | Program id, e.g. xpf. |
+| --from TEXT | text | Yes |  | ISO timestamp for the earlier snapshot. |
+| --to TEXT | text | Yes |  | ISO timestamp for the later snapshot. |
+
+#### `vertex cockpit measure`
+
+**Usage:** `vertex cockpit measure [OPTIONS]`
+
+ADF-W2.11/W3.8/W4.8 (ADR-0017): review-latency/proposal-volume report
+computed from the proposal_audit.jsonl trail. Empty/near-empty until the
+approve_*/reject_* helpers are actually called with programs_root set by
+a real review flow -- this command reports what has accrued, it does
+not simulate or backfill data.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | Yes |  | Program id, e.g. xpf. |
+| --since-days INTEGER | integer | No |  | Only include decisions from the last N days (default: all-time). |
+| --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex cockpit adoption-skip`
+
+**Usage:** `vertex cockpit adoption-skip [OPTIONS]`
+
+ADF-W5.14 (ADF-OM15): explicit non-adoption reason capture. A CLI
+cannot observe a workflow that never ran, so this command is the
+deliberate log-the-skip entry point -- an operator (or the pilot TPM
+on their behalf) records why a golden workflow was not run this cadence
+period, rather than the platform inferring or fabricating a reason.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | Yes |  | Program id, e.g. xpf. |
+| --workflow TEXT | text | Yes |  | Golden workflow that was skipped this cadence: cockpit_show, cockpit_build, weekly_report, meeting_to_action, risk_dependency_review. |
+| --reason TEXT | text | Yes |  | Non-adoption reason: not_applicable_this_cadence, manual_process_preferred, tool_issue, unaware, other. |
+
+#### `vertex cockpit adoption`
+
+**Usage:** `vertex cockpit adoption [OPTIONS]`
+
+ADF-OM15 dashboard: adoption rate + non-adoption reason breakdown
+over a recent cadence window, from real recorded adoption/non-adoption
+events -- never simulated or backfilled.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | Yes |  | Program id, e.g. xpf. |
+| --workflow TEXT | text | No |  | Restrict to one golden workflow (default: all workflows combined). |
+| --since-weeks INTEGER | integer | No | 13 | Cadence window to summarize, in weeks. |
+| --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex cockpit autonomy-evaluate`
+
+**Usage:** `vertex cockpit autonomy-evaluate [OPTIONS]`
+
+ADF-W5.12 (Section 8.15.1): runs the automatic evidence-based L0/L1/L2
+autonomy evaluator for one or all proposal classes and persists the
+result. L3/L4 require ``autonomy-promote`` (human-gated -- see that
+command's help).
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | Yes |  | Program id, e.g. xpf. |
+| --class TEXT | text | No |  | Restrict to one proposal class: risk, meeting_action, top_three, governance_decision_brief, dependency_blast_radius. Default: all. |
+
+#### `vertex cockpit autonomy-promote`
+
+**Usage:** `vertex cockpit autonomy-promote [OPTIONS]`
+
+The explicit, human-gated path -- required for L3/L4 (Section 8.15.1's
+independent-review/outbox-proven evidence cannot be computed
+automatically) and always capped at the governance-configured ceiling.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | Yes |  | Program id, e.g. xpf. |
+| --class TEXT | text | Yes |  | One of: risk, meeting_action, top_three, governance_decision_brief, dependency_blast_radius. |
+| --to TEXT | text | Yes |  | Target level: l0..l4. |
+| --reason TEXT | text | Yes |  | Evidence/justification for this promotion. |
+| --sample-rate FLOAT | float | No |  | L3/L4 only (Section 8.15.2): fraction of a batch a human must still individually review via `ai-proposals review-batch`, e.g. 0.2 for 20%% reviewed/80%% auto-approved. Must be between 0.05 and 1.0. Omit to keep full review (1.0) at L3/L4. |
+
+#### `vertex cockpit autonomy-demote`
+
+**Usage:** `vertex cockpit autonomy-demote [OPTIONS]`
+
+Manual one-level demotion for a material contradiction, duplicate
+effect, or policy violation an operator observes but the automatic
+evaluator cannot detect (Section 8.15.1).
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | Yes |  | Program id, e.g. xpf. |
+| --class TEXT | text | Yes |  | One of: risk, meeting_action, top_three, governance_decision_brief, dependency_blast_radius. |
+| --reason TEXT | text | Yes |  | Why this class is being demoted. |
+
 ### `vertex calibration`
 
 **Usage:** `vertex calibration [OPTIONS] COMMAND [ARGS]...`
@@ -2466,6 +2872,93 @@ Inspect and update governed program configuration.
 | --edition TEXT | text | No |  | Edition id, e.g. myprogram_weekly. |
 | --program TEXT | text | No |  | Program id, e.g. myprogram. |
 | --dry-run | boolean | No | False | Preview schema updates without writing files. |
+
+### `vertex decision-brief-pilot`
+
+**Usage:** `vertex decision-brief-pilot [OPTIONS] COMMAND [ARGS]...`
+
+ADF-W2.9 P5: blind A/B comparison of decision-brief-advisor's ContextCompiler/AISchemaGateway-wired pilot path against the current baseline.
+
+**Subcommands**
+
+| Command | Description |
+|---|---|
+| `compare` | Blind-compare the current decision-brief-advisor against its |
+| `summary` | Report the cumulative blind-comparison tally recorded so far for |
+
+#### `vertex decision-brief-pilot compare`
+
+**Usage:** `vertex decision-brief-pilot compare [OPTIONS]`
+
+Blind-compare the current decision-brief-advisor against its
+ContextCompiler/AISchemaGateway-wired pilot path for every pending item,
+one comparison at a time. Never affects ``decision-brief``'s own
+``--ai`` output.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --edition TEXT | text | Yes |  | Edition name, e.g. acme_weekly. |
+| --issue INTEGER | integer | No |  | Issue number. Defaults to the active issue. |
+| --seed INTEGER | integer | No |  | Deterministic RNG seed for the A/B label order (mainly for testing). |
+| --deployment TEXT | text | No |  | Override the AI deployment (else resolved from env/program config). |
+
+#### `vertex decision-brief-pilot summary`
+
+**Usage:** `vertex decision-brief-pilot summary [OPTIONS]`
+
+Report the cumulative blind-comparison tally recorded so far for
+``decision_brief_advisor``'s context-gateway pilot.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | Yes |  | Program id, e.g. myprogram. |
+
+### `vertex program-synthesizer-pilot`
+
+**Usage:** `vertex program-synthesizer-pilot [OPTIONS] COMMAND [ARGS]...`
+
+ADF-W2.9: blind A/B comparison of program_synthesizer's ContextCompiler/AISchemaGateway-wired pilot path against the current baseline.
+
+**Subcommands**
+
+| Command | Description |
+|---|---|
+| `compare` | Blind-compare program_synthesizer's ContextCompiler/AISchemaGateway- |
+| `summary` | Report the cumulative blind-comparison tally recorded so far for |
+
+#### `vertex program-synthesizer-pilot compare`
+
+**Usage:** `vertex program-synthesizer-pilot compare [OPTIONS]`
+
+Blind-compare program_synthesizer's ContextCompiler/AISchemaGateway-
+wired pilot path against its current ad-hoc-context baseline for one
+program. Never affects any production caller of ``generate_program_
+synthesis``.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | Yes |  | Program id, e.g. myprogram. |
+| --seed INTEGER | integer | No |  | Deterministic RNG seed for the A/B label order (mainly for testing). |
+| --deployment TEXT | text | No |  | Override the AI deployment (else resolved from env/program config). |
+
+#### `vertex program-synthesizer-pilot summary`
+
+**Usage:** `vertex program-synthesizer-pilot summary [OPTIONS]`
+
+Report the cumulative blind-comparison tally recorded so far for
+``program_synthesizer``'s context-gateway pilot.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | Yes |  | Program id, e.g. myprogram. |
 
 ### `vertex connectors`
 
@@ -4845,6 +5338,7 @@ Privacy & data governance matrix (WS-15).
 |---|---|
 | `show` | Print the privacy & data governance matrix. |
 | `check` | Return the posture for a single channel (machine-friendly). |
+| `purge` | WS-18/ADF-W5.9: run the unified retention purge (`src/core/privacy_purge.py`) |
 
 #### `vertex privacy show`
 
@@ -4874,6 +5368,25 @@ Return the posture for a single channel (machine-friendly).
 | Option | Type | Required | Default | Description |
 |---|---|---|---|---|
 | --channel TEXT | text | Yes |  | Channel name to inspect posture for (e.g. ado, kusto). |
+
+#### `vertex privacy purge`
+
+**Usage:** `vertex privacy purge [OPTIONS]`
+
+WS-18/ADF-W5.9: run the unified retention purge (`src/core/privacy_purge.py`)
+for one program against every registered `SIDECAR_RETENTION` rule.
+Dry-run by default -- pass --apply to actually rewrite sidecars.
+Rules with INDEFINITE retention are skipped (never auto-purged);
+non-JSONL sidecars (SQLite, YAML config, immutable archive files) are
+recorded as no-op (governed by their own rotation/migration paths).
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | Yes |  | Program id, e.g. xpf. |
+| --apply | boolean | No | False | Actually mutate sidecars. Default is dry-run (report only). |
+| --format TEXT | text | No | human | Output format: human or json. |
 
 ### `vertex observability`
 
@@ -5449,6 +5962,7 @@ Run one REV retrieval cycle and stage candidates for triage.
 | --mock-fixture PATH | path | No |  | JSON fixture of messages for the P1 walking skeleton (no live consent). |
 | --eml-inbox PATH | path | No |  | Directory containing locally-exported .eml files (inbox/ dir for EmlEnumerator). |
 | --ics-inbox PATH | path | No |  | Directory containing locally-exported .ics calendar files (inbox/ dir for IcsEnumerator). W6-1. |
+| --docs-inbox PATH | path | No |  | Directory containing locally-downloaded .docx/.pdf files (inbox/ dir for LocalFileEnumerator). P3-5. |
 | --extractor TEXT | text | No | deterministic | Extractor tier: deterministic \| llm. 'llm' requires VERTEX_AI_DEPLOYMENT. |
 
 #### `vertex rev init-inbox`
@@ -5463,12 +5977,19 @@ the program ``_rev/`` checkpoint dir, and writes an operator-facing
 ``README.md`` documenting the export-import workflow + OA-4 privacy policy.
 Idempotent: re-running only refreshes the README.
 
+The 3-directory atomicity mechanics are identical across the three
+local-import enumerators (eml/ics/docs), so ``--eml-inbox``/``--ics-inbox``/
+``--docs-inbox`` are interchangeable overrides of the same inbox root; all
+three fall back to the same program default when none is given.
+
 **Options**
 
 | Option | Type | Required | Default | Description |
 |---|---|---|---|---|
 | --program / -p TEXT | text | Yes |  | Program ID. |
 | --eml-inbox PATH | path | No |  | Inbox root (defaults to programs/<program>/rev_inbox). Must be on a LOCAL filesystem. |
+| --ics-inbox PATH | path | No |  | Inbox root for locally-exported .ics calendar files (defaults to programs/<program>/rev_inbox). Must be on a LOCAL filesystem. |
+| --docs-inbox PATH | path | No |  | Inbox root for locally-downloaded .docx/.pdf files (defaults to programs/<program>/rev_inbox). Must be on a LOCAL filesystem. |
 
 #### `vertex rev rotate-processed`
 
@@ -5483,12 +6004,19 @@ cycle. Files older than ``--max-age-days`` (default 90) **or** a surplus
 beyond ``--max-count`` (default 500, oldest first) are moved to
 ``processed/archive/``.
 
+The rotation mechanics are format-agnostic (it moves whatever is in
+``processed/``, regardless of which enumerator produced it), so
+``--eml-inbox``/``--ics-inbox``/``--docs-inbox`` are interchangeable
+overrides of the same inbox root, matching ``init-inbox``.
+
 **Options**
 
 | Option | Type | Required | Default | Description |
 |---|---|---|---|---|
 | --program TEXT | text | Yes |  | Program id. |
 | --eml-inbox PATH | path | No |  | Local-import inbox root (defaults to programs/<program>/rev_inbox). |
+| --ics-inbox PATH | path | No |  | Local-import inbox root for .ics calendar imports (defaults to programs/<program>/rev_inbox). |
+| --docs-inbox PATH | path | No |  | Local-import inbox root for .docx/.pdf imports (defaults to programs/<program>/rev_inbox). |
 | --max-age-days INTEGER | integer | No | 90 | Rotate files older than this many days. |
 | --max-count INTEGER | integer | No | 500 | Rotate oldest surplus files beyond this count. |
 | --programs-root PATH | path | No | programs | Programs root directory. |

@@ -28,10 +28,32 @@ CHECKPOINT_FILE_PATHS: tuple[str, ...] = (
     "runtime/channel_registry.sqlite3",
     "runtime/vertex_analytics.sqlite3",
     "runtime/m365_registry.yaml",
+    # ADF-W5.9 (Section 15.2: "include AI release, tier measurements,
+    # workflow/value events, cockpit history watermarks, and outbox state
+    # in checkpoint/restore drills"). The append-only, hash-chained ledger
+    # itself (programs/<id>/ledger/*.events.jsonl) is deliberately NOT
+    # added here -- restoring an older snapshot over a newer hash-chained
+    # log would break forward chain continuity, a fundamentally different
+    # (and riskier) operation than restoring mutable state like
+    # risk_register.yaml. The ledger's own append-only + hash-chain design
+    # is its protection; this generic raw-copy checkpoint mechanism is not
+    # the right tool for it.
+    "runtime/tier_decisions.jsonl",
+    "runtime/actuation/outbox.db",
+    "journal/proposal_audit.jsonl",
+    "_alerts/alerts.jsonl",
 )
 
 # Directories that are captured in each checkpoint snapshot (recursively).
-CHECKPOINT_DIR_PATHS: tuple[str, ...] = ("overrides",)
+CHECKPOINT_DIR_PATHS: tuple[str, ...] = (
+    "overrides",
+    # ADF-W5.9: cockpit history/latest.json/cockpit.html and prefetch
+    # snapshots are runtime caches, not authoritative state, but restoring
+    # them alongside a checkpoint keeps a restored program's cockpit/prefetch
+    # view consistent with the restored point in time rather than stale.
+    "runtime/cockpit",
+    "runtime/prefetch",
+)
 
 
 def create_checkpoint_snapshot(

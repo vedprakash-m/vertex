@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, cast
 
 from src.commands.gather_pipeline import ado_wiql_stage
+from src.core.ado_client import ADO_WIQL_DEFAULT_TOP
 from src.core.models_v2 import ADOConfig, KustoQuery, Program, Workstream
 
 
@@ -76,6 +77,94 @@ def test_load_wiql_golden_query_signals_emits_wiql_and_graph_signals() -> None:
     assert [signal.source for signal in signals] == ["ado/wiql", "ado/graph"]
     assert signals[0].entity_refs == ("WI:1001", "WI:1002", "WS:acme")
     assert signals[1].entity_refs == ("WI:1003",)
+
+
+def test_load_wiql_golden_query_signals_marks_capped_result_degraded() -> None:
+    """ADF-W2.1 (Section 8.4.2): a WIQL result at exactly ADO_WIQL_DEFAULT_TOP
+    is a completeness finding surfaced through the query-state sink, not
+    just a log line."""
+    program = Program(
+        schema_version="2.0",
+        id="acme",
+        name="Adventure + DD on PF",
+        ado=ADOConfig(
+            organization="your-org",
+            project="One",
+            area_paths=("One\\Adventure\\Acme",),
+            work_item_types=("Feature",),
+            excluded_states=("Removed",),
+            date_window_days=14,
+            api_timeout_seconds=30,
+        ),
+    )
+    workstreams = (Workstream(id="acme", name="Acme", area_paths=("One\\Adventure\\Acme",)),)
+
+    class _CappedADOClient:
+        def __init__(self, *args, **kwargs) -> None:
+            del args, kwargs
+
+        def execute_wiql(self, wiql: str, top: int | None = None) -> list[int]:
+            del wiql, top
+            return list(range(1, ADO_WIQL_DEFAULT_TOP + 1))
+
+    query_state_sink: dict[str, dict[str, object]] = {}
+    ado_wiql_stage.load_wiql_golden_query_signals(
+        program,
+        workstreams,
+        datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc),
+        queries=(_wiql_query(wiql="SELECT [System.Id] FROM WorkItems", query_id="capped-query"),),
+        query_state_sink=query_state_sink,
+        ado_client_factory=cast(Any, _CappedADOClient),
+        normalize_ado_team_name_fn=lambda value: value,
+        expand_with_linked_items_fn=lambda client, seed_ids: set(),
+    )
+
+    state = query_state_sink["capped-query"]
+    assert state["cap_reached"] is True
+    assert state["is_degraded"] is True
+    assert state["row_count"] == ADO_WIQL_DEFAULT_TOP
+
+
+def test_load_wiql_golden_query_signals_under_cap_is_not_degraded() -> None:
+    program = Program(
+        schema_version="2.0",
+        id="acme",
+        name="Adventure + DD on PF",
+        ado=ADOConfig(
+            organization="your-org",
+            project="One",
+            area_paths=("One\\Adventure\\Acme",),
+            work_item_types=("Feature",),
+            excluded_states=("Removed",),
+            date_window_days=14,
+            api_timeout_seconds=30,
+        ),
+    )
+    workstreams = (Workstream(id="acme", name="Acme", area_paths=("One\\Adventure\\Acme",)),)
+
+    class _SmallADOClient:
+        def __init__(self, *args, **kwargs) -> None:
+            del args, kwargs
+
+        def execute_wiql(self, wiql: str, top: int | None = None) -> list[int]:
+            del wiql, top
+            return [1001, 1002]
+
+    query_state_sink: dict[str, dict[str, object]] = {}
+    ado_wiql_stage.load_wiql_golden_query_signals(
+        program,
+        workstreams,
+        datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc),
+        queries=(_wiql_query(wiql="SELECT [System.Id] FROM WorkItems", query_id="small-query"),),
+        query_state_sink=query_state_sink,
+        ado_client_factory=cast(Any, _SmallADOClient),
+        normalize_ado_team_name_fn=lambda value: value,
+        expand_with_linked_items_fn=lambda client, seed_ids: set(),
+    )
+
+    state = query_state_sink["small-query"]
+    assert state["cap_reached"] is False
+    assert state["is_degraded"] is False
 
 
 def test_record_ado_wiql_query_state_preserves_last_success_on_error() -> None:

@@ -21,8 +21,9 @@ class RecordingADOClient(ADOClient):
 
 
 class RecordingRestADOClient(ADOClient):
-    def __init__(self, payload: dict[str, object]) -> None:
+    def __init__(self, payload: dict[str, object], *, response_headers: dict[str, str] | None = None) -> None:
         self.payload = payload
+        self.response_headers = response_headers or {}
         self.recorded_method: str | None = None
         self.recorded_url: str | None = None
         self.recorded_kwargs: dict[str, object] | None = None
@@ -33,6 +34,12 @@ class RecordingRestADOClient(ADOClient):
         self.recorded_url = url
         self.recorded_kwargs = kwargs
         return self.payload
+
+    def _request_response(self, method: str, url: str, **kwargs: object) -> "_FakeJsonResponse":
+        self.recorded_method = method
+        self.recorded_url = url
+        self.recorded_kwargs = kwargs
+        return _FakeJsonResponse(self.payload, headers=self.response_headers)
 
     def _request_with_progress(self, method: str, url: str, **kwargs: object) -> _FakeNoContentResponse:
         self.recorded_method = method
@@ -74,6 +81,18 @@ class _FakeResponse:
 class _FakeNoContentResponse:
     status_code = 204
     text = ""
+
+
+class _FakeJsonResponse:
+    status_code = 200
+    text = "{}"
+
+    def __init__(self, payload: dict[str, object], *, headers: dict[str, str] | None = None) -> None:
+        self._payload = payload
+        self.headers = headers or {}
+
+    def json(self) -> dict[str, object]:
+        return self._payload
 
 
 def test_ado_client_surfaces_admin_auth_setup_when_no_credentials(monkeypatch) -> None:
@@ -144,7 +163,59 @@ def test_list_work_item_revisions_uses_revisions_endpoint() -> None:
     assert rows == [{"rev": 3}]
     assert client.recorded_method == "GET"
     assert client.recorded_url == "https://dev.azure.com/your-org/One/_apis/wit/workItems/101/revisions?api-version=7.1"
-    assert client.recorded_kwargs == {}
+    assert client.recorded_kwargs == {"params": {"$top": "200", "$skip": "0"}}
+
+
+def test_list_work_item_revisions_pages_across_multiple_requests() -> None:
+    """ADF-W2.1: a fixture with exactly one full page (page_size rows)
+    followed by a short page must be seen as >1-page and NOT truncated."""
+
+    class _PagedRevisionsClient(ADOClient):
+        def __init__(self) -> None:
+            self._rest_base_url = "https://dev.azure.com/your-org/One/_apis/wit/"
+            self.requested_skips: list[int] = []
+
+        def _request_json(self, method: str, url: str, **kwargs: object) -> dict[str, object]:
+            del method, url
+            params = kwargs.get("params") or {}
+            skip = int(params.get("$skip", 0))  # type: ignore[union-attr]
+            self.requested_skips.append(skip)
+            if skip == 0:
+                return {"value": [{"rev": i} for i in range(1, 3)]}  # full page (page_size=2)
+            return {"value": [{"rev": 3}]}  # short page -> done
+
+    client = _PagedRevisionsClient()
+    outcomes: list[object] = []
+
+    rows = client.list_work_item_revisions(101, page_size=2, on_pagination=outcomes.append)
+
+    assert [row["rev"] for row in rows] == [1, 2, 3]
+    assert client.requested_skips == [0, 2]
+    assert len(outcomes) == 1
+    assert outcomes[0].total_fetched == 3
+    assert outcomes[0].page_count == 2
+    assert outcomes[0].is_truncated is False
+
+
+def test_list_work_item_revisions_reports_truncation_at_safety_cap() -> None:
+    class _AlwaysFullPageClient(ADOClient):
+        def __init__(self) -> None:
+            self._rest_base_url = "https://dev.azure.com/your-org/One/_apis/wit/"
+            self.call_count = 0
+
+        def _request_json(self, method: str, url: str, **kwargs: object) -> dict[str, object]:
+            del method, url, kwargs
+            self.call_count += 1
+            return {"value": [{"rev": self.call_count}, {"rev": self.call_count + 1000}]}  # always a full page
+
+    client = _AlwaysFullPageClient()
+    outcomes: list[object] = []
+
+    rows = client.list_work_item_revisions(101, page_size=2, max_pages=3, on_pagination=outcomes.append)
+
+    assert len(rows) == 6  # 3 pages x 2 rows, safety-capped
+    assert outcomes[0].is_truncated is True
+    assert outcomes[0].page_count == 3
 
 
 def test_list_work_item_comments_uses_comments_endpoint() -> None:
@@ -155,7 +226,34 @@ def test_list_work_item_comments_uses_comments_endpoint() -> None:
     assert rows == [{"id": 7}]
     assert client.recorded_method == "GET"
     assert client.recorded_url == "https://dev.azure.com/your-org/One/_apis/wit/workItems/101/comments?api-version=7.1-preview.4"
-    assert client.recorded_kwargs == {}
+    assert client.recorded_kwargs == {"params": None}
+
+
+def test_list_work_item_comments_follows_continuation_token_across_pages() -> None:
+    class _PagedCommentsClient(ADOClient):
+        def __init__(self) -> None:
+            self._rest_base_url = "https://dev.azure.com/your-org/One/_apis/wit/"
+            self.requested_tokens: list[str | None] = []
+
+        def _request_response(self, method: str, url: str, **kwargs: object) -> _FakeJsonResponse:
+            del method, url
+            params = kwargs.get("params")
+            token = (params or {}).get("continuationToken") if params else None  # type: ignore[union-attr]
+            self.requested_tokens.append(token)
+            if token is None:
+                return _FakeJsonResponse({"comments": [{"id": 1}]}, headers={"x-ms-continuationtoken": "page-2"})
+            return _FakeJsonResponse({"comments": [{"id": 2}]}, headers={})
+
+    client = _PagedCommentsClient()
+    outcomes: list[object] = []
+
+    rows = client.list_work_item_comments(101, on_pagination=outcomes.append)
+
+    assert [row["id"] for row in rows] == [1, 2]
+    assert client.requested_tokens == [None, "page-2"]
+    assert outcomes[0].total_fetched == 2
+    assert outcomes[0].page_count == 2
+    assert outcomes[0].is_truncated is False
 
 
 def test_get_work_item_relations_expands_relations() -> None:
@@ -265,6 +363,27 @@ def test_execute_wiql_honors_explicit_top_cap() -> None:
     assert client.recorded_kwargs == {"json": {"query": "Select [System.Id] From WorkItems"}}
 
 
+def test_execute_wiql_reports_cap_reached_via_on_pagination() -> None:
+    client = RecordingRestADOClient(payload={"workItems": [{"id": i} for i in range(1, 4)]})
+    outcomes: list[object] = []
+
+    item_ids = client.execute_wiql("Select [System.Id] From WorkItems", top=3, on_pagination=outcomes.append)
+
+    assert len(item_ids) == 3
+    assert len(outcomes) == 1
+    assert outcomes[0].is_truncated is True  # result count == top: likely capped
+    assert outcomes[0].total_fetched == 3
+
+
+def test_execute_wiql_reports_not_capped_when_under_top() -> None:
+    client = RecordingRestADOClient(payload={"workItems": [{"id": 101}]})
+    outcomes: list[object] = []
+
+    client.execute_wiql("Select [System.Id] From WorkItems", top=2000, on_pagination=outcomes.append)
+
+    assert outcomes[0].is_truncated is False
+
+
 def test_list_team_iterations_uses_teamsettings_iterations_endpoint() -> None:
     client = RecordingRestADOClient(payload={"values": [{"id": "iteration-1"}]})
     client.organization = "your-org"
@@ -333,3 +452,85 @@ def test_request_json_raises_timeout_error() -> None:
 
     with pytest.raises(QueryTimeoutError, match="ADO fetch timed out after 0.05s"):
         client._request_json("GET", "https://example.test")
+
+
+class _PaginatingPRClient(ADOClient):
+    """Returns successive pages of PR ``value`` arrays based on ``$skip`` so
+    the multi-page ``list_pull_requests`` loop can be exercised without a live
+    ADO connection. ``pages`` is a list of (value-list, count) pairs served in
+    order; each call pops the front page."""
+
+    def __init__(self, pages: list[list[dict[str, object]]]) -> None:
+        self._pages = list(pages)
+        self.organization = "your-org"
+        self.project = "One"
+        self.recorded_calls: list[dict[str, str]] = []
+
+    def _request_json(self, method: str, url: str, **kwargs: object) -> dict[str, object]:
+        params = kwargs.get("params", {})
+        self.recorded_calls.append({"method": method, "url": url, **(params if isinstance(params, dict) else {})})
+        if not self._pages:
+            return {"value": []}
+        return {"value": self._pages.pop(0)}
+
+
+def test_list_pull_requests_pages_across_full_result_set() -> None:
+    """ADF-W2.1 (Section 8.4.2): the discover-repos ``list_pull_requests`` now
+    pages via ``$top``/``$skip`` across the full result set, matching the
+    production ``ADOPRClient.list_pull_requests`` and ``list_work_item_revisions``
+    pagination loops."""
+    page1 = [{"pullRequestId": i} for i in range(100)]  # full page (== top)
+    page2 = [{"pullRequestId": i} for i in range(100, 150)]  # short page -> stops
+    client = _PaginatingPRClient(pages=[page1, page2])
+
+    prs = client.list_pull_requests("repo-1", status="active", top=100)
+
+    assert len(prs) == 150
+    assert prs[0]["pullRequestId"] == 0
+    assert prs[-1]["pullRequestId"] == 149
+    # Two requests: first skip=0, second skip=100
+    assert len(client.recorded_calls) == 2
+    assert client.recorded_calls[0]["$skip"] == "0"
+    assert client.recorded_calls[1]["$skip"] == "100"
+
+
+def test_list_pull_requests_single_page_when_under_top() -> None:
+    """A result that fits in one page must not make extra requests."""
+    page = [{"pullRequestId": i} for i in range(5)]  # < top=100 -> stops immediately
+    client = _PaginatingPRClient(pages=[page])
+
+    prs = client.list_pull_requests("repo-1", status="active", top=100)
+
+    assert len(prs) == 5
+    assert len(client.recorded_calls) == 1
+
+
+def test_list_pull_requests_reports_truncation_via_on_pagination() -> None:
+    """When the safety ``max_pages`` cap is hit while the provider still has
+    more data, ``on_pagination`` fires with ``is_truncated=True``."""
+    # Every page returns a full top=10 -> the loop hits max_pages=3 while data remains
+    full_page = [{"pullRequestId": i} for i in range(10)]
+    client = _PaginatingPRClient(pages=[list(full_page), list(full_page), list(full_page), list(full_page)])
+    outcomes: list[object] = []
+
+    prs = client.list_pull_requests("repo-1", status="active", top=10, max_pages=3, on_pagination=outcomes.append)
+
+    assert len(prs) == 30  # 3 pages * 10
+    assert len(client.recorded_calls) == 3  # stopped at max_pages
+    assert len(outcomes) == 1
+    assert outcomes[0].is_truncated is True
+    assert outcomes[0].page_count == 3
+    assert outcomes[0].total_fetched == 30
+
+
+def test_list_pull_requests_reports_not_truncated_on_short_page() -> None:
+    """A result that ends naturally (short page) must report is_truncated=False."""
+    page = [{"pullRequestId": i} for i in range(3)]  # short page -> stops naturally
+    client = _PaginatingPRClient(pages=[page])
+    outcomes: list[object] = []
+
+    prs = client.list_pull_requests("repo-1", status="active", top=10, on_pagination=outcomes.append)
+
+    assert len(prs) == 3
+    assert outcomes[0].is_truncated is False
+    assert outcomes[0].page_count == 1

@@ -572,7 +572,7 @@ class _FakeSummaryGenerator:
         self._draft = draft
         self.calls: list[dict[str, object]] = []
 
-    def generate(self, *, program, workstream, prior_summary, signals, drift_patterns):
+    def generate(self, *, program, workstream, prior_summary, signals, drift_patterns, programs_root=None):
         self.calls.append(
             {
                 "program": program,
@@ -580,13 +580,14 @@ class _FakeSummaryGenerator:
                 "prior_summary": prior_summary,
                 "signals": signals,
                 "drift_patterns": drift_patterns,
+                "programs_root": programs_root,
             }
         )
         return self._draft
 
 
 class _FailingSummaryGenerator:
-    def generate(self, *, program, workstream, prior_summary, signals, drift_patterns):
+    def generate(self, *, program, workstream, prior_summary, signals, drift_patterns, programs_root=None):
         raise AssertionError("Summary generator should not run when no new approved signals exist.")
 
 

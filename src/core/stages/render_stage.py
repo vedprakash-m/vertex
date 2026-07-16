@@ -65,7 +65,6 @@ class RenderStageState:
     subject_signal: str
     email_subject: str
     email_preheader: str
-    productivity_dividend_hours: float | None
     html_body: str
     markdown_body: str
     snapshot: Snapshot
@@ -425,8 +424,6 @@ class RenderStage:
             if ctx.offline_source_label is not None
             else ""
         )
-        _productivity_raw = round((len(workstream_data) * 0.25) + (len(ctx.items) * 0.08) + (len(review_status.sections) * 0.10), 1)
-        productivity_dividend: float | None = None if _productivity_raw < 1.0 else _productivity_raw
         milestone_rows = ()
         if (
             ctx.resolved_v2 is not None
@@ -454,9 +451,7 @@ class RenderStage:
             email_subject=email_subject,
             email_preheader=email_preheader,
             subject_signal=subject_signal,
-            productivity_dividend_hours=productivity_dividend,
             show_orientation=ctx.overrides_document.show_orientation or confirmed_depth < 2,
-            productivity_dividend_published=ctx.bundle.config.productivity_dividend_published,
         )
         template_contract = None
         if ctx.bundle.template_contract is not None:
@@ -637,7 +632,6 @@ class RenderStage:
                 subject_signal=subject_signal,
                 email_subject=email_subject,
                 email_preheader=email_preheader,
-                productivity_dividend_hours=productivity_dividend,
                 html_body=html_body,
                 markdown_body=markdown_body,
                 snapshot=snapshot,

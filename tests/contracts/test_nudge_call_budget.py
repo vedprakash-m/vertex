@@ -150,6 +150,7 @@ def test_nc10_registry_section_issues_zero_wiql_calls() -> None:
     """Registry sections hydrate key_ado_items directly; they never execute WIQL."""
     registry_entry = MagicMock()
     registry_entry.id = "ws1"
+    registry_entry.lifecycle_state = "active"
     registry_entry.key_ado_items = (940001, 940002)
     registry_entry.overdue_ado_item_ids = frozenset()
 

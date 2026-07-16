@@ -4,6 +4,19 @@
 **Filed:** 2026-06-11  
 **Required by:** `specs/prod-vis.md` §4 WS-5 step 0; `specs/remains.md` §6 WS-5.
 
+**Also serves (per ADR-0013, 2026-07-13):** `specs/arch-data-fix.md`'s
+"Independent evaluator" role (§3.6.2/§3.6.3 — autonomy graduation
+co-signer, model/prompt certification). ADR-0013 evaluated filing a
+separate `governance/roles/adf-independent-evaluator.md` and decided
+against it: the function is identical (approve the AI governance
+framework, co-sign graduation records, remain independent of the
+implementer), so a duplicate charter would just be two unfilled files
+tracking the same open gap. Whoever fills this role satisfies both specs'
+requirement simultaneously. Until filled, both WS-5's gate and ADF's
+corpus/model-certification work items (ADF-W0.4, ADF-W5.12, ADF-W6.2)
+stay in their current "preliminary/single-operator" state — see
+`governance/decisions/0013-raci-decision-rights.md`.
+
 ---
 
 ## Purpose

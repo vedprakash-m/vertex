@@ -46,6 +46,7 @@ _EXPECTED_BRANCH_RUNNERS = {
     "confirm_readiness": "_run_confirm_readiness_doctor",
     "adapter_cert": "_run_adapter_cert_doctor",
     "sharepoint": "_run_sharepoint_doctor",
+    "schedule_health": "_run_schedule_health_doctor",
 }
 
 

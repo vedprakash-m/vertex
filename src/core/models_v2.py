@@ -61,6 +61,8 @@ class PersonDirectory:
     team_ids: tuple[str, ...] = ()
     org_chain: tuple[str, ...] = ()
     exempt_from_vitality: bool = False
+    manager_alias: str | None = None
+    department: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +182,14 @@ class KustoQuery:
     kusto_no_safety: bool = False
     last_cycle_succeeded: bool | None = None
     metric_id: str | None = None
+    # ADF-W2.3 (Section 8.5.1): additive semantic-definition fields so a
+    # query author can declare what result_column means and how to judge it
+    # against an SLO. All default None so existing queries (no semantic
+    # config yet) compile and behave unchanged -- kusto_hydration.py only
+    # populates KustoResultSet's matching fields when these are set.
+    unit: str | None = None
+    slo_target: float | None = None
+    comparison: str | None = None  # one of >=, <=, ==, >, <
     assertion_ids: tuple[str, ...] = ()
     engine: str = "kusto"
     wiql: str | None = None
@@ -198,6 +208,10 @@ class KustoQuery:
 class KustoConfig:
     enabled: bool
     queries: tuple[KustoQuery, ...] = ()
+    # ADF-W1.6 (Section 8.5.3): bounded query concurrency. Default 1
+    # preserves the pre-existing sequential behavior unchanged; raising it
+    # is a Phase-0/ADF-W0.6 ratification decision, not a code change.
+    max_concurrency: int = 1
 
 
 # WorkIQ structured-retrieval configuration (vertex-tech-spec §13.1.1). Lives on
@@ -353,6 +367,21 @@ class DependencyType(EnumParserMixin, str, Enum):
     SHARES_RESOURCE = "shares_resource"
 
 
+class DependencyEvidenceTier(EnumParserMixin, str, Enum):
+    """ADF-W4.4 / Section 8.10.2 evidence priority for a dependency link.
+
+    1 is strongest (authoritative ADO relation), 5 is weakest (co-mention).
+    An ``INFERRED_COMENTION`` dependency may never exceed ``Confidence.LOW``
+    and cannot create an authoritative dependency or actuation.
+    """
+
+    AUTHORITATIVE_RELATION = "authoritative_relation"  # typed ADO relation (ADF-W4.1)
+    AUTHORED = "authored"  # human-authored in program.yaml / dependencies.yaml
+    SOURCE_STATEMENT = "source_statement"  # source text with dependency language
+    ETA_CO_MOVEMENT = "eta_co_movement"  # corroborated ETA co-movement
+    INFERRED_COMENTION = "inferred_comention"  # co-mention only
+
+
 class DependencyStatus(EnumParserMixin, str, Enum):
     ACTIVE = "active"
     RESOLVED = "resolved"
@@ -386,6 +415,17 @@ class Dependency:
     planned_resolution_date: date | None = None
     schedule_status: DependencyScheduleStatus | None = None
     linked_risk_ids: tuple[str, ...] = ()
+    # ADF-W4.4 (Section 8.10.2): evidence provenance tier. Defaults to AUTHORED
+    # for backward compatibility (existing YAML dependencies are human-authored).
+    evidence_tier: DependencyEvidenceTier = DependencyEvidenceTier.AUTHORED
+    evidence_refs: tuple[str, ...] = ()  # signal/source ids backing an inferred link
+    # ADF-W4.5 (Section 8.10.2): "next proving event" and "blast-radius narrative"
+    # are the two output fields the existing from_*/to_*/risk_if_broken/status
+    # fields above don't already cover. Populated only via
+    # dependency_blast_radius.py::apply_dependency_blast_radius_proposal on an
+    # approved proposal; None means "no proposal applied yet" (backward compatible).
+    next_proving_event: str | None = None
+    blast_radius_narrative: str | None = None
 
 
 class RiskImpact(EnumParserMixin, str, Enum):
@@ -393,6 +433,7 @@ class RiskImpact(EnumParserMixin, str, Enum):
     HIGH = "high"
     MEDIUM = "medium"
     LOW = "low"
+    UNASSESSED = "unassessed"  # ADF-W4.2 / INV-ADF-13: machine-derived candidate not yet reviewed
 
 
 class RiskProbability(EnumParserMixin, str, Enum):
@@ -400,6 +441,21 @@ class RiskProbability(EnumParserMixin, str, Enum):
     LIKELY = "likely"
     POSSIBLE = "possible"
     UNLIKELY = "unlikely"
+    UNASSESSED = "unassessed"  # ADF-W4.2 / INV-ADF-13: machine-derived candidate not yet reviewed
+
+
+class RiskKind(EnumParserMixin, str, Enum):
+    """ADF-W4.2 / Section 8.10.1 three-way risk taxonomy.
+
+    ``strategic`` is a human-assessed risk. ``candidate`` is a machine-derived
+    risk awaiting human review (never carries assessed probability/impact).
+    ``hygiene`` is a deterministic hygiene finding (missing owner, stale review,
+    etc.) that is not a strategic risk at all.
+    """
+
+    STRATEGIC = "strategic"
+    CANDIDATE = "candidate"
+    HYGIENE = "hygiene"
 
 
 class RiskStatus(EnumParserMixin, str, Enum):
@@ -500,6 +556,10 @@ class MilestoneStatus(EnumParserMixin, str, Enum):
     MISSED = "missed"
     COMPLETED = "completed"
     DEFERRED = "deferred"
+    # ADF-W1.7 (specs/arch-data-fix.md Section 8.10.3): a past-target
+    # milestone with a declared-complete status but zero linked work items
+    # cannot be computationally verified. It is UNKNOWN, never ON_TRACK.
+    UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -527,6 +587,11 @@ class MilestoneAssessment:
     confidence: Confidence
     reasoning: str
     completion_date: date | None = None
+    # ADF-W1.7: True when computed_health was forced away from a false-optimism
+    # default (MISSED/UNKNOWN with zero linked work items) rather than derived
+    # from real linked-item evidence. Callers that assemble report output use
+    # this to emit a context-gap coverage finding (src/core/context_gap_store.py).
+    coverage_gap: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -722,6 +787,7 @@ class EditionConfig:
     workstream_filter: WorkstreamFilter | None = None
     brand_name: str | None = None
     brand_header_url: str | None = None
+    scope_note: str | None = None
     scorecard_sort: str = "risk_desc"
     scorecard_plain_text_only: bool = False
     layout_mode: str = "dashboard"
@@ -1032,6 +1098,16 @@ class ClaimEntry:
     contradiction_status: Literal["ok", "contradicted", "unresolved"] = "ok"
     source_confidence_tier: Literal["high", "medium", "low"] = "low"
     last_validated_date: date | None = None
+    # ADF-W2.10 P6 (Section 8.10.9): one generic status-claim extension
+    # covers every deferred fact family (dependency status now; risk,
+    # milestone status, and action status as separate follow-on rules)
+    # rather than adding a dedicated field per family. `claimed_status_value`
+    # is a free-form string whose accepted vocabulary is family-specific and
+    # validated by the comparison rule that consumes it (e.g.
+    # `contradiction_engine._evaluate_claim_vs_dependency_status` only
+    # recognizes `DependencyStatus`'s own values).
+    claimed_status_family: Literal["dependency", "risk", "milestone", "action"] | None = None
+    claimed_status_value: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

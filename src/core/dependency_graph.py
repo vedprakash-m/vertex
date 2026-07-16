@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any, Iterable
 import os
 from pathlib import Path
 
@@ -12,9 +12,21 @@ from src.core.config_loader import PROGRAMS_ROOT
 from src.core.exceptions import ConfigError
 from datetime import date
 
-from src.core.models_v2 import Dependency, DependencyScheduleStatus, DependencyStatus, DependencyType, LegacyDependency, Signal
+from src.core.integration_types import RelationKind, RelationTargetKind, WorkItemRelation
+from src.core.models_v2 import (
+    Dependency,
+    DependencyEvidenceTier,
+    DependencyScheduleStatus,
+    DependencyStatus,
+    DependencyType,
+    LegacyDependency,
+    Signal,
+)
 from src.core.models import Confidence, WorkItem
 from src.core.trajectory_analyzer import DriftPattern
+
+if TYPE_CHECKING:
+    from src.core.program_fact_store import ProgramFactRevision
 
 
 _SHARED_PROGRAM_ID_SENTINEL = "__shared_registry__"
@@ -105,6 +117,7 @@ def _sync_dependency_facts(
                 scope="program",
                 entity_refs=entity_refs,
                 payload=_dependency_fact_payload(dependency),
+                source_signal_ids=dependency.evidence_refs,
                 precedence=FactPrecedence.ACTIVE_PM_JUDGMENT,
                 natural_key=natural_key,
                 created_by="vertex.dependency_graph",
@@ -172,6 +185,13 @@ def _dependency_fact_payload(dependency: Dependency) -> dict[str, object]:
             dependency.schedule_status.value if dependency.schedule_status is not None else None
         ),
         "linked_risk_ids": list(dependency.linked_risk_ids),
+        # ADF-W4.4 (Section 8.10.2): evidence provenance. Persisted so the
+        # AUTHORITATIVE_RELATION tier round-trips through the fact store and
+        # the read-side projection (project_dependencies) can distinguish a
+        # typed ADO relation from an AUTHORED/human-authored link. Additive:
+        # legacy facts without these keys default to AUTHORED / empty on read.
+        "evidence_tier": dependency.evidence_tier.value,
+        "evidence_refs": list(dependency.evidence_refs),
     }
 
 
@@ -433,6 +453,9 @@ def _parse_dependency(program_id: str, raw_dependency: dict[str, object], *, pat
         if str(value).strip()
     )
 
+    next_proving_event = str(raw_dependency.get("next_proving_event") or "").strip() or None
+    blast_radius_narrative = str(raw_dependency.get("blast_radius_narrative") or "").strip() or None
+
     return Dependency(
         id=dependency_id,
         from_program_id=from_program_id,
@@ -452,6 +475,8 @@ def _parse_dependency(program_id: str, raw_dependency: dict[str, object], *, pat
         planned_resolution_date=planned_resolution_date,
         schedule_status=schedule_status,
         linked_risk_ids=linked_risk_ids,
+        next_proving_event=next_proving_event,
+        blast_radius_narrative=blast_radius_narrative,
     )
 
 
@@ -797,6 +822,14 @@ def _serialize_dependency(dependency: Dependency, *, default_program_id: str) ->
         payload["schedule_status"] = dependency.schedule_status.value
     if dependency.linked_risk_ids:
         payload["linked_risk_ids"] = list(dependency.linked_risk_ids)
+    # ADF-W4.5 (Section 8.10.2): persist the two blast-radius-proposal output
+    # fields so an applied DependencyBlastRadiusProposal (dependency_blast_radius.py::
+    # apply_dependency_blast_radius_proposal) actually round-trips through
+    # save_dependencies/load_dependencies, not just the in-memory dataclass.
+    if dependency.next_proving_event:
+        payload["next_proving_event"] = dependency.next_proving_event
+    if dependency.blast_radius_narrative:
+        payload["blast_radius_narrative"] = dependency.blast_radius_narrative
     return payload
 
 
@@ -825,3 +858,249 @@ def _write_atomic_yaml(path: Path, payload: dict[str, Any]) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temp_path, path)
+
+
+# --------------------------------------------------------------------------------------
+# ADF-W4.4 (Section 8.10.2): AUTHORITATIVE_RELATION evidence-tier dependencies
+# derived from ADF-W4.1's typed ADO relations (src/core/ado_relations.py /
+# ADOHydrationProvider.hydrate's `relations` output). This is the only
+# evidence tier this codebase can assign non-speculatively -- an ADO
+# PREDECESSOR/SUCCESSOR link is a real, explicit statement by the work-item
+# authors, not an inference. Every other Dependency construction site in
+# this module builds from human-authored YAML (AUTHORED, the default) --
+# this is the first and only AUTHORITATIVE_RELATION producer.
+# --------------------------------------------------------------------------------------
+
+#: Only these relation kinds are dependency-shaped. Hierarchy (parent/child),
+#: RELATED, ARTIFACT_LINK, EXTERNAL_LINK, and UNKNOWN are not dependencies.
+_DEPENDENCY_RELATION_KINDS = frozenset({RelationKind.PREDECESSOR, RelationKind.SUCCESSOR})
+
+
+def dependency_from_authoritative_relation(
+    relation: WorkItemRelation,
+    *,
+    program_id: str,
+) -> Dependency | None:
+    """Converts one typed ADO relation into an AUTHORITATIVE_RELATION-tier
+    ``Dependency``. Returns ``None`` for relation kinds that aren't
+    dependency-shaped or a non-work-item target -- not every relation is a
+    dependency, and this function never guesses.
+
+    Direction: this codebase's own convention (verified against real
+    ``dependencies.yaml`` entries, e.g. ``from_milestone_id: m3-code-complete
+    -> to_milestone_id: m5-ramp-review`` with ``risk_if_broken: "Ramp review
+    cannot proceed if M3 code complete slips"``) is ``from`` = the item that
+    must complete FIRST (the blocker/predecessor), ``to`` = the item that is
+    BLOCKED (the successor, which depends on ``from``). ADO's
+    ``System.LinkTypes.DependencyPredecessor`` link on a source item names a
+    work item that must complete before the source -- so the TARGET is the
+    blocker (``from``) and the SOURCE is blocked (``to``);
+    ``DependencySuccessor`` is the exact mirror. ``dependency_type`` is
+    always ``BLOCKS``, the one ``DependencyType`` member an ADO relation
+    alone can support (``INFORMS``/``SHARES_RESOURCE`` need semantic
+    judgment this function does not have).
+    """
+    if relation.relation_kind not in _DEPENDENCY_RELATION_KINDS:
+        return None
+    if relation.target_kind != RelationTargetKind.WORK_ITEM:
+        return None
+    try:
+        target_item_id = int(relation.target_id)
+    except (TypeError, ValueError):
+        return None
+
+    if relation.relation_kind == RelationKind.PREDECESSOR:
+        # target is source's predecessor: target blocks source.
+        blocker_item_id, blocked_item_id = target_item_id, relation.source_work_item_id
+    else:  # SUCCESSOR: source is target's predecessor: source blocks target.
+        blocker_item_id, blocked_item_id = relation.source_work_item_id, target_item_id
+
+    return Dependency(
+        id=f"ado-relation-{blocker_item_id}-blocks-{blocked_item_id}",
+        from_program_id=program_id,
+        from_workstream_id=None,
+        from_item_id=blocker_item_id,  # from = predecessor/blocker (finishes first)
+        from_milestone_id=None,
+        to_program_id=program_id,
+        to_workstream_id=None,
+        to_item_id=blocked_item_id,  # to = successor/blocked (depends on "from")
+        to_milestone_id=None,
+        dependency_type=DependencyType.BLOCKS,
+        risk_if_broken="",  # unknown from a relation alone -- honest empty, never guessed
+        mitigation=None,
+        status=DependencyStatus.ACTIVE,
+        owner_alias=None,
+        evidence_tier=DependencyEvidenceTier.AUTHORITATIVE_RELATION,
+        evidence_refs=(relation.rel_type_name,),
+    )
+
+
+def relations_to_dependencies(
+    relations: Iterable[WorkItemRelation],
+    *,
+    program_id: str,
+) -> tuple[Dependency, ...]:
+    """Converts a batch of typed ADO relations into AUTHORITATIVE_RELATION
+    dependency candidates, skipping non-dependency-shaped relations and
+    deduplicating the same predecessor/successor edge (ADO commonly reports
+    both directions -- the predecessor's own PREDECESSOR link and the
+    successor's mirrored SUCCESSOR link describe one edge, not two)."""
+    seen: set[str] = set()
+    out: list[Dependency] = []
+    for relation in relations:
+        candidate = dependency_from_authoritative_relation(relation, program_id=program_id)
+        if candidate is None or candidate.id in seen:
+            continue
+        seen.add(candidate.id)
+        out.append(candidate)
+    return tuple(out)
+
+#: Prefix for all relation-derived dependency ids (see
+#: ``dependency_from_authoritative_relation``). Used by
+#: ``sync_authoritative_relation_dependencies`` to scope its closure so ONLY
+#: relation-derived ``dependency.link`` facts are reconciled -- a hand-authored
+#: dependency is never closed by an automated gather pass.
+_ADO_RELATION_ID_PREFIX = "ado-relation-"
+
+
+def sync_authoritative_relation_dependencies(
+    program_id: str,
+    relations: Iterable[WorkItemRelation],
+    *,
+    scope_item_ids: frozenset[int] | None = None,
+    programs_root: Path,
+) -> tuple[Dependency, ...]:
+    """ADF-W4.4 (Section 8.10.3): the gather-time producer of
+    AUTHORITATIVE_RELATION dependencies from typed ADO relations.
+
+    Converts relations via :func:`relations_to_dependencies`, then appends
+    ``dependency.link`` facts for them -- fact-store ONLY, never rewriting
+    ``dependencies.yaml`` (which is the human-authored source of truth;
+    rewriting it from an automated pipeline would race hand-authored content
+    and violate the NCFL ``writable: False`` policy on that file).
+
+    Idempotent across gathers: each relation-derived dependency's natural key
+    is deterministic (``DEPENDENCY:ado-relation-<blocker>-blocks-<blocked>``),
+    so a repeat gather produces a revision of the same fact, not a duplicate.
+
+    Scoped staleness closure: ``dependency.link`` facts whose entity-ref id
+    carries the ``ado-relation-`` prefix AND is no longer in the current
+    relation set are CLOSED (a relation that disappeared from ADO should not
+    linger as an active dependency). Authored dependencies (no such prefix)
+    are never touched by this reconcile -- they are owned by
+    :func:`save_dependencies` / the ``vertex dependencies`` CLI.
+
+    ADF-W2.2: ``scope_item_ids``, when provided, is the set of work-item ids
+    whose relations were actually queried this cycle. A stale relation-derived
+    fact is only closed if at least one of its two endpoints
+    (``from_item_id``/``to_item_id``) is in that scope -- i.e. we only close
+    on real evidence of removal from a directly-queried endpoint. A fact whose
+    both endpoints fall outside this cycle's scope (their revisions didn't
+    change, so their relations weren't re-fetched) is left untouched: the fact
+    store itself is the reconstitution of "the full current relation set" for
+    those items, not this cycle's necessarily-partial ``relations`` argument.
+    ``scope_item_ids=None`` (the default) preserves the exact pre-ADF-W2.2
+    behavior -- every fetch is treated as full, so anything absent is closed.
+    This keeps the function safe to call from a genuinely incremental relation
+    fetch (not yet wired) without any closure-logic change on the caller's
+    part when it lands.
+
+    Returns the converted dependencies (possibly empty) so a caller can log or
+    surface the count; persistence is a side effect.
+    """
+    from src.core.program_fact_store import (
+        FactLifecycleState,
+        FactPrecedence,
+        ProgramFactInput,
+        ProgramFactStore,
+        build_natural_key,
+    )
+
+    dependencies = relations_to_dependencies(relations, program_id=program_id)
+    if not dependencies:
+        # Still reconcile: a prior gather may have relation-derived facts that
+        # have since all disappeared from ADO. An empty current set closes them.
+        pass
+
+    store = ProgramFactStore(program_id, db_root=_resolve_fact_db_root(programs_root))
+    sync_time = datetime.now(timezone.utc)
+    active_snapshot = store.snapshot(as_of=sync_time)
+    # Only relation-derived dependency facts are in scope for this reconcile.
+    relation_active_facts = {
+        fact.natural_key: fact
+        for fact in active_snapshot.facts
+        if fact.fact_type == "dependency.link"
+        and fact.lifecycle_state == FactLifecycleState.ACTIVE
+        and _fact_entity_ref_is_relation_derived(fact)
+    }
+    current_natural_keys: set[str] = set()
+
+    for dependency in dependencies:
+        entity_refs = (f"DEPENDENCY:{dependency.id}",)
+        natural_key = build_natural_key("dependency.link", entity_refs=entity_refs, scope="program")
+        current_natural_keys.add(natural_key)
+        store.append_fact(
+            ProgramFactInput(
+                fact_type="dependency.link",
+                scope="program",
+                entity_refs=entity_refs,
+                payload=_dependency_fact_payload(dependency),
+                precedence=FactPrecedence.ACTIVE_PM_JUDGMENT,
+                natural_key=natural_key,
+                created_by="vertex.dependency_graph.relations",
+            ),
+            recorded_at=sync_time,
+        )
+
+    # Scoped closure: relation-derived facts no longer present in the current
+    # relation set are closed. Authored deps are never in relation_active_facts.
+    for natural_key, fact in relation_active_facts.items():
+        if natural_key in current_natural_keys:
+            continue
+        if scope_item_ids is not None and not _relation_fact_endpoint_in_scope(fact, scope_item_ids):
+            continue
+        store.append_fact(
+            ProgramFactInput(
+                fact_type="dependency.link",
+                scope=fact.scope,
+                entity_refs=fact.entity_refs,
+                payload=fact.payload,
+                source_signal_ids=fact.source_signal_ids,
+                confidence=fact.confidence,
+                precedence=fact.precedence,
+                review_state=fact.review_state,
+                lifecycle_state=FactLifecycleState.CLOSED,
+                valid_from=fact.valid_from,
+                valid_until=sync_time,
+                projection_history=fact.projection_history,
+                natural_key=natural_key,
+                created_by="vertex.dependency_graph.relations",
+                privacy_classification=fact.privacy_classification,
+                accepted_by=fact.accepted_by,
+            ),
+            recorded_at=sync_time,
+        )
+
+    return dependencies
+
+
+def _relation_fact_endpoint_in_scope(fact: ProgramFactRevision, scope_item_ids: frozenset[int]) -> bool:
+    """ADF-W2.2: True iff either endpoint of this relation-derived fact
+    (``from_item_id``/``to_item_id``, read from the stale fact's own payload
+    since it's no longer in the current ``relations`` argument) was among the
+    work items whose relations were actually queried this cycle."""
+    for key in ("from_item_id", "to_item_id"):
+        value = fact.payload.get(key)
+        if isinstance(value, int) and value in scope_item_ids:
+            return True
+    return False
+
+
+def _fact_entity_ref_is_relation_derived(fact: ProgramFactRevision) -> bool:
+    """True iff this fact's ``DEPENDENCY:<id>`` entity ref carries the
+    ``ado-relation-`` prefix -- i.e. it was produced by
+    ``sync_authoritative_relation_dependencies``, not hand-authored."""
+    for ref in fact.entity_refs:
+        if isinstance(ref, str) and ref.startswith("DEPENDENCY:" + _ADO_RELATION_ID_PREFIX):
+            return True
+    return False

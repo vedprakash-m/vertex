@@ -73,6 +73,10 @@ class PersistenceStageInput:
     programs_root: Path
     ai_action_extractor: AIActionExtractor | None
     dry_run: bool = False
+    # ADF-W2.12: the shared per-gather-cycle correlation id (mirrors report.py's
+    # own StageContext threading). "" means no correlation identity was
+    # threaded -- every fact-write's trace-link call degrades to a no-op.
+    correlation_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +174,8 @@ class StateWriteStageInput:
     promotion_blocked_artifacts: tuple[M365PromotionBlockedArtifact, ...]
     chart_results: tuple[Any, ...]
     hypothesis_count: int
+    # ADF-W2.12: see PersistenceStageInput.correlation_id.
+    correlation_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)

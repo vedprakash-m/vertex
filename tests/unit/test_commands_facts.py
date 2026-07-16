@@ -280,6 +280,112 @@ def _build_assumption() -> Assumption:
 
 
 # ---------------------------------------------------------------------------
+# facts import: correlation_id trace-link wiring (ADF-W2.12)
+# ---------------------------------------------------------------------------
+
+
+def test_facts_import_records_one_trace_link_per_imported_fact(monkeypatch, tmp_path: Path) -> None:
+    # ADF-W2.12: `facts import` can write dozens/hundreds of facts from one
+    # file in a single invocation -- a real multi-fact chain worth tracing.
+    # `ProgramFactStore(program)` (no root override) resolves against the
+    # real repo by default, so this monkeypatches the store construction
+    # entirely rather than touching real program state.
+    import json as _json
+    from dataclasses import dataclass
+
+    import src.commands.facts as facts_module
+
+    @dataclass(frozen=True, slots=True)
+    class _FakeRevision:
+        fact_id: str
+
+    @dataclass(frozen=True, slots=True)
+    class _FakeWriteResult:
+        revision: _FakeRevision
+        action: str
+
+    class _FakeStore:
+        def __init__(self, program_id: str) -> None:
+            self.program_id = program_id
+            self.calls = 0
+
+        def append_fact(self, fact_input, *, recorded_at):
+            self.calls += 1
+            return _FakeWriteResult(revision=_FakeRevision(fact_id=f"pf_{self.calls}"), action="created")
+
+    fake_store = _FakeStore("acme")
+    monkeypatch.setattr(facts_module, "ProgramFactStore", lambda program_id: fake_store)
+    recorded: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        facts_module,
+        "record_trace_link",
+        lambda **kwargs: recorded.append(kwargs),
+    )
+
+    input_file = tmp_path / "facts_export.json"
+    input_file.write_text(
+        _json.dumps(
+            {
+                "facts": [
+                    {"fact_type": "milestone.entry", "entity_refs": ["MILESTONE:m1"], "payload": {}},
+                    {"fact_type": "risk.entry", "entity_refs": ["RISK:r1"], "payload": {}},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["import", "--program", "acme", "--input", str(input_file)])
+
+    assert result.exit_code == 0, result.stdout
+    assert "Imported 2 facts" in result.stdout
+    assert fake_store.calls == 2
+    assert len(recorded) == 2
+    # Every link shares one correlation id -- proves this is one invocation's
+    # chain, not two independently-generated ids.
+    assert len({call["correlation_id"] for call in recorded}) == 1
+    assert {call["ref_type"] for call in recorded} == {"fact"}
+    assert {call["stage"] for call in recorded} == {"fact"}
+
+
+def test_facts_import_skips_trace_link_for_noop_writes(monkeypatch, tmp_path: Path) -> None:
+    # A content-dedup no-op (fact unchanged since last import) must not
+    # produce a misleading trace link.
+    import json as _json
+    from dataclasses import dataclass
+
+    import src.commands.facts as facts_module
+
+    @dataclass(frozen=True, slots=True)
+    class _FakeRevision:
+        fact_id: str
+
+    @dataclass(frozen=True, slots=True)
+    class _FakeWriteResult:
+        revision: _FakeRevision
+        action: str
+
+    class _FakeStore:
+        def append_fact(self, fact_input, *, recorded_at):
+            return _FakeWriteResult(revision=_FakeRevision(fact_id="pf_1"), action="noop")
+
+    monkeypatch.setattr(facts_module, "ProgramFactStore", lambda program_id: _FakeStore())
+    recorded: list[dict[str, object]] = []
+    monkeypatch.setattr(facts_module, "record_trace_link", lambda **kwargs: recorded.append(kwargs))
+
+    input_file = tmp_path / "facts_export.json"
+    input_file.write_text(
+        _json.dumps({"facts": [{"fact_type": "milestone.entry", "entity_refs": ["MILESTONE:m1"], "payload": {}}]}),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["import", "--program", "acme", "--input", str(input_file)])
+
+    assert result.exit_code == 0, result.stdout
+    assert recorded == []
+
+
+# ---------------------------------------------------------------------------
 # dual-read shadow window + snapshot pinning (spec §22 Steps 4 + 8)
 # ---------------------------------------------------------------------------
 

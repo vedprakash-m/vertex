@@ -29,6 +29,40 @@ def test_get_program_reality_db_path_defaults_to_home_vertex_dir(tmp_path: Path)
     assert path == home_root / ".vertex" / "acme" / "vertex.sqlite3"
 
 
+def test_get_program_reality_db_path_with_no_config_resolves_to_vertex_db_convention(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """ADF root-cause fix: a caller supplying neither db_root nor
+    VERTEX_DB_PATH nor an explicit home_root must land on the same
+    programs_root.parent/'vertex-db' convention doctor.py's storage check
+    treats as canonical -- never silently on ~/.vertex (the exact PS-14
+    split-brain mechanism)."""
+    monkeypatch.delenv("VERTEX_DB_PATH", raising=False)
+    programs_root = tmp_path / "programs"
+
+    path = get_program_reality_db_path("acme", programs_root=programs_root)
+
+    assert path == tmp_path / "vertex-db" / "acme" / "vertex.sqlite3"
+
+
+def test_get_program_reality_db_path_env_var_still_wins_over_the_default(tmp_path: Path, monkeypatch) -> None:
+    configured = tmp_path / "configured-db-root"
+    monkeypatch.setenv("VERTEX_DB_PATH", str(configured))
+
+    path = get_program_reality_db_path("acme", programs_root=tmp_path / "programs")
+
+    assert path == configured / "acme" / "vertex.sqlite3"
+
+
+def test_get_program_reality_db_path_explicit_db_root_wins_over_everything(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("VERTEX_DB_PATH", str(tmp_path / "should-not-be-used"))
+    explicit = tmp_path / "explicit-db-root"
+
+    path = get_program_reality_db_path("acme", db_root=explicit, programs_root=tmp_path / "programs")
+
+    assert path == explicit / "acme" / "vertex.sqlite3"
+
+
 def test_reality_store_round_trips_foundation_entities(tmp_path: Path) -> None:
     store = RealityStore("acme", db_root=tmp_path / "reality-root")
     store.initialize()

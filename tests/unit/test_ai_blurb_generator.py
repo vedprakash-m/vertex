@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -17,9 +18,11 @@ class _FakeAIClient:
         self.last_system: str | None = None
         self.last_user: str | None = None
         self.last_prompt_version: str | None = None
+        self.calls = 0
 
     def structured(self, system: str, user: str, *, parser, max_tokens: int = 800, prompt_version: str | None = None):
         del max_tokens
+        self.calls += 1
         self.last_system = system
         self.last_user = user
         self.last_prompt_version = prompt_version
@@ -117,7 +120,7 @@ def _delta(work_item_id: int, kind: DeltaKind) -> ItemDelta:
     )
 
 
-def test_generate_workstream_blurb_uses_only_confident_items_and_grounds_output() -> None:
+def test_generate_workstream_blurb_uses_only_confident_items_and_grounds_output(tmp_path: Path) -> None:
     client = _FakeAIClient("NEW Cache warmup safeguard is ready.")
     items = (
         _item(101, "Cache warmup safeguard"),
@@ -130,6 +133,8 @@ def test_generate_workstream_blurb_uses_only_confident_items_and_grounds_output(
 
     result = generate_workstream_blurb(
         client=client,
+        program_id="acme",
+        programs_root=tmp_path,
         workstream_name="Deployment",
         items=items,
         evidence_by_item=evidence_by_item,
@@ -147,11 +152,13 @@ def test_generate_workstream_blurb_uses_only_confident_items_and_grounds_output(
     assert client.last_user is not None and "#202" not in client.last_user
 
 
-def test_generate_workstream_blurb_uses_lowest_cited_evidence_confidence() -> None:
+def test_generate_workstream_blurb_uses_lowest_cited_evidence_confidence(tmp_path: Path) -> None:
     client = _FakeAIClient("NEW Cache warmup safeguard and release fallback need attention [#101] [#202].")
 
     result = generate_workstream_blurb(
         client=client,
+        program_id="acme",
+        programs_root=tmp_path,
         workstream_name="Deployment",
         items=(
             _item(101, "Cache warmup safeguard"),
@@ -176,13 +183,15 @@ def test_derive_ai_confidence_rejects_cited_items_missing_from_evidence() -> Non
         _derive_ai_confidence(evidence_by_item, (101, 202))
 
 
-def test_generate_workstream_blurb_returns_none_without_eligible_delta_items() -> None:
+def test_generate_workstream_blurb_returns_none_without_eligible_delta_items(tmp_path: Path) -> None:
     client = _FakeAIClient("NEW Cache warmup safeguard is ready.")
     items = (_item(101, "Cache warmup safeguard"),)
     evidence_by_item = {101: _evidence(101, Confidence.NONE)}
 
     result = generate_workstream_blurb(
         client=client,
+        program_id="acme",
+        programs_root=tmp_path,
         workstream_name="Deployment",
         items=items,
         evidence_by_item=evidence_by_item,
@@ -193,12 +202,14 @@ def test_generate_workstream_blurb_returns_none_without_eligible_delta_items() -
     assert result is None
 
 
-def test_generate_workstream_blurb_rejects_items_missing_evidence_context() -> None:
+def test_generate_workstream_blurb_rejects_items_missing_evidence_context(tmp_path: Path) -> None:
     client = _FakeAIClient("NEW Cache warmup safeguard is ready [#101].")
 
     with pytest.raises(BlurbGenerationError, match="202"):
         generate_workstream_blurb(
             client=client,
+            program_id="acme",
+            programs_root=tmp_path,
             workstream_name="Deployment",
             items=(
                 _item(101, "Cache warmup safeguard"),
@@ -210,12 +221,14 @@ def test_generate_workstream_blurb_rejects_items_missing_evidence_context() -> N
         )
 
 
-def test_generate_workstream_blurb_rejects_ban_list_violations() -> None:
+def test_generate_workstream_blurb_rejects_ban_list_violations(tmp_path: Path) -> None:
     client = _FakeAIClient("NEW unlock progress [#101].")
 
     with pytest.raises(BlurbGenerationError, match="ban-list"):
         generate_workstream_blurb(
             client=client,
+            program_id="acme",
+            programs_root=tmp_path,
             workstream_name="Deployment",
             items=(_item(101, "Unlock progress"),),
             evidence_by_item={101: _evidence(101, Confidence.HIGH)},
@@ -224,12 +237,14 @@ def test_generate_workstream_blurb_rejects_ban_list_violations() -> None:
         )
 
 
-def test_generate_workstream_blurb_rejects_non_delta_lead() -> None:
+def test_generate_workstream_blurb_rejects_non_delta_lead(tmp_path: Path) -> None:
     client = _FakeAIClient("Cache warmup safeguard is ready [#101].")
 
     with pytest.raises(BlurbGenerationError, match="lead with a delta token"):
         generate_workstream_blurb(
             client=client,
+            program_id="acme",
+            programs_root=tmp_path,
             workstream_name="Deployment",
             items=(_item(101, "Cache warmup safeguard"),),
             evidence_by_item={101: _evidence(101, Confidence.HIGH)},
@@ -238,12 +253,14 @@ def test_generate_workstream_blurb_rejects_non_delta_lead() -> None:
         )
 
 
-def test_generate_workstream_blurb_rejects_citations_outside_eligible_items() -> None:
+def test_generate_workstream_blurb_rejects_citations_outside_eligible_items(tmp_path: Path) -> None:
     client = _FakeAIClient("NEW Cache warmup safeguard is ready [#202].")
 
     with pytest.raises(BlurbGenerationError, match="202"):
         generate_workstream_blurb(
             client=client,
+            program_id="acme",
+            programs_root=tmp_path,
             workstream_name="Deployment",
             items=(
                 _item(101, "Cache warmup safeguard"),
@@ -258,11 +275,13 @@ def test_generate_workstream_blurb_rejects_citations_outside_eligible_items() ->
         )
 
 
-def test_generate_workstream_blurb_includes_supplemental_context_in_prompt() -> None:
+def test_generate_workstream_blurb_includes_supplemental_context_in_prompt(tmp_path: Path) -> None:
     client = _FakeAIClient("NEW Cache warmup safeguard is ready.")
 
     result = generate_workstream_blurb(
         client=client,
+        program_id="acme",
+        programs_root=tmp_path,
         workstream_name="Deployment",
         items=(_item(101, "Cache warmup safeguard"),),
         evidence_by_item={101: _evidence(101, Confidence.HIGH)},
@@ -280,7 +299,7 @@ def test_generate_workstream_blurb_includes_supplemental_context_in_prompt() -> 
     assert client.last_user is not None and "Leadership reader Jordan Lee" in client.last_user
 
 
-def test_generate_workstream_blurb_uses_narrative_limit_override() -> None:
+def test_generate_workstream_blurb_uses_narrative_limit_override(tmp_path: Path) -> None:
     long_text = "NEW " + " ".join(f"word{i}" for i in range(60)) + " [#101]."
     client = _FakeAIClient(long_text)
     editorial_rules = EditorialRules(
@@ -301,6 +320,8 @@ def test_generate_workstream_blurb_uses_narrative_limit_override() -> None:
 
     result = generate_workstream_blurb(
         client=client,
+        program_id="acme",
+        programs_root=tmp_path,
         workstream_name="Deployment",
         items=(_item(101, "Cache warmup safeguard"),),
         evidence_by_item={101: _evidence(101, Confidence.HIGH)},
@@ -313,11 +334,13 @@ def test_generate_workstream_blurb_uses_narrative_limit_override() -> None:
     assert client.last_user is not None and "Keep the blurb within 150 words." in client.last_user
 
 
-def test_generate_workstream_blurb_runs_safety_pipeline() -> None:
+def test_generate_workstream_blurb_runs_safety_pipeline(tmp_path: Path) -> None:
     client = _FakeAIClient("NEW Cache warmup safeguard moved due to vendor follow-up from foo@gmail.com.")
 
     result = generate_workstream_blurb(
         client=client,
+        program_id="acme",
+        programs_root=tmp_path,
         workstream_name="Deployment",
         items=(_item(101, "Cache warmup safeguard"),),
         evidence_by_item={101: _evidence(101, Confidence.HIGH)},
@@ -329,10 +352,12 @@ def test_generate_workstream_blurb_runs_safety_pipeline() -> None:
     assert result.text == "NEW Cache warmup safeguard moved after vendor follow-up from [PII-FILTERED-EMAIL] [#101]."
 
 
-def test_generate_workstream_blurb_rejects_non_object_payload() -> None:
+def test_generate_workstream_blurb_rejects_non_object_payload(tmp_path: Path) -> None:
     with pytest.raises(BlurbGenerationError, match="payload must be an object"):
         generate_workstream_blurb(
             client=_MalformedPayloadAIClient([]),
+            program_id="acme",
+            programs_root=tmp_path,
             workstream_name="Deployment",
             items=(_item(101, "Cache warmup safeguard"),),
             evidence_by_item={101: _evidence(101, Confidence.HIGH)},
@@ -341,10 +366,12 @@ def test_generate_workstream_blurb_rejects_non_object_payload() -> None:
         )
 
 
-def test_generate_workstream_blurb_rejects_non_string_payload_text() -> None:
+def test_generate_workstream_blurb_rejects_non_string_payload_text(tmp_path: Path) -> None:
     with pytest.raises(BlurbGenerationError, match="payload must include text as a string"):
         generate_workstream_blurb(
             client=_MalformedPayloadAIClient({"text": ["bad-text"]}),
+            program_id="acme",
+            programs_root=tmp_path,
             workstream_name="Deployment",
             items=(_item(101, "Cache warmup safeguard"),),
             evidence_by_item={101: _evidence(101, Confidence.HIGH)},
@@ -353,10 +380,12 @@ def test_generate_workstream_blurb_rejects_non_string_payload_text() -> None:
         )
 
 
-def test_generate_workstream_blurb_rejects_blank_payload_text() -> None:
+def test_generate_workstream_blurb_rejects_blank_payload_text(tmp_path: Path) -> None:
     with pytest.raises(BlurbGenerationError, match="payload text must be non-empty"):
         generate_workstream_blurb(
             client=_MalformedPayloadAIClient({"text": "   "}),
+            program_id="acme",
+            programs_root=tmp_path,
             workstream_name="Deployment",
             items=(_item(101, "Cache warmup safeguard"),),
             evidence_by_item={101: _evidence(101, Confidence.HIGH)},
@@ -365,7 +394,7 @@ def test_generate_workstream_blurb_rejects_blank_payload_text() -> None:
         )
 
 
-def test_generate_workstream_blurb_uses_nova_writing_contract_context() -> None:
+def test_generate_workstream_blurb_uses_nova_writing_contract_context(tmp_path: Path) -> None:
     client = _FakeAIClient("Deployment Safety remains medium until OneDeploy closes the 05/15 checkpoint [#101].")
     writing_style = type(
         "WritingStyle",
@@ -417,6 +446,8 @@ def test_generate_workstream_blurb_uses_nova_writing_contract_context() -> None:
 
     result = generate_workstream_blurb(
         client=client,
+        program_id="acme",
+        programs_root=tmp_path,
         workstream_name="Deployment",
         items=(_item(101, "Deployment Safety"),),
         evidence_by_item={101: _evidence(101, Confidence.HIGH)},
@@ -432,7 +463,7 @@ def test_generate_workstream_blurb_uses_nova_writing_contract_context() -> None:
     assert "Owner style note" in client.last_user
 
 
-def test_generate_workstream_blurb_rejects_synthetic_delta_token_for_voice_compat() -> None:
+def test_generate_workstream_blurb_rejects_synthetic_delta_token_for_voice_compat(tmp_path: Path) -> None:
     client = _FakeAIClient("NEW Deployment Safety is ready [#101].")
     writing_style = type(
         "WritingStyle",
@@ -460,6 +491,8 @@ def test_generate_workstream_blurb_rejects_synthetic_delta_token_for_voice_compa
     with pytest.raises(BlurbGenerationError, match="synthetic delta token"):
         generate_workstream_blurb(
             client=client,
+            program_id="acme",
+            programs_root=tmp_path,
             workstream_name="Deployment",
             items=(_item(101, "Deployment Safety"),),
             evidence_by_item={101: _evidence(101, Confidence.HIGH)},
@@ -515,7 +548,7 @@ def _ado_comment_signal(*, text: str) -> Signal:
     )
 
 
-def test_p4_1_bundle_feeds_m365_evidence_and_ado_comments_into_prompt() -> None:
+def test_p4_1_bundle_feeds_m365_evidence_and_ado_comments_into_prompt(tmp_path: Path) -> None:
     """P4-1: a populated WorkstreamEvidenceBundle adds M365 narrative/blocking and
     ADO-comment excerpts to the blurb prompt, and the blurb carries cited_source_refs."""
     client = _FakeAIClient("NEW Cache warmup safeguard is ready.")
@@ -528,6 +561,8 @@ def test_p4_1_bundle_feeds_m365_evidence_and_ado_comments_into_prompt() -> None:
 
     result = generate_workstream_blurb(
         client=client,
+        program_id="acme",
+        programs_root=tmp_path,
         workstream_name="Deployment",
         items=(_item(101, "Cache warmup safeguard"),),
         evidence_by_item={101: _evidence(101, Confidence.HIGH)},
@@ -547,12 +582,14 @@ def test_p4_1_bundle_feeds_m365_evidence_and_ado_comments_into_prompt() -> None:
     assert result.cited_source_refs == bundle.m365_evidence.source_refs
 
 
-def test_p4_1_bundle_none_preserves_ado_only_baseline_and_empty_source_refs() -> None:
+def test_p4_1_bundle_none_preserves_ado_only_baseline_and_empty_source_refs(tmp_path: Path) -> None:
     """P4-1 backward compat: no bundle → ADO-only behavior, empty cited_source_refs."""
     client = _FakeAIClient("NEW Cache warmup safeguard is ready.")
 
     result = generate_workstream_blurb(
         client=client,
+        program_id="acme",
+        programs_root=tmp_path,
         workstream_name="Deployment",
         items=(_item(101, "Cache warmup safeguard"),),
         evidence_by_item={101: _evidence(101, Confidence.HIGH)},
@@ -567,7 +604,7 @@ def test_p4_1_bundle_none_preserves_ado_only_baseline_and_empty_source_refs() ->
     assert "Structured lane evidence" not in client.last_user
 
 
-def test_p4_1_bundle_without_m365_evidence_omits_evidence_block() -> None:
+def test_p4_1_bundle_without_m365_evidence_omits_evidence_block(tmp_path: Path) -> None:
     """A bundle with only ADO-comment signals (no M365 evidence) still emits comments
     but no M365-derived lines; cited_source_refs stays empty."""
     client = _FakeAIClient("NEW Cache warmup safeguard is ready.")
@@ -579,6 +616,8 @@ def test_p4_1_bundle_without_m365_evidence_omits_evidence_block() -> None:
 
     result = generate_workstream_blurb(
         client=client,
+        program_id="acme",
+        programs_root=tmp_path,
         workstream_name="Deployment",
         items=(_item(101, "Cache warmup safeguard"),),
         evidence_by_item={101: _evidence(101, Confidence.HIGH)},
@@ -658,7 +697,7 @@ def _reference_update_signal(*, text: str = "eng.ms page updated: https://eng.ms
     )
 
 
-def test_p4_8_icm_blockers_render_as_structured_prompt_context() -> None:
+def test_p4_8_icm_blockers_render_as_structured_prompt_context(tmp_path: Path) -> None:
     """P4-8: IcM incidents appear in the blurb prompt as structured blockers with id + owner."""
     client = _FakeAIClient("NEW Cache warmup safeguard is ready.")
     bundle = WorkstreamEvidenceBundle(
@@ -670,6 +709,8 @@ def test_p4_8_icm_blockers_render_as_structured_prompt_context() -> None:
 
     generate_workstream_blurb(
         client=client,
+        program_id="acme",
+        programs_root=tmp_path,
         workstream_name="Deployment",
         items=(_item(101, "Cache warmup safeguard"),),
         evidence_by_item={101: _evidence(101, Confidence.HIGH)},
@@ -684,7 +725,7 @@ def test_p4_8_icm_blockers_render_as_structured_prompt_context() -> None:
     assert "owner=Acme-Infra" in client.last_user
 
 
-def test_p4_9_kusto_metrics_render_as_quantitative_prompt_context() -> None:
+def test_p4_9_kusto_metrics_render_as_quantitative_prompt_context(tmp_path: Path) -> None:
     """P4-9: Kusto metric text reaches the blurb prompt even without M365 evidence."""
     client = _FakeAIClient("NEW Cache warmup safeguard is ready.")
     bundle = WorkstreamEvidenceBundle(
@@ -695,6 +736,8 @@ def test_p4_9_kusto_metrics_render_as_quantitative_prompt_context() -> None:
 
     generate_workstream_blurb(
         client=client,
+        program_id="acme",
+        programs_root=tmp_path,
         workstream_name="Deployment",
         items=(_item(101, "Cache warmup safeguard"),),
         evidence_by_item={101: _evidence(101, Confidence.HIGH)},
@@ -708,7 +751,7 @@ def test_p4_9_kusto_metrics_render_as_quantitative_prompt_context() -> None:
     assert "acme-bios-rollout" in client.last_user
 
 
-def test_p4_23_ado_telemetry_summary_reaches_prompt_context() -> None:
+def test_p4_23_ado_telemetry_summary_reaches_prompt_context(tmp_path: Path) -> None:
     client = _FakeAIClient("NEW Cache warmup safeguard is ready.")
     bundle = WorkstreamEvidenceBundle(
         lane_id="deployment",
@@ -718,6 +761,8 @@ def test_p4_23_ado_telemetry_summary_reaches_prompt_context() -> None:
 
     generate_workstream_blurb(
         client=client,
+        program_id="acme",
+        programs_root=tmp_path,
         workstream_name="Deployment",
         items=(_item(101, "Cache warmup safeguard"),),
         evidence_by_item={101: _evidence(101, Confidence.HIGH)},
@@ -732,7 +777,7 @@ def test_p4_23_ado_telemetry_summary_reaches_prompt_context() -> None:
     assert "70% complete" in client.last_user
 
 
-def test_p4_23_reference_updates_reach_prompt_context() -> None:
+def test_p4_23_reference_updates_reach_prompt_context(tmp_path: Path) -> None:
     client = _FakeAIClient("NEW Cache warmup safeguard is ready.")
     bundle = WorkstreamEvidenceBundle(
         lane_id="deployment",
@@ -742,6 +787,8 @@ def test_p4_23_reference_updates_reach_prompt_context() -> None:
 
     generate_workstream_blurb(
         client=client,
+        program_id="acme",
+        programs_root=tmp_path,
         workstream_name="Deployment",
         items=(_item(101, "Cache warmup safeguard"),),
         evidence_by_item={101: _evidence(101, Confidence.HIGH)},
@@ -755,7 +802,7 @@ def test_p4_23_reference_updates_reach_prompt_context() -> None:
     assert "eng.ms/docs/acme/spec" in client.last_user
 
 
-def test_p4_24_and_p4_25_bundle_prompt_includes_trajectory_and_source_freshness() -> None:
+def test_p4_24_and_p4_25_bundle_prompt_includes_trajectory_and_source_freshness(tmp_path: Path) -> None:
     """Temporal and freshness context should reach the blurb prompt from the bundle."""
     client = _FakeAIClient("NEW Cache warmup safeguard is ready.")
     bundle = WorkstreamEvidenceBundle(
@@ -772,6 +819,8 @@ def test_p4_24_and_p4_25_bundle_prompt_includes_trajectory_and_source_freshness(
 
     generate_workstream_blurb(
         client=client,
+        program_id="acme",
+        programs_root=tmp_path,
         workstream_name="Deployment",
         items=(_item(101, "Cache warmup safeguard"),),
         evidence_by_item={101: _evidence(101, Confidence.HIGH)},
@@ -785,7 +834,7 @@ def test_p4_24_and_p4_25_bundle_prompt_includes_trajectory_and_source_freshness(
     assert "source_freshness: icm=2026-06-18; m365=2026-06-17" in client.last_user
 
 
-def test_p4_18_prompt_budget_trims_excessive_context() -> None:
+def test_p4_18_prompt_budget_trims_excessive_context(tmp_path: Path) -> None:
     """P4-18: oversized evidence/supplemental context is bounded before reaching the LLM."""
     client = _FakeAIClient("NEW Cache warmup safeguard is ready.")
     noisy_comment = " ".join(f"note{i}" for i in range(160))
@@ -798,6 +847,8 @@ def test_p4_18_prompt_budget_trims_excessive_context() -> None:
 
     generate_workstream_blurb(
         client=client,
+        program_id="acme",
+        programs_root=tmp_path,
         workstream_name="Deployment",
         items=(_item(101, "Cache warmup safeguard"),),
         evidence_by_item={101: _evidence(101, Confidence.HIGH)},
@@ -812,7 +863,7 @@ def test_p4_18_prompt_budget_trims_excessive_context() -> None:
     assert "supplemental_context_omitted:" in client.last_user
 
 
-def test_p4_27_bundle_prompt_includes_corroboration_note_and_boosted_confidence() -> None:
+def test_p4_27_bundle_prompt_includes_corroboration_note_and_boosted_confidence(tmp_path: Path) -> None:
     """P4-27: corroborated facts raise transient bundle confidence and reach the prompt."""
     from src.commands.report_ai import _boost_evidence_confidence_from_corroboration
 
@@ -838,6 +889,8 @@ def test_p4_27_bundle_prompt_includes_corroboration_note_and_boosted_confidence(
 
     generate_workstream_blurb(
         client=client,
+        program_id="acme",
+        programs_root=tmp_path,
         workstream_name="Deployment",
         items=(_item(101, "Cache warmup safeguard"),),
         evidence_by_item={101: _evidence(101, Confidence.HIGH)},
@@ -888,3 +941,114 @@ def test_p4_8_p4_9_augment_folds_icm_into_blocking_items_and_kusto_into_narrativ
         evidence, icm_blockers=[], kusto_metrics=[],
     )
     assert same is evidence
+
+
+def test_generate_workstream_blurb_records_released_terminal_on_success(tmp_path: Path) -> None:
+    # ADF-W5.1/P7: blurb_generator's AISchemaGateway migration must record a
+    # durable QG-29 "released" terminal for a successful generation, same as
+    # risk_proposal_generator's release-audit contract.
+    from src.core.ledger.event_log import read_events
+
+    client = _FakeAIClient("NEW Cache warmup safeguard is ready [#101].")
+
+    result = generate_workstream_blurb(
+        client=client,
+        program_id="acme",
+        programs_root=tmp_path,
+        workstream_name="Deployment",
+        items=(_item(101, "Cache warmup safeguard"),),
+        evidence_by_item={101: _evidence(101, Confidence.HIGH)},
+        deltas=(_delta(101, DeltaKind.NEW),),
+        editorial_rules=_editorial_rules(),
+    )
+
+    assert result is not None
+    events = read_events("acme", programs_root=tmp_path)
+    release_decisions = [event for event in events if event.event_type == "ai.release_decision.v1"]
+    assert release_decisions
+    assert release_decisions[-1].payload["terminal"] == "released"
+
+
+def test_generate_workstream_blurb_repeat_identical_request_hits_the_cache(tmp_path: Path) -> None:
+    # ADF-W5.1/P7: identical program/items/evidence/deltas/editorial_rules
+    # should be served from the AI result cache on the second call.
+    client = _FakeAIClient("NEW Cache warmup safeguard is ready [#101].")
+    items = (_item(101, "Cache warmup safeguard"),)
+    evidence_by_item = {101: _evidence(101, Confidence.HIGH)}
+    deltas = (_delta(101, DeltaKind.NEW),)
+
+    first = generate_workstream_blurb(
+        client=client,
+        program_id="acme",
+        programs_root=tmp_path,
+        workstream_name="Deployment",
+        items=items,
+        evidence_by_item=evidence_by_item,
+        deltas=deltas,
+        editorial_rules=_editorial_rules(),
+    )
+    second = generate_workstream_blurb(
+        client=client,
+        program_id="acme",
+        programs_root=tmp_path,
+        workstream_name="Deployment",
+        items=items,
+        evidence_by_item=evidence_by_item,
+        deltas=deltas,
+        editorial_rules=_editorial_rules(),
+    )
+
+    assert first is not None
+    assert second is not None
+    assert client.calls == 1
+    assert second.text == first.text
+
+
+def test_generate_workstream_blurb_different_items_do_not_hit_the_cache(tmp_path: Path) -> None:
+    client = _FakeAIClient("NEW Cache warmup safeguard is ready [#101].")
+
+    generate_workstream_blurb(
+        client=client,
+        program_id="acme",
+        programs_root=tmp_path,
+        workstream_name="Deployment",
+        items=(_item(101, "Cache warmup safeguard"),),
+        evidence_by_item={101: _evidence(101, Confidence.HIGH)},
+        deltas=(_delta(101, DeltaKind.NEW),),
+        editorial_rules=_editorial_rules(),
+    )
+    generate_workstream_blurb(
+        client=client,
+        program_id="acme",
+        programs_root=tmp_path,
+        workstream_name="Deployment",
+        items=(_item(101, "A totally different work item"),),
+        evidence_by_item={101: _evidence(101, Confidence.HIGH)},
+        deltas=(_delta(101, DeltaKind.NEW),),
+        editorial_rules=_editorial_rules(),
+    )
+
+    assert client.calls == 2
+
+
+def test_generate_workstream_blurb_oversized_request_is_discarded_before_calling_the_provider(
+    tmp_path: Path,
+) -> None:
+    # ADF-W5.1/P7: AISchemaGateway bounds must reject an oversized request
+    # payload before ever invoking the frontier provider.
+    client = _FakeAIClient("NEW Cache warmup safeguard is ready [#101].")
+
+    with pytest.raises(BlurbGenerationError, match="AISchemaGateway rejected the outbound request"):
+        generate_workstream_blurb(
+            client=client,
+            program_id="acme",
+            programs_root=tmp_path,
+            workstream_name="Deployment",
+            items=(_item(101, "Cache warmup safeguard"),),
+            evidence_by_item={101: _evidence(101, Confidence.HIGH)},
+            deltas=(_delta(101, DeltaKind.NEW),),
+            editorial_rules=_editorial_rules(),
+            supplemental_context=("x" * 200_001,),
+        )
+
+    assert client.calls == 0

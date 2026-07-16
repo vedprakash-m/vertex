@@ -9,7 +9,10 @@ def test_estimate_tokens_falls_back_when_tiktoken_is_unavailable(monkeypatch) ->
     def _raise_import_error(_name: str):
         raise ImportError("tiktoken not installed")
 
-    monkeypatch.setattr("src.ai.context_budget.importlib.import_module", _raise_import_error)
+    # ADF-W0.14 moved the real implementation (and its `import importlib`)
+    # to src/core/context_budget.py; src/ai/context_budget.py is now a pure
+    # re-export shim with no `importlib` name of its own to patch.
+    monkeypatch.setattr("src.core.context_budget.importlib.import_module", _raise_import_error)
 
     assert estimate_tokens("abcdefgh") == 2
 

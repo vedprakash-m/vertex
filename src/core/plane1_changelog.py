@@ -43,6 +43,7 @@ from src.core.models_v2 import (
     Signal,
     Workstream,
 )
+from src.core.operation_trace import REF_TYPE_FACT, record_trace_link
 from src.core.program_fact_store import FactPrecedence, ProgramFactInput, ProgramFactStore
 
 
@@ -253,8 +254,11 @@ def shadow_write_plane1_snapshot(
     recorded_at: datetime,
     home_root: Path | None = None,
     db_root: Path | None = None,
+    correlation_id: str = "",
+    programs_root: Path | None = None,
 ) -> None:
     store = ProgramFactStore(program_id, home_root=home_root, db_root=db_root)
+    written_fact_count = 0
     for entity_key, fields in snapshot.items():
         if "/" not in entity_key:
             continue
@@ -283,6 +287,25 @@ def shadow_write_plane1_snapshot(
                 ),
                 recorded_at=recorded_at,
             )
+            written_fact_count += 1
+    # ADF-W2.12: one trace link per snapshot write (not per field-fact -- a
+    # snapshot can touch hundreds of entity/field pairs, so a per-fact link
+    # would flood the ledger for no added debugging value over one summary
+    # link), no-op when no correlation identity was threaded.
+    if correlation_id and programs_root is not None and written_fact_count:
+        try:
+            record_trace_link(
+                program_id=program_id,
+                correlation_id=correlation_id,
+                workflow_id=correlation_id,
+                run_id=correlation_id,
+                stage="fact",
+                ref_type=REF_TYPE_FACT,
+                ref_id=f"plane1_snapshot:{program_id}:{written_fact_count}@{recorded_at.isoformat()}",
+                programs_root=programs_root,
+            )
+        except Exception:  # noqa: BLE001 -- a trace link is observability, never a write blocker.
+            pass
 
 
 def load_plane1_changes(

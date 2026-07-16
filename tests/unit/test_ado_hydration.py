@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from src.core.ado_hydration import ADOHydrationConfig, ADOHydrationProvider
+from src.core.ado_hydration import ADOHydrationConfig, ADOHydrationProvider, _normalize_ado_comment_html
 from src.core.integration_types import ChannelRegistration, HydrationMode, RegistrationStatus
 
 
-def _registration(ref_id: str) -> ChannelRegistration:
+def _registration(ref_id: str, *, last_verified_at: datetime | None = None) -> ChannelRegistration:
     now = datetime(2026, 5, 24, tzinfo=timezone.utc)
     return ChannelRegistration(
         channel="ado",
@@ -17,6 +17,7 @@ def _registration(ref_id: str) -> ChannelRegistration:
         status=RegistrationStatus.ACTIVE,
         first_discovered_at=now,
         last_seen_at=now,
+        last_verified_at=last_verified_at,
         workstream_ids=("demo.slice",),
     )
 
@@ -48,7 +49,8 @@ class _FakeADOClient:
             for work_item_id in work_item_ids
         ]
 
-    def list_work_item_revisions(self, work_item_id: int) -> list[dict[str, object]]:
+    def list_work_item_revisions(self, work_item_id: int, **kwargs: object) -> list[dict[str, object]]:
+        del kwargs  # ADF-W2.1: real client now accepts on_pagination/page_size/max_pages
         self.revision_calls.append(work_item_id)
         return [
             {
@@ -69,7 +71,8 @@ class _FakeADOClient:
             },
         ]
 
-    def list_work_item_comments(self, work_item_id: int) -> list[dict[str, object]]:
+    def list_work_item_comments(self, work_item_id: int, **kwargs: object) -> list[dict[str, object]]:
+        del kwargs  # ADF-W2.1: real client now accepts on_pagination/max_pages
         self.comment_calls.append(work_item_id)
         return [
             {
@@ -101,6 +104,95 @@ def test_ado_hydration_fetches_batch_and_changed_item_detail() -> None:
     assert client.batch_calls == [(101,)]
     assert client.revision_calls == [101]
     assert client.comment_calls == [101]
+
+
+def test_ado_hydration_skips_detail_fetch_when_unchanged_since_last_verification() -> None:
+    """ADF-W2.2 (Section 8.4.1): a rolling `since` window (broad) must not
+    force a re-fetch of an item that hasn't changed since ITS OWN last
+    verification -- the fixture row's ChangedDate is 2026-05-24T10:00:00Z;
+    last_verified_at is set later than that, so no detail fetch should occur
+    even though `since` (passed to hydrate) is much older/broader."""
+    client = _FakeADOClient()
+    provider = ADOHydrationProvider(client)  # type: ignore[arg-type]
+
+    result = provider.hydrate(
+        (_registration("101", last_verified_at=datetime(2026, 5, 24, 11, 0, tzinfo=timezone.utc)),),
+        datetime(2026, 5, 1, tzinfo=timezone.utc),  # broad rolling lookback
+        "demo",
+        ADOHydrationConfig(),
+        mode=HydrationMode.FULL,
+    )
+
+    assert client.revision_calls == []
+    assert client.comment_calls == []
+    assert result.resources.work_items[0].revisions == []
+    assert result.resources.work_items[0].comments == []
+
+
+def test_ado_hydration_fetches_detail_when_changed_since_last_verification() -> None:
+    """Mirror case: last_verified_at predates the row's ChangedDate, so the
+    item DID change since it was last verified -- detail is still fetched
+    even though last_verified_at is more recent than the broad `since`."""
+    client = _FakeADOClient()
+    provider = ADOHydrationProvider(client)  # type: ignore[arg-type]
+
+    result = provider.hydrate(
+        (_registration("101", last_verified_at=datetime(2026, 5, 24, 9, 0, tzinfo=timezone.utc)),),
+        datetime(2026, 5, 1, tzinfo=timezone.utc),
+        "demo",
+        ADOHydrationConfig(),
+        mode=HydrationMode.FULL,
+    )
+
+    assert client.revision_calls == [101]
+    assert client.comment_calls == [101]
+    assert len(result.resources.work_items[0].revisions) == 2
+
+
+def test_ado_hydration_no_last_verified_at_falls_back_to_since() -> None:
+    """A never-before-verified registration (fresh registration, first
+    gather) has no watermark to prefer -- falls back to the caller's
+    `since`, matching pre-ADF-W2.2 behavior exactly."""
+    client = _FakeADOClient()
+    provider = ADOHydrationProvider(client)  # type: ignore[arg-type]
+
+    result = provider.hydrate(
+        (_registration("101"),),  # last_verified_at=None
+        datetime(2026, 5, 23, tzinfo=timezone.utc),  # before the row's ChangedDate -> still "changed"
+        "demo",
+        ADOHydrationConfig(),
+        mode=HydrationMode.FULL,
+    )
+
+    assert client.revision_calls == [101]
+    assert len(result.resources.work_items[0].revisions) == 2
+
+
+def test_ado_hydration_deep_first_fetches_detail_for_never_verified_item_even_when_row_predates_since() -> None:
+    """ADF-W2.2 (Section 8.4.1): "on first registration ... fetch complete
+    bounded revisions and comments" is unconditional -- it must not be gated
+    by the same changed-since check used for already-verified items. The
+    fixture row's ChangedDate is 2026-05-24T10:00:00Z; `since` here is
+    2026-06-01 (AFTER the row's ChangedDate), so `_row_changed_since` alone
+    would report "unchanged" and skip the fetch. But this registration has
+    never been verified (`last_verified_at=None`), so this is genuinely its
+    first-ever hydration -- deep-first must still fetch full detail
+    regardless of the row looking "unchanged" relative to the window."""
+    client = _FakeADOClient()
+    provider = ADOHydrationProvider(client)  # type: ignore[arg-type]
+
+    result = provider.hydrate(
+        (_registration("101"),),  # last_verified_at=None
+        datetime(2026, 6, 1, tzinfo=timezone.utc),  # after the row's ChangedDate -> "unchanged" per the window
+        "demo",
+        ADOHydrationConfig(),
+        mode=HydrationMode.FULL,
+    )
+
+    assert client.revision_calls == [101]
+    assert client.comment_calls == [101]
+    assert len(result.resources.work_items[0].revisions) == 2
+    assert len(result.resources.work_items[0].comments) == 1
 
 
 def test_ado_hydration_freshness_only_skips_revisions_and_comments() -> None:
@@ -141,6 +233,63 @@ def test_ado_hydration_empty_registry_returns_empty_result() -> None:
     assert client.batch_calls == []
 
 
+def test_normalize_ado_comment_html_strips_tags_preserves_link_target() -> None:
+    raw = '<div>Please review <a href="https://dev.azure.com/org/proj/_workitems/edit/1234">Bug 1234</a> before EOD.</div>'
+    normalized = _normalize_ado_comment_html(raw)
+    assert "<" not in normalized
+    assert "Bug 1234" in normalized
+    assert "https://dev.azure.com/org/proj/_workitems/edit/1234" in normalized
+    assert "Please review" in normalized
+    assert "before EOD." in normalized
+
+
+def test_normalize_ado_comment_html_strips_script_and_style_blocks() -> None:
+    raw = "<style>.x{color:red}</style><script>alert(1)</script><p>Real comment text</p>"
+    normalized = _normalize_ado_comment_html(raw)
+    assert normalized == "Real comment text"
+
+
+def test_normalize_ado_comment_html_unescapes_entities_and_collapses_whitespace() -> None:
+    raw = "<p>Risk &amp; scope   &gt; expected</p>\n<p>See @mention</p>"
+    normalized = _normalize_ado_comment_html(raw)
+    assert normalized == "Risk & scope > expected See @mention"
+
+
+def test_normalize_ado_comment_html_empty_input_is_unchanged() -> None:
+    assert _normalize_ado_comment_html("") == ""
+
+
+def test_ado_hydration_strips_html_from_comment_text() -> None:
+    class _HtmlCommentClient(_FakeADOClient):
+        def list_work_item_comments(self, work_item_id: int, **kwargs: object) -> list[dict[str, object]]:
+            del kwargs
+            self.comment_calls.append(work_item_id)
+            return [
+                {
+                    "id": 7,
+                    "createdBy": {"displayName": "Owner", "uniqueName": "owner@example.com"},
+                    "createdDate": "2026-05-24T12:00:00Z",
+                    "text": '<div>Ready for review — see <a href="https://example/wi/1234">WI 1234</a></div>',
+                }
+            ]
+
+    client = _HtmlCommentClient()
+    provider = ADOHydrationProvider(client)  # type: ignore[arg-type]
+
+    result = provider.hydrate(
+        (_registration("101"),),
+        datetime(2026, 5, 23, tzinfo=timezone.utc),
+        "demo",
+        ADOHydrationConfig(),
+        mode=HydrationMode.FULL,
+    )
+
+    comment_text = result.resources.work_items[0].comments[0].text
+    assert "<" not in comment_text
+    assert "WI 1234" in comment_text
+    assert "https://example/wi/1234" in comment_text
+
+
 def test_ado_hydration_tracks_failed_ref_ids_on_batch_error() -> None:
     """When batch fetch raises QueryError, all ref_ids go to failed_ref_ids."""
     from src.core.ado_client import QueryError
@@ -165,7 +314,12 @@ def test_ado_hydration_tracks_failed_ref_ids_on_batch_error() -> None:
 
 
 def test_ado_hydration_since_skips_revisions_for_unchanged_items() -> None:
-    """`since` scoping: items not changed after `since` do not trigger revision/comment fetches."""
+    """`since` scoping: an ALREADY-VERIFIED item not changed after its own
+    last verification does not trigger revision/comment fetches. (Must use
+    an already-verified registration here -- a never-verified registration
+    always gets deep-first full detail regardless of `since`, per the
+    ADF-W2.2 fix below; see
+    test_ado_hydration_deep_first_fetches_detail_for_never_verified_item_even_when_row_predates_since.)"""
     client = _FakeADOClient()
     provider = ADOHydrationProvider(client)  # type: ignore[arg-type]
     # The fake client returns ChangedDate = 2026-05-24T10:00:00Z for all items.
@@ -173,7 +327,7 @@ def test_ado_hydration_since_skips_revisions_for_unchanged_items() -> None:
     since_after_change = datetime(2026, 5, 25, tzinfo=timezone.utc)
 
     result = provider.hydrate(
-        (_registration("101"),),
+        (_registration("101", last_verified_at=datetime(2026, 5, 24, 11, 0, tzinfo=timezone.utc)),),
         since_after_change,
         "demo",
         ADOHydrationConfig(),

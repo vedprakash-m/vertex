@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import sys
+import uuid
 from pathlib import Path
 
 try:
@@ -14,11 +16,14 @@ import typer
 from typer.core import TyperGroup
 
 from src.ai.ai_mode import AIMode, set_ai_mode
+from src.ai.tiered_router import register_decision_sink
 from src.commands.actions import app as actions_app
 from src.commands.ado import app as ado_app
+from src.commands.ai_proposals import app as ai_proposals_app
 from src.commands.admin_baseline import admin_baseline_command
 from src.commands.admin_fact_store_flip import fact_store_flip_command
 from src.commands.admin_fact_store_migrate import migrate_legacy_state_command
+from src.commands.admin_metrics_rollup import admin_metrics_rollup_command
 from src.commands.admin_platform_proof import admin_platform_proof_command
 from src.commands.admin_s7_position import admin_s7_position_command
 from src.commands.admin_reconcile import reconcile_command as admin_reconcile_command
@@ -36,6 +41,7 @@ from src.commands.audit import app as audit_app
 from src.commands.apply_proposals import apply_proposals_command
 from src.commands.assumptions import app as assumptions_app
 from src.commands.claims import app as claims_app
+from src.commands.cockpit import app as cockpit_app
 from src.commands.decisions import app as decisions_app
 from src.commands.dependencies import app as dependencies_app
 from src.commands.discover import app as discover_app
@@ -69,6 +75,7 @@ from src.commands.fleet import fleet_command
 from src.commands.gather import gather_command
 from src.commands.history import history_command
 from src.commands.hypothesis import app as hypothesis_app
+from src.commands.prefetch import prefetch_command
 from src.commands.index import app as index_app
 from src.commands.inspect import app as inspect_app
 from src.commands.ingest_update import ingest_update_command
@@ -97,6 +104,8 @@ from src.commands.prep import prep_command
 from src.commands.privacy import privacy_app
 from src.commands.observability import observability_app, alerts_app
 from src.commands.decision_brief import decision_brief_command
+from src.commands.decision_brief_pilot import app as decision_brief_pilot_app
+from src.commands.program_synthesizer_pilot import app as program_synthesizer_pilot_app
 from src.commands.propose import propose_command
 from src.commands.published_baseline import published_baseline_command
 from src.commands.rollback import rollback_command
@@ -130,6 +139,8 @@ from src.commands.vitality import vitality_command
 from src.commands.watch import watch_command
 from src.core.catchup_runner import maybe_catchup
 from src.core.edition_resolver import PROGRAMS_ROOT, resolve_edition_paths
+from src.core.adf_config import load_arch_data_fix
+from src.core.measurement_store import TierDecisionSinkConfig, make_tier_decision_sink
 
 
 class VertexRootGroup(TyperGroup):
@@ -174,6 +185,7 @@ def main(
     if ctx.invoked_subcommand is not None:
         if skip_issue_flag:
             raise typer.BadParameter("--skip-issue cannot be combined with a subcommand.")
+        _maybe_register_tier_decision_sink(ctx)
         _maybe_run_scheduled_db_maintenance(ctx)
         _maybe_run_session_catchup(ctx, no_catchup=no_catchup)
         return
@@ -206,13 +218,53 @@ def _maybe_run_session_catchup(ctx: typer.Context, *, no_catchup: bool) -> None:
     )
 
 
+def _maybe_register_tier_decision_sink(ctx: typer.Context) -> None:
+    """ADF-W0.7: persist every AI routing decision made during this invocation.
+
+    Registers a durable JSONL sink (``programs/<id>/runtime/tier_decisions.jsonl``)
+    for the process lifetime. Best-effort: a sink-setup failure must never block
+    a CLI command (INV-ADF-5 governs missing *provider* telemetry, not this
+    registration step, so failures here are swallowed after logging).
+    """
+    if ctx.invoked_subcommand in {None, "admin"}:
+        return
+    program_id = _resolve_program_for_session_catchup(sys.argv[1:])
+    if program_id is None:
+        return
+    try:
+        edition_id = _extract_option(sys.argv[1:], "--edition")
+        try:
+            execution_mode = load_arch_data_fix(program_id, programs_root=PROGRAMS_ROOT).mode.value
+        except Exception:
+            execution_mode = "off"
+        sink_config = TierDecisionSinkConfig(
+            program_id=program_id,
+            edition_id=edition_id,
+            run_id=uuid.uuid4().hex,
+            execution_mode=execution_mode,
+            programs_root=PROGRAMS_ROOT,
+        )
+        register_decision_sink(make_tier_decision_sink(sink_config))
+    except Exception:  # pragma: no cover - registration must never break the CLI
+        logging.getLogger(__name__).warning("tier decision sink registration failed", exc_info=True)
+
+
 def _maybe_run_scheduled_db_maintenance(ctx: typer.Context) -> None:
+    """Best-effort scheduled reality-store compaction for this invocation.
+
+    A compaction failure (e.g. a stale/partial local db schema) must never
+    block a CLI command, so exceptions are swallowed after logging, matching
+    the same best-effort contract as ``_maybe_register_tier_decision_sink``.
+    """
     if _should_skip_scheduled_db_maintenance(ctx, sys.argv[1:]):
         return
     program_id = _resolve_program_for_session_catchup(sys.argv[1:])
     if program_id is None:
         return
-    maybe_run_scheduled_compaction(program_id)
+    try:
+        maybe_run_scheduled_compaction(program_id)
+    except Exception:  # pragma: no cover - maintenance must never break the CLI
+        logging.getLogger(__name__).warning("scheduled db maintenance failed", exc_info=True)
 
 
 def _stdout_supports_interactive_catchup() -> bool:
@@ -266,14 +318,18 @@ app.add_typer(list_app, name="list")
 app.add_typer(actions_app, name="actions")
 app.add_typer(actuate_app, name="actuate")
 app.add_typer(ado_app, name="ado")
+app.add_typer(ai_proposals_app, name="ai-proposals")
 app.add_typer(admin_app, name="admin")
 app.add_typer(assertion_app, name="assertion")
 app.add_typer(assumptions_app, name="assumptions")
 app.add_typer(claims_app, name="claims")
+app.add_typer(cockpit_app, name="cockpit")
 app.add_typer(calibration_app, name="calibration")
 app.add_typer(commitment_app, name="commitment")
 app.add_typer(context_app, name="context")
 app.add_typer(config_app, name="config")
+app.add_typer(decision_brief_pilot_app, name="decision-brief-pilot")
+app.add_typer(program_synthesizer_pilot_app, name="program-synthesizer-pilot")
 app.add_typer(connectors_app, name="connectors")
 app.add_typer(audit_app, name="audit")
 app.command("context-diff")(_context_diff_cmd)
@@ -320,6 +376,7 @@ admin_app.command("migrate-legacy-state")(migrate_legacy_state_command)
 admin_app.command("fact-store-flip")(fact_store_flip_command)
 admin_app.command("archive-signing")(admin_archive_signing_command)
 admin_app.command("upgrade-state")(admin_upgrade_state_command)
+admin_app.command("metrics-rollup")(admin_metrics_rollup_command)
 app.command("archive-journals")(archive_journals_command)
 app.command("archive-verify")(archive_verify_command)
 app.command("ask")(ask_command)
@@ -343,6 +400,7 @@ app.command("evidence")(evidence_command)
 app.command("freshness")(freshness_command)
 app.command("fleet")(fleet_command)
 app.command("gather")(gather_command)
+app.command("prefetch")(prefetch_command)
 app.command("history")(history_command)
 app.command("investigate")(investigate_command)
 app.command("ingest-update")(ingest_update_command)

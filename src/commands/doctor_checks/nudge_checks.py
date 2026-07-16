@@ -176,11 +176,21 @@ def run_nudge_doctor(
             for k, v in raw_state.items():
                 if k == "schema_version":
                     continue
-                if not isinstance(v, str):
+                # D-5: schema 1.2 dict shape {triggered_at, origin, run_id};
+                # schema 1.1 bare ISO string. Extract the timestamp accordingly
+                # to match the runtime read path in nudge_state_store.py.
+                if isinstance(v, dict):
+                    ts = v.get("triggered_at")
+                elif isinstance(v, str):
+                    ts = v
+                else:
+                    invalid_ts_count += 1
+                    continue
+                if not isinstance(ts, str):
                     invalid_ts_count += 1
                     continue
                 try:
-                    datetime.fromisoformat(v.replace("Z", "+00:00"))
+                    datetime.fromisoformat(ts.replace("Z", "+00:00"))
                 except ValueError:
                     invalid_ts_count += 1
             if invalid_ts_count > 0:

@@ -334,10 +334,6 @@
         }
       },
       "additionalProperties": true
-    },
-    "productivity_dividend_published": {
-      "type": "boolean",
-      "default": false
     }
   },
   "additionalProperties": true

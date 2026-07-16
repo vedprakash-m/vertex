@@ -79,6 +79,87 @@ commands:
         value_options:
         - --format
         - --program
+  ai-proposals:
+    subcommands:
+      accept:
+        flags:
+        - --dry-run
+        value_options:
+        - --actor
+        - --ado-link
+        - --anchor
+        - --area-path
+        - --by-date
+        - --edition
+        - --id
+        - --iteration-path
+        - --org
+        - --program
+        - --project
+        - --type
+      flag-regression:
+        flags: []
+        value_options:
+        - --id
+        - --program
+        - --reason
+        - --type
+      generate:
+        flags:
+        - --dry-run
+        value_options:
+        - --candidate-risk-id
+        - --candidates-file
+        - --current-status
+        - --decision-ask-id
+        - --decision-text
+        - --dependency-id
+        - --deployment
+        - --description
+        - --evidence-ref
+        - --evidence-text
+        - --from-summary
+        - --meeting-ref
+        - --program
+        - --risk-if-broken
+        - --title
+        - --to-summary
+        - --transcript-file
+        - --type
+        - --work-item-id
+      list:
+        flags: []
+        value_options:
+        - --program
+        - --status
+        - --type
+      reject:
+        flags:
+        - --dry-run
+        value_options:
+        - --id
+        - --program
+        - --reason
+        - --type
+      review:
+        flags: []
+        value_options:
+        - --actor
+        - --program
+        - --type
+      review-batch:
+        flags:
+        - --dry-run
+        value_options:
+        - --actor
+        - --area-path
+        - --iteration-path
+        - --org
+        - --program
+        - --project
+        - --sample-size
+        - --seed
+        - --type
   alerts:
     subcommands:
       append:
@@ -372,6 +453,77 @@ commands:
         - --program
         - --reviewer
         - --status
+  cockpit:
+    subcommands:
+      adoption:
+        flags: []
+        value_options:
+        - --format
+        - --program
+        - --since-weeks
+        - --workflow
+      adoption-skip:
+        flags: []
+        value_options:
+        - --program
+        - --reason
+        - --workflow
+      autonomy-demote:
+        flags: []
+        value_options:
+        - --class
+        - --program
+        - --reason
+      autonomy-evaluate:
+        flags: []
+        value_options:
+        - --class
+        - --program
+      autonomy-promote:
+        flags: []
+        value_options:
+        - --class
+        - --program
+        - --reason
+        - --sample-rate
+        - --to
+      build:
+        flags:
+        - --open
+        value_options:
+        - --as-of
+        - --edition
+        - --program
+      compare:
+        flags: []
+        value_options:
+        - --from
+        - --program
+        - --to
+      explain:
+        flags: []
+        value_options:
+        - --edition
+        - --finding
+        - --program
+      measure:
+        flags: []
+        value_options:
+        - --format
+        - --program
+        - --since-days
+      show:
+        flags:
+        - --no-persist
+        value_options:
+        - --edition
+        - --format
+        - --program
+      tui:
+        flags: []
+        value_options:
+        - --edition
+        - --program
   commitment:
     subcommands:
       add:
@@ -471,6 +623,19 @@ commands:
       value_options:
       - --edition
       - --issue
+  decision-brief-pilot:
+    subcommands:
+      compare:
+        flags: []
+        value_options:
+        - --deployment
+        - --edition
+        - --issue
+        - --seed
+      summary:
+        flags: []
+        value_options:
+        - --program
   decisions:
     callback:
       flags: []
@@ -650,6 +815,7 @@ commands:
       - --reset-circuit-breakers
       - --rev-health
       - --risks
+      - --schedule-health
       - --semantic-index
       - --sharepoint
       - --source-waivers
@@ -1191,6 +1357,14 @@ commands:
       - --format
       - --owner
       - --program
+  prefetch:
+    callback:
+      flags: []
+      value_options:
+      - --channel
+      - --edition
+      - --program
+      - --ttl-seconds
   prep:
     callback:
       flags: []
@@ -1203,10 +1377,28 @@ commands:
         flags: []
         value_options:
         - --channel
+      purge:
+        flags:
+        - --apply
+        value_options:
+        - --format
+        - --program
       show:
         flags: []
         value_options:
         - --section
+  program-synthesizer-pilot:
+    subcommands:
+      compare:
+        flags: []
+        value_options:
+        - --deployment
+        - --program
+        - --seed
+      summary:
+        flags: []
+        value_options:
+        - --program
   propose:
     callback:
       flags:
@@ -1343,7 +1535,9 @@ commands:
       init-inbox:
         flags: []
         value_options:
+        - --docs-inbox
         - --eml-inbox
+        - --ics-inbox
         - --program
       label-corpus:
         flags:
@@ -1356,7 +1550,9 @@ commands:
       rotate-processed:
         flags: []
         value_options:
+        - --docs-inbox
         - --eml-inbox
+        - --ics-inbox
         - --max-age-days
         - --max-count
         - --program
@@ -1366,6 +1562,7 @@ commands:
         value_options:
         - --body
         - --container
+        - --docs-inbox
         - --eml-inbox
         - --extractor
         - --ics-inbox

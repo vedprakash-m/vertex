@@ -131,11 +131,14 @@ def review_debrief_command(
             typer.echo(line)
         raise typer.Exit(code=0)
 
+    # ADF-W2.12: one correlation id per debrief -- this invocation writes one
+    # decision plus N follow-up actions, a real multi-fact chain worth tracing.
+    correlation_id = uuid4().hex
     decisions = list(_load_decision_entries(program_id))
     decisions.append(decision_entry)
-    save_decisions(program_id, tuple(decisions), programs_root=PROGRAMS_ROOT)
+    save_decisions(program_id, tuple(decisions), programs_root=PROGRAMS_ROOT, correlation_id=correlation_id)
     for entry in action_entries:
-        append_action(program_id, entry, programs_root=PROGRAMS_ROOT)
+        append_action(program_id, entry, programs_root=PROGRAMS_ROOT, correlation_id=correlation_id)
 
     typer.echo(f"Added debrief decision {decision_entry.id} to {program_id}.")
     if action_entries:

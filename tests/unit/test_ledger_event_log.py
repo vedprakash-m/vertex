@@ -69,8 +69,9 @@ def test_knowledge_document_source_ref_round_trip() -> None:
 def test_event_registry_count_and_control_split() -> None:
     # v2.22 (ADR-0006 R2): +4 deployment/incident lifecycle types → 56 total.
     # v1.6 activation: +1 discovery.candidate_revoked.v1 (AG-10 revoke audit) → 57 total.
-    assert len(get_registered_event_types()) == 57
-    assert count_control_event_types() == (54, 3)
+    # ADF-W0.18: +16 A.2 payload schemas registered → 73 total.
+    assert len(get_registered_event_types()) == 73
+    assert count_control_event_types() == (70, 3)
 
 
 def test_validate_event_payload_rejects_missing_required_field() -> None:

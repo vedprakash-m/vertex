@@ -1601,6 +1601,9 @@ class _AuditRollbackFakeADOClient:
         self.timeout = 30
         self._rest_base_url = "https://dev.azure.com/your-org/One/_apis/wit/"
         self._session = _AuditRollbackFakeSession(self)
+        # ADF-W1.1: ADOWriter._request_json now routes mutations through the
+        # dedicated non-retrying session; alias it to the same fake session.
+        self._mutation_session = self._session
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": "Bearer fake", "Accept": "application/json", "Content-Type": "application/json"}

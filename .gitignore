@@ -63,6 +63,15 @@ archive/
 # (should live under output/, which is already ignored).
 /activation_status.json
 /activation-*.json
+/armada_newsletter_*.html
+/armada_newsletter_*.txt
+/gather_output.txt
+/repairs_safety_full.csv
+/wids.txt
+# Generic catch-all: any ad-hoc `> file.txt`/`> file.csv` shell-redirect dump
+# left in the repo root (real program data should never land here).
+/*_output.txt
+/*_full.csv
 reports/*
 !reports/*/
 reports/*/*

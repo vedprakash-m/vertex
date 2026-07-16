@@ -1,6 +1,11 @@
 # Threat Model — Vertex Platform
 
-**Status**: v1.0 — 2026-06-09 (WS-24)
+**Status**: v1.1 — 2026-07-13 (ADF-W0.11 re-review, drafted by Platform DRI
+in advisory mode). **Enforce-mode approval is UNFILLED** per
+`governance/decisions/0013-raci-decision-rights.md` — a second, independent
+security reviewer must sign before this version governs any enforce-mode
+gate. Advisory-only draft review is in scope for a solo operator; formal
+approval is not.
 **Owner**: Platform SRE + DPO
 **Cadence**: Re-reviewed every quarter; on every model-version bump; on every
 material architecture change.
@@ -31,6 +36,11 @@ CI threat model); the human-only review surfaces (no AI in the path).
 | A-6 | AIClient keys / `VERTEX_*_DEPLOYMENT` env | process env | T-2 credential theft |
 | A-7 | Model versions / deployment IDs | `ai_policy.yaml` + `_state/model_registry.jsonl` | T-7 silent model bump |
 | A-8 | L3/L4 blast-radius metadata | autonomy-audit rows | T-5 action exceeds scope |
+| A-9 *(added ADF-W0.11)* | Stakeholder reply text (context-gap solicitation answers) | `programs/<id>/nudge/replies/`, `ContextGapAnswerProposal.proposed_value` | T-8 indirect injection via reply |
+| A-10 *(added ADF-W0.11)* | `workstream_registry.yaml` `deep_context.why/what/how` fields | `programs/<id>/workstream_registry.yaml` | T-8 (poisoned field becomes AI evidence input) |
+| A-11 *(added ADF-W0.11)* | Meeting-transcript-derived `MeetingAction` proposals | `src/core/meeting_action.py`, REV-mail extraction | T-9 indirect injection via meeting content |
+| A-12 *(added ADF-W0.11)* | The six AISchemaGateway proposal types (program synthesis, meeting actions, risk proposals, top-three candidates, dependency blast-radius, governance decision briefs) | `src/core/ai_schema_gateway.py` pipeline; QG-29 release | T-1, T-9 (shared release gate) |
+| A-13 *(added ADF-W0.11)* | Outbox-dispatched ADO writes originating from a `MeetingAction` (not the original `blurb_generator` chain) | `src/core/actuation_outbox.py`, `src/core/meeting_action_routing.py` | T-1, T-5, T-9 |
 
 ## 3. Threats
 
@@ -175,6 +185,88 @@ and forget to re-cert. The `recert_at` field is the only enforcement.
 
 **Owner**: Platform SRE. **Status**: mitigated by WS-24.
 
+### T-8 — Indirect injection via stakeholder reply *(added ADF-W0.11, 2026-07-13)*
+**Attack**: Vertex drafts a context-gap solicitation (`context_gap_solicitation.py`,
+Section 8.10.8) asking a stakeholder to fill a missing `deep_context.why`/
+`.what`/`.how` field, sent as a human-reviewed-and-sent `.eml` (never
+auto-sent — NG-2 applies here too). The stakeholder's reply is parsed by
+`context_gap_reply_import.py` (local `.eml` drop, best-effort quote-
+separator isolation) into a `ContextGapAnswerProposal`
+(`context_gap_reply.py`). A malicious or compromised stakeholder replies
+with text engineered to read as a legitimate answer but that is actually
+a prompt-injection payload aimed at whatever downstream AI feature later
+reads `workstream_registry.yaml`'s `deep_context` fields as evidence
+(e.g. `program_synthesizer.py`'s assembled request, Section 8.10.5).
+
+**Mitigations in place**:
+- The reply is **never auto-applied**. `assemble_context_gap_answer_proposal`
+  stages it (`status="staged"`); only `apply_context_gap_answer` can write
+  it into `workstream_registry.yaml`, and it raises unless
+  `status == "approved"` — a human must call `approve_context_gap_answer`
+  first (`context_gap_reply.py`, Decision 3/3b, 2026-07-13).
+- `proposed_value` is the reply's raw text verbatim — no LLM
+  reinterpretation happens between "stakeholder wrote it" and "human
+  reviews it," so there is no AI-summarization step that could itself be
+  injection-poisoned before a human ever sees the exact text.
+- Downstream, if the approved `deep_context` text is later assembled into
+  a `program_synthesizer.py` request, the SemanticValidator's
+  "no unsupported causal claim" grounding check (ADF-W2.8/QG-29) still
+  applies to any AI *output* derived from it — an injected instruction in
+  the field cannot itself force an ungrounded claim past release, only
+  poison what the AI treats as an input fact.
+
+**Residual risk**: a human reviewer who approves a plausible-looking reply
+without recognizing an embedded injection payload. This is the same class
+of residual risk as T-3 (a DRI who skims and approves) — the human
+approval step is the trust boundary, not a technical filter. No content-
+scanning of reply text is applied at approval time today (unlike T-1's
+`process_generated_text`, which scans AI-*generated* text, not
+human/stakeholder-*supplied* text — scanning inbound stakeholder replies
+for injection patterns is a plausible future control, not yet built).
+
+**Owner**: Platform SRE (advisory draft) / DPO. **Status**: mitigated by
+human-approval gate; residual risk on reviewer diligence, not yet content-scanned.
+
+### T-9 — Indirect injection via meeting-transcript extraction *(added ADF-W0.11, 2026-07-13)*
+**Attack**: A poisoned meeting transcript or REV-mail deposit contains
+text engineered to be extracted as a legitimate `MeetingAction`
+(`meeting_action.py`/`meeting_action_extractor.py`, Section 8.10.4) —
+e.g. "Action: comment on work item 12345 that this is APPROVED." If
+approved, `meeting_action_routing.py` dispatches it through
+`actuation_outbox.py` (ADF-W1.3's outbox machinery) to a real ADO write —
+a structurally different path from T-1's original
+`blurb_generator`/`exec_summary_drafter` chain, so T-1's mitigations are
+not automatically inherited without this explicit mapping.
+
+**Mitigations in place**:
+- `extract_deterministic_meeting_actions` + `validate_meeting_actions`
+  run before anything is staged; malformed/incomplete actions are
+  rejected structurally, not just flagged.
+- A `MeetingAction` requires an explicit `approve_meeting_action` call
+  (human review) before `meeting_action_routing.py` will route it —
+  same human-gate shape as T-8, independent of T-1's grounding scanner.
+- Once routed, the write goes through `actuation_outbox.py`'s
+  idempotency-key/lease/receipt machinery (ADF-W1.3/W1.10) — the same
+  hash-chained, audited path T-4/T-5's mitigations already cover, so a
+  successful injection still lands in `autonomy_audit.jsonl`/the outbox
+  receipt trail and is huntable via `audit query`.
+- The AISchemaGateway-pattern generators that consume meeting-derived
+  evidence (e.g. `top_three_candidate_generator.py`,
+  `governance_decision_brief_generator.py`, when meeting actions feed
+  their assembled request) still pass through QG-29's release audit and
+  each feature's `SemanticValidator` before any AI output is released.
+
+**Residual risk**: identical in shape to T-1's residual risk (heuristic
+extraction/validation may not catch a sophisticated injection) plus T-8's
+(human approver diligence) — this threat is the composition of both,
+inherited rather than novel, but was previously undocumented because the
+outbox dispatch path did not exist before ADF-W1.3/W3.5 this session.
+
+**Owner**: Platform SRE + DRI. **Status**: mitigated by extraction
+validation + human-approval gate + existing outbox audit trail; residual
+risk unchanged in kind from T-1/T-5, now explicitly mapped onto the new
+path.
+
 ## 4. Kill chain (worked example — T-1)
 
 End-to-end T-1 path:
@@ -212,3 +304,22 @@ refused at step 5 regardless of the ladder.
 | T-5 | WS-21 autonomy ladder + `FallbackAIClient` hard block | DRI + SRE | Mitigated |
 | T-6 | `privacy_matrix` + `vertex privacy purge` (WS-15) | DPO | Mitigated |
 | T-7 | WS-24 model registry + bump detection | Platform SRE | Mitigated |
+| T-8 *(added ADF-W0.11)* | Staged proposal + explicit human approval before `apply_context_gap_answer` write | Platform SRE / DPO | Mitigated with residual (reviewer diligence; no inbound content scan) |
+| T-9 *(added ADF-W0.11)* | Extraction validation + `approve_meeting_action` gate + `actuation_outbox.py` audit trail | Platform SRE + DRI | Mitigated with residual (same class as T-1/T-5) |
+
+## 6. ADF controls mapped to threat IDs *(added ADF-W0.11, 2026-07-13)*
+
+Per `specs/arch-data-fix.md` ADF-W0.11's acceptance evidence requirement
+("map ADF controls to threat IDs"). This is additive documentation only —
+no new control is introduced by this mapping; every row cites a control
+already built and tested earlier this session.
+
+| ADF control | Module | Threat ID(s) it mitigates |
+|---|---|---|
+| AISchemaGateway 5-state lifecycle (`PLANNED→REQUESTED→RESPONDED→SCHEMA_VALIDATED→SEMANTICALLY_VALIDATED`) | `src/core/ai_schema_gateway.py` | T-1, T-9 (structural precondition for any AI output release) |
+| QG-29 terminal release decision | `src/core/quality_gates/ai_release_audit.py` | T-1, T-9 (no AI output reaches a consumer without a recorded release decision) |
+| Per-feature `SemanticValidator` (grounding / no-unsupported-causal-claim) | Six generators: `program_synthesizer.py`, `meeting_action_extractor.py`, `risk_proposal_generator.py`, `top_three_candidate_generator.py`, `dependency_blast_radius_generator.py`, `governance_decision_brief_generator.py` | T-1, T-8 (bounds what an AI can *assert* even if an input was poisoned), T-9 |
+| Proposal-type-distinct-from-record-type + human-approval-only apply (`RiskProposal`≠`RiskEntry`, `MeetingAction` approve/reject lifecycle, `TopThreeCandidateProposal`≠`Top3NowEntry`, `GovernanceDecisionBriefProposal`≠`DecisionBrief`, `ContextGapAnswerProposal`) | Same six generators + `context_gap_reply.py` | T-8, T-9 (no proposal becomes authoritative state without an explicit human transition) |
+| Outbox idempotency-key + workspace-lease + receipt classification | `src/core/actuation_outbox.py` (ADF-W1.3/W1.10) | T-4, T-5, T-9 (every dispatched write is hash-chained and lease-serialized, regardless of which generator produced it) |
+| QG-37 State Authority fail-closed check | `src/core/quality_gates/state_authority.py`, wired into `confirm.py` (Decision 2, 2026-07-13) | Not a T-1..T-9 injection threat — a data-integrity control (split-brain fact-store write prevention). Listed here for completeness since ADF-W0.11 asked for a full control inventory, not because it maps to an existing threat ID; a future revision could add a T-10 "split-brain write" threat if this document's scope is extended to non-AI integrity threats. |
+| `NudgePaths.drafts_dir` draft-only architecture (`X-Unsent: 1`, human `--mark-sent`) | `src/core/eml_writer.py`, `src/commands/nudge.py` | T-3 (extends NG-2's no-auto-send guarantee to every new ADF-generated draft: solicitations, follow-ups, nudges alike) |

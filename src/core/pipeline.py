@@ -98,6 +98,18 @@ class StageContext:
     validation_state: Any = None
     artifacts: Any = None
     fact_snapshot: ProgramFactSnapshot | None = None
+    # ADF-W2.12 (Section 8.2.6): cross-stage correlation identity, generated
+    # once at report_command entry and threaded through every stage so each
+    # artifact-producing stage can record a trace link sharing the same id.
+    # Empty string = no correlation (the default -- existing construction call
+    # sites and tests are unaffected; a stage that sees "" simply does not
+    # record a trace link).
+    correlation_id: str = ""
+    workflow_id: str = ""
+    # run_id distinguishes two runs that share a correlation_id (e.g. a retry
+    # of the same logical run); generated alongside correlation_id at
+    # report_command entry and threaded the same way.
+    run_id: str = ""
 
 
 class PipelineStage(Protocol):

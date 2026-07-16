@@ -709,13 +709,13 @@ def test_build_synthesizer_falls_back_to_backup_deployment_when_primary_generati
             trace_contexts.append(trace_context)
 
     class _FailingSynthesizer:
-        def generate(self, *, program, workstream, signals, drift_patterns, open_risks=(), open_actions=(), contradictions=()):
-            del program, workstream, signals, drift_patterns, open_risks, open_actions, contradictions
+        def generate(self, *, program, workstream, signals, drift_patterns, open_risks=(), open_actions=(), contradictions=(), programs_root=None):
+            del program, workstream, signals, drift_patterns, open_risks, open_actions, contradictions, programs_root
             raise SynthesizerError("primary deployment failed")
 
     class _SuccessfulSynthesizer:
-        def generate(self, *, program, workstream, signals, drift_patterns, open_risks=(), open_actions=(), contradictions=()):
-            del program, workstream, signals, drift_patterns, open_risks, open_actions, contradictions
+        def generate(self, *, program, workstream, signals, drift_patterns, open_risks=(), open_actions=(), contradictions=(), programs_root=None):
+            del program, workstream, signals, drift_patterns, open_risks, open_actions, contradictions, programs_root
             return draft
 
     def _build_from_client(client):
@@ -792,8 +792,8 @@ def test_build_synthesizer_passes_trace_context_to_ai_clients(monkeypatch) -> No
             seen_trace_contexts.append(trace_context)
 
     class _SuccessfulSynthesizer:
-        def generate(self, *, program, workstream, signals, drift_patterns, open_risks=(), open_actions=(), contradictions=()):
-            del program, workstream, signals, drift_patterns, open_risks, open_actions, contradictions
+        def generate(self, *, program, workstream, signals, drift_patterns, open_risks=(), open_actions=(), contradictions=(), programs_root=None):
+            del program, workstream, signals, drift_patterns, open_risks, open_actions, contradictions, programs_root
             return SynthesizedProposalDraft(
                 synthesis=WorkstreamSynthesis(
                     workstream_id="networking",
@@ -890,11 +890,11 @@ class _FakeSynthesizer:
         self.received_drift_patterns: tuple[DriftPattern, ...] = ()
         self.received_contradictions: tuple[ContradictionPacket, ...] = ()
 
-    def generate(self, *, program, workstream, signals, drift_patterns, open_risks=(), open_actions=(), contradictions=()):
+    def generate(self, *, program, workstream, signals, drift_patterns, open_risks=(), open_actions=(), contradictions=(), programs_root=None):
         self.received_signals = tuple(signals)
         self.received_drift_patterns = tuple(drift_patterns)
         self.received_contradictions = tuple(contradictions)
-        del program, workstream, signals, drift_patterns, open_risks, open_actions, contradictions
+        del program, workstream, signals, drift_patterns, open_risks, open_actions, contradictions, programs_root
         return self._draft
 
 

@@ -50,6 +50,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any, Callable
 from collections.abc import Mapping
+import portalocker.exceptions
 import typer
 
 from src.ai.ai_stage import AIStage
@@ -222,10 +223,13 @@ from src.core.config_loader import PROGRAMS_ROOT, REPORTS_ROOT, NarrativeProgram
 from src.core.continuation_contract import build_bridge_section_roster_ids, build_continuation_contract, get_continuation_contract_path, load_inherited_scorecard_dimensions
 from src.core.decision_register import assess_proposed_decision_staleness
 from src.core.delta_engine import build_deltas
+from src.core.adoption_telemetry import GoldenWorkflow, record_adoption
+from src.core.alerts import append_or_suppress_alert
+from src.core.operation_trace import REF_TYPE_OUTPUT, record_trace_link
 from src.core.edition_resolver import filter_workstreams, resolve_edition, get_program_output_dir
 from src.core.eml_writer import write_eml
 from src.core.evidence_engine import build_evidence
-from src.core.exceptions import AuthError, ConfigError, QueryError, QueryTimeoutError
+from src.core.exceptions import AuthError, ConfigError, QueryError, QueryTimeoutError, StateError
 from src.core.forecast_engine import ETAForecast, ForecastAssessment, build_forecast_assessment
 from src.core.freshness_engine import build_freshness_report
 from src.core.hygiene_engine import evaluate_hygiene
@@ -569,6 +573,16 @@ def report_command(
             },
         )
 
+    # ADF-W2.12 (Section 8.2.6): generate one correlation_id for the whole
+    # report run, threaded through every pipeline stage (via StageContext) so
+    # each artifact-producing stage can record a trace link sharing it. The
+    # run_id distinguishes two runs that happen to share a correlation_id
+    # (e.g. a retry); both are stable strings, generated here -- the single
+    # upstream source -- rather than fresh per call site.
+    correlation_id = uuid.uuid4().hex
+    workflow_id = GoldenWorkflow.WEEKLY_REPORT.value
+    run_id = uuid.uuid4().hex
+
     try:
         _maybe_auto_run_workiq_enrich(
             edition_name=edition,
@@ -591,6 +605,9 @@ def report_command(
             open_browser=not stdout,
             show_progress=not stdout,
             trace_logger=trace_logger,
+            correlation_id=correlation_id,
+            workflow_id=workflow_id,
+            run_id=run_id,
         )
     except QueryTimeoutError as error:
         typer.echo(str(error))
@@ -598,6 +615,34 @@ def report_command(
     except (AuthError, ConfigError, QueryError) as error:
         typer.echo(str(error))
         raise typer.Exit(code=2)
+
+    # ADF-W5.14: a real, completed (non-dry-run) report generation is the
+    # weekly_report golden workflow's adoption moment -- a --dry-run is a
+    # preview, not a completed run, matching cockpit's --no-persist gate.
+    if not dry_run:
+        try:
+            record_adoption(load_result.bundle.program.id, GoldenWorkflow.WEEKLY_REPORT, programs_root=PROGRAMS_ROOT)
+        except (OSError, StateError):
+            pass
+
+        # ADF-W2.12: the render stage records its output artifact under the
+        # shared correlation_id generated once at report_command entry (now
+        # threaded through every stage via StageContext). This is the output
+        # stage's link; acquisition/fact/context/release links are recorded
+        # by their owning stages inside the pipeline, all sharing this id.
+        try:
+            record_trace_link(
+                program_id=load_result.bundle.program.id,
+                correlation_id=correlation_id,
+                workflow_id=workflow_id,
+                run_id=run_id,
+                stage="render",
+                ref_type=REF_TYPE_OUTPUT,
+                ref_id=str(artifacts.manifest_path) if artifacts.manifest_path is not None else f"issue-{artifacts.issue_number}",
+                programs_root=PROGRAMS_ROOT,
+            )
+        except (OSError, portalocker.exceptions.LockException):
+            pass
 
     if write_overrides:
         typer.echo("--write-overrides is deprecated; use 'vertex apply-overrides' instead.", err=True)
@@ -801,6 +846,9 @@ def generate_report_draft(
     open_browser: bool = False,
     show_progress: bool = False,
     trace_logger: RunLoggerAdapter | None = None,
+    correlation_id: str = "",
+    workflow_id: str = "",
+    run_id: str = "",
 ) -> DraftArtifacts:
     final_ctx = _execute_report_pipeline(
         _build_stage_request_context(
@@ -821,6 +869,9 @@ def generate_report_draft(
             work_item_loader=work_item_loader,
             kusto_query_executor=kusto_query_executor,
             open_browser=open_browser,
+            correlation_id=correlation_id,
+            workflow_id=workflow_id,
+            run_id=run_id,
         ),
         show_progress=show_progress,
         trace_logger=trace_logger,
@@ -1051,6 +1102,9 @@ def _build_stage_request_context(
     work_item_loader: WorkItemLoader | None,
     kusto_query_executor: KustoQueryExecutor | None,
     open_browser: bool,
+    correlation_id: str = "",
+    workflow_id: str = "",
+    run_id: str = "",
 ) -> StageContext:
     started_at = datetime.now(timezone.utc)
     resolved_reports_root = reports_root or REPORTS_ROOT
@@ -1140,6 +1194,9 @@ def _build_stage_request_context(
         ),
         started_at=started_at,
         data_as_of=data_as_of,
+        correlation_id=correlation_id,
+        workflow_id=workflow_id,
+        run_id=run_id,
     )
 
 
@@ -1417,9 +1474,6 @@ class _OutputStage:
         )
 
 
-
-
-
 def _maybe_auto_run_workiq_enrich(
     *,
     edition_name: str,
@@ -1427,6 +1481,10 @@ def _maybe_auto_run_workiq_enrich(
     offline: bool,
     show_progress: bool,
 ) -> None:
+    """ADF-W1.5 / INV-ADF-2: report never performs WorkIQ NL discovery inline
+    (historical XPF WorkIQ p50 latency >65min). A legacy
+    ``workiq_enrich_schedule: pre_report`` config no longer triggers a live
+    call here; the operator is told to run ``vertex enrich`` out-of-band."""
     if offline:
         return
 
@@ -1438,18 +1496,24 @@ def _maybe_auto_run_workiq_enrich(
     if not m365 or not m365.enabled or schedule != "pre_report":
         return
 
+    # ADF-W5.8: this branch's own condition IS Section 8.2.5's "WorkIQ inline
+    # invocation attempted" category -- fires regardless of --show-progress.
+    try:
+        append_or_suppress_alert(
+            program_id=resolved.program.id, category="workiq_inline_invocation_attempted",
+            entity_type="edition", entity_id=edition_name, severity="warn",
+            message=f"{edition_name}'s workiq_enrich_schedule is 'pre_report' (INV-ADF-2 violation).",
+            next_command=f"vertex enrich --edition {edition_name}", programs_root=PROGRAMS_ROOT,
+        )
+    except (OSError, StateError):
+        pass
+
     if show_progress:
-        suffix = " --dry-run" if dry_run else ""
-        typer.echo(f"[AUTO] Running pre-report WorkIQ enrich{suffix}...")
-
-    from src.commands.enrich import enrich_command
-
-    enrich_command(
-        edition=edition_name,
-        dry_run=dry_run,
-        accept=False,
-        output_format="human",
-    )
+        typer.echo(
+            "[WorkIQ] workiq_enrich_schedule: pre_report is configured but report no longer runs WorkIQ "
+            "inline (INV-ADF-2). Run 'vertex enrich --edition "
+            f"{edition_name}' separately (e.g. on a schedule) before report."
+        )
 
 
 def apply_overrides_command(

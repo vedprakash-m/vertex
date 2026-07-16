@@ -129,14 +129,33 @@ def query_work_item_batch_rows(
     *,
     batch_size: int = 200,
 ) -> tuple[list[dict[str, Any]], int]:
+    """Fetches work items by id in batches. A single deleted/inaccessible id
+    in a batch (Azure DevOps raises for permission-denied ids rather than
+    silently omitting them, unlike simple not-found ids) must not poison the
+    whole chunk -- ADF-OM6: "no optional channel can block a required-channel
+    result." On a batch failure, falls back to fetching that chunk one id at
+    a time, skipping (with a warning) only the individual ids that still
+    fail, and keeping every id that succeeds."""
     if not work_item_ids:
         return [], 0
 
     rows: list[dict[str, Any]] = []
     ado_calls = 0
     for start in range(0, len(work_item_ids), batch_size):
-        rows.extend(client.query_work_items_batch(work_item_ids[start:start + batch_size], fields))
-        ado_calls += 1
+        chunk = work_item_ids[start:start + batch_size]
+        ado_calls += 1  # the batch attempt itself always consumes one call, success or failure
+        try:
+            rows.extend(client.query_work_items_batch(chunk, fields))
+        except QueryError as exc:
+            log.warning(
+                "Work item batch fetch failed for %d id(s) — retrying individually: %s", len(chunk), exc
+            )
+            for work_item_id in chunk:
+                ado_calls += 1
+                try:
+                    rows.extend(client.query_work_items_batch([work_item_id], fields))
+                except QueryError as item_exc:
+                    log.warning("Work item %s is unreadable — skipping: %s", work_item_id, item_exc)
     return rows, ado_calls
 
 

@@ -267,6 +267,120 @@ def test_run_purge_uses_all_sidcar_rules_by_default(tmp_path: Path) -> None:
     assert len(report.skipped) >= 1
 
 
+def test_adf_w59_new_rules_are_registered_in_sidecar_retention() -> None:
+    paths = {rule.artifact_path for rule in SIDECAR_RETENTION}
+    assert "runtime/tier_decisions.jsonl" in paths
+    assert "_state/ai_telemetry.jsonl" in paths
+    assert "runtime/run_telemetry.jsonl" in paths
+    assert "_alerts/alerts.jsonl" in paths
+
+
+def test_tier_decisions_purges_rows_older_than_45_days(tmp_path: Path) -> None:
+    now = _now()
+    path = tmp_path / "xpf" / "runtime" / "tier_decisions.jsonl"
+    _write_jsonl(path, [
+        {"recorded_at": (now - timedelta(days=50)).isoformat()},
+        {"recorded_at": (now - timedelta(days=10)).isoformat()},
+    ])
+    rule = next(r for r in SIDECAR_RETENTION if r.artifact_path == "runtime/tier_decisions.jsonl")
+    assert rule.retention == RetentionClass.FORTY_FIVE_DAYS
+
+    report = run_purge("xpf", programs_root=tmp_path, now=now, apply=True, rules=(rule,))
+    assert report.total_rows_purged == 1
+    remaining = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+    assert len(remaining) == 1
+
+
+def test_alerts_eligibility_field_keeps_open_alerts_regardless_of_age(tmp_path: Path) -> None:
+    """An open alert (resolved_at=None) must never purge, even if created_at
+    is ancient -- ADF-W5.9's 'open-forever/90d-resolved' policy."""
+    now = _now()
+    path = tmp_path / "xpf" / "_alerts" / "alerts.jsonl"
+    _write_jsonl(path, [
+        {"alert_id": "a1", "created_at": (now - timedelta(days=500)).isoformat(), "resolved_at": None},
+        {"alert_id": "a2", "created_at": (now - timedelta(days=500)).isoformat(), "resolved_at": (now - timedelta(days=100)).isoformat()},
+        {"alert_id": "a3", "created_at": (now - timedelta(days=500)).isoformat(), "resolved_at": (now - timedelta(days=10)).isoformat()},
+    ])
+    rule = next(r for r in SIDECAR_RETENTION if r.artifact_path == "_alerts/alerts.jsonl")
+    assert rule.eligibility_field == "resolved_at"
+
+    report = run_purge("xpf", programs_root=tmp_path, now=now, apply=True, rules=(rule,))
+    assert report.total_rows_purged == 1  # only a2 (resolved 100 days ago > 90d floor)
+    remaining_ids = {
+        json.loads(line)["alert_id"] for line in path.read_text(encoding="utf-8").splitlines() if line
+    }
+    assert remaining_ids == {"a1", "a3"}
+
+
+def test_eligibility_field_absent_means_never_purged(tmp_path: Path) -> None:
+    """A row missing the eligibility_field entirely (not just null) is also
+    treated as never-eligible, not as a fallback to another timestamp field."""
+    now = _now()
+    path = tmp_path / "xpf" / "_alerts" / "alerts.jsonl"
+    _write_jsonl(path, [
+        {"alert_id": "a1", "created_at": (now - timedelta(days=500)).isoformat()},
+    ])
+    rule = next(r for r in SIDECAR_RETENTION if r.artifact_path == "_alerts/alerts.jsonl")
+    report = run_purge("xpf", programs_root=tmp_path, now=now, apply=True, rules=(rule,))
+    assert report.total_rows_purged == 0
+
+
+def test_context_manifests_rule_is_registered() -> None:
+    rule = next(r for r in SIDECAR_RETENTION if r.artifact_path == "runtime/context_manifests")
+    assert rule.directory_glob == "*.json"
+    assert rule.eligibility_field == "compiled_at"
+    assert rule.retention == RetentionClass.NINETY_DAYS
+
+
+def _write_manifest(path: Path, *, compiled_at: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"compiled_at": compiled_at, "context_hash": path.stem}), encoding="utf-8")
+
+
+def test_context_manifests_purges_old_files_by_internal_timestamp(tmp_path: Path) -> None:
+    now = _now()
+    manifests_dir = tmp_path / "xpf" / "runtime" / "context_manifests"
+    _write_manifest(manifests_dir / "old.json", compiled_at=(now - timedelta(days=100)).isoformat())
+    _write_manifest(manifests_dir / "recent.json", compiled_at=(now - timedelta(days=10)).isoformat())
+
+    rule = next(r for r in SIDECAR_RETENTION if r.artifact_path == "runtime/context_manifests")
+    report = run_purge("xpf", programs_root=tmp_path, now=now, apply=True, rules=(rule,))
+
+    assert report.total_rows_purged == 1
+    assert not (manifests_dir / "old.json").exists()
+    assert (manifests_dir / "recent.json").exists()
+
+
+def test_context_manifests_dry_run_does_not_delete(tmp_path: Path) -> None:
+    now = _now()
+    manifests_dir = tmp_path / "xpf" / "runtime" / "context_manifests"
+    _write_manifest(manifests_dir / "old.json", compiled_at=(now - timedelta(days=100)).isoformat())
+
+    rule = next(r for r in SIDECAR_RETENTION if r.artifact_path == "runtime/context_manifests")
+    report = run_purge("xpf", programs_root=tmp_path, now=now, apply=False, rules=(rule,))
+
+    assert report.total_rows_purged == 1  # would-purge count, reported honestly
+    assert (manifests_dir / "old.json").exists()  # but nothing actually deleted
+
+
+def test_context_manifests_missing_directory_is_a_clean_noop(tmp_path: Path) -> None:
+    rule = next(r for r in SIDECAR_RETENTION if r.artifact_path == "runtime/context_manifests")
+    report = run_purge("xpf", programs_root=tmp_path, now=_now(), apply=True, rules=(rule,))
+    assert report.total_rows_purged == 0
+
+
+def test_context_manifests_malformed_json_is_skipped_not_crashed_on(tmp_path: Path) -> None:
+    now = _now()
+    manifests_dir = tmp_path / "xpf" / "runtime" / "context_manifests"
+    manifests_dir.mkdir(parents=True)
+    (manifests_dir / "corrupt.json").write_text("not valid json{{{", encoding="utf-8")
+
+    rule = next(r for r in SIDECAR_RETENTION if r.artifact_path == "runtime/context_manifests")
+    report = run_purge("xpf", programs_root=tmp_path, now=now, apply=True, rules=(rule,))
+    assert report.total_rows_purged == 0
+    assert (manifests_dir / "corrupt.json").exists()  # left alone, not deleted
+
+
 def test_purge_report_serialization(tmp_path: Path) -> None:
     """PurgeReport.to_dict() returns audit-friendly JSON-serializable shape."""
     now = _now()

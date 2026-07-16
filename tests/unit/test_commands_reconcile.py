@@ -43,6 +43,70 @@ def test_generate_reconcile_report_refreshes_and_persists_cache(tmp_path: Path) 
     assert cached[0].recommended_resolution is not None
 
 
+def test_generate_reconcile_report_wires_dependency_loader_into_contradiction_packets(tmp_path: Path) -> None:
+    """ADF-W2.10 P6: `generate_reconcile_report`'s `dependency_loader` DI
+    parameter must actually flow into `build_contradiction_packets` so a
+    dependency-status claim can surface a second contradiction alongside
+    the existing target-date one."""
+    from src.core.models_v2 import Dependency, DependencyStatus, DependencyType
+
+    programs_root = tmp_path / "programs"
+    _seed_reconcile_inputs(programs_root)
+    append_claim_entry(
+        ClaimEntry(
+            id="claim-dep-1",
+            program_id="demo",
+            edition_id="demo_weekly",
+            issue_number=77,
+            workstream_id="deployment",
+            text="The dependency on team Rome is now broken.",
+            entity_refs=("DEP:dep-rome",),
+            claim_date=date(2026, 5, 20),
+            owner_alias=None,
+            due_date=None,
+            claimed_status_family="dependency",
+            claimed_status_value="broken",
+        ),
+        programs_root=programs_root,
+    )
+    dependency = Dependency(
+        id="dep-rome",
+        from_program_id="demo",
+        from_workstream_id=None,
+        from_item_id=1001,
+        from_milestone_id=None,
+        to_program_id="demo",
+        to_workstream_id=None,
+        to_item_id=None,
+        to_milestone_id=None,
+        dependency_type=DependencyType.BLOCKS,
+        risk_if_broken="Downstream execution slips.",
+        mitigation=None,
+        status=DependencyStatus.ACTIVE,
+        owner_alias=None,
+    )
+
+    artifacts = generate_reconcile_report(
+        "demo",
+        refresh=True,
+        dry_run=True,
+        programs_root=programs_root,
+        as_of=datetime(2026, 5, 21, 9, 0, tzinfo=timezone.utc),
+        program_loader=lambda program_id, root: (_build_program(program_id), _build_workstreams()),
+        item_loader=lambda program, workstreams, as_of: (_build_items(), 0),
+        calibration_loader=lambda program_id, root: ForecastCalibrationModifier(
+            workstream_modifiers={"deployment": 0.18},
+            dri_modifiers={"priya": 0.16},
+            confidence=Confidence.HIGH,
+        ),
+        dependency_loader=lambda program_id, root: (dependency,),
+    )
+
+    assert len(artifacts.packets) == 1
+    fields = {c.field for c in artifacts.packets[0].contradictions}
+    assert "dependency_status" in fields
+
+
 def test_reconcile_report_matches_golden_fixture(tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     _seed_reconcile_inputs(programs_root)

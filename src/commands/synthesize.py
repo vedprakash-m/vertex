@@ -95,6 +95,7 @@ class _FallbackWorkstreamSynthesizer:
         open_risks=(),
         open_actions=(),
         contradictions: tuple[ContradictionPacket, ...] = (),
+        programs_root: Path = PROGRAMS_ROOT,
     ) -> SynthesizedProposalDraft | None:
         last_error: Exception | None = None
         for deployment in self._deployments:
@@ -116,6 +117,7 @@ class _FallbackWorkstreamSynthesizer:
                     open_risks=open_risks,
                     open_actions=open_actions,
                     contradictions=contradictions,
+                    programs_root=programs_root,
                 )
             except (AIClientError, RuntimeError, SynthesizerError) as error:
                 last_error = error
@@ -339,6 +341,7 @@ def synthesize_workstream(
         open_risks=open_risks,
         open_actions=open_actions,
         contradictions=contradictions,
+        programs_root=resolved_programs_root,
     )
     if draft is None:
         raise SynthesizerError(f"No synthesis draft was produced for workstream '{workstream.id}'.")

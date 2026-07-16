@@ -152,3 +152,29 @@ artifacts:
     classes: [CONFIDENTIAL]
     retention_days: 90  # short TTL; corpus-bake only, not audit-of-record
     excise: "[EXCISED] tombstone (WS-18); opt-in via VERTEX_AI_TRACE_FULL_IO, sanitized excerpts only"
+
+  # ADF-W0.16 (ADR-0015, 2026-07-13):
+  - stem: "nudge/drafts/<solicitation_id>.eml"
+    classes: [PII]
+    retention_days: 365
+    excise: "[EXCISED] tombstone (WS-18)"
+
+  - stem: "nudge/replies/<message_id>.eml"
+    classes: [PII]
+    retention_days: 365
+    excise: "[EXCISED] tombstone (WS-18)"
+
+  - stem: "_feedback/context_gap_solicitations.jsonl"
+    classes: [INTERNAL]
+    retention_days: 365
+    excise: "n/a (no PII — id/fingerprint/timestamp only)"
+
+  - stem: "runtime/program_synthesis/<ai_run_id>.json"
+    classes: [CONFIDENTIAL]
+    retention_days: 365
+    excise: "n/a (no PII — aggregated business content only)"
+
+  - stem: "workstream_registry.yaml"
+    classes: [PII]
+    retention_days: null  # indefinite; live config, overwrite-in-place
+    excise: "operator edits/redacts the field directly (not a rotating audit log)"

@@ -479,6 +479,7 @@ def _build_status_milestone_summary(
     counts: list[str] = []
     for status in (
         MilestoneStatus.MISSED,
+        MilestoneStatus.UNKNOWN,
         MilestoneStatus.AT_RISK,
         MilestoneStatus.ON_TRACK,
         MilestoneStatus.COMPLETED,

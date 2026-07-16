@@ -626,6 +626,26 @@ def load_program_context(
                 blocker_for_level=None,
             ))
 
+    # ED-03: when program.yaml declares sub_programs (multi-org internal structure), every
+    # edition should carry a scope_note describing which team(s)/org(s) it covers, so nudges
+    # and newsletters don't get confused about their accountability/coverage boundary.
+    if sub_programs:
+        for ed_id in edition_ids:
+            ed_path = resolved_editions_root / f"{ed_id}.yaml"
+            try:
+                ed_data = load_yaml_mapping(ed_path)
+                if not str(ed_data.get("scope_note") or "").strip():
+                    violations.append(InvariantViolation(
+                        code="ED-03",
+                        severity=InvariantSeverity.WARN,
+                        file=f"editions/{ed_id}.yaml",
+                        entity_id=ed_id,
+                        detail="edition has no scope_note describing team/org coverage (program defines sub_programs)",
+                        blocker_for_level=None,
+                    ))
+            except (ConfigError, OSError, KeyError, TypeError):
+                pass
+
     # KPI-01: kpis workstream_ids must match workstream_registry IDs
     registry_ws_ids = frozenset(lane.id for lane in registry_lanes)
     for kpi in kpis:

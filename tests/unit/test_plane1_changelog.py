@@ -25,6 +25,7 @@ from src.core.plane1_changelog import (
     shadow_write_plane1_snapshot,
     write_plane1_last_seen,
 )
+from src.core.operation_trace import load_operation_trace
 from src.core.models_v2 import (
     Assumption,
     AssumptionStatus,
@@ -249,6 +250,29 @@ def test_shadow_write_plane1_snapshot_appends_only_on_material_change(tmp_path: 
             ("plane1.milestone.status",),
         ).fetchone()[0]
     assert revision_count == 2
+
+
+def test_shadow_write_plane1_snapshot_records_one_trace_link_per_call(tmp_path: Path) -> None:
+    # ADF-W2.12: one trace link per snapshot write (not one per field-fact,
+    # since a real snapshot can touch hundreds of entity/field pairs), no-op
+    # when no correlation identity is threaded (the pre-existing default).
+    snapshot = {
+        "milestone/ms1": {"status": "on_track", "_name": "Milestone 1", "_linked_workstream_ids": ("ws1",)},
+        "risk/r1": {"status": "open", "_name": "Risk 1", "_linked_workstream_ids": ("ws1",)},
+    }
+    shadow_write_plane1_snapshot(
+        "acme",
+        snapshot,
+        recorded_at=datetime(2026, 5, 31, 12, 0, tzinfo=timezone.utc),
+        db_root=tmp_path,
+        correlation_id="gather-corr-3",
+        programs_root=tmp_path,
+    )
+
+    trace = load_operation_trace("acme", "gather-corr-3", programs_root=tmp_path)
+    assert trace is not None
+    assert len(trace.fact_refs) == 1
+    assert trace.fact_refs[0].startswith("plane1_snapshot:acme:2@")
 
 
 def test_compute_plane1_changes_tracks_milestone_status_change() -> None:

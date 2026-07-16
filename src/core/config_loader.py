@@ -250,7 +250,11 @@ class ReportConfig:
     scorecard_plain_text_only: bool = False
     brand_name: str | None = None
     brand_header_url: str | None = None
-    productivity_dividend_published: bool = False
+    # ADF-W1.12: productivity_dividend_published retired (formula-derived
+    # productivity_dividend_hours claim removed). A legacy program.yaml/config
+    # may still set this key; the schema's additionalProperties:true and this
+    # dataclass's absence of the field both tolerate it harmlessly (dict-based
+    # parsing below never required its presence).
     ado_fetch_timeout_seconds: int = 45
     forecast_enabled: bool = False
     mobile_safe_scorecards: str | None = None
@@ -1537,7 +1541,6 @@ def _parse_report_config(raw_config: dict[str, Any]) -> ReportConfig:
         scorecard_plain_text_only=bool(raw_config.get("scorecard_plain_text_only", False)),
         brand_name=_optional_string(raw_config.get("brand_name")),
         brand_header_url=_optional_string(raw_config.get("brand_header_url")),
-        productivity_dividend_published=bool(raw_config.get("productivity_dividend_published", False)),
         ado_fetch_timeout_seconds=resolved_ado_timeout_seconds,
         forecast_enabled=bool(raw_config.get("forecast_enabled", False)),
         mobile_safe_scorecards=_parse_mobile_safe_scorecards(raw_config.get("mobile_safe_scorecards")),

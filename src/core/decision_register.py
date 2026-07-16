@@ -12,6 +12,7 @@ import yaml
 from src.core.exceptions import ConfigError
 from src.core.journal import PROGRAMS_ROOT
 from src.core.models_v2 import DecisionEntry, DecisionStatus
+from src.core.operation_trace import REF_TYPE_FACT, record_trace_link
 from src.core.signal_ref_utils import extract_work_item_refs
 
 
@@ -27,19 +28,23 @@ def load_decisions(program_id: str, programs_root: Path = PROGRAMS_ROOT) -> tupl
     return _load_decisions_from_path(program_id, path)
 
 
-def save_decisions(program_id: str, entries: tuple[DecisionEntry, ...], programs_root: Path = PROGRAMS_ROOT) -> None:
+def save_decisions(
+    program_id: str, entries: tuple[DecisionEntry, ...], programs_root: Path = PROGRAMS_ROOT, *, correlation_id: str = "",
+) -> None:
     with _decision_register_lock(program_id, programs_root):
-        _write_decisions(program_id, entries, programs_root=programs_root)
+        _write_decisions(program_id, entries, programs_root=programs_root, correlation_id=correlation_id)
 
 
-def upsert_decisions(program_id: str, entries: tuple[DecisionEntry, ...], programs_root: Path = PROGRAMS_ROOT) -> tuple[DecisionEntry, ...]:
+def upsert_decisions(
+    program_id: str, entries: tuple[DecisionEntry, ...], programs_root: Path = PROGRAMS_ROOT, *, correlation_id: str = "",
+) -> tuple[DecisionEntry, ...]:
     with _decision_register_lock(program_id, programs_root):
         current = _load_decisions_from_path(program_id, get_decisions_path(program_id, programs_root))
         merged: dict[str, DecisionEntry] = {entry.id: entry for entry in current}
         for entry in entries:
             merged.setdefault(entry.id, entry)
         sorted_entries = sort_decisions(tuple(merged.values()))
-        _write_decisions(program_id, sorted_entries, programs_root=programs_root)
+        _write_decisions(program_id, sorted_entries, programs_root=programs_root, correlation_id=correlation_id)
         return sorted_entries
 
 
@@ -96,7 +101,9 @@ def _load_decisions_from_path(program_id: str, path: Path) -> tuple[DecisionEntr
     return tuple(entries)
 
 
-def _write_decisions(program_id: str, entries: tuple[DecisionEntry, ...], programs_root: Path = PROGRAMS_ROOT) -> None:
+def _write_decisions(
+    program_id: str, entries: tuple[DecisionEntry, ...], programs_root: Path = PROGRAMS_ROOT, *, correlation_id: str = "",
+) -> None:
     path = get_decisions_path(program_id, programs_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
@@ -109,7 +116,7 @@ def _write_decisions(program_id: str, entries: tuple[DecisionEntry, ...], progra
     temp_path = path.with_suffix(f"{path.suffix}.tmp")
     temp_path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
     os.replace(temp_path, path)
-    _sync_decision_facts(program_id, entries, programs_root=programs_root)
+    _sync_decision_facts(program_id, entries, programs_root=programs_root, correlation_id=correlation_id)
 
 
 def _decision_register_lock(program_id: str, programs_root: Path) -> portalocker.Lock:
@@ -123,6 +130,7 @@ def _sync_decision_facts(
     entries: tuple[DecisionEntry, ...],
     *,
     programs_root: Path,
+    correlation_id: str = "",
 ) -> None:
     from src.core.program_fact_store import (
         FactLifecycleState,
@@ -146,7 +154,7 @@ def _sync_decision_facts(
         entity_refs = tuple(entry.entity_refs) or (f"DECISION:{entry.id}",)
         natural_key = _decision_natural_key(entry)
         current_natural_keys.add(natural_key)
-        store.append_fact(
+        write_result = store.append_fact(
             ProgramFactInput(
                 fact_type="decision.entry",
                 scope="program",
@@ -158,6 +166,27 @@ def _sync_decision_facts(
             ),
             recorded_at=sync_time,
         )
+        # ADF-W2.12: this loop re-syncs every entry in the passed collection
+        # on every call (upsert_decisions passes existing+new merged), not
+        # just genuinely new ones -- append_fact's own content-dedup already
+        # returns "noop" for an unchanged entry, so only a real write
+        # ("created"/"proposed_revision"/an actual supersede) gets a trace
+        # link. Without this check, a resync of N pre-existing unchanged
+        # decisions would flood the ledger with N misleading trace links.
+        if correlation_id and write_result.action != "noop":
+            try:
+                record_trace_link(
+                    program_id=program_id,
+                    correlation_id=correlation_id,
+                    workflow_id=correlation_id,
+                    run_id=correlation_id,
+                    stage="fact",
+                    ref_type=REF_TYPE_FACT,
+                    ref_id=f"decision.entry:{entry.id}@{sync_time.isoformat()}",
+                    programs_root=programs_root,
+                )
+            except Exception:  # noqa: BLE001 -- a trace link is observability, never a write blocker.
+                pass
 
     for natural_key, fact in active_decisions.items():
         if natural_key in current_natural_keys:

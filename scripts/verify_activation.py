@@ -61,6 +61,7 @@ _ACCEPT_PREC_CI_LOW_FLOOR = 0.85
 _SUPPORTED_STATUS = "recommended_v1_authoritative"
 _CORPUS_FREEZE_SCHEMA_VERSION = "activation_corpus_freeze.v1"
 _CORPUS_FREEZE_FILES = ("rev_labeled_corpus.jsonl", "corpus_manifest.jsonl")
+_COUNTERFACTUAL_FREEZE_SCHEMA_VERSION = "activation_counterfactual_freeze.v1"
 _STRATA_BY_CLAIM_TYPE = {
     "deployment.completed": ("milestone", "deployment"),
     "milestone.completed": ("milestone",),
@@ -302,6 +303,125 @@ def build_counterfactual_diff_artifact(
     body = list(diff_lines)
     footer = ["```", ""]
     return "\n".join(header + body + footer)
+
+
+def build_counterfactual_freeze_manifest(
+    *,
+    with_fact_path: Path,
+    without_fact_path: Path,
+    source_document_key: str,
+    approval_event_id: str | None = None,
+    repo_root: Path = _REPO_ROOT,
+) -> dict[str, Any]:
+    """ADF-W0.13's counterfactual-artifact half (the second scope item this
+    check was originally deferred on): the AG-1 counterfactual diff
+    (``build_counterfactual_diff_artifact``) is a pure, deterministic
+    function of (with-fact text, without-fact text, source_document_key,
+    approval_event_id). Pinning its own SHA-256 -- not the input files'
+    hashes alone -- detects drift in the diff-generation logic itself
+    (a code-behavior regression), which is a materially different signal
+    than detecting the input renders changing."""
+    git_sha, _dirty = _git_metadata(repo_root)
+    artifact_text = build_counterfactual_diff_artifact(
+        with_fact_path.read_text(encoding="utf-8", errors="replace"),
+        without_fact_path.read_text(encoding="utf-8", errors="replace"),
+        source_document_key=source_document_key,
+        approval_event_id=approval_event_id,
+        with_fact_label=str(with_fact_path),
+        without_fact_label=str(without_fact_path),
+    )
+    return {
+        "schema_version": _COUNTERFACTUAL_FREEZE_SCHEMA_VERSION,
+        "source_document_key": source_document_key,
+        "approval_event_id": approval_event_id,
+        "git_sha": git_sha,
+        "with_fact_sha256": _file_sha256(with_fact_path),
+        "without_fact_sha256": _file_sha256(without_fact_path),
+        "artifact_sha256": hashlib.sha256(artifact_text.encode("utf-8")).hexdigest(),
+    }
+
+
+def write_counterfactual_freeze_manifest(
+    *,
+    output_path: Path,
+    with_fact_path: Path,
+    without_fact_path: Path,
+    source_document_key: str,
+    approval_event_id: str | None = None,
+    repo_root: Path = _REPO_ROOT,
+) -> Path:
+    """Write the current counterfactual freeze manifest for an explicit
+    operator freeze -- mirrors ``write_corpus_freeze_manifest``. Freezing is
+    never automatic; an operator runs this deliberately once a real
+    with-fact/without-fact render pair exists for a program."""
+    manifest = build_counterfactual_freeze_manifest(
+        with_fact_path=with_fact_path,
+        without_fact_path=without_fact_path,
+        source_document_key=source_document_key,
+        approval_event_id=approval_event_id,
+        repo_root=repo_root,
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return output_path
+
+
+def build_counterfactual_freeze_check(
+    *,
+    freeze_path: Path,
+    with_fact_path: Path,
+    without_fact_path: Path,
+    source_document_key: str,
+    approval_event_id: str | None = None,
+    repo_root: Path = _REPO_ROOT,
+) -> CheckResult:
+    """Verify a frozen counterfactual-artifact manifest still matches the
+    artifact regenerated from the same inputs today. ``never_frozen``
+    (missing manifest) is reported as a distinct, non-failing summary
+    string -- the caller (``adf_evidence_drift_check.py``) treats it as
+    "nothing to compare against yet," matching the corpus-freeze check's
+    own convention exactly."""
+    if not with_fact_path.exists() or not without_fact_path.exists():
+        return CheckResult(
+            "P2-COUNTERFACTUAL-FREEZE-INPUTS",
+            "fail",
+            "counterfactual freeze inputs are missing",
+            {"with_fact_path": str(with_fact_path), "without_fact_path": str(without_fact_path)},
+        )
+    expected = build_counterfactual_freeze_manifest(
+        with_fact_path=with_fact_path,
+        without_fact_path=without_fact_path,
+        source_document_key=source_document_key,
+        approval_event_id=approval_event_id,
+        repo_root=repo_root,
+    )
+    observed = _read_json(freeze_path)
+    details = {"path": str(freeze_path), "expected": expected, "actual": observed or None}
+    if not observed:
+        return CheckResult(
+            "P2-COUNTERFACTUAL-FREEZE-MANIFEST",
+            "fail",
+            "counterfactual freeze manifest is missing",
+            details,
+        )
+    failures = [
+        f"{key} mismatch"
+        for key in ("schema_version", "source_document_key", "artifact_sha256")
+        if observed.get(key) != expected.get(key)
+    ]
+    if failures:
+        return CheckResult(
+            "P2-COUNTERFACTUAL-FREEZE-MANIFEST",
+            "fail",
+            f"counterfactual freeze manifest drifted: {'; '.join(failures)}",
+            details,
+        )
+    return CheckResult(
+        "P2-COUNTERFACTUAL-FREEZE-MANIFEST",
+        "pass",
+        "counterfactual freeze manifest matches",
+        details,
+    )
 
 
 def build_family_matrix(
@@ -1928,6 +2048,10 @@ def main() -> int:
     parser.add_argument("--counterfactual-diff", type=Path, help="Write a durable unified diff artifact for the supplied render pair.")
     parser.add_argument("--counterfactual-context-lines", type=int, default=3, help="Context lines to include in --counterfactual-diff output.")
     parser.add_argument("--write-corpus-freeze", action="store_true", help="Write programs/<id>/_quality/corpus_freeze.json for the current corpus inputs before verifying.")
+    parser.add_argument("--write-counterfactual-freeze", action="store_true",
+                        help="Write programs/<id>/_quality/counterfactual_freeze/<source_document_key>.json for "
+                             "the current --with-fact-render/--without-fact-render/--source-document-key triple "
+                             "(mirrors --write-corpus-freeze). Requires all three of those flags.")
     parser.add_argument("--write-counterfactual-pair", action="store_true",
                         help="Auto-generate the with/without-fact render pair from ProgramReality for --fact-id "
                              "and supply them to the counterfactual check (mirrors --write-corpus-freeze). "
@@ -2005,6 +2129,26 @@ def main() -> int:
             approval_event_id=args.approval_event_id,
             context_lines=args.counterfactual_context_lines,
         )
+    if args.write_counterfactual_freeze:
+        if not args.with_fact_render or not args.without_fact_render or not args.source_document_key:
+            print(
+                "--write-counterfactual-freeze requires --with-fact-render, --without-fact-render, "
+                "and --source-document-key.",
+                file=sys.stderr,
+            )
+            return 2
+        freeze_path = (
+            args.programs_root / args.program / "_quality" / "counterfactual_freeze"
+            / f"{args.source_document_key}.json"
+        )
+        write_counterfactual_freeze_manifest(
+            output_path=freeze_path,
+            with_fact_path=args.with_fact_render,
+            without_fact_path=args.without_fact_render,
+            source_document_key=args.source_document_key,
+            approval_event_id=args.approval_event_id,
+        )
+        print(f"Wrote counterfactual freeze manifest: {freeze_path}")
     return 1 if report.failed else 0
 
 

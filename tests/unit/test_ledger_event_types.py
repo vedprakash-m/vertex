@@ -5,14 +5,14 @@ import pytest
 from src.core.ledger.event_types import count_control_event_types, get_event_schema, get_registered_event_types, support_table_update, validate_event_payload
 
 
-def test_registry_contains_all_57_event_types() -> None:
-    # Activation v1.6: +1 discovery.candidate_revoked audit event.
-    assert len(get_registered_event_types()) == 57
+def test_registry_contains_all_73_event_types() -> None:
+    # ADF-W0.18: +16 A.2 payload schemas registered (57 -> 73 total).
+    assert len(get_registered_event_types()) == 73
 
 
 def test_registry_has_expected_control_split() -> None:
-    # Activation v1.6: 54 non-control + 3 operator-control = 57.
-    assert count_control_event_types() == (54, 3)
+    # ADF-W0.18: 70 non-control + 3 operator-control = 73.
+    assert count_control_event_types() == (70, 3)
 
 
 @pytest.mark.parametrize(

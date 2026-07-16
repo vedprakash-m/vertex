@@ -372,6 +372,77 @@ class TestCycleHistoryBounding:
             assert "stop_category" in rec
 
 
+class TestHighVolumeBatchedDrain:
+    """ADF-W3.2: a truncated enumeration batch must still be processed this
+    cycle (not discarded and left for a future crash-recovery pass), and the
+    truncation must be classified as ``truncated_by_budget`` (not silently
+    misread as ``provider_limited``) so cockpit/doctor telemetry is honest."""
+
+    def _write_n_emls(self, eml_inbox: Path, n: int) -> None:
+        for i in range(n):
+            _write_eml(
+                eml_inbox / f"msg{i:03d}.eml",
+                _SIMPLE_EML.replace("<test-001@example.com>", f"<test-{i:03d}@example.com>"),
+            )
+
+    def test_truncated_batch_is_processed_this_cycle_not_discarded(self, tmp_path: Path) -> None:
+        eml_inbox = tmp_path / "rev_inbox"
+        eml_inbox.mkdir()
+        self._write_n_emls(eml_inbox, 5)
+        deps = _build_deps(eml_inbox)
+
+        intent = RetrievalIntent(entity_type=EntityType.MESSAGE, limit=3)
+        report = run_rev_cycle(
+            program_id="prog-local", intent=intent, deps=deps,
+            profile=RevRetrievalProfile(profile=REV_PROFILE_SEARCH_HYDRATE),
+            mailbox_tenant_id="t", mailbox_principal="u@x.com", mailbox_container="inbox",
+            correlation_id="vol-1", programs_root=tmp_path,
+            budget_limits=BudgetLimits(), set_at=NOW,
+        )
+
+        # The truncation is honestly classified as a budget stop...
+        assert report.stop_category == "truncated_by_budget"
+        # ...but the salvaged batch was still fully processed this cycle, not
+        # discarded and left stranded for a future crash-recovery pass.
+        assert report.enumerated == 3
+        assert report.processed_successfully == 3
+        assert report.candidates_staged == 3
+        assert len(list((eml_inbox / "processed").glob("*.eml"))) == 3
+        # The other 2 files were never claimed — still sitting untouched in inbox/.
+        assert len(list(eml_inbox.glob("*.eml"))) == 2
+        assert not any(deps.enumerator.claimed_dir().glob("*.eml"))
+
+    def test_multi_cycle_drain_processes_every_file_exactly_once(self, tmp_path: Path) -> None:
+        eml_inbox = tmp_path / "rev_inbox"
+        eml_inbox.mkdir()
+        self._write_n_emls(eml_inbox, 5)
+        deps = _build_deps(eml_inbox)
+
+        def _cycle(correlation_id: str) -> object:
+            intent = RetrievalIntent(entity_type=EntityType.MESSAGE, limit=3)
+            return run_rev_cycle(
+                program_id="prog-local", intent=intent, deps=deps,
+                profile=RevRetrievalProfile(profile=REV_PROFILE_SEARCH_HYDRATE),
+                mailbox_tenant_id="t", mailbox_principal="u@x.com", mailbox_container="inbox",
+                correlation_id=correlation_id, programs_root=tmp_path,
+                budget_limits=BudgetLimits(), set_at=NOW,
+            )
+
+        first = _cycle("vol-c1")
+        second = _cycle("vol-c2")
+
+        assert first.stop_category == "truncated_by_budget"
+        assert first.processed_successfully == 3
+        assert second.stop_category == "complete"
+        assert second.processed_successfully == 2
+        # All 5 unique messages landed in processed/ exactly once — lossless,
+        # no drops, no duplicates across the two-cycle drain.
+        processed_names = sorted(p.name for p in (eml_inbox / "processed").glob("*.eml"))
+        assert processed_names == [f"msg{i:03d}.eml" for i in range(5)]
+        assert not list(eml_inbox.glob("*.eml"))
+        assert not any(deps.enumerator.claimed_dir().glob("*.eml"))
+
+
 class TestCrashLoopGuard:
     """P1-5: a file that survives N consecutive startup recoveries is a poison
     file — quarantine it with reason=crash_loop so it cannot loop forever."""

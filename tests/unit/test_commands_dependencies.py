@@ -9,6 +9,7 @@ import yaml
 
 import cli
 from src.commands import dependencies as dependencies_command
+from src.core.adoption_telemetry import GoldenWorkflow, read_adoption_events
 from src.core.models import RiskLevel
 from src.core.models_v2 import Dependency, DependencyStatus, DependencyType, TrajectoryPoint
 from src.core.trajectory import backfill_trajectory_points
@@ -59,6 +60,11 @@ def test_dependencies_accept_promotes_dependency_and_marks_proposal_accepted(tmp
     proposals_payload = yaml.safe_load((repo_root / "programs" / "acme" / "_feedback" / "dependency_proposals.yaml").read_text(encoding="utf-8"))
     assert proposals_payload["proposals"][0]["status"] == "accepted"
 
+    # ADF-W5.14: accepting a dependency proposal records risk_dependency_review adoption.
+    adoption_events = read_adoption_events("acme", programs_root=(tmp_path / "programs"))
+    assert len(adoption_events) == 1
+    assert adoption_events[0].workflow == GoldenWorkflow.RISK_DEPENDENCY_REVIEW
+
 
 def test_dependencies_accept_persists_resolution_path(tmp_path: Path, monkeypatch) -> None:
     repo_root = _seed_repo(tmp_path)
@@ -105,6 +111,29 @@ def test_dependencies_dismiss_marks_proposal_dismissed(tmp_path: Path, monkeypat
     assert dismiss_result.exit_code == 0
     proposals_payload = yaml.safe_load((repo_root / "programs" / "acme" / "_feedback" / "dependency_proposals.yaml").read_text(encoding="utf-8"))
     assert proposals_payload["proposals"][0]["status"] == "dismissed"
+
+    # ADF-W5.14: dismissing a dependency proposal also records risk_dependency_review adoption.
+    adoption_events = read_adoption_events("acme", programs_root=(tmp_path / "programs"))
+    assert len(adoption_events) == 1
+    assert adoption_events[0].workflow == GoldenWorkflow.RISK_DEPENDENCY_REVIEW
+
+
+def test_dependencies_accept_unknown_proposal_does_not_record_adoption(tmp_path: Path, monkeypatch) -> None:
+    repo_root = _seed_repo(tmp_path)
+    monkeypatch.setattr(dependencies_command, "PROGRAMS_ROOT", repo_root / "programs")
+    monkeypatch.setattr(dependencies_command, "EDITIONS_ROOT", repo_root / "editions")
+    monkeypatch.setattr(dependencies_command, "PROGRAMS_ROOT", (tmp_path / "programs"))
+
+    scout_result = runner.invoke(cli.app, ["dependencies", "scout", "--program", "acme"])
+    assert scout_result.exit_code == 0
+
+    accept_result = runner.invoke(
+        cli.app,
+        ["dependencies", "accept", "--program", "acme", "--id", "dep-proposal-does-not-exist"],
+    )
+
+    assert accept_result.exit_code != 0
+    assert read_adoption_events("acme", programs_root=(tmp_path / "programs")) == ()
 
 
 def test_dependencies_scout_json_includes_eta_co_movement_proposal(tmp_path: Path, monkeypatch) -> None:

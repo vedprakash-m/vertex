@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import json
+import re
+import time
+import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
+from src.core.actuation_outbox import DispatchResult, create_task_idempotency_key, dispatch_leased_create_task, enqueue_create_task_intent
 from src.core.ado_client import ADOClient
 from src.core.ado_proposal import ADOUpdateEntry, ADOUpdateProposal, open_locked_proposal_manifest, read_proposal_manifest_from_handle, write_proposal_manifest_to_handle
 from src.core.exceptions import CredentialExpired, QueryError
@@ -14,6 +21,7 @@ from src.core.models_v2 import Signal, SignalReviewDecision
 from src.core.signal_dedup import is_duplicate_signal
 from src.core.signal_classification import classify_signal as _classify_signal
 from src.core.store_factory import build_signal_store_for_program_id
+from src.core.workspace_lease import ACTUATION_DISPATCH_DOMAIN, LeaseHeldByAnotherOwner, acquire_lease, release_lease
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +60,26 @@ class ADOWriter:
         self._client = client
         self._programs_root = programs_root
 
+    @contextmanager
+    def _actuation_lease(self, program_id: str) -> Iterator[None]:
+        """ADF-W1.10 (Appendix A.11): every ADO mutation -- not just
+        create_task, which owns its own lease via the outbox
+        (``dispatch_leased_create_task``) -- serializes against the
+        program's ``actuation_dispatch`` workspace lease domain. A short
+        per-call acquire/release (rather than one lease held across the
+        whole ``apply_manifest``/``rollback_manifest`` call) avoids
+        conflicting with create_task's own self-contained acquire/release
+        pairing, at the cost of not serializing an entire multi-entry apply
+        as one atomic unit -- acceptable, since each individual ADO write is
+        already independently safe (revision test-ops, duplicate checks).
+        """
+        owner = f"ado_writer:{uuid.uuid4().hex[:12]}"
+        lease = acquire_lease(program_id, owner, mutation_domain=ACTUATION_DISPATCH_DOMAIN, programs_root=self._programs_root)
+        try:
+            yield
+        finally:
+            release_lease(lease, programs_root=self._programs_root)
+
     def apply_manifest(
         self,
         manifest_path: Path,
@@ -80,15 +108,37 @@ class ADOWriter:
                     updated_entries.append(entry)
                     continue
 
+                # ADF-W1.2: lets _apply_entry persist attempted_at (and the
+                # stable operation_intent_id) to the manifest BEFORE it
+                # dispatches a create POST, so a lost response can be
+                # reconciled via search-before-create on the next run instead
+                # of silently duplicating the work item.
+                def _persist_attempt(attempted_entry: ADOUpdateEntry, *, _index: int = index) -> None:
+                    interim_entries = tuple(updated_entries) + (attempted_entry,) + proposal.entries[_index + 1 :]
+                    interim_proposal = replace(proposal, entries=interim_entries)
+                    interim_status = _derive_proposal_status(interim_proposal.entries, expired=False)
+                    write_proposal_manifest_to_handle(manifest_handle, interim_proposal, proposal_status=interim_status)
+
                 live_row = self._load_live_row(entry)
-                updated_entry = self._apply_entry(
-                    proposal,
-                    entry,
-                    live_row=live_row,
-                    applied_at=resolved_applied_at,
-                    existing_signals=existing_signals,
-                    signal_store=signal_store,
-                )
+                try:
+                    updated_entry = self._apply_entry(
+                        proposal,
+                        entry,
+                        live_row=live_row,
+                        applied_at=resolved_applied_at,
+                        existing_signals=existing_signals,
+                        signal_store=signal_store,
+                        persist_attempt=_persist_attempt,
+                    )
+                except LeaseHeldByAnotherOwner as error:
+                    # ADF-W1.10: every mutating action (not just create_task,
+                    # which handles its own lease internally via the outbox)
+                    # is now covered by the actuation_dispatch workspace
+                    # lease -- surface contention as a failed entry rather
+                    # than crashing the whole apply run.
+                    updated_entry = replace(
+                        entry, entry_status="failed", status_reason=f"actuation dispatch lease busy, retry later: {error}"
+                    )
                 updated_entries.append(updated_entry)
                 if updated_entry.action == "create_task" and updated_entry.entry_status == "applied" and updated_entry.work_item_id:
                     from src.core.action_tracker import associate_action_with_work_item
@@ -133,15 +183,28 @@ class ADOWriter:
             proposal, _ = read_proposal_manifest_from_handle(manifest_handle)
         resolved_rolled_back_at = _ensure_utc(rolled_back_at or datetime.now(timezone.utc))
 
-        results = tuple(
-            self._rollback_entry(
-                proposal,
-                entry,
-                action_id=action_id,
-                rolled_back_at=resolved_rolled_back_at,
-            )
-            for entry in proposal.entries
-        )
+        results_list: list[ADORollbackEntryResult] = []
+        for entry in proposal.entries:
+            try:
+                results_list.append(
+                    self._rollback_entry(
+                        proposal,
+                        entry,
+                        action_id=action_id,
+                        rolled_back_at=resolved_rolled_back_at,
+                    )
+                )
+            except LeaseHeldByAnotherOwner as error:
+                # ADF-W1.10: same contention-surfacing behavior as apply_manifest.
+                results_list.append(
+                    ADORollbackEntryResult(
+                        work_item_id=entry.work_item_id,
+                        action=entry.action,
+                        status="failed",
+                        status_reason=f"actuation dispatch lease busy, retry later: {error}",
+                    )
+                )
+        results = tuple(results_list)
         return ADORollbackArtifacts(
             manifest_path=manifest_path,
             proposal=proposal,
@@ -162,58 +225,132 @@ class ADOWriter:
         applied_at: datetime,
         existing_signals: list[Signal],
         signal_store,
+        persist_attempt: Any | None = None,
     ) -> ADOUpdateEntry:
         if entry.action == "create_task":
-            import json
             try:
                 task_data = json.loads(entry.proposed_value)
             except Exception as e:
                 return replace(entry, entry_status="failed", status_reason=f"invalid task proposal json: {e}")
-            
-            patch: list[dict[str, Any]] = []
-            title = task_data.get("title")
-            if title:
-                patch.append({"op": "add", "path": "/fields/System.Title", "value": title})
-            description = task_data.get("description")
-            if description:
-                patch.append({"op": "add", "path": "/fields/System.Description", "value": description})
-            assigned_to = task_data.get("assigned_to")
-            if assigned_to:
-                patch.append({"op": "add", "path": "/fields/System.AssignedTo", "value": assigned_to})
+
+            # ADF-W1.2 (Appendix B.8): stable intent id, assigned once at
+            # proposal-build time normally, but generated here as a fallback
+            # for pre-ADF-W1.2 manifests that predate the field.
+            operation_intent_id = entry.operation_intent_id or _new_operation_intent_id()
+            title = str(task_data.get("title") or "")
             area_path = task_data.get("area_path")
-            if area_path:
-                patch.append({"op": "add", "path": "/fields/System.AreaPath", "value": area_path})
-            iteration_path = task_data.get("iteration_path")
-            if iteration_path:
-                patch.append({"op": "add", "path": "/fields/System.IterationPath", "value": iteration_path})
-            priority = task_data.get("priority")
-            if priority is not None:
-                patch.append({"op": "add", "path": "/fields/Microsoft.VSTS.Common.Priority", "value": priority})
-            target_date = task_data.get("target_date")
-            if target_date:
-                patch.append({"op": "add", "path": "/fields/Microsoft.VSTS.Scheduling.TargetDate", "value": target_date})
-            
-            try:
-                response = self._request_json(
-                    "POST",
-                    f"{self._client._rest_base_url}workitems/$Task?api-version=7.1",
-                    json_body=patch,
-                    content_type="application/json-patch+json",
+
+            # Search-before-create/retry: only when a prior attempt was
+            # persisted (attempted_at set). A never-attempted entry has
+            # nothing to reconcile against, so skip the extra WIQL round trip.
+            if entry.attempted_at is not None:
+                existing_id = self._search_existing_create(
+                    operation_intent_id=operation_intent_id,
+                    area_path=area_path,
+                    title=title,
+                    attempted_at=entry.attempted_at,
                 )
-                new_id = response.get("id")
-                if not new_id:
-                    return replace(entry, entry_status="failed", status_reason="response did not return a new work item id")
+                if existing_id is not None:
+                    self._emit_duplicate_prevented(
+                        proposal,
+                        operation_intent_id=operation_intent_id,
+                        existing_remote_id=existing_id,
+                        detection="preflight_search",
+                    )
+                    return replace(
+                        entry,
+                        entry_status="applied",
+                        work_item_id=existing_id,
+                        remote_rev=1,
+                        operation_intent_id=operation_intent_id,
+                        status_reason="adopted existing work item via search-before-create (ADF-W1.2)",
+                    )
+
+            # ADF-W1.2: persist attempted_at + operation_intent_id BEFORE
+            # dispatch. If the process dies or the response is lost after
+            # this point but the server committed the write, the next apply
+            # run's search-before-create step (above) will find it.
+            attempted_entry = replace(entry, operation_intent_id=operation_intent_id, attempted_at=applied_at)
+            if persist_attempt is not None:
+                persist_attempt(attempted_entry)
+
+            # ADF-W1.3 (Sec 8.11): dispatch is outbox-backed rather than an
+            # inline POST. Enqueue is idempotent on operation_intent_id, so a
+            # crash-retry with the same (already-persisted) intent id reuses
+            # the existing row instead of enqueueing a duplicate.
+            idempotency_key = create_task_idempotency_key(
+                program_id=proposal.program_id,
+                org=self._client.organization,
+                project=self._client.project,
+                operation_intent_id=operation_intent_id,
+            )
+            outbox_payload_json = json.dumps(
+                {
+                    "operation_intent_id": operation_intent_id,
+                    "proposal_id": proposal.id,
+                    "org": self._client.organization,
+                    "project": self._client.project,
+                    "title": title,
+                    "description": task_data.get("description"),
+                    "assigned_to": task_data.get("assigned_to"),
+                    "area_path": area_path,
+                    "iteration_path": task_data.get("iteration_path"),
+                    "priority": task_data.get("priority"),
+                    "target_date": task_data.get("target_date"),
+                    # ADF-W1.2 (Appendix B.8): the create-marker tag makes this
+                    # dispatch attempt findable by a future search-before-create.
+                    "tags": f"vertex-intent-{operation_intent_id}",
+                }
+            )
+            enqueue_create_task_intent(
+                program_id=proposal.program_id,
+                idempotency_key=idempotency_key,
+                operation_intent_id=operation_intent_id,
+                proposal_id=proposal.id,
+                payload_json=outbox_payload_json,
+                programs_root=self._programs_root,
+            )
+
+            dispatch_owner = f"ado_writer:{uuid.uuid4().hex[:12]}"
+            try:
+                outcome = dispatch_leased_create_task(
+                    program_id=proposal.program_id,
+                    idempotency_key=idempotency_key,
+                    owner=dispatch_owner,
+                    dispatch_fn=self._dispatch_create_task_outbox_entry,
+                    programs_root=self._programs_root,
+                )
+            except LeaseHeldByAnotherOwner as error:
+                return replace(
+                    attempted_entry,
+                    entry_status="failed",
+                    status_reason=f"actuation dispatch lease busy, retry later: {error}",
+                )
+
+            if outcome.status == "completed" and outcome.remote_id:
                 self._append_audit_signal(
                     proposal,
                     entry,
                     applied_at=applied_at,
                     existing_signals=existing_signals,
                     signal_store=signal_store,
-                    raw_ref=f"ado:{new_id}",
+                    raw_ref=f"ado:{outcome.remote_id}",
                 )
-                return replace(entry, entry_status="applied", remote_rev=1, work_item_id=int(new_id))
-            except QueryError as error:
-                return replace(entry, entry_status="failed", status_reason=f"ADO task creation failed: {error}")
+                return replace(attempted_entry, entry_status="applied", remote_rev=1, work_item_id=int(outcome.remote_id))
+            if outcome.status == "uncertain_remote_state":
+                return replace(
+                    attempted_entry,
+                    entry_status="failed",
+                    status_reason=(
+                        f"ADO task creation outcome uncertain (outbox key {idempotency_key}); "
+                        "operator must reconcile before retrying"
+                    ),
+                )
+            return replace(
+                attempted_entry,
+                entry_status="failed",
+                status_reason=outcome.entry.failure_reason or "ADO task creation failed",
+            )
 
         if live_row is None:
             return replace(entry, entry_status="failed", status_reason="work item not found in ADO")
@@ -231,11 +368,12 @@ class ADOWriter:
         if entry.action == "add_comment":
             if self._has_duplicate_comment(entry):
                 return replace(entry, entry_status="skipped", status_reason="duplicate comment")
-            response = self._request_json(
-                "POST",
-                f"{self._client._rest_base_url}workItems/{entry.work_item_id}/comments?api-version=7.1-preview.4",
-                json_body={"text": entry.proposed_value},
-            )
+            with self._actuation_lease(proposal.program_id):
+                response = self._request_json(
+                    "POST",
+                    f"{self._client._rest_base_url}workItems/{entry.work_item_id}/comments?api-version=7.1-preview.4",
+                    json_body={"text": entry.proposed_value},
+                )
             self._append_audit_signal(
                 proposal,
                 entry,
@@ -254,12 +392,13 @@ class ADOWriter:
             if entry.revision_id is not None:
                 tag_patch = _prepend_test_op(tag_patch, entry.revision_id)
             try:
-                self._request_json(
-                    "PATCH",
-                    f"{self._client._rest_base_url}workItems/{entry.work_item_id}?api-version=7.1",
-                    json_body=tag_patch,
-                    content_type="application/json-patch+json",
-                )
+                with self._actuation_lease(proposal.program_id):
+                    self._request_json(
+                        "PATCH",
+                        f"{self._client._rest_base_url}workItems/{entry.work_item_id}?api-version=7.1",
+                        json_body=tag_patch,
+                        content_type="application/json-patch+json",
+                    )
             except QueryError:
                 return replace(entry, entry_status="conflict", status_reason="test op rejected (race)", remote_rev=live_rev)
             self._append_audit_signal(
@@ -281,12 +420,13 @@ class ADOWriter:
             if entry.revision_id is not None:
                 field_patch = _prepend_test_op(field_patch, entry.revision_id)
             try:
-                self._request_json(
-                    "PATCH",
-                    f"{self._client._rest_base_url}workItems/{entry.work_item_id}?api-version=7.1",
-                    json_body=field_patch,
-                    content_type="application/json-patch+json",
-                )
+                with self._actuation_lease(proposal.program_id):
+                    self._request_json(
+                        "PATCH",
+                        f"{self._client._rest_base_url}workItems/{entry.work_item_id}?api-version=7.1",
+                        json_body=field_patch,
+                        content_type="application/json-patch+json",
+                    )
             except QueryError:
                 return replace(entry, entry_status="conflict", status_reason="test op rejected (race)", remote_rev=live_rev)
             self._append_audit_signal(
@@ -339,11 +479,12 @@ class ADOWriter:
                     status_reason="rollback comment already posted",
                 )
             try:
-                self._request_json(
-                    "POST",
-                    f"{self._client._rest_base_url}workItems/{entry.work_item_id}/comments?api-version=7.1-preview.4",
-                    json_body={"text": rollback_comment},
-                )
+                with self._actuation_lease(proposal.program_id):
+                    self._request_json(
+                        "POST",
+                        f"{self._client._rest_base_url}workItems/{entry.work_item_id}/comments?api-version=7.1-preview.4",
+                        json_body={"text": rollback_comment},
+                    )
             except QueryError as error:
                 return ADORollbackEntryResult(
                     work_item_id=entry.work_item_id,
@@ -378,12 +519,13 @@ class ADOWriter:
                 )
             field_patch = _build_field_rollback_patch(entry, live_rev=live_rev)
             try:
-                self._request_json(
-                    "PATCH",
-                    f"{self._client._rest_base_url}workItems/{entry.work_item_id}?api-version=7.1",
-                    json_body=field_patch,
-                    content_type="application/json-patch+json",
-                )
+                with self._actuation_lease(proposal.program_id):
+                    self._request_json(
+                        "PATCH",
+                        f"{self._client._rest_base_url}workItems/{entry.work_item_id}?api-version=7.1",
+                        json_body=field_patch,
+                        content_type="application/json-patch+json",
+                    )
             except QueryError:
                 return ADORollbackEntryResult(
                     work_item_id=entry.work_item_id,
@@ -411,12 +553,13 @@ class ADOWriter:
             if live_rev is not None:
                 tag_patch = _prepend_test_op(tag_patch, live_rev)
             try:
-                self._request_json(
-                    "PATCH",
-                    f"{self._client._rest_base_url}workItems/{entry.work_item_id}?api-version=7.1",
-                    json_body=tag_patch,
-                    content_type="application/json-patch+json",
-                )
+                with self._actuation_lease(proposal.program_id):
+                    self._request_json(
+                        "PATCH",
+                        f"{self._client._rest_base_url}workItems/{entry.work_item_id}?api-version=7.1",
+                        json_body=tag_patch,
+                        content_type="application/json-patch+json",
+                    )
             except QueryError:
                 return ADORollbackEntryResult(
                     work_item_id=entry.work_item_id,
@@ -534,7 +677,10 @@ class ADOWriter:
     ) -> dict[str, Any]:
         headers = dict(self._client._headers())
         headers["Content-Type"] = content_type
-        response = self._client._session.request(
+        # ADF-W1.1: mutations use the non-retrying session (INV-ADF-9). A lost
+        # response after a committed write must never be silently retried by
+        # the transport layer.
+        response = self._client._mutation_session.request(
             method,
             url,
             headers=headers,
@@ -550,6 +696,13 @@ class ADOWriter:
                 auth_method=self._client.auth_method or "unknown",
                 connector="ADO",
             )
+        if response.status_code == 429:
+            # ADF-W1.1: honor Retry-After once as rate-limit courtesy, then
+            # fail closed -- no automatic retry loop for a mutation.
+            _sleep_once_for_retry_after(response.headers.get("Retry-After"))
+            raise QueryError(
+                f"ADO write rate-limited (429); no automatic retry for mutations: {response.text[:500]}"
+            )
         if response.status_code >= 400:
             raise QueryError(
                 f"ADO write failed with status {response.status_code}: {response.text[:500]}"
@@ -557,6 +710,222 @@ class ADOWriter:
         if not getattr(response, "text", ""):
             return {}
         return response.json()
+
+    def _dispatch_create_task_outbox_entry(self, outbox_entry: Any) -> DispatchResult:
+        """ADF-W1.3: the ``dispatch_fn`` handed to ``dispatch_leased_create_task``.
+
+        Reads its fields from the outbox row's own ``payload_json`` rather
+        than from a captured closure, so a *different* process that reclaims
+        a stale lease (the original worker crashed mid-dispatch) can still
+        complete this exact intent correctly.
+        """
+        try:
+            fields = json.loads(outbox_entry.payload_json)
+        except Exception as error:
+            return DispatchResult(succeeded=False, failure_reason=f"corrupt outbox payload: {error}")
+        patch = _build_create_task_patch(fields)
+        try:
+            response = self._request_json(
+                "POST",
+                f"{self._client._rest_base_url}workitems/$Task?api-version=7.1",
+                json_body=patch,
+                content_type="application/json-patch+json",
+            )
+        except QueryError as error:
+            return DispatchResult(succeeded=False, failure_reason=f"ADO task creation failed: {error}")
+        new_id = response.get("id")
+        if not new_id:
+            return DispatchResult(succeeded=False, failure_reason="response did not return a new work item id")
+        return DispatchResult(succeeded=True, remote_id=int(new_id))
+
+    def _search_existing_create(
+        self,
+        *,
+        operation_intent_id: str,
+        area_path: str | None,
+        title: str,
+        attempted_at: datetime,
+    ) -> int | None:
+        """ADF-W1.2 (Appendix B.8): search-before-create/retry.
+
+        Primary: WIQL tag search for the exact ``vertex-intent-<id>`` marker.
+        Fallback: normalized-title equality within the last 14 days in the
+        same area path. Returns the existing work item id on a hit, else
+        ``None``. Read-only; never raises (a search failure falls through to
+        a normal create attempt rather than blocking the entry).
+        """
+        tag = f"vertex-intent-{operation_intent_id}"
+        tag_wiql = f"SELECT [System.Id] FROM WorkItems WHERE [System.Tags] CONTAINS '{_escape_wiql_literal(tag)}'"
+        if area_path:
+            tag_wiql += f" AND [System.AreaPath] UNDER '{_escape_wiql_literal(area_path)}'"
+        try:
+            tag_hits = self._client.execute_wiql(tag_wiql)
+        except QueryError:
+            tag_hits = []
+        if tag_hits:
+            return tag_hits[0]
+
+        if not area_path or not title:
+            return None
+
+        cutoff = attempted_at - timedelta(days=14)
+        fallback_wiql = (
+            f"SELECT [System.Id] FROM WorkItems WHERE [System.AreaPath] UNDER '{_escape_wiql_literal(area_path)}' "
+            f"AND [System.CreatedDate] >= '{cutoff.date().isoformat()}'"
+        )
+        try:
+            candidate_ids = self._client.execute_wiql(fallback_wiql)
+        except QueryError:
+            return None
+        if not candidate_ids:
+            return None
+        try:
+            rows = self._client.query_work_items_batch(candidate_ids, fields=("System.Title",))
+        except QueryError:
+            return None
+        normalized_target = _normalize_title(title)
+        for row in rows:
+            row_title = str((row.get("fields") or {}).get("System.Title", ""))
+            if _normalize_title(row_title) == normalized_target:
+                row_id = row.get("id")
+                if isinstance(row_id, int):
+                    return row_id
+        return None
+
+    def _emit_duplicate_prevented(
+        self,
+        proposal: ADOUpdateProposal,
+        *,
+        operation_intent_id: str,
+        existing_remote_id: int,
+        detection: str,
+    ) -> None:
+        """ADF-W0.18/W1.2: durable audit record for an adopted duplicate.
+
+        Best-effort: a ledger write failure must never block the idempotent
+        adoption itself (the entry is already safely marked applied).
+        """
+        try:
+            from src.core.ledger.event_log import (
+                ConfidenceTier,
+                TemporalConfidence,
+                build_event_envelope,
+                write_event,
+            )
+            from src.core.ledger.source_refs import ADOWorkItemRef
+
+            now = datetime.now(timezone.utc)
+            source_ref = ADOWorkItemRef(
+                org=self._client.organization,
+                project=self._client.project,
+                work_item_id=existing_remote_id,
+            )
+            envelope = build_event_envelope(
+                program_id=proposal.program_id,
+                event_type="actuation.duplicate_prevented.v1",
+                occurred_at=now,
+                recorded_at=now,
+                temporal_confidence=TemporalConfidence.EXACT,
+                confidence=ConfidenceTier.SOURCE_AUTHORITATIVE,
+                actor="ado_writer",
+                payload={
+                    "operation_intent_id": operation_intent_id,
+                    "detection": detection,
+                    "existing_remote_id": str(existing_remote_id),
+                    "evidence": (
+                        f"WIQL search matched existing work item {existing_remote_id} "
+                        f"for intent {operation_intent_id}"
+                    ),
+                },
+                source_ref=source_ref,
+            )
+            write_event(envelope, programs_root=self._programs_root)
+        except Exception:  # pragma: no cover - audit write must never break adoption
+            pass
+
+
+def _new_operation_intent_id() -> str:
+    return uuid.uuid4().hex
+
+
+def _build_create_task_patch(fields: dict[str, Any]) -> list[dict[str, Any]]:
+    """ADF-W1.3: builds the JSON-Patch body from an outbox row's
+    ``payload_json`` fields (same field set the pre-outbox inline POST used)."""
+    patch: list[dict[str, Any]] = []
+    title = fields.get("title")
+    if title:
+        patch.append({"op": "add", "path": "/fields/System.Title", "value": title})
+    description = fields.get("description")
+    if description:
+        patch.append({"op": "add", "path": "/fields/System.Description", "value": description})
+    assigned_to = fields.get("assigned_to")
+    if assigned_to:
+        patch.append({"op": "add", "path": "/fields/System.AssignedTo", "value": assigned_to})
+    area_path = fields.get("area_path")
+    if area_path:
+        patch.append({"op": "add", "path": "/fields/System.AreaPath", "value": area_path})
+    iteration_path = fields.get("iteration_path")
+    if iteration_path:
+        patch.append({"op": "add", "path": "/fields/System.IterationPath", "value": iteration_path})
+    priority = fields.get("priority")
+    if priority is not None:
+        patch.append({"op": "add", "path": "/fields/Microsoft.VSTS.Common.Priority", "value": priority})
+    target_date = fields.get("target_date")
+    if target_date:
+        patch.append({"op": "add", "path": "/fields/Microsoft.VSTS.Scheduling.TargetDate", "value": target_date})
+    tags = fields.get("tags")
+    if tags:
+        patch.append({"op": "add", "path": "/fields/System.Tags", "value": tags})
+    return patch
+
+
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _normalize_title(title: str) -> str:
+    """ADF-W1.2 (Appendix B.8) title-equality normalization: lowercase, collapsed whitespace."""
+    return _WHITESPACE_RE.sub(" ", title.strip().lower())
+
+
+def _escape_wiql_literal(value: str) -> str:
+    """Escape a single-quoted WIQL string literal (double embedded quotes)."""
+    return value.replace("'", "''")
+
+
+_MAX_RETRY_AFTER_SLEEP_SECONDS = 60.0
+
+
+def _sleep_once_for_retry_after(header_value: str | None) -> float:
+    """ADF-W1.1: sleep once for a 429 ``Retry-After`` header, then return.
+
+    This is rate-limit courtesy, not a retry: the caller always raises after
+    this returns. Accepts either the delta-seconds or HTTP-date form (RFC
+    9110 10.2.3). Returns the number of seconds actually slept (0 if the
+    header is absent or unparseable), so tests can assert on it without
+    depending on wall-clock sleep.
+    """
+    seconds = _parse_retry_after_seconds(header_value)
+    if seconds > 0:
+        time.sleep(min(seconds, _MAX_RETRY_AFTER_SLEEP_SECONDS))
+    return seconds
+
+
+def _parse_retry_after_seconds(header_value: str | None) -> float:
+    if not header_value:
+        return 0.0
+    stripped = header_value.strip()
+    try:
+        return max(0.0, float(stripped))
+    except ValueError:
+        pass
+    try:
+        target = parsedate_to_datetime(stripped)
+    except (TypeError, ValueError):
+        return 0.0
+    if target.tzinfo is None:
+        target = target.replace(tzinfo=timezone.utc)
+    delta = (target - datetime.now(timezone.utc)).total_seconds()
+    return max(0.0, delta)
 
 
 def _derive_proposal_status(entries: tuple[ADOUpdateEntry, ...], *, expired: bool) -> str:

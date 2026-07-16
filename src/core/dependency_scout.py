@@ -317,6 +317,7 @@ def dependency_proposal_to_dependency(
         status=_dependency_status_active(),
         owner_alias=None,
         resolution_path=(resolution_path.strip() if resolution_path is not None and resolution_path.strip() else None),
+        evidence_refs=proposal.evidence_refs,
     )
 
 

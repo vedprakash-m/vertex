@@ -53,7 +53,7 @@ def test_ado_pr_client_list_pull_requests() -> None:
     mock_client._request_json.assert_called_once_with(
         "GET",
         "https://dev.azure.com/msazure/One/_apis/git/repositories/repo-adventure/pullrequests?api-version=7.1",
-        params={"searchCriteria.status": "active", "$top": "50"},
+        params={"searchCriteria.status": "active", "$top": "50", "$skip": "0"},
     )
 
 def _pr_client_with_value(value: list[dict]) -> ADOPRClient:
@@ -151,3 +151,54 @@ def test_list_pull_requests_tolerates_malformed_nested_objects() -> None:
     assert pr.url == "https://fallback/7"
     # Unparseable closedDate must not crash and must not invent a merge time.
     assert pr.merged_at is None
+
+
+def _pr_row(pr_id: int) -> dict:
+    return {
+        "pullRequestId": pr_id,
+        "title": f"PR {pr_id}",
+        "status": "active",
+        "targetRefName": "refs/heads/main",
+        "sourceRefName": f"refs/heads/f{pr_id}",
+        "creationDate": "2026-05-24T10:00:00Z",
+    }
+
+
+def test_list_pull_requests_pages_across_multiple_requests() -> None:
+    """ADF-W2.1: a full first page (top rows) followed by a short page is
+    seen as >1-page and not truncated."""
+    mock_client = MagicMock(spec=ADOClient)
+    mock_client.organization = "msazure"
+    mock_client.project = "One"
+    mock_client._request_json.side_effect = [
+        {"value": [_pr_row(1), _pr_row(2)]},  # full page (top=2)
+        {"value": [_pr_row(3)]},  # short page -> done
+    ]
+
+    pr_client = ADOPRClient(mock_client)
+    outcomes: list[object] = []
+    prs = pr_client.list_pull_requests("repo-x", top=2, on_pagination=outcomes.append)
+
+    assert [pr.pr_id for pr in prs] == [1, 2, 3]
+    assert mock_client._request_json.call_count == 2
+    second_call_params = mock_client._request_json.call_args_list[1].kwargs["params"]
+    assert second_call_params["$skip"] == "2"
+    assert len(outcomes) == 1
+    assert outcomes[0].total_fetched == 3
+    assert outcomes[0].page_count == 2
+    assert outcomes[0].is_truncated is False
+
+
+def test_list_pull_requests_reports_truncation_at_safety_cap() -> None:
+    mock_client = MagicMock(spec=ADOClient)
+    mock_client.organization = "msazure"
+    mock_client.project = "One"
+    mock_client._request_json.return_value = {"value": [_pr_row(1), _pr_row(2)]}  # always full
+
+    pr_client = ADOPRClient(mock_client)
+    outcomes: list[object] = []
+    prs = pr_client.list_pull_requests("repo-x", top=2, max_pages=3, on_pagination=outcomes.append)
+
+    assert len(prs) == 6  # 3 pages x 2 rows, safety-capped (dedup not expected across pages here)
+    assert outcomes[0].is_truncated is True
+    assert outcomes[0].page_count == 3
