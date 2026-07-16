@@ -246,7 +246,17 @@ def run_rev_cycle(
     # 1. Enumerate.
     enum_result = deps.enumerator.enumerate(intent, correlation_id=correlation_id)
     decision = governor.decide_for_port_result(enum_result)
-    if not decision.continue_run:
+    if isinstance(enum_result, Incomplete):
+        # A budget/page/count-truncated enumeration still carries a salvaged
+        # batch of real candidates (e.g. local-inbox files already claimed —
+        # renamed out of inbox/ into claimed/ — up to this cycle's --limit).
+        # Discarding that batch here would silently strand it until a future
+        # crash-recovery pass happens to pick the same files back up as
+        # `claimed_at_startup`, costing a full extra cycle of latency per
+        # truncated batch. Record the truncation as this cycle's stop signal
+        # and fall through to process what was actually enumerated.
+        stop_reason, stop_category, breached = decision.reason, decision.category, decision.breached_budget
+    elif not decision.continue_run:
         return _finalize_report(
             program_id=program_id,
             correlation_id=correlation_id,
@@ -769,7 +779,11 @@ def _resolve_candidate_entities(
     ``match_kind`` + ``score``. Unresolved refs are kept as ``match_kind=
     "unresolved"`` with a ``resolved_entity_id`` of ``None`` — the S-6 gate
     convention — so orphaned/ambiguous facts are visible at triage and never
-    silently projected as if they bound to a real entity.
+    silently projected as if they bound to a real entity. ADF-W2.6 (Section
+    8.14.3): a genuinely ambiguous near-tied fuzzy match is recorded as its
+    own ``match_kind="ambiguous"`` (still ``resolved_entity_id=None``) rather
+    than collapsed into plain "unresolved" or silently resolved to whichever
+    candidate scored marginally higher.
     """
     fields = _ENTITY_REF_PAYLOAD_FIELDS.get(event_type, ())
     # The sender is always a candidate person-ref (it authored the message); it
@@ -791,16 +805,26 @@ def _resolve_candidate_entities(
     resolutions: list[CandidateEntityResolution] = []
     for raw in unique_refs:
         resolved = None
+        ambiguous = False
         match_kind = "unresolved"
         score = 0.0
         if registry is not None:
             try:
-                resolved = registry.resolve(raw, entity_type="person", scope="program")
+                if hasattr(registry, "resolve_with_binding"):
+                    binding = registry.resolve_with_binding(raw, entity_type="person", scope="program")
+                    resolved = binding.resolved_entity
+                    ambiguous = binding.ambiguous
+                    score = binding.confidence
+                else:
+                    resolved = registry.resolve(raw, entity_type="person", scope="program")
             except Exception:  # pragma: no cover — defensive
                 resolved = None
+                ambiguous = False
         if resolved is not None:
             match_kind = "resolved"
             score = 1.0
+        elif ambiguous:
+            match_kind = "ambiguous"
         resolutions.append(CandidateEntityResolution(
             raw_name=raw,
             resolved_entity_id=getattr(resolved, "entity_id", None) if resolved is not None else None,

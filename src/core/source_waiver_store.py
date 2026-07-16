@@ -262,3 +262,53 @@ def _require_date(
         return date.fromisoformat(normalized)
     except ValueError as error:
         raise ConfigError(f"Invalid source waiver for '{program_id}' in {path}: {field_name} must be YYYY-MM-DD.") from error
+
+
+def is_waiver_active(waiver: SourceWaiver, *, today: date | None = None) -> bool:
+    """Section 11.3 acceptance evidence: a waiver is active only within its
+    [granted, expires] window (both inclusive). An expired waiver is NOT
+    active -- confirm-time logic still considers it until re-anchored, but
+    signal/cockpit surfaces must treat it as expired so the operator knows the
+    gate is no longer formally covered."""
+    resolved_today = today or date.today()
+    return waiver.granted <= resolved_today <= waiver.expires
+
+
+def find_waiver_for_query(
+    query_id: str,
+    waivers: tuple[SourceWaiver, ...],
+    slice_contracts: tuple[Any, ...],
+    *,
+    today: date | None = None,
+) -> SourceWaiver | None:
+    """ADF-W2.3 (Section 8.5.3 / 11.3): the policy integration deferred in the
+    prior pass. Bridges ``query_id -> contract_id -> waiver`` using slice
+    contracts: a Kusto query's ``query_id`` is the telemetry source for a
+    ``SliceContract`` whose ``source_contract.telemetry.query_id`` matches;
+    that contract's ``id`` is the ``contract_id`` a ``SourceWaiver`` keys on.
+
+    Returns the first active (non-expired) waiver for the query's telemetry
+    role, or ``None`` when no waiver exists or the query has no bound slice
+    contract. ``slice_contracts`` is typed ``Any`` to avoid importing
+    ``SliceContract`` (which would create a Zone-A -> Zone-A coupling the
+    import-boundary contract does not forbid, but the lazy-duck-type keeps this
+    helper testable with simple fakes without pulling the full contract loader).
+    """
+    if not query_id or not waivers:
+        return None
+    # Find the slice contract whose telemetry query_id matches.
+    contract_ids_for_query: list[str] = []
+    for contract in slice_contracts:
+        telemetry = getattr(getattr(contract, "source_contract", None), "telemetry", None)
+        if telemetry is not None and getattr(telemetry, "query_id", None) == query_id:
+            contract_id = getattr(contract, "id", None)
+            if isinstance(contract_id, str) and contract_id:
+                contract_ids_for_query.append(contract_id)
+
+    if not contract_ids_for_query:
+        return None
+
+    for waiver in waivers:
+        if waiver.contract_id in contract_ids_for_query and waiver.role == "telemetry" and is_waiver_active(waiver, today=today):
+            return waiver
+    return None

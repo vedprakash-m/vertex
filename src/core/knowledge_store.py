@@ -68,6 +68,8 @@ def load_knowledge(*, knowledge_root: Path, fallback_root: Path | None = None) -
             team_ids=_string_tuple(entry.get("team_ids", [])),
             org_chain=_string_tuple(entry.get("org_chain", [])),
             exempt_from_vitality=bool(entry.get("exempt_from_vitality", False)),
+            manager_alias=_optional_str(entry.get("manager_alias")),
+            department=_optional_str(entry.get("department")),
         )
         for entry in people_directory_doc.get("people", [])
         if isinstance(entry, dict)
@@ -126,6 +128,9 @@ def load_knowledge(*, knowledge_root: Path, fallback_root: Path | None = None) -
             label=_optional_str(entry.get("label")),
             result_column=_optional_str(entry.get("result_column")),
             metric_id=_optional_str(entry.get("metric_id")),
+            unit=_optional_str(entry.get("unit")),
+            slo_target=float(entry["slo_target"]) if entry.get("slo_target") is not None else None,
+            comparison=_optional_str(entry.get("comparison")),
             assertion_ids=_string_tuple(entry.get("assertion_ids", [])),
             engine=_optional_str(entry.get("engine")) or ("wiql" if _optional_str(entry.get("wiql")) else "kusto"),
             wiql=_optional_str(entry.get("wiql")),

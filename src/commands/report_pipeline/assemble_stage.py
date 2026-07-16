@@ -1084,7 +1084,6 @@ def _generate_report_draft_from_context(ctx: StageContext) -> DraftArtifacts:
     subject_signal = render_state.subject_signal
     email_subject = render_state.email_subject
     email_preheader = render_state.email_preheader
-    productivity_dividend = render_state.productivity_dividend_hours
     html_body = render_state.html_body
     markdown_body = render_state.markdown_body
     snapshot = render_state.snapshot

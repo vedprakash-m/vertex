@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, Literal, cast
 
 from src.ai.ai_mode import AIMode, get_ai_mode
 from src.ai._pipeline import AIPipelineError, process_generated_text
@@ -13,15 +13,27 @@ from src.ai.llm_trace import AITraceContext
 from src.ai.provider import DisabledStructuredProvider, LLMProvider
 from src.ai.tiered_router import TierResult, route_through_tiers
 from src.core.ado_status import _area_path_matches
+from src.core.ai_result_cache import AIResultCacheKey, canonical_input_hash, get_ai_result, put_ai_result
+from src.core.ai_schema_gateway import SchemaGatewayError, validate_bounded_payload
 from src.core.claim_tracker import ClaimExtractionResult, extract_claims_from_confirmed_narratives
+from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.models import WorkItem
 from src.core.models_v2 import ClaimEntry, DecisionAsk, Program
+from src.core.quality_gates.ai_release_audit import (
+    AIRunState,
+    ReleaseTerminal,
+    new_ai_run_id,
+    record_ai_release_decision,
+    record_ai_run_lifecycle,
+)
 from src.core.policy_loader import load_ai_feature_policy
 
 
 PROMPT_VERSION = "claim_extractor.v1"
 from src.ai.prompt_registry import load_prompt
+POLICY_VERSION = "claim_extractor.v1"
 _FEATURE = "claim_extractor"
+_OUTPUT_SCHEMA_VERSION = "1"
 
 
 class ClaimExtractorError(Exception):
@@ -97,7 +109,27 @@ class ClaimExtractor:
         items: tuple[WorkItem, ...] = (),
         valid_workstream_ids: tuple[str, ...] = (),
         workstream_area_paths: dict[str, tuple[str, ...]] | None = None,
+        programs_root: Path = PROGRAMS_ROOT,
     ) -> ClaimExtractionResult:
+        """Runs the same AISchemaGateway/QG-29 safety lifecycle established
+        by ``risk_proposal_generator.py`` (ADF-W5.1, P7), but scoped ONLY to
+        the frontier tier (``_frontier_tier`` below): claim extraction's
+        deterministic tier (explicit ``Claim:``/``Decision ask:`` markers,
+        then regex patterns) never talks to an AI provider, so it is
+        intentionally left outside AISchemaGateway's bounds/cache/lifecycle
+        machinery entirely -- that machinery exists to govern AI provider
+        round trips, and a deterministic hit makes none. Only when
+        ``route_through_tiers`` falls through to ``_frontier_tier`` (the
+        deterministic tier missed) do bounds-checked request/response
+        payloads, the five ``AIRunState`` transitions, cache wiring, and a
+        durable QG-29 terminal release decision apply. Preserves the
+        existing raise-on-rejection contract (``ClaimExtractorError`` and
+        its ``ClaimExtractorSafetyError``/``ClaimExtractorBudgetError``
+        subclasses) exactly, including the caller's (``claim_resolution.py``)
+        distinction between a graceful regex fallback (``ClaimExtractorError``)
+        and a hard failure (the safety/budget subclasses) -- a bare
+        ``raise`` inside the rejection handlers preserves the original
+        exception subtype."""
         if not narratives:
             return ClaimExtractionResult(claims=(), decision_asks=(), warnings=())
 
@@ -117,6 +149,48 @@ class ClaimExtractor:
             return TierResult(value=result, confidence=confidence)
 
         def _frontier_tier() -> ClaimExtractionResult:
+            ai_run_id = new_ai_run_id()
+
+            def _lifecycle(state: AIRunState) -> None:
+                record_ai_run_lifecycle(
+                    program_id=program_id,
+                    ai_run_id=ai_run_id,
+                    feature=_FEATURE,
+                    state=state,
+                    prompt_version=PROMPT_VERSION,
+                    policy_version=POLICY_VERSION,
+                    programs_root=programs_root,
+                )
+
+            def _discard(terminal: ReleaseTerminal, reason: str, finding_count: int = 0) -> None:
+                record_ai_release_decision(
+                    program_id=program_id,
+                    ai_run_id=ai_run_id,
+                    terminal=terminal,
+                    reason=reason,
+                    validator_finding_count=finding_count,
+                    programs_root=programs_root,
+                )
+
+            _lifecycle(AIRunState.PLANNED)
+
+            request_payload = {
+                "program_id": program_id,
+                "edition_id": edition_id,
+                "issue_number": issue_number,
+                "narratives": narratives,
+                "item_ids": [item.id for item in items],
+                "valid_workstream_ids": list(valid_workstream_ids),
+            }
+            try:
+                validate_bounded_payload(request_payload)
+            except SchemaGatewayError as error:
+                reason = f"AISchemaGateway rejected the outbound request: {error}"
+                _discard(ReleaseTerminal.DISCARDED, reason)
+                raise ClaimExtractorError(reason) from error
+
+            _lifecycle(AIRunState.REQUESTED)
+
             system_prompt = _load_prompt()
             user_prompt = _build_user_prompt(
                 narratives=narratives,
@@ -124,27 +198,71 @@ class ClaimExtractor:
                 valid_workstream_ids=valid_workstream_ids,
                 workstream_area_paths=workstream_area_paths,
             )
+            policy = load_ai_feature_policy(_FEATURE)
+            cache_key = AIResultCacheKey(
+                program_id=program_id,
+                feature=_FEATURE,
+                canonical_input_hash=canonical_input_hash(user_prompt),
+                prompt_version=PROMPT_VERSION,
+                policy_version=POLICY_VERSION,
+                model_deployment=_resolve_model_deployment(self._client),
+                context_manifest_hash=canonical_input_hash(
+                    "|".join(str(item.id) for item in items)
+                ),
+                output_schema_version=_OUTPUT_SCHEMA_VERSION,
+            )
+            cached = _cached_response(cache_key, programs_root=programs_root)
+            if cached is not None:
+                raw = cached
+            else:
+                try:
+                    raw = self._client.structured(
+                        system_prompt,
+                        user_prompt,
+                        parser=lambda payload: payload,
+                        max_tokens=policy.max_tokens,
+                        prompt_version=PROMPT_VERSION,
+                    )
+                except BudgetExceeded as error:
+                    reason = f"AOAI cost guard triggered: {error}"
+                    _discard(ReleaseTerminal.DISCARDED, reason)
+                    raise ClaimExtractorBudgetError(reason) from error
+                except AIClientError as error:
+                    reason = f"AI claim extraction failed: {error}"
+                    _discard(ReleaseTerminal.DISCARDED, reason)
+                    raise ClaimExtractorError(reason) from error
+                put_ai_result(cache_key, raw, programs_root=programs_root)
+
+            _lifecycle(AIRunState.RESPONDED)
+
             try:
-                return self._client.structured(
-                    system_prompt,
-                    user_prompt,
-                    parser=lambda payload: _parse_claim_extraction_payload(
-                        payload=payload,
-                        program_id=program_id,
-                        edition_id=edition_id,
-                        issue_number=issue_number,
-                        claim_date=claim_date,
-                        items=items,
-                        valid_workstream_ids=valid_workstream_ids,
-                        workstream_area_paths=workstream_area_paths,
-                    ),
-                    max_tokens=load_ai_feature_policy(_FEATURE).max_tokens,
-                    prompt_version=PROMPT_VERSION,
+                validate_bounded_payload(raw)
+            except SchemaGatewayError as error:
+                reason = f"AISchemaGateway rejected the response: {error}"
+                _discard(ReleaseTerminal.REJECTED, reason)
+                raise ClaimExtractorError(reason) from error
+
+            _lifecycle(AIRunState.SCHEMA_VALIDATED)
+
+            try:
+                result = _parse_claim_extraction_payload(
+                    payload=raw,
+                    program_id=program_id,
+                    edition_id=edition_id,
+                    issue_number=issue_number,
+                    claim_date=claim_date,
+                    items=items,
+                    valid_workstream_ids=valid_workstream_ids,
+                    workstream_area_paths=workstream_area_paths,
                 )
-            except BudgetExceeded as error:
-                raise ClaimExtractorBudgetError(f"AOAI cost guard triggered: {error}") from error
-            except AIClientError as error:
-                raise ClaimExtractorError(f"AI claim extraction failed: {error}") from error
+            except ClaimExtractorError as error:
+                _lifecycle(AIRunState.SEMANTICALLY_VALIDATED)
+                _discard(ReleaseTerminal.REJECTED, str(error))
+                raise
+
+            _lifecycle(AIRunState.SEMANTICALLY_VALIDATED)
+            _discard(ReleaseTerminal.RELEASED, "passed AISchemaGateway bounds and claim-extraction field validation")
+            return result
 
         outcome = route_through_tiers(
             _FEATURE,
@@ -302,6 +420,14 @@ def _parse_deterministic_claim_line(
                 payload.get("due"),
                 field_name=f"deterministic claim entry #{index} due_date",
             ),
+            claimed_status_family=_parse_optional_status_family(
+                payload.get("status_family"),
+                field_name=f"deterministic claim entry #{index} claimed_status_family",
+            ),
+            claimed_status_value=_parse_optional_status_value(
+                payload.get("status_value"),
+                field_name=f"deterministic claim entry #{index} claimed_status_value",
+            ),
         )
     except ClaimExtractorError:
         return None
@@ -364,7 +490,7 @@ def _parse_deterministic_payload(line: str, *, marker: str) -> dict[str, str] | 
             return None
         key, value = segment.split("=", 1)
         normalized_key = key.strip().lower()
-        if normalized_key not in {"owner", "due", "workstream", "refs"}:
+        if normalized_key not in {"owner", "due", "workstream", "refs", "status_family", "status_value"}:
             return None
         payload[normalized_key] = value.strip()
     return payload
@@ -504,6 +630,16 @@ def _parse_claim_entry(
         valid_workstream_ids=valid_workstream_ids,
         field_name=f"AI claim entry #{index} workstream_id",
     )
+    # ADF-W2.10 P6: optional, not required -- most claims won't assert a
+    # dependency/risk/milestone/action status, and requiring these keys
+    # would force a prompt-wide contract change across every existing
+    # caller and golden-corpus fixture.
+    claimed_status_family = _parse_optional_status_family(
+        raw_claim.get("claimed_status_family"), field_name=f"AI claim entry #{index} claimed_status_family"
+    )
+    claimed_status_value = _parse_optional_status_value(
+        raw_claim.get("claimed_status_value"), field_name=f"AI claim entry #{index} claimed_status_value"
+    )
     _validate_claim_workstream_area_paths(
         workstream_id=workstream_id,
         entity_refs=entity_refs,
@@ -523,6 +659,8 @@ def _parse_claim_entry(
         claim_date=claim_date,
         owner_alias=owner_alias,
         due_date=due_date,
+        claimed_status_family=claimed_status_family,
+        claimed_status_value=claimed_status_value,
     )
 
 
@@ -598,25 +736,47 @@ def _parse_entity_refs(
     fallback_item_ids: tuple[int, ...],
     field_name: str,
 ) -> tuple[str, ...]:
+    """Parses entity refs. `WI:<id>` refs are cross-validated against the
+    allowed work item set. `DEP:<id>` (ADF-W2.10 P6, dependency-status) and
+    `RISK:<id>` / `MS:<id>` / `ACTION:<id>` (ADF-W2.10 P7, Section 8.10.9's
+    risk/milestone/action-status extensions) refs are accepted as opaque
+    passthrough ids -- no dependency/risk/milestone/action list is threaded
+    through claim extraction today, so cross-validation happens later, at
+    comparison time, in `contradiction_engine._evaluate_claim_vs_*_status`
+    (an unknown id there is skipped gracefully, not rejected here)."""
     allowed_work_item_ids = {item.id for item in items}
+    # The four structured-fact prefixes that name "which record" a status
+    # claim is about. Upper-cased together with the id segment below to
+    # match Dependency.id / RiskEntry.id / Milestone.id / ActionItem.id
+    # case-insensitively at comparison time.
+    opaque_prefixes = ("DEP:", "RISK:", "MS:", "ACTION:")
     refs: list[str] = []
     if value is None:
         raw_refs: list[object] = []
     elif not isinstance(value, list):
-        raise ClaimExtractorError(f"{field_name} must be a list of WI refs.")
+        raise ClaimExtractorError(f"{field_name} must be a list of WI:/DEP:/RISK:/MS:/ACTION: refs.")
     else:
         raw_refs = value
 
     for raw_ref in raw_refs:
         if not isinstance(raw_ref, str):
-            raise ClaimExtractorError(f"{field_name} entries must be WI:<id> strings.")
+            raise ClaimExtractorError(f"{field_name} entries must be WI:<id>/DEP:<id>/RISK:<id>/MS:<id>/ACTION:<id> strings.")
         normalized = raw_ref.strip().upper()
+        opaque_match = next((prefix for prefix in opaque_prefixes if normalized.startswith(prefix)), None)
+        if opaque_match is not None:
+            record_id = normalized[len(opaque_match) :].strip()
+            if not record_id:
+                raise ClaimExtractorError(f"{field_name} entries must be WI:<id>/DEP:<id>/RISK:<id>/MS:<id>/ACTION:<id> strings.")
+            ref = f"{opaque_match}{record_id}"
+            if ref not in refs:
+                refs.append(ref)
+            continue
         if not normalized.startswith("WI:"):
-            raise ClaimExtractorError(f"{field_name} entries must be WI:<id> strings.")
+            raise ClaimExtractorError(f"{field_name} entries must be WI:<id>/DEP:<id>/RISK:<id>/MS:<id>/ACTION:<id> strings.")
         try:
             work_item_id = int(normalized.split(":", 1)[1])
         except ValueError as error:
-            raise ClaimExtractorError(f"{field_name} entries must be WI:<id> strings.") from error
+            raise ClaimExtractorError(f"{field_name} entries must be WI:<id>/DEP:<id>/RISK:<id>/MS:<id>/ACTION:<id> strings.") from error
         if work_item_id not in allowed_work_item_ids:
             raise ClaimExtractorError(f"{field_name} contains work item {work_item_id} outside the allowed set.")
         ref = f"WI:{work_item_id}"
@@ -658,6 +818,37 @@ def _parse_optional_owner_alias(value: object, *, field_name: str) -> str | None
     if not normalized:
         raise ClaimExtractorError(f"{field_name} must be a non-empty alias string or null.")
     return normalized
+
+
+_CLAIMED_STATUS_FAMILIES = frozenset({"dependency", "risk", "milestone", "action"})
+ClaimedStatusFamily = Literal["dependency", "risk", "milestone", "action"]
+
+
+def _parse_optional_status_family(value: object, *, field_name: str) -> ClaimedStatusFamily | None:
+    """ADF-W2.10 P6/P7: the generic family tag for `claimed_status_value`.
+    All four families (dependency, risk, milestone, action) now have
+    comparison rules in `contradiction_engine` (Section 8.10.9)."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ClaimExtractorError(f"{field_name} must be a status family string or null.")
+    normalized = value.strip().lower()
+    if not normalized:
+        return None
+    if normalized not in _CLAIMED_STATUS_FAMILIES:
+        raise ClaimExtractorError(
+            f"{field_name} must be one of {sorted(_CLAIMED_STATUS_FAMILIES)} or null."
+        )
+    return cast(ClaimedStatusFamily, normalized)
+
+
+def _parse_optional_status_value(value: object, *, field_name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ClaimExtractorError(f"{field_name} must be a status value string or null.")
+    normalized = value.strip().lower()
+    return normalized or None
 
 
 def _parse_optional_workstream_id(
@@ -707,3 +898,12 @@ def _validate_claim_workstream_area_paths(
         raise ClaimExtractorError(
             f"{field_name} does not match configured area paths for referenced work item WI:{work_item_id}."
         )
+
+
+def _resolve_model_deployment(client: LLMProvider) -> str:
+    return getattr(client, "deployment", None) or getattr(client, "model", None) or type(client).__name__
+
+
+def _cached_response(key: AIResultCacheKey, *, programs_root: Path) -> dict[str, Any] | None:
+    hit = get_ai_result(key, programs_root=programs_root)
+    return hit.value if hit is not None else None

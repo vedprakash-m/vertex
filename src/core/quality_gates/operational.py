@@ -59,7 +59,7 @@ def evaluate_milestone_risk_linkage_gate(
     failing_milestones: list[str] = []
     for milestone in milestones:
         assessment = assess_milestone_health(milestone, items, trajectories, as_of)
-        if assessment.computed_health not in {MilestoneStatus.AT_RISK, MilestoneStatus.MISSED}:
+        if assessment.computed_health not in {MilestoneStatus.AT_RISK, MilestoneStatus.MISSED, MilestoneStatus.UNKNOWN}:
             continue
         if has_milestone_risk_linkage(milestone=milestone, open_risks=open_risks):
             continue

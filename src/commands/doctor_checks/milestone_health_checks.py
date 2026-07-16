@@ -58,7 +58,7 @@ def build_milestone_health_warning(
     affected = [
         (milestone, assessments[milestone.id])
         for milestone in milestones
-        if assessments[milestone.id].computed_health in {MilestoneStatus.AT_RISK, MilestoneStatus.MISSED}
+        if assessments[milestone.id].computed_health in {MilestoneStatus.AT_RISK, MilestoneStatus.MISSED, MilestoneStatus.UNKNOWN}
     ]
     if not affected:
         return None
@@ -88,7 +88,7 @@ def build_milestone_health_warning(
         }
 
     status_fragments: list[str] = []
-    for status in (MilestoneStatus.AT_RISK, MilestoneStatus.MISSED):
+    for status in (MilestoneStatus.AT_RISK, MilestoneStatus.MISSED, MilestoneStatus.UNKNOWN):
         count = sum(1 for _, assessment in affected if assessment.computed_health == status)
         if count:
             status_label = status.value.replace("_", " ")

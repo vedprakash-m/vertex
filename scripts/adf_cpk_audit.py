@@ -1,0 +1,177 @@
+"""ADF-W0.10: CPK/SQLite migration prerequisite audit.
+
+Answers "which unfinished CPK/SQLite migrations are prerequisites for the
+Slice-1 outbox/audit work" by AST-scanning the tree for direct
+``sqlite3.connect(...)`` call sites outside the sanctioned
+``src/core/_db.py::open_program_db``/``open_program_db_with_retry`` helpers,
+then writing an ordered prerequisite list to
+``governance/decisions/adf-cpk-dependencies.md``.
+
+A direct-connect site is not automatically a bug -- some are legitimate
+one-off tooling (migration scripts, `admin` commands). This script's job is
+to make every site visible and orderable, not to judge each one; that
+judgment is Section 11's job when ADF-W1.x work items touch the same files.
+
+Usage::
+
+    python scripts/adf_cpk_audit.py            # write the governance doc
+    python scripts/adf_cpk_audit.py --print     # also print the ordered list
+"""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_SCAN_ROOT = REPO_ROOT / "src"
+OUTPUT_PATH = REPO_ROOT / "governance" / "decisions" / "adf-cpk-dependencies.md"
+
+#: Files that legitimately implement the sanctioned direct-connect helper
+#: itself and must not be flagged against their own definition.
+_EXCLUDED_FILENAMES = frozenset({"_db.py"})
+
+#: Function names considered "the sanctioned wrapper" if a connect call is
+#: found lexically inside them (belt-and-suspenders with the file exclusion
+#: above, in case a wrapper is ever duplicated elsewhere).
+_SANCTIONED_FUNCTION_NAMES = frozenset({"open_program_db", "open_program_db_with_retry"})
+
+#: Directory scan priority (lower first) for the "ordered" prerequisite list.
+#: Ledger/outbox/unit-of-work stores are the direct Slice-1 (ADF-W1.3)
+#: prerequisite; everything else is lower priority context.
+_DIRECTORY_PRIORITY: tuple[tuple[str, int], ...] = (
+    ("core/ledger", 0),
+    ("core/unit_of_work.py", 0),
+    ("core", 1),
+    ("commands/doctor_checks", 2),
+    ("commands", 3),
+)
+
+
+@dataclass(frozen=True, slots=True)
+class SqliteConnectSite:
+    file: str  # POSIX-style, relative to the scan root's parent (i.e. "src/...")
+    line: int
+    enclosing_function: str | None
+
+
+def _is_sqlite_connect_call(node: ast.Call) -> bool:
+    func = node.func
+    return isinstance(func, ast.Attribute) and func.attr == "connect" and isinstance(func.value, ast.Name) and func.value.id == "sqlite3"
+
+
+def scan_direct_sqlite_connects(scan_root: Path, *, exclude_filenames: frozenset[str] = _EXCLUDED_FILENAMES) -> tuple[SqliteConnectSite, ...]:
+    """AST-scan *scan_root* for ``sqlite3.connect(...)`` outside the sanctioned wrapper."""
+    sites: list[SqliteConnectSite] = []
+    for path in sorted(scan_root.rglob("*.py")):
+        if path.name in exclude_filenames:
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+
+        function_stack: list[str] = []
+
+        class _Visitor(ast.NodeVisitor):
+            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+                function_stack.append(node.name)
+                self.generic_visit(node)
+                function_stack.pop()
+
+            def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:  # noqa: N802
+                function_stack.append(node.name)
+                self.generic_visit(node)
+                function_stack.pop()
+
+            def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
+                if _is_sqlite_connect_call(node):
+                    enclosing = function_stack[-1] if function_stack else None
+                    if enclosing not in _SANCTIONED_FUNCTION_NAMES:
+                        try:
+                            relative = path.relative_to(scan_root.parent)
+                        except ValueError:
+                            relative = path
+                        sites.append(
+                            SqliteConnectSite(file=relative.as_posix(), line=node.lineno, enclosing_function=enclosing)
+                        )
+                self.generic_visit(node)
+
+        _Visitor().visit(tree)
+    return tuple(sites)
+
+
+def _priority_for(file_path: str) -> int:
+    for needle, priority in _DIRECTORY_PRIORITY:
+        if needle in file_path:
+            return priority
+    return len(_DIRECTORY_PRIORITY)
+
+
+def ordered_prerequisite_list(sites: tuple[SqliteConnectSite, ...]) -> tuple[SqliteConnectSite, ...]:
+    return tuple(sorted(sites, key=lambda site: (_priority_for(site.file), site.file, site.line)))
+
+
+def render_report(sites: tuple[SqliteConnectSite, ...]) -> str:
+    ordered = ordered_prerequisite_list(sites)
+    files = sorted({site.file for site in ordered})
+    lines = [
+        "# ADF-W0.10 CPK/SQLite Migration Prerequisite Audit",
+        "",
+        "**Generated by:** `scripts/adf_cpk_audit.py` (AST scan, read-only, no live state touched).",
+        "",
+        f"**Direct `sqlite3.connect(...)` call sites outside `src/core/_db.py::open_program_db`"
+        f"/`open_program_db_with_retry`:** {len(ordered)} across {len(files)} file(s).",
+        "",
+        "A direct-connect site is not automatically a defect -- some are legitimate one-off "
+        "tooling. This list orders them so ADF-W1.x work (outbox, unit-of-work, actuation) can "
+        "see which stores are still outside the sanctioned connection helper before building on "
+        "top of them. Cross-check with `vertex doctor --storage --program <id>` for the live "
+        "canonical-path picture (ADF-W1.9); this script does not query live program state.",
+        "",
+        "## Ordered prerequisite list",
+        "",
+        "| Priority | File | Line | Enclosing function |",
+        "|---|---|---|---|",
+    ]
+    for site in ordered:
+        lines.append(f"| {_priority_for(site.file)} | `{site.file}` | {site.line} | `{site.enclosing_function or '(module level)'}` |")
+    lines.append("")
+    lines.append("## Priority key")
+    lines.append("")
+    lines.append("| Priority | Meaning |")
+    lines.append("|---|---|")
+    lines.append("| 0 | Ledger/outbox/unit-of-work -- direct ADF-W1.3 prerequisite |")
+    lines.append("| 1 | Other `src/core` stores -- read/write authority relevant to ADF-W1.9 (state authority) |")
+    lines.append("| 2 | `doctor_checks` -- diagnostic read paths |")
+    lines.append("| 3 | Other `src/commands` -- operator-invoked tooling, lowest urgency |")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--scan-root", default=str(DEFAULT_SCAN_ROOT), help="Root directory to scan (default: src/).")
+    parser.add_argument("--output", default=str(OUTPUT_PATH), help="Where to write the governance doc.")
+    parser.add_argument("--print", dest="print_report", action="store_true", help="Also print the report to stdout.")
+    args = parser.parse_args(argv)
+
+    scan_root = Path(args.scan_root)
+    sites = scan_direct_sqlite_connects(scan_root)
+    report = render_report(sites)
+
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(report + "\n", encoding="utf-8")
+
+    if args.print_report:
+        print(report)
+    print(f"Wrote {output_path} ({len(sites)} direct-connect site(s) found).")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

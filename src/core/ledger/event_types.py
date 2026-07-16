@@ -581,6 +581,197 @@ _REAL_EVENT_SCHEMAS: dict[str, EventPayloadSchema] = {
         affects_support_tables=(),
         dedupe_core_fields=("candidate_id", "resulting_event_id", "revocation_event_id"),
     ),
+    # ── ADF-W0.18: specs/arch-data-fix.md Appendix A.2 event payload contracts ──
+    # Registered here (schema validation, Zone A) so build_event_envelope/
+    # write_event stop raising "Unknown ledger event type" for these sixteen
+    # types. None of these are TPM business facts (risk/decision/milestone/...);
+    # they are measurement, AI-lifecycle, and actuation-audit events. Their
+    # fact-bridge disposition (event_type_registry.py) is PASSTHROUGH for all
+    # sixteen -- see the ADF-W0.18 block there, including the explicit
+    # decision.outcome_recorded. prefix override needed to avoid colliding with
+    # the pre-existing "decision." TPM fact-bridge family.
+    "value.workflow_started.v1": _build_schema(
+        "value.workflow_started.v1",
+        required_fields=("measurement_id", "edition_id", "workflow", "mode", "actor", "started_at"),
+        field_types={
+            "measurement_id": "str", "edition_id": "str", "workflow": "str",
+            "mode": "str", "actor": "str", "started_at": "str",
+        },
+        entity_ref_fields=("measurement_id", "edition_id"),
+        dedupe_core_fields=("measurement_id",),
+    ),
+    "value.workflow_completed.v1": _build_schema(
+        "value.workflow_completed.v1",
+        required_fields=(
+            "measurement_id", "edition_id", "workflow", "mode", "actor", "completed_at",
+            "active_seconds", "machine_wait_seconds", "external_wait_seconds",
+            "review_seconds", "manual_acquisition_seconds",
+        ),
+        field_types={
+            "measurement_id": "str", "edition_id": "str", "workflow": "str", "mode": "str",
+            "actor": "str", "completed_at": "str", "active_seconds": "float",
+            "machine_wait_seconds": "float", "external_wait_seconds": "float",
+            "review_seconds": "float", "manual_acquisition_seconds": "float",
+        },
+        entity_ref_fields=("measurement_id", "edition_id"),
+        dedupe_core_fields=("measurement_id",),
+    ),
+    "value.manual_step_attested.v1": _build_schema(
+        "value.manual_step_attested.v1",
+        required_fields=("measurement_id", "step", "seconds", "attested_by", "attested_at"),
+        field_types={
+            "measurement_id": "str", "step": "str", "seconds": "float",
+            "attested_by": "str", "attested_at": "str",
+        },
+        entity_ref_fields=("measurement_id", "attested_by"),
+        dedupe_core_fields=("measurement_id", "step"),
+    ),
+    "value.review_edit_recorded.v1": _build_schema(
+        "value.review_edit_recorded.v1",
+        required_fields=(
+            "proposal_class", "proposal_id", "outcome", "review_seconds", "edit_magnitude",
+            "reviewer", "artifact_ref",
+        ),
+        field_types={
+            "proposal_class": "str", "proposal_id": "str", "outcome": "str",
+            "review_seconds": "float", "edit_magnitude": "float", "reviewer": "str",
+            "artifact_ref": "str",
+        },
+        entity_ref_fields=("proposal_id", "reviewer", "artifact_ref"),
+        dedupe_core_fields=("proposal_id", "outcome"),
+    ),
+    "value.gap_closed.v1": _build_schema(
+        "value.gap_closed.v1",
+        required_fields=("gap_id", "closed_by", "evidence_refs", "closed_at"),
+        field_types={"gap_id": "str", "closed_by": "str", "evidence_refs": "list", "closed_at": "str"},
+        entity_ref_fields=("gap_id",),
+        dedupe_core_fields=("gap_id",),
+    ),
+    "quality.confirmed_defect_prevented.v1": _build_schema(
+        "quality.confirmed_defect_prevented.v1",
+        required_fields=("gate_id", "artifact_ref", "defect_summary", "confirmed_by", "evidence_refs"),
+        field_types={
+            "gate_id": "str", "artifact_ref": "str", "defect_summary": "str",
+            "confirmed_by": "str", "evidence_refs": "list",
+        },
+        entity_ref_fields=("gate_id", "artifact_ref", "confirmed_by"),
+        dedupe_core_fields=("gate_id", "artifact_ref"),
+    ),
+    "source.acquisition_completed.v1": _build_schema(
+        "source.acquisition_completed.v1",
+        required_fields=(
+            "acquisition_id", "channel", "run_id", "completeness", "watermark_before",
+            "watermark_after", "provider_summary",
+        ),
+        optional_fields=("prefetch_snapshot_ref",),
+        field_types={
+            "acquisition_id": "str", "channel": "str", "run_id": "str", "completeness": "str",
+            "watermark_before": "str", "watermark_after": "str", "provider_summary": "dict",
+            "prefetch_snapshot_ref": "str",
+        },
+        entity_ref_fields=("acquisition_id", "run_id", "prefetch_snapshot_ref"),
+        dedupe_core_fields=("acquisition_id", "channel", "run_id"),
+    ),
+    "operation.trace_linked.v1": _build_schema(
+        "operation.trace_linked.v1",
+        required_fields=("correlation_id", "workflow_id", "run_id", "stage", "ref_type", "ref_id"),
+        optional_fields=("parent_event_id",),
+        field_types={
+            "correlation_id": "str", "workflow_id": "str", "run_id": "str", "stage": "str",
+            "ref_type": "str", "ref_id": "str", "parent_event_id": "str",
+        },
+        entity_ref_fields=("correlation_id", "workflow_id", "run_id", "ref_id", "parent_event_id"),
+        dedupe_core_fields=("correlation_id", "ref_type", "ref_id"),
+    ),
+    "decision.outcome_recorded.v1": _build_schema(
+        "decision.outcome_recorded.v1",
+        required_fields=("decision_id", "outcome", "recorded_by", "evidence_refs"),
+        field_types={
+            "decision_id": "str", "outcome": "str", "recorded_by": "str", "evidence_refs": "list",
+        },
+        entity_ref_fields=("decision_id", "recorded_by"),
+        dedupe_core_fields=("decision_id", "outcome"),
+    ),
+    "action.closed.v1": _build_schema(
+        "action.closed.v1",
+        required_fields=("action_id", "closed_state", "closed_by", "evidence_refs"),
+        optional_fields=("work_item_id",),
+        field_types={
+            "action_id": "str", "closed_state": "str", "closed_by": "str",
+            "work_item_id": "str", "evidence_refs": "list",
+        },
+        entity_ref_fields=("action_id", "closed_by", "work_item_id"),
+        dedupe_core_fields=("action_id", "closed_state"),
+    ),
+    "ai.run_lifecycle.v1": _build_schema(
+        "ai.run_lifecycle.v1",
+        required_fields=(
+            "ai_run_id", "feature", "state", "prompt_version", "policy_version",
+            "model_deployment", "context_manifest_ref",
+        ),
+        field_types={
+            "ai_run_id": "str", "feature": "str", "state": "str", "prompt_version": "str",
+            "policy_version": "str", "model_deployment": "str", "context_manifest_ref": "str",
+        },
+        entity_ref_fields=("ai_run_id", "context_manifest_ref"),
+        dedupe_core_fields=("ai_run_id", "state"),
+    ),
+    "ai.release_decision.v1": _build_schema(
+        "ai.release_decision.v1",
+        required_fields=("ai_run_id", "terminal", "reason", "validator_finding_count"),
+        optional_fields=("released_content_hash",),
+        field_types={
+            "ai_run_id": "str", "terminal": "str", "reason": "str",
+            "validator_finding_count": "int", "released_content_hash": "str",
+        },
+        entity_ref_fields=("ai_run_id",),
+        dedupe_core_fields=("ai_run_id", "terminal"),
+    ),
+    "ai.application_receipt.v1": _build_schema(
+        "ai.application_receipt.v1",
+        required_fields=("ai_run_id", "receipt"),
+        optional_fields=("artifact_ref", "proposal_id"),
+        field_types={
+            "ai_run_id": "str", "receipt": "str", "artifact_ref": "str", "proposal_id": "str",
+        },
+        entity_ref_fields=("ai_run_id", "artifact_ref", "proposal_id"),
+        dedupe_core_fields=("ai_run_id", "receipt"),
+    ),
+    "actuation.intent_created.v1": _build_schema(
+        "actuation.intent_created.v1",
+        required_fields=(
+            "operation_intent_id", "idempotency_key", "operation_type", "target_identity",
+            "proposal_id", "approval_event_ref",
+        ),
+        field_types={
+            "operation_intent_id": "str", "idempotency_key": "str", "operation_type": "str",
+            "target_identity": "str", "proposal_id": "str", "approval_event_ref": "str",
+        },
+        entity_ref_fields=("operation_intent_id", "proposal_id", "approval_event_ref"),
+        dedupe_core_fields=("operation_intent_id", "idempotency_key"),
+    ),
+    "actuation.receipt_recorded.v1": _build_schema(
+        "actuation.receipt_recorded.v1",
+        required_fields=("operation_intent_id", "receipt_state", "provider_summary"),
+        optional_fields=("remote_id", "remote_rev"),
+        field_types={
+            "operation_intent_id": "str", "receipt_state": "str", "remote_id": "str",
+            "remote_rev": "str", "provider_summary": "dict",
+        },
+        entity_ref_fields=("operation_intent_id", "remote_id"),
+        dedupe_core_fields=("operation_intent_id", "receipt_state"),
+    ),
+    "actuation.duplicate_prevented.v1": _build_schema(
+        "actuation.duplicate_prevented.v1",
+        required_fields=("operation_intent_id", "detection", "evidence"),
+        optional_fields=("existing_remote_id",),
+        field_types={
+            "operation_intent_id": "str", "detection": "str", "evidence": "str",
+            "existing_remote_id": "str",
+        },
+        entity_ref_fields=("operation_intent_id", "existing_remote_id"),
+        dedupe_core_fields=("operation_intent_id", "detection"),
+    ),
 }
 
 

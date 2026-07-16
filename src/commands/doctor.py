@@ -139,6 +139,7 @@ from src.commands.doctor_checks.storage_checks import (
     _dc02_runtime_layout_check,
 )
 from src.commands.doctor_checks.source_waiver_checks import run_source_waiver_doctor as _run_source_waiver_doctor
+from src.commands.doctor_checks.schedule_health_checks import run_schedule_health_doctor as _run_schedule_health_doctor
 from src.core.ado_client import ADOClient, ADO_RESOURCE
 from src.core.action_tracker import assess_action_staleness, get_actions_path
 from src.core.assumption_tracker import check_validation_due, get_assumptions_path
@@ -252,6 +253,7 @@ def doctor_command(
     issue: int | None = typer.Option(None, "--issue", help="Issue number required by --flip-parity."),
     charts: bool = typer.Option(False, "--charts", help="Validate chart cache TTL vs edition cadence, attachment targets, exec-summary uniqueness, and renderer IDs."),
     source_waivers: bool = typer.Option(False, "--source-waivers", help="Audit programs/<id>/source_waivers.yaml against vertex/policies/source_waivers.schema.yaml (D-32)."),
+    schedule_health: bool = typer.Option(False, "--schedule-health", help="Check whether scheduled prefetch/cockpit-build artifacts are present and fresh (ADF-W5.10)."),
     watch_sources: bool = typer.Option(False, "--watch-sources", help="Validate selected vertex watch signal sources without starting the polling loop."),
     source: list[str] = typer.Option([], "--source", help="Watch signal source to validate with --watch-sources. Repeat or use comma-separated values: ado, workiq, kusto, analytics, sprints, icm."),
     catchup_log: bool = typer.Option(False, "--catchup-log", help="Show recent catchup failures or truncation events from _feedback/usage_log.jsonl."),
@@ -370,6 +372,7 @@ def doctor_command(
         fix_hints=fix_hints,
         sharepoint=sharepoint,
         strict_lt_alignment=strict_lt_alignment,
+        schedule_health=schedule_health,
         reports_root=REPORTS_ROOT,
         archive_root=ARCHIVE_ROOT,
         editions_root=EDITIONS_ROOT,
@@ -491,6 +494,7 @@ def run_doctor(
     fix_hints: bool = False,
     sharepoint: bool = False,
     strict_lt_alignment: bool = False,
+    schedule_health: bool = False,
     reports_root: Path | None = None,
     archive_root: Path | None = None,
     templates_root: Path | None = None,
@@ -509,9 +513,9 @@ def run_doctor(
     resolved_reports_root = reports_root or REPORTS_ROOT
     resolved_programs_root = programs_root or (resolved_reports_root.parent / "programs")
     resolved_reality_db_root = reality_db_root or (resolved_programs_root.parent / "vertex-db")
-    if sum(1 for option in (check_auth, operator_gates, platform_readiness, kb, context, ids, cadence, channels, privacy, kusto, milestones, dependencies, actions, risks, escalations, decisions, assumptions, readiness, semantic_index, personas, metric_bindings, consistency, checkpoints, storage, flip_status, flip_parity, fact_parity, fact_bridge, fact_deserialization, confirm_readiness, adapter_cert, charts, source_waivers, watch_sources, catchup_log, nudge, circuit_breakers, sharepoint) if option) > 1:
+    if sum(1 for option in (check_auth, operator_gates, platform_readiness, kb, context, ids, cadence, channels, privacy, kusto, milestones, dependencies, actions, risks, escalations, decisions, assumptions, readiness, semantic_index, personas, metric_bindings, consistency, checkpoints, storage, flip_status, flip_parity, fact_parity, fact_bridge, fact_deserialization, confirm_readiness, adapter_cert, charts, source_waivers, watch_sources, catchup_log, nudge, circuit_breakers, sharepoint, schedule_health) if option) > 1:
         raise typer.BadParameter(
-            "Choose only one of --check-auth, --operator-gates, --platform-readiness, --kb, --context, --ids, --cadence, --channels, --privacy, --kusto, --milestones, --dependencies, --actions, --risks, --escalations, --decisions, --assumptions, --readiness, --semantic-index, --personas, --metric-bindings, --consistency, --checkpoints, --storage, --flip-status, --flip-parity, --fact-parity, --fact-bridge, --fact-deserialization, --confirm-readiness, --adapter-cert, --charts, --source-waivers, --watch-sources, --catchup-log, --nudge, --circuit-breakers, or --sharepoint."
+            "Choose only one of --check-auth, --operator-gates, --platform-readiness, --kb, --context, --ids, --cadence, --channels, --privacy, --kusto, --milestones, --dependencies, --actions, --risks, --escalations, --decisions, --assumptions, --readiness, --semantic-index, --personas, --metric-bindings, --consistency, --checkpoints, --storage, --flip-status, --flip-parity, --fact-parity, --fact-bridge, --fact-deserialization, --confirm-readiness, --adapter-cert, --charts, --source-waivers, --watch-sources, --catchup-log, --nudge, --circuit-breakers, --sharepoint, or --schedule-health."
         )
     if watch_source_values and not watch_sources:
         raise typer.BadParameter("--source requires --watch-sources.")
@@ -866,6 +870,20 @@ def run_doctor(
             editions_root=resolved_editions_root,
             programs_root=resolved_programs_root,
             strict_lt_alignment=strict_lt_alignment,
+        )
+    if schedule_health:
+        resolved_edition = _resolve_edition_name(edition_name, resolved_reports_root)
+        _resolved = resolve_edition(
+            resolved_edition,
+            editions_root=resolved_editions_root,
+            programs_root=resolved_programs_root,
+        )
+        if _resolved is None:
+            raise typer.BadParameter(f"Unknown edition '{resolved_edition}'.")
+        return _run_schedule_health_doctor(
+            program_id=_resolved.paths.program_id,
+            programs_root=resolved_programs_root,
+            now=now,
         )
 
     resolved_templates_root = templates_root or TEMPLATES_ROOT

@@ -464,6 +464,7 @@ def _parse_edition_config(raw_edition: dict[str, Any], path: Path) -> EditionCon
         workstream_filter=_parse_workstream_filter(raw_edition.get("workstream_filter")),
         brand_name=_optional_string(raw_edition.get("brand_name")),
         brand_header_url=_optional_string(raw_edition.get("brand_header_url")),
+        scope_note=_optional_string(raw_edition.get("scope_note")),
         scorecard_sort=str(raw_edition.get("scorecard_sort", "risk_desc")),
         scorecard_plain_text_only=bool(raw_edition.get("scorecard_plain_text_only", False)),
         layout_mode=str(raw_edition.get("layout_mode", "dashboard")),
@@ -864,7 +865,12 @@ def _parse_kusto(value: Any) -> KustoConfig | None:
         for entry in queries_payload
         if isinstance(entry, dict)
     )
-    return KustoConfig(enabled=bool(value.get("enabled", False)), queries=queries)
+    raw_max_concurrency = value.get("max_concurrency", 1)
+    try:
+        max_concurrency = max(1, int(raw_max_concurrency))
+    except (TypeError, ValueError):
+        max_concurrency = 1
+    return KustoConfig(enabled=bool(value.get("enabled", False)), queries=queries, max_concurrency=max_concurrency)
 
 
 def _parse_m365(value: Any) -> M365Config | None:

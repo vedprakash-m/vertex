@@ -6,11 +6,11 @@ in semantic dedup, escalation, forceability, etc.).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 import yaml
 
 from src.core.analytics_store import (
@@ -35,6 +35,34 @@ _DEMOTE_MIN_GATE_PASS_RATE = 0.60     # QG pass rate < 60%
 
 
 @dataclass(frozen=True, slots=True)
+class ProposalClassCounters:
+    """Appendix A.8's ``counters`` block for one proposal class."""
+
+    proposals: int = 0
+    accepted: int = 0
+    edited: int = 0
+    rejected: int = 0
+    reversals: int = 0
+    material_errors: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ProposalClassAutonomyState:
+    """Appendix A.8 (Section 8.15.1): one ``proposal_classes.<class>`` entry
+    in ``earned_autonomy_state.yaml`` -- the per-``(program_id,
+    proposal_class)`` L0-L4 ladder, distinct from this module's older
+    global ``earned_tier`` (FR-SG-39)."""
+
+    level: str  # "l0".."l4"
+    promoted_at: datetime | None
+    demoted_at: datetime | None
+    last_change_reason: str
+    evidence_window_start: datetime
+    counters: ProposalClassCounters = field(default_factory=ProposalClassCounters)
+    sample_rate: float = 1.0
+
+
+@dataclass(frozen=True, slots=True)
 class EarnedAutonomyState:
     program_id: str
     earned_tier: int        # 0 = no earned autonomy; matches maturity levels
@@ -43,6 +71,9 @@ class EarnedAutonomyState:
     promoted_at: datetime | None
     demoted_at: datetime | None
     schema_version: str = _SCHEMA_VERSION
+    #: Appendix A.8's per-proposal-class ladder state. Absent/empty means
+    #: every class defaults to l0/l1 per the ladder defaults (upcast rule).
+    proposal_classes: Mapping[str, ProposalClassAutonomyState] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,7 +113,37 @@ def load_earned_autonomy_state(
         promoted_at=_parse_datetime(promoted_raw) if promoted_raw else None,
         demoted_at=_parse_datetime(demoted_raw) if demoted_raw else None,
         schema_version=str(raw.get("schema_version", _SCHEMA_VERSION)),
+        proposal_classes=_parse_proposal_classes(raw.get("proposal_classes")),
     )
+
+
+def _parse_proposal_classes(raw: Any) -> dict[str, ProposalClassAutonomyState]:
+    if not raw:
+        return {}
+    parsed: dict[str, ProposalClassAutonomyState] = {}
+    for proposal_class, entry in dict(raw).items():
+        entry = entry or {}
+        counters_raw = entry.get("counters") or {}
+        promoted_raw = entry.get("promoted_at")
+        demoted_raw = entry.get("demoted_at")
+        window_raw = entry.get("evidence_window_start")
+        parsed[str(proposal_class)] = ProposalClassAutonomyState(
+            level=str(entry.get("level", "l0")),
+            promoted_at=_parse_datetime(promoted_raw) if promoted_raw else None,
+            demoted_at=_parse_datetime(demoted_raw) if demoted_raw else None,
+            last_change_reason=str(entry.get("last_change_reason", "")),
+            evidence_window_start=_parse_datetime(window_raw) if window_raw else datetime.now(timezone.utc),
+            counters=ProposalClassCounters(
+                proposals=int(counters_raw.get("proposals", 0)),
+                accepted=int(counters_raw.get("accepted", 0)),
+                edited=int(counters_raw.get("edited", 0)),
+                rejected=int(counters_raw.get("rejected", 0)),
+                reversals=int(counters_raw.get("reversals", 0)),
+                material_errors=int(counters_raw.get("material_errors", 0)),
+            ),
+            sample_rate=float(entry.get("sample_rate", 1.0)),
+        )
+    return parsed
 
 
 def compute_maturity_score(
@@ -225,10 +286,65 @@ def _write_earned_autonomy_state(
         "promoted_at": state.promoted_at.isoformat() if state.promoted_at else None,
         "demoted_at": state.demoted_at.isoformat() if state.demoted_at else None,
     }
+    if state.proposal_classes:
+        payload["proposal_classes"] = {
+            proposal_class: {
+                "level": entry.level,
+                "promoted_at": entry.promoted_at.isoformat() if entry.promoted_at else None,
+                "demoted_at": entry.demoted_at.isoformat() if entry.demoted_at else None,
+                "last_change_reason": entry.last_change_reason,
+                "evidence_window_start": entry.evidence_window_start.isoformat(),
+                "counters": {
+                    "proposals": entry.counters.proposals,
+                    "accepted": entry.counters.accepted,
+                    "edited": entry.counters.edited,
+                    "rejected": entry.counters.rejected,
+                    "reversals": entry.counters.reversals,
+                    "material_errors": entry.counters.material_errors,
+                },
+                "sample_rate": entry.sample_rate,
+            }
+            for proposal_class, entry in state.proposal_classes.items()
+        }
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_suffix(path.suffix + ".tmp")
     temp_path.write_text(yaml.dump(payload, default_flow_style=False, allow_unicode=True), encoding="utf-8")
     os.replace(temp_path, path)
+
+
+def write_proposal_class_state(
+    program_id: str,
+    proposal_class: str,
+    entry: ProposalClassAutonomyState,
+    *,
+    programs_root: Path = PROGRAMS_ROOT,
+) -> EarnedAutonomyState:
+    """Additive, single-class upsert into the ``proposal_classes`` block --
+    preserves this module's existing global ``earned_tier`` fields and every
+    other class's entry untouched."""
+    current = load_earned_autonomy_state(program_id, programs_root=programs_root)
+    base = current or EarnedAutonomyState(
+        program_id=program_id,
+        earned_tier=0,
+        maturity_score=0.0,
+        last_evaluated_at=datetime.now(timezone.utc),
+        promoted_at=None,
+        demoted_at=None,
+    )
+    new_classes = dict(base.proposal_classes)
+    new_classes[proposal_class] = entry
+    new_state = EarnedAutonomyState(
+        program_id=base.program_id,
+        earned_tier=base.earned_tier,
+        maturity_score=base.maturity_score,
+        last_evaluated_at=base.last_evaluated_at,
+        promoted_at=base.promoted_at,
+        demoted_at=base.demoted_at,
+        schema_version=base.schema_version,
+        proposal_classes=new_classes,
+    )
+    _write_earned_autonomy_state(new_state, programs_root=programs_root)
+    return new_state
 
 
 def _count_confirmed_risks(connection: Any) -> int:

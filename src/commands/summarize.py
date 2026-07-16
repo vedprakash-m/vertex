@@ -310,6 +310,7 @@ def _summarize_workstream(
         prior_summary=prior_text,
         signals=candidate_signals,
         drift_patterns=drift_patterns,
+        programs_root=programs_root,
     )
     if draft is None:
         warning = f"Summary generation returned no content for workstream {workstream.id}."

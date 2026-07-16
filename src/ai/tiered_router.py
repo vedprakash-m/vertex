@@ -50,6 +50,7 @@ class Tier(str, Enum):
     DETERMINISTIC = "deterministic"  # Tier 0
     LOCAL = "local"  # Tier 1
     FRONTIER = "frontier"  # Tier 2
+    CACHE = "cache"  # result-cache hit (ADF-F08 / Appendix A.4)
     NONE = "none"  # no tier produced a value
 
 
@@ -61,6 +62,7 @@ class RouteOutcome(str, Enum):
     FRONTIER_CALL = "frontier_call"
     FRONTIER_BLOCKED = "frontier_blocked"  # frontier_eligible=False in policy
     FRONTIER_DISABLED = "frontier_disabled"  # AIMode.DISABLED / OBSERVE_ONLY
+    CACHE_HIT = "cache_hit"  # shared result-cache served the request (ADF-F08)
     SKIPPED = "skipped"  # no fn produced a value and frontier unavailable
 
 
@@ -171,9 +173,26 @@ def route_through_tiers(
     local_fn: Optional[Callable[[], Optional[TierResult[T]]]] = None,
     frontier_fn: Optional[Callable[[], T]] = None,
     policy: Optional[AIFeaturePolicy] = None,
+    cache_lookup_fn: Optional[Callable[[], Optional[T]]] = None,
+    cache_store_fn: Optional[Callable[[T], object]] = None,
 ) -> RouteResult[T]:
-    """Dispatch a feature through Tier 0 → Tier 1 → Tier 2, recording the decision.
+    """Dispatch a feature through Cache → Tier 0 → Tier 1 → Tier 2 (§8.8.3),
+    recording the decision.
 
+    - ``cache_lookup_fn`` (ADF-W5.2), when supplied, is checked FIRST —
+      before deterministic/local/frontier — matching §8.8.3's
+      ``CACHE -> DETERMINISTIC -> LOCAL/ECONOMY -> FRONTIER -> FALLBACK``
+      ordering exactly. A hit short-circuits the whole call with
+      ``Tier.CACHE``/``RouteOutcome.CACHE_HIT`` and never invokes any other
+      fn — "a cache hit never masquerades as a new provider call" (§8.8.3).
+      This module has no opinion on cache-key composition or storage; the
+      caller supplies both lookup and store as closures (see
+      ``src/core/ai_result_cache.py`` for the canonical key shape).
+    - ``cache_store_fn``, when supplied, is called with the value ONLY after
+      a real frontier call succeeds — never for a deterministic/local hit
+      (those are already free; caching them would just add staleness risk
+      for no OpEx benefit) and never on a cache hit itself (nothing new to
+      store).
     - ``deterministic_fn`` / ``local_fn`` return a ``TierResult`` (value + confidence)
       or ``None`` when they cannot answer. A tier "hits" when it returns a result whose
       confidence meets ``policy.tier0_confidence_threshold``.
@@ -187,6 +206,19 @@ def route_through_tiers(
     """
     resolved_policy = policy if policy is not None else load_ai_feature_policy(feature)
     threshold = resolved_policy.tier0_confidence_threshold
+
+    # Cache — checked before every other tier (§8.8.3 ordering).
+    if cache_lookup_fn is not None:
+        cached = cache_lookup_fn()
+        if cached is not None:
+            decision = _decide(
+                feature=feature,
+                tier=Tier.CACHE,
+                outcome=RouteOutcome.CACHE_HIT,
+                confidence=1.0,
+                frontier_called=False,
+            )
+            return RouteResult(value=cached, decision=decision)
 
     best_value: Optional[T] = None
     best_confidence = 0.0
@@ -250,6 +282,8 @@ def route_through_tiers(
         return RouteResult(value=best_value, decision=decision)
 
     value = frontier_fn()
+    if cache_store_fn is not None:
+        cache_store_fn(value)
     decision = _decide(
         feature=feature,
         tier=Tier.FRONTIER,
@@ -258,6 +292,23 @@ def route_through_tiers(
         frontier_called=True,
     )
     return RouteResult(value=value, decision=decision)
+
+
+def cache_hit_stats(decisions: Optional[tuple[TierDecision, ...]] = None) -> dict[str, int]:
+    """ADF-W5.2 acceptance evidence ("avoided-call metrics"): counts cache
+    hits and frontier calls avoided by them, from the recorded decision log
+    (or an explicitly supplied snapshot, e.g. from `flush_tier_decisions_to_jsonl`'s
+    source). A cache hit is definitionally an avoided frontier call -- the
+    two counts are always equal by construction, reported together so a
+    caller doesn't have to recompute the equivalence."""
+    source = decisions if decisions is not None else recorded_decisions()
+    cache_hits = sum(1 for decision in source if decision.outcome == RouteOutcome.CACHE_HIT)
+    frontier_calls = sum(1 for decision in source if decision.outcome == RouteOutcome.FRONTIER_CALL)
+    return {
+        "cache_hits": cache_hits,
+        "frontier_calls_avoided_by_cache": cache_hits,
+        "actual_frontier_calls": frontier_calls,
+    }
 
 
 def flush_tier_decisions_to_jsonl(output_path: Path) -> int:

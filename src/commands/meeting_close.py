@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import textwrap
 from typing import Any
+import uuid
 
 from rich import box
 from rich.columns import Columns
@@ -157,6 +158,10 @@ def generate_meeting_close_artifacts(
     if program.ado is None:
         raise ValueError(f"Program '{program_id}' is missing ado configuration.")
 
+    # ADF-W2.12: one correlation id per meeting-close run -- this invocation
+    # can queue several actions extracted from one meeting, so a real
+    # multi-fact chain is worth tracing (unlike a single-item CLI mutation).
+    correlation_id = uuid.uuid4().hex
     transcript_record = _build_transcript_reader().get_transcript(meeting_id=meeting_id)
     if transcript_record is None:
         raise ValueError(f"Transcript '{meeting_id}' was not found.")
@@ -260,6 +265,7 @@ def generate_meeting_close_artifacts(
                 tuple(mapping.action for mapping in mappings),
                 approved_action_ids=frozenset(review_summary.approved_action_ids),
                 programs_root=programs_root,
+                correlation_id=correlation_id,
             )
 
     return MeetingCloseArtifacts(
@@ -367,6 +373,7 @@ def _queue_actions_for_review(
     *,
     approved_action_ids: frozenset[str] = frozenset(),
     programs_root: Path,
+    correlation_id: str = "",
 ) -> tuple[Path | None, int, int]:
     if not actions:
         return (None, 0, 0)
@@ -392,7 +399,7 @@ def _queue_actions_for_review(
         if queued_action.id in existing_action_ids:
             skipped_action_count += 1
             continue
-        append_action(program_id, queued_action, programs_root=programs_root)
+        append_action(program_id, queued_action, programs_root=programs_root, correlation_id=correlation_id)
         existing_action_ids.add(queued_action.id)
         queued_action_count += 1
 

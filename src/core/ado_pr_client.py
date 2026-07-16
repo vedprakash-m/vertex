@@ -3,12 +3,22 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from src.core.ado_client import ADOClient
 
+if TYPE_CHECKING:
+    # ADF-W2.1: type-only import; integration_types.py imports
+    # PullRequestSummary from this module, so a module-level runtime import
+    # here would be circular. See ado_client.py for the same pattern.
+    from src.core.integration_types import PaginationOutcome
+
 
 log = logging.getLogger(__name__)
+
+#: ADF-W2.1: safety bound on multi-page PR fetch, matching ado_client.py's
+#: revisions/comments pagination loops.
+_DEFAULT_MAX_PAGES = 10
 
 
 def _parse_ado_datetime(value: Any) -> datetime | None:
@@ -45,15 +55,40 @@ class ADOPRClient:
         repository_id: str,
         status: str | None = None,
         top: int = 100,
+        *,
+        max_pages: int = _DEFAULT_MAX_PAGES,
+        on_pagination: Callable[[PaginationOutcome], None] | None = None,
     ) -> tuple[PullRequestSummary, ...]:
+        """ADF-W2.1 (Section 8.4.2): pages via ``$top``/``$skip`` across the
+        full result set rather than returning only the first ``top`` PRs.
+        ``on_pagination``, if given, fires once with the fetch's
+        completeness outcome."""
         url = f"https://dev.azure.com/{self._client.organization}/{self._client.project}/_apis/git/repositories/{repository_id}/pullrequests?api-version=7.1"
-        params: dict[str, str] = {}
+        base_params: dict[str, str] = {}
         if status is not None:
-            params["searchCriteria.status"] = status
-        params["$top"] = str(top)
+            base_params["searchCriteria.status"] = status
 
-        response = self._client._request_json("GET", url, params=params)
-        value = response.get("value", [])
+        value: list[dict[str, Any]] = []
+        page_count = 0
+        is_truncated = False
+        skip = 0
+        while page_count < max_pages:
+            params = dict(base_params)
+            params["$top"] = str(top)
+            params["$skip"] = str(skip)
+            response = self._client._request_json("GET", url, params=params)
+            page_value = response.get("value", [])
+            value.extend(page_value)
+            page_count += 1
+            if len(page_value) < top:
+                break
+            skip += top
+        else:
+            is_truncated = True
+        if on_pagination is not None:
+            from src.core.integration_types import PaginationOutcome
+
+            on_pagination(PaginationOutcome(total_fetched=len(value), page_count=page_count, is_truncated=is_truncated))
 
         summaries = []
         for item in value:

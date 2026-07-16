@@ -366,6 +366,18 @@ def _signal_from_record(record: dict[str, Any]) -> Signal:
     ))
 
 
+def signal_to_record(signal: Signal) -> dict[str, Any]:
+    """Public alias of ``_signal_to_record`` -- ADF-W1.5's prefetch snapshot
+    payload serialization reuses this exact round-trip rather than inventing
+    a second one."""
+    return _signal_to_record(signal)
+
+
+def signal_from_record(record: dict[str, Any]) -> Signal:
+    """Public alias of ``_signal_from_record`` (see ``signal_to_record``)."""
+    return _signal_from_record(record)
+
+
 def _review_decision_to_record(decision: SignalReviewDecision) -> dict[str, Any]:
     return {
         "signal_id": decision.signal_id,

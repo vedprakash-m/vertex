@@ -1008,10 +1008,13 @@ class ProgramReality:
                 _assessment = _assessment_by_record_id.get(_ref)
                 if _assessment is None:
                     continue
-                # WI-2.5: resolve entity_ref to canonical ID when registry available
+                # WI-2.5: resolve entity_ref to canonical ID when registry available.
+                # ADF-W2.6: resolve_with_binding() so an ambiguous near-tied fuzzy
+                # match falls back to fact_id keying below, instead of silently
+                # joining the fact under whichever candidate scored marginally higher.
                 _key: str | None = None
                 if entity_registry is not None:
-                    _resolved = entity_registry.resolve(_ref)
+                    _resolved = entity_registry.resolve_with_binding(_ref).resolved_entity
                     if _resolved is not None:
                         _key = _resolved.entity_id
                 # Fallback: key by fact_id
@@ -1739,14 +1742,17 @@ class ProgramReality:
         """Entity lookup via EntityRegistry (WI-2.0).
 
         Resolves exact and casefold matches. WI-2.1 adds fuzzy tier.
-        Returns None when below resolution threshold.
+        Returns None when below resolution threshold OR when the fuzzy tier
+        finds a genuinely ambiguous near-tie (ADF-W2.6, Section 8.14.3) --
+        callers of this method only ever see a canonical identity or nothing,
+        never a silently-guessed pick between two close candidates.
         """
         from src.core.entity_registry import EntityRegistry
         registry = EntityRegistry.load(
             self._program_id,
             programs_root=PROGRAMS_ROOT,
         )
-        return registry.resolve(ref)
+        return registry.resolve_with_binding(ref).resolved_entity
 
     # -------------------------------------------------------------------------
     # Internal helpers

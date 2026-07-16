@@ -42,6 +42,15 @@ class ADOUpdateEntry:
     entry_status: str = "pending"
     status_reason: str | None = None
     remote_rev: int | None = None
+    # ADF-W1.2 (Appendix B.8): stable per-entry create identity, persisted
+    # before dispatch. ``operation_intent_id`` becomes the ``vertex-intent-<id>``
+    # System.Tags marker on create; ``attempted_at`` being non-None on a
+    # pending/failed entry means a prior dispatch attempt was persisted (its
+    # response may have been lost), so the next apply run must search before
+    # creating again rather than assume the earlier attempt never reached ADO.
+    # Both default None so pre-ADF-W1.2 manifests upcast cleanly.
+    operation_intent_id: str | None = None
+    attempted_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -438,6 +447,9 @@ def build_action_item_proposal(
                 current_value=None,
                 proposed_value=json.dumps(task_data),
                 reason=f"Action item tracking back-write for {action.owner_alias}.",
+                # ADF-W1.2: assigned at proposal build time so it is stable
+                # across every re-application attempt of this manifest.
+                operation_intent_id=uuid.uuid4().hex,
             )
         )
     return ADOUpdateProposal(
@@ -487,6 +499,8 @@ def proposal_to_document(
                 "entry_status": entry.entry_status,
                 "status_reason": entry.status_reason,
                 "remote_rev": entry.remote_rev,
+                "operation_intent_id": entry.operation_intent_id,
+                "attempted_at": entry.attempted_at.isoformat() if entry.attempted_at is not None else None,
             }
             for entry in proposal.entries
         ],
@@ -506,6 +520,8 @@ def proposal_from_document(document: Mapping[str, Any]) -> ADOUpdateProposal:
             entry_status=str(entry.get("entry_status") or "pending"),
             status_reason=_optional_string(entry.get("status_reason")),
             remote_rev=_coerce_int(entry.get("remote_rev")),
+            operation_intent_id=_optional_string(entry.get("operation_intent_id")),
+            attempted_at=_parse_optional_timestamp(entry.get("attempted_at")),
         )
         for entry in document.get("entries") or ()
         if isinstance(entry, Mapping)
@@ -748,6 +764,12 @@ def _optional_string(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _parse_optional_timestamp(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    return _parse_timestamp(value)
 
 
 def _load_comment_template(program_id: str, *, programs_root: Path) -> str | None:

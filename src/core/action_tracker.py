@@ -17,6 +17,7 @@ from src.core.jsonl_utils import (
     write_checksum_file,
 )
 from src.core.models_v2 import ActionItem, ActionSourceType, ActionStatus, ActionStatusUpdate, TrajectoryPoint
+from src.core.operation_trace import REF_TYPE_FACT, record_trace_link
 from src.core.store_factory import build_trajectory_store_for_program_id
 
 
@@ -60,8 +61,12 @@ def build_action_id(
     return str(uuid5(NAMESPACE_URL, seed))
 
 
-def append_action(program_id: str, action: ActionItem, programs_root: Path = PROGRAMS_ROOT) -> Path:
-    _sync_action_fact(program_id, action, recorded_at=action.created_at, programs_root=programs_root)
+def append_action(
+    program_id: str, action: ActionItem, programs_root: Path = PROGRAMS_ROOT, *, correlation_id: str = "",
+) -> Path:
+    _sync_action_fact(
+        program_id, action, recorded_at=action.created_at, programs_root=programs_root, correlation_id=correlation_id,
+    )
     target = get_actions_path(program_id, programs_root)
     payload = json.dumps(_action_to_record(action), separators=(",", ":")) + os.linesep
     append_jsonl_line(target, payload, max_bytes=_ACTIONS_MAX_BYTES)
@@ -274,10 +279,11 @@ def _sync_action_fact(
     *,
     recorded_at: datetime,
     programs_root: Path,
+    correlation_id: str = "",
 ) -> None:
     from src.core.program_fact_store import FactPrecedence, ProgramFactInput, ProgramFactStore
 
-    ProgramFactStore(program_id, db_root=_resolve_fact_db_root(programs_root)).append_fact(
+    write_result = ProgramFactStore(program_id, db_root=_resolve_fact_db_root(programs_root)).append_fact(
         ProgramFactInput(
             fact_type="action.item",
             scope="program",
@@ -299,11 +305,29 @@ def _sync_action_fact(
                 "resolved_at": action.resolved_at.isoformat() if action.resolved_at is not None else None,
                 "resolution_note": action.resolution_note,
             },
+            source_signal_ids=(action.source_signal_id,) if action.source_signal_id else (),
             precedence=FactPrecedence.ACTIVE_PM_JUDGMENT,
             created_by="vertex.action_tracker",
         ),
         recorded_at=recorded_at,
     )
+    # ADF-W2.12: skip the trace link on a genuine content-dedup no-op (e.g. a
+    # retried append_action for an already-persisted action) -- only a real
+    # write is worth recording.
+    if correlation_id and write_result.action != "noop":
+        try:
+            record_trace_link(
+                program_id=program_id,
+                correlation_id=correlation_id,
+                workflow_id=correlation_id,
+                run_id=correlation_id,
+                stage="fact",
+                ref_type=REF_TYPE_FACT,
+                ref_id=f"action.item:{action.id}@{recorded_at.isoformat()}",
+                programs_root=programs_root,
+            )
+        except Exception:  # noqa: BLE001 -- a trace link is observability, never a write blocker.
+            pass
 
 
 def _resolve_fact_db_root(programs_root: Path) -> Path | None:

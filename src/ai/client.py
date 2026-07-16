@@ -6,6 +6,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Callable, TypeVar
 
 from src.ai.ai_mode import AIMode, get_ai_mode
@@ -258,6 +259,58 @@ class AIClient:
             metadata=self._trace_context.metadata,
             trace_file=self._trace_context.trace_file,
         )
+        # ADF-W0.7: additionally emit the canonical per-program AI telemetry
+        # record (INV-ADF-5: missing AI telemetry after a provider invocation
+        # is a failure). ``feature`` is carried in the trace-context metadata
+        # by call sites; the caller name is the fallback identifier.
+        self._emit_ai_telemetry(
+            prompt_version=prompt_version,
+            latency_ms=latency_ms,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cost_usd=cost_usd,
+            error=error,
+        )
+
+    def _emit_ai_telemetry(
+        self,
+        *,
+        prompt_version: str | None,
+        latency_ms: float,
+        prompt_tokens: int | None,
+        completion_tokens: int | None,
+        cost_usd: float | None,
+        error: str | None,
+    ) -> None:
+        """Write one canonical :mod:`src.core.ai_telemetry` row per provider call.
+
+        Telemetry is best-effort-durable: a write failure must never mask the
+        underlying result/error, so exceptions here are logged and swallowed.
+        """
+        from src.core.ai_telemetry import AiTelemetryRecord, AiTelemetryStatus, append_ai_telemetry
+
+        metadata = self._trace_context.metadata if self._trace_context else {}
+        feature = str(metadata.get("feature") or self._trace_context.caller if self._trace_context else "unknown")
+        program_id = str(metadata.get("program_id") or self._trace_context.edition if self._trace_context else "unknown")
+        status = AiTelemetryStatus.FALLBACK if error is not None and "disabled" in str(error).lower() else (
+            AiTelemetryStatus.OTHER if error is not None else AiTelemetryStatus.OK
+        )
+        record = AiTelemetryRecord(
+            ts=datetime.now(timezone.utc),
+            feature=feature,
+            deployment_id=self._deployment,
+            status=status,
+            program_id=program_id,
+            latency_ms=round(latency_ms, 1) if latency_ms is not None else None,
+            tokens_in=prompt_tokens,
+            tokens_out=completion_tokens,
+            cost_usd=round(cost_usd, 6) if cost_usd is not None else None,
+            error_detail=error,
+        )
+        try:
+            append_ai_telemetry(record)
+        except Exception:  # pragma: no cover - telemetry must not break the call
+            logger.warning("AI telemetry append failed for feature=%s", feature, exc_info=True)
 
     def _extract_text(self, response: Any) -> str:
         choices = getattr(response, "choices", None) or ()

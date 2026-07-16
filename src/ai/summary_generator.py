@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import re
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Protocol, cast
 
 from src.ai.ai_mode import AIMode, get_ai_mode
 from src.ai._pipeline import AIPipelineError, process_generated_text
@@ -11,15 +11,27 @@ from src.ai.client import AIClientError
 from src.ai.deployment_fallback import FallbackStructuredClient, LEGACY_DEPLOYMENT_ALIAS_NOTICE, resolve_ai_deployments_for_feature
 from src.ai.llm_trace import AITraceContext
 from src.ai.tiered_router import TierResult, route_through_tiers
+from src.core.ai_result_cache import AIResultCacheKey, canonical_input_hash, get_ai_result, put_ai_result
+from src.core.ai_schema_gateway import SchemaGatewayError, validate_bounded_payload
+from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.models_v2 import Program, Signal, Workstream
+from src.core.quality_gates.ai_release_audit import (
+    AIRunState,
+    ReleaseTerminal,
+    new_ai_run_id,
+    record_ai_release_decision,
+    record_ai_run_lifecycle,
+)
 from src.core.summary_store import summary_word_count
 from src.core.trajectory_analyzer import DriftPattern
 from src.core.policy_loader import load_ai_feature_policy
 
 
 PROMPT_VERSION = "summary_generator.v1"
+POLICY_VERSION = "summary_generator.v1"
 from src.ai.prompt_registry import load_prompt
 _FEATURE = "summary_generator"
+_OUTPUT_SCHEMA_VERSION = "1"
 _MAX_WORDS = 500
 _WORK_ITEM_REF_PATTERN = re.compile(r"\b(?:WI:|ADO#)(\d+)\b", re.IGNORECASE)
 
@@ -102,11 +114,66 @@ class SummaryGenerator:
         prior_summary: str | None,
         signals: tuple[Signal, ...],
         drift_patterns: tuple[DriftPattern, ...],
+        programs_root: Path = PROGRAMS_ROOT,
     ) -> RollingSummaryDraft | None:
+        """Runs the same AISchemaGateway/QG-29 safety lifecycle established
+        by ``risk_proposal_generator.py`` (ADF-W5.1, P7): bounds-checked
+        request/response payloads, the five ``AIRunState`` transitions, a
+        semantic validator over the parsed summary, and a durable QG-29
+        terminal release decision recorded before any caller may consume the
+        result. Preserves this feature's existing raise-on-rejection
+        contract (``SummaryGeneratorError``) rather than switching to the
+        newer generators' return-``None``-on-rejection convention, since
+        ``summarize.py``'s CLI already depends on a hard failure surfacing a
+        clear operator-facing error for a genuinely malformed AI response."""
         if get_ai_mode() == AIMode.DISABLED or self._client is None:
             return None
         if not signals and not drift_patterns and not (prior_summary and prior_summary.strip()):
             return None
+
+        ai_run_id = new_ai_run_id()
+        program_id = program.id
+
+        def _lifecycle(state: AIRunState) -> None:
+            record_ai_run_lifecycle(
+                program_id=program_id,
+                ai_run_id=ai_run_id,
+                feature=_FEATURE,
+                state=state,
+                prompt_version=PROMPT_VERSION,
+                policy_version=POLICY_VERSION,
+                programs_root=programs_root,
+            )
+
+        def _discard(terminal: ReleaseTerminal, reason: str, finding_count: int = 0) -> None:
+            record_ai_release_decision(
+                program_id=program_id,
+                ai_run_id=ai_run_id,
+                terminal=terminal,
+                reason=reason,
+                validator_finding_count=finding_count,
+                programs_root=programs_root,
+            )
+
+        _lifecycle(AIRunState.PLANNED)
+
+        request_payload = {
+            "program_id": program.id,
+            "workstream_id": workstream.id,
+            "prior_summary": prior_summary or "",
+            "signal_texts": [signal.text for signal in signals],
+            "signal_refs": [ref for signal in signals for ref in signal.entity_refs],
+            "drift_pattern_ids": [pattern.work_item_id for pattern in drift_patterns],
+            "drift_pattern_details": [pattern.detail for pattern in drift_patterns],
+        }
+        try:
+            validate_bounded_payload(request_payload)
+        except SchemaGatewayError as error:
+            reason = f"AISchemaGateway rejected the outbound request: {error}"
+            _discard(ReleaseTerminal.DISCARDED, reason)
+            raise SummaryGeneratorError(reason) from error
+
+        _lifecycle(AIRunState.REQUESTED)
 
         system_prompt = _load_prompt()
         user_prompt = _build_user_prompt(
@@ -116,40 +183,79 @@ class SummaryGenerator:
             signals=signals,
             drift_patterns=drift_patterns,
         )
+        policy = load_ai_feature_policy(_FEATURE)
+        cache_key = AIResultCacheKey(
+            program_id=program_id,
+            feature=_FEATURE,
+            canonical_input_hash=canonical_input_hash(user_prompt),
+            prompt_version=PROMPT_VERSION,
+            policy_version=POLICY_VERSION,
+            model_deployment=_resolve_model_deployment(self._client),
+            context_manifest_hash=canonical_input_hash(
+                "|".join(ref for signal in signals for ref in signal.entity_refs)
+            ),
+            output_schema_version=_OUTPUT_SCHEMA_VERSION,
+        )
         try:
             client = self._client
-            outcome = route_through_tiers(
+            raw = route_through_tiers(
                 _FEATURE,
                 deterministic_fn=lambda: None,
                 frontier_fn=lambda: client.structured(
                     system_prompt,
                     user_prompt,
-                    parser=_parse_generated_summary_text,
+                    parser=lambda payload: payload,
                     max_tokens=load_ai_feature_policy(_FEATURE).max_tokens,
                     prompt_version=PROMPT_VERSION,
                 ),
-                policy=load_ai_feature_policy(_FEATURE),
-            )
+                policy=policy,
+                cache_lookup_fn=lambda: _cached_response(cache_key, programs_root=programs_root),
+                cache_store_fn=lambda value: put_ai_result(cache_key, value, programs_root=programs_root),
+            ).value
         except AIClientError as error:
+            _discard(ReleaseTerminal.DISCARDED, f"provider call failed: {error}")
             raise SummaryGeneratorError(f"Rolling summary generation failed: {error}") from error
-        response_text = outcome.value
 
-        text = _normalize_text(str(response_text))
-        if not text:
-            return None
+        _lifecycle(AIRunState.RESPONDED)
+
+        try:
+            validate_bounded_payload(raw)
+        except SchemaGatewayError as error:
+            reason = f"AISchemaGateway rejected the response: {error}"
+            _discard(ReleaseTerminal.REJECTED, reason)
+            raise SummaryGeneratorError(reason) from error
+
+        _lifecycle(AIRunState.SCHEMA_VALIDATED)
+
+        try:
+            text = _parse_generated_summary_text(cast(dict[str, object], raw))
+        except SummaryGeneratorError as error:
+            _discard(ReleaseTerminal.REJECTED, str(error))
+            raise
+
         try:
             processed = process_generated_text(text)
         except AIPipelineError as error:
+            _discard(ReleaseTerminal.REJECTED, str(error))
             raise SummaryGeneratorError(str(error)) from error
         text = processed.text
         if not text:
+            _lifecycle(AIRunState.SEMANTICALLY_VALIDATED)
+            _discard(ReleaseTerminal.REJECTED, "processed text pipeline produced empty output.")
             return None
-        _validate_work_item_refs(text, signals=signals, drift_patterns=drift_patterns)
+
+        findings = _validate_semantics(text, signals=signals, drift_patterns=drift_patterns)
+        _lifecycle(AIRunState.SEMANTICALLY_VALIDATED)
+
+        if findings:
+            _discard(ReleaseTerminal.REJECTED, "; ".join(findings), finding_count=len(findings))
+            raise SummaryGeneratorError("; ".join(findings))
+
+        _discard(
+            ReleaseTerminal.RELEASED,
+            "passed AISchemaGateway bounds and rolling-summary semantic validation",
+        )
         word_count = summary_word_count(text)
-        if word_count > _MAX_WORDS:
-            raise SummaryGeneratorError(
-                f"Rolling summary exceeded {_MAX_WORDS} words ({word_count})."
-            )
         return RollingSummaryDraft(text=text, prompt_version=PROMPT_VERSION, word_count=word_count)
 
 
@@ -255,3 +361,46 @@ def _validate_work_item_refs(
             "Rolling summary referenced work items outside approved signals: "
             + ", ".join(str(work_item_id) for work_item_id in unknown_ids)
         )
+
+
+def _validate_semantics(
+    text: str,
+    *,
+    signals: tuple[Signal, ...],
+    drift_patterns: tuple[DriftPattern, ...],
+) -> tuple[str, ...]:
+    """AISchemaGateway's per-feature ``SemanticValidator`` (Section 8.9.3)
+    for the rolling summary: a work-item reference outside the approved
+    evidence set, and an over-length summary, are both findings the QG-29
+    release decision must see rather than exceptions that short-circuit
+    each other -- mirrors ``risk_proposal_generator._validate_semantics``'s
+    accumulate-then-report shape."""
+    findings: list[str] = []
+    try:
+        _validate_work_item_refs(text, signals=signals, drift_patterns=drift_patterns)
+    except SummaryGeneratorError as error:
+        findings.append(str(error))
+
+    word_count = summary_word_count(text)
+    if word_count > _MAX_WORDS:
+        findings.append(f"Rolling summary exceeded {_MAX_WORDS} words ({word_count}).")
+
+    return tuple(findings)
+
+
+def _resolve_model_deployment(client: _StructuredProvider) -> str:
+    """Best-effort model/deployment identifier for the cache key (Section
+    8.8.3), mirroring ``risk_proposal_generator._resolve_model_deployment``.
+    A wrong/missing id only under-shares the cache (never over-shares,
+    since program_id/feature/input hash are still exact-matched), so this
+    degrades safely rather than raising."""
+    for attr in ("deployment", "primary_deployment", "model", "deployment_id"):
+        value = getattr(client, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    return "unknown"
+
+
+def _cached_response(key: AIResultCacheKey, *, programs_root: Path) -> dict[str, Any] | None:
+    hit = get_ai_result(key, programs_root=programs_root)
+    return hit.value if hit is not None else None

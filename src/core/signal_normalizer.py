@@ -104,7 +104,13 @@ def backfill_entity_refs(
 
     # Scan raw_ref first (most structured)
     if signal.raw_ref:
-        entity = registry.resolve(signal.raw_ref)
+        # ADF-W2.6: prefer resolve_with_binding() so a genuinely ambiguous
+        # near-tied fuzzy match is never silently backfilled as if it were a
+        # confident resolution -- ambiguous.resolved_entity is already None.
+        if hasattr(registry, "resolve_with_binding"):
+            entity = registry.resolve_with_binding(signal.raw_ref).resolved_entity
+        else:
+            entity = registry.resolve(signal.raw_ref)
         if entity and entity.entity_id not in existing_refs:
             new_refs.append(entity.entity_id)
             existing_refs.add(entity.entity_id)
@@ -130,10 +136,19 @@ def collect_unresolved_entity_refs(
     if not hasattr(registry, "resolve") or not hasattr(facts_snapshot, "facts"):
         return frozenset()
 
+    # ADF-W2.6: prefer resolve_with_binding() so a genuinely ambiguous
+    # near-tied fuzzy match counts as unresolved too -- Section 8.14.3's
+    # "ambiguous entities remain unresolved," not silently picked and thus
+    # undercounted here.
+    use_binding = hasattr(registry, "resolve_with_binding")
+
     unresolved: set[str] = set()
     for fact in facts_snapshot.facts:
         for ref in getattr(fact, "entity_refs", ()):
-            if ref and registry.resolve(ref) is None:
+            if not ref:
+                continue
+            resolved = registry.resolve_with_binding(ref).resolved_entity if use_binding else registry.resolve(ref)
+            if resolved is None:
                 unresolved.add(ref)
     return frozenset(unresolved)
 

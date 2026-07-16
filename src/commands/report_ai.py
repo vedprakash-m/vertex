@@ -28,6 +28,7 @@ from src.core.chapter_contract_loader import ChapterDefinition
 from src.core.config_loader import NarrativeProgramContext, ReportBundle, load_bundle_with_mode
 from src.core.coverage_gap import build_coverage_gaps
 from src.core.edition_resolver import filter_workstreams, resolve_edition
+from src.core.human_precedence import should_ai_fill
 from src.core.evidence_models import SourceRef, WorkstreamEvidence, extract_icm_ids
 from src.core.evidence_conflict_detector import detect_evidence_conflicts
 from src.core.evidence_store import load_approved_evidence_by_lane
@@ -811,7 +812,7 @@ def _synthesize_v2_ai_content(
     )
     budget_per_client = _report_ai_budget_per_client(bundle)
 
-    if not loaded_exec_summary_text.strip():
+    if should_ai_fill(loaded_exec_summary_text):
         exec_draft = _run_report_ai_with_fallback(
             deployments=_resolve_report_ai_deployments(
                 feature_name="exec_summary_drafter",
@@ -837,12 +838,20 @@ def _synthesize_v2_ai_content(
                 items=items,
                 deltas=deltas,
                 editorial_rules=bundle.editorial_rules,
+                program_id=ai_context.program_id,
                 edition_type=edition_type,
                 program_context=ai_program_context,
-                supplemental_context=_exec_ai_context_lines(
-                    ai_program_context,
-                    ai_context,
+                supplemental_context=(
+                    _exec_ai_context_lines(
+                        ai_program_context,
+                        ai_context,
+                    )
+                    + _program_synthesis_exec_summary_context_lines(
+                        ai_context.program_id,
+                        ai_context.programs_root,
+                    )
                 ),
+                programs_root=ai_context.programs_root,
             ),
         )
         if exec_draft is not None and exec_draft.text.strip():
@@ -908,14 +917,24 @@ def _synthesize_v2_ai_content(
                 evidence_by_item=evidence_by_item,
                 deltas=relevant_deltas(deltas, {item.id for item in section.items}),
                 editorial_rules=bundle.editorial_rules,
+                program_id=ai_context.program_id,
                 edition_type=edition_type,
                 program_context=ai_program_context,
-                supplemental_context=_section_ai_context_lines(
-                    section.items,
-                    ai_program_context,
-                    ai_context,
+                supplemental_context=(
+                    _section_ai_context_lines(
+                        section.items,
+                        ai_program_context,
+                        ai_context,
+                    )
+                    + _program_synthesis_blurb_context_lines(
+                        ai_context.program_id,
+                        ai_context.programs_root,
+                        workstream_ids=_matching_program_workstream_ids(section.items, ai_context.workstreams),
+                        item_ids={item.id for item in section.items},
+                    )
                 ),
                 workstream_evidence_bundle=section_bundle,
+                programs_root=ai_context.programs_root,
             ),
         )
         if blurb is None or not blurb.text.strip():
@@ -1411,6 +1430,118 @@ def _exec_ai_context_lines(
     lines.extend(_drift_context_lines(ai_context.drift_patterns, item_ids=set(), limit=6))
     lines.extend(_cascade_context_lines(ai_context.dependency_cascades, workstream_ids=(), limit=3))
     return tuple(lines)
+
+
+def _program_synthesis_exec_summary_context_lines(
+    program_id: str, programs_root: Path, *, limit: int = 4,
+) -> tuple[str, ...]:
+    """ADF-W2.9: supplements the exec summary's narrow view (up to 3 ranked
+    WorkItem deltas only, see `_rank_changes` in exec_summary_drafter.py)
+    with a few lines of richer program-level context -- open strategic
+    risks, unresolved contradictions, and at-risk critical-path milestones
+    -- already assembled by `assemble_program_synthesis_request` for
+    `program_synthesizer.py`, rather than building a second evidence-
+    assembly path. Reuses the existing `supplemental_context` extension
+    point `draft_exec_summary` already has (`_exec_ai_context_lines` above
+    is its only other producer) -- same output contract (plain narrative
+    text, same word-count/ban-list/citation validation), richer input only.
+    Best-effort: `assemble_program_synthesis_request` reads five different
+    stores (risk register, ProgramReality, source waivers, ...); a failure
+    in any of them must degrade to today's exec-summary behavior, not break
+    generation, mirroring `cockpit_builder.py`'s own best-effort read of the
+    same accessor."""
+    try:
+        from src.core.program_synthesis import assemble_program_synthesis_request
+
+        request = assemble_program_synthesis_request(program_id, programs_root=programs_root)
+    except Exception:
+        return ()
+
+    lines: list[str] = []
+    for item in [item for item in request.items if item.category == "strategic_risk"][:limit]:
+        severity = f" [{item.severity}]" if item.severity else ""
+        lines.append(f"Open strategic risk{severity}: {item.summary}")
+    for item in [item for item in request.items if item.category == "contradiction"][:limit]:
+        lines.append(f"Unresolved contradiction: {item.summary}")
+    for item in [item for item in request.items if item.category == "critical_path_milestone"][:limit]:
+        lines.append(f"Critical-path milestone: {item.summary}")
+    return tuple(lines)
+
+
+def _entity_refs_match_item_ids(entity_refs: tuple[str, ...], item_ids: set[int]) -> bool:
+    """Same `WI:<id>` ref-matching convention as `_signal_matches_item_ids`,
+    generalized to any `entity_refs` tuple (e.g. a `RealityConflict`'s)."""
+    if not item_ids:
+        return False
+    for entity_ref in entity_refs:
+        if not entity_ref.startswith("WI:"):
+            continue
+        raw_id = entity_ref.split(":", 1)[1].strip()
+        if raw_id.isdigit() and int(raw_id) in item_ids:
+            return True
+    return False
+
+
+def _program_synthesis_blurb_context_lines(
+    program_id: str,
+    programs_root: Path,
+    *,
+    workstream_ids: tuple[str, ...],
+    item_ids: set[int],
+    limit: int = 3,
+) -> tuple[str, ...]:
+    """ADF-W2.9: workstream-scoped analog of
+    `_program_synthesis_exec_summary_context_lines` for per-workstream
+    blurbs. Deliberately does NOT reuse `assemble_program_synthesis_request`
+    -- `SynthesisInputItem` drops workstream provenance during assembly (see
+    `program_synthesis.py`'s own docstring), so there would be no reliable
+    way to filter its output back down to one workstream without a fragile
+    `item_id` join. Instead loads risk/milestone/conflict records directly
+    (the same raw accessors `assemble_program_synthesis_request` itself
+    calls) and filters by `RiskEntry.linked_workstream_ids`/
+    `Milestone.linked_workstream_ids` (contradictions, which carry no
+    workstream field, are matched by `WI:` entity-ref against the section's
+    own item ids, mirroring `_signal_matches_item_ids`). Best-effort: any
+    accessor failure degrades to no extra lines, never breaks blurb
+    generation."""
+    if not workstream_ids and not item_ids:
+        return ()
+    try:
+        from src.core.program_reality import ProgramReality
+
+        workstream_id_set = set(workstream_ids)
+        lines: list[str] = []
+
+        reality = ProgramReality.load(program_id, programs_root=programs_root)
+        matched_risks = [
+            assessment.record
+            for assessment in reality.risks()
+            if set(getattr(assessment.record, "linked_workstream_ids", ()) or ()) & workstream_id_set
+        ][:limit]
+        for risk in matched_risks:
+            lines.append(f"Open strategic risk [{risk.probability.value}/{risk.impact.value}]: {risk.title}: {risk.description}")
+
+        matched_milestones = [
+            assessment
+            for assessment in reality.milestones()
+            if set(getattr(assessment.record, "linked_workstream_ids", ()) or ()) & workstream_id_set
+        ][:limit]
+        for assessment in matched_milestones:
+            record = assessment.record
+            name = getattr(record, "name", None) or getattr(record, "id", "unknown milestone")
+            status = str(getattr(record, "status", "")).lower()
+            lines.append(f"Critical-path milestone: {name} | status={status}")
+
+        matched_conflicts = [
+            conflict for conflict in reality.conflicts(open_only=True)
+            if _entity_refs_match_item_ids(conflict.entity_refs, item_ids)
+        ][:limit]
+        for conflict in matched_conflicts:
+            lines.append(f"Unresolved contradiction: {conflict.description}")
+
+        return tuple(lines)
+    except Exception:
+        return ()
 
 
 def _lt_deck_context_lines(program_id: str, *, programs_root: Path) -> tuple[str, ...]:

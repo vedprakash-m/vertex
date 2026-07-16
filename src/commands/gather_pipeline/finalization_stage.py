@@ -29,6 +29,7 @@ def compute_and_persist_plane1_changes(
     shadow_write_plane1_snapshot,
     persist_program_fact_snapshot,
     write_plane1_last_seen,
+    correlation_id: str = "",
 ) -> None:
     db_root = programs_root.parent / "vertex-db"
     try:
@@ -89,6 +90,8 @@ def compute_and_persist_plane1_changes(
             current_snapshot,
             recorded_at=gathered_at,
             db_root=db_root,
+            correlation_id=correlation_id,
+            programs_root=programs_root,
         )
         persist_program_fact_snapshot(
             current_facts,
@@ -102,6 +105,8 @@ def compute_and_persist_plane1_changes(
         current_snapshot,
         recorded_at=gathered_at,
         db_root=db_root,
+        correlation_id=correlation_id,
+        programs_root=programs_root,
     )
     persist_program_fact_snapshot(
         current_facts,

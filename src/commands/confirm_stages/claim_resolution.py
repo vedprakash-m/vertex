@@ -28,7 +28,7 @@ from src.core.claim_tracker import (
     build_claim_extraction_calibration_record,
     record_confirmed_claims,
 )
-from src.core.edition_resolver import resolve_edition
+from src.core.edition_resolver import PROGRAMS_ROOT, resolve_edition
 from src.core.models import WorkItem
 from src.core.narrative_store import load_narratives
 from src.core.quality_gates import GateEvaluation, QualityGateReport
@@ -45,6 +45,7 @@ def resolve_confirm_claim_extraction(
     valid_workstream_ids: tuple[str, ...],
     workstream_area_paths: dict[str, tuple[str, ...]] | None = None,
     legacy_regex_extractor: bool,
+    programs_root: Path = PROGRAMS_ROOT,
 ) -> tuple[ClaimExtractionResult | None, str, tuple[str, ...]]:
     if legacy_regex_extractor:
         return None, "regex", ()
@@ -61,6 +62,7 @@ def resolve_confirm_claim_extraction(
             items=items,
             valid_workstream_ids=valid_workstream_ids,
             workstream_area_paths=workstream_area_paths,
+            programs_root=programs_root,
         )
     except ClaimExtractorBudgetError as error:
         raise RuntimeError(str(error)) from error
@@ -131,6 +133,7 @@ def prepare_confirm_claim_extraction_for_v2(
         valid_workstream_ids=tuple(workstream_area_paths),
         workstream_area_paths=workstream_area_paths,
         legacy_regex_extractor=legacy_regex_extractor,
+        programs_root=programs_root,
     )
 
     calibration_record = None
@@ -188,6 +191,7 @@ def record_confirmed_claims_for_v2(
                 valid_workstream_ids=tuple(workstream_area_paths),
                 workstream_area_paths=workstream_area_paths,
                 legacy_regex_extractor=legacy_regex_extractor,
+                programs_root=programs_root,
             )
             warnings.extend(extractor_warnings)
         recorded = record_confirmed_claims(

@@ -2,22 +2,34 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from src.ai._pipeline import AIPipelineError, process_generated_text
 from src.ai.provider import LLMProvider
 from src.ai.tiered_router import TierResult, route_through_tiers
+from src.core.ai_result_cache import AIResultCacheKey, canonical_input_hash, get_ai_result, put_ai_result
+from src.core.ai_schema_gateway import SchemaGatewayError, validate_bounded_payload
 from src.core.ban_list_validator import find_ban_list_violations
 from src.core.config_loader import EditorialRules, NarrativeProgramContext
+from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.models import Confidence, DeltaKind, EditionType, ItemDelta, RiskLevel, WorkItem
+from src.core.quality_gates.ai_release_audit import (
+    AIRunState,
+    ReleaseTerminal,
+    new_ai_run_id,
+    record_ai_release_decision,
+    record_ai_run_lifecycle,
+)
 from src.core.verbosity_enforcer import enforce_verbosity
 from src.core.voice_validator import build_writing_contract_prompt_lines
 from src.core.policy_loader import load_ai_feature_policy
 
 
 PROMPT_VERSION = "exec_summary_drafter.v1"
+POLICY_VERSION = "exec_summary_drafter.v1"
 from src.ai.prompt_registry import load_prompt
 _FEATURE = "exec_summary_drafter"
+_OUTPUT_SCHEMA_VERSION = "1"
 _DEFAULT_EXEC_SUMMARY_MAX_WORDS = 150
 
 
@@ -48,10 +60,23 @@ def draft_exec_summary(
     items: tuple[WorkItem, ...] | list[WorkItem],
     deltas: Any,
     editorial_rules: EditorialRules,
+    program_id: str,
     edition_type: EditionType | None = None,
     program_context: NarrativeProgramContext | None = None,
     supplemental_context: tuple[str, ...] = (),
+    programs_root: Path = PROGRAMS_ROOT,
 ) -> ExecSummaryDraft | None:
+    """Runs the same AISchemaGateway/QG-29 safety lifecycle established by
+    ``risk_proposal_generator.py`` (ADF-W5.1, P7): bounds-checked
+    request/response payloads, the five ``AIRunState`` transitions, cache
+    wiring via ``AIResultCacheKey``, and a durable QG-29 terminal release
+    decision recorded before any caller may consume the result. Preserves
+    this feature's existing raise-on-rejection contract
+    (``ExecSummaryDraftError``) rather than switching to a
+    return-``None``-on-rejection convention, since ``report_ai.py``'s
+    deployment-fallback loop and ``propose.py`` both already depend on
+    ``ExecSummaryDraftError`` propagating -- same reasoning as
+    ``summary_generator.py``'s migration."""
     ranked_changes = _rank_changes(tuple(items), deltas)
     if not ranked_changes:
         return None
@@ -66,40 +91,129 @@ def draft_exec_summary(
     allowed_items = tuple(items_by_id[change.work_item_id] for change in ranked_changes)
     prompt_template = _load_prompt_template()
     system_prompt = prompt_template
+    max_words = editorial_rules.verbosity.exec_summary_max_words_for(
+        edition_type,
+        default=_DEFAULT_EXEC_SUMMARY_MAX_WORDS,
+    ) or _DEFAULT_EXEC_SUMMARY_MAX_WORDS
     user_prompt = _build_user_prompt(
         ranked_changes=ranked_changes,
         editorial_rules=editorial_rules,
         program_context=program_context,
         supplemental_context=supplemental_context,
-        max_words=editorial_rules.verbosity.exec_summary_max_words_for(
-            edition_type,
-            default=_DEFAULT_EXEC_SUMMARY_MAX_WORDS,
-        ) or _DEFAULT_EXEC_SUMMARY_MAX_WORDS,
+        max_words=max_words,
     )
-    raw_text = route_through_tiers(
+
+    ai_run_id = new_ai_run_id()
+
+    def _lifecycle(state: AIRunState) -> None:
+        record_ai_run_lifecycle(
+            program_id=program_id,
+            ai_run_id=ai_run_id,
+            feature=_FEATURE,
+            state=state,
+            prompt_version=PROMPT_VERSION,
+            policy_version=POLICY_VERSION,
+            programs_root=programs_root,
+        )
+
+    def _discard(terminal: ReleaseTerminal, reason: str, finding_count: int = 0) -> None:
+        record_ai_release_decision(
+            program_id=program_id,
+            ai_run_id=ai_run_id,
+            terminal=terminal,
+            reason=reason,
+            validator_finding_count=finding_count,
+            programs_root=programs_root,
+        )
+
+    _lifecycle(AIRunState.PLANNED)
+
+    request_payload = {
+        "program_id": program_id,
+        "ranked_change_summaries": [change.summary for change in ranked_changes],
+        "supplemental_context": list(supplemental_context),
+        "max_words": max_words,
+    }
+    try:
+        validate_bounded_payload(request_payload)
+    except SchemaGatewayError as error:
+        reason = f"AISchemaGateway rejected the outbound request: {error}"
+        _discard(ReleaseTerminal.DISCARDED, reason)
+        raise ExecSummaryDraftError(reason) from error
+
+    _lifecycle(AIRunState.REQUESTED)
+
+    policy = load_ai_feature_policy(_FEATURE)
+    cache_key = AIResultCacheKey(
+        program_id=program_id,
+        feature=_FEATURE,
+        canonical_input_hash=canonical_input_hash(user_prompt),
+        prompt_version=PROMPT_VERSION,
+        policy_version=POLICY_VERSION,
+        model_deployment=_resolve_model_deployment(client),
+        context_manifest_hash=canonical_input_hash(
+            "|".join(str(change.work_item_id) for change in ranked_changes)
+        ),
+        output_schema_version=_OUTPUT_SCHEMA_VERSION,
+    )
+    raw = route_through_tiers(
         _FEATURE,
         deterministic_fn=lambda: None,
         frontier_fn=lambda: client.structured(
             system_prompt,
             user_prompt,
-            parser=_parse_generated_exec_summary_text,
-            max_tokens=load_ai_feature_policy(_FEATURE).max_tokens,
+            parser=lambda payload: payload,
+            max_tokens=policy.max_tokens,
             prompt_version=PROMPT_VERSION,
         ),
-        policy=load_ai_feature_policy(_FEATURE),
+        policy=policy,
+        cache_lookup_fn=lambda: _cached_response(cache_key, programs_root=programs_root),
+        cache_store_fn=lambda value: put_ai_result(cache_key, value, programs_root=programs_root),
     ).value
+
+    _lifecycle(AIRunState.RESPONDED)
+
+    try:
+        validate_bounded_payload(raw)
+    except SchemaGatewayError as error:
+        reason = f"AISchemaGateway rejected the response: {error}"
+        _discard(ReleaseTerminal.REJECTED, reason)
+        raise ExecSummaryDraftError(reason) from error
+
+    _lifecycle(AIRunState.SCHEMA_VALIDATED)
+
+    try:
+        raw_text = _parse_generated_exec_summary_text(cast(dict[str, object], raw))
+    except ExecSummaryDraftError as error:
+        _lifecycle(AIRunState.SEMANTICALLY_VALIDATED)
+        _discard(ReleaseTerminal.REJECTED, str(error))
+        raise
     if not raw_text:
+        _lifecycle(AIRunState.SEMANTICALLY_VALIDATED)
+        _discard(ReleaseTerminal.REJECTED, "generated exec summary text was empty.")
         return None
 
     try:
         grounded = process_generated_text(raw_text, allowed_items=allowed_items)
     except AIPipelineError as error:
+        _lifecycle(AIRunState.SEMANTICALLY_VALIDATED)
+        _discard(ReleaseTerminal.REJECTED, str(error))
         raise ExecSummaryDraftError(str(error)) from error
 
     if not grounded.text:
+        _lifecycle(AIRunState.SEMANTICALLY_VALIDATED)
+        _discard(ReleaseTerminal.REJECTED, "processed text pipeline produced empty output.")
         return None
 
-    _validate_editorial_rules(grounded.text, editorial_rules, edition_type=edition_type)
+    try:
+        _validate_editorial_rules(grounded.text, editorial_rules, edition_type=edition_type)
+    except ExecSummaryDraftError as error:
+        _lifecycle(AIRunState.SEMANTICALLY_VALIDATED)
+        _discard(ReleaseTerminal.REJECTED, str(error))
+        raise
+
+    _lifecycle(AIRunState.SEMANTICALLY_VALIDATED)
+    _discard(ReleaseTerminal.RELEASED, "passed AISchemaGateway bounds and editorial-rules validation")
 
     return ExecSummaryDraft(
         text=grounded.text,
@@ -294,3 +408,12 @@ def _parse_generated_exec_summary_text(payload: dict[str, object]) -> str:
     if not normalized:
         raise ExecSummaryDraftError("Generated exec summary payload text must be non-empty.")
     return normalized
+
+
+def _resolve_model_deployment(client: LLMProvider) -> str:
+    return getattr(client, "deployment", None) or getattr(client, "model", None) or type(client).__name__
+
+
+def _cached_response(key: AIResultCacheKey, *, programs_root: Path) -> dict[str, Any] | None:
+    hit = get_ai_result(key, programs_root=programs_root)
+    return hit.value if hit is not None else None

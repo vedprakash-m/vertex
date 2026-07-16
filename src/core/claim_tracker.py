@@ -1011,6 +1011,8 @@ def _claim_to_record(entry: ClaimEntry) -> dict[str, Any]:
         "contradiction_status": entry.contradiction_status,
         "source_confidence_tier": entry.source_confidence_tier,
         "last_validated_date": entry.last_validated_date.isoformat() if entry.last_validated_date is not None else None,
+        "claimed_status_family": entry.claimed_status_family,
+        "claimed_status_value": entry.claimed_status_value,
     }
 
 
@@ -1041,6 +1043,11 @@ def _claim_from_record(record: dict[str, Any]) -> ClaimEntry:
         contradiction_status=cast(Literal["ok", "contradicted", "unresolved"], contradiction_status),
         source_confidence_tier=cast(Literal["high", "medium", "low"], source_confidence_tier),
         last_validated_date=_parse_optional_date(raw_lvd) if raw_lvd else None,
+        claimed_status_family=cast(
+            "Literal['dependency', 'risk', 'milestone', 'action'] | None",
+            _optional_string(record.get("claimed_status_family"), field_name="claimed_status_family"),
+        ),
+        claimed_status_value=_optional_string(record.get("claimed_status_value"), field_name="claimed_status_value"),
     )
 
 

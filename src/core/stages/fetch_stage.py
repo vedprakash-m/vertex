@@ -8,6 +8,7 @@ from src.core.archive_store import find_latest_confirmed_entry, read_archive_ind
 from src.core.edition_resolver import get_program_output_dir, PROGRAMS_ROOT
 from src.core.exceptions import QueryError, QueryTimeoutError
 from src.core.models import EditionType, Snapshot, WorkItem
+from src.core.operation_trace import REF_TYPE_SOURCE, record_trace_link
 from src.core.pipeline import StageContext
 from src.core.snapshot_store import read_snapshot
 
@@ -37,6 +38,7 @@ class FetchStage:
                 archive_root=ctx.archive_root,
             )
             fetched_at = snapshot.ado_data_as_of
+            _record_acquisition_trace(ctx, fetched_at, snapshot.items, source_label)
             return replace(
                 ctx,
                 data_as_of=fetched_at,
@@ -66,12 +68,51 @@ class FetchStage:
                 )
             raise QueryTimeoutError(guidance) from error
 
+        _record_acquisition_trace(ctx, ctx.data_as_of, items, "live")
         return replace(
             ctx,
             items=tuple(items),
             ado_calls=int(ado_calls),
             offline_source_label=None,
         )
+
+
+def _record_acquisition_trace(
+    ctx: StageContext,
+    fetched_at,
+    items,
+    mode_label: str,
+) -> None:
+    """ADF-W2.12 (Section 8.2.6): record the acquisition/source stage link
+    under the run's shared ``correlation_id``. A no-op when no correlation
+    identity was threaded (``correlation_id == ""``), so existing
+    construction call sites and unit tests are unaffected. The source
+    ``ref_id`` is content-shaped -- item count plus the authoritative
+    data-as-of timestamp plus the mode (live/offline) -- so a re-run of an
+    unchanged acquisition is dedup-idempotent (the ledger dedupes on
+    ``(correlation_id, ref_type, ref_id)``) while a genuinely different
+    fetch produces a distinct, meaningful ref."""
+    correlation_id = ctx.correlation_id
+    if not correlation_id or ctx.bundle is None or ctx.programs_root is None:
+        return
+    try:
+        record_trace_link(
+            program_id=ctx.bundle.program.id,
+            correlation_id=correlation_id,
+            workflow_id=ctx.workflow_id,
+            run_id=ctx.run_id or correlation_id,
+            stage="acquisition",
+            ref_type=REF_TYPE_SOURCE,
+            ref_id=f"ado:{mode_label}:{len(tuple(items))}@{fetched_at.isoformat()}",
+            programs_root=ctx.programs_root,
+        )
+    except Exception:
+        # A trace link is observability, never a render blocker. The ledger
+        # writer already maps OSError/LockException; mirror the report.py
+        # writer's defensive posture so a trace failure can never break a
+        # real report run. (Broad except is intentional for observability
+        # best-effort code only; this is the lone such site in this module.)
+        return
 
 
 def _load_offline_snapshot(

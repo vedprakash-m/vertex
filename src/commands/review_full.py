@@ -692,6 +692,8 @@ def _build_reviewer_context(
             workstreams=detail_sections,
             dependencies=dependencies,
             client=anticipation_client,
+            program_id=program_id,
+            programs_root=programs_root,
         )
     )
     trust_editorial_rows: tuple[ReviewerTrustRow, ...] = ()
@@ -1290,7 +1292,7 @@ def _build_milestone_rows(
         for milestone, assessment, critical_path, schedule_summary, target_history_summary, completion_history_summary in sorted(
             assessed_rows,
             key=lambda entry: (
-                0 if entry[1].computed_health in {MilestoneStatus.AT_RISK, MilestoneStatus.MISSED} else 1,
+                0 if entry[1].computed_health in {MilestoneStatus.AT_RISK, MilestoneStatus.MISSED, MilestoneStatus.UNKNOWN} else 1,
                 entry[0].target_date,
                 entry[0].name.lower(),
             ),

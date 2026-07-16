@@ -302,9 +302,7 @@ class EditionMeta:
     email_subject: str = ""
     email_preheader: str = ""
     subject_signal: str = ""
-    productivity_dividend_hours: float | None = None
     show_orientation: bool = False
-    productivity_dividend_published: bool = False
 
 
 @dataclass(frozen=True, slots=True)

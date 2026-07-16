@@ -1053,7 +1053,22 @@ def _effective_candidate_entity_resolution(candidate: KnowledgeCandidate, *, pro
     registry = _load_entity_registry_for_scope(candidate.scope, programs_root=programs_root)
     effective: list[KnowledgeCandidateEntityResolution] = []
     for resolution in candidate.entity_resolution:
-        resolved = registry.resolve(resolution.raw_name)
+        # ADF-W2.6: resolve_with_binding() so registry drift into a genuine
+        # ambiguous near-tie is itself surfaced as a change (a new
+        # "ambiguous" match_kind), rather than silently keeping the
+        # previously-recorded resolution as if nothing had changed.
+        binding = registry.resolve_with_binding(resolution.raw_name)
+        if binding.ambiguous:
+            effective.append(
+                KnowledgeCandidateEntityResolution(
+                    raw_name=resolution.raw_name,
+                    resolved_entity_id=None,
+                    match_kind="ambiguous",
+                    score=binding.confidence,
+                )
+            )
+            continue
+        resolved = binding.resolved_entity
         if resolved is None:
             effective.append(resolution)
             continue

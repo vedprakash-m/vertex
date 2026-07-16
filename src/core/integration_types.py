@@ -28,6 +28,53 @@ class HydrationMode(str, Enum):
     FRESHNESS_ONLY = "freshness_only"
 
 
+class RelationKind(str, Enum):
+    """Typed ADO work-item relation edge category (ADF-F04 / Section 8.4.3).
+
+    Mirrors the ADO ``System.LinkTypes.*`` family plus artifact/external links,
+    reduced to the Section 8.4.3 edge kinds. ``UNKNOWN`` preserves unrecognized
+    relation type names rather than dropping them (honest degradation).
+    """
+
+    HIERARCHY_PARENT = "hierarchy_parent"
+    HIERARCHY_CHILD = "hierarchy_child"
+    RELATED = "related"
+    PREDECESSOR = "predecessor"
+    SUCCESSOR = "successor"
+    ARTIFACT_LINK = "artifact_link"
+    EXTERNAL_LINK = "external_link"
+    UNKNOWN = "unknown"
+
+
+class RelationTargetKind(str, Enum):
+    """What the far end of a relation points at (Section 8.4.3 typed edges)."""
+
+    WORK_ITEM = "work_item"
+    ARTIFACT = "artifact"
+    EXTERNAL = "external"
+
+
+@dataclass(frozen=True, slots=True)
+class WorkItemRelation:
+    """One typed directed edge between a source work item and a target (ADF-W4.1).
+
+    Direction is explicit (``forward`` = source -> target as ADO reports it;
+    ``reverse`` = the edge was expressed from the target's perspective and
+    flipped at parse time). ``depth`` is populated only by budgeted traversal,
+    not by the raw parse.
+    """
+
+    source_work_item_id: int
+    relation_kind: RelationKind
+    target_kind: RelationTargetKind
+    target_id: str
+    target_type: str | None
+    target_title: str | None
+    direction: str  # "forward" | "reverse"
+    rel_type_name: str  # raw ADO ``rel`` attribute, preserved for fidelity
+    depth: int = 1
+
+
 class ScopeStatusKind(str, Enum):
     SUCCESS = "success"
     TIMEOUT = "timeout"
@@ -60,6 +107,17 @@ class ProviderCapability:
     supports_attachments: bool = False
     supports_replay: bool = False
     supports_degradation: bool = False
+    # ADF-F03 / Section 8.3.4 additive UIL capability descriptors. All default
+    # safely off so existing producers/consumers compile unchanged. These extend
+    # the existing capability contract rather than introducing a parallel
+    # ``SourceConnector`` abstraction (audit reconciliation row).
+    supports_pagination: bool = False
+    supports_relations: bool = False
+    supports_full_content: bool = False
+    supports_durable_identity: bool = False
+    supports_cancellation: bool = False
+    max_page_size: int | None = None
+    completeness_modes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +125,23 @@ class RunContext:
     dry_run: bool = False
     force_discovery: bool = False
     accept_shrinkage: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class PaginationOutcome:
+    """ADF-W2.1 (Section 8.4.2): result of a multi-page provider fetch.
+
+    ``is_truncated`` is True only when the fetch stopped because it hit its
+    own safety cap (``max_pages``) while the provider still had more data
+    to give (the last page returned a full page, or a continuation token
+    was still present) -- never for a fetch that ended because the provider
+    signaled "no more data". Reaching a cap must be a surfaced, actionable
+    finding, not just a log line (Section 8.4.2's explicit requirement).
+    """
+
+    total_fetched: int
+    page_count: int
+    is_truncated: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,6 +294,9 @@ class ADOHydrationOutput:
     work_items: tuple[WorkItem, ...]
     freshness_items: tuple[WorkItem, ...] | None = None
     pull_requests: tuple[PullRequestSummary, ...] = ()
+    # ADF-W4.1 (Section 8.4.3): typed directed edges + any traversal truncation.
+    relations: tuple[WorkItemRelation, ...] = ()
+    relation_truncation: PaginationOutcome | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,6 +367,18 @@ class KustoResultSet:
     rows: tuple[dict[str, str | int | float | bool | None], ...]
     observed_at: datetime
     workstream_ids: tuple[str, ...] = ()
+    # ADF-F05 / Appendix A.10 additive metric-semantics fields. All defaulted so
+    # existing producers/consumers compile unchanged; raw rows remain available
+    # for entity extraction/charts. No parallel result type is authorized.
+    metric_id: str | None = None
+    result_column: str | None = None
+    unit: str | None = None
+    slo_target: float | None = None
+    comparison: str | None = None  # one of >=, <=, ==, >, <
+    observed_value: float | None = None
+    is_breach: bool | None = None
+    is_partial: bool = False
+    row_count: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

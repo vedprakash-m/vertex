@@ -10,6 +10,7 @@ from src.core.entity_registry import EntityRegistry
 from src.core.ledger.event_log import EventEnvelope, ConfidenceTier, read_events
 from src.core.ledger.source_refs import source_document_key
 from src.core.models_v2 import AssumptionStatus, DecisionStatus, DependencyScheduleStatus, DependencyStatus, DependencyType, MilestoneStatus, RiskImpact, RiskProbability, RiskStatus
+from src.core.operation_trace import REF_TYPE_FACT, record_trace_link
 from src.core.protection.supersession import apply_supersession
 from src.core.program_fact_store import (
     FactLifecycleState,
@@ -1139,9 +1140,9 @@ def run_cross_source_conflict_detection(
         )
 
         for conflict in result.conflicts:
-            _append_conflict_fact(store, conflict, now)
+            _append_conflict_fact(store, conflict, now, program_id=program_id, correlation_id=correlation_id, programs_root=programs_root)
         for corroboration in result.corroborations:
-            _append_corroboration_fact(store, corroboration, now)
+            _append_corroboration_fact(store, corroboration, now, program_id=program_id, correlation_id=correlation_id, programs_root=programs_root)
         return {
             "conflicts": len(result.conflicts),
             "corroborations": len(result.corroborations),
@@ -1155,7 +1156,9 @@ def run_cross_source_conflict_detection(
         return {"conflicts": 0, "corroborations": 0, "observations": 0, "error": True}
 
 
-def _append_conflict_fact(store: ProgramFactStore, conflict: dict, now: Any) -> None:
+def _append_conflict_fact(
+    store: ProgramFactStore, conflict: dict, now: Any, *, program_id: str, correlation_id: str, programs_root: Path,
+) -> None:
     """Write one ``fact.conflict`` (reshaped to satisfy fact_schema_registry).
 
     The detector emits ``target_natural_key/observed_value/material/...``; the
@@ -1199,12 +1202,19 @@ def _append_conflict_fact(store: ProgramFactStore, conflict: dict, now: Any) -> 
             lifecycle_state=FactLifecycleState.ACTIVE,
             created_by="vertex.rev_conflict_check",
         )
-        store.append_fact(fact, recorded_at=now)
+        write_result = store.append_fact(fact, recorded_at=now)
+        if write_result.action != "noop":
+            _record_fact_trace_best_effort(
+                program_id=program_id, correlation_id=correlation_id,
+                ref_id=f"fact.conflict:{entity_id}:{family}@{now.isoformat()}", programs_root=programs_root,
+            )
     except Exception:  # noqa: BLE001
         log.debug("conflict fact append skipped", exc_info=True)
 
 
-def _append_corroboration_fact(store: ProgramFactStore, corroboration: dict, now: Any) -> None:
+def _append_corroboration_fact(
+    store: ProgramFactStore, corroboration: dict, now: Any, *, program_id: str, correlation_id: str, programs_root: Path,
+) -> None:
     """Write one ``fact.corroboration`` (reshaped to satisfy fact_schema_registry)."""
     import logging
     log = logging.getLogger(__name__)
@@ -1232,6 +1242,37 @@ def _append_corroboration_fact(store: ProgramFactStore, corroboration: dict, now
             lifecycle_state=FactLifecycleState.ACTIVE,
             created_by="vertex.rev_conflict_check",
         )
-        store.append_fact(fact, recorded_at=now)
+        write_result = store.append_fact(fact, recorded_at=now)
+        if write_result.action != "noop":
+            _record_fact_trace_best_effort(
+                program_id=program_id, correlation_id=correlation_id,
+                ref_id=f"fact.corroboration:{entity_id}:{family}@{now.isoformat()}", programs_root=programs_root,
+            )
     except Exception:  # noqa: BLE001
         log.debug("corroboration fact append skipped", exc_info=True)
+
+
+def _record_fact_trace_best_effort(*, program_id: str, correlation_id: str, ref_id: str, programs_root: Path) -> None:
+    """ADF-W2.12 (Section 8.2.6): record the fact-stage trace link under the
+    rev cycle's shared ``correlation_id``. A no-op when no correlation
+    identity was threaded (``correlation_id == ""``, the pre-ADF-W2.12
+    default), so every existing construction call site and unit test is
+    unaffected. ``workflow_id``/``run_id`` reuse ``correlation_id`` itself --
+    the rev cross-source conflict check has no separate workflow/run identity
+    concept of its own to thread instead, the same degrade `fetch_stage.py`
+    uses when ``ctx.run_id`` is unset (``run_id=ctx.run_id or correlation_id``)."""
+    if not correlation_id:
+        return
+    try:
+        record_trace_link(
+            program_id=program_id,
+            correlation_id=correlation_id,
+            workflow_id=correlation_id,
+            run_id=correlation_id,
+            stage="fact",
+            ref_type=REF_TYPE_FACT,
+            ref_id=ref_id,
+            programs_root=programs_root,
+        )
+    except Exception:  # noqa: BLE001 — a trace link is observability, never a write blocker.
+        pass

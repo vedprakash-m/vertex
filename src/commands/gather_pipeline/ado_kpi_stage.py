@@ -7,7 +7,7 @@ from typing import Any, Callable
 
 from src.commands.gather_pipeline.ado_pipeline_stage import _parse_datetime, _parse_int
 from src.commands.gather_pipeline.ado_wiql_stage import TeamNameNormalizer, record_ado_wiql_query_state, resolve_wiql_query_text
-from src.core.ado_client import ADOClient
+from src.core.ado_client import ADO_WIQL_DEFAULT_TOP, ADOClient
 from src.core.exceptions import QueryError
 from src.core.m365_payload_support import optional_string as _optional_string
 from src.core.models_v2 import KustoQuery, Program, Signal, Workstream
@@ -127,12 +127,19 @@ def build_kusto_kpi_signals(
             continue
         duration_ms = int(round((perf_counter() - started_at) * 1000))
         if query.engine == "wiql":
+            wiql_count = wiql_query_work_item_count(rows)
+            # ADF-W2.1 (Section 8.4.2): same cap_reached treatment the production
+            # gather WIQL path (ado_wiql_stage.py) already applies. A WIQL result
+            # at the top cap is likely truncated and must surface as a structured
+            # completeness finding (is_degraded/cap_reached), not just a log line.
+            cap_reached = wiql_count >= ADO_WIQL_DEFAULT_TOP
             record_ado_wiql_query_state(
                 query_state_sink,
                 query,
-                work_item_count=wiql_query_work_item_count(rows),
+                work_item_count=wiql_count,
                 as_of=as_of,
                 duration_ms=duration_ms,
+                cap_reached=cap_reached,
                 previous_state=previous_states.get(query.id),
             )
             entity_refs = entity_refs_from_wiql_kpi_rows(rows)

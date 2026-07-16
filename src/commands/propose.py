@@ -393,6 +393,7 @@ def _populate_ai_proposal_text(
                 items=ctx.items,
                 deltas=ctx.deltas,
                 editorial_rules=ctx.bundle.editorial_rules,
+                program_id=program_id,
                 edition_type=ctx.resolved_edition_type,
                 program_context=ctx.bundle.program_context,
                 supplemental_context=(
@@ -401,6 +402,7 @@ def _populate_ai_proposal_text(
                     *(() if proposal.evidence_brief.kpi_summary is None else (f"KPI summary: {proposal.evidence_brief.kpi_summary}",)),
                     f"Vitality summary: {proposal.evidence_brief.vitality_summary}",
                 ),
+                programs_root=ctx.programs_root,
             )
             if draft is None:
                 populated.append(proposal)
@@ -431,6 +433,7 @@ def _populate_ai_proposal_text(
             evidence_by_item=ctx.evidence_by_item,
             deltas=report_command_helpers._relevant_item_deltas(ctx.deltas, {item.id for item in workstream.items}),
             editorial_rules=ctx.bundle.editorial_rules,
+            program_id=program_id,
             edition_type=ctx.resolved_edition_type,
             program_context=ctx.bundle.program_context,
             supplemental_context=(
@@ -449,6 +452,7 @@ def _populate_ai_proposal_text(
                 if ctx.signal_context is not None and section_workstream_id
                 else None
             ),
+            programs_root=ctx.programs_root,
         )
         if ai_blurb is None:
             populated.append(proposal)

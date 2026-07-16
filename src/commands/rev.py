@@ -40,6 +40,8 @@ from src.m365.rev import FakeRevGraphClient, GraphMessage
 from src.core.rev.ports import CandidateEnumerator, ContentHydrator
 from src.m365.rev.eml_enumerator import EmlEnumerator
 from src.m365.rev.eml_hydrator import EmlHydrator
+from src.m365.rev.local_file_enumerator import LocalFileEnumerator
+from src.m365.rev.local_file_hydrator import LocalFileHydrator
 
 
 def _resolve_shields() -> PromptShields:
@@ -77,7 +79,8 @@ P0_SPIKE_NOTE = (
     "Live Graph API REV retrieval is permanently unavailable (all delegated Graph scopes "
     "blocked by Microsoft IT policy — see docs/adrs/adr-008-graph-api-pivot.md). "
     "Supply --eml-inbox <dir> to process locally-exported .eml files, "
-    "--ics-inbox <dir> to process locally-exported .ics calendar files, or "
+    "--ics-inbox <dir> to process locally-exported .ics calendar files, "
+    "--docs-inbox <dir> to process locally-downloaded .docx/.pdf files, or "
     "--mock-fixture <path> for a JSON fixture walking skeleton."
 )
 
@@ -94,7 +97,7 @@ is local desktop export — no API, no credentials, no expiry.
 
 ## Layout (3-directory atomicity)
 
-    rev_inbox/            <- you drop .eml files HERE (this directory)
+    rev_inbox/            <- you drop .eml/.ics/.docx/.pdf files HERE (this directory)
       claimed/           <- in-flight (do not touch; replayed after a crash)
       processed/         <- completed (purged after 90 days — OA-4)
       quarantine/        <- failed parses / oversized / crash-loop poison files
@@ -102,11 +105,12 @@ is local desktop export — no API, no credentials, no expiry.
 
 ## How to use
 
-1. Export messages from Outlook: File → Save As → `.eml` (or drag messages
-   out of Outlook into this directory).
+1. Export items into this directory: Outlook messages via File → Save As →
+   `.eml` (or drag messages out of Outlook), calendar occurrences as `.ics`,
+   or locally-downloaded `.docx`/`.pdf` documents.
 2. Run a cycle:
 
-       vertex rev run --program {program_id} --mailbox <your-upn> --eml-inbox "{inbox_abs}"
+       vertex rev run --program {program_id} --mailbox <your-upn> {run_flag} "{inbox_abs}"
 
    Files are claimed (inbox -> claimed), hydrated, extracted, vaulted, and
    staged as PENDING candidates for `vertex ledger triage list`.
@@ -117,7 +121,7 @@ is local desktop export — no API, no credentials, no expiry.
 ## Privacy (OA-4 — required before first real intake)
 
 - Restrict this directory's ACL to your own user account only.
-- Raw `.eml` content is never written to logs or support bundles.
+- Raw file content is never written to logs or support bundles.
 - `processed/` files are purged after 90 days (or once evidence excerpts are
   vaulted, whichever is later).
 - Attachments of type `application/*` (Winmail.dat, PDFs, etc.) are denied and
@@ -195,11 +199,12 @@ def rev_run(
     mock_fixture: Path | None = typer.Option(None, "--mock-fixture", help="JSON fixture of messages for the P1 walking skeleton (no live consent)."),
     eml_inbox: Path | None = typer.Option(None, "--eml-inbox", help="Directory containing locally-exported .eml files (inbox/ dir for EmlEnumerator)."),
     ics_inbox: Path | None = typer.Option(None, "--ics-inbox", help="Directory containing locally-exported .ics calendar files (inbox/ dir for IcsEnumerator). W6-1."),
+    docs_inbox: Path | None = typer.Option(None, "--docs-inbox", help="Directory containing locally-downloaded .docx/.pdf files (inbox/ dir for LocalFileEnumerator). P3-5."),
     extractor: str = typer.Option("deterministic", "--extractor", help="Extractor tier: deterministic | llm. 'llm' requires VERTEX_AI_DEPLOYMENT."),
     programs_root: Path = typer.Option(PROGRAMS_ROOT, "--programs-root", hidden=True),
 ) -> None:
     """Run one REV retrieval cycle and stage candidates for triage."""
-    if mock_fixture is None and eml_inbox is None and ics_inbox is None:
+    if mock_fixture is None and eml_inbox is None and ics_inbox is None and docs_inbox is None:
         typer.echo(P0_SPIKE_NOTE)
         raise typer.Exit(code=2)
 
@@ -282,6 +287,27 @@ def rev_run(
             verifier=_verifier,
         )
         mailbox_ctx = MailboxContext(tenant_id=tenant_id or "default", principal_mailbox=mailbox, container=container)
+    elif docs_inbox is not None:
+        _enumerator = LocalFileEnumerator(
+            inbox_root=docs_inbox,
+            mailbox_tenant_id=tenant_id or "default",
+            principal_mailbox=mailbox,
+            container=container,
+            limit=limit,
+        )
+        _hydrator = LocalFileHydrator(
+            mailbox_tenant_id=tenant_id or "default",
+            principal_mailbox=mailbox,
+            container=container,
+        )
+        deps = RevPipelineDeps(
+            enumerator=_enumerator,
+            hydrator=_hydrator,
+            shields=_resolve_shields(),
+            extractor=_extractor,
+            verifier=_verifier,
+        )
+        mailbox_ctx = MailboxContext(tenant_id=tenant_id or "default", principal_mailbox=mailbox, container=container)
     else:
         assert mock_fixture is not None
         messages = _load_mock_fixture(mock_fixture)
@@ -326,6 +352,14 @@ def rev_init_inbox(
         None, "--eml-inbox",
         help="Inbox root (defaults to programs/<program>/rev_inbox). Must be on a LOCAL filesystem.",
     ),
+    ics_inbox: Path | None = typer.Option(
+        None, "--ics-inbox",
+        help="Inbox root for locally-exported .ics calendar files (defaults to programs/<program>/rev_inbox). Must be on a LOCAL filesystem.",
+    ),
+    docs_inbox: Path | None = typer.Option(
+        None, "--docs-inbox",
+        help="Inbox root for locally-downloaded .docx/.pdf files (defaults to programs/<program>/rev_inbox). Must be on a LOCAL filesystem.",
+    ),
     programs_root: Path = typer.Option(PROGRAMS_ROOT, "--programs-root", hidden=True),
 ) -> None:
     """Scaffold the local-import inbox directory tree + write a local README (P1-5).
@@ -335,10 +369,17 @@ def rev_init_inbox(
     the program ``_rev/`` checkpoint dir, and writes an operator-facing
     ``README.md`` documenting the export-import workflow + OA-4 privacy policy.
     Idempotent: re-running only refreshes the README.
+
+    The 3-directory atomicity mechanics are identical across the three
+    local-import enumerators (eml/ics/docs), so ``--eml-inbox``/``--ics-inbox``/
+    ``--docs-inbox`` are interchangeable overrides of the same inbox root; all
+    three fall back to the same program default when none is given.
     """
-    inbox_root = eml_inbox if eml_inbox is not None else _default_inbox_root(program, programs_root)
+    explicit_inbox = eml_inbox or ics_inbox or docs_inbox
+    inbox_root = explicit_inbox if explicit_inbox is not None else _default_inbox_root(program, programs_root)
+    run_flag = _resolve_inbox_run_flag(eml_inbox, ics_inbox, docs_inbox)
     # The inbox MUST be on a local filesystem (network drives break atomic rename).
-    if eml_inbox is not None:
+    if explicit_inbox is not None:
         try:
             import os as _os
             drive, _ = _os.path.splitdrive(str(inbox_root.resolve()))
@@ -347,7 +388,7 @@ def rev_init_inbox(
             # mapped drives from Python, so we warn rather than block.
             if str(inbox_root.resolve()).startswith("\\\\"):
                 typer.echo(
-                    "WARN: --eml-inbox resolves to a UNC network path. Atomic rename "
+                    f"WARN: {run_flag} resolves to a UNC network path. Atomic rename "
                     "(inbox -> claimed) will fail with WinError 17; use a LOCAL path. "
                     "See specs/gaps.md REV-G2 (network drive).",
                     err=True,
@@ -367,14 +408,18 @@ def rev_init_inbox(
 
     readme_path = inbox_root / "README.md"
     readme_path.write_text(
-        _INBOX_README.format(program_id=program, inbox_abs=str(inbox_root.resolve())),
+        _INBOX_README.format(
+            program_id=program,
+            inbox_abs=str(inbox_root.resolve()),
+            run_flag=run_flag,
+        ),
         encoding="utf-8",
     )
     typer.echo(f"REV inbox scaffolded for program '{program}' at {inbox_root}")
     typer.echo(f"  README: {readme_path}")
-    typer.echo("Drop .eml files directly in the inbox root, then run:")
+    typer.echo("Drop your locally-exported .eml/.ics/.docx/.pdf files directly in the inbox root, then run:")
     typer.echo(
-        f"  vertex rev run --program {program} --mailbox <upn> --eml-inbox \"{inbox_root}\""
+        f"  vertex rev run --program {program} --mailbox <upn> {run_flag} \"{inbox_root}\""
     )
     typer.echo(
         "Reminder (OA-4): restrict this directory's ACL to your own account before "
@@ -384,12 +429,36 @@ def rev_init_inbox(
     raise typer.Exit(code=0)
 
 
+def _resolve_inbox_run_flag(
+    eml_inbox: Path | None, ics_inbox: Path | None, docs_inbox: Path | None,
+) -> str:
+    """Picks the ``vertex rev run`` inbox flag matching whichever explicit
+    override (if any) was supplied, mirroring ``rev_run``'s own
+    eml -> ics -> docs precedence. Defaults to ``--eml-inbox`` when none was
+    given (matching legacy default-path behavior)."""
+    if eml_inbox is not None:
+        return "--eml-inbox"
+    if ics_inbox is not None:
+        return "--ics-inbox"
+    if docs_inbox is not None:
+        return "--docs-inbox"
+    return "--eml-inbox"
+
+
 @app.command("rotate-processed")
 def rev_rotate_processed(
     program: str = typer.Option(..., "--program", help="Program id."),
     eml_inbox: Path | None = typer.Option(
         None, "--eml-inbox",
         help="Local-import inbox root (defaults to programs/<program>/rev_inbox).",
+    ),
+    ics_inbox: Path | None = typer.Option(
+        None, "--ics-inbox",
+        help="Local-import inbox root for .ics calendar imports (defaults to programs/<program>/rev_inbox).",
+    ),
+    docs_inbox: Path | None = typer.Option(
+        None, "--docs-inbox",
+        help="Local-import inbox root for .docx/.pdf imports (defaults to programs/<program>/rev_inbox).",
     ),
     max_age_days: int = typer.Option(
         90, "--max-age-days", help="Rotate files older than this many days.",
@@ -409,8 +478,14 @@ def rev_rotate_processed(
     cycle. Files older than ``--max-age-days`` (default 90) **or** a surplus
     beyond ``--max-count`` (default 500, oldest first) are moved to
     ``processed/archive/``.
+
+    The rotation mechanics are format-agnostic (it moves whatever is in
+    ``processed/``, regardless of which enumerator produced it), so
+    ``--eml-inbox``/``--ics-inbox``/``--docs-inbox`` are interchangeable
+    overrides of the same inbox root, matching ``init-inbox``.
     """
-    inbox_root = eml_inbox if eml_inbox is not None else _default_inbox_root(program, programs_root)
+    explicit_inbox = eml_inbox or ics_inbox or docs_inbox
+    inbox_root = explicit_inbox if explicit_inbox is not None else _default_inbox_root(program, programs_root)
     processed_dir = inbox_root / "processed"
     from src.core.rev.inbox_rotation import rotate_processed_dir
 
