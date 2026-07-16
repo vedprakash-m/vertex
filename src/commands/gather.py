@@ -754,6 +754,16 @@ def gather_program(
 
     if include_workiq:
         workiq_started_at = perf_counter()
+        # Bound the *whole* WorkIQ phase (all query plans combined) by the
+        # program's configured retrieval budget -- without this, a live run
+        # with N query plans could take up to WORKIQ_TIMEOUT (or the slower
+        # ~90-180s CLI fallback) *per plan* with no overall cap, stalling
+        # gather for tens of minutes. Falls back to WorkIQRetrievalConfig's
+        # own default (600s) when the program has no explicit m365.retrieval.
+        workiq_retrieval = program.m365.retrieval if program.m365 is not None else None
+        workiq_total_budget_seconds = (
+            workiq_retrieval.max_wall_clock_seconds if workiq_retrieval is not None else 600
+        )
         try:
             # Per-program match aliases (sourced from workstreams.yaml) canonicalize
             # program-specific abbreviations during discovery matching; core stays generic.
@@ -773,6 +783,7 @@ def gather_program(
                         m365_topic_router=m365_topic_router,
                         programs_root=resolved_programs_root,
                         integration_error_sink=integration_error_details,
+                        total_budget_seconds=workiq_total_budget_seconds,
                     ),
                 )
         except (AuthError, QueryError, TimeoutError, typer.BadParameter) as exc:

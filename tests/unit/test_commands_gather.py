@@ -4622,6 +4622,111 @@ def test_workiq_thread_id_falls_back_to_teams_urls_when_direct_id_missing() -> N
     ) == "AAMkExampleEventId=="
 
 
+def test_gather_program_threads_configured_workiq_total_budget_seconds(monkeypatch, tmp_path: Path) -> None:
+    """The whole WorkIQ phase (all query plans combined) must be bounded by the
+    program's configured ``m365.retrieval.max_wall_clock_seconds`` -- without
+    this, a live run with N query plans could take up to WORKIQ_TIMEOUT per
+    plan with no overall cap, stalling gather for tens of minutes."""
+    programs_root = tmp_path / "programs"
+
+    program = Program(
+        schema_version="2.0",
+        id="acme",
+        name="Adventure + DD on PF",
+        ado=ADOConfig(
+            organization="your-org",
+            project="One",
+            area_paths=("One\\Adventure\\Acme",),
+            work_item_types=("Feature",),
+            excluded_states=("Removed",),
+            date_window_days=14,
+            api_timeout_seconds=30,
+        ),
+        m365=M365Config(
+            enabled=True,
+            prefer_agency=True,
+            workiq_queries={"feedback_search": "Find feedback on Acme newsletter drafts"},
+            retrieval=WorkIQRetrievalConfig(max_wall_clock_seconds=120),
+        ),
+    )
+    workstreams = (
+        Workstream(id="acme", name="Acme", area_paths=("One\\Adventure\\Acme",), dri_email="maintainer@example.com"),
+    )
+
+    captured_kwargs: dict = {}
+
+    def _fake_build_workiq_signals(**kwargs):
+        captured_kwargs.update(kwargs)
+        return ()
+
+    monkeypatch.setattr(gather, "_load_program_context", lambda program_id, programs_root: (program, workstreams))
+    monkeypatch.setattr(gather, "_load_freshness_thresholds", lambda program_id, programs_root: (14, 30))
+    monkeypatch.setattr(gather, "_build_workiq_signals", _fake_build_workiq_signals)
+
+    gather.gather_program(
+        "acme",
+        as_of=datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc),
+        programs_root=programs_root,
+        loader=lambda program, workstreams, as_of, **_: ((), 0),
+        freshness_loader=lambda program, workstreams, as_of, **_: ((), 0),
+        include_workiq=True,
+        bridge_factory=lambda: _FakeWorkIQBridge(responses={}),
+    )
+
+    assert captured_kwargs["total_budget_seconds"] == 120
+
+
+def test_gather_program_workiq_total_budget_defaults_to_600_when_program_has_no_retrieval_config(
+    monkeypatch, tmp_path: Path
+) -> None:
+    programs_root = tmp_path / "programs"
+
+    program = Program(
+        schema_version="2.0",
+        id="acme",
+        name="Adventure + DD on PF",
+        ado=ADOConfig(
+            organization="your-org",
+            project="One",
+            area_paths=("One\\Adventure\\Acme",),
+            work_item_types=("Feature",),
+            excluded_states=("Removed",),
+            date_window_days=14,
+            api_timeout_seconds=30,
+        ),
+        m365=M365Config(
+            enabled=True,
+            prefer_agency=True,
+            workiq_queries={"feedback_search": "Find feedback on Acme newsletter drafts"},
+        ),
+    )
+    workstreams = (
+        Workstream(id="acme", name="Acme", area_paths=("One\\Adventure\\Acme",), dri_email="maintainer@example.com"),
+    )
+
+    captured_kwargs: dict = {}
+
+    def _fake_build_workiq_signals(**kwargs):
+        captured_kwargs.update(kwargs)
+        return ()
+
+    monkeypatch.setattr(gather, "_load_program_context", lambda program_id, programs_root: (program, workstreams))
+    monkeypatch.setattr(gather, "_load_freshness_thresholds", lambda program_id, programs_root: (14, 30))
+    monkeypatch.setattr(gather, "_build_workiq_signals", _fake_build_workiq_signals)
+
+    gather.gather_program(
+        "acme",
+        as_of=datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc),
+        programs_root=programs_root,
+        loader=lambda program, workstreams, as_of, **_: ((), 0),
+        freshness_loader=lambda program, workstreams, as_of, **_: ((), 0),
+        include_workiq=True,
+        bridge_factory=lambda: _FakeWorkIQBridge(responses={}),
+    )
+
+    assert captured_kwargs["total_budget_seconds"] == 600
+
+
 def test_gather_program_discovers_registry_threads_and_marks_observed_thread_as_tracked(monkeypatch, tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
 
