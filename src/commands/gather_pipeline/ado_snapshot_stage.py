@@ -276,6 +276,12 @@ def build_analytics_snapshot_filter(
         clauses.append("IsLastRevisionOfDay eq true")
     if state_conditions:
         clauses.append(f"not ( {' or '.join(state_conditions)} )")
+    required_tags = tuple(getattr(ado, "required_tags", ()) or ())
+    if required_tags:
+        tag_conditions = [
+            f"Tags/any(t: t/TagName eq '{tag.replace(chr(39), chr(39) * 2)}')" for tag in required_tags
+        ]
+        clauses.append(f"( {' or '.join(tag_conditions)} )")
     return " and ".join(clauses)
 
 
