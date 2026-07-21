@@ -12,8 +12,9 @@ from src.ai.discovery._structured_event_markers import (
     marker_occurrence_or_default,
     parse_structured_event_marker_result,
 )
+from src.core.circuit_breaker import CircuitBreaker
 from src.core.config_loader import PROGRAMS_ROOT
-from src.core.edition_resolver import load_program
+from src.core.edition_resolver import get_program_output_dir, load_program
 from src.core.knowledge_store import load_program_knowledge, select_engms_pages
 from src.core.ledger.candidate_store import CandidateEntityResolution, CandidateEvent, derive_candidate_dedupe_key
 from src.core.ledger.discovery_run_recorder import GapDetail
@@ -93,7 +94,7 @@ def run_sharepoint_pipeline(
             ),
         )
 
-    bridge = AgencyBridge()
+    bridge = AgencyBridge(workiq_breaker=_build_workiq_breaker(program_id=program_id, programs_root=programs_root))
     capabilities = bridge.probe()
     if not capabilities.available and not capabilities.has_workiq_cli:
         return SharePointPipelineBatch(
@@ -187,6 +188,19 @@ def run_sharepoint_pipeline(
         candidates=_collapse_sharepoint_candidates(candidates),
         gaps=tuple(gaps),
     )
+
+
+def _build_workiq_breaker(*, program_id: str, programs_root: Path) -> CircuitBreaker:
+    """Shared circuit breaker gating repeated WorkIQ subprocess failures.
+
+    Uses the same state file (``.workiq_breaker.json``) as ``commands/enrich.py`` so a
+    broken WorkIQ/Agency bridge trips once and all M365 discovery for this program backs
+    off together, instead of every SharePoint page in engms_pages.yaml independently
+    paying the full subprocess retry cost (up to ~360s per failed call: 3 attempts x
+    120s WORKIQ_TIMEOUT) before this pipeline gives up.
+    """
+    state_path = get_program_output_dir(program_id, programs_root=programs_root) / ".workiq_breaker.json"
+    return CircuitBreaker(state_path=state_path)
 
 
 def _is_sharepoint_page(page: EngMsPage) -> bool:

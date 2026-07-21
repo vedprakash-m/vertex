@@ -48,6 +48,11 @@ class AgencyBridge:
     TIMEOUT = 30
     PROBE_TIMEOUT = 5
     WORKIQ_TIMEOUT = 120
+    # The MCP `ask_work_iq` tool is supposed to be the fast path, but in some
+    # environments it hangs without ever returning instead of failing fast. Bound it
+    # tightly so a non-responsive MCP server can't burn the full WORKIQ_TIMEOUT budget
+    # before falling through to the (working) CLI fallback.
+    MCP_ASK_WORKIQ_TIMEOUT = 20
 
     _SERVER_ALIASES = {
         "ado": "ado",
@@ -188,10 +193,13 @@ class AgencyBridge:
     ) -> dict[str, Any] | None:
         """Ask WorkIQ a question about M365 data (no caching).
 
-        The MCP ``ask_work_iq`` path is the fast path. The local ``workiq.exe`` CLI
-        fallback is reliable but slow (often 90–180s), which blows latency-sensitive
-        discovery budgets; callers in that hot path pass ``allow_cli_fallback=False`` to
-        fail fast on the MCP path instead of degrading into the slow CLI.
+        The MCP ``ask_work_iq`` path is meant to be the fast path, so it gets only
+        ``MCP_ASK_WORKIQ_TIMEOUT`` seconds: if the MCP server doesn't respond quickly it
+        is treated as unavailable rather than allowed to consume the full budget. The
+        local ``workiq.exe`` CLI fallback is reliable but can be slow (often 90–180s),
+        which blows latency-sensitive discovery budgets; callers in that hot path pass
+        ``allow_cli_fallback=False`` to fail fast on the MCP path instead of degrading
+        into the slow CLI.
         """
 
         self._last_mcp_error = None
@@ -208,6 +216,10 @@ class AgencyBridge:
                 )
                 return None
         timeout = self.WORKIQ_TIMEOUT if timeout_seconds is None or timeout_seconds <= 0 else timeout_seconds
+        # The MCP attempt gets its own short budget (capped at the caller's timeout, in
+        # case a caller passes something smaller), separate from `timeout`, which is
+        # reserved for the CLI fallback below.
+        mcp_timeout = min(self.MCP_ASK_WORKIQ_TIMEOUT, timeout)
         payload: dict[str, Any] | None = None
         capabilities = self._capabilities_cache or self.probe()
         if capabilities.available and capabilities.has_workiq:
@@ -215,7 +227,7 @@ class AgencyBridge:
                 "workiq",
                 "ask_work_iq",
                 {"question": question},
-                timeout_seconds=timeout,
+                timeout_seconds=mcp_timeout,
             )
             if payload is not None:
                 if self._workiq_breaker is not None:
