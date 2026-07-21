@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from src.core.ado_discovery import ADODiscoveryConfig, ADODiscoveryProvider, _discovery_scopes
 from src.core.integration_types import DiscoveryCompleteness
 from src.core.slice_contract_loader import load_slice_contract
@@ -472,6 +474,11 @@ def test_ado_discovery_no_ado_contract_slices_returns_empty(tmp_path: Path) -> N
     assert result.completeness is DiscoveryCompleteness.FULL
 
 
+_ARMADA_SLICE_CONTRACTS_MISSING = not Path("programs/armada/slice_contracts.yaml").exists()
+_ARMADA_SKIP_REASON = "programs/armada/ is real, gitignored program data -- not present on a fresh clone/CI"
+
+
+@pytest.mark.skipif(_ARMADA_SLICE_CONTRACTS_MISSING, reason=_ARMADA_SKIP_REASON)
 def test_armada_discovery_scopes_honor_binding_filters_and_exclude_history() -> None:
     contracts = load_slice_contract(Path("programs/armada/slice_contracts.yaml"))
 
@@ -488,6 +495,7 @@ def test_armada_discovery_scopes_honor_binding_filters_and_exclude_history() -> 
     assert all(scope.query_id != "c6abfbc6-8d20-4393-9782-f9e3608940f9" for scope in scopes)
 
 
+@pytest.mark.skipif(_ARMADA_SLICE_CONTRACTS_MISSING, reason=_ARMADA_SKIP_REASON)
 def test_armada_overall_queries_have_distinct_governed_roles() -> None:
     """ARM-GATHER-1: neither Overall query may silently become broad scope."""
     contracts = load_slice_contract(Path("programs/armada/slice_contracts.yaml"))
