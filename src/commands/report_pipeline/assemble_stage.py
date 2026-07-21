@@ -210,7 +210,7 @@ from src.commands.report_continuity import _is_continuity_layout, _sanitize_scaf
 from src.commands.report_continuity import _build_workstream_citations, _continuity_packet_eta_label, _workstream_significant_findings
 from src.commands.report_fetch import _bound_saved_query_wiql, _extract_saved_query_wiql, _infer_risk_level, _load_live_work_items as _load_live_work_items_impl
 from src.commands.report_fetch import _load_saved_query_item_ids, _merge_item_ids, _optional_string, _parse_date, _parse_datetime, _parse_identity, _parse_tags, _query_work_item_batch_rows, _raw_identity, _render_saved_query_filter_clause
-from src.commands.report_fetch import _slice_contract_explicit_work_item_ids, _slice_contract_saved_query_clauses, _slice_contract_saved_query_ids, _work_item_from_raw, _work_item_from_sources
+from src.commands.report_fetch import _slice_contract_explicit_work_item_ids, _slice_contract_saved_query_clauses, _slice_contract_full_scope_query_ids, _slice_contract_activity_delta_query_ids, _work_item_from_raw, _work_item_from_sources
 from src.commands.report_lookback import _build_lookback_assumption_lifecycle, _build_lookback_charter_review, _build_lookback_evidence, _build_lookback_exec_summary, _build_lookback_incident_learning_summary, _build_lookback_items
 from src.commands.report_lookback import _build_lookback_ai_retrospective_rows, _build_lookback_retrospective_intelligence, _build_lookback_scorecard_data, _load_lookback_snapshots
 from src.commands.report_lookback import build_lookback_ban_list_inputs
@@ -362,6 +362,11 @@ class DraftState:
     program_fact_snapshot: ProgramFactSnapshotDraftState | None = None
     top_3_now: tuple[str, ...] = ()
     exec_summary_text: str = ""
+    # D-17: gather run lineage, pinned once at draft creation (see
+    # _pin_gather_run_lineage in src/commands/report.py) and read back
+    # verbatim by confirm -- never re-resolved live.
+    gather_run_id: str | None = None
+    gather_run_hash: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1327,6 +1332,8 @@ def _generate_lookback_draft(
     reports_root: Path,
     archive_root: Path,
     open_browser: bool,
+    gather_run_id: str | None = None,
+    gather_run_hash: str | None = None,
 ) -> DraftArtifacts:
     if lookback_range is not None and lookback_range < 2:
         raise ValueError("lookback_range must be at least 2 when edition type is lookback.")
@@ -1646,6 +1653,8 @@ def _generate_lookback_draft(
         freshness_summary={"blocks": 0, "warns": 0, "infos": 0},
         qg_results={},
         git_sha=_read_git_sha(),
+        gather_run_id=gather_run_id,
+        gather_run_hash=gather_run_hash,
     )
     qg_phase_1a = evaluate_phase_1a_gates(
         ban_list_violations=ban_violations,
@@ -1759,6 +1768,8 @@ def _generate_lookback_draft(
         qg_results=qg_report.qg_results,
         git_sha=_read_git_sha(),
         metadata={"ai_safety": {"trace_run_id": lookback_trace_run_id}} if lookback_trace_run_id is not None else None,
+        gather_run_id=gather_run_id,
+        gather_run_hash=gather_run_hash,
     )
 
     blocking_warnings = (
@@ -1866,6 +1877,8 @@ def _generate_lookback_draft(
             ),
             top_3_now=top_3_now,
             exec_summary_text=exec_summary_text,
+            gather_run_id=gather_run_id,
+            gather_run_hash=gather_run_hash,
         ),
     )
     manifest_path = write_run_manifest(
@@ -2190,7 +2203,8 @@ def _load_live_work_items(bundle: ReportBundle, as_of: datetime) -> tuple[tuple[
         bundle,
         as_of,
         ado_client_factory=ADOClient,
-        slice_contract_saved_query_ids=_slice_contract_saved_query_ids,
+        slice_contract_full_scope_query_ids=_slice_contract_full_scope_query_ids,
+        slice_contract_activity_delta_query_ids=_slice_contract_activity_delta_query_ids,
         slice_contract_saved_query_clauses=_slice_contract_saved_query_clauses,
         slice_contract_explicit_work_item_ids=_slice_contract_explicit_work_item_ids,
         query_work_item_batch_rows=_query_work_item_batch_rows,

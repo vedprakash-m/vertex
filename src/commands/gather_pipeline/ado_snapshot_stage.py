@@ -33,6 +33,12 @@ def _extract_vs403522_property(error_str: str) -> str | None:
     return m.group(1) if m else None
 
 
+#: Bounds the VS403522 (unavailable field) retry loop in
+#: ``load_analytics_signals`` so a project missing several Analytics fields
+#: is handled deterministically instead of looping forever.
+_MAX_VS403522_RETRIES = 3
+
+
 AnalyticsSignalBuilder = Callable[..., tuple[Signal, ...]]
 SprintSignalBuilder = Callable[..., tuple[Signal, ...]]
 WiqlGoldenSignalLoader = Callable[..., tuple[tuple[Signal, ...], int]]
@@ -64,50 +70,67 @@ def load_analytics_signals(
     )
     start_date_sk = date_to_sk_fn(as_of.date() - timedelta(days=program.ado.date_window_days))
     end_date_sk = date_to_sk_fn(as_of.date())
-    ado_calls = 1
-    try:
-        rows = client.query_work_item_snapshot(
-            filter_expression=build_analytics_snapshot_filter(
-                program.ado,
-                start_date_sk=start_date_sk,
-                end_date_sk=end_date_sk,
-            ),
-            select_fields=analytics_snapshot_fields,
-        )
-    except QueryError as error:
-        # VS403522: one or more fields unavailable in this ADO Analytics project.
-        # Retry once: remove IsLastRevisionOfDay from the filter AND strip any
-        # field name called out in the error from the select list.
-        if "VS403522" in str(error):
-            unavailable = _extract_vs403522_property(str(error))
-            trimmed_fields = (
-                tuple(f for f in analytics_snapshot_fields if f != unavailable)
-                if unavailable and unavailable in analytics_snapshot_fields
-                else analytics_snapshot_fields
-            )
-            log.warning(
-                "ADO analytics snapshot: VS403522 for %s (field=%r) — retrying without IsLastRevisionOfDay%s",
-                program.id,
-                unavailable,
-                f" and {unavailable}" if unavailable and trimmed_fields != analytics_snapshot_fields else "",
-            )
-            ado_calls += 1
+    ado_calls = 0
+    attempt_fields = analytics_snapshot_fields
+    include_last_revision_of_day = True
+    rows: list[dict[str, Any]] = []
+    for attempt in range(_MAX_VS403522_RETRIES + 1):
+        ado_calls += 1
+        try:
             rows = client.query_work_item_snapshot(
                 filter_expression=build_analytics_snapshot_filter(
                     program.ado,
                     start_date_sk=start_date_sk,
                     end_date_sk=end_date_sk,
-                    include_last_revision_of_day=False,
+                    include_last_revision_of_day=include_last_revision_of_day,
                 ),
-                select_fields=trimmed_fields,
+                select_fields=attempt_fields,
             )
-        else:
+            break
+        except QueryError as error:
+            # VS403522: a field unavailable in this ADO Analytics project.
+            # Deterministically strip the offending field -- IsLastRevisionOfDay
+            # from the filter, or the named field from the select list -- and
+            # retry, bounded by _MAX_VS403522_RETRIES so a project missing
+            # several fields is still handled without looping forever.
+            if "VS403522" not in str(error):
+                log.warning(
+                    "ADO analytics snapshot query failed for %s: %s — skipping analytics stage",
+                    program.id,
+                    error,
+                )
+                raise
+            if attempt == _MAX_VS403522_RETRIES:
+                log.warning(
+                    "ADO analytics snapshot query for %s still failing with VS403522 after %d retries — skipping analytics stage: %s",
+                    program.id,
+                    _MAX_VS403522_RETRIES,
+                    error,
+                )
+                raise
+            unavailable = _extract_vs403522_property(str(error))
+            changed = False
+            if unavailable == "IsLastRevisionOfDay" and include_last_revision_of_day:
+                include_last_revision_of_day = False
+                changed = True
+            elif unavailable and unavailable in attempt_fields:
+                attempt_fields = tuple(f for f in attempt_fields if f != unavailable)
+                changed = True
+            if not changed:
+                log.warning(
+                    "ADO analytics snapshot query for %s failed with VS403522 for an already-removed field %r — skipping analytics stage: %s",
+                    program.id,
+                    unavailable,
+                    error,
+                )
+                raise
             log.warning(
-                "ADO analytics snapshot query failed for %s: %s — skipping analytics stage",
+                "ADO analytics snapshot: VS403522 for %s (field=%r) — retrying without it (attempt %d/%d)",
                 program.id,
-                error,
+                unavailable,
+                attempt + 1,
+                _MAX_VS403522_RETRIES,
             )
-            raise
     analytics_signals = build_analytics_signals_fn(
         rows=rows,
         program_id=program.id,

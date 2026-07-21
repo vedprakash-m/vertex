@@ -23,11 +23,13 @@ it is unit-tested without touching real programs.
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
+from src.core.knowledge_store import get_shared_knowledge_root
 from src.core.privacy_matrix import (
     RETENTION_DAYS,
     SIDECAR_RETENTION,
@@ -145,6 +147,12 @@ def _row_contains_pii(row: dict) -> bool:
         "person",
         "person_id",
         "people_profiles",
+        # specs/people.md PPL-W1.8: the registry lease-audit and change-
+        # journal rows (§7.7/§7.8) name a real authenticated identity here,
+        # not a stable canonical ID -- IDs alone (entity_id, person:<ULID>)
+        # remain doctor/query-default-visible without --reveal-pii per
+        # §7.8, so they are deliberately NOT added as markers.
+        "authenticated_principal",
     )
     for marker in pii_markers:
         value = row.get(marker)
@@ -179,6 +187,20 @@ def _resolve_artifact_paths(
 ) -> tuple[Path, ...]:
     """Resolve any ``<token>`` placeholders in the rule's artifact_path."""
     path = rule.artifact_path
+    if "<workspace_root>" in path:
+        # specs/people.md PPL-W1.8: the registry lives under the shared
+        # `knowledge/` workspace root (get_shared_knowledge_root), NOT
+        # under `programs_root/<program_id>/` like every other rule here
+        # -- a genuinely different scope, not a placeholder naming
+        # convenience. Idempotent per the module's own design rule, so
+        # re-resolving/re-processing it on every program's purge call is
+        # a safety-vs-efficiency tradeoff, not a correctness one.
+        if "<year>" in path or "<end_sequence>" in path:
+            # Per-segment archive paths are immutable, HMAC-signed, and
+            # not resolvable without a directory walk -- same treatment
+            # as unresolved <edition> paths below.
+            return ()
+        return (get_shared_knowledge_root(programs_root) / path.replace("<workspace_root>/", ""),)
     if "<program_id>" in path:
         path = path.replace("<program_id>", program_id)
     if "<edition>" in path:
@@ -313,6 +335,41 @@ def _process_content_addressed_directory(
     )
 
 
+def _process_gather_run_directories(directory: Path, *, cutoff: datetime, retention: RetentionClass, apply: bool) -> PurgeRecord:
+    """Purge expired immutable gather runs without breaking current pointers."""
+    examined = purged = bytes_freed = 0
+    protected: set[str] = set()
+    for pointer_name in ("latest.json", "latest_full.json"):
+        try:
+            payload = json.loads((directory / pointer_name).read_text(encoding="utf-8"))
+            if isinstance(payload, dict) and isinstance(payload.get("run_id"), str):
+                protected.add(payload["run_id"])
+        except (OSError, ValueError):
+            pass
+    for state in ("committed", "failed", "quarantine"):
+        state_dir = directory / state
+        if not state_dir.is_dir():
+            continue
+        for run_dir in state_dir.iterdir():
+            manifest_path = run_dir / "manifest.json"
+            if not run_dir.is_dir() or run_dir.name in protected:
+                continue
+            examined += 1
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                timestamp = _parse_iso(manifest.get("finished_at") or manifest.get("started_at"))
+            except (OSError, ValueError, AttributeError):
+                continue
+            if timestamp is None or timestamp >= cutoff:
+                continue
+            size = sum(file.stat().st_size for file in run_dir.rglob("*") if file.is_file())
+            if apply:
+                shutil.rmtree(run_dir)
+            purged += 1
+            bytes_freed += size
+    return PurgeRecord(str(directory), retention, examined, purged, 0, bytes_freed, apply)
+
+
 def run_purge(
     program_id: str,
     *,
@@ -346,7 +403,9 @@ def run_purge(
             skipped.append(f"{rule.artifact_path}=<unresolved>")
             continue
         for path in paths:
-            if rule.directory_glob is not None:
+            if path.name == "gather_runs":
+                record = _process_gather_run_directories(path, cutoff=cutoff, retention=rule.retention, apply=apply)
+            elif rule.directory_glob is not None:
                 record = _process_content_addressed_directory(
                     path,
                     glob_pattern=rule.directory_glob,

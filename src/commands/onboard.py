@@ -23,6 +23,13 @@ from src.core.decision_register import save_decisions
 from src.core.edition_resolver import find_edition_yaml, resolve_edition_paths
 from src.core.exceptions import VertexError
 from src.core.models_v2 import Assumption, AssumptionStatus, Dependency
+from src.core.operator_identity import capture_operator_identity
+from src.core.people_registry_writer import (
+    OnboardingPerson,
+    OnboardingProgramGroup,
+    register_onboarding_facts,
+    shared_registry_is_active,
+)
 from src.core.policy_evaluator import build_default_escalation_rules_document
 from src.core.program_fact_store import (
     load_current_workstreams,
@@ -231,6 +238,7 @@ class OnboardResult:
     review_path: Path
     readme_path: Path | None = None
     validation: OnboardValidationResult | None = None
+    shared_registry_transaction_id: str | None = None
 
 
 def onboard_command(
@@ -238,6 +246,11 @@ def onboard_command(
     update: str | None = typer.Option(None, "--update", help="Existing edition name to update."),
     migrate_v3: bool = typer.Option(False, "--migrate-v3", help="Scaffold V3 program-model files for an existing edition without running the interactive wizard."),
     migrate_deps: bool = typer.Option(False, "--migrate-deps", help="Compatibility alias for --migrate-v3 when migrating legacy dependencies into dependencies.yaml."),
+    register_shared: bool = typer.Option(
+        False,
+        "--register-shared",
+        help="Register onboarding people and workstream groups in the canonical shared registry.",
+    ),
     ai: bool = typer.Option(False, "--ai", help="Use AI-assisted suggestions during onboarding when available."),
 ) -> None:
     run_migration = migrate_v3 or migrate_deps
@@ -249,9 +262,17 @@ def onboard_command(
     result = (
         run_onboard_migrate_v3(edition_name=update)
         if run_migration and update is not None
-        else run_onboard_update(edition_name=update, ai_enabled=ai)
+        else run_onboard_update(
+            edition_name=update,
+            ai_enabled=ai,
+            **({"register_shared": True} if register_shared else {}),
+        )
         if update is not None
-        else run_onboard_create(edition_name=edition or "", ai_enabled=ai)
+        else run_onboard_create(
+            edition_name=edition or "",
+            ai_enabled=ai,
+            **({"register_shared": True} if register_shared else {}),
+        )
     )
     typer.echo(f"{'Onboarding migration' if run_migration else 'Onboarding'} complete for {result.edition_name}.")
     typer.echo(f"Edition config: {result.edition_path}")
@@ -263,6 +284,8 @@ def onboard_command(
     typer.echo(f"Review config: {result.review_path}")
     if result.readme_path is not None:
         typer.echo(f"README: {result.readme_path}")
+    if result.shared_registry_transaction_id is not None:
+        typer.echo(f"Shared registry transaction: {result.shared_registry_transaction_id}")
     if result.validation is not None:
         _print_validation_summary(result.validation)
     typer.echo(f"Re-run `vertex draft --edition {result.edition_name} --dry-run` after edits to validate the edition again.")
@@ -273,6 +296,7 @@ def run_onboard_create(
     reports_root: Path | None = None,
     ai_enabled: bool = False,
     assistant: OnboardAssistant | None = None,
+    register_shared: bool = False,
 ) -> OnboardResult:
     resolved_reports_root = reports_root or REPORTS_ROOT
     _validate_edition_name(edition_name)
@@ -309,10 +333,11 @@ def run_onboard_create(
         edition_name=edition_name,
         paths=paths,
     )
+    use_shared_registry = register_shared or shared_registry_is_active(paths.programs_root)
     typer.echo()
     typer.echo("FINAL YAML PREVIEW")
     typer.echo("-" * 18)
-    _print_documents(documents)
+    _print_documents(documents, shared_factual=use_shared_registry)
 
     if not typer.confirm("Write these files?", default=True):
         typer.echo("Onboarding cancelled before writing files.")
@@ -323,6 +348,7 @@ def run_onboard_create(
         paths=paths,
         documents=documents,
         draft=draft,
+        register_shared=register_shared,
     )
 
 
@@ -331,6 +357,7 @@ def run_onboard_update(
     reports_root: Path | None = None,
     ai_enabled: bool = False,
     assistant: OnboardAssistant | None = None,
+    register_shared: bool = False,
 ) -> OnboardResult:
     resolved_reports_root = reports_root or REPORTS_ROOT
     _validate_edition_name(edition_name)
@@ -348,11 +375,13 @@ def run_onboard_update(
         reports_root=resolved_reports_root,
     )
     updated_draft = _collect_onboard_draft(edition_name, draft, assistant=resolved_assistant)
+    use_shared_registry = register_shared or shared_registry_is_active(paths.programs_root)
     documents = _ensure_optional_authoring_scaffolds(
         _merge_existing_documents(
             existing_documents=existing_documents,
             generated_documents=_build_documents(edition_name, updated_draft),
             edition_name=edition_name,
+            merge_factual=not use_shared_registry,
         ),
         edition_name=edition_name,
         paths=paths,
@@ -371,6 +400,7 @@ def run_onboard_update(
         paths=paths,
         documents=documents,
         draft=updated_draft,
+        register_shared=register_shared,
     )
 
 
@@ -1515,6 +1545,38 @@ def _build_people_directory_document(draft: OnboardDraft, *, program_id: str) ->
     }
 
 
+def _onboarding_people(draft: OnboardDraft) -> tuple[OnboardingPerson, ...]:
+    workstream_ids_by_name = {
+        workstream.name: _make_identifier(workstream.name)
+        for workstream in (draft.people.workstreams if draft.people else ())
+    }
+    return tuple(
+        OnboardingPerson(
+            alias=_alias_from_email(email),
+            email=email,
+            display_name=_optional_str(person.get("display_name")),
+            team_ids=tuple(
+                workstream_ids_by_name[name]
+                for name in person.get("workstreams", [])
+                if name in workstream_ids_by_name
+            ),
+        )
+        for person in _build_program_people(draft)
+        if (email := _optional_str(person.get("email"))) is not None
+    )
+
+
+def _onboarding_program_groups(draft: OnboardDraft) -> tuple[OnboardingProgramGroup, ...]:
+    return tuple(
+        OnboardingProgramGroup(
+            id=_make_identifier(workstream.name),
+            name=workstream.name,
+            area_paths=workstream.area_paths,
+        )
+        for workstream in (draft.people.workstreams if draft.people else ())
+    )
+
+
 def _build_teams_document(draft: OnboardDraft, *, program_id: str) -> dict[str, Any]:
     return {
         "schema_version": "1.0",
@@ -1532,19 +1594,25 @@ def _build_teams_document(draft: OnboardDraft, *, program_id: str) -> dict[str, 
     }
 
 
-def _print_documents(documents: OnboardDocuments) -> None:
-    document_pairs = (
+def _print_documents(documents: OnboardDocuments, *, shared_factual: bool = False) -> None:
+    document_pairs = [
         ("editions/<edition>.yaml", documents.edition),
         ("program.yaml", documents.program),
         ("workstreams.yaml", documents.workstreams),
         ("scorecards.yaml", documents.scorecards),
         ("editorial_rules.yaml", documents.editorial_rules),
         ("review.yaml", documents.review),
-        ("knowledge/people_directory.yaml", documents.people_directory),
-        ("knowledge/teams.yaml", documents.teams),
         ("knowledge/products.yaml", documents.products),
         ("knowledge/golden_queries.yaml", documents.golden_queries),
-    )
+    ]
+    if shared_factual:
+        typer.echo("shared registry factual registration")
+        typer.echo("  people and workstream groups will be written as typed shared registry records")
+    else:
+        document_pairs[6:6] = [
+            ("knowledge/people_directory.yaml", documents.people_directory),
+            ("knowledge/teams.yaml", documents.teams),
+        ]
     for label, document in document_pairs:
         typer.echo(label)
         typer.echo(_dump_yaml(document), nl=False)
@@ -2079,6 +2147,7 @@ def _merge_existing_documents(
     existing_documents: OnboardDocuments,
     generated_documents: OnboardDocuments,
     edition_name: str,
+    merge_factual: bool = True,
 ) -> OnboardDocuments:
     return OnboardDocuments(
         edition=_merge_edition_document(existing_documents.edition, generated_documents.edition, edition_name),
@@ -2087,8 +2156,16 @@ def _merge_existing_documents(
         scorecards=_merge_scorecards_document(existing_documents.scorecards, generated_documents.scorecards),
         editorial_rules=_merge_editorial_rules_document(existing_documents.editorial_rules, generated_documents.editorial_rules),
         review=_merge_review_document(existing_documents.review, generated_documents.review),
-        people_directory=_merge_people_directory_document(existing_documents.people_directory, generated_documents.people_directory),
-        teams=_merge_teams_document(existing_documents.teams, generated_documents.teams),
+        people_directory=(
+            _merge_people_directory_document(existing_documents.people_directory, generated_documents.people_directory)
+            if merge_factual
+            else generated_documents.people_directory
+        ),
+        teams=(
+            _merge_teams_document(existing_documents.teams, generated_documents.teams)
+            if merge_factual
+            else generated_documents.teams
+        ),
         products=existing_documents.products if existing_documents.products else generated_documents.products,
         golden_queries=existing_documents.golden_queries if existing_documents.golden_queries else generated_documents.golden_queries,
     )
@@ -2380,7 +2457,13 @@ def _build_default_onboard_assistant(*, trace_context: AITraceContext) -> Onboar
     return _build_onboard_assistant()
 
 
-def _write_documents(paths: OnboardPaths, edition_name: str, documents: OnboardDocuments) -> None:
+def _write_documents(
+    paths: OnboardPaths,
+    edition_name: str,
+    documents: OnboardDocuments,
+    *,
+    write_factual: bool,
+) -> None:
     paths.editions_root.mkdir(parents=True, exist_ok=True)
     paths.programs_root.mkdir(parents=True, exist_ok=True)
     paths.program_dir.mkdir(parents=True, exist_ok=True)
@@ -2403,8 +2486,9 @@ def _write_documents(paths: OnboardPaths, edition_name: str, documents: OnboardD
     _write_yaml(paths.program_dir / "scorecards.yaml", documents.scorecards)
     _write_yaml(paths.program_dir / "editorial_rules.yaml", documents.editorial_rules)
     _write_yaml(paths.program_dir / "review.yaml", documents.review)
-    _write_yaml(paths.knowledge_dir / "people_directory.yaml", documents.people_directory)
-    _write_yaml(paths.knowledge_dir / "teams.yaml", documents.teams)
+    if write_factual:
+        _write_yaml(paths.knowledge_dir / "people_directory.yaml", documents.people_directory)
+        _write_yaml(paths.knowledge_dir / "teams.yaml", documents.teams)
     _write_yaml(paths.knowledge_dir / "products.yaml", documents.products)
     _write_yaml(paths.knowledge_dir / "golden_queries.yaml", documents.golden_queries)
 
@@ -2414,9 +2498,27 @@ def _finalize_onboarding(
     paths: OnboardPaths,
     documents: OnboardDocuments,
     draft: OnboardDraft,
+    register_shared: bool = False,
 ) -> OnboardResult:
     program_id = draft.identity.program_id if draft.identity is not None else _default_program_id("", edition_name)
-    _write_documents(paths, edition_name, documents)
+    use_shared_registry = register_shared or shared_registry_is_active(paths.programs_root)
+    _write_documents(paths, edition_name, documents, write_factual=not use_shared_registry)
+    shared_registry_transaction_id: str | None = None
+    if use_shared_registry:
+        identity = capture_operator_identity("vertex-onboard-register-shared")
+        if not identity.principal:
+            raise typer.BadParameter("Could not resolve an authenticated OS/service principal for shared registry registration.")
+        shared_result = register_onboarding_facts(
+            program_id=program_id,
+            people=_onboarding_people(draft),
+            groups=_onboarding_program_groups(draft),
+            programs_root=paths.programs_root,
+            actor=identity.principal,
+            reason=f"vertex onboard {'--register-shared ' if register_shared else ''}{edition_name}",
+            source_ref=f"edition:{edition_name}",
+            apply=True,
+        )
+        shared_registry_transaction_id = shared_result.transaction_id
     _ensure_program_store_scaffolds(program_id, paths)
     validation = _run_onboard_validation(edition_name=edition_name, reports_root=paths.reports_root)
     readme_path = _write_readme(paths.program_dir, edition_name=edition_name, draft=draft, validation=validation)
@@ -2426,6 +2528,7 @@ def _finalize_onboarding(
         paths=paths,
         readme_path=readme_path,
         validation=validation,
+        shared_registry_transaction_id=shared_registry_transaction_id,
     )
 
 
@@ -2621,6 +2724,7 @@ def _build_onboard_result(
     paths: OnboardPaths,
     readme_path: Path | None = None,
     validation: OnboardValidationResult | None = None,
+    shared_registry_transaction_id: str | None = None,
 ) -> OnboardResult:
     return OnboardResult(
         edition_name=edition_name,
@@ -2634,4 +2738,5 @@ def _build_onboard_result(
         review_path=paths.program_dir / "review.yaml",
         readme_path=readme_path,
         validation=validation,
+        shared_registry_transaction_id=shared_registry_transaction_id,
     )

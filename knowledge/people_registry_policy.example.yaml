@@ -1,0 +1,42 @@
+# Synthetic example only. Illustrates the ALLOWLISTED customer-override
+# shape for the people-registry policy extensions named in
+# specs/people.md §6.6 -- effective policy is always
+# "platform safe defaults -> allowlisted customer override". This file
+# does not replace the platform-managed schemas in vertex/policies/; it
+# only shows which keys a customer override under knowledge/policies/
+# may set. No real customer names, thresholds, or provider details.
+schema_version: "1.0"
+
+# Mirrors a new `people_registry` section inside vertex/policies/freshness_policy.yaml.
+freshness_policy_override:
+  people_registry:
+    audience_critical_sla_days: 14
+    accountability_critical_sla_days: 30
+    informational_sla_days: 90
+
+# New sibling file: knowledge/policies/identity_source_authority.yaml
+# (never overloads the existing fact-family source_authority.yaml).
+identity_source_authority_override:
+  provider_priority:
+    - sample_directory_provider
+    - operator_assertion
+  auto_accept_confidence_threshold: 0.95
+
+# New sibling file: knowledge/policies/identity_event_materiality.yaml.
+identity_event_materiality_override:
+  emit_title_changes: false
+  emit_department_changes: false
+  emit_lifecycle_changes: true
+
+# Mirrors new people-registry entries inside vertex/policies/privacy_policy.yaml.
+privacy_policy_override:
+  people_registry:
+    default_encryption: sensitive_only
+    reveal_requires_principal_allowlist: true
+    retention_days: 730
+
+# Mirrors a new `people_registry_field_allowlists` section inside
+# vertex/policies/ai_policy.yaml.
+ai_field_allowlist_override:
+  exec_summary_drafter:
+    - display_name

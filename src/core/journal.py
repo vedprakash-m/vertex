@@ -156,16 +156,24 @@ def read_signals(
     start: datetime | None = None,
     end: datetime | None = None,
     workstream_id: str | None = None,
+    require_committed_gather_run: bool = False,
     programs_root: Path = PROGRAMS_ROOT,
 ) -> tuple[Signal, ...]:
     start_ts = _require_utc_timestamp(start) if start is not None else None
     end_ts = _require_utc_timestamp(end) if end is not None else None
     thread_links = load_latest_signal_threads(program_id, programs_root=programs_root)
+    committed_run_ids: set[str] | None = None
+    if require_committed_gather_run:
+        from src.core.gather_run_manifest import get_verified_committed_run_ids
+
+        committed_run_ids = set(get_verified_committed_run_ids(program_id, programs_root=programs_root))
 
     signals: list[Signal] = []
     for path in _iter_weekly_journal_paths(program_id, programs_root):
         for record in _read_jsonl(path):
             signal = _signal_from_record(record)
+            if committed_run_ids is not None and signal.gather_run_id is not None and signal.gather_run_id not in committed_run_ids:
+                continue
             thread_link = thread_links.get(signal.id)
             if thread_link is not None and signal.thread_id != thread_link.thread_id:
                 signal = replace(signal, thread_id=thread_link.thread_id)
@@ -338,6 +346,7 @@ def _signal_to_record(signal: Signal) -> dict[str, Any]:
         "meta": signal.metadata,
         "thread_id": signal.thread_id,
         "review_policy": signal.review_policy.value if signal.review_policy is not None else None,
+        "gather_run_id": signal.gather_run_id,
     }
 
 
@@ -363,6 +372,7 @@ def _signal_from_record(record: dict[str, Any]) -> Signal:
             if record.get("review_policy") is not None
             else None
         ),
+        gather_run_id=_optional_string(record.get("gather_run_id")),
     ))
 
 

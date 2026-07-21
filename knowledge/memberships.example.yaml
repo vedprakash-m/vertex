@@ -1,0 +1,16 @@
+# Synthetic example only. Illustrates memberships.yaml schema 1.0 for
+# specs/people.md Phase 2a (PPL-W2A.3). No real customer names. See
+# specs/people.md §7.2 for the binding TeamMembership contract.
+schema_version: "1.0"
+memberships:
+  - membership_id: "membership:9f2c1a4e6b7d8f0a1c3e5b7d9f1a3c5e7b9d1f3a5c7e9b1d3f5a7c9e1b3d5f7a"
+    person_entity_id: "person:01HQ8Y1A2B3C4D5E6F7G8H9J0K"
+    team_entity_id: "team:01HQ8Y2K3L4M5N6P7Q8R9S0T1U"
+    role: "member"
+    valid_from: "2026-01-15T00:00:00+00:00"
+    valid_until: null
+    status: active
+    source: "sample_directory_provider"
+    source_ref: null
+    observed_at: "2026-01-15T00:00:00+00:00"
+    verified_at: "2026-01-15T00:00:00+00:00"

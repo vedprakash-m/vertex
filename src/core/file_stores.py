@@ -24,15 +24,17 @@ class FileSignalStore:
         end: datetime | None = None,
         **filters: Any,
     ) -> tuple[Signal, ...]:
-        unexpected_filters = sorted(key for key in filters if key != "workstream_id")
+        unexpected_filters = sorted(key for key in filters if key not in {"workstream_id", "require_committed_gather_run"})
         if unexpected_filters:
             raise TypeError(f"Unsupported signal filters: {', '.join(unexpected_filters)}")
         workstream_id = filters.get("workstream_id")
+        require_committed_gather_run = bool(filters.get("require_committed_gather_run", False))
         return journal.read_signals(
             program_id,
             start=start,
             end=end,
             workstream_id=workstream_id,
+            require_committed_gather_run=require_committed_gather_run,
             programs_root=self._programs_root,
         )
 

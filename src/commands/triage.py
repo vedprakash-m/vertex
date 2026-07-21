@@ -77,6 +77,7 @@ from src.core.trusted_baseline_store import load_trusted_baseline_issue
 from src.core.trajectory_analyzer import analyze_trajectories
 from src.core.config_loader import REPORTS_ROOT, load_bundle_with_mode
 from src.core.continuation_contract import get_continuation_contract_path, load_continuation_contract
+from src.core.context_proposal_review import load_pending_context_proposal_rows
 from src.core.archive_store import get_dimension_history, read_archive_index
 from src.core.edition_resolver import get_nudge_paths, get_program_output_dir, resolve_edition, PROGRAMS_ROOT
 from src.core.freshness_engine import build_freshness_report
@@ -171,6 +172,8 @@ def render_triage_output(artifacts: TriageArtifacts, *, format: str) -> str:
             writer.writerow(("stale_claim", payload["edition_name"], payload["issue_number"], payload["program_id"], claim["effective_status"], claim["claim_id"], claim["text"], claim["owner_alias"], claim["workstream_id"], claim["reason_with_confidence"]))
         for proposal in payload["dependency_proposals"]:
             writer.writerow(("dependency_proposal", payload["edition_name"], payload["issue_number"], payload["program_id"], proposal["status"], proposal["id"], proposal["summary"], None, None, json.dumps({"accept_command": proposal["accept_command"], "confidence": proposal["confidence"], "detection_method": proposal["detection_method"], "from_item_id": proposal["from_item_id"], "from_workstream_id": proposal["from_workstream_id"], "occurrence_count": proposal["occurrence_count"], "to_item_id": proposal["to_item_id"], "to_workstream_id": proposal["to_workstream_id"]}, sort_keys=True)))
+        for proposal in payload["context_revisions"]:
+            writer.writerow(("context_revision", payload["edition_name"], proposal["issue_number"], payload["program_id"], "pending", proposal["proposal_id"], proposal["target"], None, None, json.dumps(proposal, sort_keys=True)))
         for learning in payload["incident_learnings"]:
             writer.writerow(("incident_learning", payload["edition_name"], payload["issue_number"], payload["program_id"], learning["confidence"], None, learning["summary"], None, None, learning["summary_with_confidence"]))
         return buffer.getvalue()
@@ -218,6 +221,7 @@ def _build_triage_payload(artifacts: TriageArtifacts) -> dict[str, Any]:
             "correlated_items": len(report.correlated_items),
             "coverage_gaps": len(report.coverage_gaps),
             "cross_program_cascades": len(report.cross_program_cascades),
+            "context_revisions": len(report.context_proposals),
             "dependency_proposals": len(report.dependency_proposals),
             "decision_debt": len(report.decision_debt),
             "decisions": len(report.decisions),
@@ -246,6 +250,20 @@ def _build_triage_payload(artifacts: TriageArtifacts) -> dict[str, Any]:
             for gap in report.coverage_gaps
         ],
         "cross_program_cascades": list(report.cross_program_cascades),
+        "context_revisions": [
+            {
+                "conflict_state": proposal.conflict_state,
+                "current_value_hash": proposal.current_value_hash,
+                "current_value_hash_label": proposal.current_hash_label,
+                "evidence": proposal.evidence,
+                "issue_number": proposal.issue_number,
+                "next_command": proposal.next_command,
+                "proposal_id": proposal.proposal_id,
+                "proposed_value": proposal.proposed_value,
+                "target": proposal.target,
+            }
+            for proposal in report.context_proposals
+        ],
         "dependency_proposals": [
             {
                 "accept_command": f"vertex dependencies accept --program {report.program_id} --id {proposal.id}",
@@ -520,6 +538,7 @@ def generate_triage_report(
     correlated_items: tuple[CorrelatedTriageItem, ...] = ()
     contradiction_lines: tuple[str, ...] = ()
     decision_debt_lines: tuple[str, ...] = ()
+    context_proposals = ()
     vitality_summary = None
     stale_narratives: tuple[StaleNarrativeFinding, ...] = ()
     open_claims: tuple[ClaimEntry, ...] = ()
@@ -647,6 +666,10 @@ def generate_triage_report(
         decision_debt_lines = _build_decision_debt_triage_lines(open_decision_asks, as_of=current_time)
         dependency_proposals = _build_dependency_proposal_triage_items(
             program_id=program_id,
+            programs_root=programs_root,
+        )
+        context_proposals = load_pending_context_proposal_rows(
+            program_id,
             programs_root=programs_root,
         )
         item_urls = report_command_helpers._build_item_urls(bundle, items)
@@ -902,6 +925,7 @@ def generate_triage_report(
         decision_debt=decision_debt_lines,
         dependency_proposals=dependency_proposals,
         incident_learnings=incident_learning_lines,
+        context_proposals=context_proposals,
         auto_approved_signal_count=auto_approved_signal_count,
         provisional_signal_count=provisional_signal_count,
         material_conflict_count=material_conflict_count,

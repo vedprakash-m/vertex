@@ -14,7 +14,7 @@ def slice_contract_saved_query_clauses(slice_contracts: tuple[SliceContract, ...
         ado_contract = contract.source_contract.ado
         if ado_contract is None:
             continue
-        clause_parts = [
+        base_clause_parts = [
             clause
             for clause in (
                 render_saved_query_filter_clause(ado_contract.filters) if ado_contract.filters is not None else "",
@@ -22,11 +22,25 @@ def slice_contract_saved_query_clauses(slice_contracts: tuple[SliceContract, ...
             )
             if clause
         ]
-        clause = " and ".join(f"({part})" for part in clause_parts)
-        if not clause:
-            continue
-        for query_id in ado_contract.saved_queries:
-            clauses_by_query_id.setdefault(query_id, []).append(clause)
+        # Schema 1.1 deliberately makes a binding the unit of scope.  The
+        # same saved query can be split between lanes (e.g. Buildout and
+        # XCatalog), so applying only the parent slice filter either leaks a
+        # lane or drops it entirely.  Keep legacy/slice-wide behavior by
+        # treating an absent binding filter as an empty conjunct.
+        bindings = ado_contract.saved_query_bindings
+        if bindings:
+            binding_items = ((binding.query_id, binding.filter) for binding in bindings)
+        else:  # Defensive compatibility for hand-built contracts in callers.
+            binding_items = ((query_id, None) for query_id in ado_contract.saved_queries)
+        for query_id, binding_filter in binding_items:
+            clause_parts = [*base_clause_parts]
+            if binding_filter is not None:
+                binding_clause = render_saved_query_filter_clause(binding_filter)
+                if binding_clause:
+                    clause_parts.append(binding_clause)
+            clause = " and ".join(f"({part})" for part in clause_parts)
+            if clause:
+                clauses_by_query_id.setdefault(query_id, []).append(clause)
 
     merged_clauses: dict[str, str] = {}
     for query_id, clauses in clauses_by_query_id.items():
@@ -52,6 +66,7 @@ def render_saved_query_filter_clause(filter_definition: Any) -> str:
             "title": "[System.Title]",
             "tag": "[System.Tags]",
             "area_path": "[System.AreaPath]",
+            "work_item_type": "[System.WorkItemType]",
         }.get(field_name)
         if field_ref is None:
             return None
@@ -60,14 +75,16 @@ def render_saved_query_filter_clause(filter_definition: Any) -> str:
         if field_name == "area_path":
             if operator == "eq":
                 return f"{field_ref} = '{escaped_value}'"
-            if operator == "contains" and "\\" in raw_value:
+            if operator == "under":
                 return f"{field_ref} under '{escaped_value}'"
+            if operator == "not_under":
+                return f"{field_ref} not under '{escaped_value}'"
             return None
+        if field_name == "tag" and operator in {"contains", "contains_words", "eq"}:
+            return f"{field_ref} Contains Words '{escaped_value}'"
         if operator == "contains":
             return f"{field_ref} contains '{escaped_value}'"
         if operator == "eq":
-            if field_name == "tag":
-                return f"{field_ref} Contains Words '{escaped_value}'"
             return f"{field_ref} = '{escaped_value}'"
         return None
 

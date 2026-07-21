@@ -84,9 +84,23 @@ def run_confirm_readiness_doctor(
                 status="fail",
                 detail=(
                     f"{len(needs_input)} dimension(s) have '❓ Needs Input' risk level: {joined}. "
-                    f"Edit {overrides_path.name} and set a valid risk level for each."
+                    f"Edit {overrides_path} and set a valid risk level for each."
                 ),
-                metadata={"program_id": program_id, "needs_input_dimensions": list(needs_input)},
+                metadata={
+                    "program_id": program_id,
+                    "overrides_path": str(overrides_path),
+                    "needs_input_dimensions": list(needs_input),
+                    "action_category": "pm-decision-required",
+                    "owner": ["pm"],
+                    "evidence_to_gather": [
+                        "A reviewed risk level for each listed scorecard dimension",
+                        "The rationale/evidence used for each human-authored risk decision",
+                    ],
+                    "llm_support": (
+                        "Can summarize current evidence and draft a risk-decision brief, "
+                        "but cannot assign or approve the risk levels."
+                    ),
+                },
             ))
         else:
             checks.append(DoctorCheck(
@@ -190,7 +204,14 @@ def _latest_overrides_path(overrides_dir: Path) -> Path | None:
 
 
 def _find_needs_input_dimensions(overrides_path: Path) -> list[str]:
-    """Return dimension names whose risk level is still '❓ Needs Input'."""
+    """Return every risk-bearing override path still awaiting a decision.
+
+    Legacy overrides use a flat ``dimensions.<name>.risk`` shape while
+    program scorecards use ``scorecards.<scorecard>.<dimension>.risk``.  The
+    previous one-level scan reported the scorecard itself when its nested
+    dimension mappings did not have a direct ``risk`` key, masking the actual
+    individual PM decisions required for a safe first confirm.
+    """
     try:
         doc = yaml.safe_load(overrides_path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError:
@@ -201,10 +222,31 @@ def _find_needs_input_dimensions(overrides_path: Path) -> list[str]:
     if not isinstance(dimensions, dict):
         return []
     blocked: list[str] = []
+
+    def collect(path: str, body: Any) -> None:
+        if not isinstance(body, dict):
+            return
+        if "risk" in body:
+            risk_value = str(body.get("risk", "") or "").strip()
+            if risk_value in _NEEDS_INPUT_MARKERS:
+                blocked.append(path)
+            return
+
+        child_mappings = [
+            (str(name), value)
+            for name, value in body.items()
+            if isinstance(value, dict)
+        ]
+        if child_mappings:
+            for child_name, child_body in child_mappings:
+                collect(f"{path} / {child_name}", child_body)
+            return
+
+        # A direct dimension mapping without a risk is as unresolved as a
+        # visible `Needs Input` marker; retain that established validation
+        # behavior for malformed or incomplete flat overrides.
+        blocked.append(path)
+
     for dim_name, dim_body in dimensions.items():
-        if not isinstance(dim_body, dict):
-            continue
-        risk_value = str(dim_body.get("risk", "") or "").strip()
-        if risk_value in _NEEDS_INPUT_MARKERS:
-            blocked.append(str(dim_name))
+        collect(str(dim_name), dim_body)
     return blocked

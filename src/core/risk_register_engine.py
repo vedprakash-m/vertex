@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -298,23 +299,32 @@ def is_unsourced(entry: RiskEntry) -> bool:
     return not entry.source_signal_ids and not entry.linked_claim_ids
 
 
-def upsert_risk_from_signal(
+def _decide_risk_upsert(
     program_id: str,
+    entries: list[RiskEntry],
+    *,
     signal_id: str,
     signal_text: str,
     signal_entity_refs: tuple[str, ...],
     signal_workstream_id: str | None,
-    programs_root: Path = PROGRAMS_ROOT,
-) -> RiskEntry:
-    """Create or update a risk entry from a risk-class signal.
+) -> tuple[RiskEntry, str]:
+    """Pure decision shared by ``upsert_risk_from_signal`` (real, mutating) and
+    ``preview_risk_upserts_from_signals`` (AG-6.3 confirm dry-run preview, no
+    persistence) -- exactly one place implements the entity-refs matching
+    rule so the two can never drift apart.
 
     Matches an existing risk by entity_refs overlap; if no match is found,
-    creates a new OPEN risk with placeholder fields.  Either way, the
-    calling signal's ID is accumulated into source_signal_ids.
+    decides a new OPEN risk with placeholder fields would be created. Either
+    way, the signal's ID would be accumulated into source_signal_ids.
+
+    Mutates ``entries`` in place (replaces the matched entry / appends the new
+    one) so a caller folding a whole signal batch through this sequentially
+    sees the same entity-ref matches a live run would produce. Returns
+    ``(resulting_entry, action)`` where ``action`` is one of ``"new"``,
+    ``"updated"``, or ``"no_change"`` (the signal was already recorded on its
+    matched risk).
     """
     today = datetime.now(timezone.utc).date()
-    entries = list(load_risk_register(program_id, programs_root=programs_root))
-
     ref_set = frozenset(signal_entity_refs)
     matched_index: int | None = None
     for i, entry in enumerate(entries):
@@ -331,9 +341,8 @@ def upsert_risk_from_signal(
                 last_reviewed_date=today,
             )
             entries[matched_index] = updated
-            save_risk_register(program_id, tuple(entries), programs_root=programs_root)
-            return updated
-        return existing
+            return updated, "updated"
+        return existing, "no_change"
 
     title = signal_text[:120].strip().rstrip(".,;") or "Untitled risk from signal"
     new_entry = RiskEntry(
@@ -365,8 +374,89 @@ def upsert_risk_from_signal(
         kind=RiskKind.CANDIDATE.value,
     )
     entries.append(new_entry)
-    save_risk_register(program_id, tuple(entries), programs_root=programs_root)
-    return new_entry
+    return new_entry, "new"
+
+
+def upsert_risk_from_signal(
+    program_id: str,
+    signal_id: str,
+    signal_text: str,
+    signal_entity_refs: tuple[str, ...],
+    signal_workstream_id: str | None,
+    programs_root: Path = PROGRAMS_ROOT,
+) -> RiskEntry:
+    """Create or update a risk entry from a risk-class signal.
+
+    Matches an existing risk by entity_refs overlap; if no match is found,
+    creates a new OPEN risk with placeholder fields.  Either way, the
+    calling signal's ID is accumulated into source_signal_ids.
+    """
+    entries = list(load_risk_register(program_id, programs_root=programs_root))
+    result, action = _decide_risk_upsert(
+        program_id,
+        entries,
+        signal_id=signal_id,
+        signal_text=signal_text,
+        signal_entity_refs=signal_entity_refs,
+        signal_workstream_id=signal_workstream_id,
+    )
+    if action != "no_change":
+        save_risk_register(program_id, tuple(entries), programs_root=programs_root)
+    return result
+
+
+@dataclass(frozen=True, slots=True)
+class RiskDeltaPreviewEntry:
+    """One row of a confirm dry-run's risk-register delta preview (D-17/
+    ARM-GATHER-11 AG-6.3): what ``upsert_risk_from_signal`` would do for one
+    RISK-class signal, computed without mutating ``risk_register.yaml``."""
+
+    signal_id: str
+    action: str  # "new" | "updated" | "no_change"
+    risk_id: str
+    title: str
+
+
+def preview_risk_upserts_from_signals(
+    program_id: str,
+    signals: tuple[tuple[str, str, tuple[str, ...], str | None], ...],
+    programs_root: Path = PROGRAMS_ROOT,
+) -> tuple[RiskDeltaPreviewEntry, ...]:
+    """Non-mutating preview of what ``upsert_risk_from_signal`` would do for
+    each ``(signal_id, signal_text, signal_entity_refs, signal_workstream_id)``
+    tuple, applied in order against the *current* ``risk_register.yaml``.
+    Never calls ``save_risk_register``; reuses ``_decide_risk_upsert`` so the
+    preview can never drift from the real upsert's matching rules (AG-6.5:
+    "real confirm matches preview").
+    """
+    entries = list(load_risk_register(program_id, programs_root=programs_root))
+    previews: list[RiskDeltaPreviewEntry] = []
+    for signal_id, signal_text, signal_entity_refs, signal_workstream_id in signals:
+        result, action = _decide_risk_upsert(
+            program_id,
+            entries,
+            signal_id=signal_id,
+            signal_text=signal_text,
+            signal_entity_refs=signal_entity_refs,
+            signal_workstream_id=signal_workstream_id,
+        )
+        previews.append(RiskDeltaPreviewEntry(signal_id=signal_id, action=action, risk_id=result.id, title=result.title))
+    return tuple(previews)
+
+
+def compute_risk_delta_preview_hash(previews: tuple[RiskDeltaPreviewEntry, ...]) -> str:
+    """Canonical hash binding a risk-delta preview to the exact signal set and
+    resulting actions it was computed from (AG-6.3: "hash-bound"). A real
+    confirm recomputing the same preview over an unchanged approved-signal
+    set and risk register produces an identical hash; any divergence (a
+    signal newly approved/unapproved, or a risk register edited between
+    dry-run and real confirm) changes it, making drift detectable."""
+    payload = [
+        {"signal_id": entry.signal_id, "action": entry.action, "risk_id": entry.risk_id, "title": entry.title}
+        for entry in previews
+    ]
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _parse_risk_entry(program_id: str, raw_entry: dict[str, Any]) -> RiskEntry:

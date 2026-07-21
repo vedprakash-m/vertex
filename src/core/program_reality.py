@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
 from src.core.truth_levels import TruthLevel
 from src.core.archive_store import find_latest_confirmed_entry, read_archive_index
+from src.core.people_legacy_affiliation import LegacyAffiliationEdge
 from src.core.knowledge_claim_store import KnowledgeContext, load_program_knowledge_claims, load_program_knowledge_scopes, resolve_knowledge_context, summarize_knowledge_status
 from src.core.knowledge.vault_integrity import summarize_knowledge_vault_integrity
 from src.core.ledger.candidate_store import CandidateDecisionRecord, load_triage_decisions
@@ -41,7 +42,6 @@ from src.core.program_fact_store import (
     FactLineage,
     ProgramFactRevision,
     ProgramFactSnapshot,
-    FactLifecycleState,
     is_fact_stale,
     load_program_facts,
     project_action_items,
@@ -59,10 +59,8 @@ from src.core.models_v2 import (
     ClaimEntry,
     DecisionEntry,
     Dependency,
-    MetricObservation,
     Milestone,
     RiskEntry,
-    Signal,
     Workstream,
 )
 
@@ -654,6 +652,22 @@ def _check_decision_outcome_drift(
 # ProgramReality facade
 # ---------------------------------------------------------------------------
 
+def _resolve_committed_gather_run_requirement(
+    program_id: str,
+    *,
+    programs_root: Path,
+    override: bool | None,
+) -> bool:
+    """Resolve D-24 reader activation while preserving an explicit override."""
+    if override is not None:
+        return override
+
+    from src.core.edition_resolver import load_program
+
+    configured_program = load_program(program_id, programs_root=programs_root)
+    return bool(configured_program and configured_program.gather.requires_committed_gather_run)
+
+
 class ProgramReality:
     """The single read interface for program state (G-1, §6.1).
 
@@ -741,6 +755,7 @@ class ProgramReality:
         archive_root: Path = ARCHIVE_ROOT,
         domains: tuple[str, ...] | None = None,
         entity_registry: EntityRegistry | None = None,
+        require_committed_gather_run: bool | None = None,
     ) -> "ProgramReality":
         """Load program reality from disk. The ONLY disk-touching point.
 
@@ -767,12 +782,22 @@ class ProgramReality:
         _sor_state = _load_sor_state(program_id, programs_root=programs_root)
         _family_sor_modes: dict[str, str] = dict(_sor_state.family_modes) if _sor_state else {}
 
+        # D-24: an explicit config can activate committed-run readers without
+        # changing every caller. Passing True/False remains a one-call override
+        # for canaries and rollback tests.
+        require_committed_gather_run = _resolve_committed_gather_run_requirement(
+            program_id,
+            programs_root=programs_root,
+            override=require_committed_gather_run,
+        )
+
         # Load the fact snapshot (single I/O point) — pass sor_state for S-5a per-family shim filtering
         snapshot = load_program_facts(
             program_id,
             as_of=as_of,
             programs_root=programs_root,
             sor_state=_sor_state,
+            require_committed_gather_run=require_committed_gather_run,
         )
 
         # Project domain views from snapshot
@@ -2113,6 +2138,44 @@ class FleetReality:
             for conflict in program.conflicts(open_only=open_only):
                 results.append(FleetConflict(program_id=program.program_id, conflict=conflict))
         return tuple(results)
+
+    def people_programs(self, alias: str, *, programs_root: Path) -> tuple[LegacyAffiliationEdge, ...]:
+        """specs/people.md PPL-W3.3: §11.1 "Fleet/query parity" -- returns
+        the SAME affiliation-edge shape `vertex kb people programs`
+        already returns (`LegacyAffiliationEdge`, PPL-W2A.2/Phase 0c),
+        restricted to this fleet's own active, non-archived program set
+        (§8.4's centralized predicate), plus additive registry-derived
+        `legacy_team_program` edges (PPL-W3.3) for any program currently
+        in `shadow`/`primary` mode. Archived programs are excluded
+        entirely -- neither legacy nor registry edges are emitted for
+        them, matching §8.4's "one centralized predicate... reused by...
+        FleetReality... query... checks." """
+        from src.core.knowledge_store import get_shared_knowledge_root
+        from src.core.people_legacy_affiliation import find_alias_edges
+        from src.core.people_query import find_registry_program_affiliations
+        from src.core.people_registry_modes import load_effective_registry_config
+        from src.core.program_lifecycle import is_program_active
+
+        active_program_ids = {pid for pid in self.program_ids() if is_program_active(pid, programs_root=programs_root)}
+        if not active_program_ids:
+            return ()
+
+        edges = tuple(
+            edge for edge in find_alias_edges(alias, programs_root=programs_root) if edge.program_id in active_program_ids
+        )
+
+        knowledge_root = get_shared_knowledge_root(programs_root)
+        effective = load_effective_registry_config(knowledge_root)
+        if effective is not None:
+            non_legacy_program_ids = {
+                pid for pid in active_program_ids if effective.effective_program_mode(pid) != "legacy"
+            }
+            if non_legacy_program_ids:
+                edges = edges + tuple(
+                    edge for edge in find_registry_program_affiliations(alias, knowledge_root=knowledge_root)
+                    if edge.program_id in non_legacy_program_ids
+                )
+        return edges
 
     def pending_actuations(self) -> tuple[FleetActuationProposal, ...]:
         results: list[FleetActuationProposal] = []

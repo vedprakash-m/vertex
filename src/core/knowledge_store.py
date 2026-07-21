@@ -1,15 +1,15 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 import re
 from typing import Any, Literal
 
-import yaml
-
 from src.core.exceptions import ConfigError
 from src.core.models_v2 import EngMsPage, KustoQuery, PersonDirectory, PersonProfile, Product, Team
 from src.core.profile_encryption import load_people_profiles_document
+from src.core.yaml_utils import fast_safe_load
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -33,30 +33,70 @@ class PeopleDirectoryDrift:
     ado_only_aliases: tuple[str, ...]
 
 
-def load_knowledge(*, knowledge_root: Path, fallback_root: Path | None = None) -> KnowledgeStore:
+_QUERY_CLASSIFICATIONS = {"validation", "analytics_history", "evidence", "hygiene", "retired"}
+
+
+def _query_classification(value: Any, path: Path) -> str:
+    classification = _optional_str(value) or "validation"
+    if classification not in _QUERY_CLASSIFICATIONS:
+        raise ConfigError(
+            f"Unsupported golden query classification {classification!r} in {path}; "
+            f"allowed values: {sorted(_QUERY_CLASSIFICATIONS)}"
+        )
+    return classification
+
+
+def load_knowledge(
+    *,
+    knowledge_root: Path,
+    fallback_root: Path | None = None,
+    document_cache: dict[Path, dict[str, Any]] | None = None,
+) -> KnowledgeStore:
+    """specs/people.md PPL-W3.5c: `document_cache`, when supplied, is keyed
+    by each document's FINAL resolved path (whichever of `knowledge_root`/
+    `fallback_root` actually had the file) -- mirroring
+    `kb_updates.py::read_program_kb_documents`'s own established
+    `document_cache` contract exactly (deepcopy on both hit and miss, so
+    a cache hit never hands back the same mutable object twice). `None`
+    (the default) is a true no-op: every existing caller keeps its
+    original always-read-from-disk behavior byte-for-byte unchanged.
+    Added after cProfile against the real 10,000-person/100-program §8.6
+    scale fixture showed `_load_optional_yaml`'s `fast_safe_load` call
+    still re-parsing the SAME shared-registry file text on every one of
+    100 `doctor --kb` per-program `load_knowledge` calls even after
+    `kb_updates.py::SharedKnowledgeTempCache` stopped re-DUMPING it --
+    the fallback file's resolved path is stable across that whole loop
+    (one reused temp directory), so a resolved-path cache correctly hits
+    on calls 2 through 100."""
     people_directory_doc = _load_optional_yaml(
         knowledge_root / "people_directory.yaml",
         fallback_path=fallback_root / "people_directory.yaml" if fallback_root is not None else None,
+        document_cache=document_cache,
     )
     people_profiles_doc = _load_optional_people_profiles_yaml(
         knowledge_root / "people_profiles.yaml",
         fallback_path=fallback_root / "people_profiles.yaml" if fallback_root is not None else None,
+        document_cache=document_cache,
     )
     teams_doc = _load_optional_yaml(
         knowledge_root / "teams.yaml",
         fallback_path=fallback_root / "teams.yaml" if fallback_root is not None else None,
+        document_cache=document_cache,
     )
     products_doc = _load_optional_yaml(
         knowledge_root / "products.yaml",
         fallback_path=fallback_root / "products.yaml" if fallback_root is not None else None,
+        document_cache=document_cache,
     )
     queries_doc = _load_optional_yaml(
         knowledge_root / "golden_queries.yaml",
         fallback_path=fallback_root / "golden_queries.yaml" if fallback_root is not None else None,
+        document_cache=document_cache,
     )
     engms_doc = _load_optional_yaml(
         knowledge_root / "engms_pages.yaml",
         fallback_path=fallback_root / "engms_pages.yaml" if fallback_root is not None else None,
+        document_cache=document_cache,
     )
 
     people_directory = tuple(
@@ -134,6 +174,7 @@ def load_knowledge(*, knowledge_root: Path, fallback_root: Path | None = None) -
             assertion_ids=_string_tuple(entry.get("assertion_ids", [])),
             engine=_optional_str(entry.get("engine")) or ("wiql" if _optional_str(entry.get("wiql")) else "kusto"),
             wiql=_optional_str(entry.get("wiql")),
+            classification=_query_classification(entry.get("classification"), knowledge_root / "golden_queries.yaml"),
         )
         for entry in queries_doc.get("queries", [])
         if isinstance(entry, dict)
@@ -176,13 +217,14 @@ def load_program_knowledge(
     programs_root: Path = PROGRAMS_ROOT,
     *,
     shared_knowledge_root: Path | None = None,
+    document_cache: dict[Path, dict[str, Any]] | None = None,
 ) -> KnowledgeStore:
     program_knowledge_root = programs_root / program_id / "knowledge"
     resolved_shared_root = shared_knowledge_root or get_shared_knowledge_root(programs_root)
     if resolved_shared_root.exists():
         fallback_root = program_knowledge_root if program_knowledge_root.exists() else None
-        return load_knowledge(knowledge_root=resolved_shared_root, fallback_root=fallback_root)
-    return load_knowledge(knowledge_root=program_knowledge_root)
+        return load_knowledge(knowledge_root=resolved_shared_root, fallback_root=fallback_root, document_cache=document_cache)
+    return load_knowledge(knowledge_root=program_knowledge_root, document_cache=document_cache)
 
 
 def validate_knowledge(knowledge: KnowledgeStore, *, known_program_ids: tuple[str, ...] = ()) -> None:
@@ -327,24 +369,38 @@ def select_sharepoint_engms_pages(
     return tuple(selected)
 
 
-def _load_optional_yaml(path: Path, *, fallback_path: Path | None = None) -> dict[str, Any]:
+def _load_optional_yaml(
+    path: Path, *, fallback_path: Path | None = None, document_cache: dict[Path, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     if not path.exists():
         if fallback_path is None or not fallback_path.exists():
             return {}
         path = fallback_path
-    with path.open("r", encoding="utf-8") as handle:
-        document = yaml.safe_load(handle) or {}
+    if document_cache is not None and path in document_cache:
+        return deepcopy(document_cache[path])
+    document = fast_safe_load(path.read_text(encoding="utf-8")) or {}
     if not isinstance(document, dict):
         raise ConfigError(f"Expected mapping at top-level in {path}")
+    if document_cache is not None:
+        document_cache[path] = document
+        document = deepcopy(document)
     return document
 
 
-def _load_optional_people_profiles_yaml(path: Path, *, fallback_path: Path | None = None) -> dict[str, Any]:
+def _load_optional_people_profiles_yaml(
+    path: Path, *, fallback_path: Path | None = None, document_cache: dict[Path, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     if not path.exists():
         if fallback_path is None or not fallback_path.exists():
             return {}
         path = fallback_path
-    return load_people_profiles_document(path)
+    if document_cache is not None and path in document_cache:
+        return deepcopy(document_cache[path])
+    document = load_people_profiles_document(path)
+    if document_cache is not None:
+        document_cache[path] = document
+        document = deepcopy(document)
+    return document
 
 
 def _string_tuple(value: Any) -> tuple[str, ...]:

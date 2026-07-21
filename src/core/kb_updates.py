@@ -24,6 +24,8 @@ from src.core.knowledge_store import (
     validate_knowledge,
 )
 from src.core.profile_encryption import dump_people_profiles_document, load_people_profiles_document
+from src.core.people_directory_schema import ContactKind, load_people_directory, load_teams
+from src.core.people_membership_schema import MembershipStatus, load_memberships
 from src.core.workstream_documents import _parse_workstreams
 
 
@@ -172,14 +174,35 @@ def read_program_kb_documents(
     program_id: str,
     *,
     programs_root: Path = PROGRAMS_ROOT,
+    document_cache: dict[Path, dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, Any]]:
+    """specs/people.md PPL-W3.5b: `document_cache`, when supplied by the
+    caller, is keyed by each document's RESOLVED absolute path (shared-root
+    or program-local, whichever `_resolve_document_path` picked) --
+    multiple programs sharing the same shared-root file (e.g.
+    `knowledge/people_directory.yaml`) hit the same cache entry, closing
+    the redundant-reparse cost `doctor --kb`'s "Knowledge" check measured
+    at scale (PPL-W3.5: re-reading the entire shared registry once per
+    known program). `None` (the default) is a true no-op -- every existing
+    caller keeps its original always-read behavior unchanged. A cache HIT
+    still returns a fresh `deepcopy` of the cached document, never the
+    same object twice, so a caller mutating its own returned dict (e.g.
+    `prepare_kb_update`, which already deep-copies before mutating) can
+    never leak a change into another program's read of the same cached
+    entry -- caching only ever removes disk I/O and parsing, never the
+    per-caller ownership of the returned data."""
     program_dir = programs_root / program_id
     documents: dict[str, dict[str, Any]] = {}
     for relative_path, spec in _SUPPORTED_DOCUMENTS.items():
-        documents[relative_path] = _read_yaml_or_default(
-            _resolve_document_path(relative_path, program_dir=program_dir, programs_root=programs_root),
-            spec,
-        )
+        resolved_path = _resolve_document_path(relative_path, program_dir=program_dir, programs_root=programs_root)
+        if document_cache is not None and resolved_path in document_cache:
+            documents[relative_path] = deepcopy(document_cache[resolved_path])
+            continue
+        document = _read_yaml_or_default(resolved_path, spec)
+        if document_cache is not None:
+            document_cache[resolved_path] = document
+            document = deepcopy(document)
+        documents[relative_path] = document
     return documents
 
 
@@ -370,9 +393,14 @@ def validate_program_kb(
     program_id: str,
     *,
     programs_root: Path = PROGRAMS_ROOT,
+    document_cache: dict[Path, dict[str, Any]] | None = None,
+    shared_knowledge_cache: "SharedKnowledgeTempCache | None" = None,
 ) -> KnowledgeStore:
-    documents = read_program_kb_documents(program_id, programs_root=programs_root)
-    return _validate_program_documents(program_id=program_id, documents=documents, programs_root=programs_root)
+    documents = read_program_kb_documents(program_id, programs_root=programs_root, document_cache=document_cache)
+    return _validate_program_documents(
+        program_id=program_id, documents=documents, programs_root=programs_root,
+        shared_knowledge_cache=shared_knowledge_cache, document_cache=document_cache,
+    )
 
 
 def prepare_kb_update(
@@ -548,14 +576,95 @@ def _resolve_document_path(relative_path: str, *, program_dir: Path, programs_ro
     return program_dir / relative_path
 
 
+class SharedKnowledgeTempCache:
+    """specs/people.md PPL-W3.5c (§8.5's scoped/lazy-loading lever).
+
+    A "knowledge/*.yaml" document (`people_directory`, `people_profiles`,
+    `teams`, `products`, `golden_queries`, `engms_pages`) resolves to the
+    SAME shared-root file for every program sharing that root (barring a
+    program-local override -- only `engms_pages.yaml` supports one, per
+    `_resolve_document_path`). `_validate_program_documents` previously
+    re-dumped that ENTIRE shared subset to a fresh temp directory and
+    re-parsed it via `load_knowledge` on EVERY call -- profiled with
+    cProfile against the real 10,000-person/2,000-team/100-program §8.6
+    scale fixture and found to be the dominant real-scale cost, not a
+    redundant-parse issue in the four typed loaders themselves: ~85% of a
+    full `doctor --kb` run's wall time was `yaml.safe_dump`/`yaml.safe_load`
+    re-serializing and re-parsing the SAME shared files 100 times (781s of
+    ~1030s in `_validate_program_documents` alone, cProfile-measured).
+
+    This cache dumps the shared subset to ONE stable temp directory once
+    per instance lifetime and reuses it as `load_knowledge`'s existing
+    `fallback_root` parameter for every subsequent call --
+    `_load_optional_yaml` already implements exactly the needed "read
+    `knowledge_root` first, fall back to `fallback_root` only for a file
+    absent from `knowledge_root`" resolution, so no change to
+    `knowledge_store.py` (30+ other callers) was needed or made. `None`
+    (the default `shared_knowledge_cache` parameter on
+    `_validate_program_documents`/`validate_program_kb`) is a true no-op:
+    every existing caller keeps its original always-fresh, single-temp-dir
+    behavior byte-for-byte unchanged; only `run_kb_doctor`'s multi-program
+    loop opts in.
+
+    Cleanup is the caller's responsibility (`close()`, or use as a context
+    manager) -- the underlying `TemporaryDirectory` is created lazily on
+    first use and must outlive every `_validate_program_documents` call
+    that references its `fallback_root`, so it cannot self-clean per call
+    the way the original inline `with TemporaryDirectory()` did.
+    """
+
+    def __init__(self) -> None:
+        self._temp_dir: TemporaryDirectory | None = None
+        self._written_relative_paths: set[str] = set()
+
+    def shared_root_path(self, *, relative_paths: tuple[str, ...], documents: dict[str, dict[str, Any]]) -> Path:
+        if self._temp_dir is None:
+            self._temp_dir = TemporaryDirectory()
+        root = Path(self._temp_dir.name)
+        for relative_path in relative_paths:
+            if relative_path in self._written_relative_paths:
+                continue
+            target = root / Path(relative_path).name
+            target.write_text(_dump_yaml(documents[relative_path]), encoding="utf-8")
+            self._written_relative_paths.add(relative_path)
+        return root
+
+    def close(self) -> None:
+        if self._temp_dir is not None:
+            self._temp_dir.cleanup()
+            self._temp_dir = None
+
+    def __enter__(self) -> "SharedKnowledgeTempCache":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+
 def _validate_program_documents(
     *,
     program_id: str,
     documents: dict[str, dict[str, Any]],
     programs_root: Path,
+    shared_knowledge_cache: SharedKnowledgeTempCache | None = None,
+    document_cache: dict[Path, dict[str, Any]] | None = None,
 ) -> KnowledgeStore:
     for relative_path, spec in _SUPPORTED_DOCUMENTS.items():
         _validate_document_shape(relative_path, documents[relative_path], spec)
+
+    program_dir = programs_root / program_id
+    shared_knowledge_root = get_shared_knowledge_root(programs_root)
+    # Recomputed per call (not assumed static across programs) so a
+    # program with its own local engms_pages.yaml override is still
+    # handled correctly -- only that ONE document falls back to the
+    # always-fresh per-call path for that program; every other program
+    # (and every other document) still uses the stable shared cache.
+    shared_relative_paths = tuple(
+        relative_path
+        for relative_path in documents
+        if relative_path.startswith("knowledge/")
+        and _resolve_document_path(relative_path, program_dir=program_dir, programs_root=programs_root).parent == shared_knowledge_root
+    ) if shared_knowledge_cache is not None else ()
 
     with TemporaryDirectory() as temp_dir_name:
         temp_root = Path(temp_dir_name)
@@ -563,6 +672,8 @@ def _validate_program_documents(
         temp_knowledge_dir = temp_program_dir / "knowledge"
         temp_knowledge_dir.mkdir(parents=True, exist_ok=True)
         for relative_path, document in documents.items():
+            if relative_path in shared_relative_paths:
+                continue
             target = temp_program_dir / relative_path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(_dump_yaml(document), encoding="utf-8")
@@ -574,10 +685,22 @@ def _validate_program_documents(
                 if path.is_dir() and (path / "program.yaml").exists()
             )
         ) if programs_root.exists() else ()
-        shared_knowledge_root = get_shared_knowledge_root(programs_root)
         uses_shared_knowledge = shared_knowledge_root.exists()
 
-        knowledge = load_knowledge(knowledge_root=temp_knowledge_dir)
+        fallback_root = None
+        if shared_relative_paths:
+            assert shared_knowledge_cache is not None
+            fallback_root = shared_knowledge_cache.shared_root_path(relative_paths=shared_relative_paths, documents=documents)
+        # Reuses the SAME `document_cache` `read_program_kb_documents`
+        # populated (keyed by resolved Path -- the temp fallback path is a
+        # DIFFERENT physical path than the real production path already
+        # cached there, so there is no key collision): once
+        # `shared_knowledge_cache`'s stable fallback_root is dumped on the
+        # first call, every subsequent call's `load_knowledge` would
+        # otherwise still re-parse that same on-disk file text from
+        # scratch on every one of the other 99 calls -- this closes that
+        # second, separately-profiled cost.
+        knowledge = load_knowledge(knowledge_root=temp_knowledge_dir, fallback_root=fallback_root, document_cache=document_cache)
         validate_knowledge(knowledge)
         if known_program_ids and not uses_shared_knowledge:
             unknown_program_references = find_unknown_team_program_references(
@@ -843,6 +966,51 @@ def _read_yaml_or_default(path: Path, spec: KbDocumentSpec) -> dict[str, Any]:
         document = yaml.safe_load(handle) or {}
     if not isinstance(document, dict):
         raise ConfigError(f"Expected mapping at top-level in {path}.")
+    if spec.relative_path == "knowledge/people_directory.yaml" and str(document.get("schema_version")) == "2.0":
+        loaded = load_people_directory(path)
+        if loaded is None:
+            raise ConfigError(f"Could not load shared people directory at {path}.")
+        memberships = load_memberships(path.parent / "memberships.yaml")
+        teams = load_teams(path.parent / "teams.yaml")
+        team_by_entity_id = {team.entity_id: team.id for team in (teams.teams if teams is not None else ())}
+        return {
+            "schema_version": "1.0",
+            "people": [
+                {
+                    "alias": person.alias,
+                    "email": next(
+                        (contact.value for contact in person.contacts if contact.kind == ContactKind.PRIMARY_EMAIL),
+                        None,
+                    ),
+                    "display_name": person.display_name,
+                    "title": person.title,
+                    "team_ids": [
+                        team_id
+                        for membership in memberships
+                        if membership.person_entity_id == person.entity_id
+                        and membership.status == MembershipStatus.ACTIVE
+                        and (team_id := team_by_entity_id.get(membership.team_entity_id)) is not None
+                    ],
+                }
+                for person in loaded.people
+            ],
+        }
+    if spec.relative_path == "knowledge/teams.yaml" and str(document.get("schema_version")) == "2.0":
+        loaded = load_teams(path)
+        if loaded is None:
+            raise ConfigError(f"Could not load shared teams directory at {path}.")
+        return {
+            "schema_version": "1.0",
+            "teams": [
+                {
+                    "id": team.id,
+                    "name": team.name,
+                    "area_paths": list(team.area_paths),
+                    "programs": list(team.legacy_programs),
+                }
+                for team in loaded.teams
+            ],
+        }
     return document
 
 

@@ -1,0 +1,57 @@
+# Synthetic example only. Illustrates entities.yaml target schema 2.0 for
+# specs/people.md Phase 2a (PPL-W2A.1). No real customer names, aliases,
+# or identifiers. See specs/people.md §7.2 for the binding CanonicalEntity/
+# EntityAlias/EntityIdentifier/EntityRedirect contract.
+schema_version: "2.0"
+entities:
+  - workspace_id: "workspace:01HQ8X7K9N3M4P5Q6R7S8T9U0V"
+    entity_id: "person:01HQ8Y1A2B3C4D5E6F7G8H9J0K"
+    entity_type: "person"
+    canonical_name: "Sample Owner"
+    scope: "org"
+    status: active
+    created_at: "2026-01-15T00:00:00+00:00"
+    aliases:
+      - value: "sample_owner"
+        kind: "vertex::alias"
+        status: active
+        valid_from: "2026-01-15T00:00:00+00:00"
+        valid_until: null
+        source: "operator_assertion"
+        source_ref: null
+        recorded_at: "2026-01-15T00:00:00+00:00"
+        verified_at: "2026-01-15T00:00:00+00:00"
+        verified_by_principal: "ACME\\sample_steward"
+    identifiers:
+      - provider: "sample_directory_provider"
+        kind: "vertex::upn"
+        subject_id: "sample_owner@example.com"
+        tenant_id: "acme-tenant"
+        binding_method: "exact"
+        binding_confidence: 1.0
+        status: active
+        recorded_at: "2026-01-15T00:00:00+00:00"
+        verified_by_principal: "ACME\\sample_steward"
+
+  - workspace_id: "workspace:01HQ8X7K9N3M4P5Q6R7S8T9U0V"
+    entity_id: "team:01HQ8Y2K3L4M5N6P7Q8R9S0T1U"
+    entity_type: "team"
+    canonical_name: "Platform Engineering"
+    scope: "org"
+    status: active
+    created_at: "2026-01-15T00:00:00+00:00"
+    aliases:
+      - value: "team_platform"
+        kind: "vertex::team_key"
+        status: active
+        valid_from: "2026-01-15T00:00:00+00:00"
+        valid_until: null
+        source: "operator_assertion"
+        source_ref: null
+        recorded_at: "2026-01-15T00:00:00+00:00"
+        verified_at: "2026-01-15T00:00:00+00:00"
+        verified_by_principal: "ACME\\sample_steward"
+    identifiers: []
+
+# EntityRedirect records (produced by `vertex kb people merge`, not hand-authored):
+redirects: []

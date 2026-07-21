@@ -22,6 +22,8 @@ class ProfileKeyring(Protocol):
 
     def set_password(self, service_name: str, username: str, password: str) -> None: ...
 
+    def delete_password(self, service_name: str, username: str) -> None: ...
+
 
 @dataclass(frozen=True, slots=True)
 class SensitiveProfileFileStatus:
@@ -94,6 +96,24 @@ def dump_people_profiles_document(document: dict[str, Any], *, existing_path: Pa
             encrypted_document = _build_encrypted_people_profiles_document(document, path=existing_path, key_id=key_id)
             return _render_yaml(encrypted_document)
     return _render_yaml(document)
+
+
+def shred_people_profiles_key(key_id: str) -> None:
+    """Irreversibly remove an encrypted-profile key after its sole profile
+    payload has been replaced with a redacted document."""
+    normalized_key_id = key_id.strip()
+    if not normalized_key_id:
+        raise ConfigError("Cannot cryptographically shred an empty people-profiles key ID.")
+    backend = _get_keyring_backend()
+    try:
+        backend.delete_password(PEOPLE_PROFILES_KEYRING_SERVICE, normalized_key_id)
+    except AttributeError as error:
+        raise ConfigError(
+            "The configured people-profiles keyring does not support deletion; "
+            "refusing to claim cryptographic shredding."
+        ) from error
+    except Exception as error:
+        raise ConfigError(f"Unable to cryptographically shred people-profiles key {normalized_key_id!r}: {error}") from error
 
 
 def _build_encrypted_people_profiles_document(document: dict[str, Any], *, path: Path, key_id: str) -> dict[str, Any]:

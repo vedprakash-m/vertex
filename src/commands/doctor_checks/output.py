@@ -55,6 +55,7 @@ def doctor_tip(
     nudge: bool = False,
     circuit_breakers: bool,
     context: bool = False,
+    schedule_health: bool = False,
 ) -> str:
     if check_auth:
         return "Tip: Re-run `vertex doctor --check-auth` after rotating ADO, Graph, or Agency CLI credentials."
@@ -122,6 +123,8 @@ def doctor_tip(
         return "Tip: Re-run `vertex doctor --nudge --edition <name>` after editing nudge edition config, migrating state, or changing section criteria."
     if circuit_breakers:
         return "Tip: Re-run `vertex doctor --edition <name> --circuit-breakers` after repeated ADO failures or after resetting breaker state."
+    if schedule_health:
+        return "Tip: Re-run `vertex doctor --schedule-health --edition <name>` after provisioning a cockpit-build or enabled-source prefetch cadence."
 
     if context:
         return "Tip: Re-run `vertex doctor --context --edition <name>` after editing any program file."

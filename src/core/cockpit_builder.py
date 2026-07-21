@@ -33,6 +33,7 @@ from src.core.cockpit_models import (
     ValueMetric,
     finalize_cockpit_snapshot,
 )
+from src.core.context_proposal_review import load_pending_context_proposal_rows
 from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.fact_lineage_coverage import compute_lineage_coverage
 from src.core.maturity_engine import load_earned_autonomy_state
@@ -104,6 +105,11 @@ def build_cockpit_snapshot(
         program_id, programs_root=programs_root, observed_at=generated_at
     )
     findings.extend(trust_findings)
+    findings.extend(
+        _build_context_proposal_findings(
+            program_id, programs_root=programs_root, observed_at=generated_at
+        )
+    )
 
     if config.is_off:
         findings.append(
@@ -156,6 +162,36 @@ def _load_config_safely(program_id: str, programs_root: Path) -> ArchDataFixConf
         return load_arch_data_fix(program_id, programs_root=programs_root)
     except Exception:
         return ArchDataFixConfig(program_id=program_id, mode=ExecutionMode.OFF)
+
+
+def _build_context_proposal_findings(
+    program_id: str, *, programs_root: Path, observed_at: datetime
+) -> list[CockpitFinding]:
+    """Expose pending NCFL revisions without treating them as applied state."""
+    try:
+        rows = load_pending_context_proposal_rows(program_id, programs_root=programs_root)
+    except Exception:
+        # The cockpit remains a best-effort read-only projection if an optional
+        # proposal artifact is concurrently replaced or damaged.
+        return []
+    return [
+        CockpitFinding(
+            finding_id=f"trust.context_proposal.{row.proposal_id}",
+            area="trust",
+            status="warn",
+            summary=f"Pending context revision: {row.target}",
+            detail=(
+                f"proposed_value={row.proposed_value!r}; current_value_hash={row.current_hash_label}; "
+                f"evidence={row.evidence}; conflict_state={row.conflict_state}; "
+                f"next_command={row.next_command}"
+            ),
+            owner=None,
+            next_command=row.next_command,
+            evidence_refs=(row.evidence,),
+            observed_at=observed_at,
+        )
+        for row in rows
+    ]
 
 
 def _build_economics_summary(

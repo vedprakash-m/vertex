@@ -24,9 +24,8 @@ on the next run when the rule no longer fires (an alert's
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
 
 from src.core.alerts import (
     AlertRecord,
@@ -178,7 +177,7 @@ def emit_platform_alerts(
                         f"zero signals for {yield_collapse.consecutive_zero_cycles} "
                         f"consecutive gather cycles."
                     ),
-                    next_command="vertex doctor --diagnose " + program_id,
+                    next_command="vertex observability diagnose --program " + program_id,
                     created_at=now,
                 ),
                 programs_root=programs_root,

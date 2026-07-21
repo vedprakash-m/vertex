@@ -1,0 +1,38 @@
+# Synthetic example only. Illustrates people_directory.yaml target schema
+# 2.0 for specs/people.md Phase 2a (PPL-W2A.2). No real customer names,
+# aliases, or emails. See specs/people.md §7.2 for the binding
+# PersonDirectory/ContactPoint/FieldVerification contract.
+schema_version: "2.0"
+people:
+  - entity_id: "person:01HQ8Y1A2B3C4D5E6F7G8H9J0K"
+    alias: "sample_owner"  # Compatibility/human hint only; EntityRegistry owns the binding.
+    display_name: "Sample Owner"
+    title: "Principal Program Manager"
+    department: "Platform Engineering"
+    manager_entity_id: null
+    status: active
+    tenant_relationship: internal
+    departed_at: null
+    exempt_from_vitality: false
+    contacts:
+      - kind: primary_email
+        value: "sample_owner@example.com"
+        status: active
+        valid_from: "2026-01-15T00:00:00+00:00"
+        valid_until: null
+        source: "sample_directory_provider"
+        source_ref: null
+        recorded_at: "2026-01-15T00:00:00+00:00"
+        verified_at: "2026-01-15T00:00:00+00:00"
+        verified_by_principal: "ACME\\sample_steward"
+        delivery_eligible: true
+    verifications:
+      - field_name: "title"
+        source: "sample_directory_provider"
+        source_ref: null
+        observed_at: "2026-01-15T00:00:00+00:00"
+        verified_at: "2026-01-15T00:00:00+00:00"
+        recorded_at: "2026-01-15T00:00:00+00:00"
+        verified_by_principal: "ACME\\sample_steward"
+        refresh_run_id: null
+        pinned: false

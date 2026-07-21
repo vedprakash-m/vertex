@@ -28,12 +28,20 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from sqlite3 import Connection
+from threading import Event, RLock, Thread, current_thread
+from typing import Callable
 
 from src.core._db import open_program_db_with_retry as open_program_db
 
 PROGRAMS_ROOT = Path(__file__).resolve().parents[2] / "programs"
 _DB_FILENAME = "workspace_lease.sqlite3"
 _DEFAULT_TTL_SECONDS = 300
+
+# A gather may legitimately include several bounded remote-source calls. Keep
+# the lease alive well before the default five-minute TTL, while still leaving
+# enough margin for a transient filesystem/database delay to be surfaced
+# before another writer can take ownership.
+DEFAULT_RENEWAL_INTERVAL_SECONDS = 60.0
 
 #: ADF-W1.13 default domain: preserves exact pre-existing single-lease-per-program behavior.
 DEFAULT_MUTATION_DOMAIN = "workspace"
@@ -98,6 +106,108 @@ class LeaseFencingTokenStale(Exception):
         self.current = current
         self.mutation_domain = mutation_domain
         super().__init__(f"stale fencing token {presented} for domain {mutation_domain!r} (current is {current})")
+
+
+class LeaseRenewalFailed(RuntimeError):
+    """A background lease renewal could not establish continued ownership.
+
+    The original exception is retained as ``__cause__``. Callers must treat
+    this as a write fence: continuing to commit after an indeterminate renewal
+    result risks a stale worker publishing over a newer lease holder.
+    """
+
+
+class LeaseRenewalHeartbeat:
+    """Renew a lease in the background and provide an explicit pre-commit fence.
+
+    Long-running commands should call :meth:`start` after acquisition, then
+    :meth:`renew_now` immediately before their irreversible promotion. Any
+    renewal failure is remembered and raised to the foreground caller; the
+    daemon thread never writes command data and is always stopped explicitly.
+    """
+
+    def __init__(
+        self,
+        handle: "LeaseHandle",
+        *,
+        programs_root: Path = PROGRAMS_ROOT,
+        interval_seconds: float = DEFAULT_RENEWAL_INTERVAL_SECONDS,
+        renew_fn: Callable[..., "LeaseHandle"] | None = None,
+    ) -> None:
+        if interval_seconds <= 0:
+            raise ValueError("interval_seconds must be positive")
+        self._handle = handle
+        self._programs_root = programs_root
+        self._interval_seconds = interval_seconds
+        self._renew_fn = renew_fn or renew_lease
+        self._stop_event = Event()
+        self._lock = RLock()
+        self._failure: BaseException | None = None
+        self._thread: Thread | None = None
+
+    @property
+    def handle(self) -> "LeaseHandle":
+        with self._lock:
+            return self._handle
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = Thread(
+            target=self._run,
+            name=f"vertex-lease-renew:{self._handle.program_id}:{self._handle.mutation_domain}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None and self._thread is not current_thread():
+            self._thread.join(timeout=max(1.0, self._interval_seconds))
+
+    def assert_current(self) -> None:
+        with self._lock:
+            failure = self._failure
+        if failure is not None:
+            raise failure
+
+    def renew_now(self) -> "LeaseHandle":
+        """Synchronously renew and fence immediately before a critical write."""
+        self.assert_current()
+        try:
+            return self._renew_once()
+        except BaseException as error:
+            with self._lock:
+                self._failure = error
+            self._stop_event.set()
+            raise
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(self._interval_seconds):
+            try:
+                self._renew_once()
+            except BaseException as error:
+                with self._lock:
+                    self._failure = error
+                self._stop_event.set()
+                return
+
+    def _renew_once(self) -> "LeaseHandle":
+        with self._lock:
+            if self._failure is not None:
+                raise self._failure
+            current = self._handle
+        try:
+            renewed = self._renew_fn(current, programs_root=self._programs_root)
+        except LeaseFencingTokenStale:
+            raise
+        except BaseException as error:
+            raise LeaseRenewalFailed(
+                f"Could not renew {current.mutation_domain!r} lease for {current.program_id!r}; refusing further writes."
+            ) from error
+        with self._lock:
+            self._handle = renewed
+        return renewed
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,0 +1,20 @@
+# Synthetic example only. Illustrates delegations.yaml schema 1.0 for
+# specs/people.md Phase 5b (PPL fast-follow, §7.6). No real customer
+# names. See specs/people.md §7.2 for the binding Delegation contract.
+# Delegation is default-off in v1 (§9, Phase 5b) -- this file stays empty
+# until an operator explicitly creates a time/surface-bounded delegation.
+schema_version: "1.0"
+delegations:
+  - delegation_id: "delegation:01HQ8Y4N5P6Q7R8S9T0U1V2W3X"
+    from_person_entity_id: "person:01HQ8Y1A2B3C4D5E6F7G8H9J0K"
+    to_person_entity_id: "person:01HQ8Y5P6Q7R8S9T0U1V2W3X4Y"
+    surfaces:
+      - "vertex::nudge"
+    valid_from: "2026-06-01T00:00:00+00:00"
+    valid_until: "2026-06-14T23:59:59+00:00"
+    reason: "Sample owner on approved leave; routing nudge replies only."
+    actor_principal: "ACME\\sample_steward"
+    program_ids:
+      - "acme"
+    workstream_ids: []
+    status: active

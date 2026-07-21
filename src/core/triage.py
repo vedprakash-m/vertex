@@ -7,6 +7,7 @@ from typing import Iterable
 
 from src.core.claim_tracker import ClaimAssessment
 from src.core.coverage_gap import CoverageGap, coverage_gap_confidence_label
+from src.core.context_proposal_review import ContextProposalReviewRow
 from src.core.dependency_scout import DependencyProposal, dependency_proposal_confidence_label
 from src.core.forecast_engine import ETAForecast
 from src.core.issue_projection import IssueProjection, issue_projection_confidence_label, issue_projection_source_label
@@ -153,6 +154,7 @@ class TriageReport:
     decision_debt: tuple[str, ...] = ()
     dependency_proposals: tuple[DependencyProposal, ...] = ()
     incident_learnings: tuple[IncidentLearning, ...] = ()
+    context_proposals: tuple[ContextProposalReviewRow, ...] = ()
     # WI-3.3: Phase-3 signal quality counters (populated when program_facts loaded)
     auto_approved_signal_count: int = 0
     provisional_signal_count: int = 0
@@ -251,6 +253,7 @@ def finalize_triage_report(
     decision_debt: tuple[str, ...] = (),
     dependency_proposals: tuple[DependencyProposal, ...] = (),
     incident_learnings: tuple[IncidentLearning, ...] = (),
+    context_proposals: tuple[ContextProposalReviewRow, ...] = (),
     # WI-3.3: Phase-3 signal quality counters
     auto_approved_signal_count: int = 0,
     provisional_signal_count: int = 0,
@@ -284,6 +287,10 @@ def finalize_triage_report(
     if incident_learnings:
         needs_attention.append(
             f"{_pluralize(len(incident_learnings), 'recent incident learning')} (see INCIDENT LEARNINGS)"
+        )
+    if context_proposals:
+        needs_attention.append(
+            f"{_pluralize(len(context_proposals), 'pending context revision')} (see CONTEXT REVISIONS)"
         )
     needs_attention.extend(milestone_attention)
     needs_attention.extend(risk_attention)
@@ -349,6 +356,7 @@ def finalize_triage_report(
         decision_debt=decision_debt,
         dependency_proposals=dependency_proposals,
         incident_learnings=incident_learnings,
+        context_proposals=context_proposals,
         auto_approved_signal_count=auto_approved_signal_count,
         provisional_signal_count=provisional_signal_count,
         material_conflict_count=material_conflict_count,
@@ -441,6 +449,9 @@ def render_triage_report(report: TriageReport) -> str:
         "INCIDENT LEARNINGS:",
         *_render_incident_learnings(report.incident_learnings),
         "",
+        "CONTEXT REVISIONS:",
+        *_render_context_proposals(report.context_proposals),
+        "",
         "MILESTONE HEALTH:",
         *_render_lines(report.milestones),
         "",
@@ -529,6 +540,18 @@ def _render_dependency_proposals(proposals: tuple[DependencyProposal, ...]) -> t
 
 def _render_incident_learnings(items: tuple[IncidentLearning, ...]) -> tuple[str, ...]:
     rendered = tuple(f"  - {item.summary_with_confidence}" for item in items)
+    return rendered or ("  - None",)
+
+
+def _render_context_proposals(rows: tuple[ContextProposalReviewRow, ...]) -> tuple[str, ...]:
+    rendered = tuple(
+        (
+            f"  - {row.proposal_id} | {row.target} | proposed={row.proposed_value!r} | "
+            f"current_hash={row.current_hash_label} | evidence={row.evidence} | "
+            f"{row.conflict_state} | Next: {row.next_command}"
+        )
+        for row in rows
+    )
     return rendered or ("  - None",)
 
 

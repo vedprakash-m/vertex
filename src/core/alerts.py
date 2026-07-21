@@ -32,7 +32,7 @@ import portalocker
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from src.core.adf_config import AlertsConfig
 from src.core.exceptions import StateError
@@ -237,7 +237,7 @@ def surface_alert_banner(
     return (
         f"[!] {len(open_alerts)} unresolved alert{plural} for {program_id} "
         f"({', '.join(counts) or 'all info'}). "
-        f"Run `vertex doctor --diagnose {program_id}` to inspect."
+        f"Run `vertex observability diagnose --program {program_id}` to inspect."
     )
 
 
@@ -285,6 +285,7 @@ def append_or_suppress_alert(
     message: str,
     next_command: str,
     programs_root: Path,
+    context: dict[str, Any] | None = None,
     owner: str | None = None,
     delivery: str | None = None,
     cooldown_minutes: int | None = None,
@@ -331,6 +332,7 @@ def append_or_suppress_alert(
             message=message,
             next_command=next_command,
             created_at=resolved_now,
+            context=context,
             entity_type=entity_type,
             entity_id=entity_id,
             owner=owner,
@@ -354,6 +356,7 @@ def append_or_suppress_alert(
         message=message if not within_cooldown else match.message,
         next_command=next_command if not within_cooldown else match.next_command,
         created_at=match.created_at,
+        context=context if not within_cooldown else match.context,
         entity_type=entity_type,
         entity_id=entity_id,
         owner=owner or match.owner,

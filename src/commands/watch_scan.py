@@ -14,6 +14,7 @@ from src.core.models import WorkItem
 from src.core.models_v2 import CatchupEvent, Program, Signal, SignalReviewDecision, Workstream
 from src.core.signal_dedup import dedupe_signals
 from src.core.signal_classification import classify_signal as _classify_signal
+from src.core.signal_review import signal_can_be_auto_approved
 from src.core.store_factory import build_program_signal_store, build_program_trajectory_store
 from src.m365.agency_bridge import AgencyBridge
 
@@ -231,7 +232,7 @@ def watch_program_once(
     auto_reviews_written = 0
     if auto_approve_signals:
         for signal in new_signals:
-            if not gather._is_auto_approved_signal(signal):
+            if not signal_can_be_auto_approved(signal):
                 continue
             signal_store.append_review(
                 program_id,

@@ -1,0 +1,44 @@
+# Synthetic example only. Illustrates identity_providers.yaml schema 1.0
+# for specs/people.md Phase 4 (§6.6, §6.8). Never stores tokens or client
+# secrets -- only secret *references* the platform's existing
+# environment/Key Vault/credential-store resolution can look up. See
+# specs/people.md §6.8 for the binding IdentityDirectoryProvider port.
+#
+# Two providers are shown: "acme_directory_export" is the accepted
+# Phase 4 first adapter (§6.8, 2026-07-20) -- a local file-import
+# provider, since live Microsoft Graph directory/people scopes are
+# permanently IT-blocked in this tenant. "sample_live_directory_provider"
+# illustrates the schema shape a future live-API adapter would use if
+# IT policy changes; it is disabled and not implemented by PPL-W4.2.
+schema_version: "1.0"
+providers:
+  - name: "acme_directory_export"
+    provider_type: "local_directory_export"
+    tenant_id: "acme-tenant"
+    endpoint_profile: null
+    capability_contract_version: "1.0"
+    allowed_fields:
+      - display_name
+      - title
+      - department
+      - manager_entity_id
+      - contacts
+    secret_ref: null
+    timeout_seconds: 30
+    rate_limit_per_minute: 60
+    enabled: false
+  - name: "sample_live_directory_provider"
+    provider_type: "structured_directory"
+    tenant_id: "acme-tenant"
+    endpoint_profile: "sample-profile"
+    capability_contract_version: "1.0"
+    allowed_fields:
+      - display_name
+      - title
+      - department
+      - manager_entity_id
+      - contacts
+    secret_ref: "keyvault://acme-vertex/sample-directory-provider-credential"
+    timeout_seconds: 20
+    rate_limit_per_minute: 60
+    enabled: false

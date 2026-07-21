@@ -34,6 +34,7 @@ _FIX_HINT_MAP: dict[str, str] = {
     "DEC-01": "Fix: ensure the decision's workstream_id matches an entry in workstreams.yaml.",
     "STK-01": "Fix: add the alias to stakeholder_register in program.yaml, or correct the RACI reference.",
     "STK-02": "Fix: add the alias to stakeholder_register in program.yaml, or correct the role reference.",
+    "STK-04": "Fix: reconcile the stakeholder's role/email between top-level stakeholder_register and charter.stakeholder_register in program.yaml -- charter is canonical (specs/people.md §5.6 item 2); update or remove the top-level entry.",
     "DATE-01": "Fix: replace stub WI IDs (9xxxxx placeholder range) with real ADO work item IDs in milestones.yaml linked_work_item_ids.",
     "FILTER-01": "Fix: replace informal OData filter values with their formal enum equivalents (e.g. 'done' -> 'Completed').",
     "KB-01": "Fix: ensure the referenced file path exists under programs/<prog>/; update program.yaml if the path has changed.",

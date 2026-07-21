@@ -376,7 +376,7 @@ def load_program_context(
     program_yaml = load_yaml_mapping(program_dir / "program.yaml")
     program_data = program_yaml.get("program", program_yaml) if isinstance(program_yaml, dict) else {}
 
-    stakeholder_register = _parse_stakeholders(program_data)
+    stakeholder_register, stk04_violations = _parse_stakeholders(program_data)
     sub_programs = _parse_sub_programs(program_data)
 
     workstreams = tuple(
@@ -442,7 +442,7 @@ def load_program_context(
     milestone_ids_set = frozenset(m.id for m in milestones)
 
     # --- Compute §5 invariants ---
-    violations: list[InvariantViolation] = []
+    violations: list[InvariantViolation] = list(stk04_violations)  # STK-04: seeded from dual-read reconciliation above.
 
     # WS-01: registry sub_program_id must exist in program.yaml sub_programs
     for lane in registry_lanes:
@@ -1211,16 +1211,94 @@ def _compute_maturity_level(
 # Section 6: YAML parsing helpers
 # ---------------------------------------------------------------------------
 
-def _parse_stakeholders(program_data: dict[str, Any]) -> tuple[StakeholderEntry, ...]:
-    entries = []
-    for s in program_data.get("stakeholder_register", []):
-        if s.get("alias"):
-            entries.append(StakeholderEntry(
-                alias=str(s["alias"]),
-                email=s.get("email"),
-                role=s.get("role"),
+def _parse_stakeholders(program_data: dict[str, Any]) -> tuple[tuple[StakeholderEntry, ...], tuple[InvariantViolation, ...]]:
+    """specs/people.md §5.6 item 2: "`charter.stakeholder_register` becomes
+    canonical after Phase 0b reconciliation. Top-level `stakeholder_register`
+    is legacy-read-only during migration." §7.1: "STK-01/02/03 dual-read
+    top-level and `charter.stakeholder_register` during migration, with
+    duplicate-equivalence validation when both are present."
+
+    Returns the MERGED stakeholder set (an alias present in either source
+    counts as known -- charter's field values win when the same alias
+    appears in both) plus any STK-04 violations found. An alias present
+    in only one source is a normal migration-in-progress state, not a
+    conflict, and produces no violation. An alias present in BOTH with
+    identical `role`/`email` is an "equivalent duplicate" (§7.1: "accepted
+    with a migration hint") and also produces no violation -- only a
+    genuine field-value MISMATCH for the same alias is STK-04.
+
+    `interest` (an extra field `charter.stakeholder_register` entries can
+    carry per `prep.py`, not modeled by `StakeholderEntry`) is
+    deliberately NOT compared -- extending the in-production
+    `StakeholderEntry` dataclass to add a field no other consumer uses is
+    out of this item's scope; STK-04 compares only the fields
+    `StakeholderEntry` already models (`role`, `email`), matching what
+    `stakeholder_aliases_set` and every existing STK-01/02/03 consumer
+    already rely on.
+    """
+    top_level_by_alias: dict[str, dict] = {
+        str(s["alias"]): s for s in (program_data.get("stakeholder_register") or []) if isinstance(s, dict) and s.get("alias")
+    }
+    charter_data = program_data.get("charter") or {}
+    charter_by_alias: dict[str, dict] = {
+        str(s["alias"]): s for s in (charter_data.get("stakeholder_register") or []) if isinstance(s, dict) and s.get("alias")
+    }
+
+    merged: dict[str, StakeholderEntry] = {
+        alias: StakeholderEntry(alias=alias, email=raw.get("email"), role=raw.get("role")) for alias, raw in charter_by_alias.items()
+    }
+    violations: list[InvariantViolation] = []
+    for alias, legacy_raw in top_level_by_alias.items():
+        charter_raw = charter_by_alias.get(alias)
+        if charter_raw is None:
+            merged[alias] = StakeholderEntry(alias=alias, email=legacy_raw.get("email"), role=legacy_raw.get("role"))
+            continue
+        if legacy_raw.get("role") != charter_raw.get("role") or legacy_raw.get("email") != charter_raw.get("email"):
+            violations.append(InvariantViolation(
+                code="STK-04",
+                severity=InvariantSeverity.ERROR,
+                file="program.yaml",
+                entity_id=alias,
+                detail=(
+                    f"stakeholder '{alias}' has semantically different top-level and charter.stakeholder_register "
+                    f"entries (top-level: role={legacy_raw.get('role')!r}, email={legacy_raw.get('email')!r}; "
+                    f"charter: role={charter_raw.get('role')!r}, email={charter_raw.get('email')!r})"
+                ),
+                blocker_for_level=None,
             ))
-    return tuple(entries)
+        # Equivalent or conflicting -- charter's values are already canonical in `merged`.
+
+    return tuple(merged.values()), tuple(violations)
+
+
+def load_program_stakeholder_aliases(program_id: str, *, programs_root: Path = PROGRAMS_ROOT) -> frozenset[str]:
+    """specs/people.md PPL-W3.5e: a lightweight accessor for exactly the
+    one field `kb_checks.py::_load_program_stakeholder_aliases` (DIR-04/
+    DIR-12A/DIR-12B) actually uses from a full `ProgramContext` --
+    `stakeholder_aliases`. Reads ONLY `program.yaml` (the resolved
+    `stakeholder_register`/`charter.stakeholder_register` dual-read
+    §5.6/§7.1 already implements via `_parse_stakeholders`), not the
+    other ~12 files `load_program_context` reads to build workstreams/
+    milestones/editions/kpis/etc. for its own invariant computation --
+    none of which this value depends on (`stakeholder_register` is parsed
+    from `program_data` alone, before any other file is touched).
+
+    Purely additive: does not change `load_program_context`'s own
+    behavior or any of its other callers. Raises `ConfigError` if
+    `program.yaml` itself is missing or malformed, matching
+    `load_program_context`'s own `program.yaml`-read semantics exactly
+    (`load_yaml_mapping`'s default `required=True`). Unlike
+    `load_program_context(..., raise_on_error=False)`, a malformed file
+    OTHER than program.yaml (e.g. a broken `kpis.yaml`) does NOT affect
+    this function at all, since it never reads that file -- a real,
+    deliberate behavioral difference from the full-context load this
+    replaces in `_load_program_stakeholder_aliases`'s loop, covered by a
+    dedicated test."""
+    program_dir = programs_root / program_id
+    program_yaml = load_yaml_mapping(program_dir / "program.yaml")
+    program_data = program_yaml.get("program", program_yaml) if isinstance(program_yaml, dict) else {}
+    stakeholder_register, _stk04_violations = _parse_stakeholders(program_data)
+    return frozenset(s.alias for s in stakeholder_register)
 
 
 def _parse_sub_programs(program_data: dict[str, Any]) -> tuple[SubProgramEntry, ...]:
