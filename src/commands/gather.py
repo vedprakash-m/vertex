@@ -2160,7 +2160,7 @@ def _load_kusto_signals_via_uil(
     use_gather_v2 = _gather_v2_enabled() if gather_v2_enabled is None else gather_v2_enabled
     if use_gather_v2:
         from src.commands.gather_pipeline import run_channel_with_extraction
-        run_channel_with_extraction_fn = run_channel_with_extraction
+        run_channel_with_extraction_fn: Callable[..., tuple[Any | None, Any | None, Any | None]] = run_channel_with_extraction
     else:
         run_channel_with_extraction_fn = _run_channel_with_extraction
     return _load_kusto_signals_via_uil_impl(
@@ -2200,7 +2200,7 @@ def _load_teams_signals_via_uil(
     use_gather_v2 = _gather_v2_enabled() if gather_v2_enabled is None else gather_v2_enabled
     if use_gather_v2:
         from src.commands.gather_pipeline import run_channel_with_extraction
-        run_channel_with_extraction_fn = run_channel_with_extraction
+        run_channel_with_extraction_fn: Callable[..., tuple[Any | None, Any | None, Any | None]] = run_channel_with_extraction
     else:
         run_channel_with_extraction_fn = _run_channel_with_extraction
     return _load_signal_channel_via_uil_impl(
@@ -2235,7 +2235,7 @@ def _load_icm_signals_via_uil(
     use_gather_v2 = _gather_v2_enabled() if gather_v2_enabled is None else gather_v2_enabled
     if use_gather_v2:
         from src.commands.gather_pipeline import run_channel_with_extraction
-        run_channel_with_extraction_fn = run_channel_with_extraction
+        run_channel_with_extraction_fn: Callable[..., tuple[Any | None, Any | None, Any | None]] = run_channel_with_extraction
     else:
         run_channel_with_extraction_fn = _run_channel_with_extraction
     return _load_signal_channel_via_uil_impl(

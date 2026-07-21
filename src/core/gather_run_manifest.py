@@ -356,13 +356,17 @@ def _parse_datetime(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value)
 
 
+def _parse_required_datetime(value: str) -> datetime:
+    return datetime.fromisoformat(value)
+
+
 def _manifest_from_payload(payload: dict[str, Any]) -> GatherRunManifest:
     query_results = tuple(
         QueryResultEntry(
             query_id=row["query_id"],
             scope_id=row["scope_id"],
             wiql_hash=row["wiql_hash"],
-            captured_at=_parse_datetime(row["captured_at"]),
+            captured_at=_parse_required_datetime(row["captured_at"]),
             raw_count=row["raw_count"],
             membership_ids=tuple(row["membership_ids"]),
             membership_hash=row["membership_hash"],
@@ -396,8 +400,8 @@ def _manifest_from_payload(payload: dict[str, Any]) -> GatherRunManifest:
         actor_identity_type=payload["actor_identity_type"],
         lease_owner=payload["lease_owner"],
         lease_fencing_token=payload["lease_fencing_token"],
-        started_at=_parse_datetime(payload["started_at"]),
-        scope_as_of=_parse_datetime(payload["scope_as_of"]),
+        started_at=_parse_required_datetime(payload["started_at"]),
+        scope_as_of=_parse_required_datetime(payload["scope_as_of"]),
         required_scope_status=RequiredScopeStatus(payload["required_scope_status"]),
         schema_version=payload.get("schema_version", SCHEMA_VERSION),
         replayed_from_run_id=payload.get("replayed_from_run_id"),
