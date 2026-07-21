@@ -196,7 +196,10 @@ def set_registry_flag(knowledge_root: Path, flag_name: str, value: bool, *, acto
         raise ConfigError("The registry has not been bootstrapped yet.")
 
     def _apply() -> RegistryConfig:
-        updated = replace(config, **{flag_name: value})
+        # flag_name is validated above against _MUTABLE_FLAG_NAMES (all bool
+        # fields on RegistryConfig); mypy cannot verify a dynamic field name
+        # against dataclasses.replace()'s precise per-field types.
+        updated = replace(config, **{flag_name: value})  # type: ignore[arg-type]
         write_registry_config(registry_config_path(knowledge_root), updated)
         return updated
 

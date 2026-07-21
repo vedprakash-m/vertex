@@ -120,19 +120,19 @@ def _records_by_key(raw: dict, collection_name: str, key_name: str) -> dict[str,
 def _diff_value(before: object, after: object, *, prefix: str) -> tuple[str, ...]:
     if type(before) is not type(after):
         return (prefix,)
-    if isinstance(before, dict):
-        fields: list[str] = []
+    if isinstance(before, dict) and isinstance(after, dict):
+        dict_fields: list[str] = []
         for key in sorted(set(before) | set(after), key=str):
             child_prefix = f"{prefix}.{key}" if prefix else str(key)
-            fields.extend(_diff_value(before.get(key), after.get(key), prefix=child_prefix))
-        return tuple(fields)
-    if isinstance(before, list):
+            dict_fields.extend(_diff_value(before.get(key), after.get(key), prefix=child_prefix))
+        return tuple(dict_fields)
+    if isinstance(before, list) and isinstance(after, list):
         if len(before) != len(after):
             return (prefix,)
-        fields: list[str] = []
+        list_fields: list[str] = []
         for index, (before_item, after_item) in enumerate(zip(before, after, strict=True)):
-            fields.extend(_diff_value(before_item, after_item, prefix=f"{prefix}[{index}]"))
-        return tuple(fields)
+            list_fields.extend(_diff_value(before_item, after_item, prefix=f"{prefix}[{index}]"))
+        return tuple(list_fields)
     return () if before == after else (prefix,)
 
 
@@ -284,15 +284,15 @@ def _write_managed_file_from_live(relative_path: str, *, knowledge_root: Path, s
             raise ConfigError("Cannot adopt a missing entities.yaml.")
         write_entities_document(destination, document)
     elif relative_path == "people_directory.yaml":
-        result = load_people_directory(knowledge_root / relative_path)
-        if result is None:
+        people_result = load_people_directory(knowledge_root / relative_path)
+        if people_result is None:
             raise ConfigError("Cannot adopt a missing people_directory.yaml.")
-        write_people_directory(destination, result.people)
+        write_people_directory(destination, people_result.people)
     elif relative_path == "teams.yaml":
-        result = load_teams(knowledge_root / relative_path)
-        if result is None:
+        teams_result = load_teams(knowledge_root / relative_path)
+        if teams_result is None:
             raise ConfigError("Cannot adopt a missing teams.yaml.")
-        write_teams(destination, result.teams)
+        write_teams(destination, teams_result.teams)
     elif relative_path == "memberships.yaml":
         write_memberships(destination, load_memberships(knowledge_root / relative_path))
     else:

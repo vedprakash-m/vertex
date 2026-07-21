@@ -311,11 +311,12 @@ class ADOHydrationProvider:
             results = [self._fetch_item_detail(work_item_id, self._client) for work_item_id in detail_ids]
         else:
             local = threading.local()
+            detail_client_factory = self._detail_client_factory
 
             def _fetch_with_isolated_client(work_item_id: int) -> _ItemDetailFetch:
                 client = getattr(local, "client", None)
                 if client is None:
-                    client = self._detail_client_factory()
+                    client = detail_client_factory()
                     local.client = client
                 return self._fetch_item_detail(work_item_id, client)
 

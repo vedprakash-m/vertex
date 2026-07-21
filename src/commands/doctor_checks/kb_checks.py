@@ -876,6 +876,8 @@ def entities_dir11_check(*, known_program_ids: tuple[str, ...], programs_root: P
         org_document = load_entities_document(org_entities_path)
     except ConfigError as error:
         return DoctorCheck("Entities DIR-11", "fail", f"Could not load org-scope entities.yaml: {error}")
+    if org_document is None:
+        return DoctorCheck("Entities DIR-11", "ok", "No schema-2.0 org entities.yaml yet; nothing to check.")
 
     all_violations: list[str] = []
     checked_program_count = 0
@@ -887,6 +889,8 @@ def entities_dir11_check(*, known_program_ids: tuple[str, ...], programs_root: P
             program_document = load_entities_document(program_entities_path)
         except ConfigError as error:
             all_violations.append(f"{program_id}: could not load entities.yaml: {error}")
+            continue
+        if program_document is None:
             continue
         checked_program_count += 1
         violations = check_dir11_compliance(org_entities=org_document.entities, program_entities=program_document.entities)

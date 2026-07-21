@@ -76,6 +76,10 @@ import dataclasses
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING, TypeVar, cast
+
+if TYPE_CHECKING:
+    from _typeshed import DataclassInstance
 
 from src.core.exceptions import ConfigError
 from src.core.knowledge_store import get_shared_knowledge_root
@@ -152,6 +156,9 @@ class SharedMigrationPlan:
             summary.merged or summary.added
             for summary in (self.entities_summary, self.people_summary, self.teams_summary)
         )
+
+
+_T = TypeVar("_T")
 
 
 def _normalize(value: str) -> str:
@@ -324,7 +331,7 @@ def _merge_person(existing: PersonDirectory, incoming: PersonDirectory) -> Perso
         or verification.source.casefold().startswith("manual_")
     }
 
-    def merged_value(field_name: str, current: object, candidate: object) -> object:
+    def merged_value(field_name: str, current: _T, candidate: _T) -> _T:
         if field_name in protected_fields or candidate in (None, "", (), "unknown"):
             return current
         return candidate
@@ -422,7 +429,7 @@ def _merge_team(existing: Team, incoming: Team) -> Team:
         or verification.source.casefold().startswith("manual_")
     }
 
-    def merged_value(field_name: str, current: object, candidate: object) -> object:
+    def merged_value(field_name: str, current: _T, candidate: _T) -> _T:
         if field_name in protected_fields or candidate in (None, "", (), "unknown"):
             return current
         return candidate
@@ -769,8 +776,8 @@ def _append_record_field_changes(
     reason: str,
     as_of: datetime,
 ) -> None:
-    before_payload = dataclasses.asdict(before) if before is not None else {}
-    after_payload = dataclasses.asdict(record)
+    before_payload = dataclasses.asdict(cast("DataclassInstance", before)) if before is not None else {}
+    after_payload = dataclasses.asdict(cast("DataclassInstance", record))
     for field_name in sorted(set(before_payload) | set(after_payload)):
         before_value = before_payload.get(field_name)
         after_value = after_payload.get(field_name)

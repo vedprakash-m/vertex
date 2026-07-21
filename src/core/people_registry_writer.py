@@ -8,7 +8,10 @@ import copy
 import hashlib
 from pathlib import Path
 import shutil
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from _typeshed import DataclassInstance
 
 import yaml
 
@@ -379,8 +382,8 @@ def _field_changes(
     after: object,
     prefix: str,
 ) -> tuple[tuple[str, str, object, object], ...]:
-    before_values = {} if before is None else asdict(before)
-    after_values = asdict(after)
+    before_values = {} if before is None else asdict(cast("DataclassInstance", before))
+    after_values = asdict(cast("DataclassInstance", after))
     return tuple(
         (entity_id, f"{prefix}.{field}", before_values.get(field), after_values.get(field))
         for field in sorted(set(before_values) | set(after_values))
@@ -559,9 +562,9 @@ def _onboarding_state(
     previous_teams = {team.entity_id: team for team in state.teams}
     for entity in after.entities.entities:
         changes.extend(_field_changes(entity_id=entity.entity_id, before=previous_entities.get(entity.entity_id), after=entity, prefix="entity"))
-    for person in after.people:
-        if previous_people.get(person.entity_id) != person:
-            changes.extend(_field_changes(entity_id=person.entity_id, before=previous_people.get(person.entity_id), after=person, prefix="person"))
+    for directory_person in after.people:
+        if previous_people.get(directory_person.entity_id) != directory_person:
+            changes.extend(_field_changes(entity_id=directory_person.entity_id, before=previous_people.get(directory_person.entity_id), after=directory_person, prefix="person"))
     for team in after.teams:
         if previous_teams.get(team.entity_id) != team:
             changes.extend(_field_changes(entity_id=team.entity_id, before=previous_teams.get(team.entity_id), after=team, prefix="team"))
@@ -832,7 +835,8 @@ def _patch_state(
                             now=now,
                         )
                     elif field_name == "team_ids":
-                        values = tuple(str(item) for item in (value or ()))
+                        value_items = value if isinstance(value, (list, tuple)) else ()
+                        values = tuple(str(item) for item in value_items)
                         memberships, membership_changes = _set_memberships(
                             _RegistryState(state.entities, people, teams, memberships),
                             person=updated,
@@ -1369,20 +1373,20 @@ def _scrub_transaction_artifacts(
             )
             changed += 1
         elif path.name == _PROFILES_PATH:
-            document = load_people_profiles_document(path)
-            redacted, profile_count = _redact_profiles(document, entity_id=entity_id, aliases=aliases)
+            profiles_document = load_people_profiles_document(path)
+            redacted_profiles, profile_count = _redact_profiles(profiles_document, entity_id=entity_id, aliases=aliases)
             if not profile_count:
                 continue
-            path.write_text(dump_people_profiles_document(redacted, existing_path=path), encoding="utf-8")
+            path.write_text(dump_people_profiles_document(redacted_profiles, existing_path=path), encoding="utf-8")
             changed += 1
         else:
-            document = load_optional_yaml_mapping(path)
-            if document is None:
+            yaml_document = load_optional_yaml_mapping(path)
+            if yaml_document is None:
                 continue
-            redacted, delegation_count = _tombstone_delegations(document, entity_id=entity_id, now=now)
+            redacted_delegations, delegation_count = _tombstone_delegations(yaml_document, entity_id=entity_id, now=now)
             if not delegation_count:
                 continue
-            _write_yaml_mapping(path, redacted)
+            _write_yaml_mapping(path, redacted_delegations)
             changed += 1
     return changed
 

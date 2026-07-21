@@ -720,8 +720,9 @@ def test_onboard_cli_passes_ai_flag_to_create(monkeypatch, tmp_path: Path) -> No
         reports_root: Path | None = None,
         ai_enabled: bool = False,
         assistant=None,
+        register_shared: bool = False,
     ) -> OnboardResult:
-        del assistant
+        del assistant, register_shared
         captured["edition_name"] = edition_name
         captured["reports_root"] = reports_root
         captured["ai_enabled"] = ai_enabled

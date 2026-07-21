@@ -265,13 +265,13 @@ def onboard_command(
         else run_onboard_update(
             edition_name=update,
             ai_enabled=ai,
-            **({"register_shared": True} if register_shared else {}),
+            register_shared=register_shared,
         )
         if update is not None
         else run_onboard_create(
             edition_name=edition or "",
             ai_enabled=ai,
-            **({"register_shared": True} if register_shared else {}),
+            register_shared=register_shared,
         )
     )
     typer.echo(f"{'Onboarding migration' if run_migration else 'Onboarding'} complete for {result.edition_name}.")

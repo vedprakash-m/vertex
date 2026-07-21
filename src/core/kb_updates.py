@@ -996,8 +996,8 @@ def _read_yaml_or_default(path: Path, spec: KbDocumentSpec) -> dict[str, Any]:
             ],
         }
     if spec.relative_path == "knowledge/teams.yaml" and str(document.get("schema_version")) == "2.0":
-        loaded = load_teams(path)
-        if loaded is None:
+        loaded_teams = load_teams(path)
+        if loaded_teams is None:
             raise ConfigError(f"Could not load shared teams directory at {path}.")
         return {
             "schema_version": "1.0",
@@ -1008,7 +1008,7 @@ def _read_yaml_or_default(path: Path, spec: KbDocumentSpec) -> dict[str, Any]:
                     "area_paths": list(team.area_paths),
                     "programs": list(team.legacy_programs),
                 }
-                for team in loaded.teams
+                for team in loaded_teams.teams
             ],
         }
     return document

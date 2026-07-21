@@ -380,10 +380,10 @@ def run_channel(
             stage=hydration_error.stage,
             error=hydration_error.message,
         )
-    hydration_error = next(iter(hydration_result.errors), None)
+    first_hydration_error = next(iter(hydration_result.errors), None)
     is_degraded = (
         discovery_degrade_reason is not None
-        or hydration_error is not None
+        or first_hydration_error is not None
         or bool(hydration_result.failed_ref_ids)
     )
     if not is_degraded:
@@ -394,7 +394,7 @@ def run_channel(
         )
     _record_outcome(
         degraded=is_degraded,
-        reason=hydration_error.message if hydration_error is not None else discovery_degrade_reason,
+        reason=first_hydration_error.message if first_hydration_error is not None else discovery_degrade_reason,
         api_calls=hydration_result.api_call_count,
     )
     return hydration_result, delta

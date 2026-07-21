@@ -231,6 +231,7 @@ def record_program_promotion_cycle(
         )
 
     if reasons:
+        failure_reason = "; ".join(reasons)
         state = ProgramPromotionState(
             program_id=program_id,
             clean_cycles=0,
@@ -239,7 +240,7 @@ def record_program_promotion_cycle(
             rollback_restore_drill_at=prior.rollback_restore_drill_at,
             last_cycle_at=now,
             last_cycle_clean=False,
-            last_failure_reason="; ".join(reasons),
+            last_failure_reason=failure_reason,
             last_cycle_consumers=tuple(sorted({entry.consumer for entry in evidence.consumers})),
         )
         _write_program_promotion_state(knowledge_root, state)
@@ -250,7 +251,7 @@ def record_program_promotion_cycle(
             required_clean_cycles=PROGRAM_PROMOTION_CLEAN_CYCLES_REQUIRED,
             ready_to_promote=False,
             action="reset",
-            reason=state.last_failure_reason,
+            reason=failure_reason,
             state=state,
         )
 
@@ -443,12 +444,12 @@ def _cycle_failure_reasons(
     if unknown_evidence:
         reasons.append(f"unknown promotion consumer evidence: {', '.join(unknown_evidence)}")
     for consumer in enabled:
-        entry = by_consumer.get(consumer)
-        if entry is None:
+        consumer_entry = by_consumer.get(consumer)
+        if consumer_entry is None:
             reasons.append(f"enabled {consumer} consumer did not run")
-        elif not entry.succeeded:
+        elif not consumer_entry.succeeded:
             reasons.append(f"enabled {consumer} consumer failed")
-        elif entry.generation_id != evidence.generation_id:
+        elif consumer_entry.generation_id != evidence.generation_id:
             reasons.append(f"enabled {consumer} consumer did not use the cycle generation")
     return tuple(reasons)
 

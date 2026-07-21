@@ -287,13 +287,13 @@ def list_conflicts(*, knowledge_root: Path, status: str | None = None) -> tuple[
         decision = str(record.get("decision") or "")
         if decision not in _OPEN_DECISIONS:
             continue
-        entity_id = record.get("entity_id")
+        record_entity_id = record.get("entity_id")
         sequence = int(record["sequence"])
-        resolved = entity_id is not None and latest_resolution_sequence.get(str(entity_id), -1) > sequence
+        resolved = record_entity_id is not None and latest_resolution_sequence.get(str(record_entity_id), -1) > sequence
         entries.append(
             ConflictQueryEntry(
                 conflict_id=str(record["conflict_id"]), decision=decision,
-                entity_id=str(entity_id) if entity_id else None, reason=str(record.get("reason") or ""),
+                entity_id=str(record_entity_id) if record_entity_id else None, reason=str(record.get("reason") or ""),
                 recorded_at=datetime.fromisoformat(str(record["recorded_at"])), sequence=sequence,
                 status="resolved" if resolved else "open",
             )

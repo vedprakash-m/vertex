@@ -270,6 +270,7 @@ def refresh_people_from_provider(
         )
 
     if apply:
+        assert config is not None
         append_people_refresh_telemetry_record(
             knowledge_root, workspace_id=config.workspace_id, refresh_run_id=refresh_run_id,
             provider=provider_name, tenant_id=provider_config.tenant_id, requested_count=len(person_refs),

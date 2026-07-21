@@ -178,7 +178,7 @@ def run_under_channel_budget(
             degrade_reason=DEGRADE_REASON_BUDGET_EXCEEDED,
             elapsed_seconds=0.0,
         )
-    attempt_timeout = policy.per_attempt_timeout_seconds
+    attempt_timeout: float = policy.per_attempt_timeout_seconds
     if remaining_budget_seconds is not None:
         attempt_timeout = min(attempt_timeout, remaining_budget_seconds)
     started = time.monotonic()
