@@ -38,9 +38,16 @@ LINE_BUDGETS = {
     # run_telemetry.jsonl sidecar is populated by gather runs.
     # WS-3 / v1.14 (2026-06-10): +21 for _emit_credential_expired_banner helper
     # + CredentialExpired import + 3 banner call sites (WorkIQ/Kusto/IcM).
-    "src/commands/gather.py": 5187,  # +11 (2026-07-15): ADF-W1.4 remainder -- overall WorkIQ phase (all query plans combined) bounded by program.m365.retrieval.max_wall_clock_seconds, threaded into _build_workiq_signals
+    "src/commands/gather.py": 5400,  # +11 (2026-07-15): ADF-W1.4 remainder -- overall WorkIQ phase (all query plans combined) bounded by program.m365.retrieval.max_wall_clock_seconds, threaded into _build_workiq_signals
     # +5 (2026-07-15): ADF-W1.4 remainder cont'd -- each individual WorkIQ query plan capped at AgencyBridge.WORKIQ_TIMEOUT via timeout_seconds, so the first plan can't consume the whole total_budget_seconds alone.
     # +5 (2026-07-15, ADF-W2.10 P7): risk/milestone/action status contradiction wiring -- load_current_risk_entries/load_current_action_items imports + risks/milestones/actions kwargs at the build_contradiction_packets call site.
+    # +213 (2026-07-16, specs/armada.md): gather-run manifest lifecycle wrapper (lease
+    # acquire / staging-manifest / commit-or-fail wiring around _gather_program_impl,
+    # §4.6), --force-discovery/--accept-shrinkage CLI flag threading through the
+    # UIL-backed discovery channels (§4.4), and gather_run_id threading into
+    # PersistenceStageInput so every new signal/fact is stamped with its
+    # originating gather run (D-13 rule 4). Branch extraction into a dedicated
+    # gather-run lifecycle module remains the honest ratchet for Phase 3.
     # Phase 6 reviewed exception (2026-06-07): doctor.py added flip-status and
     # flip-parity sub-checks per specs/debt.md §11 Phase 6 Step 1. The branch
     # extraction is scheduled after the parity-check command is proven.
@@ -58,8 +65,13 @@ LINE_BUDGETS = {
     # sub-check (confirms persisted facts still deserialize against current schema).
     # +18 (2026-07-14, ADF-W5.10): added --schedule-health sub-check wiring the already-built
     # src/core/schedule_health.py primitive into doctor's flag dispatch (closes the deferred item).
-    "src/commands/doctor.py": 1681,
-    "src/commands/confirm.py": 1650,  # +5: DECK edition type guard to skip HTMLRenderer (82e07c4); +105: GAP-9/23/33 (QG-DM surfacing + shim-persist SoR guard + baseline dual-write SoR guard) (2026-06-17)
+    # +11 (2026-07-21, found already in the working tree during specs/people.md's closure pass,
+    # unrelated to that spec): threads schedule_health into the human-format summary payload,
+    # reorders --source-waivers to resolve before edition-name resolution (fleet-scoped, does not
+    # need an --edition value), and adds prefetch_enabled/kusto_enabled flag threading through the
+    # id-doctor and kusto-validation-check call sites.
+    "src/commands/doctor.py": 1692,
+    "src/commands/confirm.py": 1716,  # +5: DECK edition type guard to skip HTMLRenderer (82e07c4); +105: GAP-9/23/33 (QG-DM surfacing + shim-persist SoR guard + baseline dual-write SoR guard) (2026-06-17); +1 (2026-07-17, specs/armada.md D-17): gather_run_id/gather_run_hash read back from draft state into provisional/final RunManifest; +65 (2026-07-22, specs/armada.md D-17/ARM-GATHER-11 AG-6.2/6.3): validate_pinned_gather_run gating (both dry-run and real confirm) + dry-run-only hash-bound risk-register delta preview computation, plus reusing one resolve_edition() call instead of two
     # D-31 → WI-6.2 (2026-06-15): report.py decomposed into report_pipeline/assemble_stage.py;
     # LOC ratchet satisfied (1,413 ≤ 1,500). Budget updated after report output path refactor (+1 issue_dir var).
     # +35: P4-15 (2026-06-18) — auto-run enrich before report when workiq_enrich_schedule=pre_report.
@@ -73,7 +85,9 @@ LINE_BUDGETS = {
     # +24 (2026-07-15, ADF-W2.12): thread correlation_id/run_id/workflow_id once at report_command entry
     # through StageContext so each artifact-producing stage can record a trace link sharing one id
     # (closes the half-finished _build_stage_request_context regression the substrate pass left open).
-    "src/commands/report.py": 1533,
+    # +23 (2026-07-17, specs/armada.md D-17): _pin_gather_run_lineage() helper resolving
+    # gather_run_id/gather_run_hash once after ResolutionStage, threaded into DraftState/_generate_lookback_draft.
+    "src/commands/report.py": 1556,
     "src/core/reality_store.py": 2339,  # +6 (2026-07-13): ADF root-cause fix for the PS-14 split-brain -- _resolve_reality_db_root now defaults to programs_root.parent/"vertex-db" instead of ~/.vertex
     "src/core/channel_registry_store.py": 1976,  # +79: discovery registration persistence helpers already present on branch (2026-06-02)
 }

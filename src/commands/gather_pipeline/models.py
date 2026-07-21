@@ -55,6 +55,12 @@ class GatherArtifacts:
     promotion_candidates: tuple[M365PromotionCandidate, ...] = ()
     promotion_blocked_artifacts: tuple[M365PromotionBlockedArtifact, ...] = ()
     chart_results: tuple[Any, ...] = ()
+    # Armada D-18/D-19: provider-native capture, kept separate from the
+    # flattened signal stream so manifest evidence is never reconstructed.
+    ado_query_results: tuple[Any, ...] = ()
+    discovered_work_item_ids: tuple[str, ...] = ()
+    hydrated_work_item_ids: tuple[str, ...] = ()
+    channel_outcomes: tuple[Any, ...] = ()
 
     @property
     def integration_error_count(self) -> int:
@@ -77,6 +83,12 @@ class PersistenceStageInput:
     # own StageContext threading). "" means no correlation identity was
     # threaded -- every fact-write's trace-link call degrades to a no-op.
     correlation_id: str = ""
+    # D-13 rule 4 (specs/armada.md): the gather-run.v1 manifest run_id minted
+    # by gather_program()'s lifecycle wrapper. None when called outside that
+    # wrapper (e.g. direct unit-test invocation) -- new signals/facts are
+    # then persisted without a gather_run_id, exactly as they were before
+    # this field existed.
+    gather_run_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +188,10 @@ class StateWriteStageInput:
     hypothesis_count: int
     # ADF-W2.12: see PersistenceStageInput.correlation_id.
     correlation_id: str = ""
+    ado_query_results: tuple[Any, ...] = ()
+    discovered_work_item_ids: tuple[str, ...] = ()
+    hydrated_work_item_ids: tuple[str, ...] = ()
+    channel_outcomes: tuple[Any, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

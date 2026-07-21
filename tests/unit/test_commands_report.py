@@ -1325,6 +1325,64 @@ def test_generate_report_draft_writes_outputs(repo_root: Path, tmp_path: Path) -
     assert "@microsoft.com" in eml_payload
 
 
+def test_generate_report_draft_stamps_gather_run_lineage_from_committed_manifest(repo_root: Path, tmp_path: Path) -> None:
+    """D-17: a report run must pin the same gather_run_id/gather_run_hash from
+    the latest committed gather run onto both the archived RunManifest and the
+    draft state -- resolved once, never silently rebound."""
+    from src.core.gather_run_manifest import (
+        GatherRunManifest,
+        GatherRunStatus,
+        RequiredScopeStatus,
+        commit_staging_run,
+        create_staging_manifest,
+        resolve_latest_committed_manifest,
+    )
+    from src.core.ledger.ulid import new_ulid
+
+    reports_root, archive_root = _seed_v2_report_layout(repo_root, tmp_path)
+    programs_root = tmp_path / "programs"
+
+    started_at = datetime(2026, 5, 4, 8, 0, tzinfo=timezone.utc)
+    staging_manifest = GatherRunManifest(
+        run_id=f"gather-{new_ulid(started_at)}",
+        status=GatherRunStatus.RUNNING,
+        program_id="acme",
+        actor_identity_type="interactive",
+        lease_owner="test-runner",
+        lease_fencing_token=1,
+        started_at=started_at,
+        scope_as_of=started_at,
+        required_scope_status=RequiredScopeStatus.FULL,
+    )
+    create_staging_manifest(staging_manifest, programs_root=programs_root)
+    committed = commit_staging_run(
+        staging_manifest,
+        finished_at=datetime(2026, 5, 4, 8, 5, tzinfo=timezone.utc),
+        programs_root=programs_root,
+    )
+    assert committed.manifest_hash is not None
+    assert resolve_latest_committed_manifest("acme", programs_root=programs_root) is not None
+
+    artifacts = generate_report_draft(
+        edition_name=EDITION_NAME,
+        reports_root=reports_root,
+        archive_root=archive_root,
+        programs_root=programs_root,
+        as_of=datetime(2026, 5, 5, 18, 0, tzinfo=timezone.utc),
+        work_item_loader=lambda bundle, timestamp: (_sample_items(timestamp), 0),
+        open_browser=False,
+    )
+
+    manifest_payload = json.loads(artifacts.manifest_path.read_text(encoding="utf-8"))
+    draft_payload = json.loads(
+        (programs_root / "acme" / "publications" / EDITION_NAME / "issue_001" / "issue_001.draft.json").read_text(encoding="utf-8")
+    )
+    assert manifest_payload["gather_run_id"] == committed.run_id
+    assert manifest_payload["gather_run_hash"] == committed.manifest_hash
+    assert draft_payload["gather_run_id"] == committed.run_id
+    assert draft_payload["gather_run_hash"] == committed.manifest_hash
+
+
 def test_generate_report_draft_reads_sqlite_backed_signals_for_telemetry(repo_root: Path, tmp_path: Path) -> None:
     reports_root, archive_root = _seed_v2_report_layout(repo_root, tmp_path)
     programs_root = reports_root.parent / "programs"
@@ -3474,7 +3532,8 @@ def test_load_live_work_items_hydrates_batch_fields_without_selecting_unsupporte
     bundle = load_report_bundle(EDITION_NAME, reports_root=reports_root)
     bundle = replace(bundle, config=replace(bundle.config, ado_fetch_timeout_seconds=60))
     recorded: dict[str, object] = {}
-    monkeypatch.setattr("src.commands.report_pipeline.assemble_stage._slice_contract_saved_query_ids", lambda bundle: ())
+    monkeypatch.setattr("src.commands.report_pipeline.assemble_stage._slice_contract_full_scope_query_ids", lambda bundle: ())
+    monkeypatch.setattr("src.commands.report_pipeline.assemble_stage._slice_contract_activity_delta_query_ids", lambda bundle: ())
     monkeypatch.setattr("src.commands.report_pipeline.assemble_stage._slice_contract_explicit_work_item_ids", lambda bundle: [])
 
     class FakeADOClient:
@@ -3554,12 +3613,20 @@ def test_load_live_work_items_merges_saved_query_results_from_slice_contracts(
     reports_root, _, _ = _seed_v2_report_layout(repo_root, tmp_path)
     bundle = load_report_bundle(EDITION_NAME, reports_root=reports_root)
     recorded: dict[str, object] = {"query_ids": [], "wiql": []}
-    saved_query_ids = (
-        "a772129c-ec88-4fb6-a7bc-d2f2d8d5fd25",
+    full_scope_query_ids = ("a772129c-ec88-4fb6-a7bc-d2f2d8d5fd25",)
+    activity_delta_query_ids = (
         "9f49512b-7037-49dd-ade4-bc1a8a9222d0",
         "8328b055-3f71-44cc-a991-e8fcf97820a9",
     )
-    monkeypatch.setattr("src.commands.report_pipeline.assemble_stage._slice_contract_saved_query_ids", lambda bundle: saved_query_ids)
+    saved_query_ids = full_scope_query_ids + activity_delta_query_ids
+    monkeypatch.setattr(
+        "src.commands.report_pipeline.assemble_stage._slice_contract_full_scope_query_ids",
+        lambda bundle: full_scope_query_ids,
+    )
+    monkeypatch.setattr(
+        "src.commands.report_pipeline.assemble_stage._slice_contract_activity_delta_query_ids",
+        lambda bundle: activity_delta_query_ids,
+    )
     monkeypatch.setattr("src.commands.report_pipeline.assemble_stage._slice_contract_explicit_work_item_ids", lambda bundle: [])
 
     class FakeADOClient:
@@ -3622,7 +3689,14 @@ def test_load_live_work_items_merges_saved_query_results_from_slice_contracts(
     )
 
     assert recorded["query_ids"] == list(saved_query_ids)
-    assert all("[System.ChangedDate] >= '2026-04-24'" in wiql for wiql in cast(list[str], recorded["wiql"]))
+    full_scope_wiql = [wiql for wiql in cast(list[str], recorded["wiql"]) if "a772129c-ec88-4fb6-a7bc-d2f2d8d5fd25" in wiql]
+    activity_delta_wiql = [
+        wiql
+        for wiql in cast(list[str], recorded["wiql"])
+        if "a772129c-ec88-4fb6-a7bc-d2f2d8d5fd25" not in wiql
+    ]
+    assert full_scope_wiql and all("[System.ChangedDate] >=" not in wiql for wiql in full_scope_wiql)
+    assert activity_delta_wiql and all("[System.ChangedDate] >= '2026-04-24'" in wiql for wiql in activity_delta_wiql)
     assert any("[System.Title] contains 'Deployment'" in wiql for wiql in cast(list[str], recorded["wiql"]))
     assert recorded["ids"] == [900001, 900002, 900003, 900004]
     assert ado_calls == 8

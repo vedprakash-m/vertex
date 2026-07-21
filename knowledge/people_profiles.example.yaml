@@ -1,6 +1,10 @@
+# Synthetic example only. Illustrates people_profiles.yaml with the
+# PPL-W2A.5 canonical entity_id addition; alias remains a human hint.
+# No real customer names. See specs/people.md §7.9.
 schema_version: "1.0"
 profiles:
-  - alias: sample_owner
+  - entity_id: "person:01HQ8Y1A2B3C4D5E6F7G8H9J0K"
+    alias: sample_owner
     comm_style: "Impact-first, one-slide maximum"
     cares_about:
       - clear risk framing

@@ -97,6 +97,49 @@ def test_confirm_readiness_fails_needs_input_dimension(tmp_path: Path) -> None:
     assert overrides_check.status == "fail"
     assert overrides_check.metadata is not None
     assert "performance" in overrides_check.metadata["needs_input_dimensions"]
+    assert overrides_check.metadata["action_category"] == "pm-decision-required"
+    assert overrides_check.metadata["owner"] == ["pm"]
+
+
+def test_confirm_readiness_names_each_nested_scorecard_dimension_needing_risk_input(tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    prog_dir = programs_root / "myprog"
+    now = datetime.now(timezone.utc)
+    _write_gather_state(prog_dir, gathered_at=now)
+    overrides_dir = prog_dir / "overrides"
+    overrides_dir.mkdir(parents=True, exist_ok=True)
+    (overrides_dir / "issue_001.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "scorecards": {
+                    "Weekly": {
+                        "Runtime": {"risk": "❓ Needs input"},
+                        "Buildouts": {"risk": "High"},
+                        "Service Fabric": {"risk": "needs_input"},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = run_confirm_readiness_doctor(
+        edition_name="test_ed",
+        program_id="myprog",
+        programs_root=programs_root,
+        editions_root=tmp_path / "editions",
+        archive_root=tmp_path / "archive",
+        now=now,
+    )
+
+    overrides_check = next(c for c in report.checks if c.label == "Overrides")
+    assert overrides_check.status == "fail"
+    assert overrides_check.metadata is not None
+    assert overrides_check.metadata["needs_input_dimensions"] == [
+        "Weekly / Runtime",
+        "Weekly / Service Fabric",
+    ]
+    assert str(overrides_dir / "issue_001.yaml") in overrides_check.detail
 
 
 def test_confirm_readiness_ok_all_confirmed(tmp_path: Path) -> None:

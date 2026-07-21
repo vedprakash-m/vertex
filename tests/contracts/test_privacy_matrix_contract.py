@@ -53,6 +53,8 @@ SPEC_SIDECAR_PATHS: tuple[str, ...] = (
     "archive/<edition>/snapshots/issue_NNN.snapshot.json",
     "archive/<edition>/manifests/issue_NNN.json",
     "runtime/gather_state.json",
+    # Armada D-10/D-14 (2026-07-21): immutable gather-run manifest evidence.
+    "runtime/gather_runs",
     "external_dependencies.jsonl",
     "ai/llm_trace_full_io.jsonl",
     # ADF-W0.16 (ADR-0015, 2026-07-13):
@@ -67,6 +69,18 @@ SPEC_SIDECAR_PATHS: tuple[str, ...] = (
     "runtime/run_telemetry.jsonl",
     "_alerts/alerts.jsonl",
     "runtime/context_manifests",
+    # specs/people.md PPL-W1.8 (2026-07-16): workspace-global registry root artifacts.
+    "<workspace_root>/registry.yaml",
+    "<workspace_root>/registry_manifest.json",
+    "<workspace_root>/registry_capability_status.yaml",
+    "<workspace_root>/.state/registry_lease_audit.jsonl",
+    "<workspace_root>/_journal/people_changes.jsonl",
+    "<workspace_root>/_journal/people_conflicts.jsonl",
+    "<workspace_root>/_journal/people_refresh_telemetry.jsonl",
+    "<workspace_root>/_journal/archive/<year>/people_changes_<end_sequence>.jsonl",
+    "<workspace_root>/_journal/archive/<year>/people_conflicts_<end_sequence>.jsonl",
+    "<workspace_root>/_journal/archive/<year>/people_refresh_telemetry_<end_sequence>.jsonl",
+    "<workspace_root>/.transactions",
 )
 
 
@@ -186,6 +200,37 @@ def test_every_sidecar_rule_has_excise_consistency() -> None:
             "runtime/context_manifests",
         ):
             assert rule.classification == DataClassification.INTERNAL
+            assert not rule.supports_excise
+            continue
+        # specs/people.md PPL-W1.8: workspace-registry config/metadata files
+        # hold no PII (IDs, generation/fencing metadata, storage-class
+        # diagnostics only) -- same rationale as migration_log.jsonl above.
+        if rule.artifact_path in (
+            "<workspace_root>/registry.yaml",
+            "<workspace_root>/registry_manifest.json",
+            "<workspace_root>/registry_capability_status.yaml",
+        ):
+            assert rule.classification == DataClassification.INTERNAL
+            assert not rule.supports_excise
+            continue
+        # specs/people.md PPL-W1.8: staged/checkpointed transaction data is
+        # transient and content-addressed by transaction_id, not a rotating
+        # append-only audit log -- same rationale as
+        # runtime/context_manifests' content-addressed exemption above,
+        # despite carrying a PII classification (it mirrors whatever the
+        # live registry holds while staged).
+        if rule.artifact_path == "<workspace_root>/.transactions":
+            assert rule.classification == DataClassification.PII
+            assert not rule.supports_excise
+            continue
+        # Armada D-10/D-14: runtime/gather_runs is immutable gather-run
+        # evidence -- a manifest-shaped directory of content-addressed run
+        # records, not a rotating append-only audit log. privacy_purge
+        # handles it specially (preserving latest pointers/current runs)
+        # rather than via per-row excise, same rationale as
+        # runtime/context_manifests' content-addressed exemption above.
+        if rule.artifact_path == "runtime/gather_runs":
+            assert rule.classification == DataClassification.CONFIDENTIAL
             assert not rule.supports_excise
             continue
         # All other sidecars (CONFIDENTIAL + PII holding append-only audit

@@ -37,6 +37,7 @@ def save_decisions(
 
 def upsert_decisions(
     program_id: str, entries: tuple[DecisionEntry, ...], programs_root: Path = PROGRAMS_ROOT, *, correlation_id: str = "",
+    gather_run_id: str | None = None,
 ) -> tuple[DecisionEntry, ...]:
     with _decision_register_lock(program_id, programs_root):
         current = _load_decisions_from_path(program_id, get_decisions_path(program_id, programs_root))
@@ -44,7 +45,10 @@ def upsert_decisions(
         for entry in entries:
             merged.setdefault(entry.id, entry)
         sorted_entries = sort_decisions(tuple(merged.values()))
-        _write_decisions(program_id, sorted_entries, programs_root=programs_root, correlation_id=correlation_id)
+        _write_decisions(
+            program_id, sorted_entries, programs_root=programs_root, correlation_id=correlation_id,
+            gather_run_id=gather_run_id,
+        )
         return sorted_entries
 
 
@@ -103,6 +107,7 @@ def _load_decisions_from_path(program_id: str, path: Path) -> tuple[DecisionEntr
 
 def _write_decisions(
     program_id: str, entries: tuple[DecisionEntry, ...], programs_root: Path = PROGRAMS_ROOT, *, correlation_id: str = "",
+    gather_run_id: str | None = None,
 ) -> None:
     path = get_decisions_path(program_id, programs_root)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -116,7 +121,10 @@ def _write_decisions(
     temp_path = path.with_suffix(f"{path.suffix}.tmp")
     temp_path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
     os.replace(temp_path, path)
-    _sync_decision_facts(program_id, entries, programs_root=programs_root, correlation_id=correlation_id)
+    _sync_decision_facts(
+        program_id, entries, programs_root=programs_root, correlation_id=correlation_id,
+        gather_run_id=gather_run_id,
+    )
 
 
 def _decision_register_lock(program_id: str, programs_root: Path) -> portalocker.Lock:
@@ -131,6 +139,7 @@ def _sync_decision_facts(
     *,
     programs_root: Path,
     correlation_id: str = "",
+    gather_run_id: str | None = None,
 ) -> None:
     from src.core.program_fact_store import (
         FactLifecycleState,
@@ -163,6 +172,7 @@ def _sync_decision_facts(
                 precedence=FactPrecedence.CONFIRMED_GOVERNANCE_DECISION,
                 natural_key=natural_key,
                 created_by="vertex.decision_register",
+                gather_run_id=gather_run_id,
             ),
             recorded_at=sync_time,
         )
@@ -209,6 +219,7 @@ def _sync_decision_facts(
                 created_by="vertex.decision_register",
                 privacy_classification=fact.privacy_classification,
                 accepted_by=fact.accepted_by,
+                gather_run_id=gather_run_id,
             ),
             recorded_at=sync_time,
         )

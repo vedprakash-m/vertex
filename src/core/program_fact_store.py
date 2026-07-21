@@ -281,6 +281,12 @@ class ProgramFactInput:
     # Privacy / retention (non-nullable with defaults — safe for ALTER TABLE ADD COLUMN)
     redaction_status: str = "active"
     retention_class: str = "pilot_local"
+    # D-13 rule 4 / D-15 (specs/armada.md): the gather-run.v1 manifest run_id
+    # that produced this fact, threaded down from the gather pipeline so
+    # readers can eventually filter to facts from committed runs only.
+    # None for facts predating this field or written outside a
+    # lifecycle-managed gather run (e.g. reviewer/manual writes).
+    gather_run_id: str | None = None
 
     def build_lineage(self) -> FactLineage:
         """Construct a typed FactLineage from this input's lineage fields."""
@@ -340,6 +346,8 @@ class ProgramFactRevision:
     # Privacy / retention (non-nullable with defaults — safe for migration)
     redaction_status: str = "active"
     retention_class: str = "pilot_local"
+    # D-13 rule 4 / D-15 (specs/armada.md): see ProgramFactInput.gather_run_id.
+    gather_run_id: str | None = None
 
     def build_lineage(self) -> FactLineage:
         """Construct a typed FactLineage from this revision's lineage fields."""
@@ -465,6 +473,27 @@ def build_natural_key(
     return digest.hexdigest()
 
 
+def build_fact_id(program_id: str, natural_key: str) -> str:
+    """Return the stable, program-scoped ID for a logical Program Fact.
+
+    A fact's natural key already identifies its semantic identity within a
+    program.  Hashing the program ID and natural key gives replays and a clean
+    restore the same fact ID without conflating equal keys in different
+    programs.  Revisions remain independently unique and are still handled by
+    the revision ledger.
+    """
+    normalized_program_id = program_id.strip().lower()
+    normalized_natural_key = natural_key.strip().lower()
+    if not normalized_program_id:
+        raise ValueError("program_id must not be empty")
+    if not normalized_natural_key:
+        raise ValueError("natural_key must not be empty")
+    digest = hashlib.sha256(
+        f"{normalized_program_id}\x1f{normalized_natural_key}".encode("utf-8")
+    ).hexdigest()
+    return f"pf_{digest}"
+
+
 def load_program_facts(
     program_id: str,
     *,
@@ -476,11 +505,31 @@ def load_program_facts(
     editions_root: Path | None = None,
     archive_root: Path | None = None,
     sor_state: FactSorState | None = None,
+    require_committed_gather_run: bool = False,
 ) -> ProgramFactSnapshot:
     resolved_db_root = db_root
     if resolved_db_root is None:
         resolved_db_root = _resolve_fact_db_root(programs_root)
     snapshot = ProgramFactStore(program_id, home_root=home_root, db_root=resolved_db_root).snapshot(as_of=as_of)
+    if require_committed_gather_run:
+        from src.core.gather_run_manifest import get_verified_committed_run_ids
+
+        committed_run_ids = get_verified_committed_run_ids(
+            program_id,
+            programs_root=programs_root or PROGRAMS_ROOT,
+        )
+        snapshot = ProgramFactSnapshot(
+            program_id=snapshot.program_id,
+            as_of=snapshot.as_of,
+            # Legacy records intentionally remain visible until the explicit
+            # §4.17 bootstrap/cutover migration.  A stamped fact is visible
+            # only once its manifest is committed and hash-valid.
+            facts=tuple(
+                fact
+                for fact in snapshot.facts
+                if fact.gather_run_id is None or fact.gather_run_id in committed_run_ids
+            ),
+        )
     if as_of is not None:
         return snapshot
 
@@ -836,6 +885,7 @@ def append_program_event(
     program_id: str,
     event: ProgramEvent,
     *,
+    precedence: FactPrecedence = FactPrecedence.CONFIRMED_GOVERNANCE_DECISION,
     recorded_at: datetime | None = None,
     db_root: Path | None = None,
     home_root: Path | None = None,
@@ -847,8 +897,9 @@ def append_program_event(
       - `entity_refs=("event:{natural_key}",)`
       - `payload=event.metadata` (1:1 mapping, the event's metadata
         bag is the fact's payload)
-      - `precedence=CONFIRMED_GOVERNANCE_DECISION` (events represent
-        decided actions, not raw telemetry)
+      - `precedence=CONFIRMED_GOVERNANCE_DECISION` by default (events represent
+        decided actions, not raw telemetry); specialised event seams may pass
+        their explicitly classified precedence.
       - `natural_key=event.natural_key` (so re-running the same event
         is idempotent and surfaces as a no-op in the dual-read window)
 
@@ -874,7 +925,7 @@ def append_program_event(
             entity_refs=(f"event:{event.natural_key}",),
             payload=event.metadata,
             scope="program",
-            precedence=FactPrecedence.CONFIRMED_GOVERNANCE_DECISION,
+            precedence=precedence,
             natural_key=event.natural_key,
         ),
         recorded_at=resolved_recorded_at,
@@ -922,6 +973,7 @@ def append_nudge_event(
             natural_key=natural_key,
             metadata={**payload, "fact_type": fact_type},
         ),
+        precedence=resolved_precedence,
         recorded_at=recorded_at,
         db_root=db_root,
         home_root=home_root,
@@ -1205,7 +1257,7 @@ class ProgramFactStore:
             if active_revision is None:
                 revision = self._insert_revision(
                     connection,
-                    fact_id=f"pf_{uuid4().hex}",
+                    fact_id=build_fact_id(self._program_id, natural_key),
                     natural_key=natural_key,
                     fact=fact,
                     recorded_at=recorded_at_value,
@@ -1239,6 +1291,7 @@ class ProgramFactStore:
                         privacy_classification=fact.privacy_classification,
                         accepted_by=fact.accepted_by,
                         write_authority=fact.write_authority,
+                        gather_run_id=fact.gather_run_id,
                     ),
                     recorded_at=recorded_at_value,
                     proposed_against_revision_id=active_revision.revision_id,
@@ -1277,7 +1330,7 @@ class ProgramFactStore:
                        domain_event_id, candidate_id,
                        source_document_key, source_hash, evidence_ref,
                        approval_event_id, source_event_id, projector_version, extractor_version,
-                       redaction_status, retention_class
+                       redaction_status, retention_class, gather_run_id
                 FROM program_fact_revisions
                 WHERE program_id = ?
                   AND review_state = ?
@@ -1380,7 +1433,7 @@ class ProgramFactStore:
                        domain_event_id, candidate_id,
                        source_document_key, source_hash, evidence_ref,
                        approval_event_id, source_event_id, projector_version, extractor_version,
-                       redaction_status, retention_class
+                       redaction_status, retention_class, gather_run_id
                 FROM program_fact_revisions
                 WHERE program_id = ?
                   AND review_state = ?
@@ -1408,7 +1461,7 @@ class ProgramFactStore:
                        domain_event_id, candidate_id,
                        source_document_key, source_hash, evidence_ref,
                        approval_event_id, source_event_id, projector_version, extractor_version,
-                       redaction_status, retention_class
+                       redaction_status, retention_class, gather_run_id
                 FROM program_fact_revisions
                 WHERE program_id = ?
                   AND review_state = ?
@@ -1434,7 +1487,7 @@ class ProgramFactStore:
                    domain_event_id, candidate_id,
                    source_document_key, source_hash, evidence_ref,
                    approval_event_id, source_event_id, projector_version, extractor_version,
-                   redaction_status, retention_class
+                   redaction_status, retention_class, gather_run_id
             FROM program_fact_revisions
             WHERE program_id = ?
               AND natural_key = ?
@@ -1472,8 +1525,8 @@ class ProgramFactStore:
                 domain_event_id, candidate_id,
                 source_document_key, source_hash, evidence_ref,
                 approval_event_id, source_event_id, projector_version, extractor_version,
-                redaction_status, retention_class
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                redaction_status, retention_class, gather_run_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 revision_id,
@@ -1510,6 +1563,7 @@ class ProgramFactStore:
                 fact.extractor_version,
                 fact.redaction_status,
                 fact.retention_class,
+                fact.gather_run_id,
             ),
         )
         row = connection.execute(
@@ -1523,7 +1577,7 @@ class ProgramFactStore:
                    domain_event_id, candidate_id,
                    source_document_key, source_hash, evidence_ref,
                    approval_event_id, source_event_id, projector_version, extractor_version,
-                   redaction_status, retention_class
+                   redaction_status, retention_class, gather_run_id
             FROM program_fact_revisions
             WHERE revision_id = ?
             """,
@@ -1586,6 +1640,7 @@ class ProgramFactStore:
             extractor_version=row_dict.get("extractor_version"),
             redaction_status=row_dict.get("redaction_status") or "active",
             retention_class=row_dict.get("retention_class") or "pilot_local",
+            gather_run_id=row_dict.get("gather_run_id"),
         )
 
     def purge_facts_after(self, cutoff: datetime) -> int:
@@ -1778,6 +1833,21 @@ class ProgramFactStore:
             CREATE INDEX IF NOT EXISTS idx_program_fact_source_event
             ON program_fact_revisions(source_event_id)
             WHERE source_event_id IS NOT NULL
+            """
+        )
+        # D-13 rule 4 (specs/armada.md): gather-run.v1 run_id lineage, so a
+        # future activated reader can filter facts to committed runs only.
+        try:
+            connection.execute(
+                "ALTER TABLE program_fact_revisions ADD COLUMN gather_run_id TEXT"
+            )
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_program_fact_gather_run
+            ON program_fact_revisions(gather_run_id)
+            WHERE gather_run_id IS NOT NULL
             """
         )
         connection.commit()

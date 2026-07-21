@@ -6,6 +6,28 @@ Resolution ladder (§6.4):
   3. rapidfuzz fuzzy match — per-scope thresholds, configurable
 
 Zone A module (INV-1 applies — must not import from src.ai or src.m365).
+
+specs/people.md PPL-W3.3b: org-scope entities additionally source from the
+shared people/team registry (PPL-W2A.1's schema-2.0 `entities.yaml`, org-
+scoped by construction), on top of -- not instead of -- the legacy
+`vertex/knowledge/entities.yaml` path this class has always read. Grounded
+by direct filesystem investigation before implementing: `vertex/knowledge/`
+does not exist anywhere in this repo, so that legacy org-scope path has
+always resolved to zero entities in production; program-scope
+`programs/<id>/knowledge/entities.yaml` (e.g. the real, live
+`programs/xpf/knowledge/entities.yaml`) is DELIBERATELY left completely
+unchanged -- it carries entity_type values (milestone, risk, decision,
+workstream, product, sku_gen, concept, program, ...) with no schema-2.0
+equivalent at all, since schema-2.0 `entities.yaml` is explicitly scoped
+to person/team identity only and folding non-person/team resolution into
+it is out of this people-registry spec's own authority. This makes the
+cutover a pure ADDITION at the one seam (org-scope) that was previously
+always empty: `resolve_with_binding` produces an identical resolution for
+every entity that already resolved via program-scope or the legacy org
+path (both untouched); the only new behavior is that person/team aliases
+known to the shared registry but not already present locally now also
+resolve, via the SAME exact/casefold/fuzzy ladder every consumer already
+uses -- no consumer file changes needed.
 """
 from __future__ import annotations
 
@@ -19,6 +41,15 @@ import yaml
 
 from src.core.config_loader import PROGRAMS_ROOT
 from src.core.entity_binding_correction_store import EntityBindingCorrection
+from src.core.knowledge_store import get_shared_knowledge_root
+from src.core.people_entity_schema import (
+    CanonicalEntity as _Schema2CanonicalEntity,
+    EntityRedirect as _Schema2EntityRedirect,
+    EntityStatus as _Schema2EntityStatus,
+    is_legacy_schema_0_entities_document,
+    load_entities_document,
+)
+from src.core.people_namespace_bridge import resolve_entity_redirect
 from src.core.program_reality import CanonicalEntity, RealityConflict
 
 #: ADF-W2.6 (Section 8.14.3): bumped whenever the resolution ladder's rules
@@ -76,6 +107,71 @@ def _parse_entities_yaml(data: dict[str, Any]) -> tuple[CanonicalEntity, ...]:
             scope=scope,
         ))
     return tuple(result)
+
+
+#: schema-2.0 `people_entity_schema.CanonicalEntity` is explicitly scoped to
+#: person/team identity (specs/people.md's own registry scope) -- other
+#: entity_type values this module resolves (milestone, risk, decision,
+#: workstream, product, sku_gen, concept, program, ...) have no schema-2.0
+#: representation at all and are never sourced from the shared registry.
+_SCHEMA2_ENTITY_TYPES = frozenset({"person", "team"})
+
+
+def _build_entities_from_schema2(
+    entities: tuple[_Schema2CanonicalEntity, ...], redirects: tuple[_Schema2EntityRedirect, ...]
+) -> tuple[CanonicalEntity, ...]:
+    """Adapts schema-2.0 person/team entities into this module's OWN
+    long-standing `CanonicalEntity`/resolution-ladder shape, rather than
+    replacing `resolve_with_binding`'s richer API (confidence, ambiguity,
+    fuzzy tier, operator corrections) with `people_namespace_bridge.py`'s
+    narrower exact/alias/redirect-only `resolve_ref_to_canonical_entity_id`
+    -- every real consumer of this module only ever touches
+    `CanonicalEntity`/`EntityBinding` attributes, never the loader, so this
+    keeps their code byte-identical while the underlying data source moves
+    to the shared registry.
+
+    `aliases` is flattened to plain strings (schema-2.0's typed
+    `EntityAlias.value`), including BOTH active and retired aliases --
+    matching `resolve_ref_to_canonical_entity_id`'s own no-status-filter
+    alias match, since a retired alias must still resolve ("alias history
+    remains resolvable after rename," §7.2a) -- plus every alias ever held
+    by a TOMBSTONED entity that redirects (possibly transitively) to this
+    one, the same "resolve-after-merge" guarantee `resolve_entity_redirect`
+    (PPL-W2A.4) provides, applied here so it flows through this module's
+    OWN exact/casefold/fuzzy ladder rather than a second lookup path."""
+    active_by_id = {entity.entity_id: entity for entity in entities if entity.status is _Schema2EntityStatus.ACTIVE}
+    redirect_aliases_by_target: dict[str, set[str]] = {}
+    for entity in entities:
+        if entity.status is not _Schema2EntityStatus.TOMBSTONED:
+            continue
+        target_id = resolve_entity_redirect(entity.entity_id, redirects)
+        if target_id in active_by_id:
+            redirect_aliases_by_target.setdefault(target_id, set()).update(alias.value for alias in entity.aliases)
+
+    result: list[CanonicalEntity] = []
+    for entity_id, entity in active_by_id.items():
+        alias_values = {alias.value for alias in entity.aliases} | redirect_aliases_by_target.get(entity_id, set())
+        result.append(CanonicalEntity(
+            entity_id=entity.entity_id, entity_type=entity.entity_type, canonical_name=entity.canonical_name,
+            aliases=tuple(sorted(alias_values)), scope=entity.scope,
+        ))
+    return tuple(result)
+
+
+def _load_shared_registry_person_team_entities(programs_root: Path) -> tuple[CanonicalEntity, ...]:
+    """PPL-W3.3b: the shared people/team registry's org-scoped
+    `entities.yaml` (PPL-W2A.1), filtered to person/team types and adapted
+    to this module's own `CanonicalEntity` shape. Returns `()` (a true
+    no-op) when the shared registry hasn't been bootstrapped/adopted, or
+    is still on legacy schema 0 -- never raises."""
+    shared_path = get_shared_knowledge_root(programs_root) / "entities.yaml"
+    if not shared_path.exists() or is_legacy_schema_0_entities_document(shared_path):
+        return ()
+    document = load_entities_document(shared_path)
+    if document is None:
+        return ()
+    person_team_entities = tuple(entity for entity in document.entities if entity.entity_type in _SCHEMA2_ENTITY_TYPES)
+    return _build_entities_from_schema2(person_team_entities, document.redirects)
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +256,8 @@ class EntityRegistry:
     """Resolves raw entity references to canonical identities (WI-2.0).
 
     Supports program-scope entities (programs/<id>/knowledge/entities.yaml)
-    and org-scope entities (vertex/knowledge/entities.yaml).
+    and org-scope entities (vertex/knowledge/entities.yaml, unioned with
+    the shared people/team registry's person/team entities -- PPL-W3.3b).
 
     Resolution order (Phase 1 — WI-2.1 adds fuzzy tier):
     1. Exact match against canonical_name or any alias
@@ -205,14 +302,24 @@ class EntityRegistry:
             raw = yaml.safe_load(program_path.read_text(encoding="utf-8")) or {}
             program_entities = _parse_entities_yaml(raw)
 
-        # Org-scope entities
+        # Org-scope entities: the legacy `vertex/knowledge/entities.yaml`
+        # path (unchanged behavior) UNIONED with the shared people/team
+        # registry's person/team entities (PPL-W3.3b, additive) -- legacy
+        # wins on an entity_id collision, so anything already resolving via
+        # that path keeps resolving to the identical entity object.
         org_entities: tuple[CanonicalEntity, ...] = ()
         if org_scope:
             repo_root = _repo_root or (programs_root.parent)
             org_path = repo_root / _ORG_ENTITIES_PATH
+            legacy_org_entities: tuple[CanonicalEntity, ...] = ()
             if org_path.exists():
                 raw = yaml.safe_load(org_path.read_text(encoding="utf-8")) or {}
-                org_entities = _parse_entities_yaml(raw)
+                legacy_org_entities = _parse_entities_yaml(raw)
+            shared_org_entities = _load_shared_registry_person_team_entities(programs_root)
+            legacy_ids = {entity.entity_id for entity in legacy_org_entities}
+            org_entities = legacy_org_entities + tuple(
+                entity for entity in shared_org_entities if entity.entity_id not in legacy_ids
+            )
 
         return cls(
             program_entities=program_entities,

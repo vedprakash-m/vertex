@@ -61,7 +61,7 @@ def test_knowledge_show_resolves_claims_for_program_scope_chain(monkeypatch, tmp
     program_dir = programs_root / "acme"
     program_dir.mkdir(parents=True, exist_ok=True)
     (program_dir / "program.yaml").write_text(
-        "id: acme\nknowledge_scopes:\n  - domain:storage-platform\n",
+        "id: acme\nname: Acme\nknowledge_scopes:\n  - domain:storage-platform\n",
         encoding="utf-8",
     )
 
@@ -227,7 +227,7 @@ def test_knowledge_redact_rewrites_claim_and_hides_it_from_show(monkeypatch, tmp
     program_dir = programs_root / "acme"
     program_dir.mkdir(parents=True, exist_ok=True)
     (program_dir / "program.yaml").write_text(
-        "id: acme\nknowledge_scopes:\n  - domain:storage-platform\n",
+        "id: acme\nname: Acme\nknowledge_scopes:\n  - domain:storage-platform\n",
         encoding="utf-8",
     )
 
@@ -938,7 +938,7 @@ def test_knowledge_status_reports_active_program_scope_overrides(monkeypatch, tm
     program_dir = programs_root / "acme"
     program_dir.mkdir(parents=True, exist_ok=True)
     (program_dir / "program.yaml").write_text(
-        "id: acme\nknowledge_scopes:\n  - domain:storage-platform\n",
+        "id: acme\nname: Acme\nknowledge_scopes:\n  - domain:storage-platform\n",
         encoding="utf-8",
     )
 
@@ -2284,7 +2284,7 @@ def test_knowledge_redact_vault_cascades_claims_and_active_candidates(monkeypatc
     program_dir = programs_root / "acme"
     program_dir.mkdir(parents=True, exist_ok=True)
     (program_dir / "program.yaml").write_text(
-        "id: acme\nknowledge_scopes:\n  - domain:storage-platform\n",
+        "id: acme\nname: Acme\nknowledge_scopes:\n  - domain:storage-platform\n",
         encoding="utf-8",
     )
     source_path = tmp_path / "knowledge-source.md"

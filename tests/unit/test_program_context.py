@@ -38,6 +38,7 @@ from src.core.program_context import (
     MaturityLevel,
     RegistryLaneEntry,
     load_program_context,
+    load_program_stakeholder_aliases,
 )
 
 
@@ -454,3 +455,70 @@ def test_summary_dict_has_required_keys(tmp_path: Path) -> None:
     assert "maturity_level" in d
     assert "invariant_errors" in d
     assert "staleness_errors" in d
+
+
+# ---------------------------------------------------------------------------
+# PPL-W3.5e: load_program_stakeholder_aliases (narrow accessor)
+# ---------------------------------------------------------------------------
+
+def test_load_program_stakeholder_aliases_matches_full_context_result(tmp_path: Path) -> None:
+    """The narrow accessor must return exactly the same alias set the
+    full `load_program_context(...).stakeholder_aliases` would, since it
+    is meant as a drop-in replacement for that one field in
+    `kb_checks.py::_load_program_stakeholder_aliases`'s loop."""
+    programs_root = _minimal_program(tmp_path)
+    ctx = load_program_context("test_prog", programs_root=programs_root, raise_on_error=False)
+
+    aliases = load_program_stakeholder_aliases("test_prog", programs_root=programs_root)
+
+    assert aliases == frozenset(ctx.stakeholder_aliases)
+    assert aliases == frozenset({"alice"})
+
+
+def test_load_program_stakeholder_aliases_merges_top_level_and_charter(tmp_path: Path) -> None:
+    """Must go through the SAME §7.1 dual-read merge `_parse_stakeholders`
+    already implements (top-level ∪ charter, charter wins on conflict),
+    not a naive top-level-only read."""
+    prog_dir = tmp_path / "programs" / "test_prog"
+    prog_dir.mkdir(parents=True, exist_ok=True)
+    _write_yaml(prog_dir / "program.yaml", {
+        "schema_version": "3.0",
+        "id": "test_prog",
+        "name": "Test Program",
+        "stakeholder_register": [{"alias": "legacy_only", "role": "owner"}],
+        "charter": {"stakeholder_register": [{"alias": "charter_only", "role": "reviewer"}]},
+        "sub_programs": [{"id": "sub1", "name": "Sub One"}],
+    })
+
+    aliases = load_program_stakeholder_aliases("test_prog", programs_root=tmp_path / "programs")
+
+    assert aliases == frozenset({"legacy_only", "charter_only"})
+
+
+def test_load_program_stakeholder_aliases_raises_when_program_yaml_missing(tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    (programs_root / "test_prog").mkdir(parents=True)
+
+    with pytest.raises(ConfigError):
+        load_program_stakeholder_aliases("test_prog", programs_root=programs_root)
+
+
+def test_load_program_stakeholder_aliases_unaffected_by_a_malformed_other_plane1_file(tmp_path: Path) -> None:
+    """PPL-W3.5e's own documented, deliberate behavior difference from
+    the full `load_program_context` this replaces in
+    `_load_program_stakeholder_aliases`'s loop: a malformed OTHER
+    Plane-1 file (here, workstreams.yaml with a non-mapping top level)
+    must NOT affect this accessor at all, since it never reads that
+    file -- unlike the old full-load-then-catch-ConfigError pattern,
+    which would have silently dropped this program's real, valid
+    stakeholder data entirely."""
+    programs_root = _minimal_program(tmp_path)
+    (programs_root / "test_prog" / "workstreams.yaml").write_text("not_a_mapping\n", encoding="utf-8")
+
+    # Confirm the premise: the FULL load_program_context really does choke on this.
+    with pytest.raises(ConfigError):
+        load_program_context("test_prog", programs_root=programs_root, raise_on_error=False)
+
+    # The narrow accessor is unaffected.
+    aliases = load_program_stakeholder_aliases("test_prog", programs_root=programs_root)
+    assert aliases == frozenset({"alice"})

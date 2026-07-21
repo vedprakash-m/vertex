@@ -86,6 +86,10 @@ from src.core.section_proposal_store import load_stale_claim_ids
 from src.core.signal_review import signal_is_approved_for_evidence
 from src.core.signal_classification import signal_class as _get_signal_class
 from src.core.risk_register_engine import upsert_risk_from_signal as _upsert_risk_from_signal
+from src.core.risk_register_engine import preview_risk_upserts_from_signals as _preview_risk_upserts_from_signals
+from src.core.risk_register_engine import compute_risk_delta_preview_hash as _compute_risk_delta_preview_hash
+from src.core.risk_register_engine import RiskDeltaPreviewEntry
+from src.core.gather_run_manifest import validate_pinned_gather_run as _validate_pinned_gather_run
 from src.core.semantic_index import mark_semantic_index_dirty, update_archive_semantic_index_for_issue
 from src.core.slice_contract_loader import load_slice_contract_for_edition
 from src.core.source_health import source_health_function_name_for_edition
@@ -98,7 +102,7 @@ from src.core.trusted_baseline_store import load_trusted_baseline_issue
 from src.core.verbosity_enforcer import enforce_verbosity
 from src.core.view_models import EditionMeta, WorkstreamData
 from src.core.gather_state_store import load_gather_state
-from src.core.models_v2 import SectionRevisionStatus, Signal
+from src.core.models_v2 import SectionRevisionStatus, Signal, SignalClass
 from src.commands.report import _ado_item_base_url, _build_auto_suggested_top_items, _build_continuity_deltas
 from src.commands.report import _build_health_summary, _build_item_urls, _build_model_program_context, _build_exec_summary_text
 from src.commands.report import _build_scorecard_data, _build_scorecard_packets, _build_snapshot, _build_top_items, _compute_read_time_minutes
@@ -132,6 +136,13 @@ class ConfirmResult:
     weekly_summary_card_path: Path | None = None
     posted_weekly_summary_card: bool = False
     workstream_association_log_path: Path | None = None
+    # D-17/ARM-GATHER-11 AG-6.3: populated on a failure-free --dry-run only --
+    # what upsert_risk_from_signal would do for each approved RISK-class
+    # signal, computed without mutating risk_register.yaml. Empty on a real
+    # confirm (which performs the upserts directly) and on any confirm that
+    # returned failures before reaching this computation.
+    risk_delta_preview: tuple[RiskDeltaPreviewEntry, ...] = ()
+    risk_delta_preview_hash: str | None = None
 
 
 def _validate_decision_strip_ack(overrides_document: OverridesDocument) -> tuple[str, ...]:
@@ -300,6 +311,11 @@ def confirm_command(
     if dry_run:
         typer.echo(f"Confirm dry-run passed for issue {result.issue_number:03d}.")
         typer.echo("Would write confirmed snapshot, archive HTML/Markdown/manifest, and reset active author state.")
+        if result.risk_delta_preview:
+            typer.echo(f"Risk-register delta preview ({len(result.risk_delta_preview)} approved risk signal(s)):")
+            for entry in result.risk_delta_preview:
+                typer.echo(f"- {entry.action}: {entry.risk_id} ({entry.title})")
+            typer.echo(f"Preview hash: {result.risk_delta_preview_hash}")
         if result.warnings:
             typer.echo(f"Warnings: {len(result.warnings)}")
             for warning in result.warnings:
@@ -508,7 +524,27 @@ def confirm_issue(
         as_of=artifacts[6].ado_data_as_of.date(),
         reports_root=resolved_reports_root,
     )
-    failures = tuple(result.message for result in blocking_results) + extra_failures + stale_failures
+    # D-17/ARM-GATHER-11 (AG-6.2): reject a pinned gather run that is invalid,
+    # stale, or PARTIAL scope -- before either a dry-run preview or a real
+    # archive transaction proceeds. Applies to both paths identically so a
+    # dry-run pass is a trustworthy predictor of the real confirm (AG-6.5).
+    _lineage_resolved_v2 = resolve_edition(
+        edition_name,
+        editions_root=editions_root,
+        programs_root=programs_root,
+    )
+    _lineage_program_id = _lineage_resolved_v2.program.id if _lineage_resolved_v2 is not None else None
+    gather_run_failures = (
+        _validate_pinned_gather_run(
+            _lineage_program_id,
+            gather_run_id=draft_state.get("gather_run_id"),
+            gather_run_hash=draft_state.get("gather_run_hash"),
+            programs_root=programs_root,
+        )
+        if _lineage_program_id is not None
+        else ()
+    )
+    failures = tuple(result.message for result in blocking_results) + extra_failures + stale_failures + gather_run_failures
     warnings = (
         artifacts[1]
         + claim_extraction_warnings
@@ -530,6 +566,35 @@ def confirm_issue(
         )
 
     if dry_run:
+        # D-17/ARM-GATHER-11 (AG-6.3): compute a hash-bound risk-register
+        # delta preview -- what upsert_risk_from_signal would do for each
+        # currently-approved RISK-class signal -- without mutating
+        # risk_register.yaml. Reuses the exact matching decision
+        # (_decide_risk_upsert) the real archive transaction's upsert loop
+        # calls, so it can never drift from what a real confirm would do.
+        risk_delta_preview: tuple[RiskDeltaPreviewEntry, ...] = ()
+        risk_delta_preview_hash: str | None = None
+        if _lineage_program_id is not None:
+            _preview_data_as_of = _parse_datetime_required(draft_state["ado_data_as_of"])
+            _preview_evidence_window_start = _preview_data_as_of - __import__("datetime", fromlist=["timedelta"]).timedelta(
+                days=bundle.config.ado.date_window_days
+            )
+            _preview_signal_store = build_signal_store_for_program_id(_lineage_program_id, programs_root=programs_root)
+            _preview_journal_signals = _preview_signal_store.read(_lineage_program_id, end=_preview_data_as_of)
+            _preview_review_states = _preview_signal_store.read_reviews(_lineage_program_id)
+            _preview_risk_signals = tuple(
+                (signal.id, signal.text or "", tuple(signal.entity_refs or ()), getattr(signal, "workstream_id", None))
+                for signal in _preview_journal_signals
+                if signal.timestamp >= _preview_evidence_window_start
+                and signal_is_approved_for_evidence(signal, _preview_review_states)
+                and _get_signal_class(signal) == SignalClass.RISK
+            )
+            risk_delta_preview = _preview_risk_upserts_from_signals(
+                _lineage_program_id,
+                _preview_risk_signals,
+                programs_root=programs_root,
+            )
+            risk_delta_preview_hash = _compute_risk_delta_preview_hash(risk_delta_preview)
         return ConfirmResult(
             issue_number=issue_number,
             next_issue_number=issue_number + 1,
@@ -539,17 +604,17 @@ def confirm_issue(
             archive_paths=None,
             failures=(),
             warnings=warnings,
+            risk_delta_preview=risk_delta_preview,
+            risk_delta_preview_hash=risk_delta_preview_hash,
         )
 
     review_status_path = get_review_status_path(edition_name, reports_root=resolved_reports_root)
     narrative_dir = get_narratives_dir(edition_name, issue_number, reports_root=resolved_reports_root)
 
-    resolved_v2 = resolve_edition(
-        edition_name,
-        editions_root=editions_root,
-        programs_root=programs_root,
-    )
-    program_id = resolved_v2.program.id if resolved_v2 is not None else None
+    # Reuse the resolution already performed above for gather-run-lineage
+    # validation instead of resolving the edition a second time.
+    resolved_v2 = _lineage_resolved_v2
+    program_id = _lineage_program_id
     resolved_workstreams = resolved_v2.workstreams if resolved_v2 is not None else ()
     resolved_scorecards = resolved_v2.scorecards if resolved_v2 is not None else ()
     items = _deserialize_items(tuple(draft_state.get("items", [])))
@@ -1385,6 +1450,11 @@ def _build_confirm_artifacts(
                 programs_root=programs_root,
             ),
         },
+        # D-17: read back the gather-run lineage pinned in the draft at
+        # generation time -- never re-resolved live, so confirm structurally
+        # cannot silently rebind to a newer committed run than the draft used.
+        gather_run_id=draft_state.get("gather_run_id"),
+        gather_run_hash=draft_state.get("gather_run_hash"),
     )
     qg_phase_1a = evaluate_phase_1a_gates(
         ban_list_violations=ban_violations,
@@ -1590,6 +1660,8 @@ def _build_confirm_artifacts(
                 issue_number=issue_number,
             ),
         },
+        gather_run_id=draft_state.get("gather_run_id"),
+        gather_run_hash=draft_state.get("gather_run_hash"),
     )
     warnings = tuple(hygiene_warnings) + _workstream_narrative_warnings(
         issue_number=issue_number,

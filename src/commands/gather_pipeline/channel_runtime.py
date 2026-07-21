@@ -3,10 +3,11 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Any, cast
 
 from src.core.adf_config import load_arch_data_fix
-from src.core.alerts import append_or_suppress_alert
+from src.core.alerts import append_or_suppress_alert, entity_scoped_alert_id, resolve_alert
 from src.core.channel_execution_policy import channel_execution_policy_for, run_under_channel_budget
 from src.core.channel_registry_store import (
     ChannelRegistryStore,
@@ -19,6 +20,7 @@ from src.core.gather_channel_support import append_integration_error_once, bindi
 from src.core.exceptions import QueryError
 from src.core.integration_types import HydrationMode, HydrationResult, RunContext
 from src.core.models_v2 import IntegrationError
+from src.core.gather_run_manifest import ChannelOutcomeEntry
 from src.commands.gather_pipeline.support import enrich_resources, sanitize_discovery_result
 
 
@@ -70,6 +72,31 @@ def _emit_channel_budget_alert_best_effort(
         pass
 
 
+def _resolve_channel_budget_alert_best_effort(
+    *, program_id: str, channel: str, programs_root: Path
+) -> None:
+    """Append a recovery transition for a channel that is healthy again.
+
+    Alert identity is stable across detections, so resolving it here only
+    affects the budget-exceeded condition for this exact program/channel.
+    This remains best effort: alert-ledger trouble must never turn healthy
+    authoritative collection into a failed gather.
+    """
+    try:
+        resolve_alert(
+            entity_scoped_alert_id(
+                program_id=program_id,
+                category="channel_budget_exceeded",
+                entity_type="channel",
+                entity_id=channel,
+            ),
+            program_id=program_id,
+            programs_root=programs_root,
+        )
+    except Exception:
+        pass
+
+
 class _SkipDiscoveryApplication(Exception):
     """ADF-W1.4 internal control-flow signal: discovery was budget-degraded.
 
@@ -78,6 +105,19 @@ class _SkipDiscoveryApplication(Exception):
     which would otherwise log a second, redundant integration error for the
     same degradation already reported at the timeout site.
     """
+
+
+_MAX_DESCRIBED_REMOVED_REFS = 10
+
+
+def _describe_removed_refs(removed: tuple[Any, ...]) -> str:
+    """Sec 4.4: format an accepted shrinkage's classified removals for the
+    operator-visible integration-error message, capped to avoid an
+    unbounded message when a channel's entire registry was removed."""
+    described = ", ".join(f"{ref.ref_kind}:{ref.ref_id}" for ref in removed[:_MAX_DESCRIBED_REMOVED_REFS])
+    if len(removed) > _MAX_DESCRIBED_REMOVED_REFS:
+        described += f", ... ({len(removed) - _MAX_DESCRIBED_REMOVED_REFS} more)"
+    return described
 
 
 def run_channel(
@@ -89,11 +129,28 @@ def run_channel(
     verified_at: datetime,
     run_ctx: RunContext,
     integration_error_sink: list[IntegrationError] | None = None,
+    discovery_result_sink: list[Any] | None = None,
+    channel_outcome_sink: list[ChannelOutcomeEntry] | None = None,
     programs_root: Path = PROGRAMS_ROOT,
 ) -> tuple[Any | None, Any | None]:
     channel = binding.config.channel
+    channel_started_at = perf_counter()
     provider_instance_id = binding_provider_instance_id(binding)
     delta = None
+    discovery_degrade_reason: str | None = None
+
+    def _record_outcome(*, degraded: bool, reason: str | None, api_calls: int = 0) -> None:
+        if channel_outcome_sink is None:
+            return
+        channel_outcome_sink.append(
+            ChannelOutcomeEntry(
+                channel=channel,
+                degraded=degraded,
+                degrade_reason=reason,
+                elapsed_seconds=perf_counter() - channel_started_at,
+                ado_call_count=api_calls if channel == "ado" else 0,
+            )
+        )
     # ADF-W1.4 (Section 8.3.1): bounded, non-blocking channel execution. An
     # unratified/unconfigured channel gets a safe conservative default policy
     # (see channel_execution_policy_for) rather than blocking indefinitely.
@@ -109,6 +166,13 @@ def run_channel(
         binding.config.discovery_threshold_hours,
         provider_instance_id=provider_instance_id,
     )
+    # ADF-W1.4/D-3: total_budget_seconds is a combined ceiling across this
+    # channel's discovery AND hydration calls this cycle, not an
+    # independent per-call budget -- a slow discovery call proportionally
+    # starves hydration's remaining window rather than each call
+    # independently getting the full per_attempt_timeout_seconds regardless
+    # of how long the other took.
+    channel_elapsed_seconds = 0.0
     if should_discover:
         try:
             if policy is not None:
@@ -120,7 +184,10 @@ def run_channel(
                         run_ctx=run_ctx,
                     ),
                     policy=policy,
+                    remaining_budget_seconds=policy.total_budget_seconds,
+                    record_count_fn=lambda result: len(result.discovered_refs),
                 )
+                channel_elapsed_seconds += outcome.elapsed_seconds
                 if outcome.degraded:
                     # ADF-W1.4: skip discovery this run rather than block past
                     # budget. The registry's existing (last known good)
@@ -130,13 +197,14 @@ def run_channel(
                         integration_error_sink,
                         source=channel,
                         stage="discovery",
-                        error=f"Discovery exceeded {policy.per_attempt_timeout_seconds}s budget; skipped this run ({outcome.degrade_reason}).",
+                        error=f"Discovery exceeded its channel budget; skipped this run ({outcome.degrade_reason}).",
                     )
                     _emit_channel_budget_alert_best_effort(
                         program_id=program_id, channel=channel, stage="discovery",
                         degrade_reason=outcome.degrade_reason, programs_root=programs_root,
                     )
                     discovery_result = None
+                    discovery_degrade_reason = outcome.degrade_reason
                 else:
                     discovery_result = outcome.value
             else:
@@ -153,6 +221,11 @@ def run_channel(
                 discovery_result,
                 expected_provider_instance_id=provider_instance_id,
             )
+            if discovery_result_sink is not None:
+                # Preserve provider-native per-query membership captures for
+                # the gather-run manifest; consumers must never reconstruct
+                # them from the flattened registry after the fact.
+                discovery_result_sink.append(discovery_result)
             for error in discovery_result.errors:
                 append_integration_error_once(
                     integration_error_sink,
@@ -190,6 +263,22 @@ def run_channel(
                     )
                     # Preserve the legacy behavior: shrinkage blocks the registry update,
                     # but hydration still runs against the pre-shrinkage registrations.
+                else:
+                    if run_ctx.accept_shrinkage and delta.is_shrinkage_guarded():
+                        # Sec 4.4: "Shrinkage acceptance prints classified removals" --
+                        # the guard would have blocked this update but --accept-shrinkage
+                        # bypassed it, so surface exactly what was removed via the same
+                        # operator-visible integration-error channel gather_command
+                        # already prints every entry from.
+                        append_integration_error_once(
+                            integration_error_sink,
+                            source=channel,
+                            stage="discovery",
+                            error=(
+                                f"Shrinkage accepted: {delta.shrinkage_pct:.0%} reduction "
+                                f"({len(delta.removed)} removed): {_describe_removed_refs(delta.removed)}"
+                            ),
+                        )
         except _SkipDiscoveryApplication:
             pass
         except (QueryError, RuntimeError, ValueError) as error:
@@ -199,6 +288,7 @@ def run_channel(
                 stage="discovery",
                 error=str(error),
             )
+            discovery_degrade_reason = str(error)
     try:
         registrations = store.pullable_registrations(channel, provider_instance_id=provider_instance_id)
         workstream_map = store.get_workstream_map(
@@ -217,6 +307,9 @@ def run_channel(
                     run_ctx=run_ctx,
                 ),
                 policy=policy,
+                remaining_budget_seconds=policy.total_budget_seconds - channel_elapsed_seconds,
+                record_count_fn=lambda result: len(result.hydrated_ref_ids),
+                page_count_fn=lambda result: result.api_call_count,
             )
             if outcome.degraded:
                 # ADF-W1.4 (Section 8.3.2): never a success-shaped empty
@@ -228,12 +321,13 @@ def run_channel(
                     integration_error_sink,
                     source=channel,
                     stage="hydration",
-                    error=f"Hydration exceeded {policy.per_attempt_timeout_seconds}s budget; degraded ({outcome.degrade_reason}).",
+                    error=f"Hydration exceeded its channel budget; degraded ({outcome.degrade_reason}).",
                 )
                 _emit_channel_budget_alert_best_effort(
                     program_id=program_id, channel=channel, stage="hydration",
                     degrade_reason=outcome.degrade_reason, programs_root=programs_root,
                 )
+                _record_outcome(degraded=True, reason=outcome.degrade_reason)
                 return None, delta
             hydration_result = cast(HydrationResult[Any], outcome.value)
         else:
@@ -256,6 +350,7 @@ def run_channel(
             stage="hydration",
             error=str(error),
         )
+        _record_outcome(degraded=True, reason=str(error))
         return None, delta
     if not run_ctx.dry_run and hydration_result.hydrated_ref_ids:
         store.mark_verified(
@@ -285,6 +380,23 @@ def run_channel(
             stage=hydration_error.stage,
             error=hydration_error.message,
         )
+    hydration_error = next(iter(hydration_result.errors), None)
+    is_degraded = (
+        discovery_degrade_reason is not None
+        or hydration_error is not None
+        or bool(hydration_result.failed_ref_ids)
+    )
+    if not is_degraded:
+        _resolve_channel_budget_alert_best_effort(
+            program_id=program_id,
+            channel=channel,
+            programs_root=programs_root,
+        )
+    _record_outcome(
+        degraded=is_degraded,
+        reason=hydration_error.message if hydration_error is not None else discovery_degrade_reason,
+        api_calls=hydration_result.api_call_count,
+    )
     return hydration_result, delta
 
 
@@ -297,6 +409,8 @@ def run_channel_with_extraction(
     verified_at: datetime,
     run_ctx: RunContext,
     integration_error_sink: list[IntegrationError] | None = None,
+    discovery_result_sink: list[Any] | None = None,
+    channel_outcome_sink: list[ChannelOutcomeEntry] | None = None,
     programs_root: Path = PROGRAMS_ROOT,
 ) -> tuple[Any | None, Any | None, Any | None]:
     hydration_result, delta = run_channel(
@@ -307,6 +421,8 @@ def run_channel_with_extraction(
         verified_at=verified_at,
         run_ctx=run_ctx,
         integration_error_sink=integration_error_sink,
+        discovery_result_sink=discovery_result_sink,
+        channel_outcome_sink=channel_outcome_sink,
         programs_root=programs_root,
     )
     if hydration_result is None:

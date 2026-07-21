@@ -9,6 +9,7 @@ import pytest
 from src.core.exceptions import ConfigError
 from src.core.models_v2 import RiskCategory, RiskEntry, RiskImpact, RiskProbability, RiskStatus
 from src.core.risk_register_engine import assess_risk_staleness, compute_risk_score, link_risk_action, load_risk_history, load_risk_register, record_risk_update, save_risk_register
+from src.core.risk_register_engine import compute_risk_delta_preview_hash, preview_risk_upserts_from_signals, upsert_risk_from_signal
 from src.core.program_fact_store import load_program_facts, project_risk_entries
 
 
@@ -406,3 +407,123 @@ def test_derive_strategic_risk_level_no_upgrade_for_low_items() -> None:
     result = derive_strategic_risk_level("acme", items)
     assert result.proposed_level == RiskLevel.LOW
     assert result.upgrade_reason is None
+
+
+class TestRiskDeltaPreview:
+    """D-17/ARM-GATHER-11 AG-6.3: confirm dry-run's non-mutating risk-register
+    delta preview must never drift from what upsert_risk_from_signal (the
+    real, mutating path) would actually do -- both share _decide_risk_upsert.
+    """
+
+    def test_preview_new_signal_reports_new_without_writing_register(self, tmp_path: Path) -> None:
+        register_path = tmp_path / "acme" / "risk_register.yaml"
+        assert not register_path.exists()
+
+        previews = preview_risk_upserts_from_signals(
+            "acme",
+            (("sig-1", "Build pipeline flakiness increasing", ("12345",), "ws-release"),),
+            programs_root=tmp_path,
+        )
+
+        assert len(previews) == 1
+        assert previews[0].signal_id == "sig-1"
+        assert previews[0].action == "new"
+        assert previews[0].title.startswith("Build pipeline flakiness")
+        # Non-mutating: no register file was created by the preview.
+        assert not register_path.exists()
+        assert load_risk_register("acme", programs_root=tmp_path) == ()
+
+    def test_preview_matches_real_upsert_for_new_then_repeated_signal(self, tmp_path: Path) -> None:
+        signal_args = dict(
+            signal_id="sig-2",
+            signal_text="Deployment rollout stalled on ring 2",
+            signal_entity_refs=("55555",),
+            signal_workstream_id="ws-deploy",
+        )
+
+        preview_before = preview_risk_upserts_from_signals(
+            "acme", ((signal_args["signal_id"], signal_args["signal_text"], signal_args["signal_entity_refs"], signal_args["signal_workstream_id"]),), programs_root=tmp_path
+        )
+        assert preview_before[0].action == "new"
+
+        real_entry = upsert_risk_from_signal("acme", programs_root=tmp_path, **signal_args)
+
+        # AG-6.5: preview's predicted risk_id/title match what the real upsert produced.
+        assert preview_before[0].risk_id == real_entry.id
+        assert preview_before[0].title == real_entry.title
+
+        # Re-observing the identical signal is a no-op for both preview and real upsert.
+        preview_after = preview_risk_upserts_from_signals(
+            "acme", ((signal_args["signal_id"], signal_args["signal_text"], signal_args["signal_entity_refs"], signal_args["signal_workstream_id"]),), programs_root=tmp_path
+        )
+        assert preview_after[0].action == "no_change"
+        assert preview_after[0].risk_id == real_entry.id
+
+    def test_preview_matches_field_for_matching_entity_ref_update(self, tmp_path: Path) -> None:
+        _write_minimal_register_for_preview(
+            tmp_path / "acme",
+            [
+                {
+                    "id": "risk-existing",
+                    "program_id": "acme",
+                    "title": "Existing risk",
+                    "description": "Already tracked",
+                    "probability": "likely",
+                    "impact": "high",
+                    "category": "technical",
+                    "owner_alias": "owner",
+                    "status": "open",
+                    "identified_date": "2026-07-01",
+                    "entity_refs": ["77777"],
+                    "source_signal_ids": ["sig-original"],
+                }
+            ],
+        )
+
+        previews = preview_risk_upserts_from_signals(
+            "acme",
+            (("sig-new", "A related update on the same risk", ("77777",), None),),
+            programs_root=tmp_path,
+        )
+
+        assert previews[0].action == "updated"
+        assert previews[0].risk_id == "risk-existing"
+        # Non-mutating: the register on disk is untouched.
+        reloaded = load_risk_register("acme", programs_root=tmp_path)
+        assert reloaded[0].source_signal_ids == ("sig-original",)
+
+    def test_preview_hash_is_stable_for_identical_input_and_changes_on_divergence(self, tmp_path: Path) -> None:
+        signals = (("sig-1", "Risk A", ("1",), None), ("sig-2", "Risk B", ("2",), None))
+
+        preview_a = preview_risk_upserts_from_signals("acme", signals, programs_root=tmp_path)
+        preview_b = preview_risk_upserts_from_signals("acme", signals, programs_root=tmp_path)
+        assert compute_risk_delta_preview_hash(preview_a) == compute_risk_delta_preview_hash(preview_b)
+
+        different_signals = signals + (("sig-3", "Risk C", ("3",), None),)
+        preview_c = preview_risk_upserts_from_signals("acme", different_signals, programs_root=tmp_path)
+        assert compute_risk_delta_preview_hash(preview_a) != compute_risk_delta_preview_hash(preview_c)
+
+    def test_preview_batch_sequential_matching_mirrors_real_upsert_loop(self, tmp_path: Path) -> None:
+        # Two signals sharing an entity_ref within the same preview batch: the
+        # second must be seen as matching the first's not-yet-persisted new risk,
+        # exactly like the real per-signal upsert loop in archive_transaction.py.
+        signals = (
+            ("sig-1", "Storage node flapping under load", ("88888",), None),
+            ("sig-2", "Storage node flapping under load (follow-up)", ("88888",), None),
+        )
+
+        previews = preview_risk_upserts_from_signals("acme", signals, programs_root=tmp_path)
+
+        assert previews[0].action == "new"
+        assert previews[1].action == "updated"
+        assert previews[1].risk_id == previews[0].risk_id
+
+
+def _write_minimal_register_for_preview(program_dir: Path, risks: list[dict]) -> None:
+    import yaml
+
+    program_dir.mkdir(parents=True, exist_ok=True)
+    (program_dir / "risk_register.yaml").write_text(
+        yaml.safe_dump({"schema_version": "1.0", "risks": risks}, sort_keys=False),
+        encoding="utf-8",
+    )

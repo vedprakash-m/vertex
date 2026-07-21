@@ -8,6 +8,7 @@ from src.commands.gather_pipeline.models import PersistenceStageInput
 from src.commands.gather_pipeline.persistence_stage import run_persistence_stage
 from src.core.models import Confidence
 from src.core.models_v2 import ADOConfig, Program, Signal
+from src.core.signal_dedup import build_deterministic_signal_id
 
 
 def _demo_program() -> Program:
@@ -92,6 +93,34 @@ def test_run_persistence_stage_dry_run_skips_disk_writes(monkeypatch, tmp_path: 
     assert result.new_signals == (signal,)
     assert result.pending_review == 1
     assert result.auto_reviews_written == 0
+
+
+def test_run_persistence_stage_canonicalizes_manifest_backed_signal_ids(monkeypatch, tmp_path: Path) -> None:
+    current_time = datetime(2026, 6, 5, 12, 0, tzinfo=timezone.utc)
+    signal = _demo_signal(current_time=current_time)
+    store = SimpleNamespace()
+    monkeypatch.setattr("src.commands.gather_pipeline.persistence_stage.signal_can_be_auto_approved", lambda signal: False)
+
+    result = run_persistence_stage(
+        PersistenceStageInput(
+            program=_demo_program(),
+            program_id="demo",
+            workstreams=(),
+            candidate_signals=(signal,),
+            existing_signals=(),
+            signal_store=store,
+            current_time=current_time,
+            programs_root=tmp_path,
+            ai_action_extractor=None,
+            dry_run=True,
+            gather_run_id="gather-committed-candidate",
+        )
+    )
+
+    persisted = result.new_signals[0]
+    assert persisted.id == build_deterministic_signal_id(signal)
+    assert persisted.gather_run_id == "gather-committed-candidate"
+    assert signal.id == "sig-1"
 
 
 def test_run_persistence_stage_surfaces_auto_enforcement_errors(monkeypatch, tmp_path: Path) -> None:

@@ -1,0 +1,35 @@
+# Synthetic example only. Illustrates teams.yaml target schema 2.0 for
+# specs/people.md Phase 2a (PPL-W2A.2). No real customer names or team
+# names. See specs/people.md §7.2 for the binding Team contract.
+schema_version: "2.0"
+teams:
+  - entity_id: "team:01HQ8Y2K3L4M5N6P7Q8R9S0T1U"
+    id: "team_platform"  # Legacy/config lookup key during migration; entity_id is canonical.
+    name: "Platform Engineering"
+    kind: org_team
+    status: active
+    parent_team_id: null
+    area_paths:
+      - "One\\Adventure\\Fabrikam\\Platform"
+    legacy_programs: []  # Migration-only carrier; not v2 authority.
+    verifications:
+      - field_name: "name"
+        source: "sample_directory_provider"
+        source_ref: null
+        observed_at: "2026-01-15T00:00:00+00:00"
+        verified_at: "2026-01-15T00:00:00+00:00"
+        recorded_at: "2026-01-15T00:00:00+00:00"
+        verified_by_principal: "ACME\\sample_steward"
+        refresh_run_id: null
+        pinned: false
+
+  - entity_id: "team:01HQ8Y3M4N5P6Q7R8S9T0U1V2W"
+    id: "acme_weekly_workstream_group"
+    name: "Acme Weekly Program Group"
+    kind: program_group  # Not org_team -- workstream-derived, cannot drive default audience expansion.
+    status: active
+    parent_team_id: null
+    area_paths: []
+    legacy_programs:
+      - "acme"
+    verifications: []

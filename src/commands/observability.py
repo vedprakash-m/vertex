@@ -3,9 +3,9 @@
 Subcommands:
   - ``vertex observability diagnose --program <id>`` —
     explain the last gather failure (failure taxonomy, open alerts,
-    per-channel failures). Mirrors ``vertex doctor --diagnose``.
+    per-channel failures).
   - ``vertex observability perf --program <id>`` —
-    per-channel P50/P95 + SLO status. Mirrors ``vertex doctor --perf``.
+    per-channel P50/P95 + SLO status.
   - ``vertex observability bundle --program <id> [--to <path>]`` —
     write a redacted support bundle.
 
@@ -41,11 +41,6 @@ from src.core.alerts import (
     surface_alert_banner,
 )
 from src.core.config_loader import PROGRAMS_ROOT
-from src.core.failure_taxonomy import (
-    FailureCategory,
-    classify_exception,
-    is_retryable,
-)
 from src.core.support_bundle import (
     SupportBundleResult,
     build_support_bundle,

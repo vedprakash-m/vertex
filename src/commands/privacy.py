@@ -12,6 +12,8 @@ import json
 import typer
 
 from src.core.edition_resolver import PROGRAMS_ROOT
+from src.core.exceptions import ConfigError
+from src.core.operator_identity import capture_operator_identity
 from src.core.privacy_matrix import (
     CHANNEL_POSTURE,
     RETENTION_DAYS,
@@ -21,9 +23,12 @@ from src.core.privacy_matrix import (
     sidecar_rules,
 )
 from src.core.privacy_purge import run_purge
+from src.core.people_registry_privacy import export_shared_registry_person, forget_shared_registry_person
 
 
 privacy_app = typer.Typer(help="Privacy & data governance matrix (WS-15).")
+privacy_people_app = typer.Typer(help="Privacy-authorized DSAR export and erasure for shared registry people.")
+privacy_app.add_typer(privacy_people_app, name="people")
 
 
 def _format_retention_days(days: int | None) -> str:
@@ -154,3 +159,104 @@ def privacy_purge_command(
         f"Totals: rows_purged={report.total_rows_purged} "
         f"rows_tombstoned={report.total_rows_tombstoned} bytes_freed={report.total_bytes_freed}"
     )
+
+
+def _resolve_privacy_principal(command_name: str) -> str:
+    identity = capture_operator_identity(command_name)
+    if not identity.principal:
+        raise typer.BadParameter("Could not resolve an authenticated OS/service principal for this privacy operation.")
+    return identity.principal
+
+
+@privacy_people_app.command("export")
+def privacy_people_export_command(
+    person: str = typer.Option(..., "--person", help="Canonical person ID or uniquely resolving alias."),
+    reason: str = typer.Option(..., "--reason", help="Required DSAR export rationale."),
+    on_behalf_of: str | None = typer.Option(None, "--on-behalf-of", help="Optional descriptive context; never grants authority."),
+    format: str = typer.Option("human", "--format", help="Output format: human or json."),
+) -> None:
+    """Export only the requested person's permitted DSAR data and audit the sensitive read."""
+    try:
+        result = export_shared_registry_person(
+            programs_root=PROGRAMS_ROOT,
+            person_ref=person,
+            reason=reason,
+            actor=_resolve_privacy_principal("privacy-people-export"),
+            on_behalf_of=on_behalf_of,
+        )
+    except ConfigError as error:
+        raise typer.BadParameter(str(error)) from error
+    payload = result.to_payload()
+    if format == "json":
+        typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+    elif format == "human":
+        typer.echo(f"DSAR export for {result.entity_id} (generation {result.generation_id}).")
+        typer.echo(f"Current person projection included: {'yes' if result.person is not None else 'no'}.")
+        typer.echo(
+            f"Profiles={len(result.profiles)}, memberships={len(result.memberships)}, "
+            f"delegations={len(result.delegations)}."
+        )
+        typer.echo(
+            "Historical journal values are intentionally excluded; customer-managed backups require external erasure action."
+        )
+        typer.echo(f"Privacy audit event: {result.audit_event_id}. Re-run with --format json for the authorized DSAR payload.")
+    else:
+        raise typer.BadParameter("--format must be 'human' or 'json'.")
+
+
+@privacy_people_app.command("forget")
+def privacy_people_forget_command(
+    person: str = typer.Option(..., "--person", help="Canonical person ID or uniquely resolving alias."),
+    reason: str = typer.Option(..., "--reason", help="Required privacy-erasure rationale."),
+    on_behalf_of: str | None = typer.Option(None, "--on-behalf-of", help="Optional descriptive context; never grants authority."),
+    apply: bool = typer.Option(False, "--apply", help="Commit the privacy erasure. Without this flag, preview only."),
+    format: str = typer.Option("human", "--format", help="Output format: human or json."),
+) -> None:
+    """Preview or apply canonical tombstone, redaction, and cryptographic-shred privacy erasure."""
+    try:
+        result = forget_shared_registry_person(
+            programs_root=PROGRAMS_ROOT,
+            person_ref=person,
+            reason=reason,
+            actor=_resolve_privacy_principal("privacy-people-forget") if apply else "<preview>",
+            on_behalf_of=on_behalf_of,
+            apply=apply,
+        )
+    except ConfigError as error:
+        raise typer.BadParameter(str(error)) from error
+    payload = {
+        "entity_id": result.entity_id,
+        "affected_paths": list(result.affected_paths),
+        "memberships_tombstoned": result.memberships_tombstoned,
+        "profiles_redacted": result.profiles_redacted,
+        "delegations_tombstoned": result.delegations_tombstoned,
+        "cache_files_removed": result.cache_files_removed,
+        "transaction_artifacts_redacted": result.transaction_artifacts_redacted,
+        "journal_records_redacted": result.journal_records_redacted,
+        "profile_disposition": result.profile_disposition,
+        "transaction_id": result.transaction_id,
+        "generation_id": result.generation_id,
+        "journal_event_ids": list(result.journal_event_ids),
+        "external_backup_action_required": result.external_backup_action_required,
+    }
+    if format == "json":
+        typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+    elif format == "human":
+        action = "Applied" if apply else "Preview: would apply"
+        typer.echo(f"{action} privacy erasure for {result.entity_id}.")
+        typer.echo(f"Affected mutable files: {', '.join(result.affected_paths)}.")
+        typer.echo(
+            f"Memberships tombstoned={result.memberships_tombstoned}, "
+            f"profiles redacted={result.profiles_redacted}, "
+            f"delegations tombstoned={result.delegations_tombstoned}."
+        )
+        if apply:
+            typer.echo(
+                f"Committed transaction {result.transaction_id}, generation {result.generation_id}; "
+                f"journal evidence: {', '.join(result.journal_event_ids)}."
+            )
+            typer.echo("Customer-managed backups require external erasure or cryptographic-shred action.")
+        else:
+            typer.echo("Preview only. Re-run with --apply as a privacy-authorized principal to commit the canonical staged transaction.")
+    else:
+        raise typer.BadParameter("--format must be 'human' or 'json'.")

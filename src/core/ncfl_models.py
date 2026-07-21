@@ -41,7 +41,17 @@ EXTRACTION_METHOD_CONFIDENCE: dict[str, str] = {
 
 # Target stores recognized by the NCFL system (§23.3 taxonomy).
 TARGET_STORES: frozenset[str] = frozenset(
-    {"milestones", "risk_register", "decisions", "workstreams", "assumptions", "knowledge_doc"}
+    {
+        "milestones",
+        "risk_register",
+        "decisions",
+        "workstreams",
+        "assumptions",
+        "knowledge_doc",
+        "people_directory",
+        "teams",
+        "workstream_registry",
+    }
 )
 
 # Statuses for the proposal lifecycle state machine.

@@ -1,0 +1,17 @@
+# Synthetic example only. Illustrates the target schema for specs/people.md
+# Phase 1 (PPL-W1.1). No real customer names, aliases, or identifiers.
+# See specs/people.md §6.6 for the binding contract.
+schema_version: "1.0"
+workspace_id: "workspace:01HQ8X7K9N3M4P5Q6R7S8T9U0V"
+customer_boundary_id: "acme-corp"
+write_mode: legacy       # legacy | shadow | primary
+program_modes:
+  acme_weekly: shadow
+  fabrikam_weekly: legacy
+provider_refresh_enabled: false
+shared_writes_enabled: false
+audience_scopes_enabled: false
+directory_steward_principals:
+  - "ACME\\sample_steward"
+pii_reveal_principals:
+  - "ACME\\sample_privacy_owner"

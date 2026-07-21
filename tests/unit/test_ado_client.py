@@ -103,6 +103,40 @@ def test_ado_client_surfaces_admin_auth_setup_when_no_credentials(monkeypatch) -
         ADOClient("your-org", "One", show_progress=False)
 
 
+def test_strict_azure_cli_mode_never_falls_back_to_default_or_pat(monkeypatch) -> None:
+    class _FailingAzureCliCredential:
+        def get_token(self, _scope: str):
+            raise RuntimeError("Azure CLI session expired")
+
+    class _UnexpectedDefaultCredential:
+        def get_token(self, _scope: str):
+            raise AssertionError("strict Azure CLI mode must not instantiate DefaultAzureCredential")
+
+    monkeypatch.setattr("src.core.ado_client.AZURE_IDENTITY_AVAILABLE", True)
+    monkeypatch.setattr(
+        "src.core.ado_client.AZURE_CREDENTIAL_TYPES",
+        (_FailingAzureCliCredential, _UnexpectedDefaultCredential),
+    )
+    monkeypatch.setenv("VERTEX_ADO_AUTH_MODE", "azure-cli")
+    monkeypatch.setenv("ADO_PAT", "must-not-be-used")
+
+    with pytest.raises(AuthError, match="Azure CLI authentication was selected"):
+        ADOClient("your-org", "One", show_progress=False)
+
+
+def test_strict_pat_mode_skips_azure_identity_providers(monkeypatch) -> None:
+    class _UnexpectedCredential:
+        def __init__(self) -> None:
+            raise AssertionError("strict PAT mode must not instantiate an AAD credential")
+
+    monkeypatch.setattr("src.core.ado_client.AZURE_IDENTITY_AVAILABLE", True)
+    monkeypatch.setattr("src.core.ado_client.AZURE_CREDENTIAL_TYPES", (_UnexpectedCredential,))
+    monkeypatch.setenv("VERTEX_ADO_AUTH_MODE", "pat")
+    monkeypatch.setenv("ADO_PAT", "scheduled-secret")
+
+    assert ADOClient("your-org", "One", show_progress=False).auth_method == "pat"
+
+
 def test_headers_wraps_token_acquisition_failures_as_auth_error() -> None:
     class _FailingCredential:
         def get_token(self, _scope: str):
@@ -114,6 +148,29 @@ def test_headers_wraps_token_acquisition_failures_as_auth_error() -> None:
 
     with pytest.raises(AuthError, match="Failed to acquire Azure DevOps token"):
         client._headers()
+
+
+def test_headers_cache_azure_cli_access_token_until_near_expiry() -> None:
+    class _AccessToken:
+        token = "cached-token"
+        expires_on = time.time() + 600
+
+    class _CountingCredential:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get_token(self, _scope: str) -> _AccessToken:
+            self.calls += 1
+            return _AccessToken()
+
+    credential = _CountingCredential()
+    client = object.__new__(ADOClient)
+    client._credential = credential
+    client.pat_env = "ADO_PAT"
+
+    assert client._headers()["Authorization"] == "Bearer cached-token"
+    assert client._headers()["Authorization"] == "Bearer cached-token"
+    assert credential.calls == 1
 
 
 def test_query_all_uses_work_items_surface() -> None:
@@ -282,6 +339,97 @@ def test_query_work_item_snapshot_history_uses_work_item_snapshot_surface() -> N
         "$filter": "WorkItemId in (101,202) and DateValue ge 2026-05-01",
         "$select": "DateValue,WorkItemId,TargetDate",
     }
+
+
+class _RecordingSnapshotADOClient(ADOClient):
+    def __init__(self, rows: list[dict[str, object]]) -> None:
+        self._rows = rows
+        self.recorded_entity_set: str | None = None
+        self.recorded_params: dict[str, str] | None = None
+
+    def query_odata_all(self, entity_set: str, params: dict[str, str]) -> list[dict[str, object]]:
+        self.recorded_entity_set = entity_set
+        self.recorded_params = params
+        return self._rows
+
+
+def test_query_work_item_snapshot_expands_area_path_and_flattens_result() -> None:
+    client = _RecordingSnapshotADOClient(
+        rows=[
+            {"DateSK": 20260501, "WorkItemId": 101, "Area": {"AreaPath": "One\\XStore\\Armada"}},
+        ]
+    )
+
+    rows = client.query_work_item_snapshot(
+        filter_expression="startswith(Area/AreaPath, 'One\\XStore\\Armada')",
+        select_fields=("DateSK", "WorkItemId", "AreaPath"),
+    )
+
+    assert client.recorded_entity_set == "WorkItemSnapshot"
+    assert client.recorded_params == {
+        "$filter": "startswith(Area/AreaPath, 'One\\XStore\\Armada')",
+        "$select": "DateSK,WorkItemId",
+        "$expand": "Area($select=AreaPath)",
+    }
+    assert rows == [{"DateSK": 20260501, "WorkItemId": 101, "AreaPath": "One\\XStore\\Armada"}]
+
+
+def test_query_work_item_snapshot_expands_both_area_and_iteration_path() -> None:
+    client = _RecordingSnapshotADOClient(
+        rows=[
+            {
+                "DateSK": 20260501,
+                "WorkItemId": 101,
+                "Area": {"AreaPath": "One\\XStore\\Armada"},
+                "Iteration": {"IterationPath": "One\\Sprint 24"},
+            },
+        ]
+    )
+
+    rows = client.query_work_item_snapshot(
+        filter_expression="DateSK ge 20260501",
+        select_fields=("DateSK", "WorkItemId", "AreaPath", "IterationPath"),
+    )
+
+    assert client.recorded_params == {
+        "$filter": "DateSK ge 20260501",
+        "$select": "DateSK,WorkItemId",
+        "$expand": "Area($select=AreaPath),Iteration($select=IterationPath)",
+    }
+    assert rows == [
+        {
+            "DateSK": 20260501,
+            "WorkItemId": 101,
+            "AreaPath": "One\\XStore\\Armada",
+            "IterationPath": "One\\Sprint 24",
+        }
+    ]
+
+
+def test_query_work_item_snapshot_flattens_missing_nested_area_to_empty_string() -> None:
+    client = _RecordingSnapshotADOClient(rows=[{"DateSK": 20260501, "WorkItemId": 101, "Area": None}])
+
+    rows = client.query_work_item_snapshot(
+        filter_expression="DateSK ge 20260501",
+        select_fields=("DateSK", "WorkItemId", "AreaPath"),
+    )
+
+    assert rows == [{"DateSK": 20260501, "WorkItemId": 101, "AreaPath": ""}]
+
+
+def test_query_work_item_snapshot_without_area_or_iteration_fields_omits_expand() -> None:
+    client = _RecordingSnapshotADOClient(rows=[{"DateSK": 20260501, "WorkItemId": 101}])
+
+    rows = client.query_work_item_snapshot(
+        filter_expression="DateSK ge 20260501",
+        select_fields=("DateSK", "WorkItemId"),
+    )
+
+    assert client.recorded_params == {
+        "$filter": "DateSK ge 20260501",
+        "$select": "DateSK,WorkItemId",
+    }
+    assert rows == [{"DateSK": 20260501, "WorkItemId": 101}]
 
 
 def test_get_saved_query_expands_wiql() -> None:

@@ -65,3 +65,62 @@ def test_render_saved_query_filter_clause_uses_contains_words_for_tag_eq() -> No
         slice_contract_helpers.render_saved_query_filter_clause(_Filter())
         == "([System.Tags] Contains Words 'Acme')"
     )
+
+
+def test_binding_filters_are_rendered_per_query_and_preserve_shared_query_lanes(tmp_path: Path) -> None:
+    """D-4: a saved query split between lanes must retain each lane predicate."""
+    contract_path = tmp_path / "slice_contracts.yaml"
+    contract_path.write_text(
+        "\n".join(
+            [
+                'schema_version: "1.1"',
+                "slices:",
+                "  - id: demo.buildout",
+                '    scorecard_name: "Demo"',
+                "    section: demo",
+                "    workstream: Demo",
+                "    workstream_id: demo",
+                "    slice_kind: scorecard_dimension",
+                '    title: "Deployment"',
+                "    source_of_truth: ado_primary",
+                "    owners:",
+                '      primary: "Owner"',
+                "    source_contract:",
+                "      ado:",
+                "        saved_queries:",
+                "          - binding_id: buildout",
+                "            query_id: shared-query",
+                "            mode: full_scope",
+                "            filter:",
+                "              all_of:",
+                "                - field: area_path",
+                "                  op: not_under",
+                '                  value: "One\\\\Catalog"',
+                "          - binding_id: catalog",
+                "            query_id: shared-query",
+                "            mode: full_scope",
+                "            filter:",
+                "              all_of:",
+                "                - field: area_path",
+                "                  op: under",
+                '                  value: "One\\\\Catalog"',
+                "                - field: work_item_type",
+                "                  op: eq",
+                "                  value: Feature",
+                "        explicit_work_item_ids: []",
+                "        required_fields: [state]",
+                "    freshness:",
+                "      warn_days: 5",
+                "      block_days: 10",
+                "    degradation:",
+                "      blank_filter_is_error: true",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    clauses = slice_contract_helpers.slice_contract_saved_query_clauses(load_slice_contract(contract_path))
+
+    assert clauses == {
+        "shared-query": "((([System.AreaPath] not under 'One\\Catalog')) or (([System.AreaPath] under 'One\\Catalog' and [System.WorkItemType] = 'Feature')))"
+    }

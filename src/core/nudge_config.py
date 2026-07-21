@@ -381,6 +381,7 @@ def _parse_new_format(
         owner_roles=owner_roles,
         to_leadership_rollup=bool(fh.get("to_leadership_rollup", False)),
         additional_cc=tuple(_str_list(fh.get("additional_cc"))),
+        audience_scope_ids=tuple(_str_list(fh.get("audience_scope_ids"))),
     )
     evaluation = NudgeEvaluationConfig(
         comment_window_days=comment_window,

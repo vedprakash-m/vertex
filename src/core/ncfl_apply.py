@@ -39,6 +39,11 @@ from src.core.ncfl_apply_policy import (
 from src.core.ncfl_models import ContextUpdateProposal
 from src.core.ncfl_proposal_store import update_proposal_status
 from src.core.ncfl_store_policy import is_ncfl_apply_writable_target_store
+from src.core.people_registry_writer import (
+    RegistryPatchOperation,
+    apply_shared_registry_patch,
+    read_shared_registry_factual_value,
+)
 
 log = logging.getLogger(__name__)
 
@@ -197,7 +202,7 @@ def apply_proposal(
             )
 
         # Step 1: write YAML (store-specific)
-        _write_to_store(proposal, programs_root=programs_root)
+        _write_to_store(proposal, actor=actor, programs_root=programs_root)
         _write_journal(journal, pid, "yaml_written", note="YAML updated")
 
         # Step 2: write changelog entry
@@ -285,6 +290,13 @@ def _read_current_value(
     from src.core.ncfl_store_policy import target_policy_by_store
 
     target_pol = target_policy_by_store().get(proposal.target_store)
+    if proposal.target_store in {"people_directory", "teams"}:
+        return read_shared_registry_factual_value(
+            programs_root=programs_root,
+            target_store=proposal.target_store,
+            target_key=proposal.target_key,
+            target_field=proposal.target_field,
+        )
     if target_pol is None or target_pol.root_yaml is None:
         return None
     yaml_path = programs_root / proposal.program_id / target_pol.root_yaml
@@ -338,7 +350,7 @@ def _read_current_value(
 
 
 def _write_to_store(
-    proposal: ContextUpdateProposal, *, programs_root: Path
+    proposal: ContextUpdateProposal, *, actor: str, programs_root: Path
 ) -> None:
     """Dispatch to the canonical save_* function for the target store.
 
@@ -348,6 +360,24 @@ def _write_to_store(
       3. Applies the field update via dataclasses.replace() with type coercion.
       4. Persists via the canonical save_* (which also syncs fact stores where relevant).
     """
+    if proposal.target_store in {"people_directory", "teams"}:
+        apply_shared_registry_patch(
+            operations=(
+                RegistryPatchOperation(
+                    relative_path=f"knowledge/{proposal.target_store}.yaml",
+                    action="set_fields",
+                    match_value=proposal.target_key,
+                    fields=((proposal.target_field, proposal.source_value),),
+                ),
+            ),
+            programs_root=programs_root,
+            actor=actor,
+            reason=f"NCFL proposal {proposal.proposal_id} applied to {proposal.target_store}",
+            source="ncfl_apply",
+            source_ref=proposal.proposal_id,
+            apply=True,
+        )
+        return
     dispatch: dict[str, Any] = {
         "assumptions": _apply_to_assumptions,
         "decisions": _apply_to_decisions,

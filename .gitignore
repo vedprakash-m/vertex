@@ -68,6 +68,10 @@ archive/
 /gather_output.txt
 /repairs_safety_full.csv
 /wids.txt
+/armada_sec*.txt
+/armada_status.txt
+/items.json
+/output_section_*.txt
 # Generic catch-all: any ad-hoc `> file.txt`/`> file.csv` shell-redirect dump
 # left in the repo root (real program data should never land here).
 /*_output.txt
@@ -168,6 +172,11 @@ scripts/ddpf_*.py
 scripts/xpf_*.py
 scripts/nova_*.py
 scripts/scrub_*.py
+# Armada scheduled-task launcher/registration scripts (Windows Task Scheduler
+# wiring, daily gather cadence) -- same program-specific-script rationale as
+# the xpf/ddpf/nova entries above.
+scripts/*armada*.py
+scripts/*armada*.ps1
 # Tests that import the hidden operational scripts above (would fail on a fresh clone).
 tests/unit/test_validate_*.py
 tests/unit/test_check_*.py
@@ -177,6 +186,7 @@ tests/unit/test_seed_issue_076_baseline.py
 # Any test file whose name contains a specific program name should stay local.
 tests/unit/test_*xpf*.py
 tests/unit/test_*nova*.py
+tests/unit/test_*armada*.py
 
 # Contract tests that depend on local programs/<program-id>/ data (not in the repo).
 # These pass only when the operator's local program directory is present.

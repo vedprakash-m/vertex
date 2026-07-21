@@ -72,6 +72,7 @@ def test_doctor_tip_context_branch() -> None:
         ("storage", "--storage"),
         ("charts", "--charts"),
         ("circuit_breakers", "--circuit-breakers"),
+        ("schedule_health", "--schedule-health"),
     ],
 )
 def test_doctor_tip_selected_branches(flag: str, fragment: str) -> None:

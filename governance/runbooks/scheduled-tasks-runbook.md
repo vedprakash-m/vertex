@@ -1,4 +1,4 @@
-# Scheduled Tasks Runbook — `vertex prefetch` / `vertex cockpit build` / `vertex admin metrics-rollup`
+# Scheduled Tasks Runbook — scheduled Armada gather, `vertex prefetch` / `vertex cockpit build` / `vertex admin metrics-rollup`
 
 **Status:** v1.1 — 2026-07-14 (ADF-W5.10 + ADF-W5.13, `specs/arch-data-fix.md` §10.6/§9.7)
 **Owner:** Program operator
@@ -13,6 +13,7 @@ WorkIQ call (Section 10.6, INV-ADF-2).
 
 | Command | Purpose | Suggested cadence |
 |---|---|---|
+| `scripts/run_armada_gather_scheduled.ps1` | Retrieves Armada's read-only ADO PAT from Windows Credential Manager and runs `vertex gather --program armada` with the PAT only in the child environment | Daily; start in shadow/manual-verification mode |
 | `vertex prefetch --program <id> [--edition <edition>] [--ttl-seconds N]` | Runs the slow live WorkIQ NL-search step out-of-band and commits a snapshot `gather` prefers over a live call | Every 1–4 hours during business hours (WorkIQ historical p50 latency is minutes, so more than a few runs/day has diminishing value) |
 | `vertex cockpit build --program <id> [--open]` | Refreshes the local HTML dashboard | Once per gather cycle, or daily |
 | `vertex cockpit show --program <id> --no-persist` | Read-only health check without writing history (safe to run more often than the above) | As needed |
@@ -26,6 +27,12 @@ exits cleanly if another operation is already using it
 without building your own locking.
 
 ## Windows Task Scheduler
+
+### Armada gather credential and task
+
+Store the **read-only** PAT with `vertex admin auth armada-scheduled-pat` (use `--status` to verify); it uses keyring service `vertex.ado`, account `armada`. Never put it in a task argument, `.env`, log, or checked-in file. The launcher retrieves it in Python and sets `ADO_PAT` only for its `cli.py gather --program armada` child process. Configure Task Scheduler to run `powershell.exe -ExecutionPolicy Bypass -File scripts/run_armada_gather_scheduled.ps1` with the repository as **Start in**. Treat exit 0 as clean, 2 as optional degradation, and 3/4 (or any unexpected non-zero) as non-current and investigate the committed gather manifest.
+
+Alternatively, review and run `scripts/register_armada_gather_task.ps1 -WhatIf`, then register it explicitly with `scripts/register_armada_gather_task.ps1`. It refuses to overwrite an existing task unless `-Replace` is supplied and configures `IgnoreNew` for overlapping runs; Vertex's gather lease remains the authoritative fencing guard. The registration script also creates a paired missed-attempt monitor two hours after the gather. To enable the documented Windows Event Log route, run it from an elevated PowerShell with `-RegisterEventSource`; this registers the `Vertex/Armada` source under the Application log without granting the recurring task elevation. The launcher records gather and monitor exit codes there best-effort, while the manifest and alert ledger remain the source of truth.
 
 1. Open Task Scheduler → **Create Task** (not "Basic Task" — you need the
    "Start in" directory field).

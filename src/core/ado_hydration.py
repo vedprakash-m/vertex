@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import html
 import re
+import threading
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from src.core.ado_client import ADOClient
 from src.core.ado_enrichment import ADO_RISK_ASSESSMENT_COMMENT_FIELD, ADO_RISK_ASSESSMENT_FIELD, normalize_risk_assessment
@@ -48,11 +50,21 @@ WORK_ITEM_BATCH_SIZE = 200
 @dataclass(frozen=True, slots=True)
 class ADOHydrationConfig:
     batch_size: int = WORK_ITEM_BATCH_SIZE
+    # Initial hydration needs complete revision/comment detail.  A small,
+    # fixed worker pool avoids serially spending the channel budget while
+    # keeping ADO request pressure bounded and predictable.
+    detail_max_workers: int = 4
 
 
 class ADOHydrationProvider:
-    def __init__(self, client: ADOClient):
+    def __init__(
+        self,
+        client: ADOClient,
+        *,
+        detail_client_factory: Callable[[], ADOClient] | None = None,
+    ):
         self._client = client
+        self._detail_client_factory = detail_client_factory
 
     @classmethod
     def from_program(
@@ -71,7 +83,13 @@ class ADOHydrationProvider:
             project=program.ado.project,
             timeout=program.ado.api_timeout_seconds,
         )
-        return cls(client), ADOHydrationConfig()
+        def _make_detail_client() -> ADOClient:
+            # requests.Session is not safe to share across worker threads.
+            # Each detail worker therefore receives its own read-only client
+            # and connection pool while retaining the cached auth boundary.
+            return client.fork_read_client()
+
+        return cls(client, detail_client_factory=_make_detail_client), ADOHydrationConfig()
 
     @property
     def channel(self) -> str:
@@ -156,61 +174,26 @@ class ADOHydrationProvider:
             rows_by_id = {_row_work_item_id(row): row for row in rows}
             fetched_at = datetime.now(timezone.utc)
             registrations_by_id = {int(reg.ref_id): reg for reg in work_item_regs if reg.ref_id.isdigit()}
+            detail_rows_by_id, detail_errors, detail_failed_ids, detail_api_calls = self._hydrate_item_details(
+                work_item_ids=work_item_ids,
+                rows_by_id=rows_by_id,
+                registrations_by_id=registrations_by_id,
+                since=since,
+                mode=mode,
+                config=config,
+            )
+            api_calls += detail_api_calls
+            errors.extend(detail_errors)
+            failed_ref_ids.extend((work_item_id, "work_item") for work_item_id in detail_failed_ids)
             for work_item_id in work_item_ids:
                 row = rows_by_id.get(work_item_id)
                 if row is None:
                     failed_ref_ids.append((str(work_item_id), "work_item"))
                     continue
                 registration = registrations_by_id.get(work_item_id)
-                revision_rows: list[dict[str, Any]] = []
-                comment_rows: list[dict[str, Any]] = []
-                # ADF-W2.2 (Section 8.4.1): "use the last verified watermark,
-                # not only a rolling lookback" -- an item already verified
-                # more recently than the caller's `since` window only needs
-                # re-detailing if it changed after ITS OWN last verification,
-                # not merely within the broader window. On a fully-stable
-                # program (nothing changed since last gather) this collapses
-                # the revision/comment fetch to zero on a repeat run, instead
-                # of re-fetching detail for every item touched within the
-                # rolling lookback every single time.
-                effective_since = since
-                if (
-                    registration is not None
-                    and registration.last_verified_at is not None
-                    and registration.last_verified_at > since
-                ):
-                    effective_since = registration.last_verified_at
-                # ADF-W2.2 (Section 8.4.1): "on first registration ... fetch
-                # complete bounded revisions and comments" -- a registration
-                # that has never been verified before (brand new this cycle,
-                # or never successfully hydrated) must get a full detail
-                # fetch regardless of the changed-since check: the item's own
-                # ChangedDate may predate the gather's rolling `since` window
-                # (e.g. a work item created months ago, untouched recently),
-                # in which case `_row_changed_since` would otherwise report
-                # "unchanged" and silently skip its very first hydration.
-                never_verified = registration is None or registration.last_verified_at is None
-                if mode is HydrationMode.FULL and (never_verified or _row_changed_since(row, effective_since)):
-                    try:
-                        revision_rows = self._client.list_work_item_revisions(work_item_id)
-                        api_calls += 1
-                        comment_loader = getattr(self._client, "list_work_item_comments", None)
-                        if callable(comment_loader):
-                            comment_rows = comment_loader(work_item_id)
-                            api_calls += 1
-                    except QueryError as error:
-                        errors.append(
-                            IntegrationError(
-                                source="ado",
-                                stage="hydration",
-                                message=f"Failed to hydrate work item {work_item_id}: {error}",
-                                retryable=True,
-                                ref_id=str(work_item_id),
-                                ref_kind="work_item",
-                            )
-                        )
-                        failed_ref_ids.append((str(work_item_id), "work_item"))
-                        continue
+                if str(work_item_id) in detail_failed_ids:
+                    continue
+                revision_rows, comment_rows = detail_rows_by_id.get(work_item_id, ([], []))
                 item = _work_item_from_batch_row(row, revision_rows=revision_rows, comment_rows=comment_rows, fetched_at=fetched_at)
                 if registration is not None:
                     item.custom_fields["workstream_ids"] = tuple(registration.workstream_ids)
@@ -288,6 +271,132 @@ class ADOHydrationProvider:
             hydrated_ref_ids=tuple(hydrated_ref_ids),
             failed_ref_ids=tuple(failed_ref_ids),
         )
+
+    def _hydrate_item_details(
+        self,
+        *,
+        work_item_ids: tuple[int, ...],
+        rows_by_id: dict[int, dict[str, Any]],
+        registrations_by_id: dict[int, ChannelRegistration],
+        since: datetime,
+        mode: HydrationMode,
+        config: ADOHydrationConfig,
+    ) -> tuple[dict[int, tuple[list[dict[str, Any]], list[dict[str, Any]]]], list[IntegrationError], list[str], int]:
+        """Fetch required revision/comment detail with deterministic results.
+
+        Calls for one work item remain ordered (revisions before comments),
+        while independent work items use at most ``detail_max_workers``
+        isolated ADO clients.  The result is assembled in input order so API
+        failure reporting remains stable despite concurrent execution.
+        """
+        detail_ids = tuple(
+            work_item_id
+            for work_item_id in work_item_ids
+            if (row := rows_by_id.get(work_item_id)) is not None
+            and _requires_item_detail(
+                row=row,
+                registration=registrations_by_id.get(work_item_id),
+                since=since,
+                mode=mode,
+            )
+        )
+        if not detail_ids:
+            return {}, [], [], 0
+
+        # Directly constructed providers and lightweight test fakes retain the
+        # original sequential behavior. Production construction supplies a
+        # factory so no HTTP session is shared across threads.
+        worker_count = min(max(config.detail_max_workers, 1), len(detail_ids))
+        if self._detail_client_factory is None or worker_count == 1:
+            results = [self._fetch_item_detail(work_item_id, self._client) for work_item_id in detail_ids]
+        else:
+            local = threading.local()
+
+            def _fetch_with_isolated_client(work_item_id: int) -> _ItemDetailFetch:
+                client = getattr(local, "client", None)
+                if client is None:
+                    client = self._detail_client_factory()
+                    local.client = client
+                return self._fetch_item_detail(work_item_id, client)
+
+            with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="vertex-ado-detail") as executor:
+                futures = {work_item_id: executor.submit(_fetch_with_isolated_client, work_item_id) for work_item_id in detail_ids}
+                results = [futures[work_item_id].result() for work_item_id in detail_ids]
+
+        detail_rows_by_id: dict[int, tuple[list[dict[str, Any]], list[dict[str, Any]]]] = {}
+        errors: list[IntegrationError] = []
+        failed_ids: list[str] = []
+        api_calls = 0
+        for result in results:
+            api_calls += result.api_calls
+            if result.error is not None:
+                errors.append(result.error)
+                failed_ids.append(str(result.work_item_id))
+                continue
+            detail_rows_by_id[result.work_item_id] = (result.revision_rows, result.comment_rows)
+        return detail_rows_by_id, errors, failed_ids, api_calls
+
+    @staticmethod
+    def _fetch_item_detail(work_item_id: int, client: ADOClient) -> "_ItemDetailFetch":
+        api_calls = 0
+        try:
+            revision_rows = client.list_work_item_revisions(work_item_id)
+            api_calls += 1
+            comment_rows: list[dict[str, Any]] = []
+            comment_loader = getattr(client, "list_work_item_comments", None)
+            if callable(comment_loader):
+                comment_rows = comment_loader(work_item_id)
+                api_calls += 1
+            return _ItemDetailFetch(work_item_id, revision_rows, comment_rows, api_calls)
+        except QueryError as error:
+            return _ItemDetailFetch(
+                work_item_id,
+                [],
+                [],
+                api_calls,
+                IntegrationError(
+                    source="ado",
+                    stage="hydration",
+                    message=f"Failed to hydrate work item {work_item_id}: {error}",
+                    retryable=True,
+                    ref_id=str(work_item_id),
+                    ref_kind="work_item",
+                ),
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class _ItemDetailFetch:
+    work_item_id: int
+    revision_rows: list[dict[str, Any]]
+    comment_rows: list[dict[str, Any]]
+    api_calls: int
+    error: IntegrationError | None = None
+
+
+def _requires_item_detail(
+    *,
+    row: dict[str, Any],
+    registration: ChannelRegistration | None,
+    since: datetime,
+    mode: HydrationMode,
+) -> bool:
+    if mode is not HydrationMode.FULL:
+        return False
+    # ADF-W2.2: an item already verified more recently than the rolling
+    # window only needs fresh detail when it changed after its own watermark.
+    effective_since = since
+    if (
+        registration is not None
+        and registration.last_verified_at is not None
+        and registration.last_verified_at > since
+    ):
+        effective_since = registration.last_verified_at
+    # First registration is always a complete bounded fetch even if the item
+    # itself predates the rolling window; otherwise it would gain a watermark
+    # without ever collecting its initial revisions/comments.
+    never_verified = registration is None or registration.last_verified_at is None
+    return never_verified or _row_changed_since(row, effective_since)
 
 
 def _chunks(values: tuple[int, ...], size: int) -> tuple[tuple[int, ...], ...]:

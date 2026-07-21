@@ -292,6 +292,400 @@ def test_kb_profiles_encrypt_and_decrypt_commands(monkeypatch, tmp_path: Path) -
     assert "comm_style: concise" in profiles_path.read_text(encoding="utf-8")
 
 
+def _write_people_phase0c_fixture(programs_root: Path) -> None:
+    # specs/people.md Phase 0c fixture: an alias shared by two programs.
+    for program_id, other_alias in (("acme", "acme_only"), ("fabrikam", "fabrikam_only")):
+        program_dir = programs_root / program_id
+        program_dir.mkdir(parents=True, exist_ok=True)
+        (program_dir / "program.yaml").write_text(
+            (
+                'schema_version: "1.0"\n'
+                f'id: "{program_id}"\n'
+                f'name: "{program_id.title()}"\n'
+                "stakeholder_register:\n"
+                "  - alias: shared_owner\n"
+                f"  - alias: {other_alias}\n"
+            ),
+            encoding="utf-8",
+        )
+
+
+def test_kb_people_overlaps_cli_shows_legacy_warning_and_cross_program_alias(monkeypatch, tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    _write_people_phase0c_fixture(programs_root)
+    monkeypatch.setattr("src.commands.kb.PROGRAMS_ROOT", programs_root)
+
+    result = runner.invoke(app, ["kb", "people", "overlaps"])
+
+    assert result.exit_code == 0
+    assert "WARNING: alias-based legacy result; identity not verified." in result.stdout
+    assert "shared_owner" in result.stdout
+    assert "acme_only" not in result.stdout  # Not an overlap -- only in one program.
+
+
+def test_kb_people_overlaps_cli_json_envelope(monkeypatch, tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    _write_people_phase0c_fixture(programs_root)
+    monkeypatch.setattr("src.commands.kb.PROGRAMS_ROOT", programs_root)
+
+    result = runner.invoke(app, ["kb", "people", "overlaps", "--format", "json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["schema_version"] == "people-query.v1"
+    assert payload["confidence_mode"] == "legacy_alias"
+    assert payload["items"][0]["alias"] == "shared_owner"
+    assert {edge["program_id"] for edge in payload["items"][0]["edges"]} == {"acme", "fabrikam"}
+
+
+def test_kb_people_programs_cli_finds_alias_across_programs(monkeypatch, tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    _write_people_phase0c_fixture(programs_root)
+    monkeypatch.setattr("src.commands.kb.PROGRAMS_ROOT", programs_root)
+
+    result = runner.invoke(app, ["kb", "people", "programs", "--person", "shared_owner"])
+
+    assert result.exit_code == 0
+    assert "WARNING: alias-based legacy result; identity not verified." in result.stdout
+    assert "acme" in result.stdout
+    assert "fabrikam" in result.stdout
+
+
+def test_kb_people_programs_cli_unknown_alias_returns_empty_not_error(monkeypatch, tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    _write_people_phase0c_fixture(programs_root)
+    monkeypatch.setattr("src.commands.kb.PROGRAMS_ROOT", programs_root)
+
+    result = runner.invoke(app, ["kb", "people", "programs", "--person", "nobody_here"])
+
+    assert result.exit_code == 0
+    assert "No legacy accountability references found" in result.stdout
+
+
+def test_kb_registry_bootstrap_cli_dry_run_creates_nothing(monkeypatch, tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    programs_root.mkdir(parents=True)
+    monkeypatch.setattr("src.commands.kb.PROGRAMS_ROOT", programs_root)
+
+    result = runner.invoke(app, ["kb", "registry", "bootstrap", "--customer-boundary-id", "acme-corp"])
+
+    assert result.exit_code == 0
+    assert "Dry run" in result.stdout
+    assert not (programs_root.parent / "knowledge" / "registry.yaml").exists()
+
+
+def test_kb_registry_bootstrap_cli_apply_creates_identity_then_status_reports_it(monkeypatch, tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    programs_root.mkdir(parents=True)
+    monkeypatch.setattr("src.commands.kb.PROGRAMS_ROOT", programs_root)
+
+    bootstrap_result = runner.invoke(app, ["kb", "registry", "bootstrap", "--customer-boundary-id", "acme-corp", "--apply"])
+
+    assert bootstrap_result.exit_code == 0
+    assert "Created workspace registry identity" in bootstrap_result.stdout
+    assert (programs_root.parent / "knowledge" / "registry.yaml").exists()
+    assert (programs_root.parent / "knowledge" / "registry_manifest.json").exists()
+
+    status_result = runner.invoke(app, ["kb", "registry", "status"])
+    assert status_result.exit_code == 0
+    assert "Customer boundary:   acme-corp" in status_result.stdout
+
+    status_json = runner.invoke(app, ["kb", "registry", "status", "--format", "json"])
+    payload = json.loads(status_json.stdout)
+    assert payload["bootstrapped"] is True
+    assert payload["customer_boundary_id"] == "acme-corp"
+
+    # Re-running bootstrap --apply must not mint a second identity.
+    second_bootstrap = runner.invoke(app, ["kb", "registry", "bootstrap", "--customer-boundary-id", "different-tenant", "--apply"])
+    assert second_bootstrap.exit_code == 0
+    assert "already exists" in second_bootstrap.stdout
+    reloaded_status = json.loads(runner.invoke(app, ["kb", "registry", "status", "--format", "json"]).stdout)
+    assert reloaded_status["customer_boundary_id"] == "acme-corp"  # Unchanged.
+
+
+def test_kb_registry_status_cli_reports_no_identity_before_bootstrap(monkeypatch, tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    programs_root.mkdir(parents=True)
+    monkeypatch.setattr("src.commands.kb.PROGRAMS_ROOT", programs_root)
+
+    result = runner.invoke(app, ["kb", "registry", "status"])
+
+    assert result.exit_code == 0
+    assert "No workspace registry identity yet" in result.stdout
+
+
+def test_kb_registry_storage_status_cli_reports_local_human(monkeypatch, tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    programs_root.mkdir(parents=True)
+    monkeypatch.setattr("src.commands.kb.PROGRAMS_ROOT", programs_root)
+
+    result = runner.invoke(app, ["kb", "registry", "storage-status"])
+
+    assert result.exit_code == 0
+    assert "Storage class:         local" in result.stdout
+    assert "Qualified for primary: True" in result.stdout
+    assert (programs_root.parent / "knowledge" / "registry_capability_status.yaml").exists()
+
+
+def test_kb_registry_storage_status_cli_json_envelope(monkeypatch, tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    programs_root.mkdir(parents=True)
+    monkeypatch.setattr("src.commands.kb.PROGRAMS_ROOT", programs_root)
+
+    result = runner.invoke(app, ["kb", "registry", "storage-status", "--format", "json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["storage_class"] == "local"
+    assert payload["qualified_for_primary"] is True
+
+
+def test_kb_registry_lease_show_cli_reports_no_lease_then_held_lease(monkeypatch, tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    programs_root.mkdir(parents=True)
+    monkeypatch.setattr("src.commands.kb.PROGRAMS_ROOT", programs_root)
+    knowledge_root = programs_root.parent / "knowledge"
+
+    empty_result = runner.invoke(app, ["kb", "registry", "lease", "show"])
+    assert empty_result.exit_code == 0
+    assert "No registry lease is currently held" in empty_result.stdout
+
+    from src.core.people_registry_lease import acquire_registry_lease
+
+    acquire_registry_lease("some-owner", knowledge_root=knowledge_root)
+
+    held_result = runner.invoke(app, ["kb", "registry", "lease", "show"])
+    assert held_result.exit_code == 0
+    assert "Owner:          some-owner" in held_result.stdout
+
+    json_result = runner.invoke(app, ["kb", "registry", "lease", "show", "--format", "json"])
+    payload = json.loads(json_result.stdout)
+    assert payload["lease"]["owner"] == "some-owner"
+
+
+def test_kb_registry_lease_release_cli_requires_force_and_reason(monkeypatch, tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    programs_root.mkdir(parents=True)
+    monkeypatch.setattr("src.commands.kb.PROGRAMS_ROOT", programs_root)
+
+    no_force = runner.invoke(app, ["kb", "registry", "lease", "release", "--reason", "test"])
+    assert no_force.exit_code != 0
+
+    no_reason = runner.invoke(app, ["kb", "registry", "lease", "release", "--force"])
+    assert no_reason.exit_code != 0
+
+
+def test_kb_registry_lease_release_cli_force_releases_when_authorized(monkeypatch, tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    programs_root.mkdir(parents=True)
+    monkeypatch.setattr("src.commands.kb.PROGRAMS_ROOT", programs_root)
+    knowledge_root = programs_root.parent / "knowledge"
+
+    from src.core.operator_identity import OperatorIdentity
+    from src.core.people_registry_lease import acquire_registry_lease
+
+    bootstrap = runner.invoke(app, ["kb", "registry", "bootstrap", "--customer-boundary-id", "acme-corp", "--apply"])
+    assert bootstrap.exit_code == 0
+    config_path = knowledge_root / "registry.yaml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "directory_steward_principals: []",
+            "directory_steward_principals:\n- test_steward\n",
+        ),
+        encoding="utf-8",
+    )
+    acquire_registry_lease("stuck-owner", knowledge_root=knowledge_root)
+
+    monkeypatch.setattr(
+        "src.commands.kb.capture_operator_identity",
+        lambda actor: OperatorIdentity(actor=actor, principal="test_steward", machine="test-machine", session="test-session"),
+    )
+
+    result = runner.invoke(app, ["kb", "registry", "lease", "release", "--force", "--reason", "stuck writer"])
+
+    assert result.exit_code == 0
+    assert "Force-released" in result.stdout
+    assert "test_steward" in result.stdout
+
+
+def _seed_bootstrapped_registry(monkeypatch, tmp_path: Path):
+    from src.core.operator_identity import OperatorIdentity
+
+    programs_root = tmp_path / "programs"
+    programs_root.mkdir(parents=True)
+    monkeypatch.setattr("src.commands.kb.PROGRAMS_ROOT", programs_root)
+    monkeypatch.setattr(
+        "src.commands.kb.capture_operator_identity",
+        lambda actor: OperatorIdentity(actor=actor, principal="test_operator", machine="test-machine", session="test-session"),
+    )
+    bootstrap = runner.invoke(app, ["kb", "registry", "bootstrap", "--customer-boundary-id", "acme-corp", "--apply"])
+    assert bootstrap.exit_code == 0
+    return programs_root
+
+
+def test_kb_registry_mode_status_cli_before_bootstrap(monkeypatch, tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    programs_root.mkdir(parents=True)
+    monkeypatch.setattr("src.commands.kb.PROGRAMS_ROOT", programs_root)
+
+    result = runner.invoke(app, ["kb", "registry", "mode", "status"])
+
+    assert result.exit_code == 0
+    assert "No workspace registry identity yet" in result.stdout
+
+
+def test_kb_registry_mode_status_cli_json_after_bootstrap(monkeypatch, tmp_path: Path) -> None:
+    _seed_bootstrapped_registry(monkeypatch, tmp_path)
+
+    result = runner.invoke(app, ["kb", "registry", "mode", "status", "--format", "json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["bootstrapped"] is True
+    assert payload["persisted_write_mode"] == "legacy"
+    assert payload["effective_write_mode"] == "legacy"
+
+
+def test_kb_registry_mode_set_write_mode_cli_dry_run_does_not_persist(monkeypatch, tmp_path: Path) -> None:
+    programs_root = _seed_bootstrapped_registry(monkeypatch, tmp_path)
+    knowledge_root = programs_root.parent / "knowledge"
+
+    result = runner.invoke(app, ["kb", "registry", "mode", "set-write-mode", "shadow"])
+
+    assert result.exit_code == 0
+    assert "Dry run" in result.stdout
+    config_path = knowledge_root / "registry.yaml"
+    assert "write_mode: legacy" in config_path.read_text(encoding="utf-8")
+
+
+def test_kb_registry_mode_set_write_mode_cli_apply_persists(monkeypatch, tmp_path: Path) -> None:
+    _seed_bootstrapped_registry(monkeypatch, tmp_path)
+
+    result = runner.invoke(app, ["kb", "registry", "mode", "set-write-mode", "shadow", "--apply"])
+
+    assert result.exit_code == 0
+    assert "set to 'shadow'" in result.stdout
+
+
+def test_kb_registry_mode_set_program_mode_cli_apply_persists(monkeypatch, tmp_path: Path) -> None:
+    _seed_bootstrapped_registry(monkeypatch, tmp_path)
+
+    result = runner.invoke(app, ["kb", "registry", "mode", "set-program-mode", "acme", "shadow", "--apply"])
+
+    assert result.exit_code == 0
+    assert "Program 'acme' mode set to 'shadow'" in result.stdout
+
+
+def test_kb_registry_mode_set_program_mode_cli_rejects_primary(monkeypatch, tmp_path: Path) -> None:
+    _seed_bootstrapped_registry(monkeypatch, tmp_path)
+
+    result = runner.invoke(app, ["kb", "registry", "mode", "set-program-mode", "acme", "primary", "--apply"])
+
+    assert result.exit_code != 0
+
+
+def test_kb_registry_mode_promotion_preview_apply_and_rollback(monkeypatch, tmp_path: Path) -> None:
+    from src.core.people_registry_identity import load_registry_manifest
+    from src.core.people_registry_modes import set_program_mode
+    from src.core.people_registry_promotion import (
+        PROGRAM_PROMOTION_CLEAN_CYCLES_REQUIRED,
+        PROGRAM_PROMOTION_REQUIRED_CONSUMERS,
+        ProgramPromotionConsumerEvidence,
+        ProgramPromotionCycleEvidence,
+        record_program_promotion_cycle,
+        record_program_rollback_restore_drill,
+    )
+
+    programs_root = _seed_bootstrapped_registry(monkeypatch, tmp_path)
+    knowledge_root = programs_root.parent / "knowledge"
+    set_program_mode(knowledge_root, "acme", "shadow", actor="test_operator")
+    manifest = load_registry_manifest(knowledge_root)
+    assert manifest is not None
+    record_program_rollback_restore_drill(
+        knowledge_root,
+        "acme",
+        generation_id=manifest.generation_id,
+        restore_verified=True,
+    )
+    evidence = ProgramPromotionCycleEvidence(
+        generation_id=manifest.generation_id,
+        load_succeeded=True,
+        load_generation_id=manifest.generation_id,
+        consumers=tuple(
+            ProgramPromotionConsumerEvidence(
+                consumer=consumer,
+                generation_id=manifest.generation_id,
+                succeeded=True,
+            )
+            for consumer in PROGRAM_PROMOTION_REQUIRED_CONSUMERS
+        ),
+        parity_divergence_count=0,
+        unresolved_critical_identity_conflicts=0,
+        nfr_compliant=True,
+    )
+    for _ in range(PROGRAM_PROMOTION_CLEAN_CYCLES_REQUIRED):
+        record_program_promotion_cycle(knowledge_root, "acme", evidence)
+
+    preview = runner.invoke(app, ["kb", "registry", "mode", "promote", "acme"])
+    assert preview.exit_code == 0
+    assert "ready" in preview.stdout
+
+    promoted = runner.invoke(app, ["kb", "registry", "mode", "promote", "acme", "--apply"])
+    assert promoted.exit_code == 0
+    assert "promoted to 'primary'" in promoted.stdout
+
+    status = runner.invoke(app, ["kb", "registry", "mode", "status", "--program", "acme", "--format", "json"])
+    assert status.exit_code == 0
+    assert json.loads(status.stdout)["program_promotion_status"]["clean_cycles"] == 5
+
+    rollback = runner.invoke(app, ["kb", "registry", "mode", "rollback", "acme", "--target", "shadow", "--apply"])
+    assert rollback.exit_code == 0
+    assert "rolled back to 'shadow'" in rollback.stdout
+
+
+def test_kb_registry_mode_set_flag_cli_apply_persists(monkeypatch, tmp_path: Path) -> None:
+    _seed_bootstrapped_registry(monkeypatch, tmp_path)
+
+    result = runner.invoke(app, ["kb", "registry", "mode", "set-flag", "provider_refresh_enabled", "true", "--apply"])
+
+    assert result.exit_code == 0
+    assert "provider_refresh_enabled set to True" in result.stdout
+
+
+def _write_synthetic_knowledge_for_shadow_parity(programs_root: Path, program_id: str) -> None:
+    knowledge_dir = programs_root / program_id / "knowledge"
+    knowledge_dir.mkdir(parents=True, exist_ok=True)
+    (knowledge_dir / "people_directory.yaml").write_text('schema_version: "1.0"\npeople:\n  - alias: alice\n', encoding="utf-8")
+    (knowledge_dir / "teams.yaml").write_text('schema_version: "1.0"\nteams:\n  - id: team-a\n    name: Team A\n', encoding="utf-8")
+    (knowledge_dir / "people_profiles.yaml").write_text('schema_version: "1.0"\nprofiles: []\n', encoding="utf-8")
+    (knowledge_dir / "products.yaml").write_text('schema_version: "1.0"\nproducts: []\n', encoding="utf-8")
+    (knowledge_dir / "golden_queries.yaml").write_text('schema_version: "1.0"\nqueries: []\n', encoding="utf-8")
+
+
+def test_kb_registry_mode_shadow_parity_cli_preview_reports_zero_divergence(monkeypatch, tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    monkeypatch.setattr("src.commands.kb.PROGRAMS_ROOT", programs_root)
+    _write_synthetic_knowledge_for_shadow_parity(programs_root, "acme")
+
+    result = runner.invoke(app, ["kb", "registry", "mode", "shadow-parity", "acme", "--format", "json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["is_zero_divergence"] is True
+    assert payload["legacy_person_count"] == payload["canonical_person_count"] == 1
+
+
+def test_kb_registry_mode_shadow_parity_cli_record_skips_legacy_mode_program(monkeypatch, tmp_path: Path) -> None:
+    programs_root = _seed_bootstrapped_registry(monkeypatch, tmp_path)
+    _write_synthetic_knowledge_for_shadow_parity(programs_root, "acme")
+
+    result = runner.invoke(app, ["kb", "registry", "mode", "shadow-parity", "acme", "--record"])
+
+    assert result.exit_code == 0
+    assert "not in shadow/primary mode" in result.stdout
+    assert not (programs_root / "acme" / "knowledge" / ".state" / "shadow_parity.json").exists()
+
+
 def test_kb_update_still_works_when_people_profiles_are_encrypted(monkeypatch, tmp_path: Path) -> None:
     programs_root = _seed_kb_update_layout(tmp_path)
     profiles_path = programs_root / "demo" / "knowledge" / "people_profiles.yaml"
@@ -517,3 +911,272 @@ def _seed_kb_update_layout(tmp_path: Path, *, team_ids: tuple[str, ...] = ()) ->
     (knowledge_dir / "products.yaml").write_text('schema_version: "1.0"\nproducts: []\n', encoding="utf-8")
     (knowledge_dir / "golden_queries.yaml").write_text('schema_version: "1.0"\nqueries: []\n', encoding="utf-8")
     return programs_root
+
+
+def _seed_query_fixture(monkeypatch, tmp_path: Path) -> Path:
+    """PPL-W3.1: a bootstrapped registry plus a typed entities/people_directory/teams/memberships
+    shared fixture, written directly through the typed writers (not raw YAML) so the fixture stays
+    byte-for-byte in sync with the real schema this session's loaders/writers implement."""
+    from src.core.people_directory_schema import (
+        ContactKind,
+        ContactPoint,
+        ContactStatus,
+        PersonDirectory,
+        Team,
+        TeamKind,
+        write_people_directory,
+        write_teams,
+    )
+    from src.core.people_entity_schema import (
+        ENTITIES_SCHEMA_VERSION,
+        AliasStatus,
+        CanonicalEntity,
+        EntitiesDocument,
+        EntityAlias,
+        EntityStatus,
+        write_entities_document,
+    )
+    from src.core.people_membership_schema import MembershipStatus, TeamMembership, write_memberships
+
+    programs_root = _seed_bootstrapped_registry(monkeypatch, tmp_path)
+    knowledge_root = programs_root.parent / "knowledge"
+    now = datetime(2026, 7, 16, 12, 0, 0, tzinfo=timezone.utc)
+
+    def alias(value: str) -> EntityAlias:
+        return EntityAlias(
+            value=value, kind="alias", status=AliasStatus.ACTIVE, valid_from=None, valid_until=None,
+            source="test", source_ref=None, recorded_at=now, verified_at=now, verified_by_principal="steward",
+        )
+
+    entities = (
+        CanonicalEntity(
+            workspace_id="ws-1", entity_id="person:alice", entity_type="person", canonical_name="Alice Adams",
+            aliases=(alias("alice"),), scope="org", created_at=now, status=EntityStatus.ACTIVE,
+        ),
+        CanonicalEntity(
+            workspace_id="ws-1", entity_id="team:platform", entity_type="team", canonical_name="Platform Team",
+            aliases=(alias("platform"),), scope="org", created_at=now, status=EntityStatus.ACTIVE,
+        ),
+    )
+    write_entities_document(knowledge_root / "entities.yaml", EntitiesDocument(schema_version=ENTITIES_SCHEMA_VERSION, entities=entities))
+
+    people = (
+        PersonDirectory(
+            entity_id="person:alice", alias="alice", display_name="Alice Adams",
+            contacts=(
+                ContactPoint(
+                    kind=ContactKind.PRIMARY_EMAIL, value="alice@example.com", status=ContactStatus.ACTIVE,
+                    valid_from=None, valid_until=None, source="test", source_ref=None,
+                    recorded_at=now, verified_at=now, verified_by_principal="steward", delivery_eligible=True,
+                ),
+            ),
+        ),
+    )
+    write_people_directory(knowledge_root / "people_directory.yaml", people)
+    write_teams(knowledge_root / "teams.yaml", (Team(entity_id="team:platform", id="platform", name="Platform Team", kind=TeamKind.ORG_TEAM),))
+    write_memberships(
+        knowledge_root / "memberships.yaml",
+        (
+            TeamMembership(
+                membership_id="m1", person_entity_id="person:alice", team_entity_id="team:platform", role="member",
+                valid_from=now, valid_until=None, source="test", source_ref=None,
+                observed_at=now, verified_at=now, status=MembershipStatus.ACTIVE,
+            ),
+        ),
+    )
+    return programs_root
+
+
+def test_kb_people_show_cli_resolves_a_bare_alias(monkeypatch, tmp_path: Path) -> None:
+    _seed_query_fixture(monkeypatch, tmp_path)
+
+    result = runner.invoke(app, ["kb", "people", "show", "--person", "alice", "--format", "json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["schema_version"] == "people-query.v1"
+    assert len(payload["items"]) == 1
+    assert payload["items"][0]["entity"]["entity_id"] == "person:alice"
+    assert len(payload["items"][0]["memberships"]) == 1
+
+
+def test_kb_people_show_cli_reports_not_found_with_exit_1(monkeypatch, tmp_path: Path) -> None:
+    _seed_query_fixture(monkeypatch, tmp_path)
+
+    result = runner.invoke(app, ["kb", "people", "show", "--person", "nobody"])
+
+    assert result.exit_code == 1
+    assert "No canonical person found" in result.stdout
+
+
+def test_kb_people_find_cli_returns_scored_candidates(monkeypatch, tmp_path: Path) -> None:
+    _seed_query_fixture(monkeypatch, tmp_path)
+
+    result = runner.invoke(app, ["kb", "people", "find", "alice", "--format", "json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["items"][0]["alias"] == "alice"
+    assert payload["items"][0]["match_kind"] == "exact"
+
+
+def test_kb_people_stale_cli_reports_zero_with_a_tight_window(monkeypatch, tmp_path: Path) -> None:
+    _seed_query_fixture(monkeypatch, tmp_path)
+
+    result = runner.invoke(app, ["kb", "people", "stale", "--freshness-days", "-1", "--format", "json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert len(payload["items"]) >= 1
+
+
+def test_kb_people_conflicts_cli_rejects_an_invalid_status(monkeypatch, tmp_path: Path) -> None:
+    _seed_query_fixture(monkeypatch, tmp_path)
+
+    result = runner.invoke(app, ["kb", "people", "conflicts", "--status", "bogus"])
+
+    assert result.exit_code != 0
+
+
+def test_kb_people_conflicts_cli_reports_no_conflicts_on_a_clean_fixture(monkeypatch, tmp_path: Path) -> None:
+    _seed_query_fixture(monkeypatch, tmp_path)
+
+    result = runner.invoke(app, ["kb", "people", "conflicts", "--format", "json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["items"] == []
+
+
+def test_kb_teams_show_cli_resolves_a_team_alias(monkeypatch, tmp_path: Path) -> None:
+    _seed_query_fixture(monkeypatch, tmp_path)
+
+    result = runner.invoke(app, ["kb", "teams", "show", "--team", "platform", "--format", "json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["items"][0]["entity"]["entity_id"] == "team:platform"
+
+
+def test_kb_teams_members_cli_lists_the_current_roster(monkeypatch, tmp_path: Path) -> None:
+    _seed_query_fixture(monkeypatch, tmp_path)
+
+    result = runner.invoke(app, ["kb", "teams", "members", "--team", "platform", "--format", "json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert len(payload["items"]) == 1
+    assert payload["items"][0]["person_entity_id"] == "person:alice"
+
+
+def test_kb_teams_show_cli_reports_not_found_with_exit_1(monkeypatch, tmp_path: Path) -> None:
+    _seed_query_fixture(monkeypatch, tmp_path)
+
+    result = runner.invoke(app, ["kb", "teams", "show", "--team", "nonexistent"])
+
+    assert result.exit_code == 1
+    assert "No canonical team found" in result.stdout
+
+
+def _seed_refresh_fixture(monkeypatch, tmp_path: Path) -> tuple[Path, Path]:
+    """PPL-W4.4: the query fixture plus an enabled local_directory_export
+    provider config and provider_refresh_enabled=True."""
+    from src.core.people_registry_modes import set_registry_flag
+
+    programs_root = _seed_query_fixture(monkeypatch, tmp_path)
+    knowledge_root = programs_root.parent / "knowledge"
+    set_registry_flag(knowledge_root, "provider_refresh_enabled", True, actor="steward")
+    (knowledge_root / "identity_providers.yaml").write_text(
+        (
+            'schema_version: "1.0"\n'
+            "providers:\n"
+            '  - name: "acme_directory_export"\n'
+            '    provider_type: "local_directory_export"\n'
+            '    tenant_id: "acme-tenant"\n'
+            '    capability_contract_version: "1.0"\n'
+            "    allowed_fields:\n"
+            "      - display_name\n"
+            "      - title\n"
+            "    enabled: true\n"
+        ),
+        encoding="utf-8",
+    )
+    export_path = tmp_path / "export.csv"
+    export_path.write_text(
+        "alias,display_name,title,department,manager_alias,email,teams\nalice,Alice Adams,Staff TPM,,,,\n",
+        encoding="utf-8",
+    )
+    return programs_root, export_path
+
+
+def test_kb_people_refresh_cli_preview_makes_no_write(monkeypatch, tmp_path: Path) -> None:
+    programs_root, export_path = _seed_refresh_fixture(monkeypatch, tmp_path)
+
+    result = runner.invoke(
+        app,
+        ["kb", "people", "refresh", "--provider", "acme_directory_export", "--person", "alice",
+         "--import-file", str(export_path), "--reason", "test", "--format", "json"],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["transaction_id"] is None
+    assert len(payload["accepted"]) >= 1
+
+
+def test_kb_people_refresh_cli_apply_commits_a_transaction(monkeypatch, tmp_path: Path) -> None:
+    programs_root, export_path = _seed_refresh_fixture(monkeypatch, tmp_path)
+
+    result = runner.invoke(
+        app,
+        ["kb", "people", "refresh", "--provider", "acme_directory_export", "--person", "alice",
+         "--import-file", str(export_path), "--reason", "test", "--apply", "--format", "json"],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["transaction_id"] is not None
+
+
+def test_kb_people_refresh_cli_team_membership_diff(monkeypatch, tmp_path: Path) -> None:
+    programs_root, _ = _seed_refresh_fixture(monkeypatch, tmp_path)
+    export_path = tmp_path / "team_export.csv"
+    export_path.write_text(
+        "alias,display_name,title,department,manager_alias,email,teams\nalice,Alice Adams,Staff TPM,,,,\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        ["kb", "people", "refresh", "--provider", "acme_directory_export", "--team", "platform",
+         "--import-file", str(export_path), "--reason", "membership sync", "--apply", "--format", "json"],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert len(payload["team_membership_diffs"]) == 1
+    diff = payload["team_membership_diffs"][0]
+    assert diff["complete"] is True
+    assert diff["removed_person_aliases"] == ["alice"]
+
+
+def test_kb_people_refresh_cli_reports_kill_switch_disabled(monkeypatch, tmp_path: Path) -> None:
+    programs_root = _seed_query_fixture(monkeypatch, tmp_path)
+    knowledge_root = programs_root.parent / "knowledge"
+    (knowledge_root / "identity_providers.yaml").write_text(
+        (
+            'schema_version: "1.0"\nproviders:\n  - name: "acme_directory_export"\n'
+            '    provider_type: "local_directory_export"\n    tenant_id: "acme-tenant"\n'
+            '    capability_contract_version: "1.0"\n    enabled: true\n'
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        ["kb", "people", "refresh", "--provider", "acme_directory_export", "--person", "alice",
+         "--reason", "test", "--format", "human"],
+    )
+
+    assert result.exit_code == 0
+    assert "disabled" in result.stdout

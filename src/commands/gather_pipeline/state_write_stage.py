@@ -102,6 +102,10 @@ def run_state_write_stage(stage_input: StateWriteStageInput) -> StateWriteStageR
         promotion_candidates=stage_input.promotion_candidates,
         promotion_blocked_artifacts=stage_input.promotion_blocked_artifacts,
         chart_results=stage_input.chart_results,
+        ado_query_results=stage_input.ado_query_results,
+        discovered_work_item_ids=stage_input.discovered_work_item_ids,
+        hydrated_work_item_ids=stage_input.hydrated_work_item_ids,
+        channel_outcomes=stage_input.channel_outcomes,
     )
     return StateWriteStageResult(
         artifacts=artifacts,

@@ -1,7 +1,7 @@
 """WS-17: failure taxonomy for SRE-grade observability.
 
 The taxonomy classifies failures into well-known **categories** so
-`vertex doctor --diagnose <last-run>` can explain *what kind* of
+`vertex observability diagnose --program <program>` can explain *what kind* of
 failure hit on the last gather, the **operator remediation hint**, and
 whether the failure is **retryable** (re-running gather may succeed)
 or **persistent** (requires operator action).
@@ -23,8 +23,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-import re
-from typing import Any
 
 
 class FailureCategory(str, Enum):
@@ -51,7 +49,7 @@ class FailureClassification:
     detail: str
 
 
-# Map of category → next-command hint shown in `doctor --diagnose`.
+# Map of category → next-command hint shown in `observability diagnose`.
 _NEXT_COMMANDS: dict[FailureCategory, str] = {
     FailureCategory.TRANSIENT_AUTH: "vertex doctor --check-auth --edition <name>",
     FailureCategory.RATE_LIMIT: "vertex gather --edition <name>   # auto-retries; if persistent, file connector ticket",
@@ -63,7 +61,7 @@ _NEXT_COMMANDS: dict[FailureCategory, str] = {
     FailureCategory.CONFIG: "vertex doctor --kb --edition <name>   # inspect program.yaml / edition.yaml",
     FailureCategory.DATA_CORRUPTION: "vertex doctor --consistency --edition <name>   # inspect archive + hash chain",
     FailureCategory.PII_LEAK: "vertex doctor --privacy --edition <name>   # check PII redaction discipline",
-    FailureCategory.UNKNOWN: "vertex doctor --diagnose <name> --format json   # capture full exception chain",
+    FailureCategory.UNKNOWN: "vertex observability diagnose --program <name> --format json   # capture full exception chain",
 }
 
 
@@ -96,7 +94,7 @@ _PATTERN_TABLE: tuple[tuple[FailureCategory, tuple[str, ...], bool], ...] = (
 def classify_exception(exc: BaseException | str) -> FailureClassification:
     """Map an exception (or its string form) to a FailureClassification.
 
-    Used by `vertex doctor --diagnose` to explain the last failure, and
+    Used by `vertex observability diagnose` to explain the last failure, and
     by the run-telemetry writer to tag the failure category in the
     per-channel health log."""
     text = _exception_text(exc)

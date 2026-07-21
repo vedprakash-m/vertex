@@ -10,6 +10,7 @@ import pytest
 from src.core.workspace_lease import (
     LeaseFencingTokenStale,
     LeaseHeldByAnotherOwner,
+    LeaseRenewalHeartbeat,
     acquire_lease,
     is_lease_expired,
     read_lease_state,
@@ -65,6 +66,30 @@ def test_renew_with_stale_fencing_token_raises(tmp_path: Path) -> None:
 
     with pytest.raises(LeaseFencingTokenStale):
         renew_lease(stale_handle, programs_root=programs_root)
+
+
+def test_renewal_heartbeat_renews_in_background_and_exposes_latest_handle(tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    handle = acquire_lease("acme", "host-a", programs_root=programs_root)
+    renewed = threading.Event()
+
+    def _renew(current, *, programs_root: Path):
+        updated = renew_lease(current, ttl_seconds=300, programs_root=programs_root)
+        renewed.set()
+        return updated
+
+    heartbeat = LeaseRenewalHeartbeat(
+        handle,
+        programs_root=programs_root,
+        interval_seconds=0.01,
+        renew_fn=_renew,
+    )
+    heartbeat.start()
+    assert renewed.wait(timeout=2), "expected the heartbeat to renew the lease"
+    heartbeat.stop()
+
+    assert heartbeat.handle.fencing_token == handle.fencing_token
+    assert heartbeat.handle.expires_at > handle.expires_at
 
 
 def test_release_clears_lease_allowing_immediate_reacquire_by_another_host(tmp_path: Path) -> None:

@@ -1,8 +1,8 @@
 """WS-17: doctor checks for diagnose + perf (per-channel P50/P95).
 
 These two checks are exposed via:
-  - ``vertex doctor --diagnose <program-id>`` — explain the last gather failure
-  - ``vertex doctor --perf <program-id>`` — per-channel latency + SLO status
+  - ``vertex observability diagnose --program <program-id>`` — explain the last gather failure
+  - ``vertex observability perf --program <program-id>`` — per-channel latency + SLO status
 
 Design:
 - diagnose: reads the latest ``gather_state.json`` (if any), the
@@ -16,26 +16,22 @@ Design:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from src.core.alerts import read_alerts, surface_alert_banner, AlertSeverity
+from src.core.alerts import AlertSeverity, read_alerts
 from src.core.failure_taxonomy import (
     FailureCategory,
     classify_exception,
-    is_retryable,
 )
 from src.core.gather_state_store import (
     GatherState,
-    get_gather_state_path,
     load_gather_state,
 )
 from src.core.run_telemetry import (
-    DEFAULT_SLO_MS,
     build_channel_perf_summary,
     read_run_telemetry,
-    run_telemetry_path,
 )
 
 
@@ -151,7 +147,7 @@ def build_diagnose_report(
                         severity="warn",
                         label="last_failure",
                         detail=f"{gather_state.integration_errors} integration error(s) recorded.",
-                        next_command=f"vertex doctor --diagnose {program_id}",
+                        next_command=f"vertex observability diagnose --program {program_id}",
                     )
                 )
         else:
@@ -200,7 +196,7 @@ def build_diagnose_report(
                         f"{', '.join(failed_channels)}. "
                         f"Category: {last_failure_category.value if last_failure_category else 'unknown'}."
                     ),
-                    next_command=last_failure_next_command or f"vertex doctor --diagnose {program_id}",
+                    next_command=last_failure_next_command or f"vertex observability diagnose --program {program_id}",
                 )
             )
         else:

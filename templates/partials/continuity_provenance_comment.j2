@@ -8,4 +8,4 @@
   </tr>
 </table>
 {% endif %}
-<!-- vertex: manifest={{ manifest.manifest_id if manifest else edition.manifest_id }} qg={{ manifest.qg_results | qg_summary if manifest else edition.qg_status }} generated={{ edition.generated_at.isoformat() }} -->
+<!-- vertex: manifest={{ manifest.manifest_id if manifest else edition.manifest_id }} qg={{ manifest.qg_results | qg_summary if manifest else edition.qg_status }} gather_run={{ manifest.gather_run_id if manifest else "" }} generated={{ edition.generated_at.isoformat() }} -->

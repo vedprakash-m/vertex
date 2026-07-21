@@ -50,9 +50,17 @@ def append_wiql_clause(wiql: str, clause: str, *, wrap_clause: bool = True) -> s
 def bound_saved_query_wiql(
     wiql: str,
     *,
-    since: datetime,
+    since: datetime | None,
     additional_clause: str | None = None,
 ) -> str:
+    """Armada spec D-2: a `full_scope` binding may never be date-bounded by a
+    consumer. Callers pass ``since=None`` for full-scope query ids so the
+    executed WIQL matches gather's undated membership exactly (mirroring
+    ``ado_discovery._discover_scope_group``); ``since`` is still applied for
+    `activity_delta` bindings, preserving prior recent-activity behavior.
+    """
+    if since is None:
+        return append_wiql_clause(wiql, additional_clause or "", wrap_clause=True)
     lower_wiql = wiql.lower()
     order_by_index = lower_wiql.rfind(" order by ")
     where_clause = lower_wiql[:order_by_index] if order_by_index >= 0 else lower_wiql
@@ -72,7 +80,7 @@ def load_saved_query_item_ids(
     client: SavedQueryClient,
     query_ids: tuple[str, ...],
     *,
-    since: datetime,
+    since: datetime | None,
     query_clauses: dict[str, str] | None = None,
     top_cap: int,
     logger: logging.Logger | None = None,

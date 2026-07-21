@@ -46,6 +46,7 @@ from src.core.program_fact_store import (
     FactPrecedence,
     ProgramFactInput,
     ProgramFactStore,
+    build_fact_id,
     build_natural_key,
     load_program_facts,
     persist_program_fact_snapshot,
@@ -123,6 +124,27 @@ def test_append_fact_creates_program_scoped_revision_and_snapshot(tmp_path) -> N
     assert snapshot.facts[0].write_authority == "human"
 
 
+def test_first_fact_id_is_deterministic_and_program_scoped(tmp_path: Path) -> None:
+    fact = ProgramFactInput(
+        fact_type="risk",
+        scope="workstream:deployment",
+        entity_refs=("WS:deployment",),
+        payload={"risk": "high"},
+    )
+    natural_key = build_natural_key(
+        fact.fact_type,
+        entity_refs=fact.entity_refs,
+        scope=fact.scope,
+    )
+    first = ProgramFactStore("acme", db_root=tmp_path / "first").append_fact(fact)
+    replay = ProgramFactStore("acme", db_root=tmp_path / "replay").append_fact(fact)
+    other_program = ProgramFactStore("other", db_root=tmp_path / "other").append_fact(fact)
+
+    assert first.revision.fact_id == build_fact_id("acme", natural_key)
+    assert replay.revision.fact_id == first.revision.fact_id
+    assert other_program.revision.fact_id != first.revision.fact_id
+
+
 def test_append_fact_persists_write_authority_round_trip(tmp_path: Path) -> None:
     store = ProgramFactStore("acme", db_root=tmp_path)
 
@@ -140,6 +162,87 @@ def test_append_fact_persists_write_authority_round_trip(tmp_path: Path) -> None
 
     assert result.revision.write_authority == "bridge"
     assert snapshot.facts[0].write_authority == "bridge"
+
+
+def test_append_fact_persists_gather_run_id_round_trip(tmp_path: Path) -> None:
+    store = ProgramFactStore("acme", db_root=tmp_path)
+
+    result = store.append_fact(
+        ProgramFactInput(
+            fact_type="action.item",
+            entity_refs=("WI:456",),
+            payload={"source": "ado", "title": "Gather-stamped action"},
+            gather_run_id="gather-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        ),
+        recorded_at=datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc),
+    )
+
+    snapshot = store.snapshot()
+
+    assert result.revision.gather_run_id == "gather-01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    assert snapshot.facts[0].gather_run_id == "gather-01ARZ3NDEKTSV4RRFFQ69G5FAV"
+
+
+def test_load_program_facts_can_exclude_non_committed_gather_runs(tmp_path: Path) -> None:
+    from src.core.gather_run_manifest import (
+        GatherRunManifest,
+        GatherRunStatus,
+        RequiredScopeStatus,
+        commit_staging_run,
+        create_staging_manifest,
+    )
+
+    programs_root = _programs_root(tmp_path)
+    started = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    running = GatherRunManifest(
+        "gather-running",
+        GatherRunStatus.RUNNING,
+        "acme",
+        "interactive",
+        "test",
+        1,
+        started,
+        started,
+        RequiredScopeStatus.FULL,
+    )
+    committed = GatherRunManifest(
+        "gather-committed",
+        GatherRunStatus.RUNNING,
+        "acme",
+        "interactive",
+        "test",
+        2,
+        started,
+        started,
+        RequiredScopeStatus.FULL,
+    )
+    create_staging_manifest(running, programs_root=programs_root)
+    create_staging_manifest(committed, programs_root=programs_root)
+    commit_staging_run(committed, finished_at=started, programs_root=programs_root)
+
+    store = ProgramFactStore("acme", db_root=tmp_path)
+    for entity_ref, gather_run_id in (
+        ("WI:1", running.run_id),
+        ("WI:2", committed.run_id),
+        ("WI:3", None),
+    ):
+        store.append_fact(
+            ProgramFactInput(
+                fact_type="action.item",
+                entity_refs=(entity_ref,),
+                payload={"source": "ado", "title": entity_ref},
+                gather_run_id=gather_run_id,
+            ),
+            recorded_at=started,
+        )
+
+    snapshot = load_program_facts(
+        "acme",
+        programs_root=programs_root,
+        require_committed_gather_run=True,
+    )
+
+    assert {fact.gather_run_id for fact in snapshot.facts} == {committed.run_id, None}
 
 
 def test_load_program_facts_primary_mode_disables_shim_merge(tmp_path: Path, monkeypatch) -> None:

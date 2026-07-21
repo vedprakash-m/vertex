@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime
 import json
 import logging
@@ -15,11 +15,11 @@ from src.core.action_tracker import append_action
 from src.core.decision_extractor_basic import extract_decisions_from_signals
 from src.core.decision_register import upsert_decisions
 from src.core.incident_journal_store import append_incident_entry
-from src.core.models_v2 import IncidentEntry, Program, ReviewPolicy, Signal, SignalReviewDecision
+from src.core.models_v2 import IncidentEntry, Program, ReviewPolicy, Signal, SignalReviewDecision, Workstream
 from src.core.program_fact_store import load_program_facts, project_action_items
 from src.core.program_paths import get_dedup_drop_log_path
 from src.core.signal_classification import classify_signal
-from src.core.signal_dedup import dedupe_signals_with_audit
+from src.core.signal_dedup import build_deterministic_signal_id, dedupe_signals_with_audit
 from src.core.signal_ref_utils import widen_ws_wi_refs
 from src.core.signal_review import compute_auto_approval_policies, signal_can_be_auto_approved, write_autonomy_audit_entries
 
@@ -32,7 +32,19 @@ def run_persistence_stage(stage_input: PersistenceStageInput) -> PersistenceStag
         stage_input.candidate_signals,
         existing_signals=stage_input.existing_signals,
     )
-    new_signals = tuple(widen_ws_wi_refs(signal, stage_input.workstreams) for signal in dedup_result.signals)
+    # D-13 rule 4 (specs/armada.md): stamp every genuinely new signal (from
+    # any channel -- they all funnel through this single persistence stage)
+    # with the current gather-run.v1 manifest run_id, so a future activated
+    # reader can filter to signals from committed runs only. None when this
+    # stage runs outside gather_program()'s lifecycle wrapper.
+    new_signals = tuple(
+        _stamp_gather_signal(
+            signal,
+            workstreams=stage_input.workstreams,
+            gather_run_id=stage_input.gather_run_id,
+        )
+        for signal in dedup_result.signals
+    )
     if not stage_input.dry_run and dedup_result.drop_log:
         write_dedup_drop_log(
             stage_input.program_id,
@@ -69,6 +81,7 @@ def run_persistence_stage(stage_input: PersistenceStageInput) -> PersistenceStag
             append_action(
                 stage_input.program_id, action,
                 programs_root=stage_input.programs_root, correlation_id=stage_input.correlation_id,
+                gather_run_id=stage_input.gather_run_id,
             )
             existing_action_ids.add(action.id)
 
@@ -77,6 +90,7 @@ def run_persistence_stage(stage_input: PersistenceStageInput) -> PersistenceStag
             upsert_decisions(
                 stage_input.program_id, extracted_decisions,
                 programs_root=stage_input.programs_root, correlation_id=stage_input.correlation_id,
+                gather_run_id=stage_input.gather_run_id,
             )
 
     auto_reviews_written = 0
@@ -145,6 +159,29 @@ def run_persistence_stage(stage_input: PersistenceStageInput) -> PersistenceStag
         pending_review=pending_review,
         auto_reviews_written=auto_reviews_written,
         extracted_action_count=len(extracted_actions),
+    )
+
+
+def _stamp_gather_signal(
+    signal: Signal,
+    *,
+    workstreams: tuple[Workstream, ...],
+    gather_run_id: str | None,
+) -> Signal:
+    """Attach gather lineage and canonicalize only manifest-backed signals.
+
+    Legacy/manual callers that do not have a gather manifest retain their
+    source IDs unchanged.  Once a signal is emitted through the lifecycle
+    wrapper, its semantic content—not a transient extractor ID—becomes its
+    durable identity.
+    """
+    widened = widen_ws_wi_refs(signal, workstreams)
+    if gather_run_id is None:
+        return widened
+    return replace(
+        widened,
+        id=build_deterministic_signal_id(widened),
+        gather_run_id=gather_run_id,
     )
 
 

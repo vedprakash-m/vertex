@@ -110,6 +110,28 @@ def test_metadata_carries_age_hours_when_present(programs_root: Path) -> None:
     assert row.metadata == {"age_hours": 2.5}
 
 
+def test_disabled_prefetch_source_is_reported_as_inactive(programs_root: Path) -> None:
+    def fake_evaluate(program_id, *, programs_root, now):
+        return (
+            ScheduleHealthFinding("prefetch", "missing", "missing snapshot", None),
+            ScheduleHealthFinding("cockpit_html", "ok", "cockpit fresh", 1.0),
+        )
+
+    report = run_schedule_health_doctor(
+        program_id="xpf",
+        programs_root=programs_root,
+        now=_NOW,
+        prefetch_enabled=False,
+        evaluate_fn=fake_evaluate,
+    )
+
+    row = _check(report, "Scheduled Prefetch")
+    assert row.status == "info"
+    assert row.metadata == {"active": False}
+    assert "M365/WorkIQ channel is disabled" in row.detail
+    assert "prefetch=inactive" in _check(report, "Schedule Health").detail
+
+
 @pytest.fixture
 def programs_root(tmp_path: Path) -> Path:
     (tmp_path / "xpf").mkdir()

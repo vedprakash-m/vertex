@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from datetime import datetime, timezone
 
 from src.core.ado_hydration import ADOHydrationConfig, ADOHydrationProvider, _normalize_ado_comment_html
@@ -104,6 +106,61 @@ def test_ado_hydration_fetches_batch_and_changed_item_detail() -> None:
     assert client.batch_calls == [(101,)]
     assert client.revision_calls == [101]
     assert client.comment_calls == [101]
+
+
+def test_ado_hydration_parallelizes_independent_initial_detail_with_isolated_clients() -> None:
+    """Initial detail stays complete without serially exhausting the channel budget."""
+
+    class _Tracker:
+        def __init__(self) -> None:
+            self.lock = threading.Lock()
+            self.active = 0
+            self.max_active = 0
+            self.factory_calls = 0
+
+        def run(self) -> None:
+            with self.lock:
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            try:
+                time.sleep(0.03)
+            finally:
+                with self.lock:
+                    self.active -= 1
+
+    tracker = _Tracker()
+
+    class _IsolatedDetailClient(_FakeADOClient):
+        def list_work_item_revisions(self, work_item_id: int, **kwargs: object) -> list[dict[str, object]]:
+            tracker.run()
+            return super().list_work_item_revisions(work_item_id, **kwargs)
+
+        def list_work_item_comments(self, work_item_id: int, **kwargs: object) -> list[dict[str, object]]:
+            tracker.run()
+            return super().list_work_item_comments(work_item_id, **kwargs)
+
+    def _make_detail_client() -> _IsolatedDetailClient:
+        with tracker.lock:
+            tracker.factory_calls += 1
+        return _IsolatedDetailClient()
+
+    provider = ADOHydrationProvider(
+        _FakeADOClient(),  # type: ignore[arg-type]
+        detail_client_factory=_make_detail_client,  # type: ignore[arg-type]
+    )
+    result = provider.hydrate(
+        (_registration("101"), _registration("102"), _registration("103")),
+        datetime(2026, 5, 23, tzinfo=timezone.utc),
+        "demo",
+        ADOHydrationConfig(detail_max_workers=3),
+        mode=HydrationMode.FULL,
+    )
+
+    assert tracker.max_active >= 2
+    assert 2 <= tracker.factory_calls <= 3
+    assert result.api_call_count == 7  # one batch plus revisions/comments for all three items
+    assert result.hydrated_ref_ids == (("101", "work_item"), ("102", "work_item"), ("103", "work_item"))
+    assert all(item.revisions and item.comments for item in result.resources.work_items)
 
 
 def test_ado_hydration_skips_detail_fetch_when_unchanged_since_last_verification() -> None:

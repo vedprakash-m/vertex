@@ -546,6 +546,8 @@ Extract structured evidence from emails and transcripts via WorkIQ.
 | --verbose | boolean | No | False | Write structured gather traces under publications/<program>/observability/. |
 | --facts-only | boolean | No | False | Skip full gather; only mirror current program facts into the fact store (FR-SG-61). |
 | --extract-evidence | boolean | No | False | Run ContentExtractionAgent on transcript signals to populate WorkstreamEvidence. Requires --workiq. Off by default until validated. |
+| --force-discovery | boolean | No | False | Sec 4.4: bypass the discovery-staleness check for UIL-backed channels (ado/kusto/teams/icm) and force discovery even if not yet due. Required after changing query bindings. |
+| --accept-shrinkage | boolean | No | False | Sec 4.4: accept a guarded registry shrinkage (>=30% removed, >=5 items) for UIL-backed channels this run instead of blocking the registry update; classified removals are printed. |
 
 ### `vertex prefetch`
 
@@ -727,6 +729,7 @@ Print up to 3 ranked CLI suggestions for the next step on the given edition.
 | --update TEXT | text | No |  | Existing edition name to update. |
 | --migrate-v3 | boolean | No | False | Scaffold V3 program-model files for an existing edition without running the interactive wizard. |
 | --migrate-deps | boolean | No | False | Compatibility alias for --migrate-v3 when migrating legacy dependencies into dependencies.yaml. |
+| --register-shared | boolean | No | False | Register onboarding people and workstream groups in the canonical shared registry. |
 | --ai | boolean | No | False | Use AI-assisted suggestions during onboarding when available. |
 
 ### `vertex setup`
@@ -1932,7 +1935,23 @@ Authentication setup commands.
 
 | Command | Description |
 |---|---|
+| `armada-scheduled-pat` | Configure the scheduler-only ADO PAT without exposing it in shell history. |
 | `setup` |  |
+
+#### `vertex admin auth armada-scheduled-pat`
+
+**Usage:** `vertex admin auth armada-scheduled-pat [OPTIONS]`
+
+Configure the scheduler-only ADO PAT without exposing it in shell history.
+
+This command intentionally has no value-taking option: PATs must never
+appear in a command line, task XML, or process argument list.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --status | boolean | No | False | Check whether the scheduled Armada PAT is configured. |
 
 #### `vertex admin auth setup`
 
@@ -2716,6 +2735,7 @@ NCFL context proposal extraction and review.
 |---|---|
 | `extract` |  |
 | `proposals` |  |
+| `manual-diff` | Print a stale-safe manual diff for a non-writable registry proposal. |
 | `dismiss` |  |
 | `apply` | Apply one accepted NCFL proposal to its Plane 1 target store. |
 | `apply-batch` | Apply all accepted NCFL proposals for an issue (batch mode). |
@@ -2745,6 +2765,20 @@ NCFL context proposal extraction and review.
 | --issue INTEGER RANGE | integer range | No |  | Optional issue number filter. |
 | --status TEXT | text | No |  | Optional status filter. |
 | --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex context manual-diff`
+
+**Usage:** `vertex context manual-diff [OPTIONS]`
+
+Print a stale-safe manual diff for a non-writable registry proposal.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --edition TEXT | text | Yes |  | Edition name, e.g. armada_weekly. |
+| --issue INTEGER RANGE | integer range | Yes |  | Issue number containing the proposal. |
+| --proposal-id TEXT | text | Yes |  | Manual-only workstream-registry proposal to render. |
 
 #### `vertex context dismiss`
 
@@ -3636,6 +3670,9 @@ Knowledge base diagnostics and history.
 | `changelog` |  |
 | `update` |  |
 | `profiles` | Protect or unwrap sensitive people profile files. |
+| `people` | specs/people.md Phase 0c: read-only, alias-based legacy cross-program queries. |
+| `teams` | specs/people.md PPL-W3.1: canonical team query surfaces. |
+| `registry` | specs/people.md Phase 1: workspace people-registry identity and lifecycle. |
 
 #### `vertex kb changelog`
 
@@ -3695,6 +3732,637 @@ Protect or unwrap sensitive people profile files.
 |---|---|---|---|---|
 | --program TEXT | text | Yes |  | Program id. |
 | --scope TEXT | text | No | active | Target active, shared, or program-scoped people_profiles.yaml. |
+
+#### `vertex kb people`
+
+**Usage:** `vertex kb people [OPTIONS] COMMAND [ARGS]...`
+
+specs/people.md Phase 0c: read-only, alias-based legacy cross-program queries.
+
+**Subcommands**
+
+| Command | Description |
+|---|---|
+| `programs` | specs/people.md Phase 0c: which programs/workstreams currently reference this alias, and in what relation. |
+| `overlaps` | specs/people.md Phase 0c: which aliases currently appear across 2+ programs' accountability fields. |
+| `pin` | Pin one explicitly named, currently populated person field. |
+| `unpin` | Remove a pin from one explicitly named person field. |
+| `attest` | Record human verification for explicitly named, currently populated person fields. |
+| `lifecycle-set` | specs/people.md PPL-W6.3a: transition a person's lifecycle status (§7.6: "Departure/inactivation is represented explicitly"). |
+| `merge` | Merge two reviewed people and redirect current mutable references through the canonical writer. |
+| `bind` | Bind an exact stable provider subject to a reviewed canonical person. |
+| `split` | Split explicitly partitioned aliases/provider IDs; ambiguous authored references remain conflicts. |
+| `unmerge` | Reverse a known merge only when its mutable generation remains unchanged. |
+| `refresh` | specs/people.md PPL-W4.4/PPL-W4.4b: refresh --person's display_name/title/department/contacts |
+| `show` | specs/people.md PPL-W3.1: show one canonical person's directory record, profile, and current memberships. |
+| `find` | specs/people.md PPL-W3.1/§8.2: bounded, scored candidate lookup -- never an automatic binding. |
+| `stale` | specs/people.md PPL-W3.1: people whose verified fields/contacts are older than the freshness window. |
+| `conflicts` | specs/people.md PPL-W3.1: quarantined identity/source conflicts from people_conflicts.jsonl (§8.3 DIR-12). |
+| `delegate` | specs/people.md PPL-W5b.2: steward-authorized delegation lifecycle (create/revoke/list). |
+
+#### `vertex kb people programs`
+
+**Usage:** `vertex kb people programs [OPTIONS]`
+
+specs/people.md Phase 0c: which programs/workstreams currently reference this alias, and in what relation.
+Alias-only -- no identity resolution, no PII reveal, no writes.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --person TEXT | text | Yes |  | Alias to look up (exact, casefold-normalized match; no fuzzy matching in this Phase 0c slice). |
+| --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex kb people overlaps`
+
+**Usage:** `vertex kb people overlaps [OPTIONS]`
+
+specs/people.md Phase 0c: which aliases currently appear across 2+ programs' accountability fields.
+Alias-only -- no identity resolution, no PII reveal, no writes. Normal intentional overlap is
+query information, not a defect (specs/people.md §8.2).
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | No |  | Scope to aliases that reference this program (still shows their other program appearances). |
+| --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex kb people pin`
+
+**Usage:** `vertex kb people pin [OPTIONS]`
+
+Pin one explicitly named, currently populated person field.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --person TEXT | text | Yes |  | Canonical person ID or uniquely resolving alias. |
+| --field TEXT | text | Yes |  | Current person field to pin. |
+| --reason TEXT | text | Yes |  | Why this field must not be overwritten by future observations. |
+| --review-at TEXT | text | No |  | Optional ISO-8601 review timestamp with UTC offset. |
+| --on-behalf-of TEXT | text | No |  | Optional descriptive operator context; never grants authority. |
+| --apply | boolean | No | False | Commit the pin. Without this flag, preview only. |
+
+#### `vertex kb people unpin`
+
+**Usage:** `vertex kb people unpin [OPTIONS]`
+
+Remove a pin from one explicitly named person field.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --person TEXT | text | Yes |  | Canonical person ID or uniquely resolving alias. |
+| --field TEXT | text | Yes |  | Currently pinned person field to release. |
+| --reason TEXT | text | Yes |  | Why the existing pin is being removed. |
+| --on-behalf-of TEXT | text | No |  | Optional descriptive operator context; never grants authority. |
+| --apply | boolean | No | False | Commit the unpin. Without this flag, preview only. |
+
+#### `vertex kb people attest`
+
+**Usage:** `vertex kb people attest [OPTIONS]`
+
+Record human verification for explicitly named, currently populated person fields.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --person TEXT | text | Yes |  | Canonical person ID or uniquely resolving alias. |
+| --field TEXT | text | Yes |  | One or more current person fields to human-attest. |
+| --reason TEXT | text | Yes |  | Evidence/rationale for the human verification. |
+| --on-behalf-of TEXT | text | No |  | Optional descriptive operator context; never grants authority. |
+| --apply | boolean | No | False | Commit the attestation. Without this flag, preview only. |
+
+#### `vertex kb people lifecycle-set`
+
+**Usage:** `vertex kb people lifecycle-set [OPTIONS]`
+
+specs/people.md PPL-W6.3a: transition a person's lifecycle status (§7.6: "Departure/inactivation is represented explicitly").
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --person TEXT | text | Yes |  | Canonical person ID or uniquely resolving alias. |
+| --status TEXT | text | Yes |  | New lifecycle status: active \| inactive \| departed \| unknown. |
+| --reason TEXT | text | Yes |  | Required steward review rationale. |
+| --apply | boolean | No | False | Commit the reviewed transition. Without this flag, preview only. |
+| --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex kb people merge`
+
+**Usage:** `vertex kb people merge [OPTIONS]`
+
+Merge two reviewed people and redirect current mutable references through the canonical writer.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --from TEXT | text | Yes |  | Source canonical person ID or uniquely resolving alias to tombstone. |
+| --into TEXT | text | Yes |  | Surviving canonical person ID or uniquely resolving alias. |
+| --reason TEXT | text | Yes |  | Required steward review rationale. |
+| --apply | boolean | No | False | Commit the reviewed merge. Without this flag, preview only. |
+| --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex kb people bind`
+
+**Usage:** `vertex kb people bind [OPTIONS]`
+
+Bind an exact stable provider subject to a reviewed canonical person.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --person TEXT | text | Yes |  | Canonical person ID or uniquely resolving alias. |
+| --provider TEXT | text | Yes |  | Identity provider name. |
+| --subject-id TEXT | text | Yes |  | Exact provider-issued stable subject ID. |
+| --reason TEXT | text | Yes |  | Required steward review rationale. |
+| --apply | boolean | No | False | Commit the reviewed binding. Without this flag, preview only. |
+| --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex kb people split`
+
+**Usage:** `vertex kb people split [OPTIONS]`
+
+Split explicitly partitioned aliases/provider IDs; ambiguous authored references remain conflicts.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --person TEXT | text | Yes |  | Canonical source person ID or uniquely resolving alias. |
+| --alias TEXT | text | Yes |  | Alias to partition into the newly created person; repeat as needed. |
+| --retain-alias TEXT | text | Yes |  | Alias explicitly retained by the source person; repeat as needed. |
+| --identifier TEXT | text | No |  | Provider identifier to partition as provider:subject-id; repeat as needed. |
+| --retain-identifier TEXT | text | No |  | Provider identifier retained by source as provider:subject-id; repeat as needed. |
+| --new-id TEXT | text | No |  | Optional new opaque person ID; defaults to a minted person:<ULID>. |
+| --reason TEXT | text | Yes |  | Required steward review rationale. |
+| --apply | boolean | No | False | Commit the reviewed split. Without this flag, preview only. |
+| --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex kb people unmerge`
+
+**Usage:** `vertex kb people unmerge [OPTIONS]`
+
+Reverse a known merge only when its mutable generation remains unchanged.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --from TEXT | text | Yes |  | Original tombstoned source canonical person ID. |
+| --reason TEXT | text | Yes |  | Required steward review rationale. |
+| --apply | boolean | No | False | Commit a safe merge reversal. Without this flag, preview only. |
+| --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex kb people refresh`
+
+**Usage:** `vertex kb people refresh [OPTIONS]`
+
+specs/people.md PPL-W4.4/PPL-W4.4b: refresh --person's display_name/title/department/contacts
+and/or --team's membership roster from a configured identity provider, routed through the
+canonical staged writer. A membership snapshot only applies when it is COMPLETE (§6.7).
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --provider TEXT | text | Yes |  | Identity provider name from identity_providers.yaml. |
+| --person TEXT | text | No |  | Canonical person ID or uniquely resolving alias to refresh; repeat as needed. |
+| --team TEXT | text | No |  | Canonical team ID or uniquely resolving alias to refresh membership for; repeat as needed. |
+| --import-file PATH | path | No |  | Operator-exported CSV/JSON directory snapshot (required for a local_directory_export provider). |
+| --reason TEXT | text | Yes |  | Required review rationale for the refresh. |
+| --apply | boolean | No | False | Commit accepted observations, quarantine below-threshold ones, and apply membership diffs. Without this flag, preview only. |
+| --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex kb people show`
+
+**Usage:** `vertex kb people show [OPTIONS]`
+
+specs/people.md PPL-W3.1: show one canonical person's directory record, profile, and current memberships.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --person TEXT | text | Yes |  | Canonical person ID or an alias/ref that resolves to one (P:<alias>, person:<alias>, bare alias, or person:<ULID>). |
+| --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex kb people find`
+
+**Usage:** `vertex kb people find [OPTIONS] TEXT`
+
+specs/people.md PPL-W3.1/§8.2: bounded, scored candidate lookup -- never an automatic binding.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --limit INTEGER | integer | No | 20 | Maximum number of candidates to return. |
+| --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex kb people stale`
+
+**Usage:** `vertex kb people stale [OPTIONS]`
+
+specs/people.md PPL-W3.1: people whose verified fields/contacts are older than the freshness window.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --freshness-days INTEGER | integer | No | 90 | v1 placeholder freshness window pending a real people_registry freshness_policy.yaml section (DIR-03). |
+| --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex kb people conflicts`
+
+**Usage:** `vertex kb people conflicts [OPTIONS]`
+
+specs/people.md PPL-W3.1: quarantined identity/source conflicts from people_conflicts.jsonl (§8.3 DIR-12).
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --status TEXT | text | No |  | Filter to 'open' or 'resolved'. Omit for both. |
+| --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex kb people delegate`
+
+**Usage:** `vertex kb people delegate [OPTIONS] COMMAND [ARGS]...`
+
+specs/people.md PPL-W5b.2: steward-authorized delegation lifecycle (create/revoke/list).
+
+**Subcommands**
+
+| Command | Description |
+|---|---|
+| `create` | specs/people.md PPL-W5b.2: create a steward-authorized delegation, gated by the delegation_enabled kill switch. |
+| `revoke` | specs/people.md PPL-W5b.2: revoke an existing delegation. |
+| `list` | specs/people.md PPL-W5b.2: read back delegations.yaml. Read-only; not gated by the delegation_enabled kill switch. |
+
+#### `vertex kb people delegate create`
+
+**Usage:** `vertex kb people delegate create [OPTIONS]`
+
+specs/people.md PPL-W5b.2: create a steward-authorized delegation, gated by the delegation_enabled kill switch.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --from TEXT | text | Yes |  | Delegating canonical person ID or uniquely resolving alias. |
+| --to TEXT | text | Yes |  | Delegate canonical person ID or uniquely resolving alias. |
+| --surface TEXT | text | Yes |  | Surface the delegation applies to (e.g. vertex::nudge); repeat as needed. |
+| --valid-from TEXT | text | Yes |  | ISO-8601 timestamp (with UTC offset) the delegation becomes active. |
+| --valid-until TEXT | text | Yes |  | ISO-8601 timestamp (with UTC offset) the delegation expires. |
+| --reason TEXT | text | Yes |  | Required steward review rationale. |
+| --program TEXT | text | No |  | Program ID this delegation is scoped to; repeat as needed. Empty means all programs. |
+| --workstream TEXT | text | No |  | Workstream ID this delegation is scoped to; repeat as needed. |
+| --apply | boolean | No | False | Commit the reviewed delegation. Without this flag, preview only. |
+| --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex kb people delegate revoke`
+
+**Usage:** `vertex kb people delegate revoke [OPTIONS]`
+
+specs/people.md PPL-W5b.2: revoke an existing delegation.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --delegation-id TEXT | text | Yes |  | Delegation ID to revoke. |
+| --reason TEXT | text | Yes |  | Required steward review rationale. |
+| --apply | boolean | No | False | Commit the reviewed revocation. Without this flag, preview only. |
+| --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex kb people delegate list`
+
+**Usage:** `vertex kb people delegate list [OPTIONS]`
+
+specs/people.md PPL-W5b.2: read back delegations.yaml. Read-only; not gated by the delegation_enabled kill switch.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --active-only | boolean | No | False | Only show currently active, in-window delegations. |
+| --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex kb teams`
+
+**Usage:** `vertex kb teams [OPTIONS] COMMAND [ARGS]...`
+
+specs/people.md PPL-W3.1: canonical team query surfaces.
+
+**Subcommands**
+
+| Command | Description |
+|---|---|
+| `show` | specs/people.md PPL-W3.1: show one canonical team's directory record. |
+| `members` | specs/people.md PPL-W3.1: current (or --as-of historical) membership roster for one canonical team. |
+
+#### `vertex kb teams show`
+
+**Usage:** `vertex kb teams show [OPTIONS]`
+
+specs/people.md PPL-W3.1: show one canonical team's directory record.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --team TEXT | text | Yes |  | Canonical team ID or an alias/ref that resolves to one. |
+| --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex kb teams members`
+
+**Usage:** `vertex kb teams members [OPTIONS]`
+
+specs/people.md PPL-W3.1: current (or --as-of historical) membership roster for one canonical team.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --team TEXT | text | Yes |  | Canonical team ID or an alias/ref that resolves to one. |
+| --as-of TEXT | text | No |  | ISO timestamp to resolve membership validity as of. Omit for the current hot set. |
+| --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex kb registry`
+
+**Usage:** `vertex kb registry [OPTIONS] COMMAND [ARGS]...`
+
+specs/people.md Phase 1: workspace people-registry identity and lifecycle.
+
+**Subcommands**
+
+| Command | Description |
+|---|---|
+| `bootstrap` | Create the shared registry root; unlike top-level `vertex bootstrap`, this |
+| `migrate-shared` | Merge program-local factual records into the shared people registry; unlike top-level `vertex migrate`, this is conflict-aware. |
+| `adopt` | Adopt direct managed-registry YAML edits through the canonical staged writer. |
+| `status` | specs/people.md PPL-W1.1: report the current workspace registry identity and generation, if any. |
+| `storage-status` | specs/people.md PPL-W1.3: report the shared knowledge/ root's storage-class qualification |
+| `lease` | specs/people.md PPL-W1.2: workspace-global registry lease inspection/recovery. |
+| `mode` | specs/people.md PPL-W1.9/PPL-W2B.6: per-program modes, promotion, and kill switches. |
+
+#### `vertex kb registry bootstrap`
+
+**Usage:** `vertex kb registry bootstrap [OPTIONS]`
+
+Create the shared registry root; unlike top-level `vertex bootstrap`, this
+initializes people-registry identity and may migrate one selected program's factual records.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --customer-boundary-id TEXT | text | No |  | Customer-controlled identifier (e.g. tenant/org short name). Required with --apply on first bootstrap. |
+| --from-program TEXT | text | No |  | Selected program whose local entities/people/teams are previewed into the first shared factual root. |
+| --apply | boolean | No | False | Actually mint and persist the workspace identity. Without this flag, preview only. |
+| --format TEXT | text | No | human | Output format for --from-program migration preview: human or json. |
+
+#### `vertex kb registry migrate-shared`
+
+**Usage:** `vertex kb registry migrate-shared [OPTIONS] PROGRAM_ID`
+
+Merge program-local factual records into the shared people registry; unlike top-level `vertex migrate`, this is conflict-aware.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --apply | boolean | No | False | Commit the fenced shared-registry transaction. Without this flag, preview only. |
+| --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex kb registry adopt`
+
+**Usage:** `vertex kb registry adopt [OPTIONS]`
+
+Adopt direct managed-registry YAML edits through the canonical staged writer.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --reason TEXT | text | Yes |  | Why the manually edited managed registry content is being adopted. |
+| --on-behalf-of TEXT | text | No |  | Optional descriptive operator context; never grants authority. |
+| --apply | boolean | No | False | Validate, journal, checkpoint, and commit the adoption. Without this flag, preview only. |
+| --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex kb registry status`
+
+**Usage:** `vertex kb registry status [OPTIONS]`
+
+specs/people.md PPL-W1.1: report the current workspace registry identity and generation, if any.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex kb registry storage-status`
+
+**Usage:** `vertex kb registry storage-status [OPTIONS]`
+
+specs/people.md PPL-W1.3: report the shared knowledge/ root's storage-class qualification
+(local/network/unsupported-sync) and whether it is eligible for write_mode: primary. Always
+recomputes live and re-persists registry_capability_status.yaml -- the same check doctor --kb runs.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex kb registry lease`
+
+**Usage:** `vertex kb registry lease [OPTIONS] COMMAND [ARGS]...`
+
+specs/people.md PPL-W1.2: workspace-global registry lease inspection/recovery.
+
+**Subcommands**
+
+| Command | Description |
+|---|---|
+| `show` | specs/people.md PPL-W1.2: report the current workspace-global registry lease state, if held. |
+| `release` | specs/people.md PPL-W1.2 (§6.7): force-release a stale registry lease. |
+
+#### `vertex kb registry lease show`
+
+**Usage:** `vertex kb registry lease show [OPTIONS]`
+
+specs/people.md PPL-W1.2: report the current workspace-global registry lease state, if held.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex kb registry lease release`
+
+**Usage:** `vertex kb registry lease release [OPTIONS]`
+
+specs/people.md PPL-W1.2 (§6.7): force-release a stale registry lease.
+Requires an authorized directory-steward principal (registry.yaml's directory_steward_principals);
+increments fencing state (never resets it) and appends an audit record.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --force | boolean | No | False | Required: force-release a stale registry lease. |
+| --reason TEXT | text | No |  | Required with --force: why this lease is being force-released. |
+
+#### `vertex kb registry mode`
+
+**Usage:** `vertex kb registry mode [OPTIONS] COMMAND [ARGS]...`
+
+specs/people.md PPL-W1.9/PPL-W2B.6: per-program modes, promotion, and kill switches.
+
+**Subcommands**
+
+| Command | Description |
+|---|---|
+| `status` | specs/people.md PPL-W1.9: report the effective registry write_mode/flags, |
+| `set-write-mode` | specs/people.md PPL-W1.9: flip the workspace write_mode. Promoting to 'primary' |
+| `set-program-mode` | specs/people.md PPL-W1.9: flip one program's mode independently of every other program's. |
+| `promotion-status` | Show persisted five-clean-cycle promotion evidence and live blockers. |
+| `promote` | Promote one shadow program only after its persisted five-cycle gate is ready. |
+| `rollback` | Roll one primary program back without rewriting shared customer facts. |
+| `record-rollback-drill` | Run a non-live registry restore drill and record its verified generation. |
+| `set-flag` | specs/people.md PPL-W1.9: flip one workspace-wide registry flag. |
+| `shadow-parity` | specs/people.md PPL-W2A.7 (§6.6): compile the canonical v2 view in parallel |
+
+#### `vertex kb registry mode status`
+
+**Usage:** `vertex kb registry mode status [OPTIONS]`
+
+specs/people.md PPL-W1.9: report the effective registry write_mode/flags,
+with environment kill-switch overrides applied and clearly distinguished from the persisted value.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | No |  | Also report this program's mode and shadow status. |
+| --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex kb registry mode set-write-mode`
+
+**Usage:** `vertex kb registry mode set-write-mode [OPTIONS] WRITE_MODE`
+
+specs/people.md PPL-W1.9: flip the workspace write_mode. Promoting to 'primary'
+is gated by PPL-W1.3's storage-class qualification check.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --apply | boolean | No | False | Actually persist the change. Without this flag, preview only. |
+
+#### `vertex kb registry mode set-program-mode`
+
+**Usage:** `vertex kb registry mode set-program-mode [OPTIONS] PROGRAM_ID MODE`
+
+specs/people.md PPL-W1.9: flip one program's mode independently of every other program's.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --apply | boolean | No | False | Actually persist the change. Without this flag, preview only. |
+
+#### `vertex kb registry mode promotion-status`
+
+**Usage:** `vertex kb registry mode promotion-status [OPTIONS] PROGRAM_ID`
+
+Show persisted five-clean-cycle promotion evidence and live blockers.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex kb registry mode promote`
+
+**Usage:** `vertex kb registry mode promote [OPTIONS] PROGRAM_ID`
+
+Promote one shadow program only after its persisted five-cycle gate is ready.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --apply | boolean | No | False | Persist the guarded shadow-to-primary transition. |
+
+#### `vertex kb registry mode rollback`
+
+**Usage:** `vertex kb registry mode rollback [OPTIONS] PROGRAM_ID`
+
+Roll one primary program back without rewriting shared customer facts.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --target TEXT | text | No | shadow | Rollback target: shadow or legacy. |
+| --apply | boolean | No | False | Persist the metadata-only rollback. |
+
+#### `vertex kb registry mode record-rollback-drill`
+
+**Usage:** `vertex kb registry mode record-rollback-drill [OPTIONS] PROGRAM_ID`
+
+Run a non-live registry restore drill and record its verified generation.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --snapshot PATH | path | Yes |  | Verified registry backup snapshot directory. |
+| --restore-to PATH | path | Yes |  | Empty directory used only for the restore drill. |
+| --apply | boolean | No | False | Run the restore drill and persist verified evidence. |
+
+#### `vertex kb registry mode set-flag`
+
+**Usage:** `vertex kb registry mode set-flag [OPTIONS] FLAG_NAME VALUE`
+
+specs/people.md PPL-W1.9: flip one workspace-wide registry flag.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --apply | boolean | No | False | Actually persist the change. Without this flag, preview only. |
+
+#### `vertex kb registry mode shadow-parity`
+
+**Usage:** `vertex kb registry mode shadow-parity [OPTIONS] PROGRAM_ID`
+
+specs/people.md PPL-W2A.7 (§6.6): compile the canonical v2 view in parallel
+with the legacy loader and report parity/divergence for one program.
+Without --record, always computes fresh regardless of the program's mode
+(a diagnostic preview); with --record, only computes/persists when the
+program's effective mode is shadow or primary, matching the real gate.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --record | boolean | No | False | Persist the result to knowledge/.state (only computed when the program's effective mode is shadow or primary). |
+| --format TEXT | text | No | human | Output format: human or json. |
 
 ### `vertex knowledge`
 
@@ -5339,6 +6007,7 @@ Privacy & data governance matrix (WS-15).
 | `show` | Print the privacy & data governance matrix. |
 | `check` | Return the posture for a single channel (machine-friendly). |
 | `purge` | WS-18/ADF-W5.9: run the unified retention purge (`src/core/privacy_purge.py`) |
+| `people` | Privacy-authorized DSAR export and erasure for shared registry people. |
 
 #### `vertex privacy show`
 
@@ -5386,6 +6055,50 @@ recorded as no-op (governed by their own rotation/migration paths).
 |---|---|---|---|---|
 | --program TEXT | text | Yes |  | Program id, e.g. xpf. |
 | --apply | boolean | No | False | Actually mutate sidecars. Default is dry-run (report only). |
+| --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex privacy people`
+
+**Usage:** `vertex privacy people [OPTIONS] COMMAND [ARGS]...`
+
+Privacy-authorized DSAR export and erasure for shared registry people.
+
+**Subcommands**
+
+| Command | Description |
+|---|---|
+| `export` | Export only the requested person's permitted DSAR data and audit the sensitive read. |
+| `forget` | Preview or apply canonical tombstone, redaction, and cryptographic-shred privacy erasure. |
+
+#### `vertex privacy people export`
+
+**Usage:** `vertex privacy people export [OPTIONS]`
+
+Export only the requested person's permitted DSAR data and audit the sensitive read.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --person TEXT | text | Yes |  | Canonical person ID or uniquely resolving alias. |
+| --reason TEXT | text | Yes |  | Required DSAR export rationale. |
+| --on-behalf-of TEXT | text | No |  | Optional descriptive context; never grants authority. |
+| --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex privacy people forget`
+
+**Usage:** `vertex privacy people forget [OPTIONS]`
+
+Preview or apply canonical tombstone, redaction, and cryptographic-shred privacy erasure.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --person TEXT | text | Yes |  | Canonical person ID or uniquely resolving alias. |
+| --reason TEXT | text | Yes |  | Required privacy-erasure rationale. |
+| --on-behalf-of TEXT | text | No |  | Optional descriptive context; never grants authority. |
+| --apply | boolean | No | False | Commit the privacy erasure. Without this flag, preview only. |
 | --format TEXT | text | No | human | Output format: human or json. |
 
 ### `vertex observability`

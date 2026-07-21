@@ -5,10 +5,40 @@ import subprocess
 
 import typer
 
+from src.core.ado_scheduled_credential import get_scheduled_ado_pat, set_scheduled_ado_pat
+
 
 app = typer.Typer(help="Authentication setup commands.")
 
 _DEVICE_LOGIN_URL = "https://aka.ms/devicelogin"
+
+
+@app.command("armada-scheduled-pat")
+def armada_scheduled_pat_command(
+    status: bool = typer.Option(False, "--status", help="Check whether the scheduled Armada PAT is configured."),
+) -> None:
+    """Configure the scheduler-only ADO PAT without exposing it in shell history.
+
+    This command intentionally has no value-taking option: PATs must never
+    appear in a command line, task XML, or process argument list.
+    """
+    if status:
+        try:
+            get_scheduled_ado_pat()
+        except RuntimeError as exc:
+            typer.echo(f"Armada scheduled ADO PAT: not configured ({exc})", err=True)
+            raise typer.Exit(code=2) from exc
+        typer.echo("Armada scheduled ADO PAT: configured (Credential Manager).")
+        raise typer.Exit(code=0)
+
+    secret = typer.prompt("Read-only ADO PAT for scheduled Armada gather", hide_input=True, confirmation_prompt=True)
+    try:
+        set_scheduled_ado_pat(secret)
+    except (RuntimeError, ValueError) as exc:
+        typer.echo(f"Could not store scheduled ADO PAT: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    typer.echo("Armada scheduled ADO PAT stored in Credential Manager.")
+    raise typer.Exit(code=0)
 
 
 @app.command("setup")

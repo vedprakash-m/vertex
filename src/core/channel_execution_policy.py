@@ -138,29 +138,81 @@ def run_under_channel_budget(
     fn: Callable[[], T],
     *,
     policy: ChannelExecutionPolicy,
+    remaining_budget_seconds: float | None = None,
+    record_count_fn: Callable[[T], int] | None = None,
+    page_count_fn: Callable[[T], int] | None = None,
 ) -> BudgetedCallOutcome:
-    """Run ``fn()`` bounded by ``policy.per_attempt_timeout_seconds``.
+    """Run ``fn()`` bounded by ``policy.per_attempt_timeout_seconds`` *and*,
+    when this call shares a ``total_budget_seconds`` ceiling with sibling
+    calls (discovery + hydration for the same channel this cycle), by
+    whatever of that total ``remaining_budget_seconds`` is left.
 
     Runs ``fn`` on a single-worker thread so a hung synchronous provider
     call cannot block the caller past the configured timeout. See the
     module docstring for the documented thread-abandonment trade-off.
+
+    If ``remaining_budget_seconds`` is given and already exhausted (<= 0),
+    ``fn`` is never invoked -- the call degrades immediately with
+    ``DEGRADE_REASON_BUDGET_EXCEEDED`` and zero elapsed time, so a slow
+    sibling call (e.g. discovery) proportionally starves this one (e.g.
+    hydration) rather than each independently getting a full
+    ``per_attempt_timeout_seconds`` regardless of the other's cost.
+
+    ``record_count_fn``/``page_count_fn``, when given alongside a
+    configured ``policy.max_records``/``policy.max_pages``, are applied to
+    a *successful* result after the call returns. An over-budget result is
+    discarded and reported as ``DEGRADE_REASON_BUDGET_EXCEEDED`` --
+    Section D-3's "authoritative scope is never silently truncated by
+    max_records" bars quietly cutting the result down to size; the only
+    compliant response is the same explicit, alerted degrade already used
+    for a timeout (fall back to the last-known-good state).
     """
+    if remaining_budget_seconds is not None and remaining_budget_seconds <= 0:
+        _log.warning(
+            "channel %s has no total budget remaining for this call; degrading without attempting it",
+            policy.channel,
+        )
+        return BudgetedCallOutcome(
+            value=None,
+            degraded=True,
+            degrade_reason=DEGRADE_REASON_BUDGET_EXCEEDED,
+            elapsed_seconds=0.0,
+        )
+    attempt_timeout = policy.per_attempt_timeout_seconds
+    if remaining_budget_seconds is not None:
+        attempt_timeout = min(attempt_timeout, remaining_budget_seconds)
     started = time.monotonic()
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"channel-{policy.channel}")
     future = executor.submit(fn)
     try:
-        value = future.result(timeout=policy.per_attempt_timeout_seconds)
+        value = future.result(timeout=attempt_timeout)
         executor.shutdown(wait=False)
-        return BudgetedCallOutcome(value=value, degraded=False, degrade_reason=None, elapsed_seconds=time.monotonic() - started)
+        elapsed_seconds = time.monotonic() - started
+        over_budget_reason = _exceeds_record_or_page_budget(
+            value, policy=policy, record_count_fn=record_count_fn, page_count_fn=page_count_fn,
+        )
+        if over_budget_reason is not None:
+            _log.warning(
+                "channel %s result exceeded its configured budget (%s); degrading rather than using a partial result",
+                policy.channel,
+                over_budget_reason,
+            )
+            return BudgetedCallOutcome(
+                value=None,
+                degraded=True,
+                degrade_reason=DEGRADE_REASON_BUDGET_EXCEEDED,
+                elapsed_seconds=elapsed_seconds,
+            )
+        return BudgetedCallOutcome(value=value, degraded=False, degrade_reason=None, elapsed_seconds=elapsed_seconds)
     except concurrent.futures.TimeoutError:
         # Do not wait for the worker: that would defeat the timeout. The
         # thread is abandoned (see module docstring); shutdown(wait=False)
         # only stops new submissions to this (single-use) executor.
         executor.shutdown(wait=False)
         _log.warning(
-            "channel %s exceeded its %ss per-attempt budget; degrading rather than blocking",
+            "channel %s exceeded its %ss attempt budget; degrading rather than blocking",
             policy.channel,
-            policy.per_attempt_timeout_seconds,
+            attempt_timeout,
         )
         return BudgetedCallOutcome(
             value=None,
@@ -171,6 +223,28 @@ def run_under_channel_budget(
     except Exception:
         executor.shutdown(wait=False)
         raise
+
+
+def _exceeds_record_or_page_budget(
+    value: T,
+    *,
+    policy: ChannelExecutionPolicy,
+    record_count_fn: Callable[[T], int] | None,
+    page_count_fn: Callable[[T], int] | None,
+) -> str | None:
+    """Returns a human-readable reason string if *value* exceeds
+    ``policy.max_records``/``policy.max_pages``, else ``None``. A ``None``
+    policy limit means "no cap configured" -- never flagged."""
+    if record_count_fn is not None and policy.max_records is not None:
+        record_count = record_count_fn(value)
+        if record_count > policy.max_records:
+            return f"{record_count} records > max_records={policy.max_records}"
+    if page_count_fn is not None and policy.max_pages is not None:
+        page_count = page_count_fn(value)
+        if page_count > policy.max_pages:
+            return f"{page_count} pages > max_pages={policy.max_pages}"
+    return None
+
 
 
 __all__ = [

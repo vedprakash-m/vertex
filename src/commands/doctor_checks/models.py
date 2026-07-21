@@ -11,6 +11,11 @@ class DoctorCheck:
     status: str
     detail: str
     metadata: dict[str, Any] | None = None
+    #: specs/people.md §8.3: the DIR-*/STK-* code this check implements, if
+    #: any. Optional and additive -- most non-registry doctor checks have
+    #: no code and leave this None; existing checks that embed a code as a
+    #: detail-string prefix (e.g. "DIR-14B: ...") are unaffected.
+    code: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

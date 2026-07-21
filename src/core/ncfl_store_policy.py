@@ -76,8 +76,26 @@ NCFL_TARGET_STORE_POLICIES: tuple[NcflTargetStorePolicy, ...] = (
         "Zone B synthesis target (Phase 5); apply writes knowledge/<doc>.md with a dated .bak — no Plane 1 YAML record store",
     ),
     NcflTargetStorePolicy("milestones", "milestones.yaml", True, "canonical writer exists and target is in NCFL scope"),
+    NcflTargetStorePolicy(
+        "people_directory",
+        None,
+        True,
+        "shared factual registry target; writes only through the fenced typed registry writer",
+    ),
     NcflTargetStorePolicy("risk_register", "risk_register.yaml", True, "canonical writer exists and target is in NCFL scope"),
+    NcflTargetStorePolicy(
+        "teams",
+        None,
+        True,
+        "shared factual registry target; writes only through the fenced typed registry writer",
+    ),
     NcflTargetStorePolicy("workstreams", "workstreams.yaml", True, "canonical writer exists and target is in NCFL scope"),
+    NcflTargetStorePolicy(
+        "workstream_registry",
+        "workstream_registry.yaml",
+        False,
+        "manual-diff-only: no canonical writer is authorized; use `vertex context manual-diff`",
+    ),
 )
 
 

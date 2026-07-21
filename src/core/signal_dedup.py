@@ -114,6 +114,19 @@ def signal_fingerprint(signal: Signal) -> str:
     return _join_fingerprint(source, signal.raw_ref, entity_refs, _stable_json(metadata), signal.text)
 
 
+def build_deterministic_signal_id(signal: Signal) -> str:
+    """Return a stable content identity for a gathered signal.
+
+    The identity is derived from the same normalized semantic fingerprint used
+    by exact deduplication, plus the program ID.  It is deliberately
+    independent of a source extractor's transient ID and of the gather run so
+    replaying the same observation produces the same signal ID while separate
+    programs remain isolated.
+    """
+    payload = f"{signal.program_id.strip().lower()}\x1f{signal_fingerprint(signal)}"
+    return f"sig_{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
+
+
 def is_duplicate_signal(signal: Signal, existing_signals: Iterable[Signal]) -> bool:
     fingerprint = signal_fingerprint(signal)
     return any(signal_fingerprint(existing) == fingerprint for existing in existing_signals)
@@ -146,7 +159,6 @@ def _dedupe_core(
 ) -> DedupResult:
     existing = tuple(existing_signals)
     seen: dict[str, str] = {}  # fingerprint → fingerprint (self-mapping for seen signals)
-    fingerprint_to_fp: dict[str, str] = {}  # maps fingerprint → representative fingerprint
     drop_log: list[DedupDropEvent] = []
     accepted: list[Signal] = []
 

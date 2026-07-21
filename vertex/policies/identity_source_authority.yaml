@@ -1,0 +1,23 @@
+policy_schema_version: "1"
+
+# §6.6/§6.8's binding identity-provider policy home (sibling to, never
+# overloading, the existing fact-family source_authority.yaml -- identity
+# observations are a distinct authority domain from program facts).
+# A customer override lives at knowledge/policies/identity_source_authority.yaml
+# under the identity_source_authority_override key (see
+# knowledge/people_registry_policy.example.yaml), following this platform's
+# established "safe default -> allowlisted customer override" pattern.
+
+# Preference order when more than one enabled provider observes the same
+# field; earlier entries win. "operator_assertion" (a directory-steward
+# correction, PPL-W2B.3) always outranks any provider, so it is implicit
+# and never listed here.
+provider_priority: []
+
+# §6.7's "only exact structured provider observations at the policy's
+# auto-accept threshold may apply without attestation, lower-confidence
+# observations become conflicts/candidates." Confidence is always [0,1]
+# (§6.8's FieldObservation.confidence); 0.95 is a deliberately high safe
+# default so ambiguous or low-quality observations default to human review
+# rather than silent auto-apply.
+auto_accept_confidence_threshold: 0.95

@@ -414,6 +414,7 @@ def doctor_command(
         nudge=nudge,
         circuit_breakers=circuit_breakers,
         context=context,
+        schedule_health=schedule_health,
     ) if report.failures == 0 else None
 
     if format == "human":
@@ -569,6 +570,14 @@ def run_doctor(
             programs_root=resolved_programs_root,
             editions_root=resolved_editions_root,
             fix_hints=fix_hints,
+        )
+    # Source-waiver governance is fleet-scoped: it audits every program's
+    # policy file and does not consume an edition.  Resolve it before the
+    # edition-scoped doctor branches so a multi-edition workspace does not
+    # force callers to supply an irrelevant `--edition` value.
+    if source_waivers:
+        return _run_source_waiver_doctor(
+            programs_root=resolved_programs_root,
         )
     resolved_edition = _resolve_edition_name(edition_name, resolved_reports_root)
     if ids:
@@ -860,10 +869,6 @@ def run_doctor(
             editions_root=resolved_editions_root,
             programs_root=resolved_programs_root,
         )
-    if source_waivers:
-        return _run_source_waiver_doctor(
-            programs_root=resolved_programs_root,
-        )
     if sharepoint:
         return _run_sharepoint_doctor(
             edition_name=resolved_edition,
@@ -884,6 +889,10 @@ def run_doctor(
             program_id=_resolved.paths.program_id,
             programs_root=resolved_programs_root,
             now=now,
+            prefetch_enabled=bool(
+                _resolved.program.m365 is not None
+                and _resolved.program.m365.enabled
+            ),
         )
 
     resolved_templates_root = templates_root or TEMPLATES_ROOT
@@ -1625,6 +1634,7 @@ def _operator_gate_transcript_health_check(
 def _operator_gate_kusto_validation_check(
     *,
     edition_name: str,
+    kusto_enabled: bool = True,
     kusto_access_check: DoctorCheck | None,
     kusto_validation_check: DoctorCheck | None,
     metric_bindings_check: DoctorCheck | None,
@@ -1632,6 +1642,7 @@ def _operator_gate_kusto_validation_check(
 ) -> DoctorCheck:
     return _operator_gate_kusto_validation_check_impl(
         edition_name=edition_name,
+        kusto_enabled=kusto_enabled,
         kusto_access_check=kusto_access_check,
         kusto_validation_check=kusto_validation_check,
         metric_bindings_check=metric_bindings_check,

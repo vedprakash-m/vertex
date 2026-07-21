@@ -35,6 +35,22 @@ def test_operator_gate_kusto_validation_prioritizes_metric_binding_gaps() -> Non
     assert check.metadata["action_category"] == "pm-decision-required"
 
 
+def test_operator_gate_kusto_validation_accepts_an_explicitly_disabled_channel() -> None:
+    check = operator_gate_kusto_validation_check(
+        edition_name="demo",
+        kusto_enabled=False,
+        kusto_access_check=DoctorCheck("Kusto Access", "warn", "Kusto is disabled."),
+        kusto_validation_check=None,
+        metric_bindings_check=DoctorCheck("Metric Bindings", "ok", "No active bindings."),
+        metric_rollout_check=DoctorCheck("Metric Rollout", "ok", "No rollouts."),
+    )
+
+    assert check.status == "ok"
+    assert check.metadata is not None
+    assert check.metadata["deferred"] is True
+    assert check.metadata["commands"] == []
+
+
 def test_operator_gate_checkpoint_creation_flags_missing_inventory() -> None:
     check = operator_gate_checkpoint_creation_check(
         edition_name="demo",

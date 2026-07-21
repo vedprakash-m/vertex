@@ -110,6 +110,17 @@ class StageContext:
     # of the same logical run); generated alongside correlation_id at
     # report_command entry and threaded the same way.
     run_id: str = ""
+    # D-17: identity of the committed gather run whose data underlies this
+    # report invocation. Resolved once, immediately after ResolutionStage
+    # (see _execute_report_pipeline in src/commands/report.py), from
+    # resolve_latest_committed_manifest(); every downstream stage that builds
+    # a RunManifest or DraftState reads these two fields rather than
+    # re-resolving, so one report run always stamps one identical
+    # gather_run_id/gather_run_hash pair everywhere. Distinct from the
+    # unrelated pre-existing run_id/correlation_id fields above, which are
+    # ADF-W2.12 observability trace-correlation ids, not gather-run lineage.
+    gather_run_id: str | None = None
+    gather_run_hash: str | None = None
 
 
 class PipelineStage(Protocol):

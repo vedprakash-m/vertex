@@ -218,6 +218,28 @@ class ScopeState:
 
 
 @dataclass(frozen=True, slots=True)
+class DiscoveryQueryResult:
+    """Immutable membership capture for one discovered ``(query, scope)``.
+
+    This deliberately lives with the provider contract rather than a command
+    implementation: consumers can persist it into a gather-run manifest
+    without re-executing a mutable saved query or inferring scope from a
+    flattened registry.
+    """
+
+    query_id: str
+    scope_id: str
+    wiql_hash: str
+    captured_at: datetime
+    raw_count: int
+    membership_ids: tuple[str, ...]
+    membership_hash: str
+    cap_reached: bool
+    completeness_state: str
+    failure_category: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class DiscoveryResult:
     channel: str
     program_id: str
@@ -228,6 +250,7 @@ class DiscoveryResult:
     errors: tuple[IntegrationError, ...]
     computed_at: datetime
     provider_instance_id: str = "default"
+    query_results: tuple[DiscoveryQueryResult, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

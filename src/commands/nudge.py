@@ -28,6 +28,7 @@ from src.ai._pipeline import process_generated_text
 from src.commands import gather as gather_helpers
 from src.core.ado_client import ADOClient
 from src.core.ado_semantics import latest_meaningful_ado_update
+from src.core.audience_scope_recipients import merge_audience_scope_recipients, resolve_audience_scope_recipients
 from src.core.business_days import business_days_since
 from src.core.context_gap_store import append_context_gap
 from src.core.edition_resolver import PROGRAMS_ROOT, get_legacy_nudge_output, get_nudge_paths, get_program_output_dir
@@ -760,6 +761,12 @@ def _orchestrate(
             config=config,
             optional_failures=optional_failures,
         )
+
+    audience_scope_recipients = resolve_audience_scope_recipients(
+        program_id=program_id, delivery=config.delivery, audience_policy=config.presentation.audience_policy,
+        programs_root=programs_root, is_valid_email=_is_valid_email,
+    )
+    to_recipients = merge_audience_scope_recipients(to_recipients, audience_scope_recipients)
 
     degraded_ids = tuple(
         sec.section_id for sec in sections

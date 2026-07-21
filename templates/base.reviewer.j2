@@ -1307,6 +1307,21 @@
             </ul>
           </div>
           {% endif %}
+          {% if context_revision_rows %}
+          <div class="section-card">
+            <h3>Context Revisions</h3>
+            <p>Pending proposals are review-only until an operator makes an explicit decision. Registry proposals remain manual-diff-only.</p>
+            <ul class="review-list">
+              {% for row in context_revision_rows %}
+              <li{% if row.anchor_id %} id="{{ row.anchor_id }}"{% endif %}>
+                <strong>{{ row.title }}</strong>
+                {% if row.detail %}<span>{{ row.detail }}</span>{% endif %}
+                <p>{{ row.summary }}</p>
+              </li>
+              {% endfor %}
+            </ul>
+          </div>
+          {% endif %}
           {% for section in sections %}
           <details class="review-section"{% if section.state.value not in ['approved', 'skipped_no_delta'] %} open{% endif %}>
             <summary>

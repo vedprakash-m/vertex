@@ -112,6 +112,23 @@ def test_run_purge_skips_indefinite_retention(tmp_path: Path) -> None:
     assert report.skipped == ("journal/signals.jsonl=indefinite",)
 
 
+def test_gather_run_purge_preserves_latest_pointer_and_removes_expired_run(tmp_path: Path) -> None:
+    root = tmp_path / "acme" / "runtime" / "gather_runs"
+    old = root / "committed" / "old"
+    current = root / "committed" / "current"
+    for directory, timestamp in ((old, "2020-01-01T00:00:00+00:00"), (current, "2020-01-01T00:00:00+00:00")):
+        directory.mkdir(parents=True)
+        (directory / "manifest.json").write_text(json.dumps({"run_id": directory.name, "finished_at": timestamp}), encoding="utf-8")
+    (root / "latest.json").write_text(json.dumps({"run_id": "current"}), encoding="utf-8")
+    rule = SidecarRetentionRule("runtime/gather_runs", DataClassification.CONFIDENTIAL, RetentionClass.ONE_YEAR, False)
+
+    report = run_purge("acme", programs_root=tmp_path, now=_now(), apply=True, rules=(rule,))
+
+    assert report.total_rows_purged == 1
+    assert not old.exists()
+    assert current.exists()
+
+
 def test_run_purge_dry_run_does_not_modify_files(tmp_path: Path) -> None:
     """Dry-run reports counts but does not write."""
     now = _now()
@@ -379,6 +396,41 @@ def test_context_manifests_malformed_json_is_skipped_not_crashed_on(tmp_path: Pa
     report = run_purge("xpf", programs_root=tmp_path, now=now, apply=True, rules=(rule,))
     assert report.total_rows_purged == 0
     assert (manifests_dir / "corrupt.json").exists()  # left alone, not deleted
+
+
+def test_workspace_root_rule_resolves_against_shared_knowledge_root_not_program_dir(tmp_path: Path) -> None:
+    # specs/people.md PPL-W1.8: <workspace_root> rules resolve against
+    # get_shared_knowledge_root(programs_root), NOT programs_root/<program_id>/
+    # like every other placeholder here.
+    now = _now()
+    programs_root = tmp_path / "programs"
+    knowledge_root = tmp_path / "knowledge"
+    sidecar = knowledge_root / "_journal" / "people_changes.jsonl"
+    _write_jsonl(
+        sidecar,
+        [
+            {"sequence": 1, "recorded_at": "2010-01-01T00:00:00Z", "entity_id": "person:1", "authenticated_principal": "ACME\\operator"},
+            {"sequence": 2, "recorded_at": "2026-06-01T00:00:00Z", "entity_id": "person:2", "authenticated_principal": "ACME\\operator"},
+        ],
+    )
+    rule = next(r for r in SIDECAR_RETENTION if r.artifact_path == "<workspace_root>/_journal/people_changes.jsonl")
+
+    report = run_purge("acme", programs_root=programs_root, now=now, apply=True, rules=(rule,))
+
+    assert report.total_rows_tombstoned == 1  # PII, supports_excise=True.
+    remaining = [json.loads(line) for line in sidecar.read_text().splitlines() if line]
+    assert len(remaining) == 2
+    assert remaining[0]["[EXCISED]"] is True
+
+
+def test_workspace_root_rule_with_year_placeholder_is_unresolvable(tmp_path: Path) -> None:
+    rule = next(
+        r for r in SIDECAR_RETENTION if r.artifact_path == "<workspace_root>/_journal/archive/<year>/people_changes_<end_sequence>.jsonl"
+    )
+    report = run_purge("acme", programs_root=tmp_path / "programs", now=_now(), apply=False, rules=(rule,))
+
+    assert report.total_rows_purged == 0
+    assert any("unresolved" in skipped for skipped in report.skipped)
 
 
 def test_purge_report_serialization(tmp_path: Path) -> None:

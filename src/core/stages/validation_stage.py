@@ -175,6 +175,8 @@ class ValidationStage:
             qg_results={},
             git_sha=support.read_git_sha(),
             metadata=manifest_metadata,
+            gather_run_id=ctx.gather_run_id,
+            gather_run_hash=ctx.gather_run_hash,
         )
         journal_signals, approved_signals = _load_gate_signals(ctx)
         qg_phase_1a = evaluate_phase_1a_gates(
@@ -336,6 +338,8 @@ class ValidationStage:
                 **manifest_metadata,
                 "draft_readiness": draft_readiness.to_payload(),
             },
+            gather_run_id=ctx.gather_run_id,
+            gather_run_hash=ctx.gather_run_hash,
         )
 
         blocking_warnings = (

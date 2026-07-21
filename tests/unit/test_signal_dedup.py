@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 from src.core.models import Confidence
 from src.core.models_v2 import Signal
-from src.core.signal_dedup import dedupe_signals
+from src.core.signal_dedup import build_deterministic_signal_id, dedupe_signals
 
 
 def test_dedupe_signals_skips_same_signal_fingerprint() -> None:
@@ -36,6 +36,36 @@ def test_dedupe_signals_skips_same_signal_fingerprint() -> None:
     kept = dedupe_signals((original, repeated))
 
     assert kept == (original,)
+
+
+def test_deterministic_signal_id_uses_semantic_content_not_extractor_id() -> None:
+    original = Signal(
+        id="extractor-attempt-one",
+        timestamp=datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc),
+        source="ado/odata",
+        program_id="acme",
+        workstream_id="deployment_readiness",
+        entity_refs=("WI:1001",),
+        text="State changed from Proposed to Active.",
+        raw_ref="workitems/1001",
+        confidence=Confidence.HIGH,
+        metadata={"field": "State", "prior": "Proposed", "current": "Active"},
+    )
+    replay = Signal(
+        id="extractor-attempt-two",
+        timestamp=original.timestamp,
+        source=original.source,
+        program_id=original.program_id,
+        workstream_id=original.workstream_id,
+        entity_refs=original.entity_refs,
+        text=original.text,
+        raw_ref=original.raw_ref,
+        confidence=original.confidence,
+        metadata=original.metadata,
+    )
+
+    assert build_deterministic_signal_id(original) == build_deterministic_signal_id(replay)
+    assert build_deterministic_signal_id(original).startswith("sig_")
 
 
 def test_dedupe_signals_keeps_equivalent_payloads_from_different_sources() -> None:

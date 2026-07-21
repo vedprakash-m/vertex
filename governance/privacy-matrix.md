@@ -53,6 +53,7 @@ Every field in every payload Vertex handles falls into exactly one of these clas
 | `external_dependencies.jsonl` | CONFIDENTIAL | 1 year | n/a (no PII) |
 | `narrative/*.md` | CONFIDENTIAL | 1 year | operator edit; no in-place automated scrub |
 | `runtime/gather_state.json` | CONFIDENTIAL + PII (error messages with paths/identifiers) | 1 year | n/a (operator-side) |
+| `runtime/gather_runs` *(Armada D-10/D-14)* | CONFIDENTIAL (immutable gather-run manifest/sidecar evidence) | 1 year | n/a (immutable evidence; `privacy_purge` removes only expired non-current committed/failed/quarantined run directories and preserves runs named by `latest.json`/`latest_full.json`) |
 | `migration_log.jsonl` | INTERNAL (no PII) | indefinite | n/a (no PII) |
 | `_feedback/*.jsonl` (edit_patterns, brief_interventions, context_gaps) | CONFIDENTIAL + PII (operator edits) | 1 year | `[EXCISED]` tombstone (WS-18) |
 | `runtime/vertex_analytics.sqlite3` | CONFIDENTIAL | 1 year | rebuild from journal after `[EXCISED]` run (WS-18) |
@@ -68,6 +69,17 @@ Every field in every payload Vertex handles falls into exactly one of these clas
 | `runtime/run_telemetry.jsonl` *(ADF-W5.9)* | INTERNAL (per-gather channel performance telemetry, no PII) | 90 days | n/a (no PII) |
 | `_alerts/alerts.jsonl` *(ADF-W5.9)* | INTERNAL (no PII) | open-forever; 90 days after `resolved_at` | n/a (no PII); eligibility keyed on `resolved_at`, not `created_at` |
 | `runtime/context_manifests/` *(ADF-W5.9)* | INTERNAL (evidence ids/token counts/classification labels, no PII or raw content) | 90 days | n/a (no PII); content-addressed directory (one `<hash>.json` per compile), age-checked per-file via `compiled_at` inside each file, not filename |
+| `<workspace_root>/registry.yaml` *(specs/people.md PPL-W1.8)* | INTERNAL (workspace/customer identity, IDs only, no PII) | indefinite | n/a (no PII) |
+| `<workspace_root>/registry_manifest.json` *(PPL-W1.8)* | INTERNAL (generation/fencing/hash metadata only) | indefinite | n/a (no PII) |
+| `<workspace_root>/registry_capability_status.yaml` *(PPL-W1.8)* | INTERNAL (storage-class diagnostics only) | indefinite | n/a (no PII) |
+| `<workspace_root>/.state/registry_lease_audit.jsonl` *(PPL-W1.8)* | PII (names the authenticated_principal who force-released a lease) | 7 years (audit-of-record) | `[EXCISED]` tombstone (WS-18) |
+| `<workspace_root>/_journal/people_changes.jsonl` *(PPL-W1.8)* | PII (field-level person/team change events) | 7 years (audit-of-record) | `[EXCISED]` tombstone (WS-18) |
+| `<workspace_root>/_journal/people_conflicts.jsonl` *(PPL-W1.8)* | PII (identity-conflict decision events) | 7 years (audit-of-record) | `[EXCISED]` tombstone (WS-18) |
+| `<workspace_root>/_journal/people_refresh_telemetry.jsonl` *(PPL-W4.7)* | PII (per-run provider-refresh audit record, carries authenticated_principal) | 7 years (audit-of-record) | `[EXCISED]` tombstone (WS-18) |
+| `<workspace_root>/_journal/archive/<year>/people_changes_<end_sequence>.jsonl` *(PPL-W1.8)* | PII (rotated, HMAC-signed segment; same class as the active stream) | 7 years (immutable audit-of-record) | `[EXCISED]` tombstone in metadata only (file is immutable) |
+| `<workspace_root>/_journal/archive/<year>/people_conflicts_<end_sequence>.jsonl` *(PPL-W1.8)* | PII (rotated, HMAC-signed segment) | 7 years (immutable audit-of-record) | `[EXCISED]` tombstone in metadata only |
+| `<workspace_root>/_journal/archive/<year>/people_refresh_telemetry_<end_sequence>.jsonl` *(PPL-W4.7)* | PII (rotated, HMAC-signed segment) | 7 years (immutable audit-of-record) | `[EXCISED]` tombstone in metadata only |
+| `<workspace_root>/.transactions/` *(PPL-W1.8)* | PII (staged/checkpointed registry data, transient) | 90 days | n/a (no in-place excise); content-addressed by transaction_id, age-checked per-file |
 
 ## 4. RBAC / consent matrix
 
@@ -96,7 +108,7 @@ and **AAD managed-identity** for unattended cron-style data plane reads.
 | ADO PR comment | PUBLIC, INTERNAL, CONFIDENTIAL | operator pre-flight review | `journal/actions.jsonl` entry |
 | Published HTML | PUBLIC, INTERNAL, CONFIDENTIAL | ban-list applied | `journal/actions.jsonl` entry |
 | Local CLI output | all classes (operator machine) | none | shell history (operator-side) |
-| Remote log/metric sink (`doctor --diagnose` support bundle) | INTERNAL only | PII redacted (regex scrubber: email, name patterns) | bundle manifest + checksum |
+| Support bundle (`vertex observability bundle`) | INTERNAL only | PII redacted (regex scrubber: email, GUID, token patterns); gather-run diagnostics are bounded summaries only and exclude raw `ado_items.jsonl`/`query_results.json` membership sidecars | bundle manifest + checksum |
 
 ## 6. Per-channel PII regression coverage
 

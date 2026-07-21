@@ -286,6 +286,7 @@ from src.core.stages.milestone_stage import MilestoneStage
 from src.core.stages.risk_stage import RiskStage
 from src.core.stages.narrative_stage import NarrativeStage
 from src.core.stages.render_stage import RenderStage
+from src.core.gather_run_manifest import resolve_latest_committed_manifest
 from src.core.stages.resolution_stage import ResolutionStage
 from src.core.stages.validation_stage import ValidationStage
 from src.core.trajectory_analyzer import analyze_trajectories
@@ -932,6 +933,23 @@ def generate_report_draft_v2(
     )
 
 
+def _pin_gather_run_lineage(ctx: StageContext) -> StageContext:
+    """D-17: resolve the latest committed gather run exactly once per report
+    invocation, immediately after resolution, and pin it on the context so
+    every downstream stage that builds a RunManifest or DraftState (standard
+    or lookback path) stamps the same identical gather_run_id/gather_run_hash
+    pair. Confirm never calls this -- it reads the pinned value back off the
+    draft state instead, so it structurally cannot silently rebind to a
+    newer committed run than the one the draft was generated from."""
+    program_id = ctx.resolved_v2.program.id if ctx.resolved_v2 is not None else None
+    if program_id is None:
+        return ctx
+    committed = resolve_latest_committed_manifest(program_id, programs_root=ctx.programs_root or PROGRAMS_ROOT)
+    if committed is None:
+        return ctx
+    return replace(ctx, gather_run_id=committed.run_id, gather_run_hash=committed.manifest_hash)
+
+
 def _execute_report_pipeline(
     request_ctx: StageContext,
     *,
@@ -942,6 +960,7 @@ def _execute_report_pipeline(
     resolution_stage = ResolutionStage()
     resolution_started = perf_counter()
     resolved_ctx = resolution_stage.execute(request_ctx)
+    resolved_ctx = _pin_gather_run_lineage(resolved_ctx)
     pipeline_stages = _report_pipeline_stages(resolved_ctx.resolved_edition_type)
     total_stages = 1 + len(pipeline_stages)
     if progress_callback is not None:
@@ -1233,6 +1252,8 @@ class _LookbackStage:
                 reports_root=ctx.reports_root,
                 archive_root=ctx.archive_root,
                 open_browser=ctx.open_browser,
+                gather_run_id=ctx.gather_run_id,
+                gather_run_hash=ctx.gather_run_hash,
             ),
         )
 
@@ -1412,6 +1433,8 @@ class _OutputStage:
                 ),
                 top_3_now=ctx.top_3_now,
                 exec_summary_text=ctx.render_exec_summary_text,
+                gather_run_id=ctx.gather_run_id,
+                gather_run_hash=ctx.gather_run_hash,
             ),
         )
         adaptive_card_paths = _write_report_adaptive_cards(

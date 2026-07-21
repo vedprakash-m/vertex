@@ -14,7 +14,10 @@ from src.core.incident_journal_store import read_incident_entries
 from src.core.journal import PROGRAMS_ROOT
 from src.core.kusto_client import build_live_kusto_query_executor
 from src.core.kusto_query_loader import load_kpi_queries
-from src.core.knowledge_store import load_program_knowledge
+from src.core.knowledge_store import get_shared_knowledge_root, load_program_knowledge
+from src.core.people_entity_schema import CanonicalEntity, load_entities_document
+from src.core.people_namespace_bridge import resolve_ref_to_canonical_entity_id
+from src.core.people_registry_governance import require_adopted_registry
 from src.core.program_fact_store import load_program_facts, project_dependencies, project_risk_entries
 from src.core.readiness_engine import (
     ReadinessConfig,
@@ -121,12 +124,39 @@ def _load_kusto_query_rows(program_id: str, dimension: ReadinessDimensionConfig,
     return execute(query)
 
 
+def _canonical_alias_exists(program_id: str, alias: str, *, programs_root: Path) -> bool:
+    """specs/people.md §7.9: "Migrate `people_directory` dimension and
+    `alias_exists()` to canonical resolution without changing readiness
+    outcome for equivalent data." An ADDITIVE check only -- `_alias_exists`
+    below calls this only after its legacy check has already failed, so
+    this can only ADD a match the legacy path missed, never remove one it
+    found; existing programs' readiness outcomes are provably unchanged.
+    Returns `False` (never raises) if no schema-2.0 `entities.yaml` exists
+    for either scope -- production has none today, so this is a safe
+    no-op until real canonical entities exist (Phase 2b migration)."""
+    knowledge_root = get_shared_knowledge_root(programs_root)
+    entities: list[CanonicalEntity] = []
+    for entities_path in (knowledge_root / "entities.yaml", programs_root / program_id / "knowledge" / "entities.yaml"):
+        try:
+            document = load_entities_document(entities_path)
+        except ConfigError:
+            continue  # Legacy-shaped or otherwise not schema 2.0 -- not this check's concern.
+        if document is not None:
+            entities.extend(document.entities)
+    if not entities:
+        return False
+    resolution = resolve_ref_to_canonical_entity_id(alias, entities=tuple(entities))
+    return resolution.canonical_entity_id is not None
+
+
 def _alias_exists(program_id: str, alias: str, *, programs_root: Path) -> bool:
     knowledge = load_program_knowledge(program_id, programs_root=programs_root)
     normalized_alias = alias.strip().lower()
     directory_aliases = {person.alias.lower() for person in knowledge.people_directory}
     profile_aliases = {profile.alias.lower() for profile in knowledge.people_profiles}
-    return normalized_alias in directory_aliases or normalized_alias in profile_aliases
+    if normalized_alias in directory_aliases or normalized_alias in profile_aliases:
+        return True
+    return _canonical_alias_exists(program_id, alias, programs_root=programs_root)
 
 
 def _load_incident_entries(
@@ -180,6 +210,10 @@ def fetch_readiness_snapshot(
     *,
     programs_root: Path = PROGRAMS_ROOT,
 ) -> tuple[ReadinessSnapshot, Path]:
+    # §7.5/§7.6: readiness is an authoritative consumer.  It must not
+    # silently accept critical shared-registry YAML drift while legacy
+    # fallback paths would otherwise make the snapshot look successful.
+    require_adopted_registry(get_shared_knowledge_root(programs_root), consumer="Readiness")
     config = load_readiness_config(program_id, programs_root=programs_root)
     snapshot = build_readiness_snapshot(
         program_id,

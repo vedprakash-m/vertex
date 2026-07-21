@@ -8,9 +8,7 @@ Verifies that append_nudge_event:
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
-
-import pytest
+from unittest.mock import MagicMock, patch
 
 from src.core.program_fact_store import append_nudge_event
 from src.core.program_fact_store import FactPrecedence
@@ -32,21 +30,6 @@ EXPECTED_PRECEDENCE = {
 class TestAppendNudgeEventPrecedence:
     """Verify fact-type → FactPrecedence mappings without touching the DB."""
 
-    def _call_and_capture_precedence(self, fact_type: str) -> FactPrecedence | None:
-        captured: list[FactPrecedence | None] = []
-
-        def _fake_append_program_event(program_id, event, *, recorded_at=None, db_root=None, home_root=None):
-            # The precedence isn't passed directly — verify through the seam
-            return MagicMock()
-
-        # We need to check that the resolve_precedence step works correctly.
-        # The simplest approach: call the function with a mock that intercepts the DB call.
-        with patch("src.core.program_fact_store.append_program_event") as mock_ape:
-            mock_ape.return_value = MagicMock()
-            append_nudge_event("nova", fact_type, {"run_id": "test-run"}, db_root=Path("/tmp/fake"))
-            assert mock_ape.called
-        return None  # We verified it was called; precedence is internal
-
     def test_delegates_to_append_program_event(self):
         with patch("src.core.program_fact_store.append_program_event") as mock_ape:
             mock_ape.return_value = MagicMock()
@@ -57,32 +40,31 @@ class TestAppendNudgeEventPrecedence:
         with patch("src.core.program_fact_store.append_program_event") as mock_ape:
             mock_ape.return_value = MagicMock()
             append_nudge_event("nova", "event.nudge.generated", {"run_id": "r2"}, db_root=Path("/tmp/fake"))
-        # The call went through — verified
-        assert mock_ape.called
+        assert mock_ape.call_args.kwargs["precedence"] is FactPrecedence.RAW_TELEMETRY
 
     def test_sent_attested_fact_type_calls_through(self):
         with patch("src.core.program_fact_store.append_program_event") as mock_ape:
             mock_ape.return_value = MagicMock()
             append_nudge_event("nova", "event.nudge.sent_attested", {"run_id": "r3"}, db_root=Path("/tmp/fake"))
-        assert mock_ape.called
+        assert mock_ape.call_args.kwargs["precedence"] is FactPrecedence.CONFIRMED_GOVERNANCE_DECISION
 
     def test_evaluated_fact_type_calls_through(self):
         with patch("src.core.program_fact_store.append_program_event") as mock_ape:
             mock_ape.return_value = MagicMock()
             append_nudge_event("nova", "event.nudge.evaluated", {"run_id": "r4"}, db_root=Path("/tmp/fake"))
-        assert mock_ape.called
+        assert mock_ape.call_args.kwargs["precedence"] is FactPrecedence.VERIFIED_SYSTEM_SIGNAL
 
     def test_waiver_created_fact_type_calls_through(self):
         with patch("src.core.program_fact_store.append_program_event") as mock_ape:
             mock_ape.return_value = MagicMock()
             append_nudge_event("nova", "event.nudge.waiver_created", {"run_id": "r5"}, db_root=Path("/tmp/fake"))
-        assert mock_ape.called
+        assert mock_ape.call_args.kwargs["precedence"] is FactPrecedence.ACTIVE_PM_JUDGMENT
 
     def test_unknown_fact_type_still_calls_through(self):
         with patch("src.core.program_fact_store.append_program_event") as mock_ape:
             mock_ape.return_value = MagicMock()
             append_nudge_event("nova", "event.nudge.unknown", {"run_id": "r6"}, db_root=Path("/tmp/fake"))
-        assert mock_ape.called
+        assert mock_ape.call_args.kwargs["precedence"] is FactPrecedence.RAW_TELEMETRY
 
     def test_program_event_receives_program_id(self):
         with patch("src.core.program_fact_store.append_program_event") as mock_ape:
@@ -95,7 +77,7 @@ class TestAppendNudgeEventPrecedence:
         from src.core.program_fact_store import ProgramEvent
         captured_event: list[ProgramEvent] = []
 
-        def _capture(program_id, event, *, recorded_at=None, db_root=None, home_root=None):
+        def _capture(program_id, event, *, precedence=None, recorded_at=None, db_root=None, home_root=None):
             captured_event.append(event)
             return MagicMock()
 
@@ -110,7 +92,6 @@ class TestAppendNudgeEventPrecedence:
 
     def test_explicit_precedence_override(self):
         """Caller can override precedence."""
-        from src.core.program_fact_store import ProgramEvent
         with patch("src.core.program_fact_store.append_program_event") as mock_ape:
             mock_ape.return_value = MagicMock()
             append_nudge_event(
@@ -120,4 +101,4 @@ class TestAppendNudgeEventPrecedence:
                 precedence=FactPrecedence.CONFIRMED_GOVERNANCE_DECISION,
                 db_root=Path("/tmp/fake"),
             )
-        assert mock_ape.called
+        assert mock_ape.call_args.kwargs["precedence"] is FactPrecedence.CONFIRMED_GOVERNANCE_DECISION

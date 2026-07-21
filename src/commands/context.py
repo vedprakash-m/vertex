@@ -14,6 +14,7 @@ from src.core.ncfl_proposal_store import (
     stage_extracted_proposals,
     update_proposal_status,
 )
+from src.core.operator_identity import capture_operator_identity
 
 
 app = typer.Typer(help="NCFL context proposal extraction and review.")
@@ -111,6 +112,29 @@ def proposals_command(
         )
 
 
+@app.command("manual-diff")
+def manual_diff_command(
+    edition: str = typer.Option(..., "--edition", help="Edition name, e.g. armada_weekly."),
+    issue: int = typer.Option(..., "--issue", min=1, help="Issue number containing the proposal."),
+    proposal_id: str = typer.Option(..., "--proposal-id", help="Manual-only workstream-registry proposal to render."),
+    programs_root: Path = typer.Option(PROGRAMS_ROOT, hidden=True),
+) -> None:
+    """Print a stale-safe manual diff for a non-writable registry proposal."""
+    from src.core.manual_registry_diff import ManualRegistryDiffError, render_workstream_registry_manual_diff
+
+    program_id = _resolve_program_id(edition, programs_root=programs_root)
+    proposals = load_proposals(program_id, issue_number=issue, programs_root=programs_root)
+    proposal = next((item for item in proposals if item.proposal_id == proposal_id), None)
+    if proposal is None:
+        raise typer.BadParameter(f"No proposal {proposal_id!r} found for {edition} issue {issue:03d}.")
+    try:
+        diff = render_workstream_registry_manual_diff(proposal, programs_root=programs_root)
+    except ManualRegistryDiffError as error:
+        typer.echo(f"Manual diff unavailable: {error}", err=True)
+        raise typer.Exit(code=2) from error
+    typer.echo(diff.text, nl=False)
+
+
 @app.command("dismiss")
 def dismiss_command(
     edition: str = typer.Option(..., "--edition", help="Edition name, e.g. acme_weekly."),
@@ -150,7 +174,10 @@ def apply_command(
     if not matched:
         typer.echo(f"No accepted proposal {proposal_id!r} found for {edition} issue {issue:03d}.")
         raise typer.Exit(code=1)
-    result = apply_proposal(matched[0], actor=actor, programs_root=programs_root, dry_run=dry_run)
+    identity = capture_operator_identity(actor)
+    if not identity.principal:
+        raise typer.BadParameter("Could not resolve an authenticated OS/service principal for NCFL apply.")
+    result = apply_proposal(matched[0], actor=identity.principal, programs_root=programs_root, dry_run=dry_run)
     prefix = "[DRY RUN] " if dry_run else ""
     typer.echo(f"{prefix}{result.action}: {result.note}")
     if result.action == "needs_repair":
@@ -172,7 +199,15 @@ def apply_batch_command(
     if not proposals:
         typer.echo(f"No accepted proposals found for {edition} issue {issue:03d}.")
         raise typer.Exit(code=0)
-    results = apply_proposals_batch(tuple(proposals), actor=actor, programs_root=programs_root, dry_run=dry_run)
+    identity = capture_operator_identity(actor)
+    if not identity.principal:
+        raise typer.BadParameter("Could not resolve an authenticated OS/service principal for NCFL apply.")
+    results = apply_proposals_batch(
+        tuple(proposals),
+        actor=identity.principal,
+        programs_root=programs_root,
+        dry_run=dry_run,
+    )
     prefix = "[DRY RUN] " if dry_run else ""
     repairs = 0
     for r in results:

@@ -106,6 +106,107 @@ def test_load_analytics_signals_retries_without_last_revision_on_vs403522() -> N
     assert "IsLastRevisionOfDay" not in call_filters[1]
 
 
+def test_load_analytics_signals_retries_across_multiple_unavailable_fields() -> None:
+    """Deterministically strips both IsLastRevisionOfDay AND a named unavailable
+    select field across successive attempts, rather than only handling one."""
+
+    class _ProgAdo:
+        area_paths = ("One\\Adventure\\Acme",)
+        work_item_types = ("Feature",)
+        excluded_states = ("Removed",)
+        api_timeout_seconds = 30
+        organization = "msazure"
+        project = "One"
+        date_window_days = 14
+
+    class _Prog:
+        id = "acme"
+        ado = _ProgAdo()
+
+    calls: list[tuple[str, tuple[str, ...]]] = []
+
+    class _FakeClient:
+        def query_work_item_snapshot(self, *, filter_expression: str, select_fields: tuple[str, ...]) -> list[dict[str, Any]]:
+            calls.append((filter_expression, select_fields))
+            if "IsLastRevisionOfDay" in filter_expression:
+                raise QueryError("VS403522: The property 'IsLastRevisionOfDay' is not available")
+            if "CycleTimeDays" in select_fields:
+                raise QueryError("VS403522: The property 'CycleTimeDays' is not available")
+            return [{"DateSK": 20260512, "WorkItemId": 101}]
+
+    def _fake_client_factory(**kwargs: Any) -> _FakeClient:
+        return _FakeClient()
+
+    captured_rows: list[Any] = []
+
+    ado_snapshot_stage.load_analytics_signals(
+        cast(Any, _Prog()),
+        workstreams=(),
+        as_of=datetime(2026, 5, 12, 8, 0, tzinfo=timezone.utc),
+        programs_root=__import__("pathlib").Path("."),
+        ado_client_factory=_fake_client_factory,
+        date_to_sk_fn=lambda d: int(d.strftime("%Y%m%d")),
+        analytics_snapshot_fields=("DateSK", "WorkItemId", "CycleTimeDays"),
+        build_analytics_signals_fn=lambda **kw: captured_rows.append(kw["rows"]) or (),
+        load_wiql_golden_query_signals_fn=lambda *a, **kw: ((), 0),
+        expected_max_age_hours=48,
+    )
+
+    assert len(calls) == 3
+    assert "IsLastRevisionOfDay" in calls[0][0] and calls[0][1] == ("DateSK", "WorkItemId", "CycleTimeDays")
+    assert "IsLastRevisionOfDay" not in calls[1][0] and calls[1][1] == ("DateSK", "WorkItemId", "CycleTimeDays")
+    assert "IsLastRevisionOfDay" not in calls[2][0] and calls[2][1] == ("DateSK", "WorkItemId")
+    assert captured_rows == [[{"DateSK": 20260512, "WorkItemId": 101}]]
+
+
+def test_load_analytics_signals_reraises_when_vs403522_field_already_removed() -> None:
+    """If the same unavailable field keeps recurring (no further field to strip),
+    the retry loop must give up instead of looping forever."""
+
+    class _ProgAdo:
+        area_paths = ("One\\Adventure\\Acme",)
+        work_item_types = ("Feature",)
+        excluded_states = ("Removed",)
+        api_timeout_seconds = 30
+        organization = "msazure"
+        project = "One"
+        date_window_days = 14
+
+    class _Prog:
+        id = "acme"
+        ado = _ProgAdo()
+
+    call_count = 0
+
+    class _FakeClient:
+        def query_work_item_snapshot(self, *, filter_expression: str, select_fields: tuple[str, ...]) -> list[dict[str, Any]]:
+            nonlocal call_count
+            call_count += 1
+            raise QueryError("VS403522: The property 'SomeGhostField' is not available")
+
+    def _fake_client_factory(**kwargs: Any) -> _FakeClient:
+        return _FakeClient()
+
+    with pytest.raises(QueryError):
+        ado_snapshot_stage.load_analytics_signals(
+            cast(Any, _Prog()),
+            workstreams=(),
+            as_of=datetime(2026, 5, 12, 8, 0, tzinfo=timezone.utc),
+            programs_root=__import__("pathlib").Path("."),
+            ado_client_factory=_fake_client_factory,
+            date_to_sk_fn=lambda d: int(d.strftime("%Y%m%d")),
+            analytics_snapshot_fields=("DateSK", "WorkItemId"),
+            build_analytics_signals_fn=lambda **kw: (),
+            load_wiql_golden_query_signals_fn=lambda *a, **kw: ((), 0),
+            expected_max_age_hours=48,
+        )
+
+    # "SomeGhostField" is never in select_fields and never IsLastRevisionOfDay,
+    # so the loop can't make progress and must abort on the very first retry
+    # attempt rather than exhausting all _MAX_VS403522_RETRIES.
+    assert call_count == 1
+
+
 def test_query_snapshot_rows_by_item_ids_prefers_latest_revision_and_hydrates_paths() -> None:
     class _FakeADOClient:
         def query_odata_all(self, entity_set: str, params: dict[str, str]) -> list[dict[str, object]]:

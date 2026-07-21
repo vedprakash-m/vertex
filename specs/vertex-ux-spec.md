@@ -1243,6 +1243,29 @@ Run: vertex ledger triage list --program <prog>
 Redacted event 01JWCM3DQPVZ; original_hash=sha256:abc123...def456.
 ```
 
+### 12.11 People Registry CLI (implemented, `.archive/specs/people.md`, Accepted, complete as of 2026-07-21)
+
+The `vertex kb registry ...` and `vertex kb people ...` command family lives under the existing `vertex kb` surface (never `vertex knowledge`, which stays the claim/vault plane) — full taxonomy in `.archive/specs/people.md` §8.1. It now spans registry bootstrap/config, denormalized read queries (`find`, `overlaps`, `programs`, `search`, `stale`, `conflicts`), governed corrections (`merge`, `split`, `bind`), field-level pin/unpin/attest governance, explicit delegation lifecycle (`delegate create/revoke/list`), provider refresh, and steward-authorized lifecycle-status transitions (`lifecycle-set`). The binding UX contracts hold across all of it: mutation commands preview by default (`--apply` is explicit and, once applied, the command reports the resulting change-journal transaction/generation IDs); human output answers the question directly with relationship type/program/workstream/freshness/source; JSON output uses a versioned envelope with stable IDs and bounded pagination (`--limit`/`--cursor`) where the result set can be large; default output shows stable ID/alias and counts only — display name/email require an explicit `--reveal-pii` that is itself audited. Phase 0c's original read-only slice (`vertex kb people overlaps`/`vertex kb people programs`) still renders its visible `WARNING: alias-based legacy result; identity not verified` caveat and exposes aliases/source paths only when no verified identity binding exists for the entity in question.
+
+**`vertex kb people lifecycle-set --person <ref> --status <active|inactive|departed|unknown> --reason "<text>"`** (preview; no steward credentials required, nothing written):
+```
+Preview: would apply lifecycle transition for person:alice: active -> departed.
+Re-run with --apply to commit the canonical staged registry transaction.
+```
+
+**`vertex kb people lifecycle-set --person <ref> --status departed --reason "<text>" --apply --format json`** (applied, as an authenticated directory steward):
+```json
+{
+  "entity_id": "person:alice",
+  "from_status": "active",
+  "generation_id": "...",
+  "to_status": "departed",
+  "transaction_id": "..."
+}
+```
+
+Full taxonomy, per-command flag reference, and rationale for the remaining `vertex kb registry`/`vertex kb people` surface (merge/split/bind, delegate, refresh, doctor-facing checks) is `tests/contracts/cli_reference_snapshot.md`, generated from the live CLI rather than hand-maintained here — this section captures the binding UX *contracts*, not a duplicate of that generated reference. The CLI surface above is complete through Phase 6; the only remaining item is a real operator-run onboarding pilot with a live DSAR/rollback proof against that pilot's own data (PPL-W6.4) — not a CLI gap, an operator-paced evidence gate. See `governance/runbooks/ppl-w64-onboarding-pilot-runbook.md` for the documented real onboarding sequence and every tooling caveat a synthetic dry run surfaced.
+
 ---
 
 ## §13 EML File Output

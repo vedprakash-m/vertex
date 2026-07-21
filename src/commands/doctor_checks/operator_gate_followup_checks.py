@@ -62,6 +62,7 @@ def operator_gate_transcript_health_check(
 def operator_gate_kusto_validation_check(
     *,
     edition_name: str,
+    kusto_enabled: bool = True,
     kusto_access_check: DoctorCheck | None,
     kusto_validation_check: DoctorCheck | None,
     metric_bindings_check: DoctorCheck | None,
@@ -72,6 +73,30 @@ def operator_gate_kusto_validation_check(
         f"vertex doctor --metric-bindings --edition {edition_name}",
         "vertex admin metric validate --program <program> --all",
     ]
+    # An explicitly disabled Kusto channel is an approved program-scope
+    # deferral, not an auth failure.  Treating its expected doctor warning as
+    # a blocking gate makes a program unable to reach operational readiness
+    # without first enabling a source it has intentionally excluded.
+    if not kusto_enabled:
+        return DoctorCheck(
+            "Gate:Kusto Validation",
+            "ok",
+            "Kusto is disabled for this program; no Kusto validation gate is active.",
+            metadata={
+                "owner": ["operator", "data_platform_owner", "pm"],
+                "action_category": None,
+                "commands": [],
+                "evidence_to_gather": [],
+                "decisions": [],
+                "llm_support": "No action is needed unless the program enables Kusto.",
+                "kusto_enabled": False,
+                "deferred": True,
+                "kusto_access": None if kusto_access_check is None else {"status": kusto_access_check.status, "detail": kusto_access_check.detail},
+                "kusto_validation": None if kusto_validation_check is None else {"status": kusto_validation_check.status, "detail": kusto_validation_check.detail},
+                "metric_bindings": None if metric_bindings_check is None else {"status": metric_bindings_check.status, "detail": metric_bindings_check.detail},
+                "metric_rollout": None if metric_rollout_check is None else {"status": metric_rollout_check.status, "detail": metric_rollout_check.detail},
+            },
+        )
     relevant_checks = [check for check in (kusto_access_check, kusto_validation_check, metric_bindings_check, metric_rollout_check) if check is not None]
     blocking = any(check.status != "ok" for check in relevant_checks)
     action_category = None
@@ -102,6 +127,8 @@ def operator_gate_kusto_validation_check(
                 "Confirm the minimum required Kusto-backed KPIs for this program and who owns each remaining validation gap.",
             ],
             "llm_support": "Can compare query definitions, summarize metric-binding gaps, and prepare a candidate validation plan; operator/PM must decide which KPIs are required for go-live.",
+            "kusto_enabled": True,
+            "deferred": False,
             "kusto_access": None if kusto_access_check is None else {"status": kusto_access_check.status, "detail": kusto_access_check.detail},
             "kusto_validation": None if kusto_validation_check is None else {"status": kusto_validation_check.status, "detail": kusto_validation_check.detail},
             "metric_bindings": None if metric_bindings_check is None else {"status": metric_bindings_check.status, "detail": metric_bindings_check.detail},

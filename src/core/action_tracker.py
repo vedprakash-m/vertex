@@ -63,9 +63,11 @@ def build_action_id(
 
 def append_action(
     program_id: str, action: ActionItem, programs_root: Path = PROGRAMS_ROOT, *, correlation_id: str = "",
+    gather_run_id: str | None = None,
 ) -> Path:
     _sync_action_fact(
         program_id, action, recorded_at=action.created_at, programs_root=programs_root, correlation_id=correlation_id,
+        gather_run_id=gather_run_id,
     )
     target = get_actions_path(program_id, programs_root)
     payload = json.dumps(_action_to_record(action), separators=(",", ":")) + os.linesep
@@ -280,6 +282,7 @@ def _sync_action_fact(
     recorded_at: datetime,
     programs_root: Path,
     correlation_id: str = "",
+    gather_run_id: str | None = None,
 ) -> None:
     from src.core.program_fact_store import FactPrecedence, ProgramFactInput, ProgramFactStore
 
@@ -308,6 +311,7 @@ def _sync_action_fact(
             source_signal_ids=(action.source_signal_id,) if action.source_signal_id else (),
             precedence=FactPrecedence.ACTIVE_PM_JUDGMENT,
             created_by="vertex.action_tracker",
+            gather_run_id=gather_run_id,
         ),
         recorded_at=recorded_at,
     )

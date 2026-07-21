@@ -321,7 +321,7 @@ def test_run_telemetry_registered_in_state_reader_registry() -> None:
     text = REGISTRY_PY.read_text(encoding="utf-8")
     assert '"run_telemetry"' in text or "'run_telemetry'" in text
     # The reader_symbols tuple must include the public surface the wire-in
-    # consumer (vertex observability perf / vertex doctor --diagnose) needs.
+    # consumer (vertex observability perf / diagnose) needs.
     for sym in ("read_run_telemetry", "build_channel_perf_summary", "run_telemetry_path"):
         assert sym in text, f"state_reader_registry missing reader_symbol {sym!r}"
 

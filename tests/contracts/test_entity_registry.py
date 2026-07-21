@@ -6,6 +6,7 @@ Covers:
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import textwrap
 import tempfile
 from pathlib import Path
@@ -18,6 +19,15 @@ from src.core.entity_registry import (
     _DEFAULT_FUZZY_THRESHOLDS,
 )
 from src.core.program_reality import CanonicalEntity
+from src.core.people_entity_schema import (
+    AliasStatus,
+    CanonicalEntity as Schema2CanonicalEntity,
+    EntitiesDocument,
+    EntityAlias,
+    EntityRedirect,
+    EntityStatus,
+    write_entities_document,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -313,3 +323,152 @@ def test_resolution_rate_block_zero_attempts():
         unresolved=0,
     )
     assert block.resolution_rate == 1.0
+
+
+# ---------------------------------------------------------------------------
+# PPL-W3.3b: org-scope entities additionally source from the shared
+# people/team registry (schema-2.0 `entities.yaml`), unioned with the
+# legacy `vertex/knowledge/entities.yaml` path.
+# ---------------------------------------------------------------------------
+
+_NOW = datetime(2026, 7, 20, tzinfo=timezone.utc)
+
+
+def _schema2_alias(value: str, *, status: AliasStatus = AliasStatus.ACTIVE) -> EntityAlias:
+    return EntityAlias(
+        value=value, kind="vertex::alias", status=status, valid_from=None, valid_until=None,
+        source="test", source_ref=None, recorded_at=_NOW, verified_at=_NOW, verified_by_principal="steward",
+    )
+
+
+def test_load_org_scope_additionally_sources_from_shared_people_registry(tmp_path: Path) -> None:
+    programs_dir = tmp_path / "programs"
+    (programs_dir / "testprog").mkdir(parents=True)
+    knowledge_root = tmp_path / "knowledge"
+    write_entities_document(
+        knowledge_root / "entities.yaml",
+        EntitiesDocument(
+            schema_version="2.0",
+            entities=(
+                Schema2CanonicalEntity(
+                    workspace_id="ws", entity_id="person:jdoe", entity_type="person", canonical_name="Jane Doe",
+                    aliases=(_schema2_alias("jdoe"),), scope="org", created_at=_NOW,
+                ),
+            ),
+        ),
+    )
+
+    reg = EntityRegistry.load("testprog", programs_root=programs_dir)
+
+    assert reg.org_entity_count == 1
+    resolved = reg.resolve("jdoe")
+    assert resolved is not None
+    assert resolved.entity_id == "person:jdoe"
+    assert resolved.canonical_name == "Jane Doe"
+
+
+def test_load_org_scope_shared_registry_filters_to_person_and_team_only(tmp_path: Path) -> None:
+    programs_dir = tmp_path / "programs"
+    (programs_dir / "testprog").mkdir(parents=True)
+    knowledge_root = tmp_path / "knowledge"
+    write_entities_document(
+        knowledge_root / "entities.yaml",
+        EntitiesDocument(
+            schema_version="2.0",
+            entities=(
+                Schema2CanonicalEntity(
+                    workspace_id="ws", entity_id="milestone:m1", entity_type="milestone", canonical_name="M1 Ship",
+                    aliases=(_schema2_alias("m1"),), scope="org", created_at=_NOW,
+                ),
+            ),
+        ),
+    )
+
+    reg = EntityRegistry.load("testprog", programs_root=programs_dir)
+
+    assert reg.org_entity_count == 0
+    assert reg.resolve("m1") is None
+
+
+def test_load_org_scope_shared_registry_resolves_retired_and_redirected_aliases(tmp_path: Path) -> None:
+    """A person renamed/merged in the shared registry: their OLD alias
+    (now retired on a tombstoned entity that redirects to the survivor)
+    must still resolve, to the CURRENT canonical entity -- §7.2a's "alias
+    history remains resolvable after rename," now honored through this
+    module's own exact/casefold/fuzzy ladder."""
+    programs_dir = tmp_path / "programs"
+    (programs_dir / "testprog").mkdir(parents=True)
+    knowledge_root = tmp_path / "knowledge"
+    write_entities_document(
+        knowledge_root / "entities.yaml",
+        EntitiesDocument(
+            schema_version="2.0",
+            entities=(
+                Schema2CanonicalEntity(
+                    workspace_id="ws", entity_id="person:old", entity_type="person", canonical_name="Old Name",
+                    aliases=(_schema2_alias("oldalias", status=AliasStatus.RETIRED),), scope="org",
+                    created_at=_NOW, status=EntityStatus.TOMBSTONED, tombstoned_at=_NOW,
+                ),
+                Schema2CanonicalEntity(
+                    workspace_id="ws", entity_id="person:new", entity_type="person", canonical_name="New Name",
+                    aliases=(_schema2_alias("newalias"),), scope="org", created_at=_NOW,
+                ),
+            ),
+            redirects=(
+                EntityRedirect(from_entity_id="person:old", to_entity_id="person:new", recorded_at=_NOW, principal_id="steward", reason="merge"),
+            ),
+        ),
+    )
+
+    reg = EntityRegistry.load("testprog", programs_root=programs_dir)
+
+    resolved = reg.resolve("oldalias")
+    assert resolved is not None
+    assert resolved.entity_id == "person:new"
+    assert resolved.canonical_name == "New Name"
+    # The tombstoned source entity itself is not directly resolvable.
+    assert reg.resolve("Old Name") is None
+
+
+def test_load_org_scope_legacy_wins_on_collision_with_shared_registry(tmp_path: Path) -> None:
+    programs_dir = tmp_path / "programs"
+    (programs_dir / "testprog").mkdir(parents=True)
+    org_dir = tmp_path / "vertex" / "knowledge"
+    org_dir.mkdir(parents=True)
+    (org_dir / "entities.yaml").write_text(textwrap.dedent("""
+        entities:
+          - entity_id: "person:jdoe"
+            entity_type: "person"
+            canonical_name: "Legacy Name"
+            aliases: ["jdoe"]
+            scope: "org"
+    """).strip())
+    knowledge_root = tmp_path / "knowledge"
+    write_entities_document(
+        knowledge_root / "entities.yaml",
+        EntitiesDocument(
+            schema_version="2.0",
+            entities=(
+                Schema2CanonicalEntity(
+                    workspace_id="ws", entity_id="person:jdoe", entity_type="person", canonical_name="Shared Name",
+                    aliases=(_schema2_alias("jdoe"),), scope="org", created_at=_NOW,
+                ),
+            ),
+        ),
+    )
+
+    reg = EntityRegistry.load("testprog", programs_root=programs_dir, _repo_root=tmp_path)
+
+    assert reg.org_entity_count == 1
+    resolved = reg.resolve("person:jdoe")
+    assert resolved is not None
+    assert resolved.canonical_name == "Legacy Name"
+
+
+def test_load_org_scope_shared_registry_missing_is_a_true_no_op(tmp_path: Path) -> None:
+    programs_dir = tmp_path / "programs"
+    (programs_dir / "testprog").mkdir(parents=True)
+
+    reg = EntityRegistry.load("testprog", programs_root=programs_dir)
+
+    assert reg.org_entity_count == 0

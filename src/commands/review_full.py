@@ -33,6 +33,7 @@ from src.core.attribution_engine import build_inline_citations, build_section_ci
 from src.core.cascade_detector import detect_dependency_cascades
 from src.core.claim_tracker import assess_claim_entries, load_open_claims, load_open_decision_asks
 from src.core.config_loader import REPORTS_ROOT, ReportBundle, ScorecardSettings, load_bundle
+from src.core.context_proposal_review import load_pending_context_proposal_rows
 from src.core.coverage_gap import CoverageGap, build_coverage_gaps, coverage_gap_confidence_label
 from src.core.decision_register import assess_proposed_decision_staleness
 from src.core.dependency_graph import load_inbound_cross_program_dependencies
@@ -821,6 +822,10 @@ def _build_reviewer_context(
         program_id,
         programs_root=programs_root,
     )
+    context_revision_rows = _build_context_revision_rows(
+        program_id,
+        programs_root=programs_root,
+    )
     raci_entries = _build_raci_entries(raw_workstreams)
 
     status_chips: list[ReviewerStatusChip] = []
@@ -946,6 +951,7 @@ def _build_reviewer_context(
         action_rows=action_rows,
         issue_rows=issue_rows,
         open_ask_rows=open_ask_rows,
+        context_revision_rows=context_revision_rows,
         status_chips=tuple(status_chips),
         sections=tuple(sections),
         dependency_lifecycle_rows=dependency_lifecycle_rows,
@@ -1124,6 +1130,35 @@ def _reviewer_telemetry_confidence_label(approved_signals: tuple[Signal, ...]) -
     }
     strongest = max(telemetry_signals, key=lambda signal: confidence_order[signal.confidence]).confidence
     return strongest.value.lower()
+
+
+def _build_context_revision_rows(
+    program_id: str | None,
+    *,
+    programs_root: Path,
+) -> tuple[ReviewerTrackedEntryRow, ...]:
+    """Render pending NCFL revisions as reviewable, not-applied context."""
+    if program_id is None:
+        return ()
+    try:
+        proposals = load_pending_context_proposal_rows(program_id, programs_root=programs_root)
+    except Exception:
+        return ()
+    return tuple(
+        ReviewerTrackedEntryRow(
+            title=f"{proposal.proposal_id} · {proposal.target}",
+            detail=(
+                f"Issue {proposal.issue_number:03d} · current hash: {proposal.current_hash_label} · "
+                f"{proposal.conflict_state}"
+            ),
+            summary=(
+                f"Proposed value: {proposal.proposed_value}. Evidence: {proposal.evidence}. "
+                f"Next: {proposal.next_command}"
+            ),
+            anchor_id=_review_entity_anchor(proposal.proposal_id),
+        )
+        for proposal in proposals
+    )
 
 
 def _build_open_ask_rows(

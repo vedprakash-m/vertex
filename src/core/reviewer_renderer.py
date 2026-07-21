@@ -306,6 +306,7 @@ class ReviewerRenderContext:
     action_rows: tuple[ReviewerTrackedEntryRow, ...]
     issue_rows: tuple[ReviewerTrackedEntryRow, ...]
     open_ask_rows: tuple[ReviewerTrackedEntryRow, ...]
+    context_revision_rows: tuple[ReviewerTrackedEntryRow, ...]
     status_chips: tuple[ReviewerStatusChip, ...]
     sections: tuple[ReviewerSectionData, ...]
     dependency_lifecycle_rows: tuple[ReviewerTrackedEntryRow, ...] = ()
@@ -342,6 +343,7 @@ def build_render_payload(context: ReviewerRenderContext) -> dict[str, Any]:
         "action_rows": context.action_rows,
         "issue_rows": context.issue_rows,
         "open_ask_rows": context.open_ask_rows,
+        "context_revision_rows": context.context_revision_rows,
         "status_chips": context.status_chips,
         "sections": context.sections,
         "dependency_lifecycle_rows": context.dependency_lifecycle_rows,

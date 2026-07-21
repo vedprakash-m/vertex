@@ -12,7 +12,7 @@ from pathlib import Path
 # ceiling downward per specs/debt.md §21.3.
 # WS-17 (2026-06-09): +19 for the run_telemetry wire-in (see
 # tests/contracts/test_architecture_fitness.py::LINE_BUDGETS).
-_GATHER_LOC_BUDGET = 5187  # +11 (2026-07-15): ADF-W1.4 remainder -- overall WorkIQ phase wall-clock budget threading; +5 (2026-07-15): per-plan timeout_seconds=AgencyBridge.WORKIQ_TIMEOUT cap
+_GATHER_LOC_BUDGET = 5400  # +11 (2026-07-15): ADF-W1.4 remainder -- overall WorkIQ phase wall-clock budget threading; +5 (2026-07-15): per-plan timeout_seconds=AgencyBridge.WORKIQ_TIMEOUT cap; +213 (2026-07-16, specs/armada.md): gather-run manifest lifecycle wrapper, discovery CLI flag threading, and gather_run_id stamping (D-13 rule 4)
 # +5 (2026-07-15, ADF-W2.10 P7): risk/milestone/action status contradiction wiring (load_current_risk_entries/load_current_action_items + risks/milestones/actions kwargs at build_contradiction_packets call site).
 # Phase 6 reviewed exception (2026-06-07): flip-status + flip-parity sub-checks
 # added per specs/debt.md §11 Phase 6 Step 1. Branch extraction scheduled after
@@ -25,7 +25,10 @@ _GATHER_LOC_BUDGET = 5187  # +11 (2026-07-15): ADF-W1.4 remainder -- overall Wor
 # +20 (2026-06-23): --rev-health/--rev-program sub-check per specs/program-context-intelligence.md §5.13 (FR-PCI-12).
 # +18 (2026-07-14, ADF-W5.10): --schedule-health sub-check wiring
 # src/core/schedule_health.py (the primitive) into doctor's flag dispatch.
-_DOCTOR_LOC_BUDGET = 1681
+# +11 (2026-07-21): see tests/contracts/test_architecture_fitness.py's matching
+# LINE_BUDGETS entry for what changed (schedule_health summary payload,
+# --source-waivers evaluation-order fix, prefetch_enabled/kusto_enabled flags).
+_DOCTOR_LOC_BUDGET = 1692
 _AI_ROUTER_ALLOWED_FILES = frozenset(
     {
         Path("src/ai/client.py"),

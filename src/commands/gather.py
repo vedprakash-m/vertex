@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta, timezone
-import hashlib
 import json
 import logging
 import os
@@ -10,10 +9,8 @@ import os
 # Feature flag for chart gather — mirrors kusto_rendering.py
 _VERTEX_CHARTS_ENABLED = os.environ.get("VERTEX_CHARTS", "1") == "1"
 from pathlib import Path
-import re
 from time import monotonic, perf_counter
-import yaml
-from typing import Any, Callable, Literal
+from typing import Any, Callable
 import uuid
 from uuid import NAMESPACE_URL, uuid5
 
@@ -113,14 +110,33 @@ from src.commands.gather_pipeline.uil_binding_stage import resolve_uil_channel_b
 from src.commands.gather_pipeline.workiq_prefetch_stage import resolve_workiq_signals as _resolve_workiq_signals
 from src.commands.gather_workiq_helpers import WorkIQQueryPlan as _WorkIQQueryPlan, _truncate_signal_text, apply_structured_workiq_discovery as _apply_structured_workiq_discovery, build_workiq_fragment_signal_text as _build_workiq_fragment_signal_text, build_workiq_signal_text as _build_workiq_signal_text, extract_work_item_refs as _extract_work_item_refs, workiq_fragment_message_id as _workiq_fragment_message_id, workiq_message_id as _workiq_message_id, workiq_signal_fragments as _workiq_signal_fragments, workiq_source_type as _workiq_source_type, workiq_timestamp as _workiq_timestamp
 from src.ai.m365_topic_router import M365TopicRouter, M365TopicRouterError
-from src.ai.safety.pii_scrubber import filter_text
-from src.core.ai_proposal_store import load_ai_proposals
 from src.core.ado_enrichment import ADO_ANALYTICS_HISTORY_FIELDS, ADO_CHILD_BATCH_FIELDS, ADO_RISK_ASSESSMENT_COMMENT_FIELD, ADO_RISK_ASSESSMENT_FIELD, build_analytics_history, build_child_work_items, build_significant_findings, extract_child_ids_by_parent, infer_ado_risk_level, normalize_risk_assessment, serialize_trajectory_points
 from src.commands.gather_pipeline.provider_facade import ADOClient
+from src.commands.gather_auxiliary import (
+    archive_stale_weekly_journal_files as _archive_stale_weekly_journal_files,
+    build_engms_signals as _build_engms_signals,
+    build_integration_error_signal as _build_integration_error_signal,
+    compute_adaptive_window_days as _compute_adaptive_window_days,
+    run_sharepoint_ingest as _run_sharepoint_ingest,
+)
+from src.commands.gather_record_helpers import (
+    build_revision_signal_text as _build_revision_signal_text,
+    field_value as _field_value,
+    infer_risk_level as _infer_risk_level,
+    is_echo_chamber_comment as _record_is_echo_chamber_comment,
+    is_echo_chamber_revision as _record_is_echo_chamber_revision,
+    load_freshness_thresholds as _load_freshness_thresholds,
+    parse_datetime as _parse_datetime,
+    parse_identity as _parse_identity,
+    parse_tags as _parse_tags,
+    read_recent_signals as _read_recent_signals,
+    record_workiq_provenance as _record_workiq_provenance,
+    resolve_icm_workstream_id as _resolve_icm_workstream_id,
+    tracked_field_name as _tracked_field_name,
+    trajectory_point_from_item as _trajectory_point_from_item,
+    vertex_service_identities as _vertex_service_identities,
+)
 from src.core.ado_discovery import expand_with_linked_items
-from src.core.action_extractor_basic import extract_actions_from_signals
-from src.core.action_tracker import append_action
-from src.core.ado_semantics import _vertex_service_identities as _load_vertex_service_identities
 from src.core.analytics_store import replace_contradiction_state
 from src.core.channel_registry_store import ChannelRegistryStore, ShrinkageGuardError, compute_registry_delta, normalize_discovery_result_provider_instance
 from src.core.program_paths import (
@@ -128,7 +144,6 @@ from src.core.program_paths import (
     resolve_channel_registry_path_for_read,
 )
 from src.core.claim_tracker import load_open_claims
-from src.core.config_loader import load_editorial_rules
 from src.core.contradiction_engine import build_contradiction_packets
 from src.core.decision_extractor_basic import extract_decisions_from_signals
 from src.core.decision_register import upsert_decisions
@@ -145,8 +160,13 @@ from src.core.discovery_service import (
     seeded_source_attempt_reason as _service_seeded_source_attempt_reason,
     select_seeded_source_auto_resolve_candidate as _service_select_seeded_source_auto_resolve_candidate,
 )
+from src.core.alerts import read_alerts as _read_alerts
 from src.core.alerts import surface_alert_banner as _surface_alert_banner
 from src.core.edition_resolver import PROGRAMS_ROOT, _parse_program
+from src.commands.gather_pipeline.lifecycle_policy import (
+    freshness_state,
+    load_gather_runtime_policy,
+)
 from src.core.feedback.calibration_router import load_forecast_calibration_modifier
 from src.core.freshness_engine import build_freshness_report
 from src.core.gather_channel_support import (
@@ -154,7 +174,37 @@ from src.core.gather_channel_support import (
     binding_provider_instance_id as _binding_provider_instance_id,
     build_integration_error as _build_integration_error,
 )
+from src.core.gather_run_manifest import (
+    ACTOR_IDENTITY_INTERACTIVE,
+    ChannelOutcomeEntry,
+    GATHER_MUTATION_DOMAIN,
+    FailedRefEntry,
+    GatherRunManifest,
+    GatherRunStatus,
+    QueryResultEntry,
+    RequiredScopeStatus,
+    commit_staging_run,
+    create_staging_manifest,
+    fail_staging_run,
+    get_staging_run_dir,
+    hash_ado_items,
+    hash_query_results,
+    quarantine_abandoned_staging_runs,
+    resolve_latest_committed_manifest,
+    resolve_latest_full_committed_manifest,
+    write_ado_items,
+    write_query_results_sidecar,
+)
 from src.core.gather_state_store import load_gather_state
+from src.core.ledger.ulid import new_ulid
+from src.core.workspace_lease import (
+    LeaseFencingTokenStale,
+    LeaseHeldByAnotherOwner,
+    LeaseRenewalHeartbeat,
+    LeaseRenewalFailed,
+    acquire_lease,
+    release_lease,
+)
 from src.core.incident_journal_store import append_incident_entry
 from src.core.journal import archive_weekly_journal_files, archive_weekly_journal_files_by_retention, get_week_key
 from src.core.journal_retention import load_signal_retention_policy
@@ -188,7 +238,7 @@ from src.core.m365_payload_support import (
 )
 from src.core.m365_router_interface import IM365TopicRouter, M365ReassignCorrection
 from src.core.context_gap_store import append_context_gap
-from src.core.exceptions import AuthError, ConfigError, CredentialExpired, QueryError
+from src.core.exceptions import AuthError, ConfigError, CredentialExpired, QueryError, StateError
 from src.core.leakage_detector import LeakageReport, detect_leakage, load_approved_workiq_signals
 from src.core.m365_signal_corpus import build_m365_corpus_texts_by_workstream, build_m365_reassign_corrections_by_workstream, build_m365_rejected_texts_by_workstream, load_approved_m365_corpus_signals
 from src.core.m365_identifiers import normalize_meeting_id, normalize_thread_id
@@ -215,7 +265,6 @@ from src.core.plane1_changelog import append_plane1_changes, compute_plane1_chan
 from src.core.models_v2 import AIProposalStatus, ActionItem, IncidentEntry, IntegrationError, KustoQuery, Milestone, Program, ReviewPolicy, Signal, SignalReviewDecision, Team, TrajectoryPoint, VitalityAggregate, VitalityScore, Workstream
 from src.core.observability import RunLoggerAdapter, configure_file_logging, get_command_trace_path
 from src.core.reality_store import RealityStore
-from src.core.signal_classification import classify_signal as _classify_signal
 from src.core.signal_review import signal_can_be_auto_approved, signal_is_approved_for_evidence, compute_auto_approval_policies, write_autonomy_audit_entries
 from src.core.signal_ref_utils import merge_entity_refs, widen_ws_wi_refs
 from src.core.signal_dedup import dedupe_signals, dedupe_signals_with_audit
@@ -226,7 +275,6 @@ from src.core.source_candidate_store import (
 )
 from src.core.source_intent_audit import append_intent_decision_log, intent_decision_payload
 from src.core.engms_signal_extractor import EngMsSignalExtractor, hashes_from_artifacts
-from src.core.source_models import IngestionRun, SourceKind
 from src.core.store_factory import build_program_signal_store, build_program_trajectory_store, build_signal_store, build_trajectory_store
 from src.core.uil_channel_flags import (
     UIL_CHANNEL_ENABLED_FUNCS as _UIL_CHANNEL_ENABLED_FUNCS,
@@ -236,9 +284,6 @@ from src.core.uil_channel_flags import (
     uil_teams_enabled as _uil_teams_enabled,
 )
 from src.core.slice_contract_loader import SliceContract, load_slice_contract
-from src.core.trajectory import backfill_trajectory_points
-from src.core.trajectory_analyzer import count_eta_slips
-from src.core.vitality_reporting import parse_vitality_archive_entry, vitality_settings_from_program
 from src.core.workstream_path_resolver import resolve_workstream_id_loose_longest as _resolve_workstream_id
 from src.core.yaml_utils import load_yaml_mapping
 from src.m365.agency_bridge import AgencyBridge, AgencyCapabilities
@@ -420,6 +465,8 @@ def gather_command(
     verbose: bool = typer.Option(False, "--verbose", help="Write structured gather traces under publications/<program>/observability/."),
     facts_only: bool = typer.Option(False, "--facts-only", help="Skip full gather; only mirror current program facts into the fact store (FR-SG-61)."),
     extract_evidence: bool = typer.Option(False, "--extract-evidence", help="Run ContentExtractionAgent on transcript signals to populate WorkstreamEvidence. Requires --workiq. Off by default until validated."),
+    force_discovery: bool = typer.Option(False, "--force-discovery", help="Sec 4.4: bypass the discovery-staleness check for UIL-backed channels (ado/kusto/teams/icm) and force discovery even if not yet due. Required after changing query bindings."),
+    accept_shrinkage: bool = typer.Option(False, "--accept-shrinkage", help="Sec 4.4: accept a guarded registry shrinkage (>=30% removed, >=5 items) for UIL-backed channels this run instead of blocking the registry update; classified removals are printed."),
 ) -> None:
     if facts_only:
         _now = datetime.now(timezone.utc)
@@ -468,23 +515,31 @@ def gather_command(
         include_lt_deck=lt_deck,
         force_refresh=force_refresh,
     )
-    artifacts = gather_program(
-        program,
-        include_workiq=resolved_flags["workiq"],
-        include_kusto=resolved_flags["kusto"],
-        probe_kusto=resolved_flags["kusto"] and probe,
-        include_analytics=resolved_flags["analytics"],
-        include_sprints=resolved_flags["sprints"],
-        include_pipelines=resolved_flags["pipelines"],
-        include_icm=resolved_flags["icm"],
-        include_dependency_scout=resolved_flags["dependency_scout"],
-        include_engms=resolved_flags["engms"],
-        include_sharepoint=resolved_flags["sharepoint"],
-        include_lt_deck=resolved_flags["lt_deck"],
-        force_refresh=resolved_flags["force_refresh"],
-        extract_evidence=extract_evidence,
-        progress_callback=_emit_progress,
-    )
+    try:
+        artifacts = gather_program(
+            program,
+            include_workiq=resolved_flags["workiq"],
+            include_kusto=resolved_flags["kusto"],
+            probe_kusto=resolved_flags["kusto"] and probe,
+            include_analytics=resolved_flags["analytics"],
+            include_sprints=resolved_flags["sprints"],
+            include_pipelines=resolved_flags["pipelines"],
+            include_icm=resolved_flags["icm"],
+            include_dependency_scout=resolved_flags["dependency_scout"],
+            include_engms=resolved_flags["engms"],
+            include_sharepoint=resolved_flags["sharepoint"],
+            include_lt_deck=resolved_flags["lt_deck"],
+            force_refresh=resolved_flags["force_refresh"],
+            extract_evidence=extract_evidence,
+            progress_callback=_emit_progress,
+            force_discovery=force_discovery,
+            accept_shrinkage=accept_shrinkage,
+        )
+    except (GatherLeaseConflict, LeaseFencingTokenStale, LeaseRenewalFailed) as error:
+        # D-7/AG-7.3: an overlapping or fenced-out gather is not a usage
+        # error (Typer's default code 2); it is scheduler-actionable state.
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=4) from error
     typer.echo(
         f"Gathered {artifacts.discovered_signals} signals ({artifacts.new_signals} new, {artifacts.pending_review} pending review) for {artifacts.program_id}"
     )
@@ -531,7 +586,87 @@ def gather_command(
             },
         )
         typer.echo(f"Trace: {trace_path}")
-    raise typer.Exit(code=0)
+    raise typer.Exit(code=_semantic_gather_exit_code(artifacts))
+
+
+def _semantic_gather_exit_code(artifacts: GatherArtifacts) -> int:
+    """D-7's successful-process outcome mapping.
+
+    The ADO channel defines required delivery scope; all other currently
+    optional integrations may degrade without invalidating the manual refresh.
+    Framework exceptions deliberately remain exceptions (the scheduler treats
+    their conventional non-zero exit as failed/non-current per D-7).
+    """
+    if _has_required_scope_degradation(artifacts):
+        return 3
+    if not artifacts.integration_errors:
+        return 0
+    return 2
+
+
+class GatherLeaseConflict(typer.BadParameter):
+    """A gather-domain lease conflict with D-7's scheduler exit semantics.
+
+    This remains a ``typer.BadParameter`` subclass so Python/API callers keep
+    the established validation-error surface, while ``gather_command`` can
+    distinguish it from ordinary CLI argument errors and return exit 4.
+    """
+
+
+def _has_required_ado_degradation(artifacts: GatherArtifacts) -> bool:
+    """ADO is the authoritative Armada delivery-scope channel.
+
+    Treat every ADO integration error as required-scope degradation. A
+    stage-name allowlist would inevitably miss a newly introduced ADO stage
+    and silently promote a partial run to FULL.
+    """
+    return any(
+        error.source == "ado"
+        for error in artifacts.integration_errors
+    )
+
+
+def _has_required_scope_degradation(artifacts: GatherArtifacts) -> bool:
+    """Required scope is degraded by ADO failure, incomplete capture, or skew."""
+    capture_times = tuple(result.captured_at for result in artifacts.ado_query_results)
+    capture_skew_exceeded = (
+        len(capture_times) >= 2
+        and (max(capture_times) - min(capture_times)).total_seconds() > 300
+    )
+    query_capture_incomplete = any(
+        result.cap_reached
+        or result.completeness_state != "FULL"
+        or result.failure_category is not None
+        for result in artifacts.ado_query_results
+    )
+    return _has_required_ado_degradation(artifacts) or query_capture_incomplete or capture_skew_exceeded
+
+
+def _alert_ledger_state(
+    program_id: str, *, programs_root: Path
+) -> tuple[dict[str, tuple[int, datetime | None, datetime | None]], bool]:
+    """Read the alert ledger without allowing observability I/O to block gather.
+
+    The boolean is intentionally carried to the manifest: failure to observe
+    alert lifecycle evidence is operationally meaningful, but it must not
+    turn a successfully gathered authoritative scope into a failed run.
+    """
+    try:
+        return (
+            {
+                record.alert_id: (record.occurrence_count, record.last_seen, record.resolved_at)
+                for record in _read_alerts(program_id, programs_root=programs_root, include_resolved=True)
+            },
+            False,
+        )
+    except (OSError, StateError, ValueError):
+        return {}, True
+
+
+def _full_discovery_timestamp(manifest: GatherRunManifest | None) -> datetime | None:
+    if manifest is None:
+        return None
+    return manifest.last_successful_full_discovery_at or manifest.last_query_captured_at or manifest.finished_at
 
 
 def gather_program(
@@ -566,6 +701,311 @@ def gather_program(
     ai_action_extractor: AIActionExtractor | None = None,
     extract_evidence: bool = False,
     progress_callback: GatherProgressCallback | None = None,
+    force_discovery: bool = False,
+    accept_shrinkage: bool = False,
+    actor_identity_type: str = ACTOR_IDENTITY_INTERACTIVE,
+) -> GatherArtifacts:
+    """D-13/Sec 4.6 lifecycle wrapper around the actual gather implementation.
+
+    Before delegating: reconciles any ``gather_runs/staging`` manifests
+    abandoned by a crashed prior process (D-13 rule 8), then acquires the
+    program's ``gather`` workspace lease -- failing fast with a clear error
+    if another process currently holds it (no silent queuing/retry) -- and
+    creates a ``status=running`` manifest. After delegating: on success,
+    populates the manifest's aggregate fields from the returned
+    ``GatherArtifacts`` and commits it; on any exception (including the
+    early config-validation ``typer.BadParameter`` raised below), fails the
+    manifest instead. The lease is always released before returning or
+    re-raising. See specs/armada.md D-13 through D-17 and Sec 4.6.
+
+    Legacy injected loaders cannot provide authoritative discovery membership.
+    They therefore commit as ``PARTIAL`` with ``discovered_count=0`` rather
+    than inferring scope from hydration. UIL ADO gathers carry immutable
+    per-query membership captures; all enabled source phases carry bounded
+    channel outcomes. Per-connector retry/throttle counters remain a future
+    enrichment where a connector does not expose those counters.
+    """
+    resolved_programs_root = programs_root or PROGRAMS_ROOT
+    runtime_policy = load_gather_runtime_policy(
+        program_id,
+        programs_root=resolved_programs_root,
+    )
+
+    def run_implementation(gather_run_id: str | None) -> GatherArtifacts:
+        return _gather_program_impl(
+            program_id,
+            as_of=as_of,
+            programs_root=programs_root,
+            loader=loader,
+            freshness_loader=freshness_loader,
+            include_workiq=include_workiq,
+            bridge_factory=bridge_factory,
+            m365_topic_router=m365_topic_router,
+            include_kusto=include_kusto,
+            probe_kusto=probe_kusto,
+            kusto_query_executor=kusto_query_executor,
+            include_analytics=include_analytics,
+            analytics_signal_loader=analytics_signal_loader,
+            include_sprints=include_sprints,
+            sprint_signal_loader=sprint_signal_loader,
+            include_pipelines=include_pipelines,
+            pipeline_signal_loader=pipeline_signal_loader,
+            include_icm=include_icm,
+            icm_client_factory=icm_client_factory,
+            include_engms=include_engms,
+            engms_extractor=engms_extractor,
+            include_sharepoint=include_sharepoint,
+            include_lt_deck=include_lt_deck,
+            force_refresh=force_refresh,
+            sharepoint_pipeline_runner=sharepoint_pipeline_runner,
+            include_dependency_scout=include_dependency_scout,
+            background_synthesis_runner=background_synthesis_runner,
+            ai_action_extractor=ai_action_extractor,
+            extract_evidence=extract_evidence,
+            progress_callback=progress_callback,
+            force_discovery=force_discovery,
+            accept_shrinkage=accept_shrinkage,
+            gather_run_id=gather_run_id,
+        )
+
+    # D-24's off mode is an explicit compatibility path. It neither creates
+    # lifecycle artifacts nor stamps records with a gather-run ID.
+    if runtime_policy.run_manifest_mode == "off":
+        return run_implementation(None)
+
+    lifecycle_started_at = datetime.now(timezone.utc)
+    quarantine_abandoned_staging_runs(
+        program_id,
+        finished_at=lifecycle_started_at,
+        programs_root=resolved_programs_root,
+    )
+
+    lease_owner = f"vertex_gather:{uuid.uuid4().hex[:12]}"
+    try:
+        lease = acquire_lease(
+            program_id,
+            lease_owner,
+            mutation_domain=GATHER_MUTATION_DOMAIN,
+            programs_root=resolved_programs_root,
+        )
+    except LeaseHeldByAnotherOwner as exc:
+        raise GatherLeaseConflict(
+            f"Program '{program_id}' already has a gather running (lease held by "
+            f"{exc.holder!r} until {exc.expires_at.isoformat()}). Wait for it to finish "
+            "or expire before retrying."
+        ) from exc
+
+    alert_ledger_before, alert_tracking_failed = _alert_ledger_state(
+        program_id, programs_root=resolved_programs_root
+    )
+    previous_committed_run = resolve_latest_committed_manifest(
+        program_id, programs_root=resolved_programs_root
+    )
+    previous_full_run = resolve_latest_full_committed_manifest(
+        program_id, programs_root=resolved_programs_root
+    )
+
+    run_id = f"gather-{new_ulid(lifecycle_started_at)}"
+    running_manifest = GatherRunManifest(
+        run_id=run_id,
+        status=GatherRunStatus.RUNNING,
+        program_id=program_id,
+        actor_identity_type=actor_identity_type,
+        lease_owner=lease.owner,
+        lease_fencing_token=lease.fencing_token,
+        started_at=lifecycle_started_at,
+        scope_as_of=as_of or lifecycle_started_at,
+        required_scope_status=RequiredScopeStatus.FULL,
+    )
+    create_staging_manifest(running_manifest, programs_root=resolved_programs_root)
+    # D-13/AG-7.3: a gather can legitimately exceed the lease TTL while a
+    # remote channel is bounded but slow. Renew in the background and retain
+    # a synchronous pre-promotion fence so a superseded worker cannot publish
+    # a manifest after a newer holder takes the gather domain.
+    lease_heartbeat = LeaseRenewalHeartbeat(lease, programs_root=resolved_programs_root)
+    lease_heartbeat.start()
+
+    try:
+        artifacts = run_implementation(run_id)
+    except BaseException:
+        try:
+            fail_staging_run(
+                running_manifest,
+                finished_at=datetime.now(timezone.utc),
+                programs_root=resolved_programs_root,
+            )
+        finally:
+            # A failure recording the failure must not strand the lease.
+            lease_heartbeat.stop()
+            release_lease(lease_heartbeat.handle, programs_root=resolved_programs_root)
+        raise
+
+    # The immediate renewal is the promotion fence: it fails if a TTL expiry
+    # allowed another process to acquire a newer fencing token while the
+    # gather was still executing. Treat that loss exactly like any other
+    # handled lifecycle failure: do not leave a runnable staging directory or
+    # a background heartbeat behind.
+    try:
+        lease = lease_heartbeat.renew_now()
+    except BaseException:
+        try:
+            fail_staging_run(
+                running_manifest,
+                finished_at=datetime.now(timezone.utc),
+                programs_root=resolved_programs_root,
+            )
+        finally:
+            lease_heartbeat.stop()
+            release_lease(lease_heartbeat.handle, programs_root=resolved_programs_root)
+        raise
+    finished_at = datetime.now(timezone.utc)
+    alert_ledger_after, post_gather_alert_tracking_failed = _alert_ledger_state(
+        program_id, programs_root=resolved_programs_root
+    )
+    alert_tracking_failed = alert_tracking_failed or post_gather_alert_tracking_failed
+    alert_ids = tuple(sorted(
+        alert_id
+        for alert_id, state in alert_ledger_after.items()
+        if state != alert_ledger_before.get(alert_id)
+    ))
+    failed_refs = tuple(
+        FailedRefEntry(ref_kind=error.source, ref_id=error.stage, reason=error.message)
+        for error in artifacts.integration_errors
+    )
+    query_results = tuple(
+        QueryResultEntry(
+            query_id=result.query_id,
+            scope_id=result.scope_id,
+            wiql_hash=result.wiql_hash,
+            captured_at=result.captured_at,
+            raw_count=result.raw_count,
+            membership_ids=result.membership_ids,
+            membership_hash=result.membership_hash,
+            cap_reached=result.cap_reached,
+            completeness_state=result.completeness_state,
+            failure_category=result.failure_category,
+        )
+        for result in artifacts.ado_query_results
+    )
+    query_capture_times = tuple(result.captured_at for result in query_results)
+    first_query_captured_at = min(query_capture_times) if query_capture_times else None
+    last_query_captured_at = max(query_capture_times) if query_capture_times else None
+    query_capture_skew_seconds = (
+        (last_query_captured_at - first_query_captured_at).total_seconds()
+        if first_query_captured_at is not None and last_query_captured_at is not None
+        else None
+    )
+    query_capture_skew_exceeded = (
+        query_capture_skew_seconds is not None and query_capture_skew_seconds > 300
+    )
+    authoritative_discovery_captured = bool(query_results)
+    required_scope_status = (
+        RequiredScopeStatus.PARTIAL
+        if (
+            _has_required_scope_degradation(artifacts)
+            or query_capture_skew_exceeded
+            or not authoritative_discovery_captured
+        )
+        else RequiredScopeStatus.FULL
+    )
+    last_successful_full_discovery_at = (
+        (last_query_captured_at or finished_at)
+        if required_scope_status is RequiredScopeStatus.FULL
+        else _full_discovery_timestamp(previous_full_run)
+    )
+    next_expected_run_at = (
+        last_successful_full_discovery_at + timedelta(hours=runtime_policy.full_discovery_cadence_hours)
+        if last_successful_full_discovery_at is not None
+        else None
+    )
+    consecutive_failed_runs = (
+        0
+        if required_scope_status is RequiredScopeStatus.FULL
+        else (previous_committed_run.consecutive_failed_runs if previous_committed_run is not None else 0) + 1
+    )
+    ado_items = [{"work_item_id": item_id} for item_id in artifacts.hydrated_work_item_ids]
+    staging_dir = get_staging_run_dir(program_id, run_id, programs_root=resolved_programs_root)
+    # The sidecars are written before the final manifest so the hashes cover
+    # exactly the data atomically promoted with that manifest.
+    write_ado_items(staging_dir, ado_items)
+    write_query_results_sidecar(staging_dir, query_results)
+    final_manifest = replace(
+        running_manifest,
+        required_scope_status=required_scope_status,
+        first_query_captured_at=first_query_captured_at,
+        last_query_captured_at=last_query_captured_at,
+        query_capture_skew_seconds=query_capture_skew_seconds,
+        query_results=query_results,
+        discovered_count=len(artifacts.discovered_work_item_ids),
+        hydrated_count=len(artifacts.hydrated_work_item_ids),
+        ado_call_count=artifacts.ado_calls,
+        failed_refs=failed_refs,
+        channel_outcomes=tuple(artifacts.channel_outcomes),
+        alert_ids=alert_ids,
+        alert_delivery_failed=alert_tracking_failed,
+        last_successful_full_discovery_at=last_successful_full_discovery_at,
+        last_attempt_at=finished_at,
+        next_expected_run_at=next_expected_run_at,
+        consecutive_failed_runs=consecutive_failed_runs,
+        freshness_state=freshness_state(
+            last_successful_full_discovery_at=last_successful_full_discovery_at,
+            # The stored state describes this immutable capture as-of its
+            # declared scope. Consumers recompute it against their own clock.
+            now=running_manifest.scope_as_of,
+            warn_hours=runtime_policy.freshness_warn_hours,
+            block_hours=runtime_policy.freshness_block_hours,
+        ),
+        cap_reached=any(result.cap_reached for result in query_results),
+        ado_items_hash=hash_ado_items(ado_items),
+        query_results_hash=hash_query_results(query_results),
+        latency=(finished_at - lifecycle_started_at).total_seconds(),
+    )
+    # Promotion is filesystem I/O and may fail. Do not strand the
+    # single-writer lease until its TTL expires; recovery will quarantine the
+    # still-staged run on the next attempt.
+    try:
+        commit_staging_run(final_manifest, finished_at=finished_at, programs_root=resolved_programs_root)
+    finally:
+        lease_heartbeat.stop()
+        release_lease(lease_heartbeat.handle, programs_root=resolved_programs_root)
+    return artifacts
+
+
+def _gather_program_impl(
+    program_id: str,
+    *,
+    as_of: datetime | None = None,
+    programs_root: Path | None = None,
+    loader: GatherLoader | None = None,
+    freshness_loader: GatherLoader | None = None,
+    include_workiq: bool = False,
+    bridge_factory: BridgeFactory | None = None,
+    m365_topic_router: IM365TopicRouter | None = None,
+    include_kusto: bool = False,
+    probe_kusto: bool = False,
+    kusto_query_executor: KustoQueryExecutor | None = None,
+    include_analytics: bool = False,
+    analytics_signal_loader: AnalyticsSignalLoader | None = None,
+    include_sprints: bool = False,
+    sprint_signal_loader: SprintSignalLoader | None = None,
+    include_pipelines: bool = False,
+    pipeline_signal_loader: PipelineSignalLoader | None = None,
+    include_icm: bool = False,
+    icm_client_factory: IcmClientFactory | None = None,
+    include_engms: bool = False,
+    engms_extractor: EngMsSignalExtractor | None = None,
+    include_sharepoint: bool = False,  # SP1-1
+    include_lt_deck: bool = False,     # SP1-1
+    force_refresh: bool = False,       # SP1-1
+    sharepoint_pipeline_runner: Any | None = None,  # SP1-2 DI: injectable for tests
+    include_dependency_scout: bool = False,
+    background_synthesis_runner: BackgroundSynthesisRunner | None = None,
+    ai_action_extractor: AIActionExtractor | None = None,
+    extract_evidence: bool = False,
+    progress_callback: GatherProgressCallback | None = None,
+    force_discovery: bool = False,
+    accept_shrinkage: bool = False,
+    gather_run_id: str | None = None,
 ) -> GatherArtifacts:
     resolved_programs_root = programs_root or PROGRAMS_ROOT
     # ADF-W2.12: one correlation id per gather cycle (mirrors report.py's
@@ -598,6 +1038,8 @@ def gather_program(
     progress_index = 0
     integration_error_details: list[IntegrationError] = []
     query_states: dict[str, dict[str, Any]] = {}
+    ado_discovery_results: list[Any] = []
+    channel_outcomes: list[ChannelOutcomeEntry] = []
     workiq_signals: tuple[Signal, ...] = ()
     kusto_signals: tuple[Signal, ...] = ()
     kusto_kpi_signals: tuple[Signal, ...] = ()
@@ -638,6 +1080,36 @@ def gather_program(
             )
         )
 
+    def _record_channel_outcome(
+        channel: str,
+        started_at: float,
+        *,
+        error_start_index: int,
+        ado_call_count: int = 0,
+    ) -> None:
+        """Append one bounded manifest outcome for a direct source phase.
+
+        UIL providers record their own outcome. Direct phases are observed at
+        this orchestration boundary so every enabled source has the same
+        operational visibility without changing connector interfaces.
+        """
+        if any(entry.channel == channel for entry in channel_outcomes):
+            return
+        new_errors = tuple(
+            error.message
+            for error in integration_error_details[error_start_index:]
+            if error.source == channel
+        )
+        channel_outcomes.append(
+            ChannelOutcomeEntry(
+                channel=channel,
+                degraded=bool(new_errors),
+                degrade_reason=new_errors[0] if new_errors else None,
+                elapsed_seconds=perf_counter() - started_at,
+                ado_call_count=ado_call_count,
+            )
+        )
+
     current_time = as_of or datetime.now(timezone.utc)
     gather_started_at = datetime.now(timezone.utc)  # WS-17: anchor run_telemetry
     gather_v2_enabled = _gather_v2_enabled()
@@ -653,6 +1125,7 @@ def gather_program(
         program_id,
         as_of=current_time,
         programs_root=resolved_programs_root,
+        default_retention_weeks=_DEFAULT_WEEKLY_JOURNAL_RETENTION_WEEKS,
     )
     signal_window_start = current_time - timedelta(
         days=_compute_adaptive_window_days(
@@ -669,6 +1142,7 @@ def gather_program(
     )
 
     fetch_started_at = perf_counter()
+    fetch_error_start = len(integration_error_details)
     ado_uil_binding = (
         _resolve_uil_channel_binding_for_gather(program, workstreams, "ado", programs_root=resolved_programs_root)
         if loader is None
@@ -684,6 +1158,10 @@ def gather_program(
             binding=ado_uil_binding,
             integration_error_sink=integration_error_details,
             gather_v2_enabled=gather_v2_enabled,
+            force_discovery=force_discovery,
+            accept_shrinkage=accept_shrinkage,
+            discovery_result_sink=ado_discovery_results,
+            channel_outcome_sink=channel_outcomes,
         )
         ado_calls = uil_ado_calls
         freshness_ado_calls = 0
@@ -703,6 +1181,13 @@ def gather_program(
         programs_root=resolved_programs_root,
         signal_store=signal_store,
     )
+    if loader is not None:
+        _record_channel_outcome(
+            "ado",
+            fetch_started_at,
+            error_start_index=fetch_error_start,
+            ado_call_count=ado_calls + freshness_ado_calls,
+        )
     _complete_progress_step(
         "fetch",
         fetch_started_at,
@@ -754,6 +1239,7 @@ def gather_program(
 
     if include_workiq:
         workiq_started_at = perf_counter()
+        workiq_error_start = len(integration_error_details)
         # Bound the *whole* WorkIQ phase (all query plans combined) by the
         # program's configured retrieval budget -- without this, a live run
         # with N query plans could take up to WORKIQ_TIMEOUT (or the slower
@@ -827,9 +1313,15 @@ def gather_program(
             *candidate_signals,
             *workiq_signals,
         )
+        _record_channel_outcome(
+            "workiq",
+            workiq_started_at,
+            error_start_index=workiq_error_start,
+        )
         _complete_progress_step("workiq", workiq_started_at, f"signals={len(workiq_signals)}")
     if _uil_teams_enabled():
         teams_uil_started_at = perf_counter()
+        teams_error_start = len(integration_error_details)
         teams_uil_count = 0
         try:
             teams_uil_binding = _resolve_uil_channel_binding_for_gather(
@@ -847,6 +1339,8 @@ def gather_program(
                     binding=teams_uil_binding,
                     integration_error_sink=integration_error_details,
                     gather_v2_enabled=gather_v2_enabled,
+                    force_discovery=force_discovery,
+                    accept_shrinkage=accept_shrinkage,
                 )
                 candidate_signals = (*candidate_signals, *teams_uil_signals)
                 teams_uil_count = len(teams_uil_signals)
@@ -855,12 +1349,18 @@ def gather_program(
             # gather signal instead of aborting ADO-backed source truth collection.
             integration_error_details.append(_build_integration_error(source="teams", stage="gather", error=str(exc)))
             log.warning("Teams UIL gather failed for %s: %s", program_id, exc)
+        _record_channel_outcome(
+            "teams",
+            teams_uil_started_at,
+            error_start_index=teams_error_start,
+        )
         # Emit the progress step exactly once whenever the channel is enabled so the
         # registered step count (built by _build_gather_progress_steps) stays in lockstep
         # with emissions across the binding-absent and failure paths.
         _complete_progress_step("teams_uil", teams_uil_started_at, f"signals={teams_uil_count}")
     if include_kusto:
         kusto_started_at = perf_counter()
+        kusto_error_start = len(integration_error_details)
         try:
             kusto_uil_binding = _resolve_uil_channel_binding_for_gather(
                 program,
@@ -881,6 +1381,8 @@ def gather_program(
                     query_state_sink=query_states,
                     previous_query_states=previous_query_states,
                     gather_v2_enabled=gather_v2_enabled,
+                    force_discovery=force_discovery,
+                    accept_shrinkage=accept_shrinkage,
                 )
             else:
                 if kusto_query_executor is None:
@@ -972,12 +1474,18 @@ def gather_program(
             *kusto_signals,
             *kusto_kpi_signals,
         )
+        _record_channel_outcome(
+            "kusto",
+            kusto_started_at,
+            error_start_index=kusto_error_start,
+        )
         _complete_progress_step("kusto", kusto_started_at, f"signals={len(kusto_signals) + len(kusto_kpi_signals)}")
 
     # Phase 2: Chart gather — independent of kusto signal gathering
     chart_gather_results: tuple[Any, ...] = ()
     if _VERTEX_CHARTS_ENABLED:
         chart_started_at = perf_counter()
+        chart_error_start = len(integration_error_details)
         try:
             from src.commands.chart_gather import gather_chart_data
 
@@ -999,6 +1507,11 @@ def gather_program(
             integration_error_details.append(
                 _build_integration_error(source="charts", stage="gather", error=str(exc))
             )
+        _record_channel_outcome(
+            "charts",
+            chart_started_at,
+            error_start_index=chart_error_start,
+        )
         _complete_progress_step(
             "chart_gather",
             chart_started_at,
@@ -1008,6 +1521,7 @@ def gather_program(
     analytics_ado_calls = 0
     if include_analytics:
         analytics_started_at = perf_counter()
+        analytics_error_start = len(integration_error_details)
         try:
             if analytics_signal_loader is None:
                 analytics_signals, analytics_ado_calls = _load_analytics_signals(
@@ -1036,6 +1550,12 @@ def gather_program(
             )
             log.warning("ADO Analytics gather failed for %s: %s", program_id, exc)
         candidate_signals = (*candidate_signals, *analytics_signals)
+        _record_channel_outcome(
+            "analytics",
+            analytics_started_at,
+            error_start_index=analytics_error_start,
+            ado_call_count=analytics_ado_calls,
+        )
         _complete_progress_step(
             "analytics",
             analytics_started_at,
@@ -1044,6 +1564,7 @@ def gather_program(
     sprint_ado_calls = 0
     if include_sprints:
         sprints_started_at = perf_counter()
+        sprints_error_start = len(integration_error_details)
         sprint_signals, sprint_ado_calls = (sprint_signal_loader or _load_sprint_signals)(
             program,
             workstreams,
@@ -1053,6 +1574,12 @@ def gather_program(
                 previous_query_states=previous_query_states,
         )
         candidate_signals = (*candidate_signals, *sprint_signals)
+        _record_channel_outcome(
+            "sprints",
+            sprints_started_at,
+            error_start_index=sprints_error_start,
+            ado_call_count=sprint_ado_calls,
+        )
         _complete_progress_step(
             "sprints",
             sprints_started_at,
@@ -1061,6 +1588,7 @@ def gather_program(
     pipeline_ado_calls = 0
     if include_pipelines:
         pipelines_started_at = perf_counter()
+        pipelines_error_start = len(integration_error_details)
         pipeline_signals, pipeline_ado_calls = (pipeline_signal_loader or _load_pipeline_signals)(
             program,
             workstreams,
@@ -1069,6 +1597,12 @@ def gather_program(
             previous_query_states=previous_query_states,
         )
         candidate_signals = (*candidate_signals, *pipeline_signals)
+        _record_channel_outcome(
+            "pipelines",
+            pipelines_started_at,
+            error_start_index=pipelines_error_start,
+            ado_call_count=pipeline_ado_calls,
+        )
         _complete_progress_step(
             "pipelines",
             pipelines_started_at,
@@ -1076,6 +1610,7 @@ def gather_program(
         )
     if include_icm:
         icm_started_at = perf_counter()
+        icm_error_start = len(integration_error_details)
         try:
             icm_uil_binding = _resolve_uil_channel_binding_for_gather(
                 program,
@@ -1092,6 +1627,8 @@ def gather_program(
                     binding=icm_uil_binding,
                     integration_error_sink=integration_error_details,
                     gather_v2_enabled=gather_v2_enabled,
+                    force_discovery=force_discovery,
+                    accept_shrinkage=accept_shrinkage,
                 )
             else:
                 icm_signals = _build_icm_signals(
@@ -1120,9 +1657,15 @@ def gather_program(
             *candidate_signals,
             *icm_signals,
         )
+        _record_channel_outcome(
+            "icm",
+            icm_started_at,
+            error_start_index=icm_error_start,
+        )
         _complete_progress_step("icm", icm_started_at, f"signals={len(icm_signals)}")
     if include_engms:
         engms_started_at = perf_counter()
+        engms_error_start = len(integration_error_details)
         engms_signals, engms_hash_state = _build_engms_signals(
             items=items,
             program_id=program_id,
@@ -1132,9 +1675,15 @@ def gather_program(
         )
         query_states["engms"] = engms_hash_state
         candidate_signals = (*candidate_signals, *engms_signals)
+        _record_channel_outcome(
+            "engms",
+            engms_started_at,
+            error_start_index=engms_error_start,
+        )
         _complete_progress_step("engms", engms_started_at, f"signals={len(engms_signals)}")
     if include_sharepoint:  # SP1-1/SP1-2/SP1-3
         sp_started_at = perf_counter()
+        sharepoint_error_start = len(integration_error_details)
         sp_result = _run_sharepoint_ingest(
             program_id=program_id,
             programs_root=resolved_programs_root,
@@ -1153,6 +1702,11 @@ def gather_program(
                 "signals_created": sp_result.signals_created,
                 "docs_processed": sp_result.docs_processed,
             }
+        _record_channel_outcome(
+            "sharepoint",
+            sp_started_at,
+            error_start_index=sharepoint_error_start,
+        )
         _complete_progress_step(
             "sharepoint",
             sp_started_at,
@@ -1171,6 +1725,7 @@ def gather_program(
             programs_root=resolved_programs_root,
             ai_action_extractor=ai_action_extractor,
             correlation_id=correlation_id,
+            gather_run_id=gather_run_id,
         )
     )
     new_signals = persistence_result.new_signals
@@ -1316,6 +1871,18 @@ def gather_program(
     )
     promotion_candidates = m365_discovery_result.promotion_candidates
     m365_discovery_state = m365_discovery_result.m365_discovery_state
+    ado_query_results = tuple(
+        query_result
+        for discovery_result in ado_discovery_results
+        for query_result in getattr(discovery_result, "query_results", ())
+    )
+    discovered_work_item_ids = tuple(sorted({
+        ref.registration.ref_id
+        for discovery_result in ado_discovery_results
+        for ref in getattr(discovery_result, "discovered_refs", ())
+        if ref.registration.ref_kind == "work_item"
+    }, key=int))
+    hydrated_work_item_ids = tuple(sorted({str(item.id) for item in items}, key=int))
     finalize_started_at = perf_counter()
     state_write_result = run_state_write_stage(
         StateWriteStageInput(
@@ -1346,6 +1913,10 @@ def gather_program(
             chart_results=chart_gather_results,
             hypothesis_count=len(proposed_hypotheses),
             correlation_id=correlation_id,
+            ado_query_results=ado_query_results,
+            discovered_work_item_ids=discovered_work_item_ids,
+            hydrated_work_item_ids=hydrated_work_item_ids,
+            channel_outcomes=tuple(channel_outcomes),
         )
     )
     _complete_progress_step(
@@ -1431,180 +2002,6 @@ def _emit_credential_expired_banner(exc: BaseException, source: str) -> None:
     )
 
 
-def _build_integration_error_signal(
-    *,
-    program_id: str,
-    source: str,
-    error: str,
-    as_of: datetime,
-) -> Signal:
-    normalized_error = error.strip() or "Unknown integration error"
-    raw_ref = f"system:{source}:{as_of.isoformat()}"
-    return Signal(
-        id=str(uuid5(NAMESPACE_URL, f"{program_id}|{raw_ref}|{normalized_error}")),
-        timestamp=as_of,
-        source="system",
-        program_id=program_id,
-        workstream_id=None,
-        entity_refs=(),
-        text=_truncate_signal_text(f"{source} integration failed: {normalized_error}"),
-        raw_ref=raw_ref,
-        confidence=Confidence.NONE,
-        metadata={
-            "integration_source": source,
-            "error": normalized_error,
-        },
-    )
-
-
-def _compute_adaptive_window_days(
-    program_id: str,
-    *,
-    signal_store: Any,
-    as_of: datetime,
-    default_days: int,
-    lookback_days: int = 90,
-) -> int:
-    """FR-SG-34: Compute an adaptive evidence window based on median signal interval.
-
-    Reads recent signal history (lookback_days) to estimate the cadence of signal
-    arrivals and returns clamp(7, 3 × median_interval_days, 45).
-    Falls back to default_days when insufficient history exists.
-    """
-    try:
-        cutoff = as_of - timedelta(days=lookback_days)
-        recent_signals = tuple(signal_store.signals_after(cutoff))
-        if len(recent_signals) < 5:
-            return default_days
-        sorted_signals = sorted(recent_signals, key=lambda s: s.created_at or as_of)
-        if len(sorted_signals) < 2:
-            return default_days
-        intervals_days: list[float] = []
-        for i in range(1, len(sorted_signals)):
-            a = sorted_signals[i - 1].created_at
-            b = sorted_signals[i].created_at
-            if a is not None and b is not None:
-                delta = (b - a).total_seconds() / 86400.0
-                if delta > 0:
-                    intervals_days.append(delta)
-        if not intervals_days:
-            return default_days
-        median_interval = sorted(intervals_days)[len(intervals_days) // 2]
-        adaptive = int(3 * median_interval)
-        return max(7, min(adaptive, 45))
-    except (OSError, AttributeError, TypeError, ValueError):
-        return default_days
-
-
-def _archive_stale_weekly_journal_files(
-    program_id: str,
-    *,
-    as_of: datetime,
-    programs_root: Path,
-) -> tuple[Path, ...]:
-    retention_policy = load_signal_retention_policy(program_id, programs_root=programs_root)
-    if retention_policy is not None:
-        return archive_weekly_journal_files_by_retention(
-            program_id,
-            as_of=as_of,
-            retention_days_by_source=retention_policy.retention_days_by_source,
-            default_retention_days=retention_policy.default_retention_days,
-            programs_root=programs_root,
-        )
-    cutoff_week = get_week_key(as_of - timedelta(weeks=_DEFAULT_WEEKLY_JOURNAL_RETENTION_WEEKS))
-    return archive_weekly_journal_files(
-        program_id,
-        before_week=cutoff_week,
-        programs_root=programs_root,
-    )
-
-
-def _build_engms_signals(
-    *,
-    items: tuple[WorkItem, ...],
-    program_id: str,
-    previous_query_states: dict[str, dict[str, Any]],
-    extractor: EngMsSignalExtractor | None = None,
-    integration_error_sink: list[IntegrationError] | None = None,
-) -> tuple[tuple[Signal, ...], dict[str, Any]]:
-    """Run the eng.ms secondary extractor over hydrated ADO work items.
-
-    Returns ``(signals, hash_state)`` where ``hash_state`` is the per-URL content-hash map
-    to persist in ``query_states['engms']`` so the next run can skip unchanged pages.
-    Never raises — integration failures are recorded on the error sink and yield no signals.
-    """
-    engms_extractor = extractor or EngMsSignalExtractor()
-    previous_hashes = hashes_from_artifacts(previous_query_states.get("engms", {}))
-    try:
-        result = engms_extractor.extract(items, program_id, previous_hashes=previous_hashes)
-    except Exception as exc:  # pragma: no cover - defensive: extractor must never crash gather
-        _append_integration_error_once(
-            integration_error_sink,
-            source="engms",
-            stage="gather",
-            error=str(exc),
-        )
-        # Preserve prior hashes so a transient failure does not re-emit every signal next run.
-        return (), dict(previous_query_states.get("engms", {}))
-    for error in result.errors:
-        _append_integration_error_once(
-            integration_error_sink,
-            source=error.source,
-            stage=error.stage,
-            error=error.message,
-        )
-    # Merge fresh hashes over prior state rather than replacing wholesale: the extractor
-    # only emits hashes for URLs it actually fetched this run (bounded by max_urls and
-    # skipping transient fetch failures). Replacing would drop prior hashes for capped or
-    # momentarily-unreachable URLs, causing them to re-emit as "new reference" on a later
-    # run. Merging preserves their last-known hash so only genuine content changes signal.
-    merged_state = dict(previous_query_states.get("engms", {}))
-    merged_state.update(result.side_artifacts)
-    return result.signals, merged_state
-
-
-def _run_sharepoint_ingest(
-    *,
-    program_id: str,
-    programs_root: Path,
-    existing_signals: tuple[Signal, ...],
-    signal_store: Any,
-    previous_gather_state: Any,
-    include_lt_deck: bool,
-    force_refresh: bool,
-    as_of: datetime,
-    pipeline_runner: Any | None,
-    integration_error_sink: list[IntegrationError] | None,
-) -> Any:
-    """SP1-2/SP1-3: Run SharePoint ingest stage and return SharePointIngestResult (or None on error)."""
-    from src.commands.gather_pipeline.sharepoint_ingest_stage import run_sharepoint_ingest_stage
-    prior_sp_state = {}
-    if previous_gather_state is not None:
-        prior_sp_state = previous_gather_state.m365_discovery.get("sharepoint", {})
-    prior_doc_states = prior_sp_state.get("doc_states", {})
-
-    try:
-        result = run_sharepoint_ingest_stage(
-            program_id=program_id,
-            programs_root=programs_root,
-            existing_signals=existing_signals,
-            signal_store=signal_store,
-            prior_doc_states=prior_doc_states,
-            batch_id=f"gather-{as_of.strftime('%Y%m%dT%H%M%S')}",
-            include_lt_deck=include_lt_deck,
-            force_refresh=force_refresh,
-            as_of=as_of,
-            pipeline_runner=pipeline_runner,
-        )
-        return result
-    except Exception as exc:
-        _append_integration_error_once(
-            integration_error_sink,
-            source="sharepoint",
-            stage="gather",
-            error=str(exc),
-        )
-        return None
 def _build_gather_progress_steps(
     *,
     include_workiq: bool,
@@ -1707,6 +2104,10 @@ def _load_ado_items_via_uil(
     binding: Any | None = None,
     integration_error_sink: list[IntegrationError] | None = None,
     gather_v2_enabled: bool | None = None,
+    force_discovery: bool = False,
+    accept_shrinkage: bool = False,
+    discovery_result_sink: list[Any] | None = None,
+    channel_outcome_sink: list[Any] | None = None,
 ) -> tuple[tuple[WorkItem, ...], tuple[WorkItem, ...], int]:
     if binding is None:
         from src.commands.channel_wiring import resolve_channel_binding
@@ -1727,8 +2128,10 @@ def _load_ado_items_via_uil(
         programs_root=programs_root,
         binding=binding,
         integration_error_sink=integration_error_sink,
-        env_flag_fn=_env_flag,
+        env_flag_fn=_uil_discovery_flag_fn(force_discovery=force_discovery, accept_shrinkage=accept_shrinkage),
         run_channel_fn=run_channel_fn,
+        discovery_result_sink=discovery_result_sink,
+        channel_outcome_sink=channel_outcome_sink,
     )
 
 
@@ -1745,6 +2148,8 @@ def _load_kusto_signals_via_uil(
     query_state_sink: dict[str, dict[str, Any]] | None = None,
     previous_query_states: dict[str, dict[str, Any]] | None = None,
     gather_v2_enabled: bool | None = None,
+    force_discovery: bool = False,
+    accept_shrinkage: bool = False,
 ) -> tuple[tuple[Signal, ...], int]:
     from src.commands.channel_wiring import resolve_channel_binding
 
@@ -1768,7 +2173,7 @@ def _load_kusto_signals_via_uil(
         include_unvalidated=include_unvalidated,
         query_state_sink=query_state_sink,
         previous_query_states=previous_query_states,
-        env_flag_fn=_env_flag,
+        env_flag_fn=_uil_discovery_flag_fn(force_discovery=force_discovery, accept_shrinkage=accept_shrinkage),
         run_channel_with_extraction_fn=run_channel_with_extraction_fn,
         record_kusto_query_state_fn=_record_kusto_query_state,
     )
@@ -1783,6 +2188,8 @@ def _load_teams_signals_via_uil(
     binding: Any | None = None,
     integration_error_sink: list[IntegrationError] | None = None,
     gather_v2_enabled: bool | None = None,
+    force_discovery: bool = False,
+    accept_shrinkage: bool = False,
 ) -> tuple[tuple[Signal, ...], int]:
     from src.commands.channel_wiring import resolve_channel_binding
 
@@ -1802,7 +2209,7 @@ def _load_teams_signals_via_uil(
         programs_root=programs_root,
         binding=binding,
         integration_error_sink=integration_error_sink,
-        env_flag_fn=_env_flag,
+        env_flag_fn=_uil_discovery_flag_fn(force_discovery=force_discovery, accept_shrinkage=accept_shrinkage),
         run_channel_with_extraction_fn=run_channel_with_extraction_fn,
     )
 
@@ -1816,6 +2223,8 @@ def _load_icm_signals_via_uil(
     binding: Any | None = None,
     integration_error_sink: list[IntegrationError] | None = None,
     gather_v2_enabled: bool | None = None,
+    force_discovery: bool = False,
+    accept_shrinkage: bool = False,
 ) -> tuple[tuple[Signal, ...], int]:
     from src.commands.channel_wiring import resolve_channel_binding
 
@@ -1835,7 +2244,7 @@ def _load_icm_signals_via_uil(
         programs_root=programs_root,
         binding=binding,
         integration_error_sink=integration_error_sink,
-        env_flag_fn=_env_flag,
+        env_flag_fn=_uil_discovery_flag_fn(force_discovery=force_discovery, accept_shrinkage=accept_shrinkage),
         run_channel_with_extraction_fn=run_channel_with_extraction_fn,
     )
 
@@ -1848,7 +2257,10 @@ def _run_channel(
     since: datetime,
     verified_at: datetime,
     run_ctx: RunContext,
-    integration_error_sink: list[IntegrationError] | None = None, programs_root: Path = PROGRAMS_ROOT,
+    integration_error_sink: list[IntegrationError] | None = None,
+    discovery_result_sink: list[Any] | None = None,
+    channel_outcome_sink: list[Any] | None = None,
+    programs_root: Path = PROGRAMS_ROOT,
 ) -> tuple[Any | None, Any | None]:
     return _run_channel_impl(
         binding,
@@ -1858,6 +2270,9 @@ def _run_channel(
         verified_at=verified_at,
         run_ctx=run_ctx,
         integration_error_sink=integration_error_sink,
+        discovery_result_sink=discovery_result_sink,
+        channel_outcome_sink=channel_outcome_sink,
+        programs_root=programs_root,
     )
 
 
@@ -1888,6 +2303,22 @@ def _gather_v2_enabled() -> bool:
 
 def _env_flag(name: str) -> bool:
     return os.getenv(name, "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _uil_discovery_flag_fn(*, force_discovery: bool, accept_shrinkage: bool) -> Callable[[str], bool]:
+    """Sec 4.4: OR the first-class ``--force-discovery``/``--accept-shrinkage``
+    CLI flags with the pre-existing ``VERTEX_UIL_*`` environment-variable
+    compatibility path -- "Environment flags remain compatibility paths, not
+    the documented operator interface."""
+
+    def _fn(name: str) -> bool:
+        if name == "VERTEX_UIL_FORCE_DISCOVERY":
+            return force_discovery or _env_flag(name)
+        if name == "VERTEX_UIL_ACCEPT_SHRINKAGE":
+            return accept_shrinkage or _env_flag(name)
+        return _env_flag(name)
+
+    return _fn
 
 
 def _resolve_uil_channel_binding_for_gather(
@@ -4955,233 +5386,9 @@ def _merge_workiq_entity_refs(*groups: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(merged)
 
 
-def _read_recent_signals(
-    program_id: str,
-    *,
-    start: datetime,
-    end: datetime,
-    programs_root: Path,
-    signal_store=None,
-) -> tuple[Signal, ...]:
-    store = signal_store or build_signal_store(programs_root=programs_root)
-    return store.read(program_id, start=start, end=end)
-
-
-def _load_freshness_thresholds(program_id: str, programs_root: Path) -> tuple[int, int]:
-    rules = load_editorial_rules(programs_root / program_id / "editorial_rules.yaml")
-    return (rules.stale_warn_days, rules.stale_block_days)
-
-
-def _resolve_icm_workstream_id(
-    *,
-    owning_team: str | None,
-    fallback_workstream_id: str | None,
-    teams: tuple[Team, ...],
-    workstreams: tuple[Workstream, ...],
-) -> str | None:
-    if owning_team is None:
-        return fallback_workstream_id
-
-    normalized_team = _normalize_team_label(owning_team)
-    candidate_workstreams: set[str] = set()
-    for team in teams:
-        if normalized_team not in {_normalize_team_label(team.id), _normalize_team_label(team.name)}:
-            continue
-        for area_path in team.area_paths:
-            resolved = _resolve_workstream_id(area_path, workstreams)
-            if resolved is not None:
-                candidate_workstreams.add(resolved)
-
-    if len(candidate_workstreams) == 1:
-        return next(iter(candidate_workstreams))
-    if fallback_workstream_id is not None and fallback_workstream_id in candidate_workstreams:
-        return fallback_workstream_id
-    return fallback_workstream_id
-
-
-def _normalize_team_label(value: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", value.strip().lower())
-
-
-def _tracked_field_name(field_name: str) -> str | None:
-    normalized = field_name.strip().lower()
-    if normalized.endswith("targetdate"):
-        return "TargetDate"
-    if normalized == "system.state" or normalized.endswith(".state"):
-        return "State"
-    if normalized.endswith("assignedto"):
-        return "AssignedTo"
-    return None
-
-
-def _build_revision_signal_text(work_item_id: int, field_name: str, prior: str | None, current: str | None) -> str:
-    before = _display_value(field_name, prior)
-    after = _display_value(field_name, current)
-    if field_name == "TargetDate":
-        return f"ADO#{work_item_id} target date changed from {before} to {after}."
-    if field_name == "AssignedTo":
-        return f"ADO#{work_item_id} owner changed from {before} to {after}."
-    return f"ADO#{work_item_id} state changed from {before} to {after}."
-
-
-def _display_value(field_name: str, value: str | None) -> str:
-    if value is None or not str(value).strip():
-        return "unset"
-    if field_name == "AssignedTo":
-        return _person_label(value)
-    return str(value).strip()
-
-
-def _person_label(value: str) -> str:
-    text = str(value).strip()
-    if "@" in text:
-        return text.split("@", 1)[0]
-    return text
-
-
-def _vertex_service_identities() -> set[str]:
-    return _load_vertex_service_identities()
-
-
-def _is_auto_approved_signal(signal: Signal) -> bool:
-    return signal_can_be_auto_approved(signal)
-
-
-def _trajectory_point_from_item(item: WorkItem, as_of: datetime) -> TrajectoryPoint:
-    return _projection_trajectory_point_from_item(item, as_of)
-
-
 def _is_echo_chamber_revision(revision: Revision, vertex_identities: set[str]) -> bool:
-    changed_by = revision.changed_by.strip().lower()
-    changed_by_email = revision.changed_by_email.strip().lower()
-    if vertex_identities and (changed_by in vertex_identities or changed_by_email in vertex_identities):
-        return True
-    for field_name, (_, current_value) in revision.fields_changed.items():
-        if field_name.strip().lower() != "system.history":
-            continue
-        if current_value is not None and current_value.strip().startswith(_VERTEX_COMMENT_PREFIX):
-            return True
-    return False
+    return _record_is_echo_chamber_revision(revision, vertex_identities)
 
 
 def _is_echo_chamber_comment(comment: Comment, vertex_identities: set[str]) -> bool:
-    created_by = comment.created_by.strip().lower()
-    created_by_email = comment.created_by_email.strip().lower()
-    if vertex_identities and (created_by in vertex_identities or created_by_email in vertex_identities):
-        return True
-    return comment.text.strip().startswith(_VERTEX_COMMENT_PREFIX)
-
-
-def _parse_identity(value: Any) -> tuple[str | None, str | None]:
-    if isinstance(value, dict):
-        display_name = value.get("displayName") or value.get("name")
-        email = value.get("uniqueName") or value.get("mailAddress")
-        return (_optional_string(display_name), _optional_string(email))
-    if isinstance(value, str):
-        return (value, None)
-    return (None, None)
-
-
-def _field_value(value: Any) -> str | None:
-    if isinstance(value, dict):
-        display_name, email = _parse_identity(value)
-        return email or display_name
-    return _optional_string(value)
-
-
-def _parse_tags(value: Any) -> list[str]:
-    if value in (None, ""):
-        return []
-    if isinstance(value, str):
-        return [tag.strip() for tag in value.split(";") if tag.strip()]
-    if isinstance(value, (list, tuple)):
-        return [str(tag).strip() for tag in value if str(tag).strip()]
-    return [str(value)]
-
-
-
-
-
-
-def _parse_datetime(value: Any) -> datetime | None:
-    if value in (None, ""):
-        return None
-    if isinstance(value, datetime):
-        return value.astimezone(timezone.utc) if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
-
-
-def _parse_int(value: Any) -> int | None:
-    if value in (None, ""):
-        return None
-    try:
-        return int(str(value))
-    except (TypeError, ValueError):
-        return None
-
-
-def _parse_float(value: Any) -> float | None:
-    if value in (None, ""):
-        return None
-    try:
-        return float(str(value))
-    except (TypeError, ValueError):
-        return None
-
-
-def _infer_risk_level(state: str, tags: list[str], risk_assessment: str | None = None) -> RiskLevel:
-    return infer_ado_risk_level(state, tags, risk_assessment)
-
-
-def _rest_call_count(item_count: int, *, batch_size: int = 200) -> int:
-    if item_count <= 0:
-        return 0
-    return ((item_count - 1) // batch_size) + 1
-
-
-def _record_workiq_provenance(
-    *,
-    workiq_signals: "tuple[Signal, ...]",
-    program_id: str,
-    programs_root: "Path",
-    run_at: "datetime",
-) -> None:
-    """Write one EvidenceProvenanceRecord per lane to evidence_provenance.jsonl.
-
-    Failures are swallowed — provenance is observability, not critical path.
-    """
-    from src.core.evidence_provenance import make_provenance_record, record_provenance
-
-    lanes: dict[str, list] = {}
-    for sig in workiq_signals:
-        if sig.workstream_id:
-            lanes.setdefault(sig.workstream_id, []).append(sig)
-
-    for lane_id, sigs in lanes.items():
-        source_counts: dict[str, int] = {}
-        for sig in sigs:
-            st = (sig.metadata or {}).get("source_type", "workiq")
-            source_counts[st] = source_counts.get(st, 0) + 1
-        dominant_source = max(source_counts, key=lambda k: source_counts[k])
-
-        latest = max(sigs, key=lambda s: s.timestamp)
-        source_ref = (latest.metadata or {}).get("message_id", latest.raw_ref or "")
-
-        try:
-            rec = make_provenance_record(
-                lane_id=lane_id,
-                source_type=dominant_source,
-                source_id=source_ref,
-                source_date=latest.timestamp.date().isoformat(),
-                confidence=0.5,
-                fields_populated=("source_type", "confidence"),
-                operator="auto",
-                run_at=run_at,
-            )
-            record_provenance(rec, program_id=program_id, programs_root=programs_root)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Failed to record provenance for lane %s: %s", lane_id, exc)
+    return _record_is_echo_chamber_comment(comment, vertex_identities)

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from src.core.ado_client import ADOClient
 from src.core.ado_saved_query_helpers import append_wiql_clause as _append_wiql_clause
@@ -15,8 +17,10 @@ from src.core.integration_types import (
     ChannelRegistration,
     DiscoveredRef,
     DiscoveryCompleteness,
+    DiscoveryQueryResult,
     DiscoveryResult,
     IntegrationError,
+    PaginationOutcome,
     ProviderCapability,
     RegistrationBinding,
     RegistrationStatus,
@@ -26,11 +30,87 @@ from src.core.integration_types import (
 )
 from src.core.models_v2 import Program, Workstream
 from src.core.work_item_states import TERMINAL_WORK_ITEM_STATES_ADO
-from src.core.slice_contract_loader import SliceContract, SliceFilterDefinition, TagExpression, load_slice_contract
+from src.core.slice_contract_loader import (
+    SavedQueryBinding,
+    SliceContract,
+    SliceFilterDefinition,
+    TagExpression,
+    load_slice_contract,
+)
 
 
 ADO_DISCOVERY_TOP_CAP = 10000
 SETUP_DISCOVERY_TOP_CAP = 200
+# Spec D-3: an ID-range partition scan must abort as PARTIAL rather than
+# spin indefinitely against a moving target if a single query's membership
+# keeps shifting under concurrent ADO writes.
+ID_PARTITION_SKEW_BUDGET_SECONDS = 300.0
+
+
+def _wiql_hash(wiql: str) -> str:
+    """Hash the exact pinned query text executed for one discovery scope."""
+    return hashlib.sha256(wiql.encode("utf-8")).hexdigest()
+
+
+def _membership_hash(membership_ids: tuple[str, ...]) -> str:
+    """Stable, unambiguous hash of an ordered work-item membership set."""
+    return hashlib.sha256("\n".join(membership_ids).encode("utf-8")).hexdigest()
+
+
+def _strip_order_by_clause(wiql: str) -> str:
+    lower_wiql = wiql.lower()
+    order_by_index = lower_wiql.rfind(" order by ")
+    if order_by_index < 0:
+        return wiql
+    return wiql[:order_by_index]
+
+
+def _execute_wiql_with_id_partitioning(
+    client: Any,
+    predicate_wiql: str,
+    top_cap: int,
+    *,
+    skew_budget_seconds: float = ID_PARTITION_SKEW_BUDGET_SECONDS,
+    clock: Callable[[], float] = time.monotonic,
+) -> tuple[list[int], bool]:
+    """Spec D-3 partition algorithm: re-run a capped WIQL query as a
+    deterministic, ID-ordered cursor scan so its full membership is proven
+    rather than silently truncated at ``top_cap``. The query's own
+    ``ORDER BY`` is dropped for this scan (execution only; the pinned
+    predicate is preserved) in favor of ``[System.Id] > cursor`` ascending,
+    since the original ordering may not be ID-based and can't be resumed
+    from the discarded, already-truncated first page.
+
+    Returns ``(ordered_ids, is_complete)``. ``is_complete`` is ``False``
+    (caller must treat the scope as ``PARTIAL``) only when a non-empty page
+    fails to advance the cursor, the skew budget is exceeded, or an id
+    recurs across pages (contradictory membership under concurrent
+    mutation) -- an empty page immediately after a full page is normal
+    completion for an exact cap multiple.
+    """
+    predicate_only = _strip_order_by_clause(predicate_wiql)
+    started_at = clock()
+    cursor = 0
+    ordered_ids: list[int] = []
+    seen_ids: set[int] = set()
+    while True:
+        page_wiql = f"{_append_wiql_clause(predicate_only, f'[System.Id] > {cursor}')} order by [System.Id] asc"
+        page_ids = client.execute_wiql(page_wiql, top=top_cap)
+        if not page_ids:
+            return ordered_ids, True
+        for work_item_id in page_ids:
+            if work_item_id in seen_ids:
+                return ordered_ids, False
+            seen_ids.add(work_item_id)
+            ordered_ids.append(work_item_id)
+        if len(page_ids) < top_cap:
+            return ordered_ids, True
+        max_id = max(page_ids)
+        if max_id <= cursor:
+            return ordered_ids, False
+        if clock() - started_at > skew_budget_seconds:
+            return ordered_ids, False
+        cursor = max_id
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +312,7 @@ class ADODiscoveryConfig:
 class ADODiscoveryProvider:
     def __init__(self, client: ADOClient):
         self._client = client
+        self._saved_query_cache: dict[str, dict[str, Any]] = {}
 
     @classmethod
     def from_program(
@@ -287,6 +368,7 @@ class ADODiscoveryProvider:
         refs: list[DiscoveredRef] = []
         statuses: dict[str, ScopeStatus] = {}
         channel_errors: list[IntegrationError] = []
+        query_results: list[DiscoveryQueryResult] = []
 
         query_groups: dict[tuple[str, str], list[_ADOScope]] = {}
         for scope in _discovery_scopes(config.slice_contracts):
@@ -294,15 +376,30 @@ class ADODiscoveryProvider:
 
         for group_scopes in query_groups.values():
             try:
-                discovered = self._discover_scope_group(program_id, config, group_scopes, computed_at)
+                discovered, is_truncated, group_query_results = self._discover_scope_group(
+                    program_id, config, group_scopes, computed_at
+                )
                 refs.extend(discovered)
+                query_results.extend(group_query_results)
+                # ADF-W2.1 / spec D-3: `returned_count >= top` must never be
+                # silently reported as FULL -- a capped WIQL result is
+                # transparently re-scanned via ID-range partitioning; only a
+                # partition scan that itself could not complete (cursor
+                # stall, skew budget, or contradictory membership) is PARTIAL.
+                scope_completeness = DiscoveryCompleteness.PARTIAL if is_truncated else DiscoveryCompleteness.FULL
                 for scope in group_scopes:
                     statuses[scope.scope_id] = ScopeStatus(
                         scope_id=scope.scope_id,
                         status=ScopeStatusKind.SUCCESS,
-                        completeness=DiscoveryCompleteness.FULL,
+                        completeness=scope_completeness,
                         item_count=len(discovered),
-                        error_message=None,
+                        error_message=(
+                            f"WIQL query {scope.query_id} hit cap {config.top} and its ID-range partition "
+                            "scan could not prove complete membership (cursor stall, skew budget, or "
+                            "contradictory membership) — narrow or manually partition this query"
+                            if is_truncated
+                            else None
+                        ),
                     )
             except QueryError as error:
                 for scope in group_scopes:
@@ -313,12 +410,29 @@ class ADODiscoveryProvider:
                         item_count=0,
                         error_message=str(error),
                     )
+                    query_results.append(
+                        DiscoveryQueryResult(
+                            query_id=scope.query_id,
+                            scope_id=scope.scope_id,
+                            wiql_hash="",
+                            captured_at=computed_at,
+                            raw_count=0,
+                            membership_ids=(),
+                            membership_hash=_membership_hash(()),
+                            cap_reached=False,
+                            completeness_state="ERROR",
+                            failure_category="query_error",
+                        )
+                    )
 
         explicit_refs = _explicit_discovered_refs(program_id, config.slice_contracts, config.provider_instance_id, computed_at)
         refs.extend(explicit_refs)
         merged = _dedup_and_merge(refs)
         completeness = DiscoveryCompleteness.FULL
-        if any(status.status is not ScopeStatusKind.SUCCESS for status in statuses.values()):
+        if any(
+            status.status is not ScopeStatusKind.SUCCESS or status.completeness is not DiscoveryCompleteness.FULL
+            for status in statuses.values()
+        ):
             completeness = DiscoveryCompleteness.PARTIAL
         return DiscoveryResult(
             channel="ado",
@@ -330,6 +444,7 @@ class ADODiscoveryProvider:
             errors=tuple(channel_errors),
             computed_at=computed_at,
             provider_instance_id=config.provider_instance_id,
+            query_results=tuple(query_results),
         )
 
     def _discover_scope_group(
@@ -338,12 +453,29 @@ class ADODiscoveryProvider:
         config: ADODiscoveryConfig,
         scopes: list["_ADOScope"],
         computed_at: datetime,
-    ) -> tuple[DiscoveredRef, ...]:
+    ) -> tuple[tuple[DiscoveredRef, ...], bool, tuple[DiscoveryQueryResult, ...]]:
         scope = scopes[0]
-        query_payload = self._client.get_saved_query(scope.query_id)
+        query_payload = self._saved_query_cache.get(scope.query_id)
+        if query_payload is None:
+            query_payload = self._client.get_saved_query(scope.query_id)
+            self._saved_query_cache[scope.query_id] = query_payload
         wiql = _extract_saved_query_wiql(query_payload)
         if wiql is None:
-            return ()
+            return (), False, tuple(
+                DiscoveryQueryResult(
+                    query_id=item.query_id,
+                    scope_id=item.scope_id,
+                    wiql_hash="",
+                    captured_at=computed_at,
+                    raw_count=0,
+                    membership_ids=(),
+                    membership_hash=_membership_hash(()),
+                    cap_reached=False,
+                    completeness_state="ERROR",
+                    failure_category="missing_wiql",
+                )
+                for item in scopes
+            )
         bounded_wiql = _append_wiql_clause(wiql, scope.clause)
         bindings = tuple(
             RegistrationBinding(
@@ -357,7 +489,21 @@ class ADODiscoveryProvider:
         )
         confidence = max(s.confidence for s in scopes)
         discovered: list[DiscoveredRef] = []
-        for work_item_id in self._client.execute_wiql(bounded_wiql, top=config.top):
+        pagination_outcomes: list[PaginationOutcome] = []
+        work_item_ids = self._client.execute_wiql(
+            bounded_wiql,
+            top=config.top,
+            on_pagination=pagination_outcomes.append,
+        )
+        is_complete = not any(outcome.is_truncated for outcome in pagination_outcomes)
+        if not is_complete:
+            # The single-page result hit the cap and is discarded in favor of
+            # a deterministic ID-ordered partition scan (spec D-3) that can
+            # prove full membership beyond one page.
+            work_item_ids, is_complete = _execute_wiql_with_id_partitioning(
+                self._client, bounded_wiql, config.top
+            )
+        for work_item_id in work_item_ids:
             ref_id = str(int(work_item_id))
             registration = ChannelRegistration(
                 channel="ado",
@@ -373,7 +519,25 @@ class ADODiscoveryProvider:
                 metadata={"query_id": scope.query_id, "slice_id": scope.slice_id},
             )
             discovered.append(DiscoveredRef(registration=registration, bindings=bindings))
-        return tuple(discovered)
+        membership_ids = tuple(str(int(work_item_id)) for work_item_id in sorted(work_item_ids))
+        query_results = tuple(
+            DiscoveryQueryResult(
+                query_id=item.query_id,
+                scope_id=item.scope_id,
+                wiql_hash=_wiql_hash(bounded_wiql),
+                captured_at=computed_at,
+                raw_count=len(membership_ids),
+                membership_ids=membership_ids,
+                membership_hash=_membership_hash(membership_ids),
+                # A partition scan that proves complete membership is not a
+                # capped result for manifest/confirm purposes; only an
+                # unresolved cap blocks authoritative use.
+                cap_reached=not is_complete,
+                completeness_state="FULL" if is_complete else "PARTIAL",
+            )
+            for item in scopes
+        )
+        return tuple(discovered), not is_complete, query_results
 
 
 @dataclass(frozen=True, slots=True)
@@ -388,6 +552,15 @@ class _ADOScope:
 
 
 def _discovery_scopes(slice_contracts: tuple[SliceContract, ...]) -> tuple[_ADOScope, ...]:
+    """Build discovery scopes from schema-1.1 bindings, not just GUIDs.
+
+    A saved-query GUID is not itself a delivery scope: Armada intentionally
+    reuses the Buildout and Overall queries across disjoint lanes.  Preserve
+    each binding's predicate and identity here so discovery executes the same
+    membership semantics as gather/report consumers.  Audit-only history
+    bindings are excluded; legacy activity-delta bindings remain included for
+    backward compatibility with schema-1.0 programs.
+    """
     scopes: list[_ADOScope] = []
     for contract in slice_contracts:
         ado_contract = contract.source_contract.ado
@@ -401,14 +574,44 @@ def _discovery_scopes(slice_contracts: tuple[SliceContract, ...]) -> tuple[_ADOS
             )
             if part
         )
-        clause = " and ".join(f"({part})" for part in clause_parts)
-        for query_id in ado_contract.saved_queries:
+        bindings = ado_contract.saved_query_bindings
+        if bindings:
+            binding_items = tuple(
+                binding
+                for binding in bindings
+                if binding.mode != "analytics_history"
+            )
+        else:  # Compatibility for hand-built contracts outside the loader.
+            binding_items = tuple(
+                SavedQueryBinding(
+                    binding_id=f"legacy-{index:02d}",
+                    query_id=query_id,
+                    mode="activity_delta",
+                )
+                for index, query_id in enumerate(ado_contract.saved_queries, start=1)
+            )
+        for binding in binding_items:
+            clause_parts_for_binding = [*clause_parts]
+            if binding.filter is not None:
+                binding_clause = _render_filter_clause(binding.filter)
+                if binding_clause:
+                    clause_parts_for_binding.append(binding_clause)
+            clause = " and ".join(f"({part})" for part in clause_parts_for_binding)
+            workstream_id = (
+                binding.workstream_ids[0]
+                if len(binding.workstream_ids) == 1
+                else contract.workstream_id or contract.id
+            )
+            # Preserve the established schema-1.0 scope-state key so existing
+            # discovery history remains readable; schema-1.1 gains the stable
+            # binding id needed for shared-query lane attribution.
+            scope_local_id = binding.query_id if binding.is_legacy else binding.binding_id
             scopes.append(
                 _ADOScope(
-                    scope_id=f"{contract.id}:{query_id}",
-                    query_id=query_id,
+                    scope_id=f"{contract.id}:{scope_local_id}",
+                    query_id=binding.query_id,
                     slice_id=contract.id,
-                    workstream_id=contract.id,
+                    workstream_id=workstream_id,
                     clause=clause,
                 )
             )
@@ -513,6 +716,7 @@ def _render_predicate(predicate: Any) -> str | None:
         "title": "[System.Title]",
         "tag": "[System.Tags]",
         "area_path": "[System.AreaPath]",
+        "work_item_type": "[System.WorkItemType]",
     }.get(str(getattr(predicate, "field", "")).strip().lower())
     operator = str(getattr(predicate, "op", "")).strip().lower()
     raw_value = str(getattr(predicate, "value", "")).strip()
@@ -522,10 +726,14 @@ def _render_predicate(predicate: Any) -> str | None:
     if field_ref == "[System.AreaPath]":
         if operator == "eq":
             return f"{field_ref} = '{escaped}'"
-        if operator == "contains" and "\\" in raw_value:
+        # ``contains`` is retained only for schema-1.0 compatibility; 1.1
+        # has the closed explicit under/not_under vocabulary.
+        if operator in {"contains", "under"} and "\\" in raw_value:
             return f"{field_ref} under '{escaped}'"
+        if operator == "not_under" and "\\" in raw_value:
+            return f"{field_ref} not under '{escaped}'"
         return None
-    if operator == "eq" and field_ref == "[System.Tags]":
+    if operator in {"eq", "contains_words"} and field_ref == "[System.Tags]":
         return f"{field_ref} Contains Words '{escaped}'"
     if operator == "eq":
         return f"{field_ref} = '{escaped}'"

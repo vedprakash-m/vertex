@@ -33,6 +33,8 @@ AZURE_IDENTITY_AVAILABLE, AZURE_CREDENTIAL_TYPES = load_ado_credential_types()
 
 
 ADO_RESOURCE = "499b84ac-1321-427f-aa17-267ca6975798/.default"
+_AUTH_MODE_ENV = "VERTEX_ADO_AUTH_MODE"
+_STRICT_AUTH_MODES: frozenset[str] = frozenset({"azure-cli", "pat"})
 
 #: ADF-W2.1 (Section 8.4.2): default WIQL result cap, made an explicit,
 #: importable constant so callers that need to detect "the result was
@@ -70,6 +72,9 @@ class ADOClient:
         self.progress_stream = progress_stream or sys.stderr
         self.auth_method = "unknown"
         self._credential: Any | None = None
+        self._credential_lock = threading.Lock()
+        self._cached_access_token: str | None = None
+        self._cached_access_token_expires_on = 0.0
         self._session = self._build_session()
         # ADF-W1.1: a separate, non-retrying session for mutations. Retrying a
         # POST/PATCH whose response was lost (timeout, connection reset) can
@@ -81,6 +86,36 @@ class ADOClient:
         )
         self._rest_base_url = f"https://dev.azure.com/{organization}/{project}/_apis/wit/"
         self._init_auth()
+
+    def fork_read_client(self) -> "ADOClient":
+        """Return a read-only client with an isolated HTTP session.
+
+        Gather hydration can concurrently read independent work items, but a
+        ``requests.Session`` must not be shared across those workers.  The
+        already-acquired credential/token is copied instead of constructing a
+        new Azure CLI credential per worker (which would spawn a token helper
+        process for each detail request).
+        """
+        clone = object.__new__(ADOClient)
+        clone.organization = self.organization
+        clone.project = self.project
+        clone.timeout = self.timeout
+        clone.pat_env = self.pat_env
+        clone.show_progress = False
+        clone.slow_warning_seconds = self.slow_warning_seconds
+        clone.progress_poll_seconds = self.progress_poll_seconds
+        clone.progress_stream = self.progress_stream
+        clone.auth_method = self.auth_method
+        clone._credential = self._credential
+        clone._credential_lock = threading.Lock()
+        with self._credential_lock:
+            clone._cached_access_token = self._cached_access_token
+            clone._cached_access_token_expires_on = self._cached_access_token_expires_on
+        clone._session = clone._build_session()
+        clone._mutation_session = clone._build_mutation_session()
+        clone._odata_base_url = self._odata_base_url
+        clone._rest_base_url = self._rest_base_url
+        return clone
 
     def query_work_items(
         self,
@@ -103,13 +138,43 @@ class ADOClient:
         select_fields: tuple[str, ...] = ("DateSK", "WorkItemId"),
         top: int | None = None,
     ) -> list[dict[str, Any]]:
+        # WorkItemSnapshot has no flat AreaPath/IterationPath scalar
+        # properties -- only the Area/Iteration navigation properties expose
+        # them (requesting the flat name in $select raises VS403522). Ask
+        # for whichever of these two callers actually requested via
+        # $expand=<Nav>($select=<Field>), then flatten the nested payload
+        # back onto each row so callers keep seeing the flat field name they
+        # asked for.
+        nav_property_by_flat_field = {"AreaPath": "Area", "IterationPath": "Iteration"}
+        requested_flat_fields = tuple(
+            field for field in select_fields if field in nav_property_by_flat_field
+        )
+        query_select_fields = tuple(
+            field for field in select_fields if field not in nav_property_by_flat_field
+        )
         params = {
             "$filter": filter_expression,
-            "$select": ",".join(select_fields),
+            "$select": ",".join(query_select_fields),
         }
+        if requested_flat_fields:
+            params["$expand"] = ",".join(
+                f"{nav_property_by_flat_field[field]}($select={field})"
+                for field in requested_flat_fields
+            )
         if top is not None:
             params["$top"] = str(top)
-        return self.query_odata_all("WorkItemSnapshot", params)
+        rows = self.query_odata_all("WorkItemSnapshot", params)
+        if not requested_flat_fields:
+            return rows
+        flattened_rows = []
+        for row in rows:
+            flattened = dict(row)
+            for field in requested_flat_fields:
+                nav_property = nav_property_by_flat_field[field]
+                nested = flattened.pop(nav_property, None)
+                flattened[field] = nested.get(field, "") if isinstance(nested, dict) else ""
+            flattened_rows.append(flattened)
+        return flattened_rows
 
     def query_all(
         self,
@@ -646,6 +711,18 @@ class ADOClient:
         return session
 
     def _init_auth(self) -> None:
+        requested_mode = os.environ.get(_AUTH_MODE_ENV, "").strip().lower()
+        if requested_mode and requested_mode not in _STRICT_AUTH_MODES:
+            raise AuthError(
+                f"{_AUTH_MODE_ENV} must be azure-cli or pat when set; got {requested_mode!r}."
+            )
+
+        if requested_mode == "pat":
+            if os.environ.get(self.pat_env):
+                self.auth_method = "pat"
+                return
+            raise AuthError("PAT authentication was selected but ADO_PAT is not set.")
+
         if AZURE_IDENTITY_AVAILABLE:
             credential_classes = tuple(AZURE_CREDENTIAL_TYPES)
             for credential_class, auth_method in zip(
@@ -653,14 +730,23 @@ class ADOClient:
                 ("azure_cli", "default_credential"),
                 strict=False,
             ):
+                if requested_mode == "azure-cli" and auth_method != "azure_cli":
+                    continue
                 try:
                     credential = credential_class()
-                    credential.get_token(ADO_RESOURCE)
+                    access_token = credential.get_token(ADO_RESOURCE)
                     self._credential = credential
+                    self._cache_access_token(access_token)
                     self.auth_method = auth_method
                     return
                 except Exception:
                     continue
+
+        if requested_mode == "azure-cli":
+            raise AuthError(
+                "Azure CLI authentication was selected but no Azure CLI Azure DevOps token "
+                "could be acquired. Run 'vertex admin auth setup' in the task principal context."
+            )
 
         if os.environ.get(self.pat_env):
             self.auth_method = "pat"
@@ -672,10 +758,7 @@ class ADOClient:
 
     def _headers(self) -> dict[str, str]:
         if self._credential is not None:
-            try:
-                token = self._credential.get_token(ADO_RESOURCE).token
-            except Exception as error:
-                raise AuthError("Failed to acquire Azure DevOps token.") from error
+            token = self._get_bearer_token()
             return {
                 "Authorization": f"Bearer {token}",
                 "Accept": "application/json",
@@ -691,6 +774,34 @@ class ADOClient:
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
+
+    def _get_bearer_token(self) -> str:
+        """Use a cached AAD token until shortly before its expiry.
+
+        AzureCliCredential's ``get_token`` launches the Azure CLI.  Calling it
+        for every REST request turns bounded work-item hydration into dozens
+        of subprocess launches, so cache the standard access token under a
+        lock and refresh it one minute before expiry.
+        """
+        credential_lock = getattr(self, "_credential_lock", None)
+        if credential_lock is None:
+            credential_lock = threading.Lock()
+            self._credential_lock = credential_lock
+        with credential_lock:
+            token = getattr(self, "_cached_access_token", None)
+            expires_on = float(getattr(self, "_cached_access_token_expires_on", 0.0) or 0.0)
+            if token and expires_on > time.time() + 60:
+                return token
+            try:
+                access_token = self._credential.get_token(ADO_RESOURCE)
+            except Exception as error:
+                raise AuthError("Failed to acquire Azure DevOps token.") from error
+            self._cache_access_token(access_token)
+            return self._cached_access_token or ""
+
+    def _cache_access_token(self, access_token: Any) -> None:
+        self._cached_access_token = str(access_token.token)
+        self._cached_access_token_expires_on = float(getattr(access_token, "expires_on", 0.0) or 0.0)
 
     def _request_json(self, method: str, url: str, **kwargs: Any) -> dict[str, Any]:
         return self._request_response(method, url, **kwargs).json()

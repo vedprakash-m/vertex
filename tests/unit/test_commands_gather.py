@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 
 from cli import app
 from src.commands import gather
+from src.commands.gather_pipeline.models import GatherArtifacts
 from src.commands.gather_pipeline import hypothesis_stage
 from src.commands.gather_pipeline import ado_pipeline_stage
 from src.core.discovery_intent import (
@@ -41,14 +42,81 @@ from src.core.journal import append_review_decision, append_signal, read_review_
 from src.core.models import Comment, Confidence, Revision, RiskLevel, WorkItem
 from src.core.metric_models import MetricSourceBinding
 from src.core.models_v2 import ADOConfig, AIConfig, ActionItem, ActionSourceType, ActionStatus, ClaimEntry, DecisionEntry, DecisionStatus, DependencyADOQuery, EmailThreadSource, KustoConfig, KustoQuery, M365Config, Milestone, MilestoneStatus, Program, ReviewPolicy, Signal, SignalClass, SignalReviewDecision, Team, TeamsChat, TeamsMeetingSeries, TrajectoryPoint, VitalityAggregate, VitalityScore, WorkIQRetrievalConfig, Workstream, WorkstreamSignalSources
+from src.core.models_v2 import IntegrationError
 from src.core.reality_store import RealityStore
 from src.core.sqlite_stores import SQLiteSignalStore, SQLiteTrajectoryStore
 from src.core.source_candidate_store import SourceCandidateStore, candidate_evidence_json
+from src.core.source_models import SourceKind
 from src.core.trajectory import read_trajectory
 from src.m365.agency_bridge import AgencyBridge, AgencyCapabilities
 
 
 runner = CliRunner()
+
+
+def test_semantic_gather_exit_codes_distinguish_optional_and_required_degradation() -> None:
+    from src.core.integration_types import DiscoveryQueryResult
+
+    base = GatherArtifacts("acme", 0, 0, 0, 0, 0, 0, 0)
+    optional = replace(base, integration_errors=(IntegrationError(source="kusto", stage="hydration", message="timeout", retryable=True),))
+    required = replace(base, integration_errors=(IntegrationError(source="ado", stage="discovery", message="cap reached", retryable=False),))
+    required_new_stage = replace(base, integration_errors=(IntegrationError(source="ado", stage="new-stage", message="failed", retryable=False),))
+
+    assert gather._semantic_gather_exit_code(base) == 0
+    assert gather._semantic_gather_exit_code(optional) == 2
+    assert gather._semantic_gather_exit_code(required) == 3
+    assert gather._has_required_ado_degradation(required) is True
+    assert gather._semantic_gather_exit_code(required_new_stage) == 3
+
+    capture_time = datetime(2026, 7, 21, 8, 0, tzinfo=timezone.utc)
+    skewed = replace(
+        base,
+        ado_query_results=(
+            DiscoveryQueryResult("q1", "s1", "a" * 64, capture_time, 0, (), "b" * 64, False, "FULL"),
+            DiscoveryQueryResult("q2", "s2", "c" * 64, capture_time + timedelta(seconds=301), 0, (), "d" * 64, False, "FULL"),
+        ),
+    )
+    assert gather._has_required_scope_degradation(skewed) is True
+    assert gather._semantic_gather_exit_code(skewed) == 3
+
+    capped = replace(
+        base,
+        ado_query_results=(
+            DiscoveryQueryResult("q1", "s1", "a" * 64, capture_time, 10_000, (), "b" * 64, True, "PARTIAL"),
+        ),
+    )
+    assert gather._has_required_scope_degradation(capped) is True
+    assert gather._semantic_gather_exit_code(capped) == 3
+
+
+def test_gather_command_maps_lease_conflict_to_scheduler_exit_four(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _conflict(*_args, **_kwargs):
+        raise gather.GatherLeaseConflict("another gather owns the lease")
+
+    monkeypatch.setattr(gather, "gather_program", _conflict)
+
+    result = runner.invoke(app, ["gather", "--program", "acme"])
+
+    assert result.exit_code == 4
+    assert "another gather owns the lease" in result.output
+
+
+def test_gather_command_maps_fencing_loss_to_scheduler_exit_four(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.core.workspace_lease import LeaseFencingTokenStale
+
+    def _fenced_out(*_args, **_kwargs):
+        raise LeaseFencingTokenStale(presented=4, current=5)
+
+    monkeypatch.setattr(gather, "gather_program", _fenced_out)
+
+    result = runner.invoke(app, ["gather", "--program", "acme"])
+
+    assert result.exit_code == 4
+    assert "stale fencing token 4" in result.output
 
 
 def _read_ingestion_run_rows(program_id: str, *, db_root: Path) -> list[tuple[str, str, int]]:
@@ -378,6 +446,8 @@ def test_gather_command_daily_cadence_enables_reduced_profile(monkeypatch) -> No
         "include_sharepoint": False,
         "include_lt_deck": False,
         "force_refresh": False,
+        "force_discovery": False,
+        "accept_shrinkage": False,
         "progress_callback": captured["kwargs"]["progress_callback"],
     }
 
@@ -419,6 +489,8 @@ def test_gather_command_weekly_cadence_enables_full_profile(monkeypatch) -> None
         "include_sharepoint": True,
         "include_lt_deck": False,
         "force_refresh": False,
+        "force_discovery": False,
+        "accept_shrinkage": False,
         "progress_callback": captured["kwargs"]["progress_callback"],
     }
 
@@ -12987,7 +13059,7 @@ def test_gather_command_with_analytics_appends_auto_approved_signals(monkeypatch
     assert len(signals) == 1
     assert signals[0].source == "ado/analytics"
     assert len(reviews) == 1
-    assert reviews[0].signal_id == "analytics-1"
+    assert reviews[0].signal_id == signals[0].id
     assert reviews[0].decision == "approved"
     assert reviews[0].reviewed_by == "system"
     assert _read_ingestion_run_rows("acme", db_root=db_root) == [
@@ -13167,7 +13239,7 @@ def test_gather_command_with_sprints_appends_auto_approved_signals(monkeypatch, 
     assert len(signals) == 1
     assert signals[0].source == "ado/sprint"
     assert len(reviews) == 1
-    assert reviews[0].signal_id == "sprint-1"
+    assert reviews[0].signal_id == signals[0].id
     assert reviews[0].decision == "approved"
     assert reviews[0].reviewed_by == "system"
     assert _read_ingestion_run_rows("acme", db_root=db_root) == [
@@ -13245,7 +13317,7 @@ def test_gather_command_with_pipelines_appends_auto_approved_signals(monkeypatch
     assert len(signals) == 1
     assert signals[0].source == "ado/pipeline"
     assert len(reviews) == 1
-    assert reviews[0].signal_id == "pipeline-1"
+    assert reviews[0].signal_id == signals[0].id
     assert reviews[0].decision == "approved"
     assert reviews[0].reviewed_by == "system"
     ingestion_runs = _read_ingestion_run_rows("acme", db_root=db_root)
@@ -13320,7 +13392,7 @@ def test_gather_command_with_pull_request_signals_records_distinct_pr_ingestion_
     assert len(signals) == 1
     assert signals[0].source == "ado/pr"
     assert len(reviews) == 1
-    assert reviews[0].signal_id == "pr-1"
+    assert reviews[0].signal_id == signals[0].id
     ingestion_runs = _read_ingestion_run_rows("acme", db_root=db_root)
     assert ("ado/pr", "success", 1) in ingestion_runs
     assert ("ado/pipeline", "success", 0) in ingestion_runs
@@ -13620,6 +13692,11 @@ def test_gather_program_degrades_gracefully_when_kusto_fails(monkeypatch, tmp_pa
     assert len(gather_state.integration_error_details) == 1
     assert gather_state.integration_error_details[0].source == "kusto"
     assert gather_state.channels["kusto"]["last_error"] == "kusto unavailable"
+    outcomes = {outcome.channel: outcome for outcome in artifacts.channel_outcomes}
+    assert outcomes["ado"].degraded is False
+    assert outcomes["kusto"].degraded is True
+    assert outcomes["kusto"].degrade_reason == "kusto unavailable"
+    assert outcomes["kusto"].elapsed_seconds >= 0
 
 
 def test_gather_program_persists_deduped_saved_query_runtime_failures(monkeypatch, tmp_path: Path) -> None:
@@ -14455,7 +14532,7 @@ kpis:
     with sqlite3.connect(store.db_path) as connection:
         rows = connection.execute(
             "SELECT source_ref, binding_id, status, metrics_observed, signals_written FROM reality_ingestion_runs WHERE source_kind = ? ORDER BY source_ref ASC",
-            (gather.SourceKind.KPI_QUERY.value,),
+            (SourceKind.KPI_QUERY.value,),
         ).fetchall()
 
     assert rows == [
@@ -14466,7 +14543,7 @@ kpis:
     with sqlite3.connect(store.db_path) as connection:
         detail_rows = connection.execute(
             "SELECT source_ref, status, signals_written, query_hash, captured_window FROM reality_ingestion_runs WHERE source_kind = ? ORDER BY source_ref ASC",
-            (gather.SourceKind.KPI_QUERY.value,),
+            (SourceKind.KPI_QUERY.value,),
         ).fetchall()
 
     assert detail_rows == [
@@ -14598,7 +14675,7 @@ kpis:
     with sqlite3.connect(store.db_path) as connection:
         rows = connection.execute(
             "SELECT source_ref, binding_id, status, metrics_observed, signals_written, query_hash FROM reality_ingestion_runs WHERE source_kind = ? ORDER BY source_ref ASC",
-            (gather.SourceKind.KPI_QUERY.value,),
+            (SourceKind.KPI_QUERY.value,),
         ).fetchall()
 
     assert rows == [
@@ -15995,7 +16072,10 @@ def test_gather_program_skips_ai_action_extractor_when_ai_is_disabled(monkeypatc
     monkeypatch.setattr(gather, "_load_freshness_thresholds", lambda program_id, programs_root: (14, 30))
     monkeypatch.setattr(gather, "_build_ado_revision_signals", lambda *args, **kwargs: ())
     monkeypatch.setattr(gather, "_build_freshness_signals", lambda *args, **kwargs: ())
-    monkeypatch.setattr(gather, "extract_actions_from_signals", lambda signals, program_id: ())
+    monkeypatch.setattr(
+        "src.commands.gather_pipeline.persistence_stage.extract_actions_from_signals",
+        lambda signals, program_id: (),
+    )
 
     artifacts = gather.gather_program(
         "acme",

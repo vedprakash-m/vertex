@@ -15,6 +15,16 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 REPORTS_ROOT = REPO_ROOT / "reports"
 _ALLOWED_ASSIGNMENT_MODES = {"auto", "manual_only"}
 _ALLOWED_SOURCE_OF_TRUTH = {"ado_primary", "telemetry_primary", "hybrid", "manual_only"}
+_ALLOWED_SCHEMA_VERSIONS = {"1.0", "1.1"}
+_ALLOWED_QUERY_MODES = {"full_scope", "activity_delta", "analytics_history"}
+# Armada spec D-20: schema 1.1 binding-level filters use a closed field/op set so the
+# loader never silently drops an unsupported predicate.
+_CLOSED_BINDING_FILTER_OPS: dict[str, set[str]] = {
+    "area_path": {"eq", "under", "not_under"},
+    "work_item_type": {"eq"},
+    "title": {"eq", "contains"},
+    "tag": {"contains_words"},
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +59,28 @@ class SliceOwners:
 
 
 @dataclass(frozen=True, slots=True)
+class SavedQueryBinding:
+    """Armada spec D-20 (schema 1.1): one typed saved-query binding.
+
+    Schema 1.0 saved-query GUID strings are synthesized into a ``legacy-NN``
+    binding with ``mode="activity_delta"`` for backward-compatible report
+    behavior (D-20 migration rule); they are never emitted by writers.
+    """
+
+    binding_id: str
+    query_id: str
+    mode: str  # full_scope | activity_delta | analytics_history
+    required: bool = True
+    workstream_ids: tuple[str, ...] = ()
+    lane_ids: tuple[str, ...] = ()
+    filter: SliceFilterDefinition | None = None
+
+    @property
+    def is_legacy(self) -> bool:
+        return self.binding_id.startswith("legacy-")
+
+
+@dataclass(frozen=True, slots=True)
 class SliceAdoSourceContract:
     saved_queries: tuple[str, ...]
     filters: SliceFilterDefinition | None
@@ -57,6 +89,15 @@ class SliceAdoSourceContract:
     tag_expression: TagExpression | None = None
     intentional_filter_only: bool = False
     intentional_filter_only_expires_on: date | None = None
+    saved_query_bindings: tuple[SavedQueryBinding, ...] = ()
+
+    def bindings_for_mode(self, mode: str) -> tuple[SavedQueryBinding, ...]:
+        return tuple(binding for binding in self.saved_query_bindings if binding.mode == mode)
+
+    @property
+    def full_scope_query_ids(self) -> tuple[str, ...]:
+        """Query IDs bound with mode=full_scope (D-2): never date-bounded by a consumer."""
+        return tuple(dict.fromkeys(binding.query_id for binding in self.bindings_for_mode("full_scope")))
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +163,9 @@ class SliceContract:
     remediation_template: str | None
     assignment_mode: str = "auto"
     required: bool = True
+    # Armada spec D-1/D-20: stable workstream identifier supplementing the
+    # existing human-readable `workstream` display field (schema 1.1+).
+    workstream_id: str | None = None
 
     @property
     def lookup_key(self) -> tuple[str, str]:
@@ -135,13 +179,18 @@ def load_slice_contract(path: Path) -> tuple[SliceContract, ...]:
         document = yaml.safe_load(handle) or {}
     if not isinstance(document, dict):
         raise ConfigError(f"Expected mapping at top-level in {path}")
-    if document.get("schema_version") != "1.0":
-        raise ConfigError(f"Unsupported slice contract schema version in {path}")
+    schema_version = str(document.get("schema_version", "")).strip()
+    if schema_version not in _ALLOWED_SCHEMA_VERSIONS:
+        raise ConfigError(
+            f"Unsupported slice contract schema version {schema_version!r} in {path}. "
+            f"Supported versions: {sorted(_ALLOWED_SCHEMA_VERSIONS)}. "
+            "Migrate with the schema-1.1 saved-query binding shape (binding_id/query_id/mode)."
+        )
     raw_slices = document.get("slices", [])
     if not isinstance(raw_slices, list):
         raise ConfigError(f"slices must be a list in {path}")
 
-    contracts = tuple(_parse_slice_contract(entry, path) for entry in raw_slices)
+    contracts = tuple(_parse_slice_contract(entry, path, schema_version=schema_version) for entry in raw_slices)
     _validate_unique_contracts(contracts, path)
     return contracts
 
@@ -198,7 +247,7 @@ def _parse_external_connector_config(raw: Any, path: Path) -> ExternalConnectorC
     )
 
 
-def _parse_slice_contract(raw_slice: Any, path: Path) -> SliceContract:
+def _parse_slice_contract(raw_slice: Any, path: Path, *, schema_version: str = "1.0") -> SliceContract:
     if not isinstance(raw_slice, dict):
         raise ConfigError(f"Each slice contract must be a mapping in {path}")
     slice_id = _require_non_empty_string(raw_slice.get("id"), path, "slice.id")
@@ -248,8 +297,29 @@ def _parse_slice_contract(raw_slice: Any, path: Path) -> SliceContract:
         raw_tag_expression = raw_ado.get("tag_expression")
         tag_expression = _parse_tag_expression(raw_tag_expression, path, slice_id) if raw_tag_expression is not None else None
         explicit_work_item_ids = _parse_int_list(raw_ado.get("explicit_work_item_ids", []), path, slice_id, "explicit_work_item_ids")
+        raw_saved_queries = raw_ado.get("saved_queries", [])
+        if not isinstance(raw_saved_queries, list):
+            raise ConfigError(f"saved_queries must be a list for slice '{slice_id}' in {path}")
+        if schema_version == "1.1":
+            saved_query_bindings = tuple(
+                _parse_saved_query_binding(entry, path, slice_id, index)
+                for index, entry in enumerate(raw_saved_queries, start=1)
+            )
+            saved_query_ids = tuple(dict.fromkeys(binding.query_id for binding in saved_query_bindings))
+        else:
+            saved_query_ids = _parse_string_list(raw_saved_queries, path, slice_id, "saved_queries")
+            saved_query_bindings = tuple(
+                SavedQueryBinding(
+                    binding_id=f"legacy-{index:02d}",
+                    query_id=query_id,
+                    mode="activity_delta",
+                    required=True,
+                )
+                for index, query_id in enumerate(saved_query_ids, start=1)
+            )
         ado_contract = SliceAdoSourceContract(
-            saved_queries=_parse_string_list(raw_ado.get("saved_queries", []), path, slice_id, "saved_queries"),
+            saved_queries=saved_query_ids,
+            saved_query_bindings=saved_query_bindings,
             filters=filters,
             tag_expression=tag_expression,
             explicit_work_item_ids=explicit_work_item_ids,
@@ -333,7 +403,58 @@ def _parse_slice_contract(raw_slice: Any, path: Path) -> SliceContract:
         remediation_template=_optional_string(raw_remediation.get("ask_template")),
         assignment_mode=assignment_mode,
         required=bool(raw_slice.get("required", True)),
+        workstream_id=_optional_string(raw_slice.get("workstream_id")),
     )
+
+
+def _parse_saved_query_binding(raw: Any, path: Path, slice_id: str, index: int) -> SavedQueryBinding:
+    if not isinstance(raw, dict):
+        raise ConfigError(
+            f"schema 1.1 saved_queries entries must be mappings (binding_id/query_id/mode) for slice '{slice_id}' in {path}"
+        )
+    binding_id = _require_non_empty_string(
+        raw.get("binding_id"), path, f"{slice_id}.source_contract.ado.saved_queries[{index}].binding_id"
+    )
+    query_id = _require_non_empty_string(
+        raw.get("query_id"), path, f"{slice_id}.source_contract.ado.saved_queries[{index}].query_id"
+    )
+    mode = str(raw.get("mode", "")).strip()
+    if mode not in _ALLOWED_QUERY_MODES:
+        raise ConfigError(
+            f"Unsupported saved query mode '{mode}' for binding '{binding_id}' in slice '{slice_id}' in {path}. "
+            f"Allowed modes: {sorted(_ALLOWED_QUERY_MODES)}"
+        )
+    raw_filter = raw.get("filter")
+    binding_filter = _parse_binding_filter(raw_filter, path, slice_id, binding_id) if raw_filter is not None else None
+    return SavedQueryBinding(
+        binding_id=binding_id,
+        query_id=query_id,
+        mode=mode,  # type: ignore[arg-type]
+        required=bool(raw.get("required", True)),
+        workstream_ids=tuple(_parse_string_list(raw.get("workstream_ids", []), path, slice_id, f"saved_queries.{binding_id}.workstream_ids")),
+        lane_ids=tuple(_parse_string_list(raw.get("lane_ids", []), path, slice_id, f"saved_queries.{binding_id}.lane_ids")),
+        filter=binding_filter,
+    )
+
+
+def _parse_binding_filter(raw_filter: Any, path: Path, slice_id: str, binding_id: str) -> SliceFilterDefinition:
+    if not isinstance(raw_filter, dict):
+        raise ConfigError(f"saved_queries[{binding_id}].filter must be a mapping for slice '{slice_id}' in {path}")
+    all_of = _parse_predicate_list(raw_filter.get("all_of", []), path, slice_id, f"saved_queries.{binding_id}.filter.all_of")
+    any_of = _parse_predicate_list(raw_filter.get("any_of", []), path, slice_id, f"saved_queries.{binding_id}.filter.any_of")
+    for predicate in (*all_of, *any_of):
+        allowed_ops = _CLOSED_BINDING_FILTER_OPS.get(predicate.field)
+        if allowed_ops is None:
+            raise ConfigError(
+                f"Unsupported saved-query binding filter field '{predicate.field}' for binding '{binding_id}' "
+                f"in slice '{slice_id}' in {path}. Allowed fields: {sorted(_CLOSED_BINDING_FILTER_OPS)}"
+            )
+        if predicate.op not in allowed_ops:
+            raise ConfigError(
+                f"Unsupported operator '{predicate.op}' for filter field '{predicate.field}' on binding "
+                f"'{binding_id}' in slice '{slice_id}' in {path}. Allowed operators: {sorted(allowed_ops)}"
+            )
+    return SliceFilterDefinition(all_of=all_of, any_of=any_of)
 
 
 def _parse_filters(raw_filters: Any, path: Path, slice_id: str) -> SliceFilterDefinition:

@@ -73,7 +73,7 @@ def test_onboard_write_documents_scaffolds_canonical_dirs(tmp_path: Path) -> Non
         golden_queries={"queries": []},
     )
 
-    _write_documents(paths, "acme_weekly", documents)
+    _write_documents(paths, "acme_weekly", documents, write_factual=True)
 
     for sub in _CANONICAL_DIRS:
         assert (program_dir / sub).is_dir(), f"onboard scaffold did not create {sub}/"

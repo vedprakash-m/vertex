@@ -10,6 +10,7 @@ from src.core.models import RiskLevel, WorkItem
 
 
 def test_run_channel_with_extraction_surfaces_extractor_errors(tmp_path: Path) -> None:
+    from src.core.alerts import append_or_suppress_alert, read_alerts
     from src.core.channel_registry_store import ChannelRegistryStore
     from src.core.integration_types import (
         ADOHydrationOutput,
@@ -18,6 +19,7 @@ def test_run_channel_with_extraction_surfaces_extractor_errors(tmp_path: Path) -
         ChannelRegistration,
         DiscoveredRef,
         DiscoveryCompleteness,
+        DiscoveryQueryResult,
         DiscoveryResult,
         ExtractionResult,
         HydrationResult,
@@ -81,6 +83,19 @@ def test_run_channel_with_extraction_surfaces_extractor_errors(tmp_path: Path) -
                 scope_state_updates={},
                 errors=(),
                 computed_at=current_time,
+                query_results=(
+                    DiscoveryQueryResult(
+                        query_id="query-1",
+                        scope_id="scope",
+                        wiql_hash="a" * 64,
+                        captured_at=current_time,
+                        raw_count=1,
+                        membership_ids=("101",),
+                        membership_hash="b" * 64,
+                        cap_reached=False,
+                        completeness_state="FULL",
+                    ),
+                ),
             )
 
     class _HydrationProvider:
@@ -123,6 +138,18 @@ def test_run_channel_with_extraction_surfaces_extractor_errors(tmp_path: Path) -
     )
 
     errors: list[IntegrationError] = []
+    discovery_results: list[DiscoveryResult] = []
+    channel_outcomes = []
+    append_or_suppress_alert(
+        program_id="demo",
+        category="channel_budget_exceeded",
+        entity_type="channel",
+        entity_id="ado",
+        severity="warn",
+        message="ADO hydration exceeded its execution budget.",
+        next_command="vertex cockpit show --program demo",
+        programs_root=tmp_path,
+    )
     hydration_result, extraction_result, delta = channel_runtime.run_channel_with_extraction(
         binding,
         store,
@@ -131,6 +158,9 @@ def test_run_channel_with_extraction_surfaces_extractor_errors(tmp_path: Path) -
         verified_at=current_time,
         run_ctx=RunContext(),
         integration_error_sink=errors,
+        discovery_result_sink=discovery_results,
+        channel_outcome_sink=channel_outcomes,
+        programs_root=tmp_path,
     )
 
     assert hydration_result is not None
@@ -140,6 +170,120 @@ def test_run_channel_with_extraction_surfaces_extractor_errors(tmp_path: Path) -
     assert len(errors) == 1
     assert errors[0].stage == "extract"
     assert errors[0].message == "extractor failed"
+    assert discovery_results[0].query_results[0].membership_ids == ("101",)
+    assert channel_outcomes[0].channel == "ado"
+    assert channel_outcomes[0].degraded is False
+    assert channel_outcomes[0].ado_call_count == 1
+    assert read_alerts("demo", programs_root=tmp_path) == ()
+
+
+def test_run_channel_accept_shrinkage_prints_classified_removals(tmp_path: Path) -> None:
+    # Sec 4.4: when --accept-shrinkage bypasses a would-be-blocked shrinkage
+    # guard, run_channel must surface exactly what was removed via the same
+    # operator-visible integration-error channel the guard-blocked path uses,
+    # rather than silently applying the reduced registry.
+    from src.core.channel_registry_store import ChannelRegistryStore
+    from src.core.integration_types import (
+        ChannelBinding,
+        ChannelConfig,
+        ChannelRegistration,
+        DiscoveredRef,
+        DiscoveryCompleteness,
+        DiscoveryResult,
+        HydrationResult,
+        IntegrationError,
+        RegistrationBinding,
+        RegistrationStatus,
+        RunContext,
+    )
+
+    current_time = datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc)
+    store = ChannelRegistryStore(tmp_path / "demo" / "channel_registry.sqlite3", "demo")
+
+    def _registration(ref_id: str) -> ChannelRegistration:
+        return ChannelRegistration(
+            channel="ado",
+            program_id="demo",
+            provider_instance_id="default",
+            ref_id=ref_id,
+            ref_kind="work_item",
+            status=RegistrationStatus.ACTIVE,
+            first_discovered_at=current_time,
+            last_seen_at=current_time,
+        )
+
+    def _discovered(ref_id: str) -> DiscoveredRef:
+        return DiscoveredRef(
+            registration=_registration(ref_id),
+            bindings=(
+                RegistrationBinding(
+                    workstream_id="demo.slice",
+                    scope_id="scope",
+                    source_type="wiql_saved_query",
+                    confidence=1.0,
+                    confidence_source="wiql_saved_query",
+                ),
+            ),
+        )
+
+    def _discovery_result(*ref_ids: str) -> DiscoveryResult:
+        return DiscoveryResult(
+            channel="ado",
+            program_id="demo",
+            discovered_refs=tuple(_discovered(ref_id) for ref_id in ref_ids),
+            completeness=DiscoveryCompleteness.FULL,
+            scope_statuses={},
+            scope_state_updates={},
+            errors=(),
+            computed_at=current_time,
+        )
+
+    # Seed the registry with 6 active registrations so that discovering only
+    # one of them next cycle trips the default shrinkage guard (>30% removed,
+    # >=5 removed).
+    store.apply_discovery_result(_discovery_result(*(str(ref_id) for ref_id in range(100, 106))))
+
+    class _DiscoveryProvider:
+        def discover(self, program_id, config, existing, run_ctx=None):
+            del config, existing, run_ctx
+            return _discovery_result("100")
+
+    class _HydrationProvider:
+        def hydrate(self, registrations, since, program_id, config, mode=None, run_ctx=None):
+            del registrations, since, program_id, config, mode, run_ctx
+            return HydrationResult(
+                channel="ado", resources=object(), api_call_count=0, errors=(),
+                hydrated_ref_ids=(), failed_ref_ids=(),
+            )
+
+    binding = ChannelBinding(
+        config=ChannelConfig(channel="ado", enabled=True, discovery_threshold_hours=24, ttl_days=30),
+        discovery_provider=_DiscoveryProvider(),
+        hydration_provider=_HydrationProvider(),
+        signal_extractor=object(),
+        discovery_config=object(),
+        hydration_config=object(),
+    )
+
+    errors: list[IntegrationError] = []
+    hydration_result, delta = channel_runtime.run_channel(
+        binding,
+        store,
+        program_id="demo",
+        since=current_time - timedelta(days=14),
+        verified_at=current_time,
+        run_ctx=RunContext(accept_shrinkage=True),
+        integration_error_sink=errors,
+    )
+
+    assert delta is not None
+    assert delta.is_shrinkage_guarded()
+    assert store.registration_count("ado") == 1
+    assert len(errors) == 1
+    assert errors[0].stage == "discovery"
+    assert errors[0].message.startswith("Shrinkage accepted: 83% reduction (5 removed): ")
+    for ref_id in ("101", "102", "103", "104", "105"):
+        assert f"work_item:{ref_id}" in errors[0].message
 
 
 def _base_binding_and_store(tmp_path: Path, *, current_time: datetime, resources):

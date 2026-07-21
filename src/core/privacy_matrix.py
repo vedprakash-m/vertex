@@ -157,6 +157,15 @@ class SidecarRetentionRule:
 # rotation policy (rev. 323) and the WS-18 audit-query retention cutoffs.
 SIDECAR_RETENTION: tuple[SidecarRetentionRule, ...] = (
     SidecarRetentionRule(
+        # Armada D-10/D-14: immutable gather-run evidence is CONFIDENTIAL
+        # and retained one year. privacy_purge handles this manifest-shaped
+        # directory specially, preserving latest pointers/current runs.
+        artifact_path="runtime/gather_runs",
+        classification=DataClassification.CONFIDENTIAL,
+        retention=RetentionClass.ONE_YEAR,
+        supports_excise=False,
+    ),
+    SidecarRetentionRule(
         artifact_path="journal/signals.jsonl",
         classification=DataClassification.CONFIDENTIAL,
         retention=RetentionClass.ONE_YEAR,
@@ -347,6 +356,113 @@ SIDECAR_RETENTION: tuple[SidecarRetentionRule, ...] = (
         supports_excise=False,
         eligibility_field="compiled_at",
         directory_glob="*.json",
+    ),
+    # specs/people.md PPL-W1.8 (§7.8): the workspace-global registry root's
+    # artifacts. Unlike every rule above, these live under the shared
+    # `knowledge/` workspace root, not a per-program directory --
+    # `<workspace_root>` is a distinct placeholder from `<program_id>`,
+    # resolved by `privacy_purge.py::_resolve_artifact_paths` against
+    # `get_shared_knowledge_root(programs_root)` instead of
+    # `programs_root/<program_id>/`.
+    SidecarRetentionRule(
+        # people_registry_identity.py: workspace/customer identity + write
+        # mode. No PII (IDs and a customer-boundary label only).
+        artifact_path="<workspace_root>/registry.yaml",
+        classification=DataClassification.INTERNAL,
+        retention=RetentionClass.INDEFINITE,
+        supports_excise=False,
+    ),
+    SidecarRetentionRule(
+        # people_registry_identity.py: generation/fencing/hash metadata only.
+        artifact_path="<workspace_root>/registry_manifest.json",
+        classification=DataClassification.INTERNAL,
+        retention=RetentionClass.INDEFINITE,
+        supports_excise=False,
+    ),
+    SidecarRetentionRule(
+        # people_registry_storage_class.py: storage-class diagnostics only.
+        artifact_path="<workspace_root>/registry_capability_status.yaml",
+        classification=DataClassification.INTERNAL,
+        retention=RetentionClass.INDEFINITE,
+        supports_excise=False,
+    ),
+    SidecarRetentionRule(
+        # people_registry_lease.py: force-release audit trail. Classified
+        # PII because it names an authenticated_principal (an identity),
+        # matching §7.8's "--reveal-pii ... writes a minimal PII-classified
+        # audit record naming ... authenticated principal" precedent.
+        artifact_path="<workspace_root>/.state/registry_lease_audit.jsonl",
+        classification=DataClassification.PII,
+        retention=RetentionClass.SEVEN_YEARS,
+        supports_excise=True,
+    ),
+    SidecarRetentionRule(
+        # people_change_journal.py: field-level person/team change events
+        # (§7.7) -- the highest-sensitivity new artifact this feature
+        # introduces once Phase 2a's real schemas replace PPL-W1.4's
+        # synthetic placeholder.
+        artifact_path="<workspace_root>/_journal/people_changes.jsonl",
+        classification=DataClassification.PII,
+        retention=RetentionClass.SEVEN_YEARS,
+        supports_excise=True,
+    ),
+    SidecarRetentionRule(
+        artifact_path="<workspace_root>/_journal/people_conflicts.jsonl",
+        classification=DataClassification.PII,
+        retention=RetentionClass.SEVEN_YEARS,
+        supports_excise=True,
+    ),
+    SidecarRetentionRule(
+        # PPL-W4.7: one audited record per --apply provider-refresh run.
+        # PII since it carries authenticated_principal, same classification
+        # rule PPL-W1.8 established for that field.
+        artifact_path="<workspace_root>/_journal/people_refresh_telemetry.jsonl",
+        classification=DataClassification.PII,
+        retention=RetentionClass.SEVEN_YEARS,
+        supports_excise=True,
+    ),
+    SidecarRetentionRule(
+        # Rotated, immutable, HMAC-signed segments (archive_signing.py) --
+        # same classification as the active stream they were rotated from.
+        artifact_path="<workspace_root>/_journal/archive/<year>/people_changes_<end_sequence>.jsonl",
+        classification=DataClassification.PII,
+        retention=RetentionClass.SEVEN_YEARS,
+        supports_excise=True,  # metadata-only excise (file is immutable), matching the archive/manifest precedent above.
+    ),
+    SidecarRetentionRule(
+        artifact_path="<workspace_root>/_journal/archive/<year>/people_conflicts_<end_sequence>.jsonl",
+        classification=DataClassification.PII,
+        retention=RetentionClass.SEVEN_YEARS,
+        supports_excise=True,
+    ),
+    SidecarRetentionRule(
+        artifact_path="<workspace_root>/_journal/archive/<year>/people_refresh_telemetry_<end_sequence>.jsonl",
+        classification=DataClassification.PII,
+        retention=RetentionClass.SEVEN_YEARS,
+        supports_excise=True,
+    ),
+    SidecarRetentionRule(
+        # people_registry_transaction.py: staged (not-yet-committed) or
+        # crash-recovered candidate registry data plus a checkpoint copy of
+        # the prior live state -- transient, but classified PII since it
+        # holds the same content class as the live registry it stages.
+        # Deliberately no directory_glob: each transaction directory holds
+        # a MIX of YAML data files, a JSON state record, and a checkpoint/
+        # subdirectory -- genuinely not the "one content-addressed JSON
+        # file per hash with a single timestamp field" shape
+        # `_process_content_addressed_directory` purges, and deleting only
+        # the files that happen to match a glob would leave the rest
+        # orphaned. Its actual lifecycle is governed by
+        # `recover_registry_transactions` (PPL-W1.5), not the generic
+        # purge engine -- registered here for classification/backup
+        # coverage only, matching `run_purge`'s existing "non-JSONL
+        # sidecar governed by its own rotation/migration path" no-op
+        # bucket (see `workstream_registry.yaml`/`runtime/gather_state.json`
+        # above for the same pattern).
+        artifact_path="<workspace_root>/.transactions",
+        classification=DataClassification.PII,
+        retention=RetentionClass.NINETY_DAYS,
+        supports_excise=False,
     ),
 )
 

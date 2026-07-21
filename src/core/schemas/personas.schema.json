@@ -40,6 +40,11 @@
         "owner": { "type": ["string", "null"] },
         "frame": { "type": ["string", "null"] },
         "always_active": { "type": "boolean" },
+        "entity_id": {
+          "description": "specs/people.md PPL-W2A.5 (§7.9): binds a person-specific persona to the canonical registry entity_id, distinguishing it from a generic/editorial persona not tied to one person. Optional in v1 -- absent for every existing persona record.",
+          "type": ["string", "null"],
+          "pattern": "^(person|team):.+$"
+        },
         "checks": {
           "type": "array",
           "items": { "$ref": "#/$defs/check" }

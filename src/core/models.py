@@ -429,6 +429,12 @@ class RunManifest:
     ai_cost_by_model: dict[str, float] = field(default_factory=dict)
     notes: tuple[str, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
+    # D-17: identifies the committed gather run whose data this manifest was
+    # rendered from. Pinned once at draft creation/regeneration time and never
+    # silently re-resolved afterwards (confirm reads it back off the draft
+    # state rather than re-querying the latest committed run).
+    gather_run_id: str | None = None
+    gather_run_hash: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -8,7 +8,7 @@ from typing import Any, Literal, cast
 
 from src.core.exceptions import ConfigError, VertexMigrationError
 from src.core.models_v2 import ADOCoverageRequirement, ADOConfig, AIConfig, AuthorConfig, DependencyADOQuery, DistributionConfig, EditionConfig, EmailThreadSource, LegacyDependency
-from src.core.models_v2 import KustoConfig, KustoQuery, LeadershipReader, M365Config, Program, Scorecard, ScorecardDimension
+from src.core.models_v2 import GatherActivationConfig, KustoConfig, KustoQuery, LeadershipReader, M365Config, Program, Scorecard, ScorecardDimension
 from src.core.models_v2 import TeamsChat, TeamsMeetingSeries, ToneCalibration, WorkstreamFilter, Workstream, WorkstreamSignalSources, WritingStyle
 from src.core.models_v2 import WORKIQ_DISCOVERY_MODES, WorkIQRetrievalConfig
 from src.core.models_v2 import (
@@ -474,6 +474,7 @@ def _parse_edition_config(raw_edition: dict[str, Any], path: Path) -> EditionCon
         mobile_safe_scorecards=_optional_string(raw_edition.get("mobile_safe_scorecards")),
         type_scale_v2=bool(raw_edition.get("type_scale_v2", False)),
         calibration_pilot=bool(raw_edition.get("calibration_pilot", False)),
+        audience_scope_ids=tuple(str(scope_id) for scope_id in (raw_edition.get("audience_scope_ids") or ())),
     )
 
 
@@ -505,7 +506,42 @@ def _parse_program(raw_program: dict[str, Any], path: Path) -> Program:
         golden_queries=_string_tuple(raw_program.get("golden_queries", [])),
         min_channel_completeness_pct=_parse_min_channel_completeness_pct(raw_program, path),
         backfill_max_days=_parse_backfill_max_days(raw_program, path),
+        gather=_parse_gather_activation_config(raw_program.get("gather"), path),
     )
+
+
+def _parse_gather_activation_config(value: Any, path: Path) -> GatherActivationConfig:
+    if value is None:
+        return GatherActivationConfig()
+    if not isinstance(value, dict):
+        raise ConfigError(f"gather must be a mapping in {path}")
+
+    raw_mode = value.get("run_manifest_mode", "shadow")
+    if not isinstance(raw_mode, str) or raw_mode.strip().lower() not in {"off", "shadow", "enforce"}:
+        raise ConfigError(f"gather.run_manifest_mode must be off, shadow, or enforce in {path}")
+    run_manifest_mode = raw_mode.strip().lower()
+    raw_scope_source = value.get("committed_scope_source", "gather_run")
+    if not isinstance(raw_scope_source, str) or raw_scope_source.strip().lower() != "gather_run":
+        raise ConfigError(f"gather.committed_scope_source must be gather_run in {path}")
+
+    cadence = _positive_gather_int(value.get("full_discovery_cadence_hours", 24), field_name="gather.full_discovery_cadence_hours", path=path)
+    warn = _positive_gather_int(value.get("freshness_warn_hours", 30), field_name="gather.freshness_warn_hours", path=path)
+    block = _positive_gather_int(value.get("freshness_block_hours", 48), field_name="gather.freshness_block_hours", path=path)
+    if block < warn:
+        raise ConfigError(f"gather.freshness_block_hours must be >= gather.freshness_warn_hours in {path}")
+    return GatherActivationConfig(
+        run_manifest_mode=cast(Literal["off", "shadow", "enforce"], run_manifest_mode),
+        committed_scope_source="gather_run",
+        full_discovery_cadence_hours=cadence,
+        freshness_warn_hours=warn,
+        freshness_block_hours=block,
+    )
+
+
+def _positive_gather_int(value: Any, *, field_name: str, path: Path) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ConfigError(f"{field_name} must be a positive integer in {path}")
+    return value
 
 
 def _parse_min_channel_completeness_pct(raw_program: dict[str, Any], path: Path) -> int:

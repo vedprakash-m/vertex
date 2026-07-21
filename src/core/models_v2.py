@@ -209,6 +209,15 @@ class KustoQuery:
     fallback_on_empty_rows: bool = False
     chapter: str | None = None
     timeout_seconds: int | None = None  # per-query override; None = KustoClient default (120s)
+    # Armada D-23: query inventory purpose. Golden queries are evidence or
+    # validation surfaces; authoritative current delivery scope is owned only
+    # by schema-1.1 saved-query bindings in slice contracts.
+    classification: Literal["validation", "analytics_history", "evidence", "hygiene", "retired"] = "validation"
+
+    @property
+    def is_authoritative_delivery_scope(self) -> bool:
+        """Golden-query inventory entries can never establish delivery scope."""
+        return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -744,6 +753,21 @@ class WorkstreamFilter:
 
 
 @dataclass(frozen=True, slots=True)
+class GatherActivationConfig:
+    """D-24's explicit reader-activation and freshness policy."""
+
+    run_manifest_mode: Literal["off", "shadow", "enforce"] = "shadow"
+    committed_scope_source: Literal["gather_run"] = "gather_run"
+    full_discovery_cadence_hours: int = 24
+    freshness_warn_hours: int = 30
+    freshness_block_hours: int = 48
+
+    @property
+    def requires_committed_gather_run(self) -> bool:
+        return self.run_manifest_mode == "enforce"
+
+
+@dataclass(frozen=True, slots=True)
 class Program:
     schema_version: str
     id: str
@@ -771,6 +795,7 @@ class Program:
     golden_queries: tuple[str, ...] = ()
     min_channel_completeness_pct: int = 80
     backfill_max_days: int = 14
+    gather: GatherActivationConfig = field(default_factory=GatherActivationConfig)
 
 
 @dataclass(frozen=True, slots=True)
@@ -804,6 +829,11 @@ class EditionConfig:
     mobile_safe_scorecards: str | None = None
     type_scale_v2: bool = False
     calibration_pilot: bool = False
+    #: specs/people.md §7.4/PPL-W5a.1: opt-in names into a program's
+    #: `audience_scopes:` block (src/core/audience_scopes.py). Empty by
+    #: default -- an edition with no opt-in resolves zero extra recipients,
+    #: matching every existing edition's current (unaffected) behavior.
+    audience_scope_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -902,6 +932,11 @@ class Signal:
     metadata: dict[str, Any] | None = None
     thread_id: str | None = None
     review_policy: ReviewPolicy | None = None
+    # D-13 rule 4 (specs/armada.md): the gather-run.v1 manifest run_id that
+    # produced this signal, so readers can eventually filter to signals from
+    # committed runs only. None for signals predating this field or written
+    # outside a lifecycle-managed gather run.
+    gather_run_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

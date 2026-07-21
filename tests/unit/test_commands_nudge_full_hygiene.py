@@ -225,6 +225,133 @@ def test_generate_full_hygiene_nudges_returns_three_sections(
     assert section_c.total_count == 1   # POST_RAMP_IDS = [802001]
 
 
+def _seed_audience_scope_registry(programs_root: Path) -> None:
+    """specs/people.md PPL-W5a.6: a real schema-2.0 shared registry with one
+    org_team ("platform") containing one active member ("newmember") who is
+    NOT among nudge.py's own legacy-schema recipients -- proving the
+    audience-scope pipeline is a genuinely ADDITIVE recipient source."""
+    from datetime import datetime, timezone as tz
+
+    from src.core.audience_scopes import audience_scopes_path_for_program
+    from src.core.people_directory_schema import (
+        ContactKind, ContactPoint, ContactStatus, PersonDirectory, PersonStatus,
+        Team, TeamKind, TeamStatus, write_people_directory, write_teams,
+    )
+    from src.core.people_entity_schema import AliasStatus, CanonicalEntity, EntitiesDocument, EntityAlias, write_entities_document
+    from src.core.people_membership_schema import MembershipStatus, TeamMembership, write_memberships
+    from src.core.people_registry_identity import bootstrap_registry_identity, load_registry_config
+    from src.core.people_registry_modes import set_registry_flag
+
+    now = datetime(2026, 5, 22, tzinfo=tz.utc)
+
+    def alias(value: str) -> EntityAlias:
+        return EntityAlias(
+            value=value, kind="vertex::alias", status=AliasStatus.ACTIVE, valid_from=None, valid_until=None,
+            source="test", source_ref=None, recorded_at=now, verified_at=now, verified_by_principal="steward",
+        )
+
+    knowledge_root = programs_root.parent / "knowledge"
+    if load_registry_config(knowledge_root) is None:
+        bootstrap_registry_identity(knowledge_root=knowledge_root, customer_boundary_id="acme-corp", apply=True, as_of=now)
+    set_registry_flag(knowledge_root, "audience_scopes_enabled", True, actor="test-principal")
+    write_entities_document(
+        knowledge_root / "entities.yaml",
+        EntitiesDocument(
+            schema_version="2.0",
+            entities=(
+                CanonicalEntity(workspace_id="ws", entity_id="team:platform", entity_type="team", canonical_name="Platform", aliases=(alias("platform"),), scope="org", created_at=now),
+                CanonicalEntity(workspace_id="ws", entity_id="person:newmember", entity_type="person", canonical_name="New Member", aliases=(alias("newmember"),), scope="org", created_at=now),
+            ),
+        ),
+    )
+    write_teams(knowledge_root / "teams.yaml", (Team(entity_id="team:platform", id="platform", name="Platform", kind=TeamKind.ORG_TEAM, status=TeamStatus.ACTIVE),))
+    write_memberships(
+        knowledge_root / "memberships.yaml",
+        (
+            TeamMembership(membership_id="m1", person_entity_id="person:newmember", team_entity_id="team:platform", role="member", valid_from=now, valid_until=None, source="test", source_ref=None, observed_at=now, verified_at=now, status=MembershipStatus.ACTIVE),
+        ),
+    )
+    write_people_directory(
+        knowledge_root / "people_directory.yaml",
+        (
+            PersonDirectory(
+                entity_id="person:newmember", alias="newmember", status=PersonStatus.ACTIVE,
+                contacts=(
+                    ContactPoint(
+                        kind=ContactKind.PRIMARY_EMAIL, value="newmember@example.com", status=ContactStatus.ACTIVE,
+                        valid_from=None, valid_until=None, source="test", source_ref=None,
+                        recorded_at=now, verified_at=now, verified_by_principal="steward", delivery_eligible=True,
+                    ),
+                ),
+            ),
+        ),
+    )
+    scope_path = audience_scopes_path_for_program("acme", programs_root=programs_root)
+    scope_path.parent.mkdir(parents=True, exist_ok=True)
+    scope_path.write_text('schema_version: "1.0"\naudience_scopes:\n  engineering_hygiene:\n    team_refs: [platform]\n', encoding="utf-8")
+
+
+def test_generate_full_hygiene_nudges_adds_audience_scope_recipients(
+    monkeypatch,
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    stage_v2_report_workspace(repo_root, tmp_path, edition_names=("acme_weekly", "nova_nudge"))
+    programs_root = tmp_path / "programs"
+    _seed_full_hygiene_config(programs_root)
+    _seed_people(tmp_path / "knowledge")
+    _seed_registry(programs_root)
+    _seed_audience_scope_registry(programs_root)
+
+    # Opt this edition into the new audience scope, matching the same
+    # full_hygiene: block additional_cc/to_leadership_rollup already live in.
+    edition_path = programs_root / "acme" / "editions" / "nova_nudge.yaml"
+    import yaml as yaml_module
+    doc = yaml_module.safe_load(edition_path.read_text(encoding="utf-8"))
+    doc["full_hygiene"]["audience_scope_ids"] = ["engineering_hygiene"]
+    edition_path.write_text(yaml_module.safe_dump(doc, sort_keys=False), encoding="utf-8")
+
+    monkeypatch.setattr("src.commands.nudge.ADOClient", _FullHygieneFakeADOClient)
+
+    artifacts = generate_full_hygiene_nudges(
+        program_id="acme",
+        dry_run=True,
+        as_of=datetime(2026, 5, 22, 18, 0, tzinfo=timezone.utc),
+        programs_root=programs_root,
+    )
+
+    emails = {r.email for r in artifacts.to_recipients}
+    assert "newmember@example.com" in emails
+
+
+def test_generate_full_hygiene_nudges_without_audience_scope_ids_is_unaffected(
+    monkeypatch,
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    """Zero-regression check: the SAME audience-scope registry exists on
+    disk, but this edition never opts in (`audience_scope_ids` absent) --
+    the new registry member must not silently appear as a recipient."""
+    stage_v2_report_workspace(repo_root, tmp_path, edition_names=("acme_weekly", "nova_nudge"))
+    programs_root = tmp_path / "programs"
+    _seed_full_hygiene_config(programs_root)
+    _seed_people(tmp_path / "knowledge")
+    _seed_registry(programs_root)
+    _seed_audience_scope_registry(programs_root)
+
+    monkeypatch.setattr("src.commands.nudge.ADOClient", _FullHygieneFakeADOClient)
+
+    artifacts = generate_full_hygiene_nudges(
+        program_id="acme",
+        dry_run=True,
+        as_of=datetime(2026, 5, 22, 18, 0, tzinfo=timezone.utc),
+        programs_root=programs_root,
+    )
+
+    emails = {r.email for r in artifacts.to_recipients}
+    assert "newmember@example.com" not in emails
+
+
 def test_generate_full_hygiene_nudges_deduplicates_b_from_c(
     monkeypatch,
     repo_root: Path,

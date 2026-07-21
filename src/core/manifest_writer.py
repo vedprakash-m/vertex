@@ -43,6 +43,8 @@ def build_run_manifest(
     ai_cost_by_model: dict[str, float] | None = None,
     notes: tuple[str, ...] = (),
     metadata: dict[str, Any] | None = None,
+    gather_run_id: str | None = None,
+    gather_run_hash: str | None = None,
 ) -> RunManifest:
     return RunManifest(
         manifest_id=manifest_id,
@@ -63,6 +65,8 @@ def build_run_manifest(
         git_sha=git_sha,
         notes=tuple(notes),
         metadata=dict(metadata or {}),
+        gather_run_id=gather_run_id,
+        gather_run_hash=gather_run_hash,
     )
 
 

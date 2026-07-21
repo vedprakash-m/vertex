@@ -36,7 +36,12 @@ from src.core.schedule_health import (
 #: A missing artifact is deliberately downgraded to ``info`` (not ``fail``)
 #: since a program that has never scheduled prefetch/cockpit builds is a
 #: legitimate early-adoption state, not a health failure.
-_STATUS_MAP: dict[str, str] = {"ok": "ok", "warn": "warn", "missing": "info"}
+_STATUS_MAP: dict[str, str] = {
+    "ok": "ok",
+    "warn": "warn",
+    "missing": "info",
+    "inactive": "info",
+}
 
 _LABEL_BY_ARTIFACT: dict[str, str] = {
     "prefetch": "Scheduled Prefetch",
@@ -49,6 +54,7 @@ def run_schedule_health_doctor(
     program_id: str,
     programs_root: Path,
     now: datetime | None = None,
+    prefetch_enabled: bool = True,
     evaluate_fn: Callable[..., Sequence[ScheduleHealthFinding]] | None = None,
 ) -> DoctorReport:
     """Return a DoctorReport auditing scheduled-task freshness for one program.
@@ -61,6 +67,10 @@ def run_schedule_health_doctor(
         The ``programs/`` directory containing ``<program_id>/``.
     now
         Optional override for the staleness comparison instant (UTC).
+    prefetch_enabled
+        Whether the program has enabled the WorkIQ/M365 source consumed by
+        ``vertex prefetch``. A disabled source is reported as inactive rather
+        than incorrectly as a missing scheduled artifact.
     evaluate_fn
         Dependency seam for tests; defaults to the real
         :func:`src.core.schedule_health.evaluate_schedule_health`.
@@ -79,6 +89,22 @@ def run_schedule_health_doctor(
                     f"Could not evaluate schedule health for {program_id}: {error}",
                 ),
             ),
+        )
+
+    if not prefetch_enabled:
+        findings = tuple(
+            ScheduleHealthFinding(
+                artifact="prefetch",
+                status="inactive",
+                detail=(
+                    f"WorkIQ prefetch is inactive for {program_id} because the program's "
+                    "M365/WorkIQ channel is disabled."
+                ),
+                age_hours=None,
+            )
+            if finding.artifact == "prefetch"
+            else finding
+            for finding in findings
         )
 
     if not findings:
@@ -116,11 +142,14 @@ def run_schedule_health_doctor(
 def _finding_to_check(finding: ScheduleHealthFinding) -> DoctorCheck:
     label = _LABEL_BY_ARTIFACT.get(finding.artifact, finding.artifact)
     status = _STATUS_MAP.get(finding.status, "info")
+    metadata = {"age_hours": finding.age_hours} if finding.age_hours is not None else None
+    if finding.status == "inactive":
+        metadata = {"active": False}
     return DoctorCheck(
         label,
         status,
         finding.detail,
-        metadata={"age_hours": finding.age_hours} if finding.age_hours is not None else None,
+        metadata=metadata,
     )
 
 

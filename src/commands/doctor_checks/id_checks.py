@@ -202,6 +202,11 @@ def run_id_doctor(
         fallback_dimension_ids=tuple(sorted(set(canonical_scorecard_ids))),
     )
     anchor_checks = build_slice_anchor_checks(bundle.slice_contracts, as_of=date.today())
+    crosswalk_checks = build_slice_crosswalk_checks(
+        bundle.slice_contracts,
+        registry_entries,
+        known_workstream_ids=workstream_ids,
+    )
     return DoctorReport(
         edition=edition_name,
         checks=(
@@ -211,6 +216,7 @@ def run_id_doctor(
                 f"programs/{program_id} scorecards, chapter contract, slice contracts, registry, and workstreams align ({len(slice_ids)} canonical dimensions, {len(registry_entries)} registry lanes, {len(workstream_ids)} workstreams).",
             ),
             *anchor_checks,
+            *crosswalk_checks,
             composition_check,
         ),
     )
@@ -307,33 +313,48 @@ def build_cross_edition_composition_check(
 
 
 def build_slice_anchor_checks(slice_contracts: Any, *, as_of: date) -> tuple[DoctorCheck, ...]:
+    """Armada spec §1.4/§4.2 (D-1): correct the doctor's false-green anchor check.
+
+    Explicit work-item IDs and filters are temporary exceptions or curated
+    highlights (spec line 18) — never scope authority. An `ado_primary` slice
+    is anchor-complete only when it has at least one saved query. A slice with
+    zero saved queries may still pass if it declares an owned, non-expired
+    exception via the existing `intentional_filter_only` +
+    `intentional_filter_only_expires_on` fields (reused here for both the
+    filter-only and explicit-ID-only/no-scope cases, not just the originally
+    narrower filter-only combination).
+    """
     checks: list[DoctorCheck] = []
     for contract in slice_contracts:
         ado_contract = contract.source_contract.ado
         if ado_contract is None:
-            checks.append(
-                DoctorCheck(
-                    f"Anchor {contract.id}",
-                    "warn",
-                    f"{contract.id}: raw anchor gap; source_contract.ado is missing, so add saved_queries or explicit_work_item_ids.",
+            if contract.source_of_truth == "ado_primary":
+                checks.append(
+                    DoctorCheck(
+                        f"Anchor {contract.id}",
+                        "warn",
+                        f"{contract.id}: raw anchor gap; source_contract.ado is missing, so add saved_queries or explicit_work_item_ids.",
+                    )
                 )
-            )
             continue
 
-        is_filter_only = (
-            ado_contract.filters is not None
-            and not ado_contract.filters.is_empty()
-            and not ado_contract.saved_queries
-            and not ado_contract.explicit_work_item_ids
-        )
-        if is_filter_only and ado_contract.intentional_filter_only:
+        if ado_contract.saved_queries:
+            # Scope authority present (D-1). Explicit IDs/filters alongside it are
+            # curated exceptions/highlights, not a completeness concern here.
+            continue
+
+        if contract.source_of_truth != "ado_primary":
+            # Non-ado_primary slices are not required to carry ADO scope authority.
+            continue
+
+        if ado_contract.intentional_filter_only:
             expires_on = ado_contract.intentional_filter_only_expires_on
             if expires_on is None:
                 checks.append(
                     DoctorCheck(
                         f"Anchor {contract.id}",
                         "warn",
-                        f"{contract.id}: filter-only waiver is missing intentional_filter_only_expires_on.",
+                        f"{contract.id}: declared exception is missing intentional_filter_only_expires_on.",
                     )
                 )
                 continue
@@ -342,33 +363,79 @@ def build_slice_anchor_checks(slice_contracts: Any, *, as_of: date) -> tuple[Doc
                     DoctorCheck(
                         f"Anchor {contract.id}",
                         "warn",
-                        f"{contract.id}: filter-only waiver expired on {expires_on.isoformat()}; add saved_queries or explicit_work_item_ids, or renew the waiver.",
+                        f"{contract.id}: declared exception expired on {expires_on.isoformat()}; add saved_queries or renew the exception.",
                     )
                 )
                 continue
             continue
 
-        if ado_contract.saved_queries or ado_contract.explicit_work_item_ids:
-            continue
-
-        if is_filter_only:
-            checks.append(
-                DoctorCheck(
-                    f"Anchor {contract.id}",
-                    "warn",
-                    f"{contract.id}: raw anchor gap; contract is filter-only, so add saved_queries or explicit_work_item_ids, or mark it intentional with an expiry date.",
-                )
-            )
-            continue
-
+        has_explicit_only = bool(ado_contract.explicit_work_item_ids) and (
+            ado_contract.filters is None or ado_contract.filters.is_empty()
+        )
+        has_filter_only = (
+            ado_contract.filters is not None
+            and not ado_contract.filters.is_empty()
+            and not ado_contract.explicit_work_item_ids
+        )
+        if has_explicit_only:
+            reason = "explicit_work_item_ids alone do not establish scope completeness (spec D-1)"
+        elif has_filter_only:
+            reason = "contract is filter-only"
+        elif ado_contract.explicit_work_item_ids or (ado_contract.filters is not None and not ado_contract.filters.is_empty()):
+            reason = "explicit_work_item_ids and filters alone do not establish scope completeness (spec D-1)"
+        else:
+            reason = "no saved_queries, explicit_work_item_ids, or filters are configured"
         checks.append(
             DoctorCheck(
                 f"Anchor {contract.id}",
                 "warn",
-                f"{contract.id}: raw anchor gap; no saved_queries or explicit_work_item_ids are configured.",
+                f"{contract.id}: raw anchor gap; {reason}. Add saved_queries, or mark it an intentional exception with intentional_filter_only_expires_on.",
             )
         )
     return tuple(checks)
+
+
+def build_slice_crosswalk_checks(
+    slice_contracts: Any,
+    registry_entries: Any,
+    *,
+    known_workstream_ids: set[str],
+) -> tuple[DoctorCheck, ...]:
+    """Validate D-4's stable binding-to-lane crosswalk.
+
+    A lane name in a saved-query binding is not enough: the registry must
+    explicitly point back to the owning slice.  This avoids display-name and
+    ID-coincidence joins while still permitting a slice to own several lanes.
+    """
+    registry_by_id = {entry.id: entry for entry in registry_entries}
+    problems: list[str] = []
+    for contract in slice_contracts:
+        if contract.workstream_id and contract.workstream_id not in known_workstream_ids:
+            problems.append(f"{contract.id} references unknown workstream_id '{contract.workstream_id}'")
+        ado_contract = contract.source_contract.ado
+        if ado_contract is None:
+            continue
+        for binding in ado_contract.saved_query_bindings:
+            for workstream_id in binding.workstream_ids:
+                if workstream_id not in known_workstream_ids:
+                    problems.append(
+                        f"{contract.id}:{binding.binding_id} references unknown binding workstream_id '{workstream_id}'"
+                    )
+            for lane_id in binding.lane_ids:
+                lane = registry_by_id.get(lane_id)
+                if lane is None:
+                    problems.append(f"{contract.id}:{binding.binding_id} references unknown registry lane '{lane_id}'")
+                elif contract.id not in lane.source_slice_ids:
+                    problems.append(
+                        f"registry lane '{lane_id}' must declare source_slice_ids including '{contract.id}' "
+                        f"for binding '{binding.binding_id}'"
+                    )
+    if not problems:
+        return ()
+    detail = "; ".join(problems[:2])
+    if len(problems) > 2:
+        detail += f"; +{len(problems) - 2} more"
+    return (DoctorCheck("Scope crosswalk", "warn", detail),)
 
 
 def load_program_edition_ids(program_id: str, *, editions_root: Path) -> tuple[str, ...]:

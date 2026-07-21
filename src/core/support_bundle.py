@@ -6,7 +6,11 @@ an on-call SRE needs to triage a failure WITHOUT exposing PII:
   - ``gather_state.json`` (last-run footprint, PII not stored there)
   - ``run_telemetry.jsonl`` (per-channel latency history, PII not stored)
   - ``alerts.jsonl`` (open + resolved alerts, PII not stored)
+  - ``gather_runs.json`` (bounded, redacted lifecycle diagnostics; never raw
+    membership/evidence sidecars)
   - ``manifests/issue_*.json`` (latest archive manifest, PII not stored)
+  - ``registry_summary.json`` (specs/people.md PPL-W1.8: workspace-registry
+    generation/record counts only -- never raw journal content)
   - ``doctor_report.txt`` (last doctor run, if present)
   - ``environment.txt`` (vertex version, python version, OS — no hostnames)
   - ``redaction_log.txt`` (every field scrubbed, with a redaction reason)
@@ -33,7 +37,16 @@ from typing import Any, Iterable, Mapping
 
 from src.core.exceptions import StateError
 from src.core.gather_state_store import load_gather_state, resolve_gather_state_path_for_read
+from src.core.gather_run_manifest import (
+    COMMITTED_SUBDIR,
+    FAILED_SUBDIR,
+    QUARANTINE_SUBDIR,
+    STAGING_SUBDIR,
+    get_gather_runs_dir,
+)
 from src.core.jsonl_utils import parse_jsonl_line
+from src.core.knowledge_store import get_shared_knowledge_root
+from src.core.people_registry_privacy import build_registry_privacy_summary
 from src.core.program_paths import resolve_run_telemetry_path_for_read
 from src.core.run_telemetry import read_run_telemetry
 from src.core.alerts import read_alerts, _alerts_path
@@ -161,12 +174,31 @@ def build_support_bundle(
                 _add_json(tar, f"manifests/{latest_manifest.name}", redacted)
                 file_count += 1
 
-        # 5. environment.txt
+        # 5. Gather-run lifecycle diagnostics. These are intentionally a
+        # bounded summary, rather than copying confidential raw ADO-membership
+        # sidecars into a support artifact. They still give SRE enough context
+        # to diagnose stale pointers, failed promotions, and fencing recovery.
+        gather_runs = _build_gather_runs_diagnostics(program_id, programs_root=programs_root)
+        if gather_runs is not None:
+            redacted, redaction_log = _redact(gather_runs, "gather_runs")
+            _add_json(tar, "gather_runs.json", redacted)
+            file_count += 1
+
+        # 6. registry_summary.json -- specs/people.md PPL-W1.8 (§7.8):
+        # counts/metadata only, PII excluded by default (include_pii is
+        # never passed True here -- this bundle is "always redacted",
+        # matching this module's own stated invariant above).
+        knowledge_root = get_shared_knowledge_root(programs_root)
+        registry_summary = build_registry_privacy_summary(knowledge_root, include_pii=False)
+        _add_json(tar, "registry_summary.json", registry_summary.to_payload())
+        file_count += 1
+
+        # 7. environment.txt
         env_payload = _build_environment_payload()
         _add_text(tar, "environment.txt", env_payload)
         file_count += 1
 
-        # 6. redaction_log.txt (last, after all redactions counted)
+        # 8. redaction_log.txt (last, after all redactions counted)
         _add_text(tar, "redaction_log.txt", "\n".join(redaction_log.entries) + ("\n" if redaction_log.entries else ""))
         file_count += 1
 
@@ -181,6 +213,110 @@ def build_support_bundle(
 
 
 # ---------- internals ----------
+
+
+_GATHER_RUN_DIAGNOSTIC_LIMIT = 10
+_GATHER_RUN_MANIFEST_FIELDS = (
+    "run_id",
+    "status",
+    "schema_version",
+    "program_id",
+    "actor_identity_type",
+    "lease_fencing_token",
+    "started_at",
+    "finished_at",
+    "scope_as_of",
+    "data_as_of",
+    "required_scope_status",
+    "discovered_count",
+    "hydrated_count",
+    "cap_reached",
+    "shrinkage_classification",
+    "latency",
+    "ado_call_count",
+    "retry_count",
+    "throttle_count",
+    "freshness_state",
+    "alert_delivery_failed",
+    "manifest_hash",
+)
+
+
+def _build_gather_runs_diagnostics(program_id: str, *, programs_root: Path) -> dict[str, Any] | None:
+    """Return an SRE-safe, bounded summary of gather lifecycle evidence.
+
+    Raw ``ado_items.jsonl`` and ``query_results.json`` files are deliberately
+    excluded: their item membership is confidential evidence, unnecessary for
+    first-line operational diagnosis, and already retained under the governed
+    gather-run lifecycle. Invalid manifests are represented as diagnostic rows
+    instead of making bundle creation fail during an incident.
+    """
+    root = get_gather_runs_dir(program_id, programs_root=programs_root)
+    if not root.exists():
+        return None
+
+    pointers: dict[str, Any] = {}
+    for pointer_name in ("latest.json", "latest_full.json"):
+        pointer_path = root / pointer_name
+        if not pointer_path.exists():
+            continue
+        try:
+            payload = json.loads(pointer_path.read_text(encoding="utf-8"))
+            pointers[pointer_name] = (
+                {key: payload.get(key) for key in ("run_id", "manifest_hash")}
+                if isinstance(payload, dict)
+                else {"error": "pointer payload is not an object"}
+            )
+        except (OSError, json.JSONDecodeError) as error:
+            pointers[pointer_name] = {"error": f"unreadable pointer: {type(error).__name__}"}
+
+    runs: list[dict[str, Any]] = []
+    for state_dir_name in (COMMITTED_SUBDIR, FAILED_SUBDIR, QUARANTINE_SUBDIR, STAGING_SUBDIR):
+        state_root = root / state_dir_name
+        if not state_root.is_dir():
+            continue
+        candidates = sorted(
+            (path for path in state_root.iterdir() if path.is_dir()),
+            key=lambda path: path.name,
+            reverse=True,
+        )[:_GATHER_RUN_DIAGNOSTIC_LIMIT]
+        for run_dir in candidates:
+            manifest_path = run_dir / "manifest.json"
+            try:
+                payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if not isinstance(payload, dict):
+                    raise ValueError("manifest payload is not an object")
+            except (OSError, json.JSONDecodeError, ValueError) as error:
+                runs.append(
+                    {
+                        "state_directory": state_dir_name,
+                        "run_id": run_dir.name,
+                        "error": f"unreadable manifest: {type(error).__name__}",
+                    }
+                )
+                continue
+            entry = {key: payload.get(key) for key in _GATHER_RUN_MANIFEST_FIELDS}
+            entry["state_directory"] = state_dir_name
+            entry["failed_ref_count"] = len(payload.get("failed_refs") or [])
+            entry["query_result_count"] = len(payload.get("query_results") or [])
+            outcomes = payload.get("channel_outcomes") or []
+            entry["channel_outcomes"] = [
+                {
+                    key: outcome.get(key)
+                    for key in ("channel", "degraded", "degrade_reason", "elapsed_seconds", "ado_call_count", "retry_count", "throttle_count")
+                }
+                for outcome in outcomes
+                if isinstance(outcome, dict)
+            ]
+            runs.append(entry)
+
+    return {
+        "schema_version": "gather-run-diagnostics.v1",
+        "program_id": program_id,
+        "pointers": pointers,
+        "runs": runs,
+        "per_state_limit": _GATHER_RUN_DIAGNOSTIC_LIMIT,
+    }
 
 
 def _redact_node(node: Any, path: str, log: RedactionLog) -> tuple[Any, RedactionLog]:

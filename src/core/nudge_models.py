@@ -275,6 +275,12 @@ class NudgeDeliveryConfig:
     # item assignees when to_leadership_rollup=True (e.g. leadership stakeholders
     # not derivable from ADO/workstream data).
     additional_cc: tuple[str, ...] = ()
+    #: specs/people.md §7.4/PPL-W5a.6: opt-in names into a program's
+    #: audience_scopes.yaml (src/core/audience_scopes.py). Empty by
+    #: default -- an edition with no opt-in resolves zero extra
+    #: recipients, matching every existing nudge config's current
+    #: (unaffected) behavior.
+    audience_scope_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

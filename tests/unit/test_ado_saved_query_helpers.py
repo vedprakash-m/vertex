@@ -27,6 +27,58 @@ def test_bound_saved_query_wiql_injects_date_when_changeddate_only_in_select() -
     assert result.index("[System.ChangedDate] >= '2026-05-08'") < result.lower().index(" order by ")
 
 
+def test_bound_saved_query_wiql_skips_date_bound_when_since_is_none() -> None:
+    """Armada spec D-2: a `full_scope` binding must never be date-bounded by a
+    consumer -- passing since=None must leave the WIQL's membership identical
+    to gather's undated saved-query execution (only filter/tag clauses may be
+    appended)."""
+    wiql = (
+        "select [System.Id], [System.Title] from WorkItems "
+        "where [System.TeamProject] = @project "
+        "order by [System.Id]"
+    )
+
+    result = bound_saved_query_wiql(wiql, since=None, additional_clause=None)
+
+    assert result == wiql
+    assert "ChangedDate" not in result
+
+
+def test_bound_saved_query_wiql_since_none_still_applies_additional_clause() -> None:
+    wiql = "select [System.Id] from WorkItems where [System.TeamProject] = @project order by [System.Id]"
+
+    result = bound_saved_query_wiql(wiql, since=None, additional_clause="[System.AreaPath] under 'One\\XCatalog'")
+
+    assert "ChangedDate" not in result
+    assert "[System.AreaPath] under 'One\\XCatalog'" in result
+
+
+def test_load_saved_query_item_ids_since_none_produces_undated_wiql() -> None:
+    class _FakeClient:
+        def get_saved_query(self, query_id: str) -> dict[str, str]:
+            return {
+                "wiql": (
+                    "select [System.Id] from WorkItems where [System.TeamProject] = 'One' "
+                    f"and [System.AreaPath] under '{query_id}' order by [System.Id]"
+                )
+            }
+
+        def execute_wiql(self, wiql: str, top: int = 2000) -> list[int]:
+            assert "ChangedDate" not in wiql
+            return [201, 202]
+
+    ids, membership, ado_calls = load_saved_query_item_ids(
+        _FakeClient(),
+        ("full-scope-query",),
+        since=None,
+        top_cap=2000,
+    )
+
+    assert ids == [201, 202]
+    assert membership == {201: ("full-scope-query",), 202: ("full-scope-query",)}
+    assert ado_calls == 2
+
+
 def test_append_wiql_clause_wraps_discovery_clause_before_order_by() -> None:
     wiql = "Select [System.Id] From WorkItems order by [System.ChangedDate] desc"
 

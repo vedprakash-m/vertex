@@ -104,6 +104,7 @@ def run_operator_gates_doctor(
         ),
         operator_gate_kusto_validation_check(
             edition_name=edition_name,
+            kusto_enabled=bool(getattr(getattr(resolved.program, "kusto", None), "enabled", False)),
             kusto_access_check=auth_checks.get("Kusto Access"),
             kusto_validation_check=auth_checks.get("Kusto Validation"),
             metric_bindings_check=metric_checks.get("Metric Bindings"),
@@ -127,7 +128,7 @@ def run_operator_gates_doctor(
         summary_status = "fail"
         summary_detail = (
             f"{len(blocking_gate_labels)} blocking operator gate(s) remain: {', '.join(blocking_gate_labels)}. "
-            "Execute them in order so durable IDs, transcript health, Kusto validation, checkpoint creation, and rollback evidence converge before the first live rollback rehearsal."
+            "Resolve and record evidence for these gates before treating the program as operationally ready."
         )
     elif warning_gate_labels:
         summary_status = "warn"

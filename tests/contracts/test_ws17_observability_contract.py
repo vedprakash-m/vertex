@@ -6,7 +6,7 @@ Spec: `specs/prod-vis.md` §WS-17 acceptance:
 
 These tests assert:
 1. Failure taxonomy classifies common shapes correctly
-2. doctor --diagnose / observability diagnose surfaces the last failure
+2. observability diagnose surfaces the last failure
 3. run_telemetry.jsonl round-trips; P50/P95/SLO status computed correctly
 4. Support bundle always redacts PII (even when bundle includes a planted
    email in non-PII slot)
@@ -18,14 +18,12 @@ from __future__ import annotations
 
 import json
 import tarfile
-import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from src.core.alerts import (
-    ALERTS_FILENAME,
     AlertRecord,
     AlertSeverity,
     append_alert,
@@ -45,11 +43,17 @@ from src.core.run_telemetry import (
     append_run_telemetry,
     build_channel_perf_summary,
     read_run_telemetry,
-    run_telemetry_path,
 )
 from src.core.support_bundle import (
     PII_ALLOWED_FIELDS,
     build_support_bundle,
+)
+from src.core.gather_run_manifest import (
+    GatherRunManifest,
+    GatherRunStatus,
+    RequiredScopeStatus,
+    commit_staging_run,
+    create_staging_manifest,
 )
 
 
@@ -206,6 +210,7 @@ def test_alerts_append_resolve_banner(tmp_path: Path) -> None:
     assert "2 unresolved" in banner
     assert "1 critical" in banner
     assert "1 error" in banner
+    assert "vertex observability diagnose --program demo" in banner
 
     # Resolve a1
     assert resolve_alert("a1", program_id="demo", programs_root=tmp_path) is True
@@ -302,6 +307,44 @@ def test_support_bundle_preserves_documented_pii_slots(tmp_path: Path) -> None:
     with tarfile.open(result.bundle_path, "r:gz") as tar:
         gs = tar.extractfile("gather_state.json").read().decode("utf-8")
         assert "bob@contoso.com" in gs, "Documented PII slot was scrubbed — should be preserved"
+
+
+def test_support_bundle_includes_bounded_gather_run_lifecycle_diagnostics(tmp_path: Path) -> None:
+    program_id = "demo"
+    (tmp_path / program_id).mkdir()
+    started_at = datetime(2026, 7, 21, 8, 0, tzinfo=timezone.utc)
+    running = GatherRunManifest(
+        run_id="gather-test-run",
+        status=GatherRunStatus.RUNNING,
+        program_id=program_id,
+        actor_identity_type="interactive",
+        lease_owner="operator@example.com",
+        lease_fencing_token=7,
+        started_at=started_at,
+        scope_as_of=started_at,
+        required_scope_status=RequiredScopeStatus.FULL,
+        discovered_count=12,
+        hydrated_count=11,
+    )
+    create_staging_manifest(running, programs_root=tmp_path)
+    commit_staging_run(running, finished_at=started_at + timedelta(seconds=2), programs_root=tmp_path)
+
+    result = build_support_bundle(
+        program_id,
+        programs_root=tmp_path,
+        output_path=tmp_path / "bundle.tar.gz",
+    )
+
+    with tarfile.open(result.bundle_path, "r:gz") as tar:
+        names = tar.getnames()
+        assert "gather_runs.json" in names
+        diagnostics = json.loads(tar.extractfile("gather_runs.json").read().decode("utf-8"))
+        assert diagnostics["pointers"]["latest.json"]["run_id"] == "gather-test-run"
+        assert diagnostics["runs"][0]["run_id"] == "gather-test-run"
+        assert diagnostics["runs"][0]["discovered_count"] == 12
+        assert "operator@example.com" not in json.dumps(diagnostics)
+        assert "ado_items.jsonl" not in names
+        assert "query_results.json" not in names
 
 
 def test_support_bundle_pii_allowed_fields_is_stable() -> None:

@@ -30,6 +30,10 @@ from src.core.config_loader import ReportBundle
 from src.core.exceptions import QueryError
 from src.core.models import RiskLevel, WorkItem
 from src.core.query_builder import build_odata_filter
+from src.commands.gather_pipeline.slice_contract_helpers import (
+    render_saved_query_filter_clause as _shared_render_saved_query_filter_clause,
+    slice_contract_saved_query_clauses as _shared_slice_contract_saved_query_clauses,
+)
 
 DEFAULT_ADO_TOP = 1000
 _WORK_ITEM_BATCH_SIZE = 200
@@ -53,7 +57,7 @@ def _load_saved_query_item_ids(
     client: Any,
     query_ids: tuple[str, ...],
     *,
-    since: datetime,
+    since: datetime | None,
     query_clauses: dict[str, str] | None = None,
 ) -> tuple[list[int], dict[int, tuple[str, ...]], int]:
     from src.core.ado_saved_query_helpers import load_saved_query_item_ids
@@ -73,7 +77,8 @@ def _load_live_work_items(
     as_of: datetime,
     *,
     ado_client_factory: Callable[..., Any],
-    slice_contract_saved_query_ids: Callable[[ReportBundle], tuple[str, ...]],
+    slice_contract_full_scope_query_ids: Callable[[ReportBundle], tuple[str, ...]],
+    slice_contract_activity_delta_query_ids: Callable[[ReportBundle], tuple[str, ...]],
     slice_contract_saved_query_clauses: Callable[[ReportBundle], dict[str, str]],
     slice_contract_explicit_work_item_ids: Callable[[ReportBundle], list[int]],
     query_work_item_batch_rows: Callable[[Any, list[int], tuple[str, ...]], tuple[list[dict[str, Any]], int]],
@@ -107,12 +112,32 @@ def _load_live_work_items(
         if int(row.get("WorkItemId") or row.get("id") or 0) > 0
     }
     ids = list(row_by_id)
-    saved_query_item_ids, saved_query_membership, saved_query_ado_calls = _load_saved_query_item_ids(
+    saved_query_clauses = slice_contract_saved_query_clauses(bundle)
+    # Armada spec D-2: `full_scope` bindings are never date-bounded (since=None,
+    # matching gather's undated membership); `activity_delta` bindings keep the
+    # existing recent-activity date bound. `analytics_history` bindings are
+    # audit-only and are intentionally excluded from live-item membership.
+    full_scope_ids, full_scope_membership, full_scope_ado_calls = _load_saved_query_item_ids(
         client,
-        slice_contract_saved_query_ids(bundle),
-        since=since,
-        query_clauses=slice_contract_saved_query_clauses(bundle),
+        slice_contract_full_scope_query_ids(bundle),
+        since=None,
+        query_clauses=saved_query_clauses,
     )
+    activity_delta_ids, activity_delta_membership, activity_delta_ado_calls = _load_saved_query_item_ids(
+        client,
+        slice_contract_activity_delta_query_ids(bundle),
+        since=since,
+        query_clauses=saved_query_clauses,
+    )
+    saved_query_item_ids = _merge_item_ids(full_scope_ids, activity_delta_ids)
+    saved_query_membership: dict[int, tuple[str, ...]] = {}
+    for membership in (full_scope_membership, activity_delta_membership):
+        for work_item_id, query_ids in membership.items():
+            existing = saved_query_membership.get(work_item_id, ())
+            saved_query_membership[work_item_id] = existing + tuple(
+                query_id for query_id in query_ids if query_id not in existing
+            )
+    saved_query_ado_calls = full_scope_ado_calls + activity_delta_ado_calls
     ids = _merge_item_ids(ids, saved_query_item_ids)
     ids = _merge_item_ids(ids, slice_contract_explicit_work_item_ids(bundle))
     batch_rows, batch_ado_calls = query_work_item_batch_rows(client, ids, _BATCH_FIELDS)
@@ -198,6 +223,43 @@ def _slice_contract_saved_query_ids(bundle: ReportBundle) -> tuple[str, ...]:
     return tuple(ordered_query_ids)
 
 
+def _slice_contract_saved_query_ids_by_mode(bundle: ReportBundle, mode: str) -> tuple[str, ...]:
+    if not bundle.slice_contracts:
+        return ()
+
+    ordered_query_ids: list[str] = []
+    seen_query_ids: set[str] = set()
+    for contract in bundle.slice_contracts:
+        ado_contract = contract.source_contract.ado
+        if ado_contract is None:
+            continue
+        for binding in ado_contract.saved_query_bindings:
+            if binding.mode != mode:
+                continue
+            if binding.query_id in seen_query_ids:
+                continue
+            seen_query_ids.add(binding.query_id)
+            ordered_query_ids.append(binding.query_id)
+    return tuple(ordered_query_ids)
+
+
+def _slice_contract_full_scope_query_ids(bundle: ReportBundle) -> tuple[str, ...]:
+    return _slice_contract_saved_query_ids_by_mode(bundle, "full_scope")
+
+
+def _slice_contract_activity_delta_query_ids(bundle: ReportBundle) -> tuple[str, ...]:
+    """Armada spec D-2: if a query id is bound `full_scope` anywhere it is never
+    date-bounded, even when the same GUID is also separately bound `activity_delta`
+    (safety-first — full-scope classification always wins for that query id).
+    """
+    full_scope_ids = set(_slice_contract_full_scope_query_ids(bundle))
+    return tuple(
+        query_id
+        for query_id in _slice_contract_saved_query_ids_by_mode(bundle, "activity_delta")
+        if query_id not in full_scope_ids
+    )
+
+
 def _slice_contract_explicit_work_item_ids(bundle: ReportBundle) -> list[int]:
     if not bundle.slice_contracts:
         return []
@@ -217,83 +279,16 @@ def _slice_contract_explicit_work_item_ids(bundle: ReportBundle) -> list[int]:
 
 
 def _slice_contract_saved_query_clauses(bundle: ReportBundle) -> dict[str, str]:
-    if not bundle.slice_contracts:
-        return {}
-
-    clauses_by_query_id: dict[str, list[str]] = {}
-    for contract in bundle.slice_contracts:
-        ado_contract = contract.source_contract.ado
-        if ado_contract is None or ado_contract.filters is None:
-            continue
-        clause = _render_saved_query_filter_clause(ado_contract.filters)
-        if not clause:
-            continue
-        for query_id in ado_contract.saved_queries:
-            clauses_by_query_id.setdefault(query_id, []).append(clause)
-
-    merged_clauses: dict[str, str] = {}
-    for query_id, clauses in clauses_by_query_id.items():
-        ordered_unique_clauses = tuple(dict.fromkeys(clause for clause in clauses if clause))
-        if not ordered_unique_clauses:
-            continue
-        if len(ordered_unique_clauses) == 1:
-            merged_clauses[query_id] = ordered_unique_clauses[0]
-            continue
-        merged_clauses[query_id] = "(" + " or ".join(ordered_unique_clauses) + ")"
-    return merged_clauses
+    return _shared_slice_contract_saved_query_clauses(bundle.slice_contracts)
 
 
 def _render_saved_query_filter_clause(filter_definition: Any) -> str:
-    def _render_predicate(predicate: Any) -> str | None:
-        field_name = str(getattr(predicate, "field", "")).strip().lower()
-        operator = str(getattr(predicate, "op", "")).strip().lower()
-        raw_value = str(getattr(predicate, "value", "")).strip()
-        if not raw_value:
-            return None
+    """Compatibility export for existing report callers and tests.
 
-        field_ref = {
-            "title": "[System.Title]",
-            "tag": "[System.Tags]",
-            "area_path": "[System.AreaPath]",
-        }.get(field_name)
-        if field_ref is None:
-            return None
-
-        escaped_value = raw_value.replace("'", "''")
-        if field_name == "area_path":
-            if operator == "eq":
-                return f"{field_ref} = '{escaped_value}'"
-            if operator == "contains" and "\\" in raw_value:
-                return f"{field_ref} under '{escaped_value}'"
-            return None
-        if operator == "contains":
-            return f"{field_ref} contains '{escaped_value}'"
-        if operator == "eq":
-            if field_name == "tag":
-                return f"{field_ref} contains '{escaped_value}'"
-            return f"{field_ref} = '{escaped_value}'"
-        return None
-
-    all_of_parts = [
-        rendered
-        for rendered in (_render_predicate(predicate) for predicate in getattr(filter_definition, "all_of", ()))
-        if rendered is not None
-    ]
-    any_of_parts = [
-        rendered
-        for rendered in (_render_predicate(predicate) for predicate in getattr(filter_definition, "any_of", ()))
-        if rendered is not None
-    ]
-
-    if any_of_parts:
-        groups = []
-        for rendered_any_of in any_of_parts:
-            group_parts = [*all_of_parts, rendered_any_of]
-            groups.append("(" + " and ".join(group_parts) + ")")
-        return " or ".join(groups)
-    if all_of_parts:
-        return "(" + " and ".join(all_of_parts) + ")"
-    return ""
+    Gather and report must render the exact same WIQL predicates (D-2/D-4),
+    so the implementation lives in the shared slice-contract helper.
+    """
+    return _shared_render_saved_query_filter_clause(filter_definition)
 
 
 def _work_item_from_sources(raw: dict[str, Any], batch_row: dict[str, Any], fetched_at: datetime) -> WorkItem:

@@ -37,6 +37,8 @@ def test_ncfl_apply_writable_subset_is_conservative() -> None:
         "risk_register",
         "workstreams",
         "knowledge_doc",
+        "people_directory",
+        "teams",
     })
     assert is_ncfl_apply_writable_target_store("knowledge_doc") is True
     assert is_ncfl_apply_writable_target_store("dependencies") is False
@@ -47,9 +49,10 @@ def test_apply_writable_targets_require_ncfl_writable_root_yaml() -> None:
     for target_policy in target_policy_by_store().values():
         if not target_policy.apply_writable:
             continue
-        # knowledge_doc is a Zone B markdown target (Phase 5, §24.6): it writes
-        # knowledge/<doc>.md directly, so it has no Plane 1 YAML root_yaml.
-        if target_policy.target_store == "knowledge_doc":
+        # knowledge_doc is a Zone B markdown target; people_directory and teams
+        # are shared registry targets. None is deliberate for all three because
+        # they do not write a program-root Plane 1 YAML file.
+        if target_policy.target_store in {"knowledge_doc", "people_directory", "teams"}:
             assert target_policy.root_yaml is None
             continue
         assert target_policy.root_yaml is not None

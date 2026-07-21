@@ -125,3 +125,10 @@ def test_load_ado_wiql_queries_filters_unvalidated_queries_for_gather() -> None:
     )
 
     assert [query.id for query in queries] == ["wiql-ready"]
+
+
+def test_golden_query_has_explicit_non_authoritative_classification() -> None:
+    query = _kusto_query("armada-evidence")
+
+    assert query.classification == "validation"
+    assert query.is_authoritative_delivery_scope is False

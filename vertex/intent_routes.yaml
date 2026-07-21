@@ -598,6 +598,12 @@ commands:
         value_options:
         - --edition
         - --issue
+      manual-diff:
+        flags: []
+        value_options:
+        - --edition
+        - --issue
+        - --proposal-id
       proposals:
         flags: []
         value_options:
@@ -957,11 +963,13 @@ commands:
   gather:
     callback:
       flags:
+      - --accept-shrinkage
       - --analytics
       - --dependency-scout
       - --engms
       - --extract-evidence
       - --facts-only
+      - --force-discovery
       - --force-refresh
       - --icm
       - --kusto
@@ -1019,7 +1027,16 @@ commands:
         - --format
         - --program
         - --since
+      people:
+        flags: []
+        value_options: []
       profiles:
+        flags: []
+        value_options: []
+      registry:
+        flags: []
+        value_options: []
+      teams:
         flags: []
         value_options: []
       update:
@@ -1377,6 +1394,9 @@ commands:
         flags: []
         value_options:
         - --channel
+      people:
+        flags: []
+        value_options: []
       purge:
         flags:
         - --apply
