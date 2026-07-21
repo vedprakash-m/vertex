@@ -884,7 +884,7 @@ def recover_registry_transactions(knowledge_root: Path, *, as_of: datetime | Non
                 release_registry_lease(held_lease, knowledge_root=knowledge_root)
             outcomes.append(RegistryRecoveryOutcome(transaction_id, "rolled_back_staged", "Live data/manifest unchanged; discarded staged transaction."))
 
-    return outcomes
+    return tuple(outcomes)
 
 
 def detect_stale_registry_lease(knowledge_root: Path, *, as_of: datetime | None = None) -> RegistryLeaseHandle | None:

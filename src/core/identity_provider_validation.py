@@ -161,36 +161,30 @@ def _classify_field(
     allowed: set[str],
     policy: IdentitySourceAuthorityPolicy,
 ) -> ValidatedFieldObservation:
-    common = dict(
-        request_id=request_id, entity_id=entity_id, field_name=field.field_name,
-        value=field.value, confidence=field.confidence, observed_at=field.observed_at,
-    )
-    if field.field_name not in allowed:
+    def _outcome(outcome: str, reason: str) -> ValidatedFieldObservation:
         return ValidatedFieldObservation(
-            **common, outcome=REJECTED,
-            reason=f"{field.field_name!r} is not in this provider's configured allowed_fields.",
+            request_id=request_id, entity_id=entity_id, field_name=field.field_name,
+            value=field.value, confidence=field.confidence, observed_at=field.observed_at,
+            outcome=outcome, reason=reason,
         )
+
+    if field.field_name not in allowed:
+        return _outcome(REJECTED, f"{field.field_name!r} is not in this provider's configured allowed_fields.")
     if field.field_name in UNRESOLVED_FIELDS:
-        return ValidatedFieldObservation(
-            **common, outcome=UNRESOLVED,
-            reason=f"{field.field_name!r} is a registered-but-unresolved observation; a resolution stage must map it to a canonical field before it can be accepted.",
+        return _outcome(
+            UNRESOLVED,
+            f"{field.field_name!r} is a registered-but-unresolved observation; a resolution stage must map it to a canonical field before it can be accepted.",
         )
     if field.field_name not in PERSON_FIELDS:
-        return ValidatedFieldObservation(
-            **common, outcome=REJECTED,
-            reason=f"{field.field_name!r} is not a registered Zone A person field.",
-        )
+        return _outcome(REJECTED, f"{field.field_name!r} is not a registered Zone A person field.")
     if not (0.0 <= field.confidence <= 1.0):
-        return ValidatedFieldObservation(
-            **common, outcome=REJECTED,
-            reason=f"confidence {field.confidence!r} is outside the valid [0.0, 1.0] range.",
-        )
+        return _outcome(REJECTED, f"confidence {field.confidence!r} is outside the valid [0.0, 1.0] range.")
     if field.confidence < policy.auto_accept_confidence_threshold:
-        return ValidatedFieldObservation(
-            **common, outcome=QUARANTINED,
-            reason=f"confidence {field.confidence:.3f} is below the auto-accept threshold {policy.auto_accept_confidence_threshold:.3f}.",
+        return _outcome(
+            QUARANTINED,
+            f"confidence {field.confidence:.3f} is below the auto-accept threshold {policy.auto_accept_confidence_threshold:.3f}.",
         )
-    return ValidatedFieldObservation(**common, outcome=ACCEPTED, reason="within allowlist and at/above the auto-accept confidence threshold.")
+    return _outcome(ACCEPTED, "within allowlist and at/above the auto-accept confidence threshold.")
 
 
 def quarantine_field_observation(

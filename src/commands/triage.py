@@ -77,7 +77,7 @@ from src.core.trusted_baseline_store import load_trusted_baseline_issue
 from src.core.trajectory_analyzer import analyze_trajectories
 from src.core.config_loader import REPORTS_ROOT, load_bundle_with_mode
 from src.core.continuation_contract import get_continuation_contract_path, load_continuation_contract
-from src.core.context_proposal_review import load_pending_context_proposal_rows
+from src.core.context_proposal_review import ContextProposalReviewRow, load_pending_context_proposal_rows
 from src.core.archive_store import get_dimension_history, read_archive_index
 from src.core.edition_resolver import get_nudge_paths, get_program_output_dir, resolve_edition, PROGRAMS_ROOT
 from src.core.freshness_engine import build_freshness_report
@@ -538,7 +538,7 @@ def generate_triage_report(
     correlated_items: tuple[CorrelatedTriageItem, ...] = ()
     contradiction_lines: tuple[str, ...] = ()
     decision_debt_lines: tuple[str, ...] = ()
-    context_proposals = ()
+    context_proposals: tuple[ContextProposalReviewRow, ...] = ()
     vitality_summary = None
     stale_narratives: tuple[StaleNarrativeFinding, ...] = ()
     open_claims: tuple[ClaimEntry, ...] = ()

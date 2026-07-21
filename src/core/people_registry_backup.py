@@ -155,7 +155,7 @@ def restore_registry_backup_snapshot(snapshot_dir: Path, knowledge_root: Path) -
     # "then re-reads/verifies the same manifest"
     restored_manifest = load_registry_manifest(knowledge_root)
     verified = restored_manifest is not None and restored_manifest.generation_id == snapshot_payload["generation_id"]
-    if not verified:
+    if restored_manifest is None or not verified:
         raise ConfigError(
             f"Restored registry manifest generation "
             f"({restored_manifest.generation_id if restored_manifest is not None else '<missing>'}) does not match the "

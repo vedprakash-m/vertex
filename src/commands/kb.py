@@ -8,6 +8,7 @@ from io import StringIO
 import json
 import os
 from pathlib import Path
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import typer
@@ -1278,7 +1279,7 @@ def _query_generation_id() -> str | None:
     return manifest.generation_id if manifest is not None else None
 
 
-def _query_envelope_payload(*, items: list[dict[str, object]], next_cursor: str | None) -> dict[str, object]:
+def _query_envelope_payload(*, items: Sequence[Mapping[str, object]], next_cursor: str | None) -> dict[str, object]:
     return {
         "schema_version": "people-query.v1",
         "generation_id": _query_generation_id(),
@@ -1571,7 +1572,7 @@ def kb_registry_lease_show_command(
     handle = read_registry_lease_state(knowledge_root=knowledge_root)
 
     if format == "json":
-        payload: dict[str, Any] = (
+        payload: dict[str, Any] | None = (
             None
             if handle is None
             else {

@@ -47,6 +47,7 @@ from pathlib import Path
 
 from src.core.identity_provider_port import (
     FieldObservation,
+    FieldValue,
     IdentityLookupRequest,
     IdentityObservation,
     MembershipObservation,
@@ -156,7 +157,7 @@ def _row_to_observation(row: _DirectoryRow, *, request_id: str, provider: str, t
     fields: list[FieldObservation] = []
     complete_fields: list[str] = []
 
-    def add(field_name: str, value: object) -> None:
+    def add(field_name: str, value: FieldValue) -> None:
         if value is None:
             return
         fields.append(

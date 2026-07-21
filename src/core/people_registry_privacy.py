@@ -24,9 +24,9 @@ from src.core.exceptions import ConfigError
 from src.core.knowledge_store import get_shared_knowledge_root
 from src.core.ledger.ulid import new_ulid
 from src.core.people_change_journal import STREAM_PEOPLE_CHANGES, STREAM_PEOPLE_CONFLICTS, append_people_change_record, read_journal_records
-from src.core.people_directory_schema import load_people_directory
+from src.core.people_directory_schema import PersonDirectory, load_people_directory
 from src.core.people_entity_schema import CanonicalEntity, load_entities_document
-from src.core.people_membership_schema import load_memberships
+from src.core.people_membership_schema import TeamMembership, load_memberships
 from src.core.people_registry_governance import require_adopted_registry
 from src.core.people_registry_identity import RegistryConfig, RegistryManifest, load_registry_config, load_registry_manifest
 from src.core.people_registry_lease import read_force_release_audit_records
@@ -179,7 +179,7 @@ def _delegation_references_person(record: object, *, entity_id: str) -> bool:
     )
 
 
-def _safe_person_payload(person: object) -> dict[str, object] | None:
+def _safe_person_payload(person: PersonDirectory | None) -> dict[str, object] | None:
     if person is None:
         return None
     contacts = [
@@ -203,7 +203,7 @@ def _safe_person_payload(person: object) -> dict[str, object] | None:
     }
 
 
-def _safe_membership_payload(membership: object) -> dict[str, object]:
+def _safe_membership_payload(membership: TeamMembership) -> dict[str, object]:
     return {
         "membership_id": membership.membership_id,
         "team_entity_id": membership.team_entity_id,

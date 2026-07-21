@@ -792,6 +792,8 @@ class ADOClient:
             expires_on = float(getattr(self, "_cached_access_token_expires_on", 0.0) or 0.0)
             if token and expires_on > time.time() + 60:
                 return token
+            if self._credential is None:
+                raise AuthError("Failed to acquire Azure DevOps token: no credential is configured.")
             try:
                 access_token = self._credential.get_token(ADO_RESOURCE)
             except Exception as error:

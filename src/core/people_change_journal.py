@@ -52,6 +52,7 @@ from pathlib import Path
 import re
 
 from src.core.archive_signing import (
+    SignatureRecord,
     archive_signing_unavailable,
     get_archive_signing_key,
     load_signature_record,
@@ -491,7 +492,7 @@ def redact_person_journal_records(
         paths = (*archived_paths, journal_active_path(knowledge_root, stream))
         records_by_path = tuple((path, tuple(read_jsonl_records(path))) for path in paths)
         all_records = tuple(record for _, records in records_by_path for record in records)
-        signature_records: dict[Path, object] = {}
+        signature_records: dict[Path, SignatureRecord] = {}
         for path, records in records_by_path:
             if path not in archived_paths or not records:
                 continue
@@ -546,7 +547,6 @@ def redact_person_journal_records(
                         "the operation requires manual recovery."
                     )
                 signature = signature_records[path]
-                assert hasattr(signature, "key_id")
                 write_signature_record(
                     manifest_signature_sidecar_path(path),
                     sign_manifest(

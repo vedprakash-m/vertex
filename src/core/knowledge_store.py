@@ -4,7 +4,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 import re
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from src.core.exceptions import ConfigError
 from src.core.models_v2 import EngMsPage, KustoQuery, PersonDirectory, PersonProfile, Product, Team
@@ -36,14 +36,14 @@ class PeopleDirectoryDrift:
 _QUERY_CLASSIFICATIONS = {"validation", "analytics_history", "evidence", "hygiene", "retired"}
 
 
-def _query_classification(value: Any, path: Path) -> str:
+def _query_classification(value: Any, path: Path) -> Literal["validation", "analytics_history", "evidence", "hygiene", "retired"]:
     classification = _optional_str(value) or "validation"
     if classification not in _QUERY_CLASSIFICATIONS:
         raise ConfigError(
             f"Unsupported golden query classification {classification!r} in {path}; "
             f"allowed values: {sorted(_QUERY_CLASSIFICATIONS)}"
         )
-    return classification
+    return cast('Literal["validation", "analytics_history", "evidence", "hygiene", "retired"]', classification)
 
 
 def load_knowledge(
