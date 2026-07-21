@@ -960,6 +960,9 @@ def test_discover_candidates_source_sharepoint_stages_candidates_and_collapses_d
     )
 
     class FakeBridge:
+        def __init__(self, **_kwargs):
+            pass
+
         def probe(self):
             return SimpleNamespace(
                 available=True,
@@ -1066,6 +1069,9 @@ def test_discover_candidates_source_sharepoint_records_auth_gap_when_runtime_is_
     )
 
     class FakeBridge:
+        def __init__(self, **_kwargs):
+            pass
+
         def probe(self):
             return SimpleNamespace(
                 available=False,
