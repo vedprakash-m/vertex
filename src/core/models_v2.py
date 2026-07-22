@@ -213,6 +213,12 @@ class KustoQuery:
     # validation surfaces; authoritative current delivery scope is owned only
     # by schema-1.1 saved-query bindings in slice contracts.
     classification: Literal["validation", "analytics_history", "evidence", "hygiene", "retired"] = "validation"
+    # specs/backlog.md BL-F1: the `ado_odata` engine's query text -- an ADO
+    # Analytics OData $filter/$select pair (see src/core/ado_client.py's
+    # ADOClient.query_work_items), distinct from `kql`/`wiql` above. Only
+    # populated for engine == "ado_odata" entries.
+    ado_filter: str | None = None
+    ado_select: str | None = None
 
     @property
     def is_authoritative_delivery_scope(self) -> bool:

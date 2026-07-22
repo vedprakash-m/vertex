@@ -8,6 +8,14 @@ from typing import Any
 
 from src.commands.doctor_checks.models import DoctorCheck, DoctorReport, directory_size, format_bytes
 from src.commands.gather_pipeline.lifecycle_policy import load_gather_runtime_policy
+from src.core.armada_leakage import (
+    NO_UNRESOLVED_SLA_DAYS,
+    OWNER_DISPOSITION_SLA_DAYS,
+    find_leakage_query,
+    compute_leakage_rate,
+    leakage_ledger_path,
+    leakage_sla_violations,
+)
 from src.core.exceptions import StateError
 from src.core.archive_store import find_latest_confirmed_entry, read_archive_index
 from src.core.edition_resolver import (
@@ -121,6 +129,7 @@ def run_storage_doctor(
         _gather_freshness_check(program_id, programs_root=programs_root),
         _gather_completeness_oracle_check(program_id, programs_root=programs_root),
         _rev_extraction_precision_regression_check(program_id, programs_root=programs_root),
+        _armada_leakage_hygiene_check(program_id, programs_root=programs_root),
         _fact_store_authority_check(program_id, programs_root=programs_root),
         _cost_ledger_storage_check(edition_name, programs_root=programs_root),
         _ai_proposal_queue_check(program_id, programs_root=programs_root),
@@ -937,6 +946,70 @@ def _rev_extraction_precision_regression_check(program_id: str, *, programs_root
             "baseline": _XTRACT_PREC_BASELINE,
             "floor": _XTRACT_PREC_REGRESSION_FLOOR,
         },
+    )
+
+
+def _armada_leakage_hygiene_check(program_id: str, *, programs_root: Path) -> DoctorCheck:
+    """specs/backlog.md BL-F1 (armada.md D-9): tag-hygiene leakage_rate
+    warn-only check. Never blocks (D-9's own text: "warning-only for
+    manual-refresh MVP unless it causes a required lane to have no
+    authoritative scope") -- mirrors `_gather_completeness_oracle_check`'s
+    non-blocking pattern.
+
+    Applicable only to programs that actually declare the
+    `armada-xhealth-catchall-ado` golden query; every other program reports
+    `ok`/not-applicable rather than a synthetic pass.
+    """
+    query = find_leakage_query(program_id, programs_root=programs_root)
+    if query is None:
+        return DoctorCheck(
+            "Armada Tag Hygiene",
+            "ok",
+            f"no {program_id!r}-scoped ado_odata leakage query configured; not applicable.",
+            metadata={"applicable": False},
+        )
+    if not leakage_ledger_path(program_id, programs_root=programs_root).exists():
+        return DoctorCheck(
+            "Armada Tag Hygiene",
+            "ok",
+            "leakage query configured but no discovery has been synced yet.",
+            metadata={"applicable": True, "synced": False},
+        )
+
+    rate = compute_leakage_rate(program_id, programs_root=programs_root)
+    violations = leakage_sla_violations(program_id, programs_root=programs_root)
+    metadata: dict[str, Any] = {
+        "applicable": True,
+        "synced": True,
+        "leakage_rate": rate.value,
+        "leakage_rate_confidence": rate.confidence.value,
+        "likely_missing_tag_items": rate.likely_missing_tag_items,
+        "authoritative_scope_items": rate.authoritative_scope_items,
+        "sla_violation_count": len(violations),
+    }
+    if violations:
+        overdue_ids = [v.work_item_id for v in violations if v.kind == "owner_disposition_overdue"]
+        unresolved_ids = [v.work_item_id for v in violations if v.kind == "no_unresolved_candidate"]
+        parts = []
+        if overdue_ids:
+            parts.append(
+                f"{len(overdue_ids)} candidate(s) past the {OWNER_DISPOSITION_SLA_DAYS}-day owner-disposition SLA: {overdue_ids[:5]}"
+            )
+        if unresolved_ids:
+            parts.append(
+                f"{len(unresolved_ids)} candidate(s) past the {NO_UNRESOLVED_SLA_DAYS}-day no-unresolved-candidate rule: {unresolved_ids[:5]}"
+            )
+        return DoctorCheck(
+            "Armada Tag Hygiene",
+            "warn",
+            "; ".join(parts) + f" (leakage_rate={rate.value}).",
+            metadata=metadata,
+        )
+    return DoctorCheck(
+        "Armada Tag Hygiene",
+        "ok",
+        f"leakage_rate={rate.value} ({rate.detail}); no SLA violations.",
+        metadata=metadata,
     )
 
 

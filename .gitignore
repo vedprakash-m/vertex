@@ -194,6 +194,10 @@ tests/unit/test_seed_issue_076_baseline.py
 tests/unit/test_*xpf*.py
 tests/unit/test_*nova*.py
 tests/unit/test_*armada*.py
+# armada_leakage.py is a general-purpose src/core module (no private
+# scripts, no local program data -- fully mocked ADO client in tests);
+# it belongs in source control like any other unit test.
+!tests/unit/test_armada_leakage.py
 
 # Contract tests that depend on local programs/<program-id>/ data (not in the repo).
 # These pass only when the operator's local program directory is present.

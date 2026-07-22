@@ -8,6 +8,7 @@ from src.ai.cost_guard import CostGuard
 from src.commands.doctor_checks.models import directory_size, format_bytes
 from src.commands.doctor_checks.storage_checks import (
     _ai_proposal_queue_check,
+    _armada_leakage_hygiene_check,
     _cost_ledger_storage_check,
     _dc01_root_cleanliness_check,
     _dc02_runtime_layout_check,
@@ -720,3 +721,76 @@ def test_dc03_warns_on_platform_filename_in_docs(tmp_path: Path) -> None:
     assert result.status == "warn"
     assert result.metadata["detail"] == "platform_pattern"
     assert "run_telemetry.jsonl" in result.metadata["files"]
+
+
+def test_armada_leakage_check_ok_when_no_query_configured(tmp_path: Path, monkeypatch) -> None:
+    import src.commands.doctor_checks.storage_checks as storage_checks
+
+    monkeypatch.setattr(storage_checks, "find_leakage_query", lambda *_a, **_k: None)
+
+    result = _armada_leakage_hygiene_check("demo", programs_root=tmp_path)
+
+    assert result.status == "ok"
+    assert result.metadata["applicable"] is False
+
+
+def test_armada_leakage_check_ok_when_query_configured_but_never_synced(tmp_path: Path, monkeypatch) -> None:
+    import src.commands.doctor_checks.storage_checks as storage_checks
+
+    monkeypatch.setattr(storage_checks, "find_leakage_query", lambda *_a, **_k: object())
+
+    result = _armada_leakage_hygiene_check("armada", programs_root=tmp_path)
+
+    assert result.status == "ok"
+    assert result.metadata == {"applicable": True, "synced": False}
+
+
+def test_armada_leakage_check_ok_with_no_sla_violations(tmp_path: Path, monkeypatch) -> None:
+    from datetime import timezone as _timezone
+
+    import src.commands.doctor_checks.storage_checks as storage_checks
+    from src.core.armada_leakage import RawAdoCandidate, sync_leakage_candidates
+
+    monkeypatch.setattr(storage_checks, "find_leakage_query", lambda *_a, **_k: object())
+    sync_leakage_candidates(
+        "armada", org="msazure", project="One",
+        raw_candidates=(RawAdoCandidate(1, "Bug", "T1", "Active", "alice"),),
+        discovery_run_id="run-1", query_version="v1", programs_root=tmp_path,
+        now=datetime(2026, 7, 22, 12, 0, 0, tzinfo=_timezone.utc),
+    )
+
+    result = _armada_leakage_hygiene_check("armada", programs_root=tmp_path)
+
+    assert result.status == "ok"
+    assert result.metadata["applicable"] is True
+    assert result.metadata["synced"] is True
+    assert result.metadata["sla_violation_count"] == 0
+
+
+def test_armada_leakage_check_warns_on_sla_violations(tmp_path: Path, monkeypatch) -> None:
+    import src.commands.doctor_checks.storage_checks as storage_checks
+    from src.core.armada_leakage import RawAdoCandidate, sync_leakage_candidates
+
+    monkeypatch.setattr(storage_checks, "find_leakage_query", lambda *_a, **_k: object())
+    old_now = datetime(2026, 6, 1, 12, 0, 0)
+    sync_leakage_candidates(
+        "armada", org="msazure", project="One",
+        raw_candidates=(RawAdoCandidate(1, "Bug", "T1", "Active", "alice"),),
+        discovery_run_id="run-1", query_version="v1", programs_root=tmp_path, now=old_now,
+    )
+
+    # The check calls leakage_sla_violations with no explicit `now`, which
+    # defaults to the real wall clock -- freeze it at the storage_checks
+    # call site so this test doesn't depend on when it happens to run.
+    real_violations = storage_checks.leakage_sla_violations
+
+    def _frozen_violations(program_id, *, programs_root, now=None):
+        return real_violations(program_id, programs_root=programs_root, now=datetime(2026, 7, 22, 12, 0, 0))
+
+    monkeypatch.setattr(storage_checks, "leakage_sla_violations", _frozen_violations)
+
+    result = _armada_leakage_hygiene_check("armada", programs_root=tmp_path)
+
+    assert result.status == "warn"
+    assert result.metadata["sla_violation_count"] > 0
+    assert "owner-disposition SLA" in result.detail
