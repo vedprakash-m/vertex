@@ -29,6 +29,7 @@ prompts:
   - prose_event_extractor.v3
   - prose_event_extractor.v4
   - rev_extractor.v1
+  - rev_judge.v1
   - risk_proposal_generator.v1
   - setup_discovery_assistant.v1
   - setup_explainer.v1

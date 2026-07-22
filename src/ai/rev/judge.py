@@ -26,55 +26,13 @@ from pathlib import Path
 from typing import Any
 
 from src.ai.provider import LLMProvider
+from src.ai.prompt_registry import load_prompt
 from src.ai.tiered_router import RouteResult, route_through_tiers
 from src.core.policy_loader import load_ai_feature_policy
 from src.ai.rev.extractor import ExtractedClaim
 
 _JUDGE_FEATURE = "rev_judge"
-
-
-_JUDGE_SYSTEM_PROMPT = """\
-You are a fact-extraction judge for a Technical Program Management (TPM) intelligence system.
-
-You will be shown:
-1. A canonical email body (source text)
-2. Two lists of extracted program events (Extractor A and Extractor B)
-
-Your task is to evaluate each extracted event and score the overall quality of each extractor.
-
-## Scoring per extracted event
-
-For each event in each extractor's output, assign one of:
-- CORRECT: The event is factually supported by the source text, the event_type is appropriate, and the excerpt is a real substring of the text.
-- PARTIAL: The event is partially correct — the fact exists but the event_type is wrong, the excerpt is off, or key payload fields are missing/incorrect.
-- HALLUCINATED: The event asserts something not clearly stated in the source text.
-
-## Ground-truth events
-
-You will also be shown a list of "ground truth" events — the complete set of material facts present in the source text. These are pre-identified by a human reviewer.
-
-For each ground-truth event, determine which extractor (A, B, both, or neither) captured it.
-
-## Output format
-
-Return a JSON object with this structure:
-{
-  "extractor_a": {
-    "scores": [{"event_type": "...", "verdict": "CORRECT|PARTIAL|HALLUCINATED", "reason": "..."}],
-    "precision": <float 0-1>,
-    "recall": <float 0-1>
-  },
-  "extractor_b": {
-    "scores": [{"event_type": "...", "verdict": "CORRECT|PARTIAL|HALLUCINATED", "reason": "..."}],
-    "precision": <float 0-1>,
-    "recall": <float 0-1>
-  },
-  "ground_truth_coverage": [
-    {"fact": "...", "captured_by": "A|B|both|neither"}
-  ],
-  "summary": "one paragraph comparing the two extractors"
-}
-"""
+LLM_PROMPT_VERSION = "rev_judge.v1"
 
 
 @dataclass
@@ -295,7 +253,7 @@ def judge_extractions(
                 cached = get_judge_result(
                     program_id=prog_id,
                     source_document_key=mid,
-                    prompt_version="rev_judge.v1",
+                    prompt_version=LLM_PROMPT_VERSION,
                     ground_truth_hash=gt_hash,
                     programs_root=prog_root,
                 )
@@ -313,11 +271,11 @@ def judge_extractions(
                     deterministic_fn=None,
                     local_fn=None,
                     frontier_fn=lambda: client.structured(
-                        _JUDGE_SYSTEM_PROMPT,
+                        load_prompt(LLM_PROMPT_VERSION),
                         user_prompt,
                         parser=lambda p: p if isinstance(p, dict) else {},
                         max_tokens=_policy.max_tokens,
-                        prompt_version="rev_judge.v1",
+                        prompt_version=LLM_PROMPT_VERSION,
                     ),
                 )
                 raw = raw_route.value if raw_route.value is not None else {}
@@ -329,7 +287,7 @@ def judge_extractions(
                     put_judge_result(
                         program_id=prog_id,
                         source_document_key=mid,
-                        prompt_version="rev_judge.v1",
+                        prompt_version=LLM_PROMPT_VERSION,
                         ground_truth_hash=gt_hash,
                         verdict=raw,
                         programs_root=prog_root,

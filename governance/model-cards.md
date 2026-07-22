@@ -111,10 +111,12 @@ Phase 0 model-card reconciliation (§0.4; spec archived to
 - **rev_judge** — `src/ai/rev/judge.py` (imported for compatibility via
   the now-thin `src/ai/rev/rev_judge.py` shim). Scores extractor output
   (correct/partial/hallucinated claim counts) for the REV pipeline.
-  **Known gap, tracked by arch-fix.md AF-2 (`specs/backlog.md` §7 BL-C2)**: its system prompt
-  (`_JUDGE_SYSTEM_PROMPT`) is still a raw Python string constant, not a
-  `prompt_registry.py`-managed version — it is the one provider-bound
-  prompt AF-2 explicitly calls out for migration into the registry.
+  Its system prompt is now registered as `rev_judge.v1` in
+  `src/ai/prompts/registry.yaml`, loaded via `prompt_registry.load_prompt()`
+  (`specs/backlog.md` WO-3, closing the gap formerly tracked here as
+  BL-C2's first step). Not yet wired through `AISchemaGateway`/the
+  release-audit lifecycle — that remains BL-C2's open scope, tracked by
+  WO-4's call-site inventory.
 - **setup_assistant** — `src/ai/setup_assistant.py`, prompt
   `setup_ws_suggest.v1`. Workstream-suggestion assistant used during the
   onboarding wizard; distinct from `onboard_assistant` (structure/style

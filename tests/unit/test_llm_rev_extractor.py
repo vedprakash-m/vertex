@@ -490,6 +490,91 @@ class TestZoneBBoundaryExtractorLLM:
 
 
 # ---------------------------------------------------------------------------
+# WO-3: rev_judge system prompt is registry-managed (specs/backlog.md)
+# ---------------------------------------------------------------------------
+
+
+class TestJudgePromptRegistration:
+    """rev_judge.v1 replaces the old ``_JUDGE_SYSTEM_PROMPT`` constant."""
+
+    def test_rev_judge_v1_is_registered(self) -> None:
+        from src.ai.prompt_registry import registered_versions
+
+        assert "rev_judge.v1" in registered_versions()
+
+    def test_loaded_prompt_matches_the_former_constant_verbatim(self) -> None:
+        from src.ai.prompt_registry import load_prompt
+        from src.ai.rev.judge import LLM_PROMPT_VERSION
+
+        assert LLM_PROMPT_VERSION == "rev_judge.v1"
+        loaded = load_prompt(LLM_PROMPT_VERSION)
+        # The former `_JUDGE_SYSTEM_PROMPT` module constant, verbatim (only a
+        # single trailing newline is gone -- load_prompt() always strips --
+        # which does not change model behaviour).
+        former_constant = (
+            'You are a fact-extraction judge for a Technical Program Management (TPM) intelligence system.\n'
+            '\n'
+            'You will be shown:\n'
+            '1. A canonical email body (source text)\n'
+            '2. Two lists of extracted program events (Extractor A and Extractor B)\n'
+            '\n'
+            'Your task is to evaluate each extracted event and score the overall quality of each extractor.\n'
+            '\n'
+            '## Scoring per extracted event\n'
+            '\n'
+            'For each event in each extractor\'s output, assign one of:\n'
+            '- CORRECT: The event is factually supported by the source text, the event_type is appropriate, and the excerpt is a real substring of the text.\n'
+            '- PARTIAL: The event is partially correct — the fact exists but the event_type is wrong, the excerpt is off, or key payload fields are missing/incorrect.\n'
+            '- HALLUCINATED: The event asserts something not clearly stated in the source text.\n'
+            '\n'
+            '## Ground-truth events\n'
+            '\n'
+            'You will also be shown a list of "ground truth" events — the complete set of material facts present in the source text. These are pre-identified by a human reviewer.\n'
+            '\n'
+            'For each ground-truth event, determine which extractor (A, B, both, or neither) captured it.\n'
+            '\n'
+            '## Output format\n'
+            '\n'
+            'Return a JSON object with this structure:\n'
+            '{\n'
+            '  "extractor_a": {\n'
+            '    "scores": [{"event_type": "...", "verdict": "CORRECT|PARTIAL|HALLUCINATED", "reason": "..."}],\n'
+            '    "precision": <float 0-1>,\n'
+            '    "recall": <float 0-1>\n'
+            '  },\n'
+            '  "extractor_b": {\n'
+            '    "scores": [{"event_type": "...", "verdict": "CORRECT|PARTIAL|HALLUCINATED", "reason": "..."}],\n'
+            '    "precision": <float 0-1>,\n'
+            '    "recall": <float 0-1>\n'
+            '  },\n'
+            '  "ground_truth_coverage": [\n'
+            '    {"fact": "...", "captured_by": "A|B|both|neither"}\n'
+            '  ],\n'
+            '  "summary": "one paragraph comparing the two extractors"\n'
+            '}'
+        )
+        assert loaded == former_constant
+
+    def test_judge_source_calls_load_prompt_not_an_inline_literal(self) -> None:
+        """judge.py's frontier call site must resolve its system prompt via
+        load_prompt(), not a module-level string constant (WO-3)."""
+        src_path = Path(__file__).parents[2] / "src" / "ai" / "rev" / "judge.py"
+        source = src_path.read_text(encoding="utf-8")
+        assert "_JUDGE_SYSTEM_PROMPT" not in source
+        tree = ast.parse(source, filename=str(src_path))
+        assert any(
+            isinstance(node, ast.ImportFrom)
+            and node.module == "src.ai.prompt_registry"
+            and any(alias.name == "load_prompt" for alias in node.names)
+            for node in ast.walk(tree)
+        ), "judge.py must import load_prompt from src.ai.prompt_registry"
+        assert any(
+            isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "load_prompt"
+            for node in ast.walk(tree)
+        ), "judge.py must resolve its system prompt via load_prompt(...)"
+
+
+# ---------------------------------------------------------------------------
 # JudgementReport — structure + recommendation
 # ---------------------------------------------------------------------------
 
