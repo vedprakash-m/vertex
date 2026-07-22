@@ -1,0 +1,61 @@
+name: Backlog Protection
+
+# BL-K1 (specs/bklg.md, resolved 2026-07-22): restores the CI protection
+# docs/contributing.md has claimed exists since before this workflow was
+# ever actually created. Runs the citation checker against the tracked
+# canonical backlog + companion specs, and fails the job if any protected
+# spec's line count drops by more than 50% versus the previous commit.
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+jobs:
+  protect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Citation check (concrete file/directory references must resolve)
+        run: |
+          python scripts/check_backlog_citations.py specs/bklg.md specs/vertex-prd.md specs/vertex-tech-spec.md specs/vertex-ux-spec.md docs/runbook.md
+
+      - name: Bulk-deletion guard (fail on >50% line-count drop vs previous commit)
+        shell: bash
+        run: |
+          set -euo pipefail
+          protected_files="specs/bklg.md specs/vertex-prd.md specs/vertex-tech-spec.md specs/vertex-ux-spec.md"
+          if ! git cat-file -e HEAD~1 2>/dev/null; then
+            echo "No previous commit to compare against (shallow or first-ever commit) -- skipping."
+            exit 0
+          fi
+          failed=0
+          for path in $protected_files; do
+            if ! git cat-file -e "HEAD~1:${path}" 2>/dev/null; then
+              echo "SKIP ${path}: did not exist at the previous commit."
+              continue
+            fi
+            previous_lines=$(git show "HEAD~1:${path}" | wc -l | tr -d ' ')
+            current_lines=$(wc -l < "${path}" | tr -d ' ')
+            if [ "${previous_lines}" -eq 0 ]; then
+              continue
+            fi
+            min_allowed=$(( (previous_lines + 1) / 2 ))
+            if [ "${current_lines}" -lt "${min_allowed}" ]; then
+              echo "FAIL: ${path} dropped from ${previous_lines} lines to ${current_lines} lines (>50% vs the previous commit)." >&2
+              failed=1
+            else
+              echo "OK: ${path} (${previous_lines} -> ${current_lines} lines)"
+            fi
+          done
+          exit "${failed}"

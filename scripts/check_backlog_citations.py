@@ -21,11 +21,30 @@ VALIDATED_PREFIXES = (
     "editions/",
     "knowledge/",
     "scripts/",
-    "specs/backlog.md",
+    "specs/bklg.md",
     "specs/vertex-",
     "src/",
     "templates/",
 )
+# BL-K1 (2026-07-22): specs/backlog.md is the actively-edited, gitignored
+# working copy specs/bklg.md is periodically sanitized-and-resynced from --
+# it may legitimately not exist in a fresh clone, so (unlike specs/bklg.md
+# itself) it is NOT in VALIDATED_PREFIXES: a citation to it is never
+# flagged as unresolved either way.
+#
+# A backlog/changelog is, by definition, full of references to things that
+# don't exist -- either not YET (planned work) or not ANYMORE (a changelog
+# entry correctly describing a file that was later archived/deleted). A
+# citation checker that can't tell either of those apart from "typo'd path"
+# would fail on every real backlog or changelog. Rather than let that make
+# the whole check unusable, known exceptions are named here explicitly, one
+# line per path with the reason -- remove the line once it's no longer true
+# (the BL-* item ships, or the historical prose is deleted/rewritten).
+KNOWN_FUTURE_PATHS = {
+    "knowledge/policies/privacy_policy.yaml": "BL-E1 (DIR-08A/08B PII policy override path) — DRI-decision-gated, not yet built.",
+    ".archive/specs/acme-onboard.md": "vertex-prd.md's 2026-06-16 changelog line describes this archival; the file was apparently removed in a later cleanup pass. Historical prose, not a live reference.",
+    "src/ai/local_tier.py": "vertex-tech-spec.md's 2026-07-13 changelog line describes deleting this file (ADF-W5.3's gate was never cleared) -- correctly citing something that no longer exists on purpose.",
+}
 VALIDATED_TOP_LEVEL = {"README.md", "cli.py", "pyproject.toml", "vertex.py"}
 VALIDATED_EXTENSIONS = {
     ".md",
@@ -55,6 +74,8 @@ def _iter_candidates(text: str) -> set[str]:
 def _validate_path(raw_path: str) -> str | None:
     normalized = raw_path[:-1] if raw_path.endswith("/") else raw_path
     if not normalized:
+        return None
+    if normalized in KNOWN_FUTURE_PATHS:
         return None
     if normalized not in VALIDATED_TOP_LEVEL and not normalized.startswith(VALIDATED_PREFIXES):
         return None

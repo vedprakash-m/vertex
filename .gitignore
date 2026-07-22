@@ -86,6 +86,12 @@ specs/*
 !specs/vertex-prd.md
 !specs/vertex-tech-spec.md
 !specs/vertex-ux-spec.md
+!specs/bklg.md
+# specs/bklg.md (BL-K1, resolved 2026-07-22): the tracked, sanitized canonical
+# remaining-work backlog. specs/backlog.md (still gitignored below) remains
+# the actively-edited working copy with full, unsanitized operational detail
+# (e.g. real annotator identities) — see specs/bklg.md's own header for the
+# resync convention between the two.
 # Canonical specs tracked: PRD, Tech, UX only.
 # Other specs, including consolidated.md, are local-only implementation notes.
 # The generated CLI reference snapshot lives in tests/contracts/cli_reference_snapshot.md.
@@ -181,6 +187,7 @@ scripts/*armada*.ps1
 tests/unit/test_validate_*.py
 tests/unit/test_check_*.py
 !tests/unit/test_check_spec_drift.py
+!tests/unit/test_check_backlog_citations.py
 tests/unit/test_seed_issue_076_baseline.py
 # Program-specific test files that import private scripts (gitignored).
 # Any test file whose name contains a specific program name should stay local.

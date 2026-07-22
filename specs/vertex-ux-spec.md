@@ -2,7 +2,7 @@
 
 **Version:** 1.0  
 **Status:** Reflects implemented state as of 2026-07-08  
-**Companion docs:** [vertex-prd.md](vertex-prd.md) (requirements), [vertex-tech-spec.md](vertex-tech-spec.md) (technical), `specs/backlog.md` (remaining real-data activation work)
+**Companion docs:** [vertex-prd.md](vertex-prd.md) (requirements), [vertex-tech-spec.md](vertex-tech-spec.md) (technical), `specs/bklg.md` (remaining real-data activation work)
 **Scope:** All visual surfaces for Vertex's currently supported Microsoft TPM-program archetypes — newsletter HTML, condensed daily, deck Markdown, reviewer HTML, Teams Markdown, Adaptive Card JSON draft surfaces, freshness report, CLI terminal output, EML files. Binding for layout, color, typography, spacing, and rendering behavior. Broader TPM/EM/global/non-ADO surface expansion is roadmap, not current scope.
 
 ## Changelog
@@ -1208,7 +1208,7 @@ Ledger: 1,247 events (847 source_authoritative, 312 ai_extracted, 88 operator_co
 - sha256:6477a618…  milestone.completed.v1  batch=rev:20260628081716  extraction_confidence=0.800
     why: rollout Completed
 ```
-This is the minimum-viable trust surface for the "judgment, not discovery" thesis — full drill-down (source excerpt + counter-source context for `disputed` facts) remains a Vision-bar item (`GAP-36`/`GAP-37`, tracked in `specs/backlog.md`'s non-goals).
+This is the minimum-viable trust surface for the "judgment, not discovery" thesis — full drill-down (source excerpt + counter-source context for `disputed` facts) remains a Vision-bar item (`GAP-36`/`GAP-37`, tracked in `specs/bklg.md`'s non-goals).
 
 **Degraded-to-legacy banner (milestone render path, added 2026-07-07):** if the milestone section's `ProgramReality` read path fails while the family's source-of-record mode is non-legacy, it does **not** silently fall back — the operator must explicitly set `VERTEX_REPORT_ALLOW_LEGACY_MILESTONE_ROLLBACK=1`, and doing so renders a visible degraded banner on the affected section (and blocks the AG-1 activation-sentence gate for that render). This is the "no silent fallback" rule: a migrated render surface either reads real data or visibly says it didn't.
 
@@ -1358,7 +1358,7 @@ No MSO conditional branches for charts. No client-side script. No dark-mode CSS 
 
 The `#9CA3AF` faint color is used only for provenance/timestamps at ≥11px (meets AA-Large 3:1 threshold).
 
-**Cockpit HTML target (reconciled from `.archive/specs/arch-data-fix.md` §10.3):** the standalone `vertex cockpit` HTML output (§18.5) targets **WCAG 2.2 AA**, an intentional upgrade over this section's platform-wide 2.1 AA baseline — cockpit is a newer, self-contained surface (no external JS/CSS, skip-link + semantic landmarks already implemented) where the tighter bar was adopted from the start rather than retrofitted. No independent automated WCAG audit has been run yet (no accessibility-testing tool is wired into CI); this is tracked in `specs/backlog.md`, not a blocker for cockpit's current advisory-mode use.
+**Cockpit HTML target (reconciled from `.archive/specs/arch-data-fix.md` §10.3):** the standalone `vertex cockpit` HTML output (§18.5) targets **WCAG 2.2 AA**, an intentional upgrade over this section's platform-wide 2.1 AA baseline — cockpit is a newer, self-contained surface (no external JS/CSS, skip-link + semantic landmarks already implemented) where the tighter bar was adopted from the start rather than retrofitted. No independent automated WCAG audit has been run yet (no accessibility-testing tool is wired into CI); this is tracked in `specs/bklg.md`, not a blocker for cockpit's current advisory-mode use.
 
 ### 15.2 Screen Reader Support
 
@@ -1543,7 +1543,7 @@ Pass condition: generated cards stay within body/action limits, preserve risk em
 - `explain <finding_id>` renders every explainability field a `CockpitFinding` actually carries (why, detail, owner, source-age, evidence, next-command) and honestly labels the fields it doesn't yet have data for (calculation/rule, confidence, what-Vertex-did-not-do) rather than fabricating content.
 - `compare <earlier> <later>` operates only on retained history snapshots — never a live recompute — so a comparison is always reproducible from the same two points in time.
 - Value/time-savings figures always render their confidence tier (`measured`/`calibrated`/`proxy`/`unavailable`) alongside the number — a figure is never presented as a bare percentage without its evidence tier visible.
-- No formal §17 acceptance-mapping ID exists for this surface yet; an independent WCAG audit and golden-snapshot goldens are tracked in `specs/backlog.md`, not yet attempted.
+- No formal §17 acceptance-mapping ID exists for this surface yet; an independent WCAG audit and golden-snapshot goldens are tracked in `specs/bklg.md`, not yet attempted.
 Pass condition: the HTML render opens safely from a local file with no external requests, risk color is never reused for system-health state, every finding's explanation is either real data or an honest "not yet available" label, and no evidence-derived string can inject markup.
 
 ---

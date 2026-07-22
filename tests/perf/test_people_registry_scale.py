@@ -60,6 +60,7 @@ import json
 import os
 import platform
 import random
+import sys
 import threading
 import tracemalloc
 from datetime import datetime, timezone
@@ -388,6 +389,69 @@ def test_registry_scale_envelope_full_doctor(tmp_path: Path) -> None:
     (OUTPUT_PATH.parent / "people_registry_scale_full_doctor_evidence.json").write_text(
         json.dumps(evidence, indent=2, sort_keys=True), encoding="utf-8"
     )
+
+    assert evidence["full_doctor_within_budget"], evidence
+
+
+# specs/backlog.md BL-E2: the original 10,000-person/2,000-team/100-program
+# "Target/local SSD" profile above (measured 111-134s against this same 10s
+# budget -- an 11-13x miss with no owner or decision date) was a design
+# target for a future multi-program fleet that does not exist yet (fleet
+# rollout is an explicit non-goal pending BL-G1's own sponsor/scope
+# decision). Real current usage (XPF, 2026-07-22) is 172 people / 23 teams /
+# 9 programs. BL-E2 was resolved by narrowing the publicly-supported scale
+# to a profile with generous headroom over that real usage, empirically
+# measured (not interpolated/estimated) to meet the budget:
+CURRENT_SCALE_PERSON_COUNT = 1_000
+CURRENT_SCALE_TEAM_COUNT = 100
+CURRENT_SCALE_PROGRAM_COUNT = 20
+
+
+@pytest.mark.slow
+def test_registry_scale_envelope_full_doctor_current_scale(tmp_path: Path, monkeypatch) -> None:
+    """§8.6's full-doctor budget at the "Current-scale" profile (BL-E2,
+    specs/backlog.md): 1,000 people / 100 teams / 20 programs -- roughly
+    5.8x/4.3x/2.2x headroom over real current XPF usage (172/23/9). This is
+    the currently-supported, currently-met scale target; the 10,000/2,000/
+    100 "Target/local SSD" profile above remains documented as a future
+    fleet-scale aspiration (BL-G1), not a currently-met commitment.
+
+    Empirically measured directly (not interpolated): 6.3-6.6s across
+    repeated runs at this exact shape, and 10.33s (over budget) at
+    1,500/150/25 -- so this profile has real, measured margin, not a
+    razor's-edge pass. Hard-blocking (no xfail): this is the profile Vertex
+    now actually commits to meeting.
+    """
+    this_module = sys.modules[__name__]
+    monkeypatch.setattr(this_module, "PERSON_COUNT", CURRENT_SCALE_PERSON_COUNT)
+    monkeypatch.setattr(this_module, "TEAM_COUNT", CURRENT_SCALE_TEAM_COUNT)
+
+    programs_root = tmp_path / "programs"
+    knowledge_root = get_shared_knowledge_root(programs_root)
+    bootstrap_registry_identity(knowledge_root=knowledge_root, customer_boundary_id="perf-corp", apply=True)
+    _build_fixture(knowledge_root, programs_root, program_count=CURRENT_SCALE_PROGRAM_COUNT)
+
+    doctor_start = perf_counter()
+    report = run_kb_doctor(editions_root=tmp_path / "editions", programs_root=programs_root)
+    full_doctor_seconds = perf_counter() - doctor_start
+    assert report is not None
+
+    evidence = {
+        "schema_version": "people-registry-scale-current-scale-full-doctor-evidence.v1",
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "environment": _collect_environment(),
+        "fixture_shape": {
+            "people": CURRENT_SCALE_PERSON_COUNT,
+            "teams": CURRENT_SCALE_TEAM_COUNT,
+            "programs": CURRENT_SCALE_PROGRAM_COUNT,
+        },
+        "full_doctor_seconds": round(full_doctor_seconds, 3),
+        "full_doctor_budget_seconds": FULL_DOCTOR_BUDGET_SECONDS,
+        "full_doctor_within_budget": full_doctor_seconds <= FULL_DOCTOR_BUDGET_SECONDS,
+    }
+    current_scale_output = OUTPUT_PATH.parent / "people_registry_scale_current_scale_full_doctor_evidence.json"
+    current_scale_output.parent.mkdir(parents=True, exist_ok=True)
+    current_scale_output.write_text(json.dumps(evidence, indent=2, sort_keys=True), encoding="utf-8")
 
     assert evidence["full_doctor_within_budget"], evidence
 
