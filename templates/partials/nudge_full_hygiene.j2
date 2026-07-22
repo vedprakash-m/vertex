@@ -19,7 +19,7 @@
 {%- endmacro -%}
 
 <!-- Call to action -->
-<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;border-collapse:collapse;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;border-collapse:collapse;">
   <tr>
     <td style="background:#EFF6FF;border:1px solid #BFDBFE;padding:12px 16px;border-radius:6px;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;font-size:12px;color:#1E3A5F;">
       <p style="margin:0 0 8px 0;font-weight:700;font-size:13px;">What's in this nudge:</p>
@@ -39,7 +39,7 @@
 </table>
 
 <!-- Legend -->
-<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;border-collapse:collapse;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;border-collapse:collapse;">
   <tr>
     <td style="background:#F3F4F6;padding:8px 12px;border-radius:4px;font-size:11px;color:#374151;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;">
       <strong>Legend:</strong>&nbsp;
@@ -55,7 +55,7 @@
 {% for section in sections %}
 {% if section.query_error %}
 <!-- Section {{ section.letter }}: {{ section.title }} — DEGRADED -->
-<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:4px;border-collapse:collapse;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:4px;border-collapse:collapse;">
   <tr>
     <td style="background:#7F1D1D;padding:8px 12px;border-radius:4px 4px 0 0;">
       <span style="color:#FFFFFF;font-weight:700;font-size:13px;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;">
@@ -64,7 +64,7 @@
     </td>
   </tr>
 </table>
-<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:20px;border-collapse:collapse;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:20px;border-collapse:collapse;">
   <tr>
     <td style="background:#FEF2F2;padding:8px 12px;border:1px solid #FECACA;border-radius:0 0 4px 4px;font-size:11px;color:#991B1B;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;">
       Query error: {{ section.error_details | default("data unavailable") | e }}. Retry or check ADO connectivity.
@@ -73,7 +73,7 @@
 </table>
 {% else %}
 <!-- Section {{ section.letter }}: {{ section.title }} -->
-<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:4px;border-collapse:collapse;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:4px;border-collapse:collapse;">
   <tr>
     <td style="background:#1E3A5F;padding:8px 12px;border-radius:4px 4px 0 0;">
       <span style="color:#FFFFFF;font-weight:700;font-size:13px;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;">
@@ -88,7 +88,7 @@
 </table>
 
 <!-- Section {{ section.letter }} summary stats -->
-<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:8px;border-collapse:collapse;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:8px;border-collapse:collapse;">
   <tr>
     <td style="background:#F0F4FF;padding:6px 12px;border:1px solid #DBEAFE;border-radius:0 0 4px 4px;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;font-size:11px;color:#374151;">
       <strong>Summary:</strong>&nbsp;
@@ -105,7 +105,7 @@
 </table>
 
 {% if section.groups %}
-<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:20px;border-collapse:collapse;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;font-size:11px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:20px;border-collapse:collapse;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;font-size:11px;">
   <!-- Column header -->
   <tr style="background:#E5E7EB;">
     <td style="padding:4px 6px;color:#374151;font-weight:600;white-space:nowrap;">ADO#</td>

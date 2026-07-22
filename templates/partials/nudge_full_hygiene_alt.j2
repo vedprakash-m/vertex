@@ -21,7 +21,7 @@
 {%- endmacro -%}
 
 {%- macro hygiene_strip(cells, size) -%}
-  <table cellpadding="0" cellspacing="0" style="margin:0 auto;border-collapse:collapse;">
+  <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 auto;border-collapse:collapse;">
     <tr>
       {%- for cell in cells %}
       <td style="width:18px;text-align:center;font-size:{{ size }};line-height:1;">{{ cell }}</td>
@@ -101,7 +101,7 @@
 {%- endmacro -%}
 
 <!-- Call to action -->
-<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;border-collapse:collapse;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;border-collapse:collapse;">
   <tr>
     <td style="background:#EFF6FF;border:1px solid #BFDBFE;padding:12px 16px;border-radius:6px;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;font-size:12px;color:#1E3A5F;">
       <p style="margin:0 0 8px 0;font-weight:700;font-size:13px;">What's in this report:</p>
@@ -147,7 +147,7 @@
 {% set tile_count = leadership_rollup | length %}
 {% set tile_width = ((100 / tile_count) | round(2)) if tile_count > 0 else 100 %}
 <!-- Leadership rollup: ADO hygiene compliance scorecard by accountable leader -->
-<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;border-collapse:collapse;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;border-collapse:collapse;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;">
   <tr>
     <td style="background:#1E3A5F;padding:8px 12px;border-radius:4px 4px 0 0;">
       <span style="color:#FFFFFF;font-weight:700;font-size:13px;">Leadership Rollup — ADO Hygiene Compliance</span>
@@ -162,7 +162,7 @@
   </tr>
   <tr>
     <td style="padding:8px 0 0 0;">
-      <table width="100%" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:separate;border-spacing:0;table-layout:fixed;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:separate;border-spacing:0;table-layout:fixed;">
         <tr>
           {% for leader in leadership_rollup %}
           {% set no_scope = leader.total_count == 0 and leader.closed_count == 0 %}
@@ -181,7 +181,7 @@
             {% set band_border = '#16A34A' if leader.percent_compliant >= 80 else ('#D97706' if leader.percent_compliant >= 50 else '#DC2626') %}
           {% endif %}
           <td width="{{ tile_width }}%" style="width:{{ tile_width }}%;padding:0 {% if not loop.last %}4px{% else %}0{% endif %} 0 0;vertical-align:top;">
-            <table width="100%" cellpadding="0" cellspacing="0" style="width:100%;height:100%;border-collapse:collapse;background:{{ band_bg }};border-top:3px solid {{ band_border }};">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;height:100%;border-collapse:collapse;background:{{ band_bg }};border-top:3px solid {{ band_border }};">
               <tr>
                 <td style="padding:8px 4px 7px 4px;text-align:center;">
                   <p style="margin:0 0 2px 0;font-size:10px;font-weight:700;line-height:1.2;color:{{ band_fg }};">
@@ -208,7 +208,7 @@
 {% endif %}
 
 <!-- Legend -->
-<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;border-collapse:collapse;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;border-collapse:collapse;">
   <tr>
     <td style="background:#F3F4F6;padding:8px 12px;border-radius:4px;font-size:11px;color:#374151;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;">
       <strong>Hygiene column key (left to right):</strong>&nbsp;
@@ -226,7 +226,7 @@
 {% for section in sections %}
 {% if section.query_error %}
 <!-- Section {{ section.letter }}: {{ section.title }} — DEGRADED -->
-<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:20px;border-collapse:collapse;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:20px;border-collapse:collapse;">
   <tr>
     <td style="background:#FEF2F2;padding:8px 12px;border:1px solid #FECACA;border-radius:4px;font-size:11px;color:#991B1B;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;">
       <strong>{% if sections | length > 1 %}Section {{ section.letter }} — {% endif %}{{ section.title }} [DATA UNAVAILABLE]</strong><br>
@@ -236,7 +236,7 @@
 </table>
 {% elif section.total_count > 0 %}
 <!-- Section: {{ section.title }} -->
-<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:4px;border-collapse:collapse;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:4px;border-collapse:collapse;">
   <tr>
     <td style="background:#1E3A5F;padding:8px 12px;border-radius:4px 4px 0 0;">
       <span style="color:#FFFFFF;font-weight:700;font-size:13px;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;">
@@ -251,7 +251,7 @@
 </table>
 
 <!-- Summary stats -->
-<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:8px;border-collapse:collapse;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:8px;border-collapse:collapse;">
   <tr>
     <td style="background:#F0F4FF;padding:6px 12px;border:1px solid #DBEAFE;border-radius:0 0 4px 4px;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;font-size:11px;color:#374151;">
       <strong>Summary:</strong>&nbsp;
@@ -268,7 +268,7 @@
 </table>
 
 {% if section.leader_portfolios %}
-<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:20px;border-collapse:collapse;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;font-size:11px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:20px;border-collapse:collapse;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;font-size:11px;">
   {{ column_header_row() }}
 
   {%- set ns = namespace(first_group_rendered=false) %}
