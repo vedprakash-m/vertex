@@ -11,7 +11,16 @@ from src.ai.client import AIClientError
 from src.ai.deployment_fallback import FallbackStructuredClient, LEGACY_DEPLOYMENT_ALIAS_NOTICE, resolve_ai_deployments_for_feature
 from src.ai.provider import LLMProvider
 from src.ai.tiered_router import TierResult, route_through_tiers
+from src.core.ai_schema_gateway import SchemaGatewayError, validate_bounded_payload
+from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.exceptions import ConfigError
+from src.core.quality_gates.ai_release_audit import (
+    AIRunState,
+    ReleaseTerminal,
+    new_ai_run_id,
+    record_ai_release_decision,
+    record_ai_run_lifecycle,
+)
 from src.core.yaml_utils import load_yaml_mapping
 from src.core.policy_loader import load_ai_feature_policy
 
@@ -109,7 +118,7 @@ class IntentRouter:
         )
         return cls(client=client)
 
-    def route(self, request: str, *, default_edition: str = "") -> RoutedInvocation:
+    def route(self, request: str, *, default_edition: str = "", programs_root: Path = PROGRAMS_ROOT) -> RoutedInvocation:
         normalized_request = request.strip()
         if not normalized_request:
             raise IntentRouterError("A natural-language request is required.")
@@ -126,6 +135,7 @@ class IntentRouter:
         system_prompt = _load_prompt()
         user_prompt = _build_user_prompt(request=normalized_request, default_edition=default_edition)
         _det = _route_known_intent(normalized_request, default_edition=default_edition)
+        program_id = _program_id_from_edition(default_edition)
 
         def _deterministic_fn() -> TierResult[RoutedInvocation] | None:
             if _det is None:
@@ -137,12 +147,12 @@ class IntentRouter:
             outcome = route_through_tiers(
                 _FEATURE,
                 deterministic_fn=_deterministic_fn,
-                frontier_fn=lambda: client.structured(
-                    system_prompt,
-                    user_prompt,
-                    parser=_parse_routed_invocation,
-                    max_tokens=load_ai_feature_policy(_FEATURE).max_tokens,
-                    prompt_version=PROMPT_VERSION,
+                frontier_fn=lambda: _run_ai_route(
+                    client,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    program_id=program_id,
+                    programs_root=programs_root,
                 ),
                 policy=load_ai_feature_policy(_FEATURE),
             )
@@ -154,6 +164,96 @@ class IntentRouter:
         raise IntentRouterError(
             "Unsupported natural-language request for deterministic routing. Try a direct CLI command or configure Azure OpenAI for AI fallback."
         )
+
+
+def _run_ai_route(
+    client: _StructuredProvider,
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    program_id: str,
+    programs_root: Path = PROGRAMS_ROOT,
+) -> RoutedInvocation:
+    """specs/backlog.md BL-C2: bounds-check the raw response through
+    AISchemaGateway and record a durable QG-29 release-audit trail before
+    any routed invocation is consumed -- ``intent_router``'s output
+    directly determines which CLI command executes, so this is a
+    ``production``-classified call site per governance/ai-call-inventory.md.
+
+    ``_parse_routed_invocation``'s own args/route-catalog validation
+    already does real semantic checking (a routed command must name an
+    enumerated command, its args must satisfy that command's declared
+    flags/value_options) -- there is no separate ``SemanticValidator``
+    class here because that validation already exists and already raises
+    the exact ``IntentRouterError`` this module's callers depend on;
+    duplicating it as a second validator would just be two copies of the
+    same rule.
+    """
+    ai_run_id = new_ai_run_id()
+
+    def _lifecycle(state: AIRunState) -> None:
+        record_ai_run_lifecycle(
+            program_id=program_id,
+            ai_run_id=ai_run_id,
+            feature=_FEATURE,
+            state=state,
+            prompt_version=PROMPT_VERSION,
+            policy_version=PROMPT_VERSION,
+            programs_root=programs_root,
+        )
+
+    def _discard(terminal: ReleaseTerminal, reason: str) -> None:
+        record_ai_release_decision(
+            program_id=program_id,
+            ai_run_id=ai_run_id,
+            terminal=terminal,
+            reason=reason,
+            validator_finding_count=0,
+            programs_root=programs_root,
+        )
+
+    _lifecycle(AIRunState.PLANNED)
+    _lifecycle(AIRunState.REQUESTED)
+    try:
+        raw = client.structured(
+            system_prompt,
+            user_prompt,
+            parser=lambda payload: payload,
+            max_tokens=load_ai_feature_policy(_FEATURE).max_tokens,
+            prompt_version=PROMPT_VERSION,
+        )
+    except Exception as error:
+        _discard(ReleaseTerminal.DISCARDED, f"provider call failed: {error}")
+        raise
+    _lifecycle(AIRunState.RESPONDED)
+
+    if not isinstance(raw, dict):
+        _discard(ReleaseTerminal.DISCARDED, "no structured response returned by the provider.")
+        raise IntentRouterError("Intent routing returned a non-object payload.")
+
+    try:
+        validate_bounded_payload(raw)
+    except SchemaGatewayError as error:
+        _discard(ReleaseTerminal.REJECTED, f"AISchemaGateway rejected the response: {error}")
+        raise IntentRouterError(f"Intent routing response rejected by AISchemaGateway: {error}") from error
+    _lifecycle(AIRunState.SCHEMA_VALIDATED)
+
+    try:
+        invocation = _parse_routed_invocation(raw)
+    except IntentRouterError as error:
+        _discard(ReleaseTerminal.REJECTED, f"route-catalog/args validation failed: {error}")
+        raise
+    _lifecycle(AIRunState.SEMANTICALLY_VALIDATED)
+
+    record_ai_release_decision(
+        program_id=program_id,
+        ai_run_id=ai_run_id,
+        terminal=ReleaseTerminal.RELEASED,
+        reason="passed AISchemaGateway bounds and route-catalog/args validation",
+        validator_finding_count=0,
+        programs_root=programs_root,
+    )
+    return invocation
 
 
 def render_invocation(invocation: RoutedInvocation) -> str:
