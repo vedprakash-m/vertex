@@ -37,6 +37,7 @@ from src.core.context_proposal_review import load_pending_context_proposal_rows
 from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.fact_lineage_coverage import compute_lineage_coverage
 from src.core.maturity_engine import load_earned_autonomy_state
+from src.core.outcome_metrics import compute_om4_audit_coverage
 from src.core.program_synthesis import load_latest_released_program_synthesis
 from src.core.ledger.event_log import read_events
 from src.core.measurement_store import read_measurements, tier_decision_store_path
@@ -546,7 +547,12 @@ def _build_reliability_summary(
     """ADF-W1.11: actuation safety state. ``duplicate_preventions`` is real
     (counts ``actuation.duplicate_prevented.v1`` ledger events emitted by the
     ADF-W1.2 search-before-create safeguard); the outbox-derived counts stay
-    at 0 until ADF-W1.3 wires a live mutation domain through it."""
+    at 0 until ADF-W1.3 wires a live mutation domain through it.
+
+    specs/backlog.md BL-C7: ``audit_coverage`` is now OM-4's live value
+    (``src.core.outcome_metrics.compute_om4_audit_coverage``) rather than a
+    hardcoded ``None`` placeholder -- see governance/outcome-metrics.md.
+    """
     findings: list[CockpitFinding] = []
     try:
         events = read_events(program_id, programs_root=programs_root)
@@ -554,12 +560,13 @@ def _build_reliability_summary(
         events = ()
     duplicate_preventions = sum(1 for event in events if event.event_type == "actuation.duplicate_prevented.v1")
 
+    om4 = compute_om4_audit_coverage(program_id, programs_root=programs_root)
     summary = ReliabilityCockpitSummary(
         outbox_pending=0,
         uncertain_remote_state=0,
         dead_letter_count=0,
         duplicate_preventions=duplicate_preventions,
-        audit_coverage=None,
+        audit_coverage=om4.value,
     )
     findings.append(
         CockpitFinding(
@@ -575,6 +582,19 @@ def _build_reliability_summary(
             owner=None,
             next_command=None,
             evidence_refs=(),
+            observed_at=observed_at,
+        )
+    )
+    findings.append(
+        CockpitFinding(
+            finding_id="reliability.om4_audit_coverage",
+            area="reliability",
+            status="ok" if om4.confidence == ValueConfidence.MEASURED and (om4.value or 0) >= 1.0 else "info",
+            summary=f"OM-4 (zero unaudited AI outputs consumed): {om4.confidence.value}.",
+            detail=om4.detail,
+            owner=None,
+            next_command=None,
+            evidence_refs=om4.evidence_refs,
             observed_at=observed_at,
         )
     )
