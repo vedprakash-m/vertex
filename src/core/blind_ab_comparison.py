@@ -22,6 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import math
 from pathlib import Path
 from typing import Literal
 
@@ -29,6 +30,14 @@ from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.jsonl_utils import append_jsonl_line, read_jsonl_records
 
 ComparisonChoice = Literal["a", "b", "tie", "neither"]
+
+#: specs/backlog.md BL-D3's pre-registered decision rule (2026-07-22):
+#: swap to production only if the win-rate 95% lower confidence bound
+#: exceeds this threshold AND zero critical errors were observed.
+BL_D3_DECISION_THRESHOLD = 0.5
+#: BL-D3's pre-registered minimum decisive (non-tie/non-neither)
+#: observation count before a swap decision may be made either way.
+BL_D3_MIN_OBSERVATIONS = 30
 
 _MAX_BYTES = 10 * 1024 * 1024  # matches proposal_audit.jsonl's rotation cap
 
@@ -50,6 +59,12 @@ class ComparisonRecord:
     choice: ComparisonChoice
     recorded_at: datetime
     notes: str | None = None
+    # BL-D3's pre-registered rubric: a critical error (hallucinated or
+    # unsupported claim) is disqualifying regardless of win rate, and is
+    # tracked separately from the win/loss/tie/neither choice above -- a
+    # candidate response can "win" the reviewer's preference and still
+    # contain a critical error the decision rule must not ignore.
+    critical_error: bool = False
 
 
 def record_comparison(
@@ -64,6 +79,7 @@ def record_comparison(
     programs_root: Path = PROGRAMS_ROOT,
     recorded_at: datetime | None = None,
     notes: str | None = None,
+    critical_error: bool = False,
 ) -> None:
     """Append one blind-comparison judgment. Always durable (unlike
     ``record_proposal_event``'s opt-in no-op default) -- this harness has
@@ -78,6 +94,7 @@ def record_comparison(
         choice=choice,
         recorded_at=recorded_at or datetime.now(timezone.utc),
         notes=notes,
+        critical_error=critical_error,
     )
     line = json.dumps(_to_jsonable(record), sort_keys=True) + "\n"
     append_jsonl_line(blind_ab_comparison_path(program_id, programs_root=programs_root), line, max_bytes=_MAX_BYTES)
@@ -94,6 +111,7 @@ def _to_jsonable(record: ComparisonRecord) -> dict[str, object]:
         "choice": record.choice,
         "recorded_at": record.recorded_at.isoformat(),
         "notes": record.notes,
+        "critical_error": record.critical_error,
     }
 
 
@@ -121,6 +139,9 @@ def read_comparisons(
                 choice=raw["choice"],
                 recorded_at=datetime.fromisoformat(raw["recorded_at"]),
                 notes=raw.get("notes"),
+                # Backward-compatible: comparisons recorded before this
+                # field existed default to no critical error, not unknown.
+                critical_error=bool(raw.get("critical_error", False)),
             )
         )
     return tuple(records)
@@ -137,6 +158,26 @@ class ComparisonSummary:
     # None when there are no decisive (a/b) comparisons yet -- a rate of
     # 0.0 would otherwise be indistinguishable from "no evidence".
     candidate_win_rate: float | None
+    critical_errors: int
+    # 95% Wilson-score lower bound on the candidate win rate over decisive
+    # comparisons only. None when there are no decisive comparisons yet.
+    # BL-D3's decision rule reads this bound, not the raw point estimate,
+    # specifically to avoid over-trusting a small early sample.
+    candidate_win_rate_lower_bound: float | None
+
+
+def _wilson_lower_bound(successes: int, total: int, *, z: float = 1.96) -> float:
+    """95%-confidence (z=1.96) Wilson-score lower bound for a binomial
+    proportion. Preferred over a normal approximation for small/moderate
+    sample sizes, which is exactly the regime BL-D3's pilot comparisons
+    operate in."""
+    if total == 0:
+        raise ValueError("total must be > 0")
+    phat = successes / total
+    denominator = 1 + z * z / total
+    centre = phat + z * z / (2 * total)
+    spread = z * math.sqrt((phat * (1 - phat) + z * z / (4 * total)) / total)
+    return max(0.0, (centre - spread) / denominator)
 
 
 def summarize_comparisons(records: tuple[ComparisonRecord, ...], *, surface: str) -> ComparisonSummary:
@@ -144,7 +185,10 @@ def summarize_comparisons(records: tuple[ComparisonRecord, ...], *, surface: str
     baseline_wins = 0
     ties = 0
     neither = 0
+    critical_errors = 0
     for record in records:
+        if record.critical_error:
+            critical_errors += 1
         if record.choice == "tie":
             ties += 1
         elif record.choice == "neither":
@@ -155,6 +199,7 @@ def summarize_comparisons(records: tuple[ComparisonRecord, ...], *, surface: str
             baseline_wins += 1
     decisive = candidate_wins + baseline_wins
     win_rate = candidate_wins / decisive if decisive else None
+    win_rate_lower_bound = _wilson_lower_bound(candidate_wins, decisive) if decisive else None
     return ComparisonSummary(
         surface=surface,
         total=len(records),
@@ -163,15 +208,46 @@ def summarize_comparisons(records: tuple[ComparisonRecord, ...], *, surface: str
         ties=ties,
         neither=neither,
         candidate_win_rate=win_rate,
+        critical_errors=critical_errors,
+        candidate_win_rate_lower_bound=win_rate_lower_bound,
     )
 
 
+SwapDecision = Literal["swap", "hold", "insufficient_data"]
+
+
+def recommend_swap_decision(
+    summary: ComparisonSummary,
+    *,
+    min_observations: int = BL_D3_MIN_OBSERVATIONS,
+    decision_threshold: float = BL_D3_DECISION_THRESHOLD,
+) -> SwapDecision:
+    """BL-D3's pre-registered decision rule, applied mechanically: any
+    critical error is disqualifying regardless of sample size or win rate;
+    otherwise swap only once at least ``min_observations`` decisive
+    comparisons exist AND the win-rate lower confidence bound clears
+    ``decision_threshold``. This function is the auditable form of the
+    rule -- the numeric defaults themselves are a pre-registered proposal
+    pending the program operator's sign-off (see specs/backlog.md BL-D3)."""
+    if summary.critical_errors > 0:
+        return "hold"
+    decisive = summary.candidate_wins + summary.baseline_wins
+    if decisive < min_observations:
+        return "insufficient_data"
+    assert summary.candidate_win_rate_lower_bound is not None
+    return "swap" if summary.candidate_win_rate_lower_bound > decision_threshold else "hold"
+
+
 __all__ = [
+    "BL_D3_DECISION_THRESHOLD",
+    "BL_D3_MIN_OBSERVATIONS",
     "ComparisonChoice",
     "ComparisonRecord",
     "ComparisonSummary",
+    "SwapDecision",
     "blind_ab_comparison_path",
     "read_comparisons",
     "record_comparison",
+    "recommend_swap_decision",
     "summarize_comparisons",
 ]

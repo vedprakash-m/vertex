@@ -40,6 +40,7 @@ from src.ai.provider import LLMProvider
 from src.core.blind_ab_comparison import (
     ComparisonChoice,
     read_comparisons,
+    recommend_swap_decision,
     record_comparison,
     summarize_comparisons,
 )
@@ -142,6 +143,11 @@ def run_context_gateway_comparison(
         choice = "tie"
     else:
         choice = "neither"
+    # BL-D3's pre-registered rubric: a critical error (hallucinated/
+    # unsupported claim) is recorded independent of the win/loss/tie
+    # choice above -- it disqualifies a swap regardless of win rate.
+    critical_raw = prompt_fn("Did either option contain a critical error (hallucinated/unsupported claim)? [y/N]").strip().lower()
+    critical_error = critical_raw in ("y", "yes")
     record_comparison(
         program_id=program_id,
         surface=_SURFACE,
@@ -151,6 +157,7 @@ def run_context_gateway_comparison(
         a_is_candidate=a_is_candidate,
         choice=choice,
         programs_root=programs_root,
+        critical_error=critical_error,
     )
     return ComparisonRunResult(program_id=program_id, compared=True)
 
@@ -209,9 +216,14 @@ def summary_command(
         typer.echo(f"  Baseline (current ad hoc context) wins: {summary.baseline_wins}")
         typer.echo(f"  Ties: {summary.ties}  Neither: {summary.neither}")
         if summary.candidate_win_rate is not None:
-            typer.echo(f"  Candidate win rate (excl. ties/neither): {summary.candidate_win_rate:.0%}")
+            typer.echo(
+                f"  Candidate win rate (excl. ties/neither): {summary.candidate_win_rate:.0%} "
+                f"(95% lower bound: {summary.candidate_win_rate_lower_bound:.0%})"
+            )
         else:
             typer.echo("  Candidate win rate: n/a (no decisive comparisons yet)")
+        typer.echo(f"  Critical errors: {summary.critical_errors}")
+        typer.echo(f"  BL-D3 decision rule recommends: {recommend_swap_decision(summary).upper()}")
     raise typer.Exit(code=0)
 
 
