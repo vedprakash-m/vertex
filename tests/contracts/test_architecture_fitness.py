@@ -805,6 +805,73 @@ def test_inv13_echo_chamber_guards_exist_and_are_called() -> None:
     )
 
 
+# INV-AF-13: all file-backed SQLite stores must use the shared connection
+# policy. These are the only sanctioned raw connections in src/core.
+_INV_AF_13_ALLOWLIST = {
+    "src/core/_db.py": "implements open_program_db itself",
+    "src/core/unit_of_work.py": "owns CPK's cross-database ATTACH primitive",
+    "src/core/checkpoint_store.py": (
+        "src->dst pair uses SQLite's native page-level Connection.backup() "
+        "API, not domain SQL; the shared connection policy's pragmas are "
+        "irrelevant to a byte-level backup replication call"
+    ),
+}
+# Per-line exceptions: (file, literal substring, rationale). Used where a
+# single file has both migrated and deliberately-raw connections, so a
+# whole-file allowlist entry would be too coarse.
+_INV_AF_13_LINE_EXCEPTIONS = (
+    (
+        "src/core/ledger/program_views.py",
+        'sqlite3.connect(":memory:")',
+        "in-memory DB, has no file path; open_program_db() requires a Path",
+    ),
+    (
+        "src/core/people_registry_cache.py",
+        "connection = sqlite3.connect(str(temp_db_path))",
+        "temp-file-then-os.replace() atomic rebuild; forcing WAL here risks "
+        "an unrenamed -wal sidecar undermining the atomic swap (see the "
+        "call site's own comment)",
+    ),
+)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="WO-2 must migrate the reported stores before INV-AF-13 can pass",
+)
+def test_inv_af_13_file_backed_sqlite_uses_shared_db_policy() -> None:
+    """INV-AF-13: raw file-backed sqlite3.connect calls are forbidden.
+
+    This guard is landed before the migration work (WO-2), so it is expected
+    to report the current pending scope until each store is migrated. The
+    in-memory projection fixture and the people-registry-cache atomic-rebuild
+    temp file are allowed for the reasons stated in
+    ``_INV_AF_13_LINE_EXCEPTIONS``.
+    """
+    violations: list[str] = []
+    for py_file in (REPO_ROOT / "src/core").rglob("*.py"):
+        relative_path = py_file.relative_to(REPO_ROOT).as_posix()
+        if relative_path in _INV_AF_13_ALLOWLIST:
+            continue
+        for line_number, line in enumerate(
+            py_file.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            if "sqlite3.connect(" not in line:
+                continue
+            if any(
+                relative_path == exception_path and exception_substring in line
+                for exception_path, exception_substring, _rationale in _INV_AF_13_LINE_EXCEPTIONS
+            ):
+                continue
+            violations.append(f"{relative_path}:{line_number}")
+
+    assert violations == [], (
+        "INV-AF-13 violation: file-backed SQLite connections bypass "
+        "open_program_db(): "
+        + ", ".join(violations)
+    )
+
+
 def test_inv14_nudge_cooldown_default_is_14_days() -> None:
     """INV-14: the default nudge cooldown must be 14 days."""
     from src.core.vitality_reporting import VitalitySettings

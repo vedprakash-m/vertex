@@ -2,9 +2,55 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
+from src.core import _db
 from src.core.ledger.event_log import ConfidenceTier, TemporalConfidence, build_event_envelope
-from src.core.ledger.program_views import canonical_projection_dump, collapse_orphan_links, collapse_shadow_links, project_events_to_memory, project_events_to_sqlite
+from src.core.ledger.program_views import _ensure_schema, canonical_projection_dump, collapse_orphan_links, collapse_shadow_links, connect_projection_db, project_events_to_memory, project_events_to_sqlite
 from src.core.ledger.source_refs import LTDeckRef, OperatorAssertionRef
+
+
+def test_connect_projection_db_uses_strict_local_shared_db_policy(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(_db, "_is_network_filesystem_path", lambda _path: False)
+
+    with connect_projection_db(tmp_path / "projection.sqlite3") as connection:
+        _ensure_schema(connection)
+        journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+        busy_timeout = connection.execute("PRAGMA busy_timeout").fetchone()[0]
+        synchronous = connection.execute("PRAGMA synchronous").fetchone()[0]
+
+    assert str(journal_mode).lower() == "wal"
+    assert busy_timeout == 5000
+    assert synchronous == 1  # SQLite NORMAL
+
+
+def test_connect_projection_db_uses_network_safe_delete_journal(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(_db, "_is_network_filesystem_path", lambda _path: True)
+
+    with connect_projection_db(tmp_path / "projection.sqlite3") as connection:
+        _ensure_schema(connection)
+        journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+
+    assert str(journal_mode).lower() == "delete"
+
+
+def test_connect_projection_db_rolls_back_failed_transaction_and_recovers(tmp_path) -> None:
+    db_path = tmp_path / "projection.sqlite3"
+
+    with pytest.raises(RuntimeError, match="simulate interruption"):
+        with connect_projection_db(db_path) as connection:
+            _ensure_schema(connection)
+            connection.execute(
+                "INSERT INTO projection_meta (schema_version, built_at, event_watermark, as_of, knowledge_as_of, coverage_earliest, coverage_latest, projector_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("interrupted", "2026-07-21T00:00:00+00:00", "", None, None, None, None, "test"),
+            )
+            raise RuntimeError("simulate interruption")
+
+    with connect_projection_db(db_path) as connection:
+        _ensure_schema(connection)
+        rows = connection.execute("SELECT schema_version FROM projection_meta").fetchall()
+
+    assert rows == []
 
 
 def _deck_ref() -> LTDeckRef:

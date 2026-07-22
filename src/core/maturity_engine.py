@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Mapping
 import yaml
 
+from src.core._db import open_program_db
 from src.core.analytics_store import (
     get_program_analytics_store_path,
     load_autonomy_audit_records,
@@ -162,10 +163,7 @@ def compute_maturity_score(
             gate_pass_rate_factor=0.0,
         )
 
-    import sqlite3
-    connection = sqlite3.connect(str(db_path))
-    connection.row_factory = sqlite3.Row
-    try:
+    with open_program_db(db_path, read_only=True) as connection:
         confirmed_issues = _count_confirmed_risks(connection)
         issue_factor = min(1.0, confirmed_issues / max(_ADVANCE_MIN_CONFIRMED_ISSUES, 1))
 
@@ -191,8 +189,6 @@ def compute_maturity_score(
             + 0.25 * override_factor
             + 0.20 * gate_factor
         )
-    finally:
-        connection.close()
 
     return MaturityScoreBreakdown(
         overall=round(min(1.0, max(0.0, overall)), 4),

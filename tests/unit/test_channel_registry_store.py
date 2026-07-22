@@ -734,13 +734,19 @@ def test_governance_refresh_uses_confidence_source_from_highest_confidence_live_
 
 
 def test_connect_uses_delete_journal_mode_for_network_paths(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(channel_registry_store, "_is_network_filesystem_path", lambda path: True)
+    from src.core import _db
+
+    monkeypatch.setattr(_db, "_is_network_filesystem_path", lambda path: True)
     store = ChannelRegistryStore(tmp_path / "channel_registry.sqlite3", "demo")
 
     with store._connect() as conn:
         journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        synchronous = conn.execute("PRAGMA synchronous").fetchone()[0]
 
     assert str(journal_mode).lower() == "delete"
+    assert busy_timeout == 5000
+    assert synchronous == 2  # SQLite FULL ("strict" durability preserves the prior unset default)
 
 
 def test_delta_history_prunes_rows_older_than_retention(monkeypatch, tmp_path) -> None:
@@ -874,6 +880,36 @@ def test_reassign_workstream_noop_when_already_correct(tmp_path) -> None:
     assert migrated == 0
     registrations = store.active_registrations("ado")
     assert len(registrations) == 1
+    assert "ws-a" in registrations[0].workstream_ids
+
+
+def test_connect_is_atomic_across_multiple_statements_in_one_block(tmp_path) -> None:
+    """INV-AF-13 (WO-2 item 9) atomicity regression.
+
+    ``_connect()`` used to open the connection with ``isolation_level=None``
+    (autocommit): each statement inside a ``with store._connect() as conn:``
+    block committed durably the instant it ran, independent of whatever
+    happened later in the same block. After migrating to
+    ``open_program_db()``, all statements in one block now share a single
+    implicit transaction that commits -- or rolls back -- together. This
+    test would have FAILED under the old autocommit behaviour (the UPDATE
+    below would have persisted despite the later exception); it must pass
+    now that the block is atomic.
+    """
+    store = ChannelRegistryStore(tmp_path / "channel_registry.sqlite3", "demo")
+    store.apply_discovery_result(_result(_discovered("101", "ws-a")))
+
+    with pytest.raises(RuntimeError, match="simulate interruption"):
+        with store._connect() as conn:
+            conn.execute(
+                "UPDATE registration_bindings SET workstream_id = ? WHERE ref_id = ?",
+                ("ws-migrated", "101"),
+            )
+            raise RuntimeError("simulate interruption")
+
+    registrations = store.active_registrations("ado")
+    assert len(registrations) == 1
+    assert "ws-migrated" not in registrations[0].workstream_ids
     assert "ws-a" in registrations[0].workstream_ids
 
 

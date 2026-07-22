@@ -29,6 +29,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator
 
+from src.core._db import open_program_db
+
 log = logging.getLogger(__name__)
 
 DB_FILENAME = "candidates.db"
@@ -110,18 +112,16 @@ def candidate_db_path(db_dir: Path) -> Path:
 
 @contextmanager
 def _open_db(db_path: Path) -> Generator[sqlite3.Connection, None, None]:
-    conn = sqlite3.connect(str(db_path), timeout=10)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    try:
+    """INV-AF-13 (WO-2 item 5): routed through ``open_program_db()``. The
+    prior code passed ``timeout=10`` (10s) to ``sqlite3.connect()``, which
+    Python maps directly to ``sqlite3_busy_timeout()`` — i.e. it *was* the
+    busy timeout, not a separate connect timeout. ``busy_timeout_ms=10_000``
+    preserves that exactly (default is 5000 for every other migrated store).
+    ``durability="balanced"`` (the default) preserves the prior
+    ``synchronous=NORMAL`` on local paths.
+    """
+    with open_program_db(db_path, busy_timeout_ms=10_000) as conn:
         yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
 
 
 def init_candidate_db(db_dir: Path) -> None:

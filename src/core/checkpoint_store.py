@@ -157,6 +157,16 @@ def _copy_checkpoint_file(src: Path, dst: Path) -> None:
 
 
 def _copy_sqlite(src: Path, dst: Path) -> None:
+    """INV-AF-13 (WO-2 item 8): deliberately NOT routed through
+    open_program_db(). This uses SQLite's native page-level online backup API
+    (``Connection.backup()``), which replicates the source file's raw pages
+    into the destination wholesale -- it runs no domain SQL and isn't served
+    by the shared read/write connection policy (WAL/synchronous pragmas set
+    on either handle are irrelevant since ``backup()`` overwrites the
+    destination's pages outright). Allowlisted in
+    tests/contracts/test_architecture_fitness.py's INV-AF-13 guard, same
+    rationale class as unit_of_work.py's cross-database ATTACH primitive.
+    """
     src_conn = sqlite3.connect(src)
     dst_conn = sqlite3.connect(dst)
     try:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 
+import pytest
+
 from src.core.discovery_intent import (
     DiscoveryAttempt,
     DiscoveryAttemptOutcome,
@@ -295,3 +297,50 @@ def test_derive_intent_state_requires_two_high_confidence_pending_candidates_for
         store.link_candidate_to_intent(candidate.candidate_id, intent.intent_id, 0.30)
 
     assert store.derive_intent_state(intent.intent_id, as_of=as_of) == SourceIntentStatus.CANDIDATE_FOUND.value
+
+
+def test_connect_is_atomic_across_multiple_statements_in_one_block(tmp_path) -> None:
+    """INV-AF-13 (WO-2 item 10) atomicity regression.
+
+    ``_connect()`` used to open the connection with ``isolation_level=None``
+    (autocommit): each statement inside a ``with store._connect() as conn:``
+    block committed durably the instant it ran, independent of whatever
+    happened later in the same block. After migrating to
+    ``open_program_db()``, all statements in one block now share a single
+    implicit transaction that commits -- or rolls back -- together. This
+    test would have FAILED under the old autocommit behaviour (the INSERT
+    below would have persisted despite the later exception); it must pass
+    now that the block is atomic.
+    """
+    store = SourceCandidateStore(tmp_path / "channel_registry.sqlite3", "demo")
+
+    with pytest.raises(RuntimeError, match="simulate interruption"):
+        with store._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO source_intents(
+                    intent_id, program_id, workstream_id, ref_kind, display_name, normalized_name,
+                    status, created_at, updated_at, updated_by, decision_version
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "intent-atomicity-test",
+                    "demo",
+                    "demo.acme",
+                    SourceRefKind.MEETING_SERIES.value,
+                    "Should Not Persist",
+                    "should not persist",
+                    SourceIntentStatus.DECLARED.value,
+                    "2026-06-01T00:00:00+00:00",
+                    "2026-06-01T00:00:00+00:00",
+                    None,
+                    0,
+                ),
+            )
+            raise RuntimeError("simulate interruption")
+
+    with store._connect() as conn:
+        rows = conn.execute("SELECT intent_id FROM source_intents WHERE intent_id = ?", ("intent-atomicity-test",)).fetchall()
+
+    assert rows == []

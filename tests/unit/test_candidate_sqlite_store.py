@@ -112,6 +112,19 @@ class TestInitCandidateDb:
         _sqls.init_candidate_db(db_dir)
         assert db_dir.is_dir()
 
+    def test_open_db_preserves_prior_wal_and_10s_busy_timeout(self, tmp_path: Path) -> None:
+        db_dir = tmp_path / "prog" / "ledger" / "candidates"
+        _sqls.init_candidate_db(db_dir)
+
+        with _sqls._open_db(_sqls.candidate_db_path(db_dir)) as conn:
+            journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+            busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+            synchronous = conn.execute("PRAGMA synchronous").fetchone()[0]
+
+        assert str(journal_mode).lower() == "wal"
+        assert busy_timeout == 10_000
+        assert synchronous == 1  # SQLite NORMAL
+
 
 # ---------------------------------------------------------------------------
 # sqlite_insert_candidate
