@@ -19,6 +19,7 @@ prompts:
   - governance_decision_brief_generator.v1
   - intent_router.v1
   - learning_distiller.v1
+  - lookback_retrospective.v1
   - m365_topic_router.v1
   - meeting_action_extractor.v1
   - onboard_structure_assistant.v1

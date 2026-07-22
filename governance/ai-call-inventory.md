@@ -12,6 +12,19 @@ module/caller to determine gateway/audit wiring and real-world consumption.
 
 Analysis only — no call site was modified to produce this document.
 
+**Update 2026-07-22 (BL-C2 Phase A):** two of the three feature-name
+mismatches this inventory found were fixed (`report_lookback.py` given its
+own registered feature and prompt, now 27 total; `kb.py`'s telemetry no
+longer falls back to a caller-string) — see each row's `[FIXED]` note and
+the reverse-check section below. A new CI ratchet,
+`tests/contracts/test_ai_call_site_ratchet.py`, now fails the build if a
+new file starts making direct provider calls without being added to this
+document and to the ratchet's own known-file list in the same change —
+this is BL-C2 step 5's "CI ratchet" requirement. `setup.py:205`'s
+duplication and the full per-site `AISchemaGateway`/`ai_release_audit`
+wiring for `production`-classified sites remain open; see
+`specs/backlog.md`'s BL-C2 row for what's done vs. remaining.
+
 **Classification legend:** `production` (output can reach a published
 artifact or written fact), `advisory` (staged proposal requiring explicit
 human accept/reject), `evaluation` (comparison/QA harness, not a production
@@ -52,8 +65,8 @@ apply this label; see rev_judge's note).
 | rev_extractor | `src/ai/rev/extractor.py:566` (`.structured`) / `:507` (`route_through_tiers`) | Yes — `rev_extractor.v1` | No | No | advisory | Real logic in `LLMRevExtractor`, used by `src/commands/rev.py --extractor llm`; `rev_run`'s own docstring: "stage candidates for triage" — not auto-published. |
 | rev_judge | `src/ai/rev/judge.py:273` (`.structured`) / `:269` (`route_through_tiers`) | Yes — `rev_judge.v1` (WO-3, 2026-07-22 — was an inline constant when this inventory's underlying research ran) | No | No | evaluation | `judge_extractions()` compares two extractors' claims against ground truth (LLM-as-judge). **No production CLI/script caller found** anywhere in `src/commands/` or `scripts/`; only invoked from `tests/unit/test_rev_cache_store.py`. Close to "retired" but not confident enough to apply that label — it's clearly *designed* as an evaluation harness and is asserted-live by a deliberate AST anchor (see below). A human should confirm whether it's meant to be wired up somewhere or is dead. |
 | activation_judge | `src/ai/activation_judge.py:305` / `:301` | Yes — `activation_judge.v1` | No | No | evaluation | Used by `scripts/run_activation_judge.py`, feeding `scripts/verify_activation.py`'s judge layer (WO-7 context) — a build/QA judge, not a program-published artifact. |
-| default | `src/commands/kb.py:358` (`.chat`, no `route_through_tiers`) — feature resolved at `kb.py:315` | **No** — hardcoded system string, `prompt_version="kb_update_plan.v1"` (unregistered) | No | No | advisory | `vertex kb update`'s AI-assisted correction planner. Preview the operator must confirm with `--apply`. Telemetry's `feature` metadata actually resolves to the caller string (`src.commands.kb._plan_kb_update_with_ai`), not `"default"` or any of the 26 — a telemetry/policy naming mismatch (see reverse-check below). |
-| *(unlabeled — borrows `exec_summary_drafter`'s policy)* | `src/commands/report_lookback.py:583` (`.structured`, no `route_through_tiers`) | **No** — hardcoded system string, `prompt_version="lookback_retrospective_v1"` (unregistered, not in the 30) | No | No | production | `_build_lookback_ai_retrospective_rows`, called live from `assemble_stage.py:1535` and appended directly into `retrospective_intelligence.rows`, flowing straight into the rendered lookback report with no further gate. Deployment/temperature/budget resolved via `feature_name="exec_summary_drafter"` (`assemble_stage.py:1521`) even though this is a functionally distinct prompt/feature — the clearest **feature-name mismatch** found (see reverse-check below). |
+| default | `src/commands/kb.py:358` (`.chat`, no `route_through_tiers`) — feature resolved at `kb.py:315` | **No** — hardcoded system string, `prompt_version="kb_update_plan.v1"` (unregistered) | No | No | advisory | `vertex kb update`'s AI-assisted correction planner. Preview the operator must confirm with `--apply`. **[FIXED 2026-07-22]** Telemetry's `feature` metadata previously fell back to the caller string; `_build_kb_update_trace_context` now sets `metadata["feature"] = "default"` explicitly (`tests/unit/test_commands_kb.py`). Prompt/max_tokens are still an inline literal, not registry-managed — that part of the gap remains open. |
+| lookback_retrospective | `src/commands/report_lookback.py:583` (`.structured`, via `route_through_tiers`) | **Yes** — `lookback_retrospective.v1` | No | No | production | `_build_lookback_ai_retrospective_rows`, called live from `assemble_stage.py:1535` and appended directly into `retrospective_intelligence.rows`, flowing straight into the rendered lookback report with no further gate. **[FIXED 2026-07-22]** Given its own registered feature (`vertex/policies/ai_policy.yaml`) and prompt (`lookback_retrospective.v1`, moved out of an inline string), routed through `route_through_tiers` (`tests/unit/test_report_lookback_ai.py`). Deployment *connectivity* resolution (`assemble_stage.py:1521`) remains intentionally shared with `exec_summary_drafter` — documented as deliberate in `ai_policy.yaml`'s comment, not a leftover mismatch. Still not wired through `AISchemaGateway`/`ai_release_audit` — that part of BL-C2 remains open. |
 
 Two additional non-functional matches, noted for completeness but **not**
 counted as real call sites above:
@@ -84,27 +97,26 @@ default`) have at least one confirmed call site above.
 **Call sites whose feature name does not appear in the 26 (mismatch
 direction):**
 
-- `src/commands/report_lookback.py:583` — no `_FEATURE`/named-feature
-  constant of its own; its deployment resolution borrows
-  `"exec_summary_drafter"` (a valid one of the 26) for a functionally
-  unrelated prompt/output (`lookback_retrospective_v1`, unregistered). Not a
-  literal string mismatch, but a semantic one — the policy/telemetry
-  feature label doesn't describe what's actually being called.
-- `src/commands/kb.py:358` — resolves under `"default"` (valid) for
-  deployment/policy, but the AI-telemetry `feature` field (via
-  `AIClient._emit_ai_telemetry`) falls back to the trace-context **caller**
-  string `"src.commands.kb._plan_kb_update_with_ai"` because no `"feature"`
-  key is set in that call's trace metadata — so telemetry records for this
-  call site won't show up under any of the 26 feature names at all.
-- `src/commands/setup.py:205` — resolves under `"onboard_assistant"`
-  (valid) for deployment, which is itself odd since the logic and prompt
-  text are functionally `setup_assistant`'s (registered as
-  `setup_ws_suggest.v1`), just reimplemented inline rather than sharing
-  code.
+- ~~`src/commands/report_lookback.py:583`~~ **[FIXED 2026-07-22]** — given
+  its own registered feature (`lookback_retrospective`, now 27 features
+  total) and prompt; deployment *connectivity* resolution remains
+  intentionally shared with `exec_summary_drafter` (documented, not a
+  mismatch).
+- ~~`src/commands/kb.py:358`~~ **[FIXED 2026-07-22]** — `metadata["feature"]`
+  now explicitly set to `"default"`; telemetry no longer falls back to the
+  caller string. The prompt/max_tokens are still an inline literal
+  (unregistered) — that narrower gap remains open.
+- `src/commands/setup.py:205` — **still open.** Resolves under
+  `"onboard_assistant"` (valid) for deployment, which is itself odd since
+  the logic and prompt text are functionally `setup_assistant`'s
+  (registered as `setup_ws_suggest.v1`), just reimplemented inline rather
+  than sharing code. Not attempted in this pass — consolidating two
+  near-duplicate implementations risks a subtle UX behavior change that
+  needs its own dedicated review, not a drive-by fix.
 
 No call site used a completely invented feature-name string outside the
-26 — all mismatches found are of the "borrowed/wrong policy label for a
-distinct prompt" kind rather than a literal typo'd feature key.
+26 (now 27) — all mismatches found were of the "borrowed/wrong policy
+label for a distinct prompt" kind rather than a literal typo'd feature key.
 
 ## Prompt-registry side note
 

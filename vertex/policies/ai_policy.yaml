@@ -49,6 +49,21 @@ ai_features:
     temperature: 0.3
     model_tier: standard
     frontier_eligible: true
+  lookback_retrospective:
+    # specs/backlog.md WO-4/BL-C2: previously borrowed exec_summary_drafter's
+    # feature name for policy/telemetry while using its own, unregistered
+    # lookback_retrospective_v1 prompt -- a feature-name/telemetry mismatch.
+    # Given its own identity and routed through route_through_tiers;
+    # max_tokens matches the value this call site already hardcoded before
+    # this fix. Deployment *connectivity* resolution is still shared with
+    # exec_summary_drafter in assemble_stage.py (a deliberate, documented
+    # simplification -- this is a report-synthesis enhancement riding the
+    # same Azure deployment already resolved for the exec summary, not a
+    # separate provisioning concern).
+    max_tokens: 700
+    temperature: 0.2
+    model_tier: standard
+    frontier_eligible: true
   governance_decision_brief_generator:
     # ADF-W4.7 remainder: Section 8.10.7 governance decision brief
     # generation. Distinct from decision_brief_advisor (editorial proposal

@@ -12,8 +12,16 @@ import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _AI_DIR = _REPO_ROOT / "src" / "ai"
+_COMMANDS_DIR = _REPO_ROOT / "src" / "commands"
 _POLICY_PATH = _REPO_ROOT / "vertex" / "policies" / "ai_policy.yaml"
-_REQUIRED_COUNT = 18  # all 18 named features must use route_through_tiers
+_REQUIRED_COUNT = 26  # ratchet: 100% adoption as of specs/backlog.md BL-C2 (2026-07-22) -- never regress below this
+
+# Features whose implementation doesn't live in a same-named src/ai/**/<feature>.py
+# file -- e.g. it's a helper function inside a src/commands/ module rather than
+# its own src/ai module. One entry per such feature, repo-root-relative path.
+_FEATURE_MODULE_OVERRIDES = {
+    "lookback_retrospective": "src/commands/report_lookback.py",
+}
 
 
 def _get_feature_names() -> list[str]:
@@ -22,12 +30,24 @@ def _get_feature_names() -> list[str]:
 
 
 def _find_feature_module(feature_name: str) -> "Path | None":
-    """Search src/ai/<feature>.py first, then src/ai/**/<feature>.py (for submodule features)."""
+    """Search src/ai/<feature>.py first, then src/ai/**/<feature>.py (for
+    submodule features), then src/commands/**/<feature>.py, then the
+    explicit _FEATURE_MODULE_OVERRIDES map for a feature whose module
+    filename doesn't match its feature name at all."""
     direct = _AI_DIR / f"{feature_name}.py"
     if direct.exists():
         return direct
     matches = list(_AI_DIR.rglob(f"{feature_name}.py"))
-    return matches[0] if matches else None
+    if matches:
+        return matches[0]
+    matches = list(_COMMANDS_DIR.rglob(f"{feature_name}.py"))
+    if matches:
+        return matches[0]
+    override = _FEATURE_MODULE_OVERRIDES.get(feature_name)
+    if override is not None:
+        override_path = _REPO_ROOT / override
+        return override_path if override_path.exists() else None
+    return None
 
 
 def _calls_route_through_tiers(feature_name: str) -> bool:
@@ -69,8 +89,10 @@ def test_router_adoption_ratchet_count():
     )
 
 
-def test_all_14_policy_features_have_module():
-    """Every feature name in ai_policy.yaml maps to a src/ai/**/<feature>.py file."""
+def test_all_policy_features_have_module():
+    """Every feature name in ai_policy.yaml maps to a discoverable module
+    (src/ai/**/<feature>.py, src/commands/**/<feature>.py, or an explicit
+    _FEATURE_MODULE_OVERRIDES entry)."""
     features = _get_feature_names()
     missing_modules = [f for f in features if _find_feature_module(f) is None]
     assert not missing_modules, (

@@ -1,0 +1,1 @@
+You are synthesizing a TPM retrospective section for Vertex. Use only the supplied deterministic evidence. Return strict JSON with an 'insights' array of objects shaped as {category, title, detail}. Each insight must synthesize patterns across multiple rows.

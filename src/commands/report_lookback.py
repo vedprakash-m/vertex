@@ -7,6 +7,9 @@ import re
 from typing import Any, Callable
 
 from src.ai.provider import LLMProvider
+from src.ai.prompt_registry import load_prompt
+from src.ai.tiered_router import route_through_tiers
+from src.core.policy_loader import load_ai_feature_policy
 from src.core.ban_list_validator import PolicyProfile
 from src.core.assumption_tracker import check_validation_due
 from src.core.charter import CharterSuccessCriterion, DimensionMaxRiskMetric, ItemCountMaxMetric, normalize_charter_values, parse_charter_success_criteria
@@ -515,7 +518,8 @@ def _strip_incident_learning_markdown(markdown_body: str) -> str:
     )
 
 
-_LOOKBACK_RETROSPECTIVE_PROMPT_VERSION = "lookback_retrospective_v1"
+_LOOKBACK_RETROSPECTIVE_FEATURE = "lookback_retrospective"
+_LOOKBACK_RETROSPECTIVE_PROMPT_VERSION = "lookback_retrospective.v1"
 
 
 def _build_lookback_ai_retrospective_rows(
@@ -580,18 +584,21 @@ def _build_lookback_ai_retrospective_rows(
             )
         return tuple(rows)
 
-    return client.structured(
-        system=(
-            "You are synthesizing a TPM retrospective section for Vertex. "
-            "Use only the supplied deterministic evidence. "
-            "Return strict JSON with an 'insights' array of objects shaped as "
-            "{category, title, detail}. Each insight must synthesize patterns across multiple rows."
+    user_prompt = "\n".join(user_lines)
+    outcome = route_through_tiers(
+        _LOOKBACK_RETROSPECTIVE_FEATURE,
+        deterministic_fn=None,
+        local_fn=None,
+        frontier_fn=lambda: client.structured(
+            load_prompt(_LOOKBACK_RETROSPECTIVE_PROMPT_VERSION),
+            user_prompt,
+            parser=_parse_response,
+            max_tokens=load_ai_feature_policy(_LOOKBACK_RETROSPECTIVE_FEATURE).max_tokens,
+            prompt_version=_LOOKBACK_RETROSPECTIVE_PROMPT_VERSION,
         ),
-        user="\n".join(user_lines),
-        parser=_parse_response,
-        max_tokens=700,
-        prompt_version=_LOOKBACK_RETROSPECTIVE_PROMPT_VERSION,
+        policy=load_ai_feature_policy(_LOOKBACK_RETROSPECTIVE_FEATURE),
     )
+    return outcome.value or ()
 
 
 def _build_lookback_claim_accuracy_rows(

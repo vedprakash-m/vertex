@@ -818,6 +818,17 @@ def test_build_kb_update_client_passes_trace_context_to_builder(monkeypatch, tmp
     assert seen_trace_contexts == [trace_context]
 
 
+def test_build_kb_update_trace_context_sets_feature_metadata_for_telemetry(tmp_path: Path) -> None:
+    """specs/backlog.md WO-4: without metadata['feature'], AIClient's
+    telemetry `feature` field silently fell back to the caller string,
+    making this call site invisible to any feature-scoped telemetry query."""
+    trace_context = kb_module._build_kb_update_trace_context(
+        program_id="demo",
+        programs_root=tmp_path / "programs",
+    )
+    assert trace_context.metadata["feature"] == "default"
+
+
 def test_build_kb_update_client_returns_none_when_invocation_ai_disabled(monkeypatch) -> None:
     monkeypatch.setenv("AZURE_OPENAI_KB_DEPLOYMENT", "kb-primary")
     monkeypatch.setattr(

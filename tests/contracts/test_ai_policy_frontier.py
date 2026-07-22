@@ -51,6 +51,7 @@ KNOWN_FEATURES: frozenset[str] = frozenset(
         "governance_decision_brief_generator",
         "intent_router",
         "learning_distiller",
+        "lookback_retrospective",
         "m365_topic_router",
         "meeting_action_extractor",
         "onboard_assistant",

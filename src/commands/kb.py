@@ -390,6 +390,11 @@ def _build_kb_update_trace_context(*, program_id: str, programs_root: Path) -> A
             "program_id": program_id,
             "task_type": "kb_update_plan",
             "run_budget_usd": 0.25,
+            # specs/backlog.md WO-4: without this, AI telemetry's `feature`
+            # field silently fell back to the caller string above instead of
+            # a real ai_policy.yaml feature name, making this call site
+            # invisible to any feature-scoped telemetry query.
+            "feature": "default",
         },
     )
 
