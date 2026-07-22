@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from src.core.integration_types import RegistryFeedbackEvent
 
-from src.core.fs_utils import _is_network_filesystem_path
+from src.core._db import open_program_db
 from src.core.integration_types import (
     ChannelRegistration,
     DiscoveredRef,
@@ -1014,13 +1014,17 @@ class ChannelRegistryStore:
             raise SchemaVersionError(f"Unsupported channel registry schema version {version_error}; run `vertex integration schema-migrate --program <id>`.")
 
     def _connect(self, *, init: bool = False) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, detect_types=0, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA busy_timeout = 5000")
-        journal_mode = "DELETE" if _is_network_filesystem_path(self.db_path) else "WAL"
-        conn.execute(f"PRAGMA journal_mode = {journal_mode}")
-        return conn
+        """INV-AF-13 (WO-2 item 9): routed through open_program_db() (its
+        context-manager sugar bypassed -- callers use the raw connection's
+        own ``with ... as conn:`` commit/rollback protocol). Dropping the
+        prior ``isolation_level=None`` autocommit mode means statements in
+        one ``with`` block now commit or roll back together atomically
+        instead of independently; see test_channel_registry_store.py's
+        ``test_connect_is_atomic_across_multiple_statements_in_one_block``.
+        ``durability="strict"`` preserves the prior always-FULL synchronous
+        default (never explicitly set before).
+        """
+        return open_program_db(self.db_path, durability="strict").connection
 
     def _load_registrations(
         self,

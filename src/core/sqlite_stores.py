@@ -9,6 +9,7 @@ from pathlib import Path
 import sqlite3
 from typing import Any, Literal, cast
 
+from src.core._db import open_program_db
 from src.core.journal import PROGRAMS_ROOT
 from src.core.models import Confidence, RiskLevel
 from src.core.models_v2 import ReviewPolicy, Signal, SignalReviewDecision, SignalThreadLink, SignalUsageMarker, TrajectoryPoint
@@ -368,22 +369,18 @@ def read_sqlite_signal_review_log(
 
 @contextmanager
 def _connect_program_db(program_id: str, *, programs_root: Path) -> Iterator[sqlite3.Connection]:
+    """INV-AF-13 (WO-2 item 2): routed through ``open_program_db()`` instead of
+    a hand-rolled ``sqlite3.connect`` + hardcoded ``PRAGMA journal_mode=WAL``,
+    so this store picks WAL/DELETE by filesystem like every other store
+    (network drives were previously forced into WAL, which is unsafe there).
+    ``durability="strict"`` preserves this store's prior always-``synchronous
+    =FULL`` behavior (the old code never set ``PRAGMA synchronous``, leaving
+    SQLite's library default of FULL in effect).
+    """
     path = get_program_sqlite_store_path(program_id, programs_root=programs_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(path)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
-    connection.execute("PRAGMA journal_mode = WAL")
-    connection.execute("PRAGMA busy_timeout = 5000")
-    _ensure_schema(connection)
-    try:
+    with open_program_db(path, durability="strict") as connection:
+        _ensure_schema(connection)
         yield connection
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
-    finally:
-        connection.close()
 
 
 def _ensure_schema(connection: sqlite3.Connection) -> None:

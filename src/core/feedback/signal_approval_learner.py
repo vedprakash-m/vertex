@@ -9,6 +9,7 @@ import sqlite3
 from typing import Any
 from uuid import uuid4
 
+from src.core._db import open_program_db
 from src.core.analytics_store import get_program_analytics_store_path
 from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.feedback._advisory_yaml import load_advisory_yaml, write_advisory_yaml
@@ -63,8 +64,7 @@ def build_signal_approval_rule_proposals(
     if not database_path.exists():
         return ()
 
-    with sqlite3.connect(database_path) as connection:
-        connection.row_factory = sqlite3.Row
+    with open_program_db(database_path, read_only=True) as connection:
         try:
             rows = connection.execute(
                 """

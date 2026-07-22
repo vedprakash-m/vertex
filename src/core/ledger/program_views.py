@@ -8,6 +8,7 @@ from pathlib import Path
 import sqlite3
 from typing import Any, Iterable, Iterator
 
+from src.core._db import open_program_db
 from src.core.ledger.candidate_store import CandidateDecisionRecord, load_triage_decisions
 from src.core.ledger.event_log import EventEnvelope, EventWriteResult, read_events
 from src.core.ledger.event_index import load_entity_event_ids, load_event_entity_refs
@@ -436,9 +437,15 @@ def project_events_to_memory(
 
 
 def canonical_projection_dump(projection_path: Path) -> dict[str, list[dict[str, Any]]]:
-    connection = sqlite3.connect(projection_path)
-    try:
-        connection.row_factory = sqlite3.Row
+    """INV-AF-13 (WO-2 item 6): routed through ``open_program_db()`` in
+    read-only mode — this function only ever runs ``SELECT`` queries and
+    never commits. The prior raw ``sqlite3.connect()`` would silently create
+    an empty file if ``projection_path`` was missing (then fail on "no such
+    table" from the ``SELECT``s below); ``read_only=True`` fails fast with a
+    clearer "unable to open database file" instead — every caller already
+    guards on ``projection_path.exists()`` first.
+    """
+    with open_program_db(projection_path, read_only=True) as connection:
         return {
             "proj_program": _dump_table(connection, "SELECT * FROM proj_program ORDER BY program_id"),
             "proj_phase": _dump_table(connection, "SELECT * FROM proj_phase ORDER BY phase_id"),
@@ -465,8 +472,6 @@ def canonical_projection_dump(projection_path: Path) -> dict[str, list[dict[str,
             "gaps": _dump_table(connection, "SELECT * FROM gaps ORDER BY event_id"),
             "projection_meta": _dump_projection_meta(connection),
         }
-    finally:
-        connection.close()
 
 
 def collapse_shadow_links(rows: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> dict[str, str | None]:
@@ -500,10 +505,17 @@ def get_current_projection_path(program_id: str, *, programs_root: Path = PROGRA
 
 @contextmanager
 def connect_projection_db(path: Path) -> Iterator[sqlite3.Connection]:
-    connection = sqlite3.connect(path)
+    """INV-AF-13 (WO-2 item 6): connection creation routed through
+    ``open_program_db()`` (``durability="balanced"`` preserves the prior
+    always-``synchronous=NORMAL`` behavior on local paths), but the
+    ``SQLiteUnitOfWork`` context-manager sugar is deliberately bypassed —
+    this store needs its post-commit ``PRAGMA wal_checkpoint(TRUNCATE)`` to
+    run *between* commit and close, which ``SQLiteUnitOfWork.__exit__``
+    doesn't expose a hook for. Manual commit/rollback/checkpoint/close
+    preserves the exact prior ordering.
+    """
+    connection = open_program_db(path).connection
     try:
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA synchronous=NORMAL")
         yield connection
         connection.commit()
     except Exception:

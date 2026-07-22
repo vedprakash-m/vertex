@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from src.core._db import open_program_db
 from src.core.channel_registry_store import ChannelRegistryStore
 from src.core.discovery_intent import (
     CandidateIntentMatch,
@@ -797,11 +798,19 @@ class SourceCandidateStore:
         return 1
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, detect_types=0, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA busy_timeout = 5000")
-        return conn
+        """INV-AF-13 (WO-2 item 10): same migration and atomicity caveat as
+        channel_registry_store.py's ``_connect()`` (WO-2 item 9) -- routed
+        through open_program_db() with its context-manager sugar bypassed,
+        since callers use ``with self._connect() as conn:`` on the raw
+        connection. Dropping the prior ``isolation_level=None`` autocommit
+        mode means statements in one block now commit/roll back atomically
+        together rather than independently; see
+        test_source_candidate_store.py's
+        ``test_connect_is_atomic_across_multiple_statements_in_one_block``.
+        ``durability="strict"`` preserves the prior always-FULL synchronous
+        default (never explicitly set before).
+        """
+        return open_program_db(self.db_path, durability="strict").connection
 
 
 def _intent_from_row(row: sqlite3.Row) -> SourceIntent:

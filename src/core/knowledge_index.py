@@ -6,6 +6,7 @@ from pathlib import Path
 import sqlite3
 from typing import Iterator
 
+from src.core._db import open_program_db
 from src.core.knowledge_candidate_store import KnowledgeCandidate, KnowledgeCandidateDecisionRecord, load_pending_candidates, load_triage_decisions
 from src.core.knowledge_claim_store import KnowledgeClaimRevision, load_all_claim_revisions
 
@@ -21,16 +22,9 @@ def get_knowledge_index_path(*, knowledge_root: Path) -> Path:
 @contextmanager
 def connect_knowledge_index(*, knowledge_root: Path) -> Iterator[sqlite3.Connection]:
     path = get_knowledge_index_path(knowledge_root=knowledge_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(path)
-    try:
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA synchronous=FULL")
+    with open_program_db(path, durability="strict") as connection:
         _ensure_schema(connection)
         yield connection
-        connection.commit()
-    finally:
-        connection.close()
 
 
 def ensure_knowledge_index(*, knowledge_root: Path, programs_root: Path) -> bool:

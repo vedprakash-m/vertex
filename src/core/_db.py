@@ -33,6 +33,7 @@ def open_program_db(
     *,
     read_only: bool = False,
     durability: Literal["balanced", "strict"] = "balanced",
+    busy_timeout_ms: int = 5000,
 ) -> SQLiteUnitOfWork:
     if not read_only:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -40,7 +41,7 @@ def open_program_db(
     connection = sqlite3.connect(connection_target, uri=read_only)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
-    connection.execute("PRAGMA busy_timeout = 5000")
+    connection.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
     if not read_only:
         is_network_path = _is_network_filesystem_path(path)
         journal_mode = "DELETE" if is_network_path else "WAL"
@@ -55,6 +56,7 @@ def open_program_db_with_retry(
     *,
     read_only: bool = False,
     durability: Literal["balanced", "strict"] = "balanced",
+    busy_timeout_ms: int = 5000,
     max_attempts: int = 8,
     base_delay_s: float = 0.02,
 ) -> SQLiteUnitOfWork:
@@ -76,7 +78,12 @@ def open_program_db_with_retry(
     last_error: sqlite3.OperationalError | None = None
     for attempt in range(max_attempts):
         try:
-            return open_program_db(path, read_only=read_only, durability=durability)
+            return open_program_db(
+                path,
+                read_only=read_only,
+                durability=durability,
+                busy_timeout_ms=busy_timeout_ms,
+            )
         except sqlite3.OperationalError as error:
             message = str(error).lower()
             if "locked" not in message and "busy" not in message:

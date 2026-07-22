@@ -52,6 +52,7 @@ import os
 import sqlite3
 from pathlib import Path
 
+from src.core._db import open_program_db
 from src.core.jsonl_utils import compute_file_checksum
 from src.core.people_directory_schema import load_people_directory, load_teams
 from src.core.people_entity_schema import is_legacy_schema_0_entities_document, load_entities_document
@@ -234,6 +235,17 @@ def rebuild_cache(
     temp_db_path = db_path.with_suffix(db_path.suffix + ".tmp")
     if temp_db_path.exists():
         temp_db_path.unlink()
+    # INV-AF-13 (WO-2 item 7): deliberately NOT routed through open_program_db().
+    # This builds a disposable temp DB that is atomically os.replace()'d into
+    # place immediately below -- the entire correctness property of this cache
+    # rebuild is that swap being all-or-nothing. open_program_db() would force
+    # WAL journal mode on local paths, which writes to separate -wal/-shm
+    # sidecar files that must be checkpointed back into the main file before
+    # close(); os.replace() only renames the main file, so any timing gap in
+    # that checkpoint could silently rename a temp file that is missing
+    # already-committed rows. Plain DELETE-journal-mode SQLite (the default
+    # used here) has no such sidecar-checkpoint hazard. Allowlisted in
+    # tests/contracts/test_architecture_fitness.py's INV-AF-13 guard.
     connection = sqlite3.connect(str(temp_db_path))
     try:
         connection.execute("CREATE TABLE entity_alias_index (alias TEXT NOT NULL, entity_id TEXT NOT NULL, entity_type TEXT NOT NULL)")
@@ -269,11 +281,8 @@ def lookup_alias_in_cache(knowledge_root: Path, alias: str) -> tuple[tuple[str, 
     db_path = cache_db_path(knowledge_root)
     if not db_path.exists():
         return ()
-    connection = sqlite3.connect(str(db_path))
-    try:
+    with open_program_db(db_path, read_only=True) as connection:
         cursor = connection.execute(
             "SELECT entity_id, entity_type FROM entity_alias_index WHERE alias = ?", (alias.strip().casefold(),)
         )
         return tuple((row[0], row[1]) for row in cursor.fetchall())
-    finally:
-        connection.close()
