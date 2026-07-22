@@ -70,6 +70,35 @@ _STRATA_BY_CLAIM_TYPE = {
 }
 
 
+#: WO-7 (specs/backlog.md BL-L1): the last real read-only run (2026-07-21,
+#: git_sha f3cf5f3) reported 7 non-PASS checks split into two distinct
+#: classes that earlier revisions of this script's own documentation
+#: conflated: two checks fail by default and only pass if the verifier is
+#: re-run with write flags to regenerate their own evidence
+#: ("operational-failure"); the other five are structural/external and
+#: cannot be made to pass by re-running anything ("accepted-limitation").
+#: This mapping is the authoritative classification -- do not invent a
+#: third bucket; a FAIL check_id not present here reports "unclassified"
+#: rather than silently guessing.
+_NON_PASS_CLASSIFICATION: dict[str, str] = {
+    "O-0-DATA-SUFFICIENCY": "accepted-limitation",
+    "PS-5-CORPUS-SNAPSHOT": "accepted-limitation",
+    "AG-2-CORPUS-CERTIFICATION": "accepted-limitation",
+    "AG-3-CLEAN-CYCLE": "accepted-limitation",
+    "AG-3-CLEAN-CYCLE-STREAK": "accepted-limitation",
+    "AG-1-COUNTERFACTUAL-DIFF": "operational-failure",
+    "P2-CORPUS-FREEZE-MANIFEST": "operational-failure",
+}
+
+
+def classify_check_status(check_id: str, status: str) -> str | None:
+    """Return this check's WO-7 classification, or None for pass/info checks
+    (classification only applies to non-PASS gates)."""
+    if status != "fail":
+        return None
+    return _NON_PASS_CLASSIFICATION.get(check_id, "unclassified")
+
+
 @dataclass(frozen=True, slots=True)
 class CheckResult:
     check_id: str
@@ -80,6 +109,10 @@ class CheckResult:
     @property
     def failed(self) -> bool:
         return self.status == "fail"
+
+    @property
+    def classification(self) -> str | None:
+        return classify_check_status(self.check_id, self.status)
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,10 +170,36 @@ class ActivationReport:
     keystone_family: str
     family_matrix: tuple[FamilyMatrixRow, ...]
     checks: tuple[CheckResult, ...]
+    write_flags_used: bool = False
 
     @property
     def failed(self) -> bool:
         return any(check.failed for check in self.checks)
+
+    def counts_by_status(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for check in self.checks:
+            counts[check.status] = counts.get(check.status, 0) + 1
+        return counts
+
+    def status_snapshot(self) -> dict[str, Any]:
+        """WO-7 (specs/backlog.md BL-L1 steps 1, 3): a machine-readable
+        summary distinguishing *verifying* (this snapshot) from
+        *manufacturing the evidence that makes verification pass*
+        (``write_flags_used``) -- never publish a static PASS/FAIL count
+        without also stating whether write flags were used to get there."""
+        return {
+            "generated_at": self.generated_at,
+            "git_sha": self.git_sha,
+            "counts_by_status": self.counts_by_status(),
+            "total_checks": len(self.checks),
+            "write_flags_used": self.write_flags_used,
+            "non_pass_classifications": {
+                check.check_id: check.classification
+                for check in self.checks
+                if check.classification is not None
+            },
+        }
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -156,10 +215,13 @@ class ActivationReport:
                     "status": check.status,
                     "summary": check.summary,
                     "details": check.details,
+                    "classification": check.classification,
                 }
                 for check in self.checks
             ],
             "failed": self.failed,
+            "write_flags_used": self.write_flags_used,
+            "status_snapshot": self.status_snapshot(),
         }
 
 
@@ -470,6 +532,7 @@ def build_activation_report(
     source_document_key: str | None = None,
     approval_event_id: str | None = None,
     data_floor: int = _DATA_SUFFICIENCY_FLOOR,
+    write_flags_used: bool = False,
 ) -> ActivationReport:
     git_sha, dirty = _git_metadata(repo_root)
     matrix = build_family_matrix(program=program, programs_root=programs_root, repo_root=repo_root)
@@ -491,6 +554,7 @@ def build_activation_report(
         keystone_family=keystone_family,
         family_matrix=matrix,
         checks=tuple(checks),
+        write_flags_used=write_flags_used,
     )
 
 
@@ -2068,6 +2132,11 @@ def main() -> int:
         print(json.dumps([{"check_id": r.check_id, "status": r.status, "summary": r.summary, "details": r.details} for r in results], indent=2))
         return 1 if any(result.failed for result in results) else 0
 
+    # WO-7: any of these three mutate persisted state (or, for
+    # --write-counterfactual-pair, this same run's counterfactual check
+    # inputs) that AG-1/P2 read -- a bare run uses none of them.
+    write_flags_used = bool(args.write_corpus_freeze or args.write_counterfactual_pair or args.write_counterfactual_freeze)
+
     if args.write_corpus_freeze:
         write_corpus_freeze_manifest(
             program=args.program,
@@ -2111,6 +2180,7 @@ def main() -> int:
         source_document_key=args.source_document_key,
         approval_event_id=args.approval_event_id,
         data_floor=args.data_floor,
+        write_flags_used=write_flags_used,
     )
     payload = report.to_dict()
     print(json.dumps(payload, indent=2, sort_keys=True, default=str))

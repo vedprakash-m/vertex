@@ -4,18 +4,106 @@ import json
 from pathlib import Path
 
 from scripts.verify_activation import (
+    ActivationReport,
+    CheckResult,
     _build_evidence_appendix_checks,
     build_counterfactual_diff_artifact,
     build_corpus_certification_check,
     build_corpus_freeze_check,
     build_corpus_freeze_manifest,
     build_family_matrix,
+    classify_check_status,
     clean_cycle_streak,
     counterfactual_render_diff,
     is_clean_cycle,
     write_corpus_freeze_manifest,
     write_counterfactual_diff_artifact,
 )
+
+
+def test_classify_check_status_maps_the_seven_known_non_pass_checks() -> None:
+    """WO-7 (specs/backlog.md BL-L1): §0.1's authoritative mapping — do not
+    invent a third bucket, and an unknown FAIL must say so rather than
+    silently guessing a classification."""
+    accepted_limitation_checks = (
+        "O-0-DATA-SUFFICIENCY",
+        "PS-5-CORPUS-SNAPSHOT",
+        "AG-2-CORPUS-CERTIFICATION",
+        "AG-3-CLEAN-CYCLE",
+        "AG-3-CLEAN-CYCLE-STREAK",
+    )
+    for check_id in accepted_limitation_checks:
+        assert classify_check_status(check_id, "fail") == "accepted-limitation"
+
+    for check_id in ("AG-1-COUNTERFACTUAL-DIFF", "P2-CORPUS-FREEZE-MANIFEST"):
+        assert classify_check_status(check_id, "fail") == "operational-failure"
+
+    assert classify_check_status("SOME-NEW-CHECK", "fail") == "unclassified"
+    assert classify_check_status("O-0-DATA-SUFFICIENCY", "pass") is None
+    assert classify_check_status("PS-3-LAST-CYCLE-SNAPSHOT", "info") is None
+
+
+def test_activation_report_status_snapshot_reproduces_documented_counts() -> None:
+    """A synthetic report matching the 2026-07-21 real run's shape (49
+    PASS / 7 FAIL / 2 INFO of 58) must classify exactly as WO-7's
+    acceptance test states."""
+    non_pass_ids = (
+        "O-0-DATA-SUFFICIENCY",
+        "PS-5-CORPUS-SNAPSHOT",
+        "AG-2-CORPUS-CERTIFICATION",
+        "AG-3-CLEAN-CYCLE",
+        "AG-3-CLEAN-CYCLE-STREAK",
+        "AG-1-COUNTERFACTUAL-DIFF",
+        "P2-CORPUS-FREEZE-MANIFEST",
+    )
+    checks = tuple(CheckResult(check_id, "fail", "synthetic") for check_id in non_pass_ids)
+    checks += (
+        CheckResult("PS-3-LAST-CYCLE-SNAPSHOT", "info", "synthetic"),
+        CheckResult("P0-TEST-SUITE-COUNT", "info", "synthetic"),
+    )
+    checks += tuple(CheckResult(f"SYNTHETIC-PASS-{i}", "pass", "synthetic") for i in range(49))
+
+    report = ActivationReport(
+        generated_at="2026-07-21T00:00:00+00:00",
+        git_sha="f3cf5f3",
+        dirty_worktree=False,
+        program="xpf",
+        keystone_family="milestone.completed",
+        family_matrix=(),
+        checks=checks,
+    )
+
+    snapshot = report.status_snapshot()
+    assert snapshot["counts_by_status"] == {"pass": 49, "fail": 7, "info": 2}
+    assert snapshot["total_checks"] == 58
+    assert snapshot["write_flags_used"] is False
+    assert snapshot["non_pass_classifications"]["AG-1-COUNTERFACTUAL-DIFF"] == "operational-failure"
+    assert snapshot["non_pass_classifications"]["P2-CORPUS-FREEZE-MANIFEST"] == "operational-failure"
+    for check_id in (
+        "O-0-DATA-SUFFICIENCY", "PS-5-CORPUS-SNAPSHOT", "AG-2-CORPUS-CERTIFICATION",
+        "AG-3-CLEAN-CYCLE", "AG-3-CLEAN-CYCLE-STREAK",
+    ):
+        assert snapshot["non_pass_classifications"][check_id] == "accepted-limitation"
+    # INFO/PASS checks never appear in the classification map.
+    assert "PS-3-LAST-CYCLE-SNAPSHOT" not in snapshot["non_pass_classifications"]
+    assert "SYNTHETIC-PASS-0" not in snapshot["non_pass_classifications"]
+
+
+def test_activation_report_to_dict_includes_write_flags_used_and_snapshot() -> None:
+    report = ActivationReport(
+        generated_at="2026-07-21T00:00:00+00:00",
+        git_sha="f3cf5f3",
+        dirty_worktree=False,
+        program="xpf",
+        keystone_family="milestone.completed",
+        family_matrix=(),
+        checks=(CheckResult("SOME-CHECK", "pass", "ok"),),
+        write_flags_used=True,
+    )
+    payload = report.to_dict()
+    assert payload["write_flags_used"] is True
+    assert payload["status_snapshot"]["write_flags_used"] is True
+    assert payload["checks"][0]["classification"] is None
 
 
 def test_is_clean_cycle_rejects_empty_complete_cycle() -> None:
