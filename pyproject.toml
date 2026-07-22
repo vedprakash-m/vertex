@@ -22,7 +22,16 @@ dependencies = [
   "PyYAML>=6.0.2",
   "requests>=2.32.3",
   "rich>=13.7.1",
-  "typer>=0.12.3",
+  "python-dotenv>=1.0.0",
+  # Upper bounds: typer 0.26.x / click 8.4.x changed CLI group introspection and
+  # broke scripts/generate_intent_routes._click_root() ("Vertex CLI root is not
+  # a Click group") plus root NL routing / typer.Exit handling. Cap below the
+  # breaking releases until the introspection is made forward-compatible (same
+  # pins as requirements.txt -- WO-8 found this cap was missing here, so a
+  # plain `pip install -e .` without requirements.txt could pull a broken
+  # typer/click pair).
+  "typer>=0.12.3,<0.26",
+  "click>=8.1.7,<8.4",
 ]
 
 [project.scripts]
@@ -33,6 +42,50 @@ vertex = "cli:app"
 # Dev-only supply-chain assurance (WS-7). `pip install -e ".[dev]"` to enable.
 dev = [
   "pip-audit>=2.7.0",
+]
+# WO-8 (specs/backlog.md BL-C5): named extras for optional integration
+# surfaces, split out of the single flat requirements.txt so a base install
+# doesn't need to compile pydantic-core (an openai transitive dependency) or
+# pull in integrations most deployments don't use. Every package here is
+# already imported lazily/defensively at its call site (try/except ImportError
+# with a graceful-degradation path or a domain QueryError) -- see
+# src/adapters/microsoft/kusto_runtime.py's load_kusto_sdk_types() and
+# src/core/entity_registry.py's rapidfuzz import for the existing pattern
+# this extras split formalizes, not introduces.
+ai = [
+  # Frontier LLM provider access (src/ai/request_router.py dynamically
+  # imports this) and its tokenizer (src/ai/context_tokenizers.py,
+  # src/core/context_budget.py). Pulls in pydantic v2 transitively --
+  # deliberately isolated here, not in base, since pydantic-core is a
+  # compiled (Rust) wheel.
+  "openai>=1.30.0",
+  "tiktoken>=0.7.0",
+]
+ai-local = [
+  # Tier-1 "local semantic" seam in src/ai/tiered_router.py (embeddings /
+  # fuzzy match / keyword graph, near-zero OpEx) -- today this tier is
+  # implemented entirely by rapidfuzz fuzzy matching (src/core/entity_registry.py);
+  # no local-inference engine (e.g. an on-device LLM runtime) is wired up yet,
+  # so this extra is intentionally small until one is.
+  "rapidfuzz>=3.9,<4",
+]
+m365 = [
+  # msgraph-sdk: NOT currently imported anywhere in src/ as of 2026-07-22 --
+  # grepped before adding this. The delegated Graph API scopes this SDK would
+  # serve are permanently blocked by MS IT (see governance/decisions and the
+  # local .eml/.ics/Teams-JSON import pivot); kept declared here rather than
+  # dropped outright since WO-8 is a packaging change, not a dependency-
+  # removal decision -- removing it is a separate, smaller follow-up.
+  "msgraph-sdk>=1.15.0",
+]
+kusto = [
+  # src/adapters/microsoft/kusto_runtime.py's load_kusto_sdk_types()
+  "azure-kusto-data>=4.3",
+]
+render = [
+  # src/core/charts/declarative.py, src/core/charts/deployment_velocity.py,
+  # src/core/kusto_rendering.py, src/core/theme_context.py
+  "matplotlib>=3.8",
 ]
 
 [tool.setuptools]
