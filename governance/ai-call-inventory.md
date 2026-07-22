@@ -1,0 +1,300 @@
+# AI provider-call inventory
+
+## Current W1.6a scope and dispositions (2026-10-24)
+
+This source-only reconciliation supersedes the historical counts and consumer
+claims below. It does not authorize a provider call or establish runtime
+authorization, qualification or production migration.
+
+The baseline contains **35 syntactic provider-bound expressions** under `src/`:
+**31 legacy feature invocations** (29 in `src/ai`, two in `src/commands`),
+**one test-only runner pilot**, **two fallback forwarding expressions** and
+**one SDK transport expression**. The 31 legacy invocations use **27 feature
+policy identities**; repeated invocations are not separate features. Of the 35
+expressions, 32 are `.structured`, two are `.chat` and one is the SDK
+`.chat.completions.create`. Infrastructure is excluded from the feature
+migration denominator. No legacy invocation has been retired by this work.
+
+Dispositions describe current source evidence, not permission:
+
+- `legacy`: feature invocation outside `StructuredFeatureRunner`, including
+  application, advisory and evaluation paths. Classification as evaluation is
+  not equivalent to having only test consumers.
+- `test-only-pilot`: runner-backed dependency blast-radius helper; known
+  consumers are its export and unit tests, not the actual proposal command.
+- `infrastructure`: fallback forwarding or SDK transport; not an additional
+  feature, and not proof that its upstream callers are authorized.
+
+`src/commands/kb.py`'s `_plan_kb_update_with_ai` returns `KbUpdatePlan | None`
+for an advisory preview. Its `default` identity and inline, unregistered
+`kb_update_plan.v1` prompt remain a migration blocker. The other command-layer
+site, `report_lookback.py`'s `_run_ai_route`, returns retrospective rows for a
+published report; it has its own `lookback_retrospective.v1` identity, bounded
+validation and release audit, but still uses legacy dispatch.
+
+The original dependency generator remains wired at
+`src/commands/ai_proposals.py`'s `_generate_dependency_blast_radius`. Its pilot
+cannot be switched into production as-is: it supplies
+`snapshot_id="no-snapshot-pinning-yet"` and `principal="system"`.
+W1.6f now compiles all dependency request fields as required context alongside
+the referenced evidence and sends only compiled content to the provider.
+Unequal evidence-reference/text sequences abstain before compilation and
+released-cache lookup rather than being truncated by `zip`.
+No caller with both approved snapshot and principal binding was established
+by this discovery. Snapshot/principal propagation remains a migration
+prerequisite; input-integrity tests do not supply that authority.
+No identity, trust, budget or policy
+defaults are invented here. Existing prompt/model/schema versions, cache keys,
+failure contracts, release semantics and output consumers require feature-wise
+migration evidence, not a blanket dispatch switch.
+
+**Consumer corrections:** `scripts/run_rev_judge.py` calls
+`src.ai.rev.judge.judge_extractions`; the historical claim of no script consumer
+is stale. It remains an evaluation feature, not a retired or test-only feature.
+For `program_synthesizer`, verified command references are the comparison pilot;
+the original implementation can persist released synthesis, but an ordinary
+production command invocation was not established. These findings do not turn
+evaluation output into production qualification.
+
+## Function-level syntactic baseline
+
+The table below is the only machine-checked invocation baseline. Paths are
+repository-relative identifiers. The ordinal is source order among recognized
+calls with the same lexical qualified function and callee, starting at one;
+line numbers are deliberately not identities. Lambdas retain their enclosing
+named scope. Nested functions and methods retain their lexical qualification.
+
+| Path | Qualified function | Callee | Ordinal | Feature | Disposition |
+|---|---|---|---|---|---|
+| src/ai/action_extractor.py | ActionExtractor.extract_actions._frontier_extract | self._client.structured | 1 | action_extractor | legacy |
+| src/ai/activation_judge.py | assess_activation | client.structured | 1 | activation_judge | legacy |
+| src/ai/anticipation_engine.py | _generate_with_ai | client.structured | 1 | anticipation_engine | legacy |
+| src/ai/anticipation_engine.py | _generate_with_ai | client.structured | 2 | anticipation_engine | legacy |
+| src/ai/backfill_extractor.py | BackfillExtractor.extract_newsletter | client.structured | 1 | backfill_extractor | legacy |
+| src/ai/blurb_generator.py | generate_workstream_blurb | client.structured | 1 | blurb_generator | legacy |
+| src/ai/claim_extractor.py | ClaimExtractor.extract_claims._frontier_tier | self._client.structured | 1 | claim_extractor | legacy |
+| src/ai/context_synthesizer.py | ContextSynthesizer.synthesize | self._client.structured | 1 | context_synthesizer | legacy |
+| src/ai/decision_brief_advisor.py | _advise_on_item | client.structured | 1 | decision_brief_advisor | legacy |
+| src/ai/decision_brief_advisor.py | _advise_on_item_via_context_gateway | client.structured | 1 | decision_brief_advisor | legacy |
+| src/ai/dependency_blast_radius_generator.py | generate_dependency_blast_radius_proposal | client.structured | 1 | dependency_blast_radius_generator | legacy |
+| src/ai/dependency_blast_radius_generator.py | generate_dependency_blast_radius_proposal_via_runner.call_provider | client.structured | 1 | dependency_blast_radius_generator | test-only-pilot |
+| src/ai/deployment_fallback.py | FallbackAIClient.chat | client.chat | 1 | shared-forwarding | infrastructure |
+| src/ai/deployment_fallback.py | FallbackAIClient.structured | client.structured | 1 | shared-forwarding | infrastructure |
+| src/ai/discovery/prose_event_extractor.py | _extract_via_llm | client.structured | 1 | prose_event_extractor | legacy |
+| src/ai/exec_summary_drafter.py | draft_exec_summary | client.structured | 1 | exec_summary_drafter | legacy |
+| src/ai/governance_decision_brief_generator.py | generate_governance_decision_brief | client.structured | 1 | governance_decision_brief_generator | legacy |
+| src/ai/intent_router.py | _run_ai_route | client.structured | 1 | intent_router | legacy |
+| src/ai/learning_distiller.py | LearningDistiller.distill | client.structured | 1 | learning_distiller | legacy |
+| src/ai/m365_topic_router.py | _run_ai_route | client.structured | 1 | m365_topic_router | legacy |
+| src/ai/meeting_action_extractor.py | extract_llm_meeting_actions | client.structured | 1 | meeting_action_extractor | legacy |
+| src/ai/onboard_assistant.py | OnboardAssistant.suggest_scorecards | client.structured | 1 | onboard_assistant | legacy |
+| src/ai/onboard_assistant.py | OnboardAssistant.analyze_style_sample | client.structured | 1 | onboard_assistant | legacy |
+| src/ai/program_synthesizer.py | generate_program_synthesis | client.structured | 1 | program_synthesizer | legacy |
+| src/ai/program_synthesizer.py | generate_program_synthesis_via_context_gateway | client.structured | 1 | program_synthesizer | legacy |
+| src/ai/request_router.py | AIRequestRouter.route | self._client.chat.completions.create | 1 | shared-transport | infrastructure |
+| src/ai/rev/extractor.py | LLMRevExtractor._call_llm_and_merge | self._client.structured | 1 | rev_extractor | legacy |
+| src/ai/rev/judge.py | judge_extractions | client.structured | 1 | rev_judge | legacy |
+| src/ai/risk_proposal_generator.py | generate_risk_proposal | client.structured | 1 | risk_proposal_generator | legacy |
+| src/ai/setup_assistant.py | SetupAssistant._ai_suggest_workstreams | client.structured | 1 | setup_assistant | legacy |
+| src/ai/summary_generator.py | SummaryGenerator.generate | client.structured | 1 | summary_generator | legacy |
+| src/ai/synthesizer.py | WorkstreamSynthesizer.generate | client.structured | 1 | synthesizer | legacy |
+| src/ai/top_three_candidate_generator.py | generate_top_three_candidates | client.structured | 1 | top_three_candidate_generator | legacy |
+| src/commands/kb.py | _plan_kb_update_with_ai | client.chat | 1 | default | legacy |
+| src/commands/report_lookback.py | _run_ai_route | client.structured | 1 | lookback_retrospective | legacy |
+
+## Static limitations and unreachable anchors
+
+The ratchet parses Python source without importing feature modules or calling
+providers. It recognizes attribute calls named `structured` or `chat`, plus
+the SDK attribute-chain suffix `.chat.completions.create`. Comments and
+docstrings do not count. Receiver types are not resolved: an unrelated
+object's `.chat()` would be conservatively inventoried. Aliased callables,
+`getattr`, generated code, runtime factories and other dynamic dispatch are
+not exhaustively detected. Lexical scope includes code that may never execute;
+the provider table is not a reachability or full call-graph proof. It covers
+`src/`, not tests, scripts or installed third-party implementations.
+
+The following are **test-support/unreachable router anchors**, outside the
+35-expression provider denominator and not runtime adoption evidence:
+
+- `src/ai/rev/rev_extractor.py`: module-level `if False` call to
+  `route_through_tiers("rev_extractor", ...)`.
+- `src/ai/rev/rev_judge.py`: module-level `if False` call to
+  `route_through_tiers("rev_judge", ...)`.
+
+Router-adoption evidence instead comes from `LLMRevExtractor.extract` in
+`src/ai/rev/extractor.py` and `judge_extractions` in `src/ai/rev/judge.py`.
+The adoption ratchet excludes literal boolean dead `if` branches, but does
+not solve arbitrary conditions, aliases, unreachable functions or runtime
+paths. A surviving router-call expression is syntactic evidence only.
+Neither ratchet claims zero unauthorized runtime calls, dynamic-dispatch
+completeness, real snapshot/principal binding or completed runner migration.
+
+## Historical BL-C2 analysis (superseded where corrected above)
+
+*(specs/backlog.md WO-4, part of BL-C2's AI-boundary coverage audit.)*
+
+Every provider-bound call site under `src/`, reconciled against the 26
+`ai_features` in `vertex/policies/ai_policy.yaml` and the 30 prompt versions
+registered in `src/ai/prompts/registry.yaml`. Produced by tracing every
+`.structured(`/`.chat(` call (the only two methods `src/ai/client.py`
+exposes — there is no `.complete()` anywhere in `src/`) and every
+`route_through_tiers(` call site, then reading enough of each surrounding
+module/caller to determine gateway/audit wiring and real-world consumption.
+
+Analysis only — no call site was modified to produce this document.
+
+**Update 2026-07-22 (BL-C2 Phase A):** two of the three feature-name
+mismatches this inventory found were fixed (`report_lookback.py` given its
+own registered feature and prompt, now 27 total; `kb.py`'s telemetry no
+longer falls back to a caller-string) — see each row's `[FIXED]` note and
+the reverse-check section below. A new CI ratchet,
+`tests/contracts/test_ai_call_site_ratchet.py`, now fails the build if a
+new file starts making direct provider calls without being added to this
+document and to the ratchet's own known-file list in the same change —
+this is BL-C2 step 5's "CI ratchet" requirement. `setup.py:205`'s
+duplication is fixed and every `production`-classified site now has full
+`AISchemaGateway`/`ai_release_audit` wiring — see `specs/backlog.md`'s
+BL-C2 row for the small items that remain (step 3's advisory/evaluation
+reduced-bar recording).
+
+**Classification legend:** `production` (output can reach a published
+artifact or written fact), `advisory` (staged proposal requiring explicit
+human accept/reject), `evaluation` (comparison/QA harness, not a production
+consumer), `retired` (dead code — none found with enough confidence to
+apply this label; see rev_judge's note).
+
+## Inventory
+
+| Feature | Call site (file:line) | Registry-managed prompt? | Through AISchemaGateway? | Records ai_release_audit decision? | Classification | Notes |
+|---|---|---|---|---|---|---|
+| action_extractor | `src/ai/action_extractor.py:104` (`.structured`) / `:124` (`route_through_tiers`) | Yes — `action_extractor.v1` | No | No | advisory | Called from `src/commands/meeting_close.py:312`; output feeds a queued/approved/dismissed/pending human-review flow before any ADO write. |
+| anticipation_engine | `src/ai/anticipation_engine.py` (`_generate_with_ai`, `program_id is None` branch) | Yes — `anticipation_question.v1` | **Yes** | No (by design) | production | Used by `src/commands/review_full.py` (can legitimately run without a resolved program). **[FIXED 2026-07-22]** This branch previously skipped **all** of AISchemaGateway's bounds/semantic checks, not just the audit trail — `validate_bounded_payload` was never called on either the outbound request or the inbound response, and `_validate_semantics` (the question-mark/non-empty check) was never invoked, so a response that lost its question mark would have been silently accepted. Now applies the identical request-bounds/response-bounds/semantic-validation rigor as the `program_id` branch below; only the durable QG-29 audit trail is correctly still absent (there is genuinely no program to attribute it to). 2 new regression tests prove the previously-dormant checks now fire. |
+| anticipation_engine | `src/ai/anticipation_engine.py` (`_generate_with_ai`, `program_id` branch) | Yes | Yes | Yes | production | Used by `src/commands/prep.py`. Full QG-29 lifecycle + terminal, unchanged — this branch was already correct; only its `program_id is None` sibling above needed fixing. |
+| backfill_extractor | `src/ai/backfill_extractor.py:111` / `:108` | Yes — `backfill_extractor.v1` | No | No | advisory | Used by `src/commands/backfill.py`; gated behind interactive `typer.confirm`, writes a candidate export + summary, not a released fact. |
+| blurb_generator | `src/ai/blurb_generator.py:179` / `:176` | Yes — `workstream_blurb.v1` | Yes | Yes | production | Used directly in `assemble_stage.py`/`report.py`/`report_ai.py` (auto-included once QG-29 `RELEASED`). Also reused as a proposal candidate in `src/commands/propose.py` — same call site serves both a direct-publish and a proposal path; dual-use ambiguity, not asserted confidently as one or the other. |
+| claim_extractor | `src/ai/claim_extractor.py:219` / `:267` | Yes — `claim_extractor.v1` | Yes | Yes | production | Used by `src/commands/confirm_stages/claim_resolution.py`, part of the standard `vertex confirm` pipeline producing published newsletter claims. |
+| context_synthesizer | `src/ai/context_synthesizer.py:150` / `:147` | Yes — `context_synthesizer.v1` | No | No | advisory | Module docstring: output is always a `ContextUpdateProposal`, "never auto-applied"; operator applies via `vertex context apply`. The only gateway/audit-eligible-looking feature that deliberately opts out of both — worth a human check on whether that's intentional. |
+| decision_brief_advisor | `src/ai/decision_brief_advisor.py:205` / `:202` | Yes — `decision_brief_advisor.v1` | Yes | Yes | production | `advise_on_decision_brief`, called from `src/commands/decision_brief.py:180` — the real command path. |
+| decision_brief_advisor | `src/ai/decision_brief_advisor.py:314` / `:311` | Yes — same version | Yes (via `_parse_advice_with_gateway`) | **No** | evaluation | `advise_on_decision_brief_via_context_gateway`. Docstring: "Not wired into any production command — only the blind A/B comparison harness (`src/commands/decision_brief_pilot.py`) calls this, pending real evidence before any production swap." |
+| dependency_blast_radius_generator | `src/ai/dependency_blast_radius_generator.py:95` / `:92` | Yes — `dependency_blast_radius_generator.v1` | Yes | Yes | advisory | Only CLI caller is `src/commands/ai_proposals.py`'s `generate`→`stage_proposal`→accept/reject flow. |
+| exec_summary_drafter | `src/ai/exec_summary_drafter.py:162` / `:159` | Yes — `exec_summary_drafter.v1` | Yes | Yes | production | Used directly in the report pipeline, auto-included once released. |
+| governance_decision_brief_generator | `src/ai/governance_decision_brief_generator.py:100` / `:97` | Yes — `governance_decision_brief_generator.v1` | Yes | Yes | advisory | Same `ai_proposals.py` staged-proposal flow as dependency/risk/top-three/meeting_action. |
+| intent_router | `src/ai/intent_router.py` (`_run_ai_route`) | Yes — `intent_router.v1` | **Yes** | **Yes** | production | Used by `src/commands/ask.py`; output (a `RoutedInvocation`) directly determines which CLI command executes. **[FIXED 2026-07-22]** Raw response now bounds-checked via `validate_bounded_payload` before `_parse_routed_invocation`'s existing route-catalog/args check (which serves as the semantic validator — no separate class, since that validation already exists and already raises the exact `IntentRouterError` callers depend on); every run gets a full `planned→...→semantically_validated` lifecycle plus a durable `released`/`rejected`/`discarded` terminal via `ai_release_audit`. `route()` gained a `programs_root` parameter for this. Tests: `tests/unit/test_ai_intent_router.py` (2 new: released-trail + rejected-trail assertions). |
+| learning_distiller | `src/ai/learning_distiller.py:156` / `:153` | Yes — `learning_distiller.v1` | No | No | advisory | Used by `src/commands/confirm_stages/learning_distiller.py`; output is a `LearningDistillation` of editorial-rule proposals, written to a proposals artifact but not auto-applied to `EditorialRules`/ban-list. |
+| m365_topic_router | `src/ai/m365_topic_router.py` (`_run_ai_route`) | Yes — `m365_topic_router.v1` | **Yes** | **Yes** | production | Used by `src/commands/gather.py`'s M365 discovery stage; feeds `promotion_candidates`/`promotion_blocked` artifact building. **[FIXED 2026-07-22]** Raw response now bounds-checked via `validate_bounded_payload` before `_parse_routing_decision`'s existing workstream-membership/confidence/topics/reasoning validation (which serves as the semantic validator — no separate class, matching the `intent_router` precedent). Full QG-29 lifecycle + `released`/`rejected`/`discarded` terminal recorded on every AI attempt; `route_artifact`'s existing graceful-degradation contract (never raises, falls back to the deterministic router on any AI failure) is unchanged. `M365TopicRouter` gained `program_id`/`programs_root` fields, set by `from_program`. Tests: `tests/unit/test_ai_m365_topic_router.py` (2 new: released-trail + rejected-trail assertions; 9 existing AI-path tests given `programs_root=tmp_path` isolation — a repo-pollution bug of the same class WO-3/BL-C2's `intent_router` fix found, caught before landing this time). |
+| meeting_action_extractor | `src/ai/meeting_action_extractor.py:128` / `:125` | Yes — `meeting_action_extractor.v1` | Yes | Yes | advisory | Sole CLI wiring is `ai_proposals.py`'s `_generate_meeting_action` → `stage_proposal` → accept/reject. |
+| onboard_assistant | `src/ai/onboard_assistant.py:181` / `:178` (structure) | Yes — `onboard_structure_assistant.v1` | No | No | advisory | Interactive `vertex setup`/onboarding suggestions; operator chooses whether to accept. |
+| onboard_assistant | `src/ai/onboard_assistant.py:218` / `:215` (style) | Yes — `onboard_style_assistant.v1` | No | No | advisory | Same reasoning as above. |
+| summary_generator | `src/ai/summary_generator.py:204` / `:201` | Yes — `summary_generator.v1` | Yes | Yes | production | Used by `src/commands/summarize.py`, feeds rolling workstream summaries directly into report content once released. |
+| synthesizer | `src/ai/synthesizer.py:149` / `:146` | Yes — `synthesizer.v1` | Yes | Yes | production | Used by `src/commands/synthesize.py`. |
+| risk_proposal_generator | `src/ai/risk_proposal_generator.py:178` / `:175` | Yes — `risk_proposal_generator.v1` | Yes | Yes | advisory | `ai_policy.yaml`'s own comment: "`apply_risk_proposal` only ever fires on human approval." Staged via `ai_proposals.py`. |
+| top_three_candidate_generator | `src/ai/top_three_candidate_generator.py:118` / `:115` | Yes — `top_three_candidate_generator.v1` | Yes | Yes | advisory | Same `ai_proposals.py` staged-proposal flow. |
+| setup_assistant | `src/ai/setup_assistant.py:219` / `:216` | Yes — `setup_ws_suggest.v1` | No | No | advisory | Workstream suggestions during setup; operator accepts/edits. **[FIXED 2026-07-22]** `src/commands/setup.py`'s own near-duplicate inline reimplementation (hardcoded prompt text, no `route_through_tiers`) retired — the command layer now builds its client (unchanged — still resolves under `"onboard_assistant"` for deployment, and still deliberately does not call `SetupAssistant.from_environment()`, to avoid constructing an unused `OnboardAssistant` via that path) and delegates to `SetupAssistant(client=...).suggest_workstreams_from_description(...)`, the one real implementation. `_parse_ws_suggestions`'s PII-scrub test moved to a new `tests/unit/test_ai_setup_assistant.py` (4 tests) rather than silently dropped. `test_ai_call_site_ratchet.py`'s known-file list updated to remove the now-stale `src/commands/setup.py` entry. |
+| program_synthesizer | `src/ai/program_synthesizer.py:141` / `:138` | Yes — `program_synthesis.v1` | Yes | Yes | production | `generate_program_synthesis`; on `RELEASED` calls `persist_program_synthesis(...)` directly (no separate accept/reject step) — feeds the cockpit. |
+| program_synthesizer | `src/ai/program_synthesizer.py:268` / `:265` | Yes | Yes | Yes | evaluation | `generate_program_synthesis_via_context_gateway`. Docstring: "NOT a production swap… exists so a blind comparison harness can gather real evidence." Only caller is `src/commands/program_synthesizer_pilot.py`. |
+| prose_event_extractor | `src/ai/discovery/prose_event_extractor.py:209` / `:206` | Yes — `prose_event_extractor.v1`–`v4` (wave-selected) | No | No | advisory | Feeds `CandidateEvent`s into `src/core/ledger/candidate_store.py` via `src/commands/discover.py`; candidates require triage/confirmation, not auto-published. |
+| rev_extractor | `src/ai/rev/extractor.py` (`_call_llm_and_merge`) | Yes — `rev_extractor.v1` | **Yes** | **Yes** | advisory | Real logic in `LLMRevExtractor`, used by `src/commands/rev.py --extractor llm`; `rev_run`'s own docstring: "stage candidates for triage" — not auto-published, so `advisory` (matching `risk_proposal_generator`'s precedent: full wiring does not require a `production` label, only a genuine human-approval gate before consumption) is the correct classification, not a downgrade. **[FIXED 2026-07-27, specs/backlog.md BL-C2 caveat]** This row's "No"/"No" wiring columns were the real gap, not the classification — flagged when investigating BL-C6's OM-1 dependency (this is the exact REV-extraction path BL-C2's original 2026-07-21 reopening was about). Raw response now bounds-checked via `validate_bounded_payload` before `_parse_llm_rev_payload` runs, mirroring `intent_router`'s `_run_ai_route` shape exactly. No separate `SemanticValidator` class: `_parse_llm_rev_payload`'s own per-claim grounding check (an excerpt must be a verified real substring of the canonical source text, or it is silently dropped) already is the semantic validator, and is a stronger anti-hallucination check than most `SemanticValidator` implementations elsewhere. Full QG-29 lifecycle + `released`/`rejected`/`discarded` terminal recorded via `ai_release_audit` on every LLM-tier attempt when a `program_id` is known (always true from the real `vertex rev run` pipeline); correctly absent only for the standalone evaluation caller `scripts/run_rev_judge.py`'s bare `from_env()` construction, which has no program to attribute it to — the same honest limitation already accepted for `anticipation_engine`'s no-program_id branch. Existing graceful-degradation contract preserved exactly (any rejection falls back to the deterministic baseline, never raises). Tests: `tests/unit/test_llm_rev_extractor.py`'s new `TestLLMRevExtractorAuditTrail` class (released-trail, rejected-trail, discarded-trail, no-program_id-skips-audit cases). |
+| rev_judge | `src/ai/rev/judge.py:273` (`.structured`) / `:269` (`route_through_tiers`) | Yes — `rev_judge.v1` (WO-3, 2026-07-22 — was an inline constant when this inventory's underlying research ran) | No | No | evaluation | `judge_extractions()` compares two extractors' claims against ground truth (LLM-as-judge). **No production CLI/script caller found** anywhere in `src/commands/` or `scripts/`; only invoked from `tests/unit/test_rev_cache_store.py`. Close to "retired" but not confident enough to apply that label — it's clearly *designed* as an evaluation harness and is asserted-live by a deliberate AST anchor (see below). A human should confirm whether it's meant to be wired up somewhere or is dead. |
+| activation_judge | `src/ai/activation_judge.py:305` / `:301` | Yes — `activation_judge.v1` | No | No | evaluation | Used by `scripts/run_activation_judge.py`, feeding `scripts/verify_activation.py`'s judge layer (WO-7 context) — a build/QA judge, not a program-published artifact. |
+| default | `src/commands/kb.py:358` (`.chat`, no `route_through_tiers`) — feature resolved at `kb.py:315` | **No** — hardcoded system string, `prompt_version="kb_update_plan.v1"` (unregistered) | No | No | advisory | `vertex kb update`'s AI-assisted correction planner. Preview the operator must confirm with `--apply`. **[FIXED 2026-07-22]** Telemetry's `feature` metadata previously fell back to the caller string; `_build_kb_update_trace_context` now sets `metadata["feature"] = "default"` explicitly (`tests/unit/test_commands_kb.py`). Prompt/max_tokens are still an inline literal, not registry-managed — that part of the gap remains open. |
+| lookback_retrospective | `src/commands/report_lookback.py` (`_run_ai_route`) | **Yes** — `lookback_retrospective.v1` | **Yes** | **Yes** | production | `_build_lookback_ai_retrospective_rows`, called live from `assemble_stage.py:1535` and appended directly into `retrospective_intelligence.rows`, flowing straight into the rendered lookback report with no further gate. **[FIXED 2026-07-22]** Given its own registered feature and prompt, routed through `route_through_tiers`. **Now also wired through AISchemaGateway/ai_release_audit** (second pass, same day): raw response bounds-checked via `validate_bounded_payload`, then the existing `_parse_response` closure (title/detail non-empty, length caps, text-safety pipeline) reused as the semantic validator — no separate class. Preserves the feature's existing lenient contract exactly (any rejection degrades to zero insights, never blocks lookback report generation) with one correctness improvement: a non-dict response previously risked an uncaught `AttributeError` not in `assemble_stage.py`'s caught-exception list; now it degrades to zero insights like every other rejection. Deployment *connectivity* resolution (`assemble_stage.py:1521`) remains intentionally shared with `exec_summary_drafter` — documented as deliberate in `ai_policy.yaml`'s comment. Tests: `tests/unit/test_report_lookback_ai.py` (2 new: released trail, discarded-on-non-dict trail) + `tests/unit/test_commands_report.py`'s PII-scrub test given `tmp_path` isolation (same class of pollution bug as `intent_router`/`m365_topic_router`, caught before landing) and its `AIPipelineError`-raising stub updated for the new `program_id`/`programs_root` kwargs. |
+
+Two additional non-functional matches, noted for completeness but **not**
+counted as real call sites above:
+
+- `src/ai/rev/rev_extractor.py:76` and `src/ai/rev/rev_judge.py:39` each
+  contain `route_through_tiers("rev_extractor"/"rev_judge", None, None,
+  None)` inside an `if False:` block — an intentional dead-code AST anchor
+  so a contract test (`test_router_adoption_ratchet`) can find the string in
+  the module's AST. Not live code.
+- `src/ai/deployment_fallback.py:131` (`.chat`) and `:159` (`.structured`)
+  are the generic `FallbackAIClient`/`FallbackStructuredClient` passthrough
+  implementations — infrastructure every feature-specific call site above
+  routes through, not a feature call site in its own right.
+
+## Reverse check against the 26 features
+
+**Features with zero call sites found:** none. All 26 features in
+`ai_policy.yaml` (`action_extractor, anticipation_engine,
+backfill_extractor, blurb_generator, claim_extractor, context_synthesizer,
+decision_brief_advisor, dependency_blast_radius_generator,
+exec_summary_drafter, governance_decision_brief_generator, intent_router,
+learning_distiller, m365_topic_router, meeting_action_extractor,
+onboard_assistant, summary_generator, synthesizer, risk_proposal_generator,
+top_three_candidate_generator, setup_assistant, program_synthesizer,
+prose_event_extractor, rev_extractor, rev_judge, activation_judge,
+default`) have at least one confirmed call site above.
+
+**Call sites whose feature name does not appear in the 26 (mismatch
+direction):**
+
+- ~~`src/commands/report_lookback.py:583`~~ **[FIXED 2026-07-22]** — given
+  its own registered feature (`lookback_retrospective`, now 27 features
+  total) and prompt; deployment *connectivity* resolution remains
+  intentionally shared with `exec_summary_drafter` (documented, not a
+  mismatch).
+- ~~`src/commands/kb.py:358`~~ **[FIXED 2026-07-22]** — `metadata["feature"]`
+  now explicitly set to `"default"`; telemetry no longer falls back to the
+  caller string. The prompt/max_tokens are still an inline literal
+  (unregistered) — that narrower gap remains open.
+- ~~`src/commands/setup.py:205`~~ **[FIXED 2026-07-22]** — the inline
+  near-duplicate reimplementation is retired; the command layer now
+  delegates to `SetupAssistant.suggest_workstreams_from_description`, the
+  one real, prompt-registry-backed implementation.
+
+No call site used a completely invented feature-name string outside the
+26 (now 27) — all mismatches found were of the "borrowed/wrong policy
+label for a distinct prompt" kind rather than a literal typo'd feature key.
+
+## Advisory/evaluation reduced-bar check (BL-C2 step 3, 2026-07-22)
+
+BL-C2's step 3 sets a bar per classification: `production` requires the
+full AISchemaGateway/`ai_release_audit` contract (now shipped everywhere
+it applies, see above); `advisory`/`evaluation` sites require at minimum
+**(a)** a registry-managed, versioned prompt and **(b)** a durable trace,
+with the reduced bar **explicitly recorded**, not assumed. Checked every
+`advisory`/`evaluation` row in the table above against both:
+
+- **(a) Registry-managed prompt.** All but one already pass: `default`
+  (`src/commands/kb.py`'s update planner) still uses an inline, unregistered
+  system string — tracked above as a real, still-open narrow gap, not
+  silently accepted.
+- **(b) Durable trace.** Every `advisory`/`evaluation` site routes through
+  either `route_through_tiers` (which records a routing decision) or a
+  direct `client.structured(...)` call captured by `llm_trace.py`'s
+  metadata-only tracing (the same mechanism `ai_release_audit.py`'s own
+  module docstring contrasts itself against) — real but ephemeral, exactly
+  the reduced bar this classification calls for, not the durable QG-29
+  ledger `production` sites now carry. No `advisory`/`evaluation` site is
+  silently untraced.
+
+**Sites with a genuinely narrower posture than "registry prompt + ephemeral
+trace," each already called out by name above rather than left implicit**:
+`context_synthesizer` (deliberately opts out of gateway/audit entirely,
+flagged in its own row as "worth a human check on whether that's
+intentional"); `rev_judge` (no confirmed production caller at all, flagged
+as "close to retired… a human should confirm"); the two unused
+`setup_discovery_assistant.v1`/`setup_explainer.v1` prompts (flagged in the
+side note below). These three are genuine open questions for a human, not
+gaps this pass can silently resolve — recording that explicitly **is** this
+step's deliverable.
+
+## Prompt-registry side note
+
+Two of the 30 registered prompt versions — `setup_discovery_assistant.v1`
+and `setup_explainer.v1` — have no `load_prompt(...)` caller anywhere in
+`src/` (only `setup_ws_suggest.v1` of the three `setup_*` entries is
+actually loaded, from `src/ai/setup_assistant.py:213`). Worth a human check
+on whether those two are pre-provisioned for planned-but-unbuilt call sites
+or are stale registrations.
+
+## What this inventory does *not* do
+
+Per WO-4's explicit scope, this is analysis only: no call site was changed,
+and nothing above is classified `retired` (the `rev_judge` finding is the
+closest candidate, but is left as `evaluation` pending human confirmation).
+Closing BL-C2's remaining scope — wiring every `advisory`/`production` call
+site through `AISchemaGateway` and `ai_release_audit` where it currently
+isn't, and resolving the three feature-name mismatches above — is separate,
+not-yet-scoped follow-up work.
