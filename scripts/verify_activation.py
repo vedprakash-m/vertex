@@ -2136,6 +2136,18 @@ def main() -> int:
     # --write-counterfactual-pair, this same run's counterfactual check
     # inputs) that AG-1/P2 read -- a bare run uses none of them.
     write_flags_used = bool(args.write_corpus_freeze or args.write_counterfactual_pair or args.write_counterfactual_freeze)
+    if write_flags_used:
+        # BL-L1 action (2): these three flags still work here for
+        # backward compatibility, but scripts/regenerate_activation_evidence.py
+        # is now the sanctioned, attested path -- it records who
+        # regenerated evidence, when, against which commit, and why, as a
+        # durable, separately-named operation instead of an unlogged side
+        # effect of a verifier invocation.
+        print(
+            "NOTE: regenerating evidence via verify_activation.py's --write-* flags directly. "
+            "Prefer scripts/regenerate_activation_evidence.py, which attests who/when/why this ran.",
+            file=sys.stderr,
+        )
 
     if args.write_corpus_freeze:
         write_corpus_freeze_manifest(
