@@ -2,6 +2,14 @@ jsonschema>=4.23.0
 portalocker>=3.1.1
 PyYAML>=6.0.2
 rapidfuzz>=3.9,<4
+# WO-8 (specs/backlog.md BL-C5): these three are in pyproject.toml's base
+# [project.dependencies] but were missing here, so CI's `validate` job
+# (which only runs `pip install -r requirements.txt`, unlike
+# `fresh-clone-smoke` which also runs `pip install -e .`) was silently
+# relying on something else providing them.
+beautifulsoup4>=4.12
+icalendar>=5.0
+python-docx>=1.1
 # Upper bounds: typer 0.26.x / click 8.4.x changed CLI group introspection and broke
 # `scripts/generate_intent_routes._click_root()` ("Vertex CLI root is not a Click
 # group") plus root NL routing / typer.Exit handling. Cap below the breaking releases
