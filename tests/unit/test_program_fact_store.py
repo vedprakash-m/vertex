@@ -4,6 +4,9 @@ from dataclasses import replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+import pytest
+
+from src.core import _db
 from src.core.action_tracker import append_action, load_actions
 from src.core.assumption_tracker import load_assumptions, save_assumptions
 from src.core.archive_store import write_skipped_issue
@@ -94,6 +97,61 @@ def _strip_risk_meta(items: tuple) -> tuple:
 
 def _strip_decision_meta(items: tuple) -> tuple:
     return tuple(replace(d, fact_id=None, last_validated_at=None) for d in items)
+
+
+def test_connect_uses_strict_local_shared_db_policy(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(_db, "_is_network_filesystem_path", lambda _path: False)
+    store = ProgramFactStore("acme", db_root=tmp_path)
+
+    with store._connect() as connection:
+        journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+        busy_timeout = connection.execute("PRAGMA busy_timeout").fetchone()[0]
+        synchronous = connection.execute("PRAGMA synchronous").fetchone()[0]
+
+    assert str(journal_mode).lower() == "wal"
+    assert busy_timeout == 5000
+    assert synchronous == 2  # SQLite FULL
+
+
+def test_connect_uses_network_safe_delete_journal(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(_db, "_is_network_filesystem_path", lambda _path: True)
+    store = ProgramFactStore("acme", db_root=tmp_path)
+
+    with store._connect() as connection:
+        journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+
+    assert str(journal_mode).lower() == "delete"
+
+
+def test_connect_rolls_back_failed_transaction_and_recovers(tmp_path) -> None:
+    store = ProgramFactStore("acme", db_root=tmp_path)
+
+    with pytest.raises(RuntimeError, match="simulate interruption"):
+        with store._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO program_fact_revisions (
+                    revision_id, fact_id, program_id, natural_key, fact_type, scope,
+                    entity_refs_json, payload_json, source_signal_ids_json, confidence,
+                    precedence, review_state, lifecycle_state, valid_from, valid_until,
+                    recorded_at, superseded_at, projection_history_json,
+                    proposed_against_revision_id, created_by
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "rev-interrupted", "fact-1", "acme", "nk-1", "milestone.entry", "program",
+                    "[]", "{}", "[]", "high",
+                    "confirmed", "approved", "active", None, None,
+                    "2026-07-22T00:00:00+00:00", None, "[]",
+                    None, "test",
+                ),
+            )
+            raise RuntimeError("simulate interruption")
+
+    with store._connect() as connection:
+        rows = connection.execute("SELECT revision_id FROM program_fact_revisions").fetchall()
+
+    assert rows == []
 
 
 def test_append_fact_creates_program_scoped_revision_and_snapshot(tmp_path) -> None:

@@ -835,18 +835,16 @@ _INV_AF_13_LINE_EXCEPTIONS = (
 )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="WO-2 must migrate the reported stores before INV-AF-13 can pass",
-)
 def test_inv_af_13_file_backed_sqlite_uses_shared_db_policy() -> None:
     """INV-AF-13: raw file-backed sqlite3.connect calls are forbidden.
 
-    This guard is landed before the migration work (WO-2), so it is expected
-    to report the current pending scope until each store is migrated. The
-    in-memory projection fixture and the people-registry-cache atomic-rebuild
-    temp file are allowed for the reasons stated in
-    ``_INV_AF_13_LINE_EXCEPTIONS``.
+    WO-2 (specs/backlog.md) migrated all 12 originally-reported stores onto
+    open_program_db() -- this now runs as a permanent regression guard, not
+    an expected-failure placeholder. The in-memory projection fixture and
+    the people-registry-cache atomic-rebuild temp file are allowed for the
+    reasons stated in ``_INV_AF_13_LINE_EXCEPTIONS``; checkpoint_store.py's
+    backup-API pair and unit_of_work.py's cross-database ATTACH primitive
+    are allowlisted whole-file in ``_INV_AF_13_ALLOWLIST``.
     """
     violations: list[str] = []
     for py_file in (REPO_ROOT / "src/core").rglob("*.py"):

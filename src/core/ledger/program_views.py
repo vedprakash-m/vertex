@@ -439,7 +439,7 @@ def project_events_to_memory(
 def canonical_projection_dump(projection_path: Path) -> dict[str, list[dict[str, Any]]]:
     """INV-AF-13 (WO-2 item 6): routed through ``open_program_db()`` in
     read-only mode — this function only ever runs ``SELECT`` queries and
-    never commits. The prior raw ``sqlite3.connect()`` would silently create
+    never commits. The prior raw sqlite3 connect call would silently create
     an empty file if ``projection_path`` was missing (then fail on "no such
     table" from the ``SELECT``s below); ``read_only=True`` fails fast with a
     clearer "unable to open database file" instead — every caller already

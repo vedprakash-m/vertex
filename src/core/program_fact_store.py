@@ -15,6 +15,7 @@ import time
 from typing import Any, Iterator, TypedDict
 from uuid import uuid4
 
+from src.core._db import open_program_db
 from src.core.archive_store import ARCHIVE_ROOT, load_skipped_issues_for_program
 from src.core.exceptions import ConfigError
 from src.core.assumption_tracker import load_assumptions
@@ -1703,20 +1704,29 @@ class ProgramFactStore:
         absorb for ``workspace_lease.py``. Bounded, jittered exponential
         backoff; re-raises any non-lock/busy ``OperationalError``
         immediately, and the last error after ``max_attempts`` is exhausted.
+
+        INV-AF-13 (WO-2 item 11): connection creation routed through
+        ``open_program_db()`` (``durability="strict"`` preserves this
+        store's prior always-FULL ``synchronous`` default, never explicitly
+        set before) instead of a hand-rolled raw sqlite3 connect call +
+        hardcoded ``PRAGMA journal_mode=WAL``. The retry loop itself is
+        deliberately kept bespoke rather than delegated to
+        ``open_program_db_with_retry()``: that helper only retries the
+        connect+pragma step, but this store's own retry must also cover
+        ``_initialize_schema``'s ``CREATE TABLE`` statements (the exact
+        concurrent-first-open race ADF-W5.9 above documents), so one
+        combined retry loop is preserved intact.
         """
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
         last_error: sqlite3.OperationalError | None = None
         for attempt in range(max_attempts):
-            connection = sqlite3.connect(self._db_path)
-            connection.row_factory = sqlite3.Row
+            connection: sqlite3.Connection | None = None
             try:
-                connection.execute("PRAGMA journal_mode=WAL")
-                connection.execute("PRAGMA foreign_keys=ON")
-                connection.execute("PRAGMA busy_timeout = 5000")
+                connection = open_program_db(self._db_path, durability="strict").connection
                 self._initialize_schema(connection)
                 return connection
             except sqlite3.OperationalError as error:
-                connection.close()
+                if connection is not None:
+                    connection.close()
                 message = str(error).lower()
                 if "locked" not in message and "busy" not in message:
                     raise

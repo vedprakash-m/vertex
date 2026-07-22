@@ -3,6 +3,9 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+import pytest
+
+from src.core import _db
 from src.core.hypothesis_models import (
     AssertionOperator,
     ChallengeKind,
@@ -17,7 +20,7 @@ from src.core.hypothesis_models import (
     TelemetryAssertion,
 )
 from src.core.metric_models import MetricAggregation, MetricObservation, MetricQualityState, MetricSourceBinding, ObservationWindow
-from src.core.reality_store import RealityStore, get_program_reality_db_path
+from src.core.reality_store import RealityStore, _connect_reality_db, get_program_reality_db_path
 from src.core.source_models import MetricBindingHealth, SourceKind, SourceRef
 
 
@@ -27,6 +30,45 @@ def test_get_program_reality_db_path_defaults_to_home_vertex_dir(tmp_path: Path)
     path = get_program_reality_db_path("acme", home_root=home_root)
 
     assert path == home_root / ".vertex" / "acme" / "vertex.sqlite3"
+
+
+def test_connect_reality_db_uses_strict_local_shared_db_policy(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(_db, "_is_network_filesystem_path", lambda _path: False)
+
+    with _connect_reality_db(tmp_path / "vertex.sqlite3") as connection:
+        journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+        busy_timeout = connection.execute("PRAGMA busy_timeout").fetchone()[0]
+        synchronous = connection.execute("PRAGMA synchronous").fetchone()[0]
+
+    assert str(journal_mode).lower() == "wal"
+    assert busy_timeout == 5000
+    assert synchronous == 2  # SQLite FULL
+
+
+def test_connect_reality_db_uses_network_safe_delete_journal(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(_db, "_is_network_filesystem_path", lambda _path: True)
+
+    with _connect_reality_db(tmp_path / "vertex.sqlite3") as connection:
+        journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+
+    assert str(journal_mode).lower() == "delete"
+
+
+def test_connect_reality_db_rolls_back_failed_transaction_and_recovers(tmp_path: Path) -> None:
+    db_path = tmp_path / "vertex.sqlite3"
+
+    with pytest.raises(RuntimeError, match="simulate interruption"):
+        with _connect_reality_db(db_path) as connection:
+            connection.execute(
+                "INSERT INTO schema_versions (migration_id, applied_at, applied_by) VALUES (?, ?, ?)",
+                ("interrupted", "2026-07-22T00:00:00+00:00", "test"),
+            )
+            raise RuntimeError("simulate interruption")
+
+    with _connect_reality_db(db_path) as connection:
+        rows = connection.execute("SELECT migration_id FROM schema_versions").fetchall()
+
+    assert rows == []
 
 
 def test_get_program_reality_db_path_with_no_config_resolves_to_vertex_db_convention(

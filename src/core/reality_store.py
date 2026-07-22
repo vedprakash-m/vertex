@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import sqlite3
 
+from src.core._db import open_program_db
 from src.core.digest_cache import compute_digest_sha256, serialize_digest_model
 from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.hypothesis_models import (
@@ -1549,21 +1550,14 @@ def resolve_binding_owner(
 
 @contextmanager
 def _connect_reality_db(db_path: Path) -> Iterator[sqlite3.Connection]:
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(db_path)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
-    connection.execute("PRAGMA journal_mode = WAL")
-    connection.execute("PRAGMA busy_timeout = 5000")
-    _ensure_schema(connection)
-    try:
+    """INV-AF-13 (WO-2 item 12): routed through open_program_db()
+    (durability="strict" preserves this store's prior always-FULL
+    synchronous default, never explicitly set before). Same reference
+    pattern as src/core/ledger/event_index.py.
+    """
+    with open_program_db(db_path, durability="strict") as connection:
+        _ensure_schema(connection)
         yield connection
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
-    finally:
-        connection.close()
 
 
 def _ensure_schema(connection: sqlite3.Connection) -> None:
