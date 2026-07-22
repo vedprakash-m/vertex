@@ -167,10 +167,48 @@ def test_run_comparison_records_blind_judgment_for_each_item(monkeypatch, tmp_pa
     assert len(records) == 2
     for record in records:
         assert record.choice == "b"
+        # "b" is not a "y"/"yes" answer to the critical-error question either.
+        assert record.critical_error is False
         # Exactly one of the two texts is the baseline, one is the candidate.
         texts = {record.option_a_text, record.option_b_text}
         assert any("baseline reasoning" in t for t in texts)
         assert any("candidate reasoning" in t for t in texts)
+
+
+def test_run_comparison_records_critical_error_when_reviewer_flags_it(monkeypatch, tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    _write_ai_enabled_program(programs_root)
+    brief = _brief(_item("risks"))
+    monkeypatch.setattr(
+        "src.commands.decision_brief_pilot.load_pending_decision_brief",
+        lambda **kwargs: (brief, "acme"),
+    )
+    monkeypatch.setattr(
+        "src.commands.decision_brief_pilot.resolve_ai_deployments_for_feature", lambda **kwargs: ("fake-deployment",)
+    )
+    monkeypatch.setattr("src.commands.decision_brief_pilot.FallbackAIClient", lambda **kwargs: object())
+    monkeypatch.setattr(
+        "src.commands.decision_brief_pilot.advise_on_decision_brief",
+        lambda *, client, brief, program_id, programs_root=None: _brief(
+            *[_with_advice(item, verdict="ACCEPT", reasoning="baseline reasoning") for item in brief.items]
+        ),
+    )
+    monkeypatch.setattr(
+        "src.commands.decision_brief_pilot.advise_on_decision_brief_via_context_gateway",
+        lambda *, client, brief, program_id, programs_root=None: _brief(
+            *[_with_advice(item, verdict="REVISE", reasoning="candidate reasoning") for item in brief.items]
+        ),
+    )
+
+    answers = iter(["a", "y"])
+    result = run_context_gateway_comparison(
+        edition_name="acme_weekly", seed=1234, programs_root=programs_root,
+        prompt_fn=lambda _msg: next(answers), echo_fn=lambda _msg: None,
+    )
+
+    assert result.compared_item_ids == ("risks",)
+    records = read_comparisons("acme", surface="decision_brief_advisor", programs_root=programs_root)
+    assert records[0].critical_error is True
 
 
 def test_run_comparison_skips_items_missing_advice_from_either_side(monkeypatch, tmp_path: Path) -> None:

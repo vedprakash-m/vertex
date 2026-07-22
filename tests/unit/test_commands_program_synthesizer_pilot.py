@@ -167,15 +167,50 @@ def test_run_comparison_records_blind_judgment(monkeypatch, tmp_path: Path) -> N
 
     assert result.compared is True
     assert result.program_id == "acme"
-    assert len(prompts) == 1
+    # One prompt for the win/loss/tie/neither choice, one for BL-D3's
+    # critical-error rubric question.
+    assert len(prompts) == 2
 
     records = read_comparisons("acme", surface="program_synthesizer", programs_root=programs_root)
     assert len(records) == 1
     record = records[0]
     assert record.choice == "b"
+    # _prompt returns "b" for both prompts; "b" is not a "y"/"yes" answer.
+    assert record.critical_error is False
     texts = {record.option_a_text, record.option_b_text}
     assert any("baseline through-line" in t for t in texts)
     assert any("candidate through-line" in t for t in texts)
+
+
+def test_run_comparison_records_critical_error_when_reviewer_flags_it(monkeypatch, tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    _write_ai_enabled_program(programs_root)
+    monkeypatch.setattr(
+        "src.commands.program_synthesizer_pilot.assemble_program_synthesis_request",
+        lambda program_id, **kwargs: _request(program_id),
+    )
+    monkeypatch.setattr(
+        "src.commands.program_synthesizer_pilot.resolve_ai_deployments_for_feature", lambda **kwargs: ("fake-deployment",)
+    )
+    monkeypatch.setattr("src.commands.program_synthesizer_pilot.FallbackAIClient", lambda **kwargs: object())
+    monkeypatch.setattr(
+        "src.commands.program_synthesizer_pilot.generate_program_synthesis",
+        lambda request, *, client, programs_root: _outcome(released=True, through_line="baseline through-line"),
+    )
+    monkeypatch.setattr(
+        "src.commands.program_synthesizer_pilot.generate_program_synthesis_via_context_gateway",
+        lambda request, *, client, programs_root: _outcome(released=True, through_line="candidate through-line"),
+    )
+
+    answers = iter(["a", "yes"])
+    result = run_context_gateway_comparison(
+        program_id="acme", seed=1234, programs_root=programs_root,
+        prompt_fn=lambda _msg: next(answers), echo_fn=lambda _msg: None,
+    )
+
+    assert result.compared is True
+    records = read_comparisons("acme", surface="program_synthesizer", programs_root=programs_root)
+    assert records[0].critical_error is True
 
 
 def test_run_comparison_skips_when_either_side_not_released(monkeypatch, tmp_path: Path) -> None:
