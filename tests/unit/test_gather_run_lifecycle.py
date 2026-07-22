@@ -25,6 +25,8 @@ from src.core.gather_run_manifest import (
     read_manifest,
     resolve_latest_committed_manifest,
     resolve_latest_full_committed_manifest,
+    ORACLE_RESULT_OPERATOR_EXPORT_MATCH,
+    ORACLE_RESULT_SAME_ENDPOINT_RERUN,
 )
 from src.core.ledger.ulid import new_ulid
 from src.core.models import RiskLevel, WorkItem
@@ -270,6 +272,54 @@ def test_gather_program_persists_captured_query_membership_sidecars(
     run_dir = get_committed_run_dir("acme", committed.run_id, programs_root=programs_root)
     assert (run_dir / "ado_items.jsonl").exists()
     assert (run_dir / "query_results.json").exists()
+
+
+def test_gather_program_records_operator_source_export_reconciliation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """D-19/AG-2.12: ``source_export_counts`` reconciles each scope's
+    committed ``QueryResultEntry.oracle_result`` beyond the default weak
+    same-endpoint-rerun proof -- matching scopes report a match, disagreeing
+    scopes report a mismatch, and scopes with no operator export recorded
+    keep the explicit same-endpoint-rerun default."""
+    programs_root = tmp_path / "programs"
+    captured_at = datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc)
+    artifacts = GatherArtifacts(
+        program_id="acme", scanned_items=0, discovered_signals=0, new_signals=0,
+        pending_review=0, trajectory_updates=0, auto_reviews_written=0, ado_calls=2,
+        ado_query_results=(
+            DiscoveryQueryResult(
+                query_id="query-1", scope_id="scope-match", wiql_hash="a" * 64,
+                captured_at=captured_at, raw_count=10, membership_ids=(),
+                membership_hash="b" * 64, cap_reached=False, completeness_state="FULL",
+            ),
+            DiscoveryQueryResult(
+                query_id="query-2", scope_id="scope-mismatch", wiql_hash="c" * 64,
+                captured_at=captured_at, raw_count=10, membership_ids=(),
+                membership_hash="d" * 64, cap_reached=False, completeness_state="FULL",
+            ),
+            DiscoveryQueryResult(
+                query_id="query-3", scope_id="scope-unrecorded", wiql_hash="e" * 64,
+                captured_at=captured_at, raw_count=10, membership_ids=(),
+                membership_hash="f" * 64, cap_reached=False, completeness_state="FULL",
+            ),
+        ),
+    )
+    monkeypatch.setattr(gather, "_gather_program_impl", lambda *_args, **_kwargs: artifacts)
+
+    gather.gather_program(
+        "acme",
+        as_of=captured_at,
+        programs_root=programs_root,
+        source_export_counts={"scope-match": 10, "scope-mismatch": 7},
+    )
+
+    committed = resolve_latest_committed_manifest("acme", programs_root=programs_root)
+    assert committed is not None
+    results_by_scope = {result.scope_id: result for result in committed.query_results}
+    assert results_by_scope["scope-match"].oracle_result == ORACLE_RESULT_OPERATOR_EXPORT_MATCH
+    assert results_by_scope["scope-mismatch"].oracle_result == "operator_source_export:mismatch:reported=7:observed=10"
+    assert results_by_scope["scope-unrecorded"].oracle_result == ORACLE_RESULT_SAME_ENDPOINT_RERUN
 
 
 def test_gather_program_uses_program_configured_manifest_timing(

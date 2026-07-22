@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 
 from src.core.gather_run_manifest import (
+    ACTOR_IDENTITY_SYNTHETIC,
+    LEGACY_CUTOFF_RUN_ID_PREFIX,
     ChannelOutcomeEntry,
     FailedRefEntry,
     GatherRunManifest,
@@ -14,14 +16,18 @@ from src.core.gather_run_manifest import (
     RequiredScopeStatus,
     commit_staging_run,
     compute_manifest_hash,
+    create_legacy_cutoff_manifest,
     create_staging_manifest,
     fail_staging_run,
+    get_committed_root,
     get_committed_run_dir,
     get_failed_run_dir,
     get_latest_full_pointer_path,
     get_latest_pointer_path,
+    get_legacy_cutoff_at,
     get_quarantine_run_dir,
     get_staging_run_dir,
+    get_verified_committed_run_ids,
     hash_ado_items,
     hash_query_results,
     quarantine_abandoned_staging_runs,
@@ -167,6 +173,45 @@ class TestManifestHashing:
             membership_ids=(), membership_hash="mh2", cap_reached=False, completeness_state="FULL",
         )
         assert hash_query_results((entry_a, entry_b)) == hash_query_results((entry_b, entry_a))
+
+
+class TestResolveOracleResult:
+    """D-19/AG-2.12: completeness-oracle evidence classification."""
+
+    def test_defaults_to_same_endpoint_rerun_when_no_operator_export_recorded(self) -> None:
+        assert gather_run_manifest.resolve_oracle_result("scope-a", 42, {}) == (
+            gather_run_manifest.ORACLE_RESULT_SAME_ENDPOINT_RERUN
+        )
+
+    def test_matches_when_operator_export_agrees_with_raw_count(self) -> None:
+        assert gather_run_manifest.resolve_oracle_result("scope-a", 42, {"scope-a": 42}) == (
+            gather_run_manifest.ORACLE_RESULT_OPERATOR_EXPORT_MATCH
+        )
+
+    def test_mismatch_when_operator_export_disagrees_with_raw_count(self) -> None:
+        result = gather_run_manifest.resolve_oracle_result("scope-a", 42, {"scope-a": 40})
+        assert result == "operator_source_export:mismatch:reported=40:observed=42"
+
+    def test_ignores_operator_exports_recorded_for_other_scopes(self) -> None:
+        assert gather_run_manifest.resolve_oracle_result("scope-a", 42, {"scope-b": 99}) == (
+            gather_run_manifest.ORACLE_RESULT_SAME_ENDPOINT_RERUN
+        )
+
+    def test_is_weak_oracle_result_true_for_none_and_same_endpoint_rerun(self) -> None:
+        assert gather_run_manifest.is_weak_oracle_result(None) is True
+        assert gather_run_manifest.is_weak_oracle_result(gather_run_manifest.ORACLE_RESULT_SAME_ENDPOINT_RERUN) is True
+
+    def test_is_weak_oracle_result_false_for_operator_export_outcomes(self) -> None:
+        assert gather_run_manifest.is_weak_oracle_result(gather_run_manifest.ORACLE_RESULT_OPERATOR_EXPORT_MATCH) is False
+        assert gather_run_manifest.is_weak_oracle_result("operator_source_export:mismatch:reported=1:observed=2") is False
+
+    def test_is_mismatched_oracle_result_true_only_for_mismatch_outcomes(self) -> None:
+        assert gather_run_manifest.is_mismatched_oracle_result(
+            "operator_source_export:mismatch:reported=1:observed=2"
+        ) is True
+        assert gather_run_manifest.is_mismatched_oracle_result(None) is False
+        assert gather_run_manifest.is_mismatched_oracle_result(gather_run_manifest.ORACLE_RESULT_SAME_ENDPOINT_RERUN) is False
+        assert gather_run_manifest.is_mismatched_oracle_result(gather_run_manifest.ORACLE_RESULT_OPERATOR_EXPORT_MATCH) is False
 
 
 def test_directory_promotion_retries_transient_windows_permission_denial(
@@ -485,3 +530,85 @@ class TestSidecarWriters:
 
         payload = json.loads(path.read_text(encoding="utf-8"))
         assert [row["query_id"] for row in payload] == ["q1", "q2"]
+
+
+class TestLegacyCutoffManifest:
+    """§4.17 step 5: the synthetic bootstrap manifest that bounds how far
+    back an unstamped (pre-run-lifecycle) signal/fact may be grandfathered
+    once a program activates run-aware reads."""
+
+    def test_create_legacy_cutoff_manifest_is_committed_and_synthetic(self, tmp_path: Path) -> None:
+        cutoff = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        manifest = create_legacy_cutoff_manifest("demo", legacy_cutoff_at=cutoff, programs_root=tmp_path)
+
+        assert manifest.run_id.startswith(LEGACY_CUTOFF_RUN_ID_PREFIX)
+        assert manifest.status is GatherRunStatus.COMMITTED
+        assert manifest.actor_identity_type == ACTOR_IDENTITY_SYNTHETIC
+        assert manifest.legacy_cutoff_at == cutoff
+        assert manifest.manifest_hash is not None
+        assert compute_manifest_hash(manifest) == manifest.manifest_hash
+
+        committed_dir = get_committed_run_dir("demo", manifest.run_id, programs_root=tmp_path)
+        assert read_manifest(committed_dir).run_id == manifest.run_id
+
+    def test_create_legacy_cutoff_manifest_does_not_touch_latest_pointers(self, tmp_path: Path) -> None:
+        create_legacy_cutoff_manifest("demo", legacy_cutoff_at=datetime(2026, 1, 1, tzinfo=timezone.utc), programs_root=tmp_path)
+
+        assert not get_latest_pointer_path("demo", programs_root=tmp_path).exists()
+        assert not get_latest_full_pointer_path("demo", programs_root=tmp_path).exists()
+
+    def test_create_legacy_cutoff_manifest_is_idempotent(self, tmp_path: Path) -> None:
+        cutoff = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        first = create_legacy_cutoff_manifest("demo", legacy_cutoff_at=cutoff, programs_root=tmp_path)
+        second = create_legacy_cutoff_manifest("demo", legacy_cutoff_at=cutoff, programs_root=tmp_path)
+
+        assert first.run_id == second.run_id
+        committed_root = get_committed_root("demo", programs_root=tmp_path)
+        legacy_dirs = [p for p in committed_root.iterdir() if p.name.startswith(LEGACY_CUTOFF_RUN_ID_PREFIX)]
+        assert len(legacy_dirs) == 1
+
+    def test_get_legacy_cutoff_at_returns_none_when_no_manifest_exists(self, tmp_path: Path) -> None:
+        assert get_legacy_cutoff_at("demo", programs_root=tmp_path) is None
+
+    def test_get_legacy_cutoff_at_returns_earliest_cutoff_when_multiple_exist(self, tmp_path: Path) -> None:
+        earlier = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        later = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        # Force two distinct synthetic manifests to coexist (idempotency
+        # normally prevents this; this simulates a hypothetical drift and
+        # asserts the most conservative — earliest — cutoff wins).
+        manifest_a = GatherRunManifest(
+            run_id=f"{LEGACY_CUTOFF_RUN_ID_PREFIX}A",
+            status=GatherRunStatus.COMMITTED,
+            program_id="demo",
+            actor_identity_type=ACTOR_IDENTITY_SYNTHETIC,
+            lease_owner="legacy-cutoff-bootstrap",
+            lease_fencing_token=0,
+            started_at=later,
+            scope_as_of=later,
+            required_scope_status=RequiredScopeStatus.FULL,
+            legacy_cutoff_at=later,
+        )
+        manifest_b = GatherRunManifest(
+            run_id=f"{LEGACY_CUTOFF_RUN_ID_PREFIX}B",
+            status=GatherRunStatus.COMMITTED,
+            program_id="demo",
+            actor_identity_type=ACTOR_IDENTITY_SYNTHETIC,
+            lease_owner="legacy-cutoff-bootstrap",
+            lease_fencing_token=0,
+            started_at=earlier,
+            scope_as_of=earlier,
+            required_scope_status=RequiredScopeStatus.FULL,
+            legacy_cutoff_at=earlier,
+        )
+        from src.core.gather_run_manifest import write_manifest
+
+        for manifest in (manifest_a, manifest_b):
+            hashed = gather_run_manifest._with_manifest_hash(manifest, compute_manifest_hash(manifest))
+            write_manifest(get_committed_run_dir("demo", manifest.run_id, programs_root=tmp_path), hashed)
+
+        assert get_legacy_cutoff_at("demo", programs_root=tmp_path) == earlier
+
+    def test_get_verified_committed_run_ids_includes_legacy_cutoff_manifest(self, tmp_path: Path) -> None:
+        manifest = create_legacy_cutoff_manifest("demo", legacy_cutoff_at=datetime(2026, 1, 1, tzinfo=timezone.utc), programs_root=tmp_path)
+
+        assert manifest.run_id in get_verified_committed_run_ids("demo", programs_root=tmp_path)

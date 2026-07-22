@@ -548,6 +548,7 @@ Extract structured evidence from emails and transcripts via WorkIQ.
 | --extract-evidence | boolean | No | False | Run ContentExtractionAgent on transcript signals to populate WorkstreamEvidence. Requires --workiq. Off by default until validated. |
 | --force-discovery | boolean | No | False | Sec 4.4: bypass the discovery-staleness check for UIL-backed channels (ado/kusto/teams/icm) and force discovery even if not yet due. Required after changing query bindings. |
 | --accept-shrinkage | boolean | No | False | Sec 4.4: accept a guarded registry shrinkage (>=30% removed, >=5 items) for UIL-backed channels this run instead of blocking the registry update; classified removals are printed. |
+| --source-export TEXT | text | No |  | D-19/AG-2.12: record an operator-verified ADO source-export/UI membership count for a scope, as '<scope_id>=<count>'. Repeatable. Reconciles that scope's committed query_results entry beyond the weak same-endpoint rerun. |
 
 ### `vertex prefetch`
 
@@ -1550,6 +1551,7 @@ Vertex operator and debug commands.
 | `s7-position` |  |
 | `reconcile` |  |
 | `migrate-legacy-state` |  |
+| `bootstrap-legacy-cutoff` |  |
 | `fact-store-flip` |  |
 | `archive-signing` | Manage the HMAC key used to sign archive manifests. |
 | `upgrade-state` |  |
@@ -1703,6 +1705,17 @@ Vertex operator and debug commands.
 |---|---|---|---|---|
 | --program TEXT | text | Yes |  | Program id, e.g. myprogram. |
 | --dry-run | boolean | No | False | Preview imported fact counts without writing to the fact store. |
+
+#### `vertex admin bootstrap-legacy-cutoff`
+
+**Usage:** `vertex admin bootstrap-legacy-cutoff [OPTIONS]`
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | Yes |  | Program id, e.g. armada. |
+| --at TEXT | text | No |  | ISO-8601 UTC timestamp for the legacy cutoff (§4.17 migration step 5). Defaults to now. Unstamped signals/facts at or before this timestamp remain visible once the program later flips gather.run_manifest_mode to 'enforce'; unstamped records after it are excluded. |
 
 #### `vertex admin fact-store-flip`
 

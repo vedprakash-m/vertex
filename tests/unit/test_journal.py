@@ -309,3 +309,55 @@ def test_read_signals_can_exclude_non_committed_gather_runs(tmp_path: Path) -> N
     append_signal(Signal("signal-legacy", started, "manual", "acme", "ws", ("WI:2",), "legacy", None, Confidence.HIGH), programs_root=programs_root, partition_at=started)
 
     assert tuple(signal.id for signal in read_signals("acme", programs_root=programs_root, require_committed_gather_run=True)) == ("signal-legacy",)
+
+
+def test_read_signals_bounds_unstamped_signals_by_legacy_cutoff(tmp_path: Path) -> None:
+    """§4.17 step 5: once a legacy-cutoff manifest exists, an unstamped
+    signal is grandfathered only up to the cutoff; unstamped signals after
+    the cutoff are excluded under enforcement."""
+    from src.core.gather_run_manifest import create_legacy_cutoff_manifest
+
+    programs_root = tmp_path / "programs"
+    cutoff = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    create_legacy_cutoff_manifest("acme", legacy_cutoff_at=cutoff, programs_root=programs_root)
+
+    pre_cutoff = datetime(2025, 6, 1, tzinfo=timezone.utc)
+    post_cutoff = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    append_signal(
+        Signal("signal-pre-cutoff", pre_cutoff, "manual", "acme", "ws", ("WI:1",), "before cutoff", None, Confidence.HIGH),
+        programs_root=programs_root,
+        partition_at=pre_cutoff,
+    )
+    append_signal(
+        Signal("signal-post-cutoff", post_cutoff, "manual", "acme", "ws", ("WI:2",), "after cutoff", None, Confidence.HIGH),
+        programs_root=programs_root,
+        partition_at=post_cutoff,
+    )
+
+    assert tuple(
+        signal.id for signal in read_signals("acme", programs_root=programs_root, require_committed_gather_run=True)
+    ) == ("signal-pre-cutoff",)
+
+
+def test_read_signals_keeps_unstamped_signals_when_no_legacy_cutoff_exists(tmp_path: Path) -> None:
+    """Backward compatibility: programs that haven't bootstrapped a
+    legacy-cutoff manifest keep today's behavior — unstamped signals remain
+    visible unconditionally, regardless of when they occurred."""
+    programs_root = tmp_path / "programs"
+
+    pre = datetime(2025, 6, 1, tzinfo=timezone.utc)
+    post = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    append_signal(
+        Signal("signal-a", pre, "manual", "acme", "ws", ("WI:1",), "a", None, Confidence.HIGH),
+        programs_root=programs_root,
+        partition_at=pre,
+    )
+    append_signal(
+        Signal("signal-b", post, "manual", "acme", "ws", ("WI:2",), "b", None, Confidence.HIGH),
+        programs_root=programs_root,
+        partition_at=post,
+    )
+
+    assert tuple(
+        signal.id for signal in read_signals("acme", programs_root=programs_root, require_committed_gather_run=True)
+    ) == ("signal-a", "signal-b")

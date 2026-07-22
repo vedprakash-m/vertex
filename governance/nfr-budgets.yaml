@@ -203,6 +203,17 @@ budgets:
     ratified_at: "2026-07-13"
     ratified_by: "the Platform DRI (per ADR-0014)"
 
+  - id: armada-gather-ado-p95-latency
+    area: "Gather (Armada)"
+    description: "Armada ADO-channel gather p95 latency, gather-run.v1 telemetry (.archive/specs/armada.md D-22/ARM-GATHER-6, checklist item 6)"
+    budget_class: production-SLO
+    direction: ceiling
+    unit: ms
+    value: null  # observed evidence only, not yet ratified: `vertex observability perf --program armada` reports 10/10 successful ADO canaries, p95_latency_ms=18941, slo_status=ok (2026-07-21) -- well under both the temporary (180s) and steady-state (60s) ceilings named in .archive/specs/armada.md §4.6. Formal ratification (or an explicit DRI override) is tracked as an acceptance-checklist item in governance/decisions/0019-armada-gather-refresh.md, not decided here.
+    status: candidate
+    ratified_at: null
+    ratified_by: null
+
   - id: operations-accountable-role
     area: "Operations"
     description: "named accountable role (pilot DRI / Platform SRE) for live-cadence sequencing"

@@ -784,7 +784,7 @@ Each program has `programs/<prog>/program.yaml` containing:
 - `readiness` — readiness-gate enablement and snapshot freshness thresholds
 - `scorecard` — scorecard behavior toggles including dependency-risk uplift
 - `audit` — autonomy-audit retention and archive warning thresholds
-- `gather` — gather execution backend selection
+- `gather` — gather execution backend selection, plus an optional `gather-run.v1` manifest activation mode (`off`/`shadow`/`enforce`, complete as of 2026-07-22) that gates committed-run visibility for run-aware readers without changing legacy behavior until explicitly enabled — see Tech Spec §11.3 and `.archive/specs/armada.md` for the full binding contract
 
 Program-owned runtime metadata also includes:
 
@@ -1016,6 +1016,7 @@ The `PROVIDER_REGISTRY` in `channel_wiring.py` maps channel names to their provi
 - Signal usage markers appended to `reviews.jsonl`
 - Vitality archive entry written to `vitality.json`
 - Override and narrative files reset for next issue
+- Where a program has activated `gather-run.v1` manifests (complete as of 2026-07-22, `.archive/specs/armada.md`), confirm binds to exactly one pinned committed gather run (run id + content hash) and computes a non-mutating risk-delta preview (new/updated/no-change rows, plus a stable preview hash) before any real archive write. A stale, partial, or hash-mismatched pinned run blocks confirm rather than silently drafting off unverified evidence; the first trusted confirm for a program is a non-destructive but effectively irreversible baseline commit — later corrections happen through new governed records, not rollback.
 
 ### 9.6 Freshness Report (`vertex freshness`)
 
@@ -1947,6 +1948,7 @@ pytest tests/ --run-integration             # Live ADO tests
 - **Circuit breaker:** File-backed (CLOSED → OPEN → HALF_OPEN) for external service calls
 - **Locked writes:** Journal and trajectory writes use `portalocker` for atomic append
 - **Graceful degradation:** WorkIQ/Kusto/IcM unavailability → warning, not failure
+- **Gather-run manifests (complete as of 2026-07-22, `.archive/specs/armada.md`):** an optional `gather-run.v1` state machine (staged → committed/failed/quarantined, atomic `latest.json`/`latest_full.json` pointers, canonical content hashing, run-scoped idempotency/replay/quarantine) gives run-aware readers a trust boundary — no reader sees a run until it is atomically committed. Retention purges expired non-current committed/failed/quarantined runs (90-day default) while always preserving pointer-named and confirm-bound runs; default RPO/RTO is 24h/4h. Freshness and missed-attempt alerts are persisted, cockpit/doctor-visible, and evaluated independently of data staleness. A gather-wide lease/fencing mechanism serializes concurrent gather attempts.
 
 ### 16.3 Observability
 

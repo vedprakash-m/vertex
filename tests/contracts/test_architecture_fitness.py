@@ -38,7 +38,12 @@ LINE_BUDGETS = {
     # run_telemetry.jsonl sidecar is populated by gather runs.
     # WS-3 / v1.14 (2026-06-10): +21 for _emit_credential_expired_banner helper
     # + CredentialExpired import + 3 banner call sites (WorkIQ/Kusto/IcM).
-    "src/commands/gather.py": 5400,  # +11 (2026-07-15): ADF-W1.4 remainder -- overall WorkIQ phase (all query plans combined) bounded by program.m365.retrieval.max_wall_clock_seconds, threaded into _build_workiq_signals
+    "src/commands/gather.py": 5436,  # +11 (2026-07-15): ADF-W1.4 remainder -- overall WorkIQ phase (all query plans combined) bounded by program.m365.retrieval.max_wall_clock_seconds, threaded into _build_workiq_signals
+    # +36 (2026-07-21, specs/armada.md D-19/AG-2.12): completeness-oracle
+    # reconciliation -- resolve_oracle_result import/application at the
+    # QueryResultEntry construction site, source_export_counts param on
+    # gather_program, and the --source-export CLI option (with its
+    # _parse_source_export_counts helper) on `vertex gather`.
     # +5 (2026-07-15): ADF-W1.4 remainder cont'd -- each individual WorkIQ query plan capped at AgencyBridge.WORKIQ_TIMEOUT via timeout_seconds, so the first plan can't consume the whole total_budget_seconds alone.
     # +5 (2026-07-15, ADF-W2.10 P7): risk/milestone/action status contradiction wiring -- load_current_risk_entries/load_current_action_items imports + risks/milestones/actions kwargs at the build_contradiction_packets call site.
     # +213 (2026-07-16, specs/armada.md): gather-run manifest lifecycle wrapper (lease

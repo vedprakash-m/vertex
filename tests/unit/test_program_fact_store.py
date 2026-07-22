@@ -245,6 +245,70 @@ def test_load_program_facts_can_exclude_non_committed_gather_runs(tmp_path: Path
     assert {fact.gather_run_id for fact in snapshot.facts} == {committed.run_id, None}
 
 
+def test_load_program_facts_bounds_unstamped_facts_by_legacy_cutoff(tmp_path: Path) -> None:
+    """§4.17 step 5: once a legacy-cutoff manifest exists, an unstamped fact
+    is grandfathered only up to the cutoff; unstamped facts recorded after
+    the cutoff are excluded under enforcement."""
+    from src.core.gather_run_manifest import create_legacy_cutoff_manifest
+
+    programs_root = _programs_root(tmp_path)
+    cutoff = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    create_legacy_cutoff_manifest("acme", legacy_cutoff_at=cutoff, programs_root=programs_root)
+
+    store = ProgramFactStore("acme", db_root=tmp_path)
+    for entity_ref, recorded_at in (
+        ("WI:1", datetime(2025, 6, 1, tzinfo=timezone.utc)),  # unstamped, pre-cutoff -> visible
+        ("WI:2", datetime(2026, 6, 1, tzinfo=timezone.utc)),  # unstamped, post-cutoff -> excluded
+    ):
+        store.append_fact(
+            ProgramFactInput(
+                fact_type="action.item",
+                entity_refs=(entity_ref,),
+                payload={"source": "ado", "title": entity_ref},
+                gather_run_id=None,
+            ),
+            recorded_at=recorded_at,
+        )
+
+    snapshot = load_program_facts(
+        "acme",
+        programs_root=programs_root,
+        require_committed_gather_run=True,
+    )
+
+    assert {fact.entity_refs for fact in snapshot.facts} == {("WI:1",)}
+
+
+def test_load_program_facts_keeps_unstamped_facts_when_no_legacy_cutoff_exists(tmp_path: Path) -> None:
+    """Backward compatibility: programs that haven't bootstrapped a
+    legacy-cutoff manifest keep today's behavior — unstamped facts remain
+    visible unconditionally, regardless of when they were recorded."""
+    programs_root = _programs_root(tmp_path)
+
+    store = ProgramFactStore("acme", db_root=tmp_path)
+    for entity_ref, recorded_at in (
+        ("WI:1", datetime(2025, 6, 1, tzinfo=timezone.utc)),
+        ("WI:2", datetime(2026, 6, 1, tzinfo=timezone.utc)),
+    ):
+        store.append_fact(
+            ProgramFactInput(
+                fact_type="action.item",
+                entity_refs=(entity_ref,),
+                payload={"source": "ado", "title": entity_ref},
+                gather_run_id=None,
+            ),
+            recorded_at=recorded_at,
+        )
+
+    snapshot = load_program_facts(
+        "acme",
+        programs_root=programs_root,
+        require_committed_gather_run=True,
+    )
+
+    assert {fact.entity_refs for fact in snapshot.facts} == {("WI:1",), ("WI:2",)}
+
+
 def test_load_program_facts_primary_mode_disables_shim_merge(tmp_path: Path, monkeypatch) -> None:
     programs_root = _programs_root(tmp_path)
     actions_path = programs_root / "acme" / "journal" / "actions.jsonl"

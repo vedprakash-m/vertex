@@ -7,6 +7,7 @@ import sqlite3
 from typing import Any
 
 from src.commands.doctor_checks.models import DoctorCheck, DoctorReport, directory_size, format_bytes
+from src.commands.gather_pipeline.lifecycle_policy import load_gather_runtime_policy
 from src.core.exceptions import StateError
 from src.core.archive_store import find_latest_confirmed_entry, read_archive_index
 from src.core.edition_resolver import (
@@ -17,6 +18,7 @@ from src.core.edition_resolver import (
     _LAYOUT_MARKER_FILENAME,
     _output_subdir,
 )
+from src.core.gather_run_manifest import is_mismatched_oracle_result, is_weak_oracle_result, resolve_latest_committed_manifest
 from src.core.journal import (
     get_program_journal_archive_dir,
     get_program_journal_dir,
@@ -117,6 +119,7 @@ def run_storage_doctor(
             latest_confirmed_issue_number=(latest_confirmed.issue_number if latest_confirmed is not None else None),
         ),
         _gather_freshness_check(program_id, programs_root=programs_root),
+        _gather_completeness_oracle_check(program_id, programs_root=programs_root),
         _fact_store_authority_check(program_id, programs_root=programs_root),
         _cost_ledger_storage_check(edition_name, programs_root=programs_root),
         _ai_proposal_queue_check(program_id, programs_root=programs_root),
@@ -782,6 +785,82 @@ def _gather_freshness_check(program_id: str, *, programs_root: Path) -> DoctorCh
         "ok",
         f"last gather run for {program_id!r} finished {age_hours:.1f}h ago (within {_GATHER_FRESHNESS_THRESHOLD_HOURS}h threshold).",
         metadata={"last_gather_finished_at": finished_at.isoformat(), "age_hours": round(age_hours, 1)},
+    )
+
+
+def _gather_completeness_oracle_check(program_id: str, *, programs_root: Path) -> DoctorCheck:
+    """Armada D-19/AG-2.12: surface the completeness-oracle posture of the
+    last committed gather run.
+
+    §4.3's preferred proof order for discovery completeness is (1) an
+    independent Kusto/OData validation query [deferred — ARM-GATHER-15],
+    (2) an operator-recorded sanitized ADO source-export/UI count, or (3) a
+    same-endpoint rerun, which is only a weak consistency check. This check
+    never blocks (`vertex doctor` never fails on it) — it exists so a
+    same-endpoint rerun is not silently treated as sufficient completeness
+    evidence forever; it warns when required scopes still rest only on that
+    weak proof, and when an operator-recorded source export disagreed with
+    the discovered count.
+    """
+    run_manifest_mode = load_gather_runtime_policy(program_id, programs_root=programs_root).run_manifest_mode
+    if run_manifest_mode == "off":
+        return DoctorCheck(
+            "Gather Completeness Oracle",
+            "ok",
+            f"gather-run manifest mode is 'off' for {program_id!r}; completeness-oracle reconciliation is not applicable.",
+            metadata={"run_manifest_mode": "off"},
+        )
+
+    manifest = resolve_latest_committed_manifest(program_id, programs_root=programs_root)
+    if manifest is None:
+        return DoctorCheck(
+            "Gather Completeness Oracle",
+            "warn",
+            f"no committed gather run yet for {program_id!r}; completeness-oracle posture unknown.",
+            metadata={"committed_run": None},
+        )
+
+    if not manifest.query_results:
+        return DoctorCheck(
+            "Gather Completeness Oracle",
+            "ok",
+            f"run {manifest.run_id} recorded no ADO query results; completeness-oracle reconciliation is not applicable.",
+            metadata={"run_id": manifest.run_id},
+        )
+
+    mismatched_scopes = sorted(
+        {result.scope_id for result in manifest.query_results if is_mismatched_oracle_result(result.oracle_result)}
+    )
+    if mismatched_scopes:
+        return DoctorCheck(
+            "Gather Completeness Oracle",
+            "warn",
+            (
+                f"run {manifest.run_id} has {len(mismatched_scopes)} scope(s) where the operator-recorded "
+                f"source-export count disagreed with discovery: {', '.join(mismatched_scopes[:5])}."
+            ),
+            metadata={"run_id": manifest.run_id, "mismatched_scopes": mismatched_scopes},
+        )
+
+    weak_scopes = sorted(
+        {result.scope_id for result in manifest.query_results if is_weak_oracle_result(result.oracle_result)}
+    )
+    if weak_scopes:
+        return DoctorCheck(
+            "Gather Completeness Oracle",
+            "warn",
+            (
+                f"{len(weak_scopes)}/{len(manifest.query_results)} scope(s) in run {manifest.run_id} rely only on a "
+                "same-endpoint rerun; record `vertex gather --source-export <scope_id>=<count>` for stronger evidence."
+            ),
+            metadata={"run_id": manifest.run_id, "same_endpoint_rerun_scopes": weak_scopes},
+        )
+
+    return DoctorCheck(
+        "Gather Completeness Oracle",
+        "ok",
+        f"all {len(manifest.query_results)} scope(s) in run {manifest.run_id} carry an operator source-export reconciliation.",
+        metadata={"run_id": manifest.run_id},
     )
 
 

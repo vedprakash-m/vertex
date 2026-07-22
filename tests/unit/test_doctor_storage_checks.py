@@ -14,9 +14,20 @@ from src.commands.doctor_checks.storage_checks import (
     _dc03_docs_directory_check,
     _edition_workspace_layout_check,
     _fact_store_authority_check,
+    _gather_completeness_oracle_check,
     _program_sqlite_storage_check,
     _sidecar_health_check,
     _sqlite_storage_check,
+)
+from src.commands.gather_pipeline.lifecycle_policy import GatherRuntimePolicy
+from src.core.gather_run_manifest import (
+    GatherRunManifest,
+    GatherRunStatus,
+    QueryResultEntry,
+    RequiredScopeStatus,
+    commit_staging_run,
+    create_staging_manifest,
+    ORACLE_RESULT_OPERATOR_EXPORT_MATCH,
 )
 from src.ai.edit_learner import get_edit_patterns_path
 from src.core.action_tracker import get_actions_path
@@ -332,6 +343,99 @@ def test_fact_store_authority_check_uses_persisted_primary_mode_when_env_is_unse
     assert result.status == "ok"
     assert result.metadata["fact_store_authority"] == "authoritative"
     assert result.metadata["sor_mode"] == "primary"
+
+
+def _make_gather_run_manifest(*, query_results: tuple[QueryResultEntry, ...]) -> GatherRunManifest:
+    now = datetime(2026, 7, 21, 12, 0, 0)
+    return GatherRunManifest(
+        run_id="gather-01ORACLE",
+        status=GatherRunStatus.RUNNING,
+        program_id="demo",
+        actor_identity_type="interactive",
+        lease_owner="host-a",
+        lease_fencing_token=1,
+        started_at=now,
+        scope_as_of=now,
+        required_scope_status=RequiredScopeStatus.FULL,
+        query_results=query_results,
+    )
+
+
+def _query_result(scope_id: str, *, oracle_result: str | None) -> QueryResultEntry:
+    return QueryResultEntry(
+        query_id=f"q-{scope_id}",
+        scope_id=scope_id,
+        wiql_hash="h1",
+        captured_at=datetime(2026, 7, 21, 12, 0, 0),
+        raw_count=10,
+        membership_ids=(),
+        membership_hash="mh1",
+        cap_reached=False,
+        completeness_state="FULL",
+        oracle_result=oracle_result,
+    )
+
+
+def test_gather_completeness_oracle_check_ok_when_manifest_mode_is_off(tmp_path: Path, monkeypatch) -> None:
+    import src.commands.doctor_checks.storage_checks as storage_checks
+
+    monkeypatch.setattr(
+        storage_checks, "load_gather_runtime_policy", lambda *_a, **_k: GatherRuntimePolicy(run_manifest_mode="off")
+    )
+
+    result = _gather_completeness_oracle_check("demo", programs_root=tmp_path)
+
+    assert result.status == "ok"
+    assert result.metadata["run_manifest_mode"] == "off"
+
+
+def test_gather_completeness_oracle_check_warns_when_no_committed_run_exists(tmp_path: Path) -> None:
+    result = _gather_completeness_oracle_check("demo", programs_root=tmp_path)
+
+    assert result.status == "warn"
+    assert result.metadata["committed_run"] is None
+
+
+def test_gather_completeness_oracle_check_warns_on_weak_same_endpoint_rerun_scopes(tmp_path: Path) -> None:
+    manifest = _make_gather_run_manifest(
+        query_results=(_query_result("scope-a", oracle_result=None),)
+    )
+    create_staging_manifest(manifest, programs_root=tmp_path)
+    commit_staging_run(manifest, finished_at=datetime(2026, 7, 21, 12, 5, 0), programs_root=tmp_path)
+
+    result = _gather_completeness_oracle_check("demo", programs_root=tmp_path)
+
+    assert result.status == "warn"
+    assert result.metadata["same_endpoint_rerun_scopes"] == ["scope-a"]
+
+
+def test_gather_completeness_oracle_check_ok_when_all_scopes_reconciled(tmp_path: Path) -> None:
+    manifest = _make_gather_run_manifest(
+        query_results=(_query_result("scope-a", oracle_result=ORACLE_RESULT_OPERATOR_EXPORT_MATCH),)
+    )
+    create_staging_manifest(manifest, programs_root=tmp_path)
+    commit_staging_run(manifest, finished_at=datetime(2026, 7, 21, 12, 5, 0), programs_root=tmp_path)
+
+    result = _gather_completeness_oracle_check("demo", programs_root=tmp_path)
+
+    assert result.status == "ok"
+    assert result.metadata["run_id"] == "gather-01ORACLE"
+
+
+def test_gather_completeness_oracle_check_warns_on_operator_export_mismatch(tmp_path: Path) -> None:
+    manifest = _make_gather_run_manifest(
+        query_results=(
+            _query_result("scope-a", oracle_result="operator_source_export:mismatch:reported=8:observed=10"),
+        )
+    )
+    create_staging_manifest(manifest, programs_root=tmp_path)
+    commit_staging_run(manifest, finished_at=datetime(2026, 7, 21, 12, 5, 0), programs_root=tmp_path)
+
+    result = _gather_completeness_oracle_check("demo", programs_root=tmp_path)
+
+    assert result.status == "warn"
+    assert result.metadata["mismatched_scopes"] == ["scope-a"]
+
 
 
 # ---------------------------------------------------------------------------

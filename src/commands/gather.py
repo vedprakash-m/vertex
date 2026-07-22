@@ -192,6 +192,7 @@ from src.core.gather_run_manifest import (
     quarantine_abandoned_staging_runs,
     resolve_latest_committed_manifest,
     resolve_latest_full_committed_manifest,
+    resolve_oracle_result,
     write_ado_items,
     write_query_results_sidecar,
 )
@@ -408,6 +409,28 @@ _GATHER_CADENCE_PROFILES: dict[str, dict[str, bool]] = {
 }
 
 
+def _parse_source_export_counts(entries: list[str]) -> dict[str, int]:
+    """D-19/AG-2.12: parse repeated ``--source-export <scope_id>=<count>``
+    values into a ``{scope_id: count}`` map. Raises ``typer.BadParameter`` on
+    a malformed entry (missing ``=`` or a non-integer count) so a typo fails
+    fast rather than silently recording a wrong reconciliation.
+    """
+    counts: dict[str, int] = {}
+    for entry in entries:
+        scope_id, sep, raw_count = entry.partition("=")
+        if not sep or not scope_id:
+            raise typer.BadParameter(
+                f"Invalid --source-export value '{entry}'. Expected '<scope_id>=<count>'."
+            )
+        try:
+            counts[scope_id] = int(raw_count)
+        except ValueError as error:
+            raise typer.BadParameter(
+                f"Invalid --source-export count for scope '{scope_id}': '{raw_count}' is not an integer."
+            ) from error
+    return counts
+
+
 def _resolve_gather_flags(
     *,
     cadence: str | None,
@@ -467,7 +490,13 @@ def gather_command(
     extract_evidence: bool = typer.Option(False, "--extract-evidence", help="Run ContentExtractionAgent on transcript signals to populate WorkstreamEvidence. Requires --workiq. Off by default until validated."),
     force_discovery: bool = typer.Option(False, "--force-discovery", help="Sec 4.4: bypass the discovery-staleness check for UIL-backed channels (ado/kusto/teams/icm) and force discovery even if not yet due. Required after changing query bindings."),
     accept_shrinkage: bool = typer.Option(False, "--accept-shrinkage", help="Sec 4.4: accept a guarded registry shrinkage (>=30% removed, >=5 items) for UIL-backed channels this run instead of blocking the registry update; classified removals are printed."),
+    source_export: list[str] = typer.Option(
+        [],
+        "--source-export",
+        help="D-19/AG-2.12: record an operator-verified ADO source-export/UI membership count for a scope, as '<scope_id>=<count>'. Repeatable. Reconciles that scope's committed query_results entry beyond the weak same-endpoint rerun.",
+    ),
 ) -> None:
+    source_export_counts = _parse_source_export_counts(source_export)
     if facts_only:
         _now = datetime.now(timezone.utc)
         _programs_root = PROGRAMS_ROOT
@@ -534,6 +563,7 @@ def gather_command(
             progress_callback=_emit_progress,
             force_discovery=force_discovery,
             accept_shrinkage=accept_shrinkage,
+            source_export_counts=source_export_counts,
         )
     except (GatherLeaseConflict, LeaseFencingTokenStale, LeaseRenewalFailed) as error:
         # D-7/AG-7.3: an overlapping or fenced-out gather is not a usage
@@ -704,6 +734,7 @@ def gather_program(
     force_discovery: bool = False,
     accept_shrinkage: bool = False,
     actor_identity_type: str = ACTOR_IDENTITY_INTERACTIVE,
+    source_export_counts: dict[str, int] | None = None,
 ) -> GatherArtifacts:
     """D-13/Sec 4.6 lifecycle wrapper around the actual gather implementation.
 
@@ -724,8 +755,16 @@ def gather_program(
     per-query membership captures; all enabled source phases carry bounded
     channel outcomes. Per-connector retry/throttle counters remain a future
     enrichment where a connector does not expose those counters.
+
+    ``source_export_counts`` (D-19/AG-2.12): an optional ``{scope_id: count}``
+    map of operator-recorded sanitized ADO source-export counts, used to
+    reconcile each scope's discovered ``raw_count`` against an
+    explicitly-recorded external observation rather than only the weak
+    same-endpoint rerun. Recorded per scope on ``query_results[].oracle_result``;
+    never affects discovery/hydration behavior itself.
     """
     resolved_programs_root = programs_root or PROGRAMS_ROOT
+    resolved_source_export_counts = source_export_counts or {}
     runtime_policy = load_gather_runtime_policy(
         program_id,
         programs_root=resolved_programs_root,
@@ -883,6 +922,9 @@ def gather_program(
             membership_hash=result.membership_hash,
             cap_reached=result.cap_reached,
             completeness_state=result.completeness_state,
+            oracle_result=resolve_oracle_result(
+                result.scope_id, result.raw_count, resolved_source_export_counts
+            ),
             failure_category=result.failure_category,
         )
         for result in artifacts.ado_query_results

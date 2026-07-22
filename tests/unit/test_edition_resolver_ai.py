@@ -91,12 +91,17 @@ def test_committed_gather_run_reader_activation_is_config_driven(
     not (Path(__file__).resolve().parents[2] / "programs" / "armada" / "program.yaml").exists(),
     reason="programs/armada/ is real, gitignored program data -- not present on a fresh clone/CI",
 )
-def test_armada_declares_the_d24_shadow_timing_policy() -> None:
+def test_armada_declares_the_d24_timing_policy() -> None:
     programs_root = Path(__file__).resolve().parents[2] / "programs"
     program = load_program("armada", programs_root=programs_root)
 
     assert program is not None
-    assert program.gather.run_manifest_mode == "shadow"
+    # D-24/§4.17 migration steps 6+8: Armada started at 'shadow' and flips to
+    # 'enforce' only after the operator bootstraps a legacy-cutoff manifest
+    # and the DRI confirms activation (specs/armada.md, archived). Both
+    # states are legitimate depending on where this operator's live program
+    # currently sits in that migration.
+    assert program.gather.run_manifest_mode in ("shadow", "enforce")
     assert program.gather.full_discovery_cadence_hours == 24
     assert program.gather.freshness_warn_hours == 30
     assert program.gather.freshness_block_hours == 48

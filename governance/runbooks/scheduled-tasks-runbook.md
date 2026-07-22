@@ -47,7 +47,7 @@ Alternatively, review and run `scripts/register_armada_gather_task.ps1 -WhatIf`,
    ```
    Program/script:  C:\path\to\venv\Scripts\python.exe
    Add arguments:   cli.py prefetch --program xpf --edition xpf_weekly
-   Start in:        Q:\Ved\myProjects\MS\vertex
+   Start in:        C:\path\to\vertex
    ```
 
 5. **Conditions** tab: uncheck "Start the task only if the computer is on

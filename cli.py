@@ -23,6 +23,7 @@ from src.commands.ai_proposals import app as ai_proposals_app
 from src.commands.admin_baseline import admin_baseline_command
 from src.commands.admin_fact_store_flip import fact_store_flip_command
 from src.commands.admin_fact_store_migrate import migrate_legacy_state_command
+from src.commands.admin_legacy_cutoff import bootstrap_legacy_cutoff_command
 from src.commands.admin_metrics_rollup import admin_metrics_rollup_command
 from src.commands.admin_platform_proof import admin_platform_proof_command
 from src.commands.admin_s7_position import admin_s7_position_command
@@ -373,6 +374,7 @@ admin_app.command("platform-proof")(admin_platform_proof_command)
 admin_app.command("s7-position")(admin_s7_position_command)
 admin_app.command("reconcile")(admin_reconcile_command)
 admin_app.command("migrate-legacy-state")(migrate_legacy_state_command)
+admin_app.command("bootstrap-legacy-cutoff")(bootstrap_legacy_cutoff_command)
 admin_app.command("fact-store-flip")(fact_store_flip_command)
 admin_app.command("archive-signing")(admin_archive_signing_command)
 admin_app.command("upgrade-state")(admin_upgrade_state_command)

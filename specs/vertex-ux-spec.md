@@ -1266,6 +1266,24 @@ Re-run with --apply to commit the canonical staged registry transaction.
 
 Full taxonomy, per-command flag reference, and rationale for the remaining `vertex kb registry`/`vertex kb people` surface (merge/split/bind, delegate, refresh, doctor-facing checks) is `tests/contracts/cli_reference_snapshot.md`, generated from the live CLI rather than hand-maintained here — this section captures the binding UX *contracts*, not a duplicate of that generated reference. The CLI surface above is complete through Phase 6; the only remaining item is a real operator-run onboarding pilot with a live DSAR/rollback proof against that pilot's own data (PPL-W6.4) — not a CLI gap, an operator-paced evidence gate. See `governance/runbooks/ppl-w64-onboarding-pilot-runbook.md` for the documented real onboarding sequence and every tooling caveat a synthetic dry run surfaced.
 
+### 12.12 Gather-Run Manifest CLI (implemented, `.archive/specs/armada.md`, complete as of 2026-07-22)
+
+The `gather-run.v1` manifest lifecycle (§11.3, Tech Spec) is invisible to programs that leave `gather.run_manifest_mode` at its default `off`; once a program opts into `shadow`/`enforce`, `vertex gather` and `vertex doctor --storage` gain the surfaces below. Full per-flag reference is `tests/contracts/cli_reference_snapshot.md`; this section captures the binding UX contracts.
+
+**`vertex gather --program <id> --source-export <scope_id>=<count>`** (repeatable): records an operator-verified ADO source-export/UI membership count for one full-scope binding, reconciling that scope's committed `query_results` entry beyond the weak same-endpoint-rerun default. This is the order-2 completeness-oracle proof (§4.3); order-1 (an independent Kusto/OData validation query) remains explicitly deferred and is never fabricated from order-2 evidence.
+
+**`vertex doctor --storage --program <id>`** — Gather Completeness Oracle check (never blocks; `warn`/`ok` only):
+```
+WARN  Gather Completeness Oracle
+      2/5 scope(s) in run gather-01K... rely only on a same-endpoint rerun;
+      record `vertex gather --source-export <scope_id>=<count>` for stronger evidence.
+```
+Other `--storage` outcomes for the same run: `ok` when every required scope's oracle result is order-1/order-2-backed, `warn` when an operator-recorded source export disagreed with discovery (named scopes listed), and `ok`/not-applicable when `run_manifest_mode` is `off` or the run recorded no ADO query results.
+
+**`vertex admin bootstrap-legacy-cutoff --program <id> [--at <ISO-8601>]`** — one-time operator action (§4.17 migration step 5) that writes a synthetic committed `gather-legacy-<ULID>` manifest recording `legacy_cutoff_at` (defaults to now). Idempotent; never touches `latest.json`/`latest_full.json`. Unstamped signals/facts at or before the cutoff remain visible once the program later flips `gather.run_manifest_mode` to `enforce`; unstamped records after it are excluded. This command has no preview/`--apply` split — it is additive and safe to re-run, and its own idempotency is the safety mechanism rather than a dry-run gate.
+
+**Confirm dry-run risk-delta preview** (visible whenever a pinned gather run exists, per §9.5 PRD): each row is `new`/`updated`/`no_change`, risk ID, and title, followed by a stable preview hash; a real confirm blocks (rather than silently drafting) if the pinned run is stale, partial, or hash-mismatched against what a prior dry-run reported.
+
 ---
 
 ## §13 EML File Output

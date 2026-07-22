@@ -448,6 +448,7 @@ def test_gather_command_daily_cadence_enables_reduced_profile(monkeypatch) -> No
         "force_refresh": False,
         "force_discovery": False,
         "accept_shrinkage": False,
+        "source_export_counts": {},
         "progress_callback": captured["kwargs"]["progress_callback"],
     }
 
@@ -491,8 +492,60 @@ def test_gather_command_weekly_cadence_enables_full_profile(monkeypatch) -> None
         "force_refresh": False,
         "force_discovery": False,
         "accept_shrinkage": False,
+        "source_export_counts": {},
         "progress_callback": captured["kwargs"]["progress_callback"],
     }
+
+
+def test_gather_command_parses_repeated_source_export_options(monkeypatch) -> None:
+    """D-19/AG-2.12: `--source-export scope=count` (repeatable) parses into a
+    ``{scope_id: count}`` map threaded straight into ``gather_program``."""
+    captured: dict[str, object] = {}
+
+    def _fake_gather_program(*args, **kwargs):
+        captured["kwargs"] = kwargs
+        return gather.GatherArtifacts(
+            program_id="acme",
+            scanned_items=0,
+            discovered_signals=0,
+            new_signals=0,
+            pending_review=0,
+            trajectory_updates=0,
+            auto_reviews_written=0,
+            ado_calls=0,
+        )
+
+    monkeypatch.setattr(gather, "gather_program", _fake_gather_program)
+
+    result = runner.invoke(
+        app,
+        [
+            "gather",
+            "--program",
+            "acme",
+            "--source-export",
+            "scope-a=10",
+            "--source-export",
+            "scope-b=25",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["kwargs"]["source_export_counts"] == {"scope-a": 10, "scope-b": 25}
+
+
+def test_gather_command_rejects_malformed_source_export_option(monkeypatch) -> None:
+    result = runner.invoke(app, ["gather", "--program", "acme", "--source-export", "scope-a"])
+
+    assert result.exit_code != 0
+    assert "Invalid --source-export value" in result.output
+
+
+def test_gather_command_rejects_non_integer_source_export_count(monkeypatch) -> None:
+    result = runner.invoke(app, ["gather", "--program", "acme", "--source-export", "scope-a=not-a-number"])
+
+    assert result.exit_code != 0
+    assert "is not an integer" in result.output
 
 
 def test_gather_command_verbose_writes_trace_file(monkeypatch, tmp_path: Path) -> None:

@@ -1,7 +1,7 @@
 # PPL-W6.4 Onboarding Pilot Runbook — real people-registry pilot cycle
 
 **Status:** v1.0 — 2026-07-21 (`specs/people.md` Phase 6, PPL-W6.4)
-**Owner:** This workspace's sole operator (Vedprakash Mishra)
+**Owner:** This workspace's sole operator
 **Scope:** running a real onboarding cycle against the shared People/Team/
 Program-Affiliation Registry and proving backward compatibility, restore,
 privacy/DSAR, and rollback against that pilot's real data — the one

@@ -983,6 +983,7 @@ commands:
       value_options:
       - --cadence
       - --program
+      - --source-export
   history:
     callback:
       flags: []

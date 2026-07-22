@@ -512,23 +512,31 @@ def load_program_facts(
         resolved_db_root = _resolve_fact_db_root(programs_root)
     snapshot = ProgramFactStore(program_id, home_root=home_root, db_root=resolved_db_root).snapshot(as_of=as_of)
     if require_committed_gather_run:
-        from src.core.gather_run_manifest import get_verified_committed_run_ids
+        from src.core.gather_run_manifest import get_legacy_cutoff_at, get_verified_committed_run_ids
 
         committed_run_ids = get_verified_committed_run_ids(
             program_id,
             programs_root=programs_root or PROGRAMS_ROOT,
         )
+        # §4.17 step 5: an unstamped fact is grandfathered as "legacy" only up
+        # to the ratified cutoff, once the program has bootstrapped one via
+        # `create_legacy_cutoff_manifest`. Before that, `legacy_cutoff_at` is
+        # None and every unstamped fact stays visible (unchanged prior
+        # behavior) — this is the bootstrap/cutover migration itself.
+        legacy_cutoff_at = get_legacy_cutoff_at(
+            program_id,
+            programs_root=programs_root or PROGRAMS_ROOT,
+        )
+
+        def _visible(fact: ProgramFactRevision) -> bool:
+            if fact.gather_run_id is not None:
+                return fact.gather_run_id in committed_run_ids
+            return legacy_cutoff_at is None or fact.recorded_at <= legacy_cutoff_at
+
         snapshot = ProgramFactSnapshot(
             program_id=snapshot.program_id,
             as_of=snapshot.as_of,
-            # Legacy records intentionally remain visible until the explicit
-            # §4.17 bootstrap/cutover migration.  A stamped fact is visible
-            # only once its manifest is committed and hash-valid.
-            facts=tuple(
-                fact
-                for fact in snapshot.facts
-                if fact.gather_run_id is None or fact.gather_run_id in committed_run_ids
-            ),
+            facts=tuple(fact for fact in snapshot.facts if _visible(fact)),
         )
     if as_of is not None:
         return snapshot

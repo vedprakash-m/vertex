@@ -64,6 +64,15 @@ _PROMOTION_RETRY_DELAY_SECONDS = 0.05
 #: but these two are the only identities gather can run under today.
 ACTOR_IDENTITY_INTERACTIVE = "interactive"
 ACTOR_IDENTITY_SCHEDULED = "scheduled"
+#: §4.17 step 5's synthetic legacy-cutoff manifest is not produced by a real
+#: gather invocation, so it carries its own actor identity rather than
+#: pretending to be an interactive/scheduled run.
+ACTOR_IDENTITY_SYNTHETIC = "synthetic"
+
+#: §4.17 step 5: prefix for the synthetic legacy-cutoff run ID
+#: (``gather-legacy-<ULID>``), distinguishing it from real ``gather-<ULID>``
+#: runs at a glance.
+LEGACY_CUTOFF_RUN_ID_PREFIX = "gather-legacy-"
 
 
 class GatherRunStatus(str, Enum):
@@ -97,6 +106,57 @@ class QueryResultEntry:
     completeness_state: str
     oracle_result: str | None = None
     failure_category: str | None = None
+
+
+# D-19/AG-2.12: the closed set of completeness-oracle outcomes a
+# ``QueryResultEntry.oracle_result`` may carry. §4.3's preferred order is
+# (1) an independent Kusto/OData validation query -- deferred pending
+# ARM-GATHER-15 qualification, not yet a usable oracle; (2) a sanitized ADO
+# query export/UI membership count the operator explicitly records; (3) a
+# same-endpoint rerun, which is only a weak consistency check and must never
+# be the *silent* sole completeness proof. ``resolve_oracle_result`` records
+# outcome (3) explicitly (rather than leaving the field ``None``, which would
+# read as "not evaluated") so doctor can surface exactly which scopes still
+# rest on the weak proof alone.
+ORACLE_RESULT_SAME_ENDPOINT_RERUN = "same_endpoint_rerun"
+ORACLE_RESULT_OPERATOR_EXPORT_MATCH = "operator_source_export:match"
+_ORACLE_RESULT_OPERATOR_EXPORT_MISMATCH_PREFIX = "operator_source_export:mismatch"
+
+
+def resolve_oracle_result(
+    scope_id: str,
+    raw_count: int,
+    operator_source_export_counts: dict[str, int],
+) -> str:
+    """D-19/AG-2.12: classify one scope's completeness-oracle evidence.
+
+    Returns ``ORACLE_RESULT_OPERATOR_EXPORT_MATCH`` when the operator
+    recorded a sanitized source-export count for ``scope_id`` (e.g. via
+    ``vertex gather --source-export <scope_id>=<count>``) and it agrees with
+    the discovered ``raw_count``; a descriptive mismatch string (still
+    prefixed ``operator_source_export:mismatch``) when it disagrees; or the
+    explicit ``ORACLE_RESULT_SAME_ENDPOINT_RERUN`` default when no operator
+    export was recorded for this scope.
+    """
+    if scope_id not in operator_source_export_counts:
+        return ORACLE_RESULT_SAME_ENDPOINT_RERUN
+    reported_count = operator_source_export_counts[scope_id]
+    if reported_count == raw_count:
+        return ORACLE_RESULT_OPERATOR_EXPORT_MATCH
+    return f"{_ORACLE_RESULT_OPERATOR_EXPORT_MISMATCH_PREFIX}:reported={reported_count}:observed={raw_count}"
+
+
+def is_weak_oracle_result(oracle_result: str | None) -> bool:
+    """True when ``oracle_result`` reflects only the weak same-endpoint
+    rerun proof (including the legacy/unset ``None`` case, which predates
+    this field being populated)."""
+    return oracle_result is None or oracle_result == ORACLE_RESULT_SAME_ENDPOINT_RERUN
+
+
+def is_mismatched_oracle_result(oracle_result: str | None) -> bool:
+    """True when an operator-recorded source export disagreed with the
+    discovered raw count for that scope."""
+    return oracle_result is not None and oracle_result.startswith(_ORACLE_RESULT_OPERATOR_EXPORT_MISMATCH_PREFIX)
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +225,11 @@ class GatherRunManifest:
     ado_items_hash: str | None = None
     query_results_hash: str | None = None
     manifest_hash: str | None = None
+    #: §4.17 step 5: set only on the synthetic legacy-cutoff manifest. Records
+    #: with no ``gather_run_id`` are attributed to this run at read time (never
+    #: by rewriting historical JSONL) when their timestamp is at or before this
+    #: cutoff. ``None`` on every real gather-run manifest.
+    legacy_cutoff_at: datetime | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +278,15 @@ def compute_manifest_hash(manifest: GatherRunManifest) -> str:
     payload["channel_outcomes"] = _to_jsonable(_sorted_channel_outcomes(manifest.channel_outcomes))
     payload["failed_refs"] = _to_jsonable(_sorted_failed_refs(manifest.failed_refs))
     payload["alert_ids"] = sorted(manifest.alert_ids)
+    if manifest.legacy_cutoff_at is None:
+        # §4.17 step 5 backward compatibility: manifests written before this
+        # field existed never had it in their hashed payload. Omitting the
+        # key when unset (the default for every ordinary gather run) keeps
+        # this computation byte-identical to the pre-field version, so
+        # historical manifest_hash values keep verifying. The one manifest
+        # type that actually sets this field (the synthetic legacy-cutoff
+        # manifest) still gets it covered by the hash below.
+        payload.pop("legacy_cutoff_at", None)
     text = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hash_content(text)
 
@@ -291,6 +365,99 @@ def get_verified_committed_run_ids(
         ):
             run_ids.add(manifest.run_id)
     return frozenset(run_ids)
+
+
+def get_legacy_cutoff_at(
+    program_id: str,
+    *,
+    programs_root: Path = PROGRAMS_ROOT,
+) -> datetime | None:
+    """§4.17 step 5: return the program's ratified legacy-cutoff timestamp, or
+    ``None`` if no legacy-cutoff manifest has been created yet.
+
+    Only a hash-valid, committed manifest with ``legacy_cutoff_at`` set
+    counts — the same tamper-resistance rule as
+    ``get_verified_committed_run_ids``. Creation is idempotent
+    (``create_legacy_cutoff_manifest``), so normally at most one such manifest
+    exists; if more than one is somehow present, the earliest cutoff is used
+    so grandfathering stays maximally conservative.
+    """
+    committed_root = get_committed_root(program_id, programs_root=programs_root)
+    if not committed_root.exists():
+        return None
+
+    cutoffs: list[datetime] = []
+    for run_dir in committed_root.iterdir():
+        if not run_dir.is_dir():
+            continue
+        try:
+            manifest = read_manifest(run_dir)
+        except (OSError, json.JSONDecodeError, KeyError, ValueError):
+            continue
+        if manifest.legacy_cutoff_at is None:
+            continue
+        if (
+            manifest.status is GatherRunStatus.COMMITTED
+            and manifest.manifest_hash
+            and compute_manifest_hash(manifest) == manifest.manifest_hash
+        ):
+            cutoffs.append(manifest.legacy_cutoff_at)
+    return min(cutoffs) if cutoffs else None
+
+
+def create_legacy_cutoff_manifest(
+    program_id: str,
+    *,
+    legacy_cutoff_at: datetime,
+    programs_root: Path = PROGRAMS_ROOT,
+) -> GatherRunManifest:
+    """§4.17 step 5: create (once) the synthetic committed
+    ``gather-legacy-<ULID>`` manifest that bounds how far back an unstamped
+    (pre-run-lifecycle) signal/fact may be attributed to "legacy" at read
+    time. This never rewrites historical JSONL — attribution happens only in
+    the read path (``journal.read_signals`` / ``program_fact_store.load_program_facts``).
+
+    Idempotent: if a valid legacy-cutoff manifest already exists, it is
+    returned unchanged rather than creating a duplicate.
+    """
+    existing_cutoff = get_legacy_cutoff_at(program_id, programs_root=programs_root)
+    if existing_cutoff is not None:
+        committed_root = get_committed_root(program_id, programs_root=programs_root)
+        for run_dir in committed_root.iterdir():
+            if not run_dir.is_dir() or not run_dir.name.startswith(LEGACY_CUTOFF_RUN_ID_PREFIX):
+                continue
+            try:
+                manifest = read_manifest(run_dir)
+            except (OSError, json.JSONDecodeError, KeyError, ValueError):
+                continue
+            if manifest.legacy_cutoff_at == existing_cutoff:
+                return manifest
+        # Defensive: a valid cutoff was found but its manifest could not be
+        # re-read (should not happen). Fall through and create a fresh one
+        # rather than raise, since idempotency is best-effort convenience.
+
+    from src.core.ledger.ulid import new_ulid
+
+    run_id = f"{LEGACY_CUTOFF_RUN_ID_PREFIX}{new_ulid(legacy_cutoff_at)}"
+    manifest = GatherRunManifest(
+        run_id=run_id,
+        status=GatherRunStatus.COMMITTED,
+        program_id=program_id,
+        actor_identity_type=ACTOR_IDENTITY_SYNTHETIC,
+        lease_owner="legacy-cutoff-bootstrap",
+        lease_fencing_token=0,
+        started_at=legacy_cutoff_at,
+        scope_as_of=legacy_cutoff_at,
+        required_scope_status=RequiredScopeStatus.FULL,
+        finished_at=legacy_cutoff_at,
+        legacy_cutoff_at=legacy_cutoff_at,
+    )
+    manifest_hash = compute_manifest_hash(manifest)
+    manifest = _with_manifest_hash(manifest, manifest_hash)
+
+    committed_dir = get_committed_run_dir(program_id, run_id, programs_root=programs_root)
+    write_manifest(committed_dir, manifest)
+    return manifest
 
 
 def get_latest_pointer_path(program_id: str, *, programs_root: Path = PROGRAMS_ROOT) -> Path:
@@ -432,6 +599,7 @@ def _manifest_from_payload(payload: dict[str, Any]) -> GatherRunManifest:
         ado_items_hash=payload.get("ado_items_hash"),
         query_results_hash=payload.get("query_results_hash"),
         manifest_hash=payload.get("manifest_hash"),
+        legacy_cutoff_at=_parse_datetime(payload.get("legacy_cutoff_at")),
     )
 
 
