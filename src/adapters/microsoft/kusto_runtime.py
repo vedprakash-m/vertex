@@ -15,6 +15,6 @@ def load_kusto_sdk_types() -> tuple[Any, Any, Any, Any]:
         from azure.kusto.data import KustoConnectionStringBuilder
     except ImportError as error:  # pragma: no cover - depends on optional packages
         raise QueryError(
-            "Kusto support requires optional dependencies. Run: pip install -r requirements.txt"
+            'Kusto support requires optional dependencies. Run: pip install -e ".[kusto]"'
         ) from error
     return AzureKustoClient, KustoConnectionStringBuilder, ClientRequestProperties, DefaultAzureCredential

@@ -112,7 +112,7 @@ def _get_client_secret_credential_class() -> Any:
         from azure.identity import ClientSecretCredential
     except ImportError as error:
         raise AuthError(
-            "Direct IcM incident access requires azure-identity. Run: pip install -r requirements.txt"
+            'Direct IcM incident access requires azure-identity. Run: pip install -e "."'
         ) from error
     return ClientSecretCredential
 

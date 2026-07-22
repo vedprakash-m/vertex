@@ -124,7 +124,7 @@ class AIRequestRouter:
             module = importlib.import_module("openai")
         except ImportError as error:  # pragma: no cover - depends on optional packages
             raise RuntimeError(
-                "AI support requires optional dependencies. Run: pip install -r requirements.txt"
+                'AI support requires optional dependencies. Run: pip install -e ".[ai]"'
             ) from error
 
         client_class = getattr(module, "AzureOpenAI", None)

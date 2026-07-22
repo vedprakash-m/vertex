@@ -99,7 +99,7 @@ def test_ai_client_surfaces_missing_optional_dependencies(monkeypatch) -> None:
 
     monkeypatch.setattr("src.ai.request_router.importlib.import_module", _raise_import_error)
 
-    with pytest.raises(RuntimeError, match="requirements.txt"):
+    with pytest.raises(RuntimeError, match=r'pip install -e "\.\[ai\]"'):
         AIClient("blurb-model", 0.2, 0.5)
 
 

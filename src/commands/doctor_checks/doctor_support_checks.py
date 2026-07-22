@@ -107,7 +107,7 @@ def mail_preview_check(
         return DoctorCheck(
             "Mail Preview",
             "warn",
-            "--send-draft unavailable; missing azure-identity. Run: pip install -r requirements.txt",
+            '--send-draft unavailable; missing azure-identity. Run: pip install -e "."',
         )
     if resolver("requests") is None:
         return DoctorCheck("Mail Preview", "warn", "--send-draft unavailable; requests is missing from the environment.")

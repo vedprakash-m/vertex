@@ -61,6 +61,49 @@ jobs:
       - name: Spec drift guard (WS-9)
         run: python scripts/check_spec_drift.py
 
+  extras-offline-wheel-check:
+    # BL-C5 (specs/backlog.md §7): pydantic-core (openai's transitive
+    # dependency, isolated into the `ai` extra so a base install never
+    # needs it) is a compiled/Rust wheel. If no prebuilt wheel exists for a
+    # given platform/Python combination, `pip install` silently falls back
+    # to a source build requiring a Rust toolchain most CI runners and
+    # locked-down operator machines don't have. This job proves (1) a base
+    # install genuinely never pulls in pydantic (the isolation this extras
+    # split exists for), and (2) every optional extra installs from
+    # prebuilt wheels only (`--only-binary=:all:`), so a missing-wheel
+    # regression is caught here rather than by a user's fresh install.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Base package installs wheel-only, no extras
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --only-binary=:all: -e .
+
+      - name: Confirm base install does not pull in pydantic (extras isolation)
+        run: |
+          python -c "
+          import importlib.util
+          import sys
+          if importlib.util.find_spec('pydantic') is not None:
+              print('FAIL: pydantic importable from a base-only install; the ai extra is not actually isolated.', file=sys.stderr)
+              sys.exit(1)
+          print('OK: pydantic is not present in a base-only install.')
+          "
+
+      - name: Every optional extra installs wheel-only
+        run: |
+          set -euo pipefail
+          for extra in ai ai-local m365 kusto render dev; do
+            echo "--- pip install --only-binary=:all: -e .[$extra] ---"
+            python -m pip install --only-binary=:all: -e ".[$extra]"
+          done
+
   fresh-clone-smoke:
     # WS-16: fresh-clone → pip install → vertex --help → setup → doctor → migrate round-trip.
     # Runs on a CLEAN clone with NO programs/ data. The repo is checked out fresh by
