@@ -1688,7 +1688,7 @@ def rank_context_gaps(gaps: list[ContextGapRecord]) -> list[ContextGapRecord]
 
 ### 9.16 Program Fact Store (`src/core/program_fact_store.py`)
 
-System-of-record for Vertex's synthesized program beliefs (signals.md §7.4). Extends the RealityStore database (`~/.vertex/<program_id>/vertex.sqlite3`) with two recorded-time-travel tables (SD-15: `as_of` queries filter on `recorded_at` only; `valid_from`/`valid_until` are stored but not yet a query axis — GAP-36d implements the valid-time dimension), bringing the per-program SQLite total to **15 tables**.
+System-of-record for Vertex's synthesized program beliefs (signals.md §7.4). Extends the RealityStore database (`~/.vertex/<program_id>/vertex.sqlite3`) with two recorded-time-travel tables (SD-15: `snapshot()` takes independent `as_of` (transaction time) and `valid_at` (valid time) parameters — `valid_at` defaults to `as_of` when omitted, preserving every existing caller's behavior exactly; GAP-36d, closed 2026-07-22, see `specs/bklg.md` §12 BL-H1), bringing the per-program SQLite total to **15 tables**.
 
 **Architecture (four-store responsibility model — signals.md §7.4.1):**
 - **Raw Evidence Journal** — immutable source events (`journal/*.jsonl`, `vertex_store.sqlite3`)
@@ -1743,7 +1743,7 @@ def load_current_action_items(program_id, ...) -> tuple[ActionItem, ...]
 
 ```sql
 -- Recorded-time-travel fact revisions — each row is one revision; fact_id groups revisions of the same fact.
--- (valid_from/valid_until stored but as_of queries filter on recorded_at only — GAP-36d adds valid-time axis)
+-- (valid_from/valid_until filtered against an independent valid_at parameter, defaulting to as_of — GAP-36d, closed 2026-07-22)
 CREATE TABLE program_fact_revisions (
     revision_id TEXT PRIMARY KEY,            -- pfr_<uuid>
     fact_id TEXT NOT NULL,                   -- pf_<uuid> (shared across revisions of the same fact)

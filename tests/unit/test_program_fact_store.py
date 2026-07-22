@@ -1162,6 +1162,125 @@ def test_dependency_projection_ignores_closed_fact_revisions(tmp_path: Path) -> 
     assert project_dependencies(snapshot) == ()
 
 
+def test_snapshot_valid_at_defaults_to_as_of_unchanged_behavior(tmp_path: Path) -> None:
+    """GAP-36d: not passing valid_at must be byte-for-byte the prior
+    single-axis behavior -- a fact whose valid_from is after as_of stays
+    invisible, exactly as before this change."""
+    store = ProgramFactStore("acme", db_root=tmp_path)
+    recorded_at = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    future_valid_from = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    payload = {
+        "id": "m-future",
+        "program_id": "acme",
+        "name": "Future-valid milestone",
+        "target_date": "2026-07-10",
+        "owner_alias": "operator",
+        "status": "on_track",
+        "exit_criteria": [],
+        "linked_workstream_ids": [],
+        "linked_work_item_ids": [],
+        "notes": None,
+        "last_reviewed_date": None,
+    }
+    store.append_fact(
+        ProgramFactInput(
+            fact_type="milestone.entry",
+            scope="program",
+            entity_refs=("MILESTONE:m-future",),
+            payload=payload,
+            natural_key=build_natural_key("milestone.entry", entity_refs=("MILESTONE:m-future",), scope="program"),
+            valid_from=future_valid_from,
+        ),
+        recorded_at=recorded_at,
+    )
+
+    snapshot = store.snapshot(as_of=recorded_at)
+
+    assert snapshot.valid_at == recorded_at
+    assert project_milestones(snapshot) == ()
+
+
+def test_snapshot_valid_at_independently_controls_the_valid_time_axis(tmp_path: Path) -> None:
+    """GAP-36d's actual point: transaction time (as_of) and valid time
+    (valid_at) can now diverge. A fact recorded on 2026-06-01 describing a
+    state that only becomes valid on 2026-07-01 is invisible when asked
+    "what do we know, as of 2026-06-01, about the world as of 2026-06-01"
+    but visible when asked "what did we know, as of 2026-06-01, about the
+    world as of 2026-07-15" -- a genuine second, independent axis, not the
+    same recorded_at value reused twice."""
+    store = ProgramFactStore("acme", db_root=tmp_path)
+    recorded_at = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    future_valid_from = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    payload = {
+        "id": "m-future",
+        "program_id": "acme",
+        "name": "Future-valid milestone",
+        "target_date": "2026-07-10",
+        "owner_alias": "operator",
+        "status": "on_track",
+        "exit_criteria": [],
+        "linked_workstream_ids": [],
+        "linked_work_item_ids": [],
+        "notes": None,
+        "last_reviewed_date": None,
+    }
+    store.append_fact(
+        ProgramFactInput(
+            fact_type="milestone.entry",
+            scope="program",
+            entity_refs=("MILESTONE:m-future",),
+            payload=payload,
+            natural_key=build_natural_key("milestone.entry", entity_refs=("MILESTONE:m-future",), scope="program"),
+            valid_from=future_valid_from,
+        ),
+        recorded_at=recorded_at,
+    )
+
+    same_axis_snapshot = store.snapshot(as_of=recorded_at)
+    diverged_snapshot = store.snapshot(as_of=recorded_at, valid_at=datetime(2026, 7, 15, tzinfo=timezone.utc))
+
+    assert project_milestones(same_axis_snapshot) == ()
+    assert len(project_milestones(diverged_snapshot)) == 1
+    assert diverged_snapshot.as_of == recorded_at  # transaction time unchanged
+    assert diverged_snapshot.valid_at == datetime(2026, 7, 15, tzinfo=timezone.utc)
+
+
+def test_load_program_facts_threads_valid_at_through(tmp_path: Path) -> None:
+    store = ProgramFactStore("acme", db_root=tmp_path)
+    recorded_at = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    future_valid_from = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    payload = {
+        "id": "m-future2",
+        "program_id": "acme",
+        "name": "Future-valid milestone 2",
+        "target_date": "2026-07-10",
+        "owner_alias": "operator",
+        "status": "on_track",
+        "exit_criteria": [],
+        "linked_workstream_ids": [],
+        "linked_work_item_ids": [],
+        "notes": None,
+        "last_reviewed_date": None,
+    }
+    store.append_fact(
+        ProgramFactInput(
+            fact_type="milestone.entry",
+            scope="program",
+            entity_refs=("MILESTONE:m-future2",),
+            payload=payload,
+            natural_key=build_natural_key("milestone.entry", entity_refs=("MILESTONE:m-future2",), scope="program"),
+            valid_from=future_valid_from,
+        ),
+        recorded_at=recorded_at,
+    )
+
+    snapshot = load_program_facts(
+        "acme", as_of=recorded_at, valid_at=datetime(2026, 7, 15, tzinfo=timezone.utc), db_root=tmp_path,
+    )
+
+    assert len(project_milestones(snapshot)) == 1
+
+
 def test_milestone_projection_ignores_closed_fact_revisions(tmp_path: Path) -> None:
     store = ProgramFactStore("acme", db_root=tmp_path)
     recorded_at = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
@@ -1333,7 +1452,7 @@ def test_load_program_facts_derives_db_root_from_programs_root(monkeypatch, tmp_
             assert program_id == "acme"
             captured.append(db_root)
 
-        def snapshot(self, *, as_of=None):
+        def snapshot(self, *, as_of=None, valid_at=None):
             assert as_of is not None
             return sentinel
 

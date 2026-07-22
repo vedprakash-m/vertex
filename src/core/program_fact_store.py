@@ -380,6 +380,12 @@ class ProgramFactSnapshot:
     program_id: str
     as_of: datetime
     facts: tuple[ProgramFactRevision, ...]
+    # GAP-36d: the valid-time axis, distinct from `as_of` (transaction time).
+    # Defaults to `as_of` at every construction site below when the caller
+    # does not request a different valid-time point -- this field existing
+    # and always being populated is what makes the bitemporal query a real,
+    # queryable axis rather than merely stored-but-inert columns.
+    valid_at: datetime | None = None
 
 
 class ProgramFactEnvelope(TypedDict, total=False):
@@ -499,6 +505,7 @@ def load_program_facts(
     program_id: str,
     *,
     as_of: datetime | None = None,
+    valid_at: datetime | None = None,
     fact_types: tuple[str, ...] | None = None,
     home_root: Path | None = None,
     db_root: Path | None = None,
@@ -511,7 +518,9 @@ def load_program_facts(
     resolved_db_root = db_root
     if resolved_db_root is None:
         resolved_db_root = _resolve_fact_db_root(programs_root)
-    snapshot = ProgramFactStore(program_id, home_root=home_root, db_root=resolved_db_root).snapshot(as_of=as_of)
+    snapshot = ProgramFactStore(program_id, home_root=home_root, db_root=resolved_db_root).snapshot(
+        as_of=as_of, valid_at=valid_at,
+    )
     if require_committed_gather_run:
         from src.core.gather_run_manifest import get_legacy_cutoff_at, get_verified_committed_run_ids
 
@@ -538,6 +547,7 @@ def load_program_facts(
             program_id=snapshot.program_id,
             as_of=snapshot.as_of,
             facts=tuple(fact for fact in snapshot.facts if _visible(fact)),
+            valid_at=snapshot.valid_at,
         )
     if as_of is not None:
         return snapshot
@@ -579,6 +589,7 @@ def load_program_facts(
         program_id=snapshot.program_id,
         as_of=snapshot.as_of,
         facts=tuple(sorted(merged_facts.values(), key=lambda fact: (fact.fact_type, fact.natural_key))),
+        valid_at=snapshot.valid_at,
     )
 
 
@@ -604,6 +615,7 @@ def build_legacy_program_fact_snapshot(
         program_id=program_id,
         as_of=snapshot_at,
         facts=shim_facts,
+        valid_at=snapshot_at,
     )
 
 
@@ -1325,8 +1337,19 @@ class ProgramFactStore:
             )
             return ProgramFactWriteResult(revision=revision, action="superseded")
 
-    def snapshot(self, *, as_of: datetime | None = None) -> ProgramFactSnapshot:
+    def snapshot(self, *, as_of: datetime | None = None, valid_at: datetime | None = None) -> ProgramFactSnapshot:
+        """``as_of`` is transaction time (what was recorded/known by when);
+        ``valid_at`` is valid time (what state of the world does the fact
+        describe). GAP-36d: these were previously conflated into a single
+        parameter applied to both `recorded_at`/`superseded_at` AND
+        `valid_from`/`valid_until` -- `valid_at` defaults to the resolved
+        `as_of` value when not supplied, which is byte-for-byte the prior
+        behavior, so every existing caller is unaffected. Passing a
+        different `valid_at` is what makes this a true bitemporal query:
+        "what did we believe, as of transaction time T1, was true about the
+        world as of valid time T2" for T1 != T2."""
         snapshot_at = as_of or datetime.now(timezone.utc)
+        resolved_valid_at = valid_at if valid_at is not None else snapshot_at
         with self._connect() as connection:
             rows = connection.execute(
                 """
@@ -1354,14 +1377,15 @@ class ProgramFactStore:
                     FactReviewState.ACCEPTED.value,
                     _serialize_datetime(snapshot_at),
                     _serialize_datetime(snapshot_at),
-                    _serialize_datetime(snapshot_at),
-                    _serialize_datetime(snapshot_at),
+                    _serialize_datetime(resolved_valid_at),
+                    _serialize_datetime(resolved_valid_at),
                 ),
             ).fetchall()
         return ProgramFactSnapshot(
             program_id=self._program_id,
             as_of=snapshot_at,
             facts=tuple(self._row_to_revision(row) for row in rows),
+            valid_at=resolved_valid_at,
         )
 
     def pin_snapshot(
@@ -3185,6 +3209,7 @@ def filter_facts_for_render(
         program_id=snapshot.program_id,
         as_of=snapshot.as_of,
         facts=visible,
+        valid_at=snapshot.valid_at,
     )
 
 
