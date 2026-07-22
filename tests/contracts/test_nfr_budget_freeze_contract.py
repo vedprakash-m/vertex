@@ -8,7 +8,11 @@ ratified value — "no later phase may lower a budget to pass" (arch-fix.md
 §A.0).
 
 ADR-0014 (governance/decisions/0014-scale-budget-ratification.md) ratified
-the first 12 budgets on 2026-07-13.
+the first 12 budgets on 2026-07-13. ADR-0019
+(governance/decisions/0019-armada-gather-refresh.md) ratified a 13th,
+`armada-gather-ado-p95-latency`, on 2026-07-22 (specs/backlog.md BL-I1 —
+confirmed directly with the operator before this ratification landed, not
+inferred from the ADR's own prose).
 """
 from __future__ import annotations
 
@@ -28,6 +32,7 @@ _RATIFIED_FLOOR: dict[str, float] = {
     "capacity-trace-metadata-retention": 90,
     "capacity-sanitized-excerpt-retention": 90,
     "compatibility-schema-version-window": 2,
+    "armada-gather-ado-p95-latency": 60000,
 }
 
 
@@ -60,8 +65,9 @@ def test_every_area_from_spec_table_is_present() -> None:
     assert not missing, f"nfr-budgets.yaml is missing area(s) from arch-fix.md §8: {sorted(missing)}"
 
 
-def test_ratified_set_matches_adr_0014() -> None:
-    # ADR-0014 ratified exactly these ids on 2026-07-13. Update this test
+def test_ratified_set_matches_adr_0014_and_0019() -> None:
+    # ADR-0014 ratified the first 14 ids on 2026-07-13; ADR-0019 added a
+    # 15th (armada-gather-ado-p95-latency) on 2026-07-22. Update this test
     # (and _RATIFIED_FLOOR above, and the ADR) in the same change that
     # ratifies or unratifies a budget.
     expected_ratified = {
@@ -79,10 +85,11 @@ def test_ratified_set_matches_adr_0014() -> None:
         "compatibility-schema-version-window",
         "operations-accountable-role",
         "privacy-retention-rtbf",
+        "armada-gather-ado-p95-latency",
     }
     actual_ratified = {b.id for b in ratified_budgets()}
     assert actual_ratified == expected_ratified, (
-        f"ratified set drifted from ADR-0014: missing={expected_ratified - actual_ratified}, "
+        f"ratified set drifted from ADR-0014/0019: missing={expected_ratified - actual_ratified}, "
         f"unexpected={actual_ratified - expected_ratified}"
     )
 

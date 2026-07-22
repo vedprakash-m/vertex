@@ -209,10 +209,10 @@ budgets:
     budget_class: production-SLO
     direction: ceiling
     unit: ms
-    value: null  # observed evidence only, not yet ratified: `vertex observability perf --program armada` reports 10/10 successful ADO canaries, p95_latency_ms=18941, slo_status=ok (2026-07-21) -- well under both the temporary (180s) and steady-state (60s) ceilings named in .archive/specs/armada.md §4.6. Formal ratification (or an explicit DRI override) is tracked as an acceptance-checklist item in governance/decisions/0019-armada-gather-refresh.md, not decided here.
-    status: candidate
-    ratified_at: null
-    ratified_by: null
+    value: 60000  # ratified at the steady-state ceiling named in .archive/specs/armada.md §4.6. `vertex observability perf --program armada` measured p95_latency_ms=18941 across 10/10 successful ADO canaries (2026-07-21, slo_status=ok) -- well under both this steady-state ceiling and the temporary 180000ms one. Confirmed 2026-07-22 by the operator directly (not inferred from prior file text) that this ratification is real.
+    status: ratified
+    ratified_at: "2026-07-22"
+    ratified_by: "the Accountable DRI (this workspace's sole operator), per governance/decisions/0019-armada-gather-refresh.md checklist item 6"
 
   - id: operations-accountable-role
     area: "Operations"
