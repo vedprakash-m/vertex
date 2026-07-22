@@ -175,6 +175,8 @@ def load_knowledge(
             engine=_optional_str(entry.get("engine")) or ("wiql" if _optional_str(entry.get("wiql")) else "kusto"),
             wiql=_optional_str(entry.get("wiql")),
             classification=_query_classification(entry.get("classification"), knowledge_root / "golden_queries.yaml"),
+            ado_filter=_optional_str(entry.get("ado_filter")),
+            ado_select=_optional_str(entry.get("ado_select")),
         )
         for entry in queries_doc.get("queries", [])
         if isinstance(entry, dict)
