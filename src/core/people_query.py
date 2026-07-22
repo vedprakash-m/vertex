@@ -83,6 +83,7 @@ from src.core.people_directory_schema import (
 )
 from src.core.people_entity_schema import CanonicalEntity, EntityRedirect, load_entities_document
 from src.core.people_legacy_affiliation import LegacyAffiliationEdge
+from src.core.people_legacy_reference_metrics import record_legacy_alias_reference
 from src.core.people_membership_schema import TeamMembership, read_all_memberships, read_memberships_as_of
 from src.core.people_namespace_bridge import normalize_alias_for_lookup, resolve_ref_to_canonical_entity_id
 
@@ -142,6 +143,8 @@ class PersonQueryResult:
 def find_person(ref: str, *, knowledge_root: Path) -> PersonQueryResult | None:
     entities, redirects = _load_entities(knowledge_root)
     resolution = resolve_ref_to_canonical_entity_id(ref, entities=entities, redirects=redirects)
+    if resolution.resolved_via == "alias_match":
+        record_legacy_alias_reference(knowledge_root, entity_type="person", ref=ref)
     if resolution.canonical_entity_id is None:
         return None
     entity = next((e for e in entities if e.entity_id == resolution.canonical_entity_id), None)
@@ -165,6 +168,8 @@ class TeamQueryResult:
 def find_team(ref: str, *, knowledge_root: Path) -> TeamQueryResult | None:
     entities, redirects = _load_entities(knowledge_root)
     resolution = resolve_ref_to_canonical_entity_id(ref, entities=entities, redirects=redirects)
+    if resolution.resolved_via == "alias_match":
+        record_legacy_alias_reference(knowledge_root, entity_type="team", ref=ref)
     if resolution.canonical_entity_id is None:
         return None
     entity = next((e for e in entities if e.entity_id == resolution.canonical_entity_id), None)
