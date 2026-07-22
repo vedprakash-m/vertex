@@ -113,9 +113,9 @@ def candidate_db_path(db_dir: Path) -> Path:
 @contextmanager
 def _open_db(db_path: Path) -> Generator[sqlite3.Connection, None, None]:
     """INV-AF-13 (WO-2 item 5): routed through ``open_program_db()``. The
-    prior code passed ``timeout=10`` (10s) to ``sqlite3.connect()``, which
-    Python maps directly to ``sqlite3_busy_timeout()`` — i.e. it *was* the
-    busy timeout, not a separate connect timeout. ``busy_timeout_ms=10_000``
+    prior code passed ``timeout=10`` (10s) to the raw sqlite3 connect call,
+    which Python maps directly to ``sqlite3_busy_timeout()`` — i.e. it *was*
+    the busy timeout, not a separate connect timeout. ``busy_timeout_ms=10_000``
     preserves that exactly (default is 5000 for every other migrated store).
     ``durability="balanced"`` (the default) preserves the prior
     ``synchronous=NORMAL`` on local paths.
