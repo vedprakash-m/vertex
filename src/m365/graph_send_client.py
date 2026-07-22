@@ -80,7 +80,7 @@ def _get_device_code_credential_class() -> Any:
         from azure.identity import DeviceCodeCredential
     except ImportError as error:
         raise AuthError(
-            "Graph mail send requires azure-identity. Run: pip install -r requirements.txt"
+            'Graph mail send requires azure-identity. Run: pip install -e "."'
         ) from error
     return DeviceCodeCredential
 
