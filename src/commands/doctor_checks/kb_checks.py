@@ -52,6 +52,7 @@ from src.core.identity_provider_port import load_identity_providers_document
 from src.core.audience_scopes import audience_scopes_path_for_program, load_audience_scopes
 from src.core.people_registry_storage_class import refresh_registry_storage_status
 from src.core.people_registry_governance import inspect_registry_manifest_integrity
+from src.core.people_legacy_reference_metrics import summarize_legacy_reference_log
 from src.core.people_registry_transaction import detect_stale_registry_lease, recover_registry_transactions
 from src.core.store_factory import build_trajectory_store_for_program_id
 
@@ -149,6 +150,7 @@ def run_kb_doctor(
     checks.append(registry_manifest_integrity_check(programs_root=programs_root))
     checks.append(entities_dir11_check(known_program_ids=known_program_ids, programs_root=programs_root))
     checks.append(registry_dir05_shadow_check(known_program_ids=known_program_ids, programs_root=programs_root))
+    checks.append(registry_legacy_reference_check(programs_root=programs_root))
     # Loaded ONCE and shared across DIR-01/02/06 -- see _SharedRegistrySnapshot's
     # own docstring for the redundant-reparse regression this closes (PPL-W3.5).
     shared_registry_snapshot = _load_shared_registry_snapshot(programs_root)
@@ -963,6 +965,32 @@ def registry_dir05_shadow_check(*, known_program_ids: tuple[str, ...], programs_
         "Registry DIR-05", "ok",
         f"{checked_program_count} program(s) with local people/team files checked; no shadowed records found.",
         code="DIR-05A",
+    )
+
+
+def registry_legacy_reference_check(*, programs_root: Path) -> DoctorCheck:
+    """specs/backlog.md WO-6 (BL-J1, schema-3.0 horizon): warn-only,
+    never-blocking count of `people find`/`teams show` lookups that
+    resolved via the legacy alias-keyed compatibility path
+    (`P:<alias>`/`person:<alias>`/bare alias) rather than an
+    already-canonical `entity_id`. Measurement only -- no numeric horizon
+    threshold is picked here; see WO-6's own note in specs/backlog.md for
+    why that is a human decision, not an agent one."""
+    knowledge_root = get_shared_knowledge_root(programs_root)
+    summary = summarize_legacy_reference_log(knowledge_root)
+    if summary.legacy_reference_count == 0:
+        return DoctorCheck(
+            "Registry legacy references", "ok",
+            "No legacy alias-keyed people/team lookups recorded.",
+            metadata={"legacy_reference_count": 0}, code="DIR-16",
+        )
+    sample = ", ".join(summary.sample_refs)
+    return DoctorCheck(
+        "Registry legacy references", "warn",
+        f"DIR-16: {summary.legacy_reference_count} people/team lookup(s) resolved via the legacy alias-keyed "
+        f"path rather than a canonical entity_id; sample refs: {sample}.",
+        metadata={"legacy_reference_count": summary.legacy_reference_count, "sample_refs": list(summary.sample_refs)},
+        code="DIR-16",
     )
 
 

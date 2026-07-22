@@ -172,6 +172,33 @@ def test_run_kb_doctor_dir05_check_ok_when_shadow_is_equivalent(tmp_path: Path) 
     assert "safe to remove" in dir05_check.detail
 
 
+def test_run_kb_doctor_legacy_reference_check_ok_with_no_log(tmp_path: Path) -> None:
+    report = run_kb_doctor(
+        editions_root=tmp_path / "editions",
+        programs_root=tmp_path / "programs",
+    )
+
+    legacy_check = next(check for check in report.checks if check.label == "Registry legacy references")
+    assert legacy_check.status == "ok"
+    assert legacy_check.metadata["legacy_reference_count"] == 0
+
+
+def test_run_kb_doctor_legacy_reference_check_warns_on_recorded_legacy_lookups(tmp_path: Path) -> None:
+    from src.core.people_legacy_reference_metrics import record_legacy_alias_reference
+
+    knowledge_root = tmp_path / "knowledge"
+    record_legacy_alias_reference(knowledge_root, entity_type="person", ref="P:alice")
+    record_legacy_alias_reference(knowledge_root, entity_type="team", ref="team:acme-core")
+
+    report = run_kb_doctor(editions_root=tmp_path / "editions", programs_root=tmp_path / "programs")
+
+    legacy_check = next(check for check in report.checks if check.label == "Registry legacy references")
+    assert legacy_check.status == "warn"
+    assert legacy_check.metadata["legacy_reference_count"] == 2
+    assert "P:alice" in legacy_check.metadata["sample_refs"]
+    assert "DIR-16" in legacy_check.detail
+
+
 def test_knowledge_predicate_registry_check_warns_when_threshold_exceeded(monkeypatch) -> None:
     monkeypatch.setattr("src.commands.doctor_checks.kb_checks.predicate_count", lambda: 101)
 

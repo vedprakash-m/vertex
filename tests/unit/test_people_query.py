@@ -143,6 +143,24 @@ def test_find_person_returns_none_for_unknown_ref(tmp_path: Path) -> None:
     assert find_person("nobody", knowledge_root=knowledge_root) is None
 
 
+def test_find_person_records_legacy_reference_for_bare_alias_but_not_canonical_ref(tmp_path: Path) -> None:
+    """WO-6 (specs/backlog.md, schema-3.0 horizon): a bare-alias lookup is
+    the legacy compatibility path and must be counted; an already-canonical
+    ref must not be."""
+    from src.core.people_legacy_reference_metrics import summarize_legacy_reference_log
+
+    knowledge_root = tmp_path / "knowledge"
+    _seed_registry(knowledge_root)
+
+    find_person("person:alice", knowledge_root=knowledge_root)
+    assert summarize_legacy_reference_log(knowledge_root).legacy_reference_count == 0
+
+    find_person("alice", knowledge_root=knowledge_root)
+    summary = summarize_legacy_reference_log(knowledge_root)
+    assert summary.legacy_reference_count == 1
+    assert summary.sample_refs == ("alice",)
+
+
 def test_find_person_rejects_a_team_ref(tmp_path: Path) -> None:
     knowledge_root = tmp_path / "knowledge"
     _seed_registry(knowledge_root)
