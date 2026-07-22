@@ -311,6 +311,34 @@ class TestScriptWrapper:
         rc = qc_main(["--program", "p-script-fail", "--programs-root", str(tmp_path)])
         assert rc == 1
 
+    def test_script_output_appends_trend_record(self, tmp_path: Path) -> None:
+        # BL-A3 action item 2: persist a trend, not just a point reading,
+        # whenever a run is published via --output.
+        from scripts.rev_quality_check import main as qc_main
+
+        bodies = [f"Deployment completed 2026-06-{20+i:02d}." for i in range(5)]
+        cands = _stage("p-trend", tmp_path, bodies)
+        proposed = {c.candidate_id: c.proposed_event_type for c in cands}
+        _write_corpus(tmp_path, "p-trend", _label_rows(cands, proposed, label="accept"))
+        output = tmp_path / "p-trend" / "_quality" / "rev_quality_metrics.json"
+
+        rc = qc_main(["--program", "p-trend", "--programs-root", str(tmp_path), "--output", str(output)])
+        assert rc == 0
+        trend_path = output.parent / "rev_quality_trend.jsonl"
+        assert trend_path.exists()
+        lines = trend_path.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1
+        record = json.loads(lines[0])
+        assert record["program_id"] == "p-trend"
+        assert record["g_xtract_prec"] == 1.0
+        assert "recorded_at" in record
+
+        # A second published run appends, it does not overwrite.
+        rc = qc_main(["--program", "p-trend", "--programs-root", str(tmp_path), "--output", str(output)])
+        assert rc == 0
+        lines = trend_path.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 2
+
     def test_script_human_report_rendered(self, tmp_path: Path, capsys) -> None:
         from scripts.rev_quality_check import main as qc_main
 

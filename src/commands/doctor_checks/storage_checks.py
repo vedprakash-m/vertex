@@ -120,6 +120,7 @@ def run_storage_doctor(
         ),
         _gather_freshness_check(program_id, programs_root=programs_root),
         _gather_completeness_oracle_check(program_id, programs_root=programs_root),
+        _rev_extraction_precision_regression_check(program_id, programs_root=programs_root),
         _fact_store_authority_check(program_id, programs_root=programs_root),
         _cost_ledger_storage_check(edition_name, programs_root=programs_root),
         _ai_proposal_queue_check(program_id, programs_root=programs_root),
@@ -861,6 +862,81 @@ def _gather_completeness_oracle_check(program_id: str, *, programs_root: Path) -
         "ok",
         f"all {len(manifest.query_results)} scope(s) in run {manifest.run_id} carry an operator source-export reconciliation.",
         metadata={"run_id": manifest.run_id},
+    )
+
+
+#: specs/backlog.md BL-A3: the frozen 2026-07-07 preliminary, single-annotator
+#: g_xtract_prec measurement that BL-A2 permanently accepted as XPF's
+#: operating-tier ceiling (programs/xpf/_quality/rev_quality_metrics.json).
+_XTRACT_PREC_BASELINE = 0.8667
+#: BL-A3 action item 4's required explicit, falsifiable delta: an absolute
+#: drop of more than this below the baseline is a regression worth a warn.
+#: Chosen (not derived) as a round number comfortably larger than normal
+#: run-to-run noise on a ~15-candidate preliminary sample; revisit once a
+#: larger, fleet-scale corpus makes the noise floor itself measurable.
+_XTRACT_PREC_REGRESSION_DELTA = 0.05
+_XTRACT_PREC_REGRESSION_FLOOR = round(_XTRACT_PREC_BASELINE - _XTRACT_PREC_REGRESSION_DELTA, 4)
+
+
+def _rev_extraction_precision_regression_check(program_id: str, *, programs_root: Path) -> DoctorCheck:
+    """BL-A3: compensating monitor for BL-A2's accepted precision ceiling.
+
+    BL-A2 permanently accepted `recommended_v1_authoritative` as XPF's
+    operating tier on the strength of a preliminary, single-annotator
+    measurement -- defensible, but accepting a ceiling with no ongoing
+    measurement means a real-world regression below it would be invisible.
+    Warn-only, never blocks (mirrors `_gather_completeness_oracle_check`'s
+    non-blocking pattern): this is a monitor, not a new publish gate.
+    """
+    metrics_path = programs_root / program_id / "_quality" / "rev_quality_metrics.json"
+    if not metrics_path.exists():
+        return DoctorCheck(
+            "REV Extraction Precision",
+            "ok",
+            f"no {metrics_path.name} published yet for {program_id!r}; nothing to compare against the BL-A3 baseline.",
+            metadata={"metrics_present": False},
+        )
+    try:
+        data = json.loads(metrics_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return DoctorCheck(
+            "REV Extraction Precision",
+            "warn",
+            f"{metrics_path} could not be parsed: {exc}",
+            metadata={"metrics_present": True, "parse_error": str(exc)},
+        )
+    current = data.get("g_xtract_prec")
+    if not isinstance(current, (int, float)):
+        return DoctorCheck(
+            "REV Extraction Precision",
+            "ok",
+            f"{metrics_path.name} has no numeric g_xtract_prec field yet.",
+            metadata={"metrics_present": True},
+        )
+    if current < _XTRACT_PREC_REGRESSION_FLOOR:
+        return DoctorCheck(
+            "REV Extraction Precision",
+            "warn",
+            (
+                f"g_xtract_prec={current:.4f} has dropped {_XTRACT_PREC_REGRESSION_DELTA:.2f}+ below the "
+                f"2026-07-07 baseline {_XTRACT_PREC_BASELINE:.4f} (floor {_XTRACT_PREC_REGRESSION_FLOOR:.4f}). "
+                "Re-run scripts/rev_quality_check.py and review the labeled corpus for a real extraction regression."
+            ),
+            metadata={
+                "g_xtract_prec": current,
+                "baseline": _XTRACT_PREC_BASELINE,
+                "floor": _XTRACT_PREC_REGRESSION_FLOOR,
+            },
+        )
+    return DoctorCheck(
+        "REV Extraction Precision",
+        "ok",
+        f"g_xtract_prec={current:.4f} is at or above the BL-A3 regression floor {_XTRACT_PREC_REGRESSION_FLOOR:.4f}.",
+        metadata={
+            "g_xtract_prec": current,
+            "baseline": _XTRACT_PREC_BASELINE,
+            "floor": _XTRACT_PREC_REGRESSION_FLOOR,
+        },
     )
 
 

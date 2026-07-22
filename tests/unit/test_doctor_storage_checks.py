@@ -16,6 +16,7 @@ from src.commands.doctor_checks.storage_checks import (
     _fact_store_authority_check,
     _gather_completeness_oracle_check,
     _program_sqlite_storage_check,
+    _rev_extraction_precision_regression_check,
     _sidecar_health_check,
     _sqlite_storage_check,
 )
@@ -435,6 +436,74 @@ def test_gather_completeness_oracle_check_warns_on_operator_export_mismatch(tmp_
 
     assert result.status == "warn"
     assert result.metadata["mismatched_scopes"] == ["scope-a"]
+
+
+def _write_quality_metrics(programs_root: Path, program_id: str, g_xtract_prec: float) -> None:
+    import json as _json
+
+    qdir = programs_root / program_id / "_quality"
+    qdir.mkdir(parents=True, exist_ok=True)
+    (qdir / "rev_quality_metrics.json").write_text(
+        _json.dumps({"program_id": program_id, "g_xtract_prec": g_xtract_prec}), encoding="utf-8"
+    )
+
+
+def test_rev_extraction_precision_check_ok_when_no_metrics_published(tmp_path: Path) -> None:
+    result = _rev_extraction_precision_regression_check("xpf", programs_root=tmp_path)
+
+    assert result.status == "ok"
+    assert result.metadata["metrics_present"] is False
+
+
+def test_rev_extraction_precision_check_ok_at_baseline(tmp_path: Path) -> None:
+    _write_quality_metrics(tmp_path, "xpf", 0.8667)
+
+    result = _rev_extraction_precision_regression_check("xpf", programs_root=tmp_path)
+
+    assert result.status == "ok"
+    assert result.metadata["g_xtract_prec"] == 0.8667
+
+
+def test_rev_extraction_precision_check_ok_just_above_floor(tmp_path: Path) -> None:
+    _write_quality_metrics(tmp_path, "xpf", 0.8167)  # exactly at the floor -- not below it
+
+    result = _rev_extraction_precision_regression_check("xpf", programs_root=tmp_path)
+
+    assert result.status == "ok"
+
+
+def test_rev_extraction_precision_check_warns_below_floor(tmp_path: Path) -> None:
+    _write_quality_metrics(tmp_path, "xpf", 0.75)
+
+    result = _rev_extraction_precision_regression_check("xpf", programs_root=tmp_path)
+
+    assert result.status == "warn"
+    assert result.metadata["g_xtract_prec"] == 0.75
+    assert result.metadata["floor"] == 0.8167
+
+
+def test_rev_extraction_precision_check_ok_when_field_missing(tmp_path: Path) -> None:
+    import json as _json
+
+    qdir = tmp_path / "xpf" / "_quality"
+    qdir.mkdir(parents=True, exist_ok=True)
+    (qdir / "rev_quality_metrics.json").write_text(_json.dumps({"program_id": "xpf"}), encoding="utf-8")
+
+    result = _rev_extraction_precision_regression_check("xpf", programs_root=tmp_path)
+
+    assert result.status == "ok"
+    assert result.metadata["metrics_present"] is True
+
+
+def test_rev_extraction_precision_check_warns_on_unparseable_json(tmp_path: Path) -> None:
+    qdir = tmp_path / "xpf" / "_quality"
+    qdir.mkdir(parents=True, exist_ok=True)
+    (qdir / "rev_quality_metrics.json").write_text("{not valid json", encoding="utf-8")
+
+    result = _rev_extraction_precision_regression_check("xpf", programs_root=tmp_path)
+
+    assert result.status == "warn"
+    assert "parse_error" in result.metadata
 
 
 
