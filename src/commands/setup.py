@@ -19,7 +19,6 @@ from typing import Annotated, Callable
 import typer
 
 from src.ai.ai_mode import AIMode, get_ai_mode
-from src.ai._pipeline import process_generated_text
 from src.commands.onboard import ADOStage, IdentityStage
 from src.core.setup_state import (
     ConversationStateMachine,
@@ -174,11 +173,26 @@ def _ai_suggest_workstreams(description: str) -> list[tuple[str, str]]:
     """Try to use the AI provider to propose workstreams from a description.
 
     Returns list of (name, description) tuples, or empty list on failure.
+
+    specs/backlog.md BL-C2: this used to be a near-duplicate, inline
+    reimplementation of ``src.ai.setup_assistant.SetupAssistant``'s own
+    ``suggest_workstreams_from_description`` (hardcoded prompt text
+    instead of the registered ``setup_ws_suggest.v1``, no
+    ``route_through_tiers``). Now builds the same client this function
+    always built, then delegates to the real implementation -- one
+    prompt/policy path instead of two silently-diverging ones.
+    Constructs ``SetupAssistant(client=...)`` directly (not
+    ``.from_environment()``), which never triggers ``OnboardAssistant.
+    from_environment()``'s own deployment resolution -- this command
+    layer resolves its own deployment first and does not need a second,
+    independent resolution for a feature (``onboard_assistant``'s
+    scorecard/style suggestions) this call site never uses.
     """
     if get_ai_mode() == AIMode.DISABLED:
         return []
     try:
         from src.ai.deployment_fallback import FallbackStructuredClient, resolve_ai_deployments_for_feature
+        from src.ai.setup_assistant import SetupAssistant
 
         deployments = resolve_ai_deployments_for_feature(
             feature_name="onboard_assistant",
@@ -195,44 +209,12 @@ def _ai_suggest_workstreams(description: str) -> list[tuple[str, str]]:
             temperature=0.3,
             budget_usd=0.2,
         )
-        system = (
-            "You are a TPM onboarding assistant. "
-            "Given a program description, return a JSON object with key 'workstreams' "
-            "containing a list of objects, each with 'name' (2-4 words) and 'description' "
-            "(one sentence). Return 3-5 workstreams. Return JSON only."
-        )
-        user = f"Program description: {description}"
-        result: list[tuple[str, str]] = client.structured(
-            system,
-            user,
-            parser=_parse_ws_suggestions,
-            max_tokens=300,
-            prompt_version="setup_ws_suggest.v1",
-        )
-        return result
+        assistant = SetupAssistant(client=client)
+        suggestions = assistant.suggest_workstreams_from_description(description)
+        return [(suggestion.name, suggestion.description) for suggestion in suggestions]
 
     except Exception:  # noqa: BLE001 — graceful degradation
         return []
-
-
-def _parse_ws_suggestions(payload: object) -> list[tuple[str, str]]:
-    if not isinstance(payload, dict):
-        return []
-    raw = payload.get("workstreams", [])
-    if not isinstance(raw, list):
-        return []
-    result = []
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        name = item.get("name", "")
-        desc = item.get("description", "")
-        if isinstance(name, str) and name.strip():
-            safe_name = process_generated_text(name.strip()).text
-            safe_desc = process_generated_text(desc.strip() if isinstance(desc, str) else "").text
-            if safe_name:
-                result.append((safe_name, safe_desc))
-    return result
 
 
 # ---------------------------------------------------------------------------

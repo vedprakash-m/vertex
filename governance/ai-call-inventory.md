@@ -21,9 +21,10 @@ the reverse-check section below. A new CI ratchet,
 new file starts making direct provider calls without being added to this
 document and to the ratchet's own known-file list in the same change —
 this is BL-C2 step 5's "CI ratchet" requirement. `setup.py:205`'s
-duplication and the full per-site `AISchemaGateway`/`ai_release_audit`
-wiring for `production`-classified sites remain open; see
-`specs/backlog.md`'s BL-C2 row for what's done vs. remaining.
+duplication is fixed and every `production`-classified site now has full
+`AISchemaGateway`/`ai_release_audit` wiring — see `specs/backlog.md`'s
+BL-C2 row for the small items that remain (step 3's advisory/evaluation
+reduced-bar recording).
 
 **Classification legend:** `production` (output can reach a published
 artifact or written fact), `advisory` (staged proposal requiring explicit
@@ -57,8 +58,7 @@ apply this label; see rev_judge's note).
 | synthesizer | `src/ai/synthesizer.py:149` / `:146` | Yes — `synthesizer.v1` | Yes | Yes | production | Used by `src/commands/synthesize.py`. |
 | risk_proposal_generator | `src/ai/risk_proposal_generator.py:178` / `:175` | Yes — `risk_proposal_generator.v1` | Yes | Yes | advisory | `ai_policy.yaml`'s own comment: "`apply_risk_proposal` only ever fires on human approval." Staged via `ai_proposals.py`. |
 | top_three_candidate_generator | `src/ai/top_three_candidate_generator.py:118` / `:115` | Yes — `top_three_candidate_generator.v1` | Yes | Yes | advisory | Same `ai_proposals.py` staged-proposal flow. |
-| setup_assistant | `src/ai/setup_assistant.py:219` / `:216` | Yes — `setup_ws_suggest.v1` | No | No | advisory | Workstream suggestions during setup; operator accepts/edits. |
-| setup_assistant | `src/commands/setup.py:205` (direct `.structured`, no `route_through_tiers`) | **No** — hardcoded system-prompt string; only the `prompt_version="setup_ws_suggest.v1"` label is reused for telemetry | No | No | advisory | Near-duplicate of `setup_assistant.py`'s `_ai_suggest_workstreams`, reimplemented inline in the command layer with its own hardcoded prompt text rather than calling `load_prompt`. Latent drift risk between the two implementations — worth a human look. |
+| setup_assistant | `src/ai/setup_assistant.py:219` / `:216` | Yes — `setup_ws_suggest.v1` | No | No | advisory | Workstream suggestions during setup; operator accepts/edits. **[FIXED 2026-07-22]** `src/commands/setup.py`'s own near-duplicate inline reimplementation (hardcoded prompt text, no `route_through_tiers`) retired — the command layer now builds its client (unchanged — still resolves under `"onboard_assistant"` for deployment, and still deliberately does not call `SetupAssistant.from_environment()`, to avoid constructing an unused `OnboardAssistant` via that path) and delegates to `SetupAssistant(client=...).suggest_workstreams_from_description(...)`, the one real implementation. `_parse_ws_suggestions`'s PII-scrub test moved to a new `tests/unit/test_ai_setup_assistant.py` (4 tests) rather than silently dropped. `test_ai_call_site_ratchet.py`'s known-file list updated to remove the now-stale `src/commands/setup.py` entry. |
 | program_synthesizer | `src/ai/program_synthesizer.py:141` / `:138` | Yes — `program_synthesis.v1` | Yes | Yes | production | `generate_program_synthesis`; on `RELEASED` calls `persist_program_synthesis(...)` directly (no separate accept/reject step) — feeds the cockpit. |
 | program_synthesizer | `src/ai/program_synthesizer.py:268` / `:265` | Yes | Yes | Yes | evaluation | `generate_program_synthesis_via_context_gateway`. Docstring: "NOT a production swap… exists so a blind comparison harness can gather real evidence." Only caller is `src/commands/program_synthesizer_pilot.py`. |
 | prose_event_extractor | `src/ai/discovery/prose_event_extractor.py:209` / `:206` | Yes — `prose_event_extractor.v1`–`v4` (wave-selected) | No | No | advisory | Feeds `CandidateEvent`s into `src/core/ledger/candidate_store.py` via `src/commands/discover.py`; candidates require triage/confirmation, not auto-published. |
@@ -106,13 +106,10 @@ direction):**
   now explicitly set to `"default"`; telemetry no longer falls back to the
   caller string. The prompt/max_tokens are still an inline literal
   (unregistered) — that narrower gap remains open.
-- `src/commands/setup.py:205` — **still open.** Resolves under
-  `"onboard_assistant"` (valid) for deployment, which is itself odd since
-  the logic and prompt text are functionally `setup_assistant`'s
-  (registered as `setup_ws_suggest.v1`), just reimplemented inline rather
-  than sharing code. Not attempted in this pass — consolidating two
-  near-duplicate implementations risks a subtle UX behavior change that
-  needs its own dedicated review, not a drive-by fix.
+- ~~`src/commands/setup.py:205`~~ **[FIXED 2026-07-22]** — the inline
+  near-duplicate reimplementation is retired; the command layer now
+  delegates to `SetupAssistant.suggest_workstreams_from_description`, the
+  one real, prompt-registry-backed implementation.
 
 No call site used a completely invented feature-name string outside the
 26 (now 27) — all mismatches found were of the "borrowed/wrong policy

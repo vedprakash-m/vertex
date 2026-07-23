@@ -138,23 +138,6 @@ def test_ai_suggest_workstreams_does_not_require_unused_onboard_assistant(monkey
     assert suggestions == [("Reliability", "Track platform health.")]
 
 
-def test_parse_ws_suggestions_runs_ai_text_through_safety_pipeline() -> None:
-    import src.commands.setup as setup_mod
-
-    suggestions = setup_mod._parse_ws_suggestions(
-        {
-            "workstreams": [
-                {
-                    "name": "Reliability",
-                    "description": "Track platform health with foo@gmail.com.",
-                }
-            ]
-        }
-    )
-
-    assert suggestions == [("Reliability", "Track platform health with [PII-FILTERED-EMAIL].")]
-
-
 def test_session_load_returns_none_when_no_files(tmp_path: Path) -> None:
     """T3 edge: load_session returns None when no session exists."""
     assert load_session(tmp_path) is None

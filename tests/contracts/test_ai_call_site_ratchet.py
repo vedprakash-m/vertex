@@ -57,7 +57,6 @@ _KNOWN_CALL_SITE_FILES = frozenset({
     "src/ai/top_three_candidate_generator.py",
     "src/commands/kb.py",
     "src/commands/report_lookback.py",
-    "src/commands/setup.py",
 })
 
 # Files containing the literal substring only inside a docstring/comment
