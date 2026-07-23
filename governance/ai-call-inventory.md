@@ -115,6 +115,39 @@ No call site used a completely invented feature-name string outside the
 26 (now 27) — all mismatches found were of the "borrowed/wrong policy
 label for a distinct prompt" kind rather than a literal typo'd feature key.
 
+## Advisory/evaluation reduced-bar check (BL-C2 step 3, 2026-07-22)
+
+BL-C2's step 3 sets a bar per classification: `production` requires the
+full AISchemaGateway/`ai_release_audit` contract (now shipped everywhere
+it applies, see above); `advisory`/`evaluation` sites require at minimum
+**(a)** a registry-managed, versioned prompt and **(b)** a durable trace,
+with the reduced bar **explicitly recorded**, not assumed. Checked every
+`advisory`/`evaluation` row in the table above against both:
+
+- **(a) Registry-managed prompt.** All but one already pass: `default`
+  (`src/commands/kb.py`'s update planner) still uses an inline, unregistered
+  system string — tracked above as a real, still-open narrow gap, not
+  silently accepted.
+- **(b) Durable trace.** Every `advisory`/`evaluation` site routes through
+  either `route_through_tiers` (which records a routing decision) or a
+  direct `client.structured(...)` call captured by `llm_trace.py`'s
+  metadata-only tracing (the same mechanism `ai_release_audit.py`'s own
+  module docstring contrasts itself against) — real but ephemeral, exactly
+  the reduced bar this classification calls for, not the durable QG-29
+  ledger `production` sites now carry. No `advisory`/`evaluation` site is
+  silently untraced.
+
+**Sites with a genuinely narrower posture than "registry prompt + ephemeral
+trace," each already called out by name above rather than left implicit**:
+`context_synthesizer` (deliberately opts out of gateway/audit entirely,
+flagged in its own row as "worth a human check on whether that's
+intentional"); `rev_judge` (no confirmed production caller at all, flagged
+as "close to retired… a human should confirm"); the two unused
+`setup_discovery_assistant.v1`/`setup_explainer.v1` prompts (flagged in the
+side note below). These three are genuine open questions for a human, not
+gaps this pass can silently resolve — recording that explicitly **is** this
+step's deliverable.
+
 ## Prompt-registry side note
 
 Two of the 30 registered prompt versions — `setup_discovery_assistant.v1`
