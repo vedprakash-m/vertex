@@ -138,27 +138,71 @@ def _generate_with_ai(
     )
 
     if program_id is None:
+        # specs/backlog.md BL-C2: no program to attribute a durable
+        # ai_release_audit trail to (review_full.py can legitimately run
+        # without a resolved program), so QG-29's lifecycle/terminal
+        # recording genuinely does not apply here -- but AISchemaGateway's
+        # bounds check and the same semantic validator the program_id
+        # branch below uses are both program-independent (Zone-A pure
+        # functions) and were previously skipped in this branch only,
+        # not because they didn't apply. Now applied here too, so the two
+        # call sites differ only in audit-trail durability, not in
+        # validation rigor.
+        request_payload = {
+            "reader": reader,
+            "question_seed": question_seed,
+            "response_seed": response_seed,
+            "evidence": list(evidence),
+        }
         try:
-            outcome = route_through_tiers(
+            validate_bounded_payload(request_payload)
+        except SchemaGatewayError as error:
+            logger.warning("AI anticipation request rejected by AISchemaGateway; using deterministic fallback: %s", error)
+            return None
+
+        try:
+            raw = route_through_tiers(
                 _FEATURE,
                 deterministic_fn=lambda: None,
                 frontier_fn=lambda: client.structured(
                     "You generate concise leadership anticipation questions as strict JSON.",
                     user_prompt,
-                    parser=_parse_ai_rendered_question,
+                    parser=lambda payload: payload,
                     max_tokens=load_ai_feature_policy(_FEATURE).max_tokens,
                     prompt_version=PROMPT_VERSION,
                 ),
                 policy=load_ai_feature_policy(_FEATURE),
-            )
-            rendered = outcome.value
+            ).value
         except (AIPipelineError, ValueError, TypeError, AIClientError) as error:
             logger.warning("AI anticipation formatting failed; using deterministic fallback: %s", error)
             return None
         except Exception as error:
             logger.warning("AI anticipation call failed; using deterministic fallback: %s", error)
             return None
-        return _validated_rendered_pair(rendered)
+
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            logger.warning("AI anticipation response was not a structured object; using deterministic fallback.")
+            return None
+        try:
+            validate_bounded_payload(raw)
+        except SchemaGatewayError as error:
+            logger.warning("AI anticipation response rejected by AISchemaGateway; using deterministic fallback: %s", error)
+            return None
+        try:
+            question_text, response_text = _parse_ai_rendered_question(raw)
+        except ValueError as error:
+            logger.warning("AI anticipation response malformed; using deterministic fallback: %s", error)
+            return None
+        findings = _validate_semantics(question_text, response_text)
+        if findings:
+            logger.warning(
+                "AI anticipation response failed semantic validation; using deterministic fallback: %s",
+                "; ".join(findings),
+            )
+            return None
+        return _validated_rendered_pair((question_text, response_text))
 
     ai_run_id = new_ai_run_id()
 
