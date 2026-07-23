@@ -180,7 +180,7 @@ BL-H1: in-progress (2026-07-22)
 BL-H2: in-progress (2026-07-22)
 BL-H3: in-progress (2026-07-22)
 BL-I1: in-progress (2026-07-22)
-BL-J1: in-progress (2026-07-22)
+BL-J1: deferred (2026-07-22)
 BL-K1: complete (2026-07-22)
 BL-L1: complete (2026-07-22)
 -->

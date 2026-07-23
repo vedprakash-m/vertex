@@ -52,7 +52,7 @@ from src.core.identity_provider_port import load_identity_providers_document
 from src.core.audience_scopes import audience_scopes_path_for_program, load_audience_scopes
 from src.core.people_registry_storage_class import refresh_registry_storage_status
 from src.core.people_registry_governance import inspect_registry_manifest_integrity
-from src.core.people_legacy_reference_metrics import summarize_legacy_reference_log
+from src.core.people_legacy_reference_metrics import evaluate_schema_3_0_horizon, summarize_legacy_reference_log
 from src.core.people_registry_transaction import detect_stale_registry_lease, recover_registry_transactions
 from src.core.store_factory import build_trajectory_store_for_program_id
 
@@ -973,23 +973,31 @@ def registry_legacy_reference_check(*, programs_root: Path) -> DoctorCheck:
     never-blocking count of `people find`/`teams show` lookups that
     resolved via the legacy alias-keyed compatibility path
     (`P:<alias>`/`person:<alias>`/bare alias) rather than an
-    already-canonical `entity_id`. Measurement only -- no numeric horizon
-    threshold is picked here; see WO-6's own note in specs/backlog.md for
-    why that is a human decision, not an agent one."""
+    already-canonical `entity_id`. Also surfaces BL-J1's horizon status
+    (operator-ratified 2026-07-22: zero reads across 8 consecutive weeks) --
+    informational only, never blocking; reaching `met=True` does not by
+    itself trigger the schema-3.0 removal, it only makes the removal
+    schedulable per WO-6's step 4."""
     knowledge_root = get_shared_knowledge_root(programs_root)
     summary = summarize_legacy_reference_log(knowledge_root)
+    horizon = evaluate_schema_3_0_horizon(knowledge_root)
+    horizon_note = f" Schema-3.0 horizon: {horizon.reason} ({'MET' if horizon.met else 'not yet met'})."
     if summary.legacy_reference_count == 0:
         return DoctorCheck(
             "Registry legacy references", "ok",
-            "No legacy alias-keyed people/team lookups recorded.",
-            metadata={"legacy_reference_count": 0}, code="DIR-16",
+            f"No legacy alias-keyed people/team lookups recorded.{horizon_note}",
+            metadata={"legacy_reference_count": 0, "schema_3_0_horizon_met": horizon.met}, code="DIR-16",
         )
     sample = ", ".join(summary.sample_refs)
     return DoctorCheck(
         "Registry legacy references", "warn",
         f"DIR-16: {summary.legacy_reference_count} people/team lookup(s) resolved via the legacy alias-keyed "
-        f"path rather than a canonical entity_id; sample refs: {sample}.",
-        metadata={"legacy_reference_count": summary.legacy_reference_count, "sample_refs": list(summary.sample_refs)},
+        f"path rather than a canonical entity_id; sample refs: {sample}.{horizon_note}",
+        metadata={
+            "legacy_reference_count": summary.legacy_reference_count,
+            "sample_refs": list(summary.sample_refs),
+            "schema_3_0_horizon_met": horizon.met,
+        },
         code="DIR-16",
     )
 
