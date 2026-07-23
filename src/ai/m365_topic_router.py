@@ -12,10 +12,19 @@ from src.ai.deployment_fallback import FallbackStructuredClient, LEGACY_DEPLOYME
 from src.ai.llm_trace import AITraceContext
 from src.ai.provider import DisabledStructuredProvider, LLMProvider
 from src.ai.tiered_router import TierResult, route_through_tiers
+from src.core.ai_schema_gateway import SchemaGatewayError, validate_bounded_payload
+from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.keyword_topic_router import KeywordM365TopicRouter, M365RoutingDecision
 from src.core.m365_router_interface import IM365TopicRouter, M365ReassignCorrection
 from src.core.models_v2 import Program, Workstream
 from src.core.policy_loader import load_ai_feature_policy, load_m365_routing_policy
+from src.core.quality_gates.ai_release_audit import (
+    AIRunState,
+    ReleaseTerminal,
+    new_ai_run_id,
+    record_ai_release_decision,
+    record_ai_run_lifecycle,
+)
 
 
 PROMPT_VERSION = "m365_topic_router.v1"
@@ -34,6 +43,12 @@ class M365TopicRouterError(Exception):
 class M365TopicRouter(IM365TopicRouter):
     client: LLMProvider
     fallback_router: IM365TopicRouter = field(default_factory=KeywordM365TopicRouter)
+    # specs/backlog.md BL-C2: program_id/programs_root for the QG-29
+    # release-audit trail -- default "" only exercised by direct-construction
+    # tests that don't care about the audit trail; the real `from_program`
+    # constructor always sets a real program_id.
+    program_id: str = ""
+    programs_root: Path = PROGRAMS_ROOT
 
     @classmethod
     def from_program(
@@ -41,9 +56,10 @@ class M365TopicRouter(IM365TopicRouter):
         program: Program,
         *,
         trace_context: AITraceContext | None = None,
+        programs_root: Path = PROGRAMS_ROOT,
     ) -> "M365TopicRouter":
         if get_ai_mode() == AIMode.DISABLED:
-            return cls(client=DisabledStructuredProvider(feature_name="M365TopicRouter"))
+            return cls(client=DisabledStructuredProvider(feature_name="M365TopicRouter"), program_id=program.id, programs_root=programs_root)
         if program.ai is None or not program.ai.enabled:
             raise M365TopicRouterError("AI routing requires program.ai.enabled to be true.")
 
@@ -67,7 +83,7 @@ class M365TopicRouter(IM365TopicRouter):
             requests_per_minute=program.ai.requests_per_minute,
             trace_context=trace_context,
         )
-        return cls(client=client)
+        return cls(client=client, program_id=program.id, programs_root=programs_root)
 
     def route_artifact(
         self,
@@ -102,9 +118,10 @@ class M365TopicRouter(IM365TopicRouter):
             outcome = route_through_tiers(
                 _FEATURE,
                 deterministic_fn=lambda: None,
-                frontier_fn=lambda: self.client.structured(
-                    _load_prompt(),
-                    _build_user_prompt(
+                frontier_fn=lambda: _run_ai_route(
+                    self.client,
+                    system_prompt=_load_prompt(),
+                    user_prompt=_build_user_prompt(
                         display_name=display_name,
                         subject_or_title=subject_or_title,
                         participant_aliases=participant_aliases,
@@ -115,12 +132,9 @@ class M365TopicRouter(IM365TopicRouter):
                         recent_reassign_corrections=recent_reassign_corrections,
                         fallback_decision=fallback_decision,
                     ),
-                    parser=lambda payload: _parse_routing_decision(
-                        payload=payload,
-                        workstream_profiles=workstream_profiles,
-                    ),
-                    max_tokens=load_ai_feature_policy(_FEATURE).max_tokens,
-                    prompt_version=PROMPT_VERSION,
+                    workstream_profiles=workstream_profiles,
+                    program_id=self.program_id,
+                    programs_root=self.programs_root,
                 ),
                 policy=load_ai_feature_policy(_FEATURE),
             )
@@ -129,6 +143,91 @@ class M365TopicRouter(IM365TopicRouter):
             return _combine_routing_decisions(fallback_decision=fallback_decision, ai_decision=outcome.value)
         except (AIClientError, M365TopicRouterError, TypeError, ValueError):
             return fallback_decision
+
+
+def _run_ai_route(
+    client: LLMProvider,
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    workstream_profiles: tuple[Workstream, ...],
+    program_id: str,
+    programs_root: Path,
+) -> M365RoutingDecision:
+    """specs/backlog.md BL-C2: m365_topic_router is production-classified
+    (its output feeds `promotion_candidates`/`promotion_blocked` artifact
+    building during gather). Bounds-checks the raw response through
+    AISchemaGateway, then reuses `_parse_routing_decision`'s existing
+    workstream-membership/confidence/topics/reasoning validation as the
+    semantic validator -- that check already exists and already raises the
+    exact `M365TopicRouterError` `route_artifact`'s broad except clause
+    depends on, so a separate validator class would just duplicate it.
+    """
+    ai_run_id = new_ai_run_id()
+
+    def _lifecycle(state: AIRunState) -> None:
+        record_ai_run_lifecycle(
+            program_id=program_id,
+            ai_run_id=ai_run_id,
+            feature=_FEATURE,
+            state=state,
+            prompt_version=PROMPT_VERSION,
+            policy_version=PROMPT_VERSION,
+            programs_root=programs_root,
+        )
+
+    def _discard(terminal: ReleaseTerminal, reason: str) -> None:
+        record_ai_release_decision(
+            program_id=program_id,
+            ai_run_id=ai_run_id,
+            terminal=terminal,
+            reason=reason,
+            validator_finding_count=0,
+            programs_root=programs_root,
+        )
+
+    _lifecycle(AIRunState.PLANNED)
+    _lifecycle(AIRunState.REQUESTED)
+    try:
+        raw = client.structured(
+            system_prompt,
+            user_prompt,
+            parser=lambda payload: payload,
+            max_tokens=load_ai_feature_policy(_FEATURE).max_tokens,
+            prompt_version=PROMPT_VERSION,
+        )
+    except Exception as error:
+        _discard(ReleaseTerminal.DISCARDED, f"provider call failed: {error}")
+        raise
+    _lifecycle(AIRunState.RESPONDED)
+
+    if not isinstance(raw, dict):
+        _discard(ReleaseTerminal.DISCARDED, "no structured response returned by the provider.")
+        raise M365TopicRouterError("AI routing payload must be an object.")
+
+    try:
+        validate_bounded_payload(raw)
+    except SchemaGatewayError as error:
+        _discard(ReleaseTerminal.REJECTED, f"AISchemaGateway rejected the response: {error}")
+        raise M365TopicRouterError(f"AI routing response rejected by AISchemaGateway: {error}") from error
+    _lifecycle(AIRunState.SCHEMA_VALIDATED)
+
+    try:
+        decision = _parse_routing_decision(payload=raw, workstream_profiles=workstream_profiles)
+    except M365TopicRouterError as error:
+        _discard(ReleaseTerminal.REJECTED, f"routing semantic validation failed: {error}")
+        raise
+    _lifecycle(AIRunState.SEMANTICALLY_VALIDATED)
+
+    record_ai_release_decision(
+        program_id=program_id,
+        ai_run_id=ai_run_id,
+        terminal=ReleaseTerminal.RELEASED,
+        reason="passed AISchemaGateway bounds and routing semantic validation",
+        validator_finding_count=0,
+        programs_root=programs_root,
+    )
+    return decision
 
 
 def _prefer_deterministic_routing(fallback_decision: M365RoutingDecision) -> bool:
