@@ -9006,7 +9006,7 @@ def test_generate_report_draft_lookback_appends_ai_retrospective_synthesis(monke
     assert draft_payload["ai_trace_run_id"] == artifacts.manifest.metadata["ai_safety"]["trace_run_id"]
 
 
-def test_build_lookback_ai_retrospective_rows_scrubs_pii_from_ai_output() -> None:
+def test_build_lookback_ai_retrospective_rows_scrubs_pii_from_ai_output(tmp_path: Path) -> None:
     class _FakeLookbackAIClient:
         def structured(self, system: str, user: str, *, parser, max_tokens: int = 800, prompt_version: str | None = None):
             del system, user, max_tokens, prompt_version
@@ -9058,6 +9058,8 @@ def test_build_lookback_ai_retrospective_rows_scrubs_pii_from_ai_output() -> Non
                 scorecards=(),
             ),
         ),
+        program_id="acme",
+        programs_root=tmp_path,
     )
 
     assert len(rows) == 1
@@ -9194,8 +9196,8 @@ def test_generate_report_draft_lookback_degrades_when_ai_retrospective_parser_re
 
     monkeypatch.setattr("src.commands.report_pipeline.assemble_stage._create_ai_client", lambda **kwargs: _FakeAIClient())
 
-    def _raise_pipeline_error(*, client, retrospective_intelligence, snapshots):
-        del client, retrospective_intelligence, snapshots
+    def _raise_pipeline_error(*, client, retrospective_intelligence, snapshots, program_id="", programs_root=None):
+        del client, retrospective_intelligence, snapshots, program_id, programs_root
         raise AIPipelineError("Generated text rejected by injection detector: prompt_injection")
 
     monkeypatch.setattr("src.commands.report_pipeline.assemble_stage._build_lookback_ai_retrospective_rows", _raise_pipeline_error)
