@@ -5,8 +5,8 @@ Spec §WS-7 says the default artifact-signing path is **cosign keyless
 network access to the Sigstore transparency log, which is unavailable in
 this Windows-CI environment and in many air-gapped Microsoft tenants. The
 fallback is **HMAC-SHA256 with a keyring-backed key** (the same `keyring>=25`
-dep already in `requirements.txt`); this is the only path implemented in
-this commit.
+base dependency already declared in `pyproject.toml`); this is the only path
+implemented in this commit.
 
 The `vertex archive verify --edition <e>` command is the verification entry
 point. It loads the manifest, recomputes the content hash, and checks the
