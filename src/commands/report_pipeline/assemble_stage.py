@@ -1536,6 +1536,8 @@ def _generate_lookback_draft(
                     client=ai_client,
                     retrospective_intelligence=retrospective_intelligence,
                     snapshots=snapshots,
+                    program_id=resolved_edition.program.id if resolved_edition is not None else "",
+                    programs_root=programs_root,
                 )
                 if ai_rows:
                     retrospective_intelligence = replace(

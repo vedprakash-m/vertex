@@ -9,7 +9,16 @@ from typing import Any, Callable
 from src.ai.provider import LLMProvider
 from src.ai.prompt_registry import load_prompt
 from src.ai.tiered_router import route_through_tiers
+from src.core.ai_schema_gateway import SchemaGatewayError, validate_bounded_payload
+from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.policy_loader import load_ai_feature_policy
+from src.core.quality_gates.ai_release_audit import (
+    AIRunState,
+    ReleaseTerminal,
+    new_ai_run_id,
+    record_ai_release_decision,
+    record_ai_run_lifecycle,
+)
 from src.core.ban_list_validator import PolicyProfile
 from src.core.assumption_tracker import check_validation_due
 from src.core.charter import CharterSuccessCriterion, DimensionMaxRiskMetric, ItemCountMaxMetric, normalize_charter_values, parse_charter_success_criteria
@@ -527,6 +536,8 @@ def _build_lookback_ai_retrospective_rows(
     client: LLMProvider,
     retrospective_intelligence: RetrospectiveIntelligenceSummary,
     snapshots: tuple[Snapshot, ...],
+    program_id: str = "",
+    programs_root: Path = PROGRAMS_ROOT,
 ) -> tuple[RetrospectiveIntelligenceRow, ...]:
     if not retrospective_intelligence.rows or not snapshots:
         return ()
@@ -589,16 +600,106 @@ def _build_lookback_ai_retrospective_rows(
         _LOOKBACK_RETROSPECTIVE_FEATURE,
         deterministic_fn=None,
         local_fn=None,
-        frontier_fn=lambda: client.structured(
-            load_prompt(_LOOKBACK_RETROSPECTIVE_PROMPT_VERSION),
-            user_prompt,
-            parser=_parse_response,
-            max_tokens=load_ai_feature_policy(_LOOKBACK_RETROSPECTIVE_FEATURE).max_tokens,
-            prompt_version=_LOOKBACK_RETROSPECTIVE_PROMPT_VERSION,
+        frontier_fn=lambda: _run_ai_route(
+            client,
+            system_prompt=load_prompt(_LOOKBACK_RETROSPECTIVE_PROMPT_VERSION),
+            user_prompt=user_prompt,
+            parse_response=_parse_response,
+            program_id=program_id,
+            programs_root=programs_root,
         ),
         policy=load_ai_feature_policy(_LOOKBACK_RETROSPECTIVE_FEATURE),
     )
     return outcome.value or ()
+
+
+def _run_ai_route(
+    client: LLMProvider,
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    parse_response: Callable[[dict[str, Any]], tuple[RetrospectiveIntelligenceRow, ...]],
+    program_id: str,
+    programs_root: Path,
+) -> tuple[RetrospectiveIntelligenceRow, ...]:
+    """specs/backlog.md BL-C2: lookback_retrospective is production-
+    classified (its output is appended directly into the rendered
+    lookback report with no further gate). Bounds-checks the raw response
+    through AISchemaGateway, then reuses the caller's own `parse_response`
+    (already real semantic validation: title/detail non-empty, length caps,
+    the text-safety pipeline) rather than a separate validator class.
+
+    Preserves this feature's existing lenient contract exactly: any
+    rejection degrades to zero insights (never blocks lookback report
+    generation, matching this call site's caller in `assemble_stage.py`,
+    which already treats retrospective AI synthesis as best-effort) --
+    the one behavior change is that a non-dict response, which previously
+    would have raised an uncaught `AttributeError` from `payload.get(...)`
+    (not in `assemble_stage.py`'s caught-exception list), now degrades to
+    zero insights like every other rejection instead of a latent crash
+    risk.
+    """
+    ai_run_id = new_ai_run_id()
+
+    def _lifecycle(state: AIRunState) -> None:
+        record_ai_run_lifecycle(
+            program_id=program_id,
+            ai_run_id=ai_run_id,
+            feature=_LOOKBACK_RETROSPECTIVE_FEATURE,
+            state=state,
+            prompt_version=_LOOKBACK_RETROSPECTIVE_PROMPT_VERSION,
+            policy_version=_LOOKBACK_RETROSPECTIVE_PROMPT_VERSION,
+            programs_root=programs_root,
+        )
+
+    def _discard(terminal: ReleaseTerminal, reason: str) -> None:
+        record_ai_release_decision(
+            program_id=program_id,
+            ai_run_id=ai_run_id,
+            terminal=terminal,
+            reason=reason,
+            validator_finding_count=0,
+            programs_root=programs_root,
+        )
+
+    _lifecycle(AIRunState.PLANNED)
+    _lifecycle(AIRunState.REQUESTED)
+    try:
+        raw = client.structured(
+            system_prompt,
+            user_prompt,
+            parser=lambda payload: payload,
+            max_tokens=load_ai_feature_policy(_LOOKBACK_RETROSPECTIVE_FEATURE).max_tokens,
+            prompt_version=_LOOKBACK_RETROSPECTIVE_PROMPT_VERSION,
+        )
+    except Exception as error:
+        _discard(ReleaseTerminal.DISCARDED, f"provider call failed: {error}")
+        raise
+    _lifecycle(AIRunState.RESPONDED)
+
+    if not isinstance(raw, dict):
+        _discard(ReleaseTerminal.DISCARDED, "no structured response returned by the provider.")
+        return ()
+
+    try:
+        validate_bounded_payload(raw)
+    except SchemaGatewayError as error:
+        _discard(ReleaseTerminal.REJECTED, f"AISchemaGateway rejected the response: {error}")
+        return ()
+    _lifecycle(AIRunState.SCHEMA_VALIDATED)
+
+    rows = parse_response(raw)
+    _lifecycle(AIRunState.SEMANTICALLY_VALIDATED)
+
+    record_ai_release_decision(
+        program_id=program_id,
+        ai_run_id=ai_run_id,
+        terminal=ReleaseTerminal.RELEASED,
+        reason=f"passed AISchemaGateway bounds; {len(rows)} insight row(s) survived semantic filtering",
+        validator_finding_count=0,
+        programs_root=programs_root,
+    )
+    return rows
 
 
 def _build_lookback_claim_accuracy_rows(
