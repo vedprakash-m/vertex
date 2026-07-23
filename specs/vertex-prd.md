@@ -126,23 +126,63 @@ Vertex does not replace TPM/EM judgment. Human-confirmed facts outrank machine i
 - **Architecture remediation (`arch-fix`, formerly `specs/arch-fix.md`, archived 2026-07-10):** a 12-audit-reconciled program closing the gap between promised and enforced AI-safety/persistence/actuation guarantees. **Phase 0 (Contract & Evidence Freeze) is fully code-complete**: count-probe repair, model-card reconciliation (all 19 `ai_policy.yaml` features carded), the composed authority-registry view, an opt-in sanitized AI I/O capture prerequisite, and an NFR/OpEx budget freeze scaffold. **Phase 1 (Common Persistence Kernel) primitives** (monotonic sequence allocator, workspace leasing with fencing tokens, projection checkpoints, cross-database `UnitOfWork`, a generic durable outbox engine, a content-addressed program checkpoint manifest) were built here and wired into production AI-safety/actuation paths by the successor program below. **`arch-fix`'s remaining scope (the AI Safety Boundary, fail-closed AI audit, approval-anchored actuation) was inherited and completed by `arch-data-fix` (formerly `specs/arch-data-fix.md`, archived 2026-07-15)** — see §12.1a/§12.1b of `vertex-tech-spec.md` for the shipped AI Safety Boundary (`AISchemaGateway`, per-feature `SemanticValidator[T]`, the QG-29 fail-closed release-audit lifecycle, live across every structured AI generator) and the deterministic `ContextCompiler`. `arch-data-fix` additionally shipped the TPM/EM cockpit, a shared program-synthesis narrative contract, gap-driven proactive solicitation, and full operational telemetry/correlation tracing. Its own remaining scope (a production-swap decision pending real comparison data, an unfilled second-annotator governance role, and several calendar-bound items) is tracked in `specs/bklg.md` — see that file for the current, executable-gate-mapped status.
 
 <!--
-  spec-posture (machine-readable; parsed by scripts/check_spec_drift.py `p12-posture-block`).
+  spec-posture (machine-readable; parsed by scripts/check_spec_drift.py `p12-posture-block`
+  and, bidirectionally against specs/bklg.md, by `p12b-posture-backlog-reconciliation`).
   Each line: `<work-item>: <status> (<date>)`. Statuses: complete | in-progress | deferred | not-started.
   This block is the single source of truth for work-item status referenced from the prose
   posture section above; the prose is a human narrative, this block is the CI-checked contract.
+
+  BL-K1 step 5 (specs/bklg.md): every not-started/deferred/in-progress line below must
+  resolve to a real `### BL-<id>` heading in specs/bklg.md, or carry a trailing
+  `[no-backlog-row: <reason>]` annotation (used for non-BL identifiers like GAP-36/37,
+  which are tracked inside a BL-* row's prose rather than owning their own heading).
+  Conversely every currently-open (non-`done`) BL-* row in specs/bklg.md's own
+  Status-at-a-glance table must appear here. Lifecycle -> posture-status mapping:
+  bklg `actionable`/`reopened` -> `in-progress`; `blocked-external`/`blocked-decision`/
+  `deferred`/`accepted-limitation` -> `deferred`; `done` -> `complete` (not required here
+  once done, but harmless to leave).
 -->
 <!-- spec-posture
 WS-1: complete (2026-06-29)
 GAP-5: complete (2026-06-16)
-GAP-36: not-started
-GAP-37: not-started
+GAP-36: not-started [no-backlog-row: tracked under BL-H1]
+GAP-36d: complete (2026-07-22)
+GAP-37: not-started [no-backlog-row: tracked under BL-H1]
 T0-4-trust-badges: complete (2026-07-08)
-BL-A1: deferred
-BL-A2: deferred
 data-flow-v1: complete (2026-07-08)
 arch-fix-phase0: complete (2026-07-09)
 arch-fix-phase1-cpk: complete (2026-07-15)
 arch-data-fix: complete (2026-07-15)
+BL-A1: deferred (2026-07-22)
+BL-A2: deferred (2026-07-22)
+BL-A3: complete (2026-07-22)
+BL-B1: complete (2026-07-22)
+BL-B2: deferred (2026-07-22)
+BL-C1: complete (2026-07-22)
+BL-C2: complete (2026-07-22)
+BL-C3: complete (2026-07-15)
+BL-C4: complete (2026-07-15)
+BL-C5: in-progress (2026-07-22)
+BL-C6: deferred (2026-07-22)
+BL-C7: complete (2026-07-22)
+BL-D1: complete (2026-07-15)
+BL-D2: deferred (2026-07-22)
+BL-D3: deferred (2026-07-22)
+BL-D4: deferred (2026-07-22)
+BL-D5: deferred (2026-07-22)
+BL-E1: deferred (2026-07-22)
+BL-E2: complete (2026-07-22)
+BL-E3: deferred (2026-07-22)
+BL-F1: in-progress (2026-07-22)
+BL-F2: in-progress (2026-07-22)
+BL-G1: deferred (2026-07-22)
+BL-H1: in-progress (2026-07-22)
+BL-H2: in-progress (2026-07-22)
+BL-H3: in-progress (2026-07-22)
+BL-I1: in-progress (2026-07-22)
+BL-J1: in-progress (2026-07-22)
+BL-K1: complete (2026-07-22)
+BL-L1: complete (2026-07-22)
 -->
 
 ---

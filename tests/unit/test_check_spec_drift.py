@@ -410,6 +410,186 @@ def test_check_posture_block_fails_on_malformed_line(tmp_path: Path) -> None:
     assert "unparseable posture line" in by_id["p12-posture-block"].detail
 
 
+def _write_posture_prd(root: Path, posture_lines: str) -> None:
+    _write_file(
+        root,
+        "specs/vertex-prd.md",
+        f"""
+        Vertex is for Microsoft TPM programs.
+        Current supported scope: Microsoft TPM programs using the declared supported archetypes and exclusions.
+        Roadmap direction: broader TPM/EM adoption outside Microsoft is not part of the current supported V-11 bar.
+        The ADO UIL gather path is now default-on; Kusto, Teams, and IcM remain env-gated.
+        Migration status: the unified read API and shadow-write foundation are landed and the irreversible flip to system-of-record remains pending.
+
+        <!-- spec-posture
+          WS-1: complete (2026-06-29)
+        {posture_lines}
+        -->
+        """,
+    )
+
+
+def test_check_posture_backlog_reconciliation_passes_when_bklg_absent(tmp_path: Path) -> None:
+    """specs/bklg.md is a tracked-but-derived file; a checkout that hasn't
+    synced it yet must not fail this check."""
+    module = _load_module()
+    _build_good_repo(tmp_path)
+    results = module.run_checks(repo_root=tmp_path)
+    by_id = {result.check_id: result for result in results}
+    assert by_id["p12b-posture-backlog-reconciliation"].status == "pass"
+
+
+def test_check_posture_backlog_reconciliation_passes_with_matching_heading_and_lifecycle(tmp_path: Path) -> None:
+    module = _load_module()
+    _build_good_repo(tmp_path)
+    _write_posture_prd(tmp_path, "  BL-X1: in-progress (2026-07-22)")
+    _write_file(
+        tmp_path,
+        "specs/bklg.md",
+        """
+        | Item | § | Lifecycle | Pri | Accountable | Next action |
+        |---|---|---|---|---|---|
+        | BL-X1 | §1 | `actionable` | P1 | Someone | Do the thing |
+
+        ### BL-X1 — Some work item
+        Prose.
+        """,
+    )
+    results = module.run_checks(repo_root=tmp_path)
+    by_id = {result.check_id: result for result in results}
+    assert by_id["p12b-posture-backlog-reconciliation"].status == "pass"
+
+
+def test_check_posture_backlog_reconciliation_fails_on_missing_heading(tmp_path: Path) -> None:
+    module = _load_module()
+    _build_good_repo(tmp_path)
+    _write_posture_prd(tmp_path, "  BL-X1: in-progress (2026-07-22)")
+    _write_file(
+        tmp_path,
+        "specs/bklg.md",
+        """
+        | Item | § | Lifecycle | Pri | Accountable | Next action |
+        |---|---|---|---|---|---|
+        | BL-X1 | §1 | `actionable` | P1 | Someone | Do the thing |
+        """,
+    )
+    results = module.run_checks(repo_root=tmp_path)
+    by_id = {result.check_id: result for result in results}
+    assert by_id["p12b-posture-backlog-reconciliation"].status == "fail"
+    assert "no `### BL-X1` heading" in by_id["p12b-posture-backlog-reconciliation"].detail
+
+
+def test_check_posture_backlog_reconciliation_passes_with_no_backlog_row_annotation(tmp_path: Path) -> None:
+    module = _load_module()
+    _build_good_repo(tmp_path)
+    _write_posture_prd(tmp_path, "  BL-X1: in-progress (2026-07-22) [no-backlog-row: tracked under BL-X2]")
+    _write_file(
+        tmp_path,
+        "specs/bklg.md",
+        """
+        | Item | § | Lifecycle | Pri | Accountable | Next action |
+        |---|---|---|---|---|---|
+        """,
+    )
+    results = module.run_checks(repo_root=tmp_path)
+    by_id = {result.check_id: result for result in results}
+    assert by_id["p12b-posture-backlog-reconciliation"].status == "pass"
+
+
+def test_check_posture_backlog_reconciliation_fails_on_status_contradiction(tmp_path: Path) -> None:
+    """The exact contradiction BL-K1 step 5 exists to catch: bklg.md's own
+    Status-at-a-glance table says an item is `done`, but the posture block
+    still declares it `deferred`."""
+    module = _load_module()
+    _build_good_repo(tmp_path)
+    _write_posture_prd(tmp_path, "  BL-X1: deferred (2026-07-22)")
+    _write_file(
+        tmp_path,
+        "specs/bklg.md",
+        """
+        | Item | § | Lifecycle | Pri | Accountable | Next action |
+        |---|---|---|---|---|---|
+        | BL-X1 | §1 | `done` | — | — | Shipped |
+
+        ### BL-X1 — Some work item
+        Prose.
+        """,
+    )
+    results = module.run_checks(repo_root=tmp_path)
+    by_id = {result.check_id: result for result in results}
+    assert by_id["p12b-posture-backlog-reconciliation"].status == "fail"
+    assert "is `done`" in by_id["p12b-posture-backlog-reconciliation"].detail
+    assert "posture declares it 'deferred'" in by_id["p12b-posture-backlog-reconciliation"].detail
+
+
+def test_check_posture_backlog_reconciliation_fails_when_open_item_missing_from_posture(tmp_path: Path) -> None:
+    module = _load_module()
+    _build_good_repo(tmp_path)
+    _write_posture_prd(tmp_path, "")
+    _write_file(
+        tmp_path,
+        "specs/bklg.md",
+        """
+        | Item | § | Lifecycle | Pri | Accountable | Next action |
+        |---|---|---|---|---|---|
+        | BL-X1 | §1 | `actionable` | P1 | Someone | Do the thing |
+
+        ### BL-X1 — Some work item
+        Prose.
+        """,
+    )
+    results = module.run_checks(repo_root=tmp_path)
+    by_id = {result.check_id: result for result in results}
+    assert by_id["p12b-posture-backlog-reconciliation"].status == "fail"
+    assert "no entry in the PRD's spec-posture block" in by_id["p12b-posture-backlog-reconciliation"].detail
+
+
+def test_check_backlog_table_heading_parity_passes_when_bklg_absent(tmp_path: Path) -> None:
+    module = _load_module()
+    _build_good_repo(tmp_path)
+    results = module.run_checks(repo_root=tmp_path)
+    by_id = {result.check_id: result for result in results}
+    assert by_id["p12c-backlog-table-heading-parity"].status == "pass"
+
+
+def test_check_backlog_table_heading_parity_fails_on_heading_with_no_row(tmp_path: Path) -> None:
+    module = _load_module()
+    _build_good_repo(tmp_path)
+    _write_file(
+        tmp_path,
+        "specs/bklg.md",
+        """
+        | Item | § | Lifecycle | Pri | Accountable | Next action |
+        |---|---|---|---|---|---|
+
+        ### BL-X1 — Some work item with no table row
+        Prose.
+        """,
+    )
+    results = module.run_checks(repo_root=tmp_path)
+    by_id = {result.check_id: result for result in results}
+    assert by_id["p12c-backlog-table-heading-parity"].status == "fail"
+    assert "heading(s) with no Status-at-a-glance table row: BL-X1" in by_id["p12c-backlog-table-heading-parity"].detail
+
+
+def test_check_backlog_table_heading_parity_fails_on_row_with_no_heading(tmp_path: Path) -> None:
+    module = _load_module()
+    _build_good_repo(tmp_path)
+    _write_file(
+        tmp_path,
+        "specs/bklg.md",
+        """
+        | Item | § | Lifecycle | Pri | Accountable | Next action |
+        |---|---|---|---|---|---|
+        | BL-X1 | §1 | `actionable` | P1 | Someone | Orphan row, no heading |
+        """,
+    )
+    results = module.run_checks(repo_root=tmp_path)
+    by_id = {result.check_id: result for result in results}
+    assert by_id["p12c-backlog-table-heading-parity"].status == "fail"
+    assert "row(s) with no matching ### heading: BL-X1" in by_id["p12c-backlog-table-heading-parity"].detail
+
+
 def test_check_digest_sunset_fails_after_sunset_when_shim_still_present(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Proves the date-gated sunset enforcement actually fires: if
     `digest.j2`'s deprecation shim is still present after the stated

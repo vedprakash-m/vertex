@@ -369,9 +369,54 @@ _POSTURE_BLOCK_RE = re.compile(
     r"<!--\s*spec-posture\s*\n(.*?)-->", re.DOTALL,
 )
 _POSTURE_LINE_RE = re.compile(
-    r"^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)\s*:\s*(complete|in-progress|deferred|not-started)(?:\s*\((\d{4}-\d{2}-\d{2})\))?\s*$",
+    r"^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)\s*:\s*(complete|in-progress|deferred|not-started)"
+    r"(?:\s*\((\d{4}-\d{2}-\d{2})\))?(?:\s*\[no-backlog-row:\s*([^\]]+)\])?\s*$",
 )
 _VALID_POSTURE_STATUSES = frozenset({"complete", "in-progress", "deferred", "not-started"})
+
+# BL-K1 step 5: bklg.md's 7-state lifecycle taxonomy maps onto the PRD's
+# 4-state posture vocabulary. `done` items are not required to keep a
+# posture-block line (they're historical once shipped), but if they do, only
+# `complete` is a non-contradiction.
+_LIFECYCLE_TO_POSTURE = {
+    "actionable": "in-progress",
+    "reopened": "in-progress",
+    "blocked-external": "deferred",
+    "blocked-decision": "deferred",
+    "deferred": "deferred",
+    "accepted-limitation": "deferred",
+    "done": "complete",
+}
+
+_PostureEntry = tuple[str, str, "str | None", "str | None"]
+
+
+def _parse_posture_block(prd: str) -> tuple[list[_PostureEntry], list[str]]:
+    """Parse the `<!-- spec-posture -->` block into (work_item, status, date,
+    no_backlog_row_annotation) tuples, plus a list of parse-failure messages.
+    """
+    failures: list[str] = []
+    match = _POSTURE_BLOCK_RE.search(prd)
+    if match is None:
+        return [], ["specs/vertex-prd.md has no `<!-- spec-posture ... -->` block."]
+
+    body = match.group(1)
+    entries: list[_PostureEntry] = []
+    seen: set[str] = set()
+    for raw_line in body.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        line_match = _POSTURE_LINE_RE.match(stripped)
+        if line_match is None:
+            failures.append(f"unparseable posture line: {raw_line!r}")
+            continue
+        work_item, status, date, annotation = line_match.groups()
+        if work_item in seen:
+            failures.append(f"duplicate posture entry for {work_item!r}")
+        seen.add(work_item)
+        entries.append((work_item, status, date, annotation))
+    return entries, failures
 
 
 def _check_posture_block(repo_root: Path) -> CheckResult:
@@ -385,39 +430,17 @@ def _check_posture_block(repo_root: Path) -> CheckResult:
     hard-FAIL under ``--strict`` (see ``main``).
     """
     prd = _read_text(repo_root, "specs/vertex-prd.md")
-    failures: list[str] = []
 
-    match = _POSTURE_BLOCK_RE.search(prd)
-    if match is None:
-        failures.append(
-            "specs/vertex-prd.md has no `<!-- spec-posture ... -->` block. "
-            "Add one near the 'Current implementation posture' section."
-        )
+    entries, failures = _parse_posture_block(prd)
+    if not entries and failures and "no `<!-- spec-posture" in failures[0]:
         return CheckResult("p12-posture-block", "Structured posture block present", "fail", "; ".join(failures))
-
-    body = match.group(1)
-    entries: list[tuple[str, str, str | None]] = []
-    seen: set[str] = set()
-    for raw_line in body.splitlines():
-        stripped = raw_line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        line_match = _POSTURE_LINE_RE.match(stripped)
-        if line_match is None:
-            failures.append(f"unparseable posture line: {raw_line!r}")
-            continue
-        work_item, status, date = line_match.group(1), line_match.group(2), line_match.group(3)
-        if work_item in seen:
-            failures.append(f"duplicate posture entry for {work_item!r}")
-        seen.add(work_item)
-        entries.append((work_item, status, date))
 
     if not entries:
         failures.append("spec-posture block is empty (no work-item lines)")
 
     # The specific contradiction this check exists to catch: WS-1 declared
     # `deferred` in the posture block while the changelog says `complete`.
-    posture_ws1 = next((s for w, s, _ in entries if w == "WS-1"), None)
+    posture_ws1 = next((s for w, s, _, _ in entries if w == "WS-1"), None)
     if posture_ws1 is not None:
         # The changelog line dated 2026-06-29 states WS-1 is complete; any
         # posture-block status other than `complete` for WS-1 contradicts it.
@@ -434,6 +457,179 @@ def _check_posture_block(repo_root: Path) -> CheckResult:
         "Structured posture block present",
         "pass",
         f"{len(entries)} work-item entries parsed cleanly.",
+    )
+
+
+_BACKLOG_HEADING_RE = re.compile(
+    r"^#{2,4}\s+(?:\d+(?:\.\d+)*\.?\s+)?(BL-[A-Za-z0-9]+)\b",
+    re.MULTILINE,
+)
+# Status-at-a-glance table rows: `| **BL-K1** *(new)* | §12 | `actionable` | ...`
+# or `| BL-C5 | §7 | `actionable` | ...`. The id may be bold and/or suffixed
+# with an italicized `*(new)*` marker; lifecycle is always a code span.
+_BACKLOG_TABLE_ROW_RE = re.compile(
+    r"^\|\s*\*{0,2}(BL-[A-Za-z0-9]+)\*{0,2}[^|]*\|\s*§\d+\s*\|\s*`([a-z-]+)`\s*\|",
+)
+
+
+def _extract_backlog_headings(bklg_text: str) -> set[str]:
+    return {m.group(1) for m in _BACKLOG_HEADING_RE.finditer(bklg_text)}
+
+
+def _extract_backlog_lifecycles(bklg_text: str) -> dict[str, str]:
+    """Parse the '## Status at a glance' table into {BL-id: lifecycle}."""
+    lifecycles: dict[str, str] = {}
+    for line in bklg_text.splitlines():
+        row_match = _BACKLOG_TABLE_ROW_RE.match(line.strip())
+        if row_match is None:
+            continue
+        work_item, lifecycle = row_match.group(1), row_match.group(2)
+        if lifecycle in _LIFECYCLE_TO_POSTURE:
+            lifecycles[work_item] = lifecycle
+    return lifecycles
+
+
+def _check_posture_backlog_reconciliation(repo_root: Path) -> CheckResult:
+    """BL-K1 step 5: the PRD's `<!-- spec-posture -->` block and specs/bklg.md
+    (the tracked, sanitized canonical backlog) must not silently diverge.
+
+    Bidirectional:
+      1. Every posture-block entry that names a `BL-*` item must resolve to a
+         real `### BL-<id>` heading in bklg.md, unless annotated
+         `[no-backlog-row: <reason>]` (used for identifiers like GAP-36/37
+         that are tracked inside another BL-* row's prose).
+      2. Every posture-block `BL-*` entry's declared status must not
+         contradict bklg.md's own Status-at-a-glance lifecycle for that item
+         (mapped through `_LIFECYCLE_TO_POSTURE`).
+      3. Every currently-open (non-`done`) `BL-*` row in bklg.md's table must
+         appear somewhere in the posture block, so an item can't quietly drop
+         off the machine-readable ledger while still being open work.
+
+    specs/bklg.md is gitignored-adjacent (tracked, but derived from the
+    untracked specs/backlog.md working copy) so this check degrades to a
+    no-op pass if it's absent rather than failing a checkout that hasn't
+    synced it yet.
+    """
+    bklg_path = repo_root / "specs" / "bklg.md"
+    if not bklg_path.exists():
+        return CheckResult(
+            "p12b-posture-backlog-reconciliation",
+            "Posture/backlog reconciliation",
+            "pass",
+            "specs/bklg.md not present in this checkout; nothing to reconcile.",
+        )
+
+    prd = _read_text(repo_root, "specs/vertex-prd.md")
+    bklg = bklg_path.read_text(encoding="utf-8")
+
+    entries, parse_failures = _parse_posture_block(prd)
+    headings = _extract_backlog_headings(bklg)
+    lifecycles = _extract_backlog_lifecycles(bklg)
+
+    failures: list[str] = list(parse_failures)
+
+    posture_by_item = {work_item: status for work_item, status, _date, _annotation in entries}
+
+    for work_item, status, _date, annotation in entries:
+        if not work_item.startswith("BL-"):
+            continue
+        if work_item not in headings and annotation is None:
+            failures.append(
+                f"posture entry {work_item!r} has no `### {work_item}` heading in specs/bklg.md "
+                "and no `[no-backlog-row: ...]` annotation explaining why"
+            )
+        lifecycle = lifecycles.get(work_item)
+        if lifecycle is None:
+            continue
+        expected_status = _LIFECYCLE_TO_POSTURE[lifecycle]
+        if lifecycle == "done":
+            # Once done, any posture status is historically defensible, but
+            # `deferred`/`not-started` would be an active contradiction.
+            if status in ("deferred", "not-started"):
+                failures.append(
+                    f"{work_item} is `done` in specs/bklg.md's Status-at-a-glance table "
+                    f"but posture declares it {status!r}"
+                )
+        elif status != expected_status:
+            failures.append(
+                f"{work_item} is `{lifecycle}` in specs/bklg.md (maps to posture "
+                f"{expected_status!r}) but the posture block declares it {status!r}"
+            )
+
+    for work_item, lifecycle in lifecycles.items():
+        if lifecycle == "done":
+            continue
+        if work_item not in posture_by_item:
+            failures.append(
+                f"{work_item} is `{lifecycle}` (open work) in specs/bklg.md's "
+                "Status-at-a-glance table but has no entry in the PRD's spec-posture block"
+            )
+
+    if failures:
+        return CheckResult(
+            "p12b-posture-backlog-reconciliation", "Posture/backlog reconciliation", "fail", "; ".join(failures),
+        )
+    return CheckResult(
+        "p12b-posture-backlog-reconciliation",
+        "Posture/backlog reconciliation",
+        "pass",
+        f"{len(entries)} posture entries reconcile cleanly against {len(headings)} bklg.md headings "
+        f"and {len(lifecycles)} tracked lifecycles.",
+    )
+
+
+def _check_backlog_table_heading_parity(repo_root: Path) -> CheckResult:
+    """BL-K1 step 6 (narrowed scope): specs/bklg.md's Status-at-a-glance table
+    and its `### BL-*` section headings must name exactly the same set of
+    items.
+
+    Full mechanical *generation* of the table (as step 6 originally
+    envisioned) was evaluated and deliberately not attempted here: the
+    table's free-text "Next action" column is genuinely hand-authored
+    narrative (current status, blockers, cross-references to other items),
+    and templating it risks silently misstating it -- the exact
+    "overstated-but-wrong" failure mode this backlog has already caught and
+    corrected twice (BL-C1's scope table, BL-C2's premature closure). This
+    check instead enforces the mechanically-verifiable half: every table row
+    has a matching heading and every heading has a matching table row, so an
+    item can't be added to one and forgotten in the other. Reuses the same
+    heading/table extraction as `p12b-posture-backlog-reconciliation`.
+
+    Degrades to a no-op pass if specs/bklg.md is absent, same as p12b.
+    """
+    bklg_path = repo_root / "specs" / "bklg.md"
+    if not bklg_path.exists():
+        return CheckResult(
+            "p12c-backlog-table-heading-parity",
+            "Backlog table/heading parity",
+            "pass",
+            "specs/bklg.md not present in this checkout; nothing to check.",
+        )
+    bklg = bklg_path.read_text(encoding="utf-8")
+    headings = _extract_backlog_headings(bklg)
+    table_items = set(_extract_backlog_lifecycles(bklg))
+
+    failures: list[str] = []
+    headings_without_row = sorted(headings - table_items)
+    if headings_without_row:
+        failures.append(
+            f"### heading(s) with no Status-at-a-glance table row: {', '.join(headings_without_row)}"
+        )
+    rows_without_heading = sorted(table_items - headings)
+    if rows_without_heading:
+        failures.append(
+            f"Status-at-a-glance row(s) with no matching ### heading: {', '.join(rows_without_heading)}"
+        )
+
+    if failures:
+        return CheckResult(
+            "p12c-backlog-table-heading-parity", "Backlog table/heading parity", "fail", "; ".join(failures),
+        )
+    return CheckResult(
+        "p12c-backlog-table-heading-parity",
+        "Backlog table/heading parity",
+        "pass",
+        f"{len(headings)} ### BL-* headings and {len(table_items)} table rows agree 1:1.",
     )
 
 
@@ -481,6 +677,8 @@ CHECKERS: tuple[Checker, ...] = (
     _check_dead_green_run_pointer,
     _check_computed_module_count,
     _check_posture_block,
+    _check_posture_backlog_reconciliation,
+    _check_backlog_table_heading_parity,
     _check_digest_sunset,
 )
 
