@@ -322,6 +322,70 @@ def test_anticipate_questions_falls_back_when_ai_payload_response_is_blank() -> 
     assert eta_drift_question.question.startswith("Why has")
 
 
+def test_anticipate_questions_no_program_id_falls_back_when_response_lacks_question_mark() -> None:
+    # specs/backlog.md BL-C2: the no-program_id branch previously never
+    # called _validate_semantics at all, so an AI response that lost its
+    # question mark would have been silently accepted. Now it is checked
+    # the same way the program_id branch already does.
+    anticipated = anticipate_questions(
+        **_base_kwargs(
+            client=_MalformedPayloadClient(
+                {"question": "What moved the ramp timeline", "suggested_response": "Name the blocker."}
+            )
+        )
+    )
+
+    eta_drift_question = next(question for question in anticipated if question.confidence == Confidence.HIGH)
+    assert eta_drift_question.question.startswith("Why has")  # deterministic seed, not the ungrounded AI text
+
+
+def test_anticipate_questions_no_program_id_falls_back_on_oversized_request() -> None:
+    # specs/backlog.md BL-C2: the no-program_id branch previously never
+    # bounds-checked the outbound request at all.
+    client = _FakeClient(
+        '{"question": "What moved the ramp timeline again?", "suggested_response": "Name the blocker, owner, checkpoint, and consequence."}'
+    )
+    kwargs = _base_kwargs(client=client)
+    kwargs["workstreams"] = (
+        WorkstreamData(
+            section_id="deployment_readiness",
+            title="x" * 200_001,
+            blurb="Ramp timeline remains conditional.",
+            dependency_cascades=(),
+            items=(
+                WorkItem(
+                    id=900001,
+                    type="Feature",
+                    title="UD chunking rollout",
+                    state="Active",
+                    assigned_to="Vertex Maintainer",
+                    assigned_to_email="maintainer@example.com",
+                    area_path="One\\Adventure\\Acme\\Deployment",
+                    iteration_path="FY26\\Sprint 20",
+                    target_date=None,
+                    risk_level=RiskLevel.MEDIUM,
+                    tags=[],
+                    custom_fields={},
+                    revisions=[],
+                    comments=[],
+                    fetched_at=datetime(2026, 5, 10, 18, 0, tzinfo=timezone.utc),
+                ),
+            ),
+            citations=(),
+            review_state=ReviewState.PENDING,
+            risk=RiskLevel.MEDIUM,
+            prior_risk=RiskLevel.MEDIUM,
+            total_items=1,
+        ),
+    )
+
+    anticipated = anticipate_questions(**kwargs)
+
+    eta_drift_question = next(question for question in anticipated if question.confidence == Confidence.HIGH)
+    assert eta_drift_question.question.startswith("Why has")
+    assert client.calls == 0
+
+
 def test_anticipate_questions_rejects_finding_reader_not_in_provided_readers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "src.ai.anticipation_engine.detect_anticipated_questions",
