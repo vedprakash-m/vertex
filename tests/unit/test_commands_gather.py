@@ -6540,7 +6540,11 @@ def test_gather_program_caps_ai_routing_confidence_when_keyword_router_disagrees
     monkeypatch.setattr(
         gather.M365TopicRouter,
         "from_program",
-        classmethod(lambda cls, program: gather.M365TopicRouter(client=_FakeAiClient(), fallback_router=_FallbackRouter())),
+        classmethod(
+            lambda cls, program: gather.M365TopicRouter(
+                client=_FakeAiClient(), fallback_router=_FallbackRouter(), program_id="acme", programs_root=programs_root,
+            )
+        ),
     )
 
     gather.gather_program(

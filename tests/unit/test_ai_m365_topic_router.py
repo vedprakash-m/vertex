@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -8,6 +9,7 @@ from src.ai.ai_mode import AIMode, set_ai_mode
 from src.ai.client import AIClientError
 from src.ai.m365_topic_router import PROMPT_VERSION, M365TopicRouter
 from src.core.keyword_topic_router import M365RoutingDecision
+from src.core.ledger.event_log import read_events
 from src.core.m365_router_interface import M365ReassignCorrection
 from src.core.models_v2 import AIConfig, ADOConfig, Program, Workstream, WorkstreamSignalSources
 
@@ -64,7 +66,7 @@ class _FakeFallbackRouter:
         )
 
 
-def test_ai_m365_topic_router_returns_structured_decision() -> None:
+def test_ai_m365_topic_router_returns_structured_decision(tmp_path: Path) -> None:
     router = M365TopicRouter(
         client=_FakeAIClient(
             {
@@ -73,7 +75,9 @@ def test_ai_m365_topic_router_returns_structured_decision() -> None:
                 "topics": ["pilot readiness", "firmware"],
                 "reasoning": "Repeated pilot readiness language aligns with the Contoso workstream.",
             }
-        )
+        ),
+        program_id="acme",
+        programs_root=tmp_path,
     )
     workstreams = (
         Workstream(id="acme", name="Store rollout", signal_sources=WorkstreamSignalSources(workiq_keywords=("schie",))),
@@ -99,7 +103,7 @@ def test_ai_m365_topic_router_returns_structured_decision() -> None:
     assert router.client.last_user is not None and "Workstream profiles:" in router.client.last_user
 
 
-def test_ai_m365_topic_router_boosts_confidence_when_ai_and_fallback_agree() -> None:
+def test_ai_m365_topic_router_boosts_confidence_when_ai_and_fallback_agree(tmp_path: Path) -> None:
     router = M365TopicRouter(
         client=_FakeAIClient(
             {
@@ -110,6 +114,8 @@ def test_ai_m365_topic_router_boosts_confidence_when_ai_and_fallback_agree() -> 
             }
         ),
         fallback_router=_FakeFallbackRouter(),
+        program_id="acme",
+        programs_root=tmp_path,
     )
     workstreams = (Workstream(id="acme", name="Store rollout"),)
 
@@ -128,7 +134,7 @@ def test_ai_m365_topic_router_boosts_confidence_when_ai_and_fallback_agree() -> 
     assert "Agreement with deterministic fallback increased confidence" in decision.reasoning
 
 
-def test_ai_m365_topic_router_falls_back_when_reasoning_is_rejected_by_safety_pipeline() -> None:
+def test_ai_m365_topic_router_falls_back_when_reasoning_is_rejected_by_safety_pipeline(tmp_path: Path) -> None:
     router = M365TopicRouter(
         client=_FakeAIClient(
             {
@@ -139,6 +145,8 @@ def test_ai_m365_topic_router_falls_back_when_reasoning_is_rejected_by_safety_pi
             }
         ),
         fallback_router=_FakeFallbackRouter(),
+        program_id="acme",
+        programs_root=tmp_path,
     )
     workstreams = (Workstream(id="acme", name="Store rollout"),)
 
@@ -156,7 +164,7 @@ def test_ai_m365_topic_router_falls_back_when_reasoning_is_rejected_by_safety_pi
     assert decision.reasoning == "Fallback router decision."
 
 
-def test_ai_m365_topic_router_falls_back_when_ai_returns_unknown_workstream_id() -> None:
+def test_ai_m365_topic_router_falls_back_when_ai_returns_unknown_workstream_id(tmp_path: Path) -> None:
     client = _FakeAIClient(
         {
             "workstream_id": "fabricated",
@@ -165,7 +173,7 @@ def test_ai_m365_topic_router_falls_back_when_ai_returns_unknown_workstream_id()
             "reasoning": "Repeated pilot readiness language aligns with the fabricated workstream.",
         }
     )
-    router = M365TopicRouter(client=client, fallback_router=_FakeFallbackRouter())
+    router = M365TopicRouter(client=client, fallback_router=_FakeFallbackRouter(), program_id="acme", programs_root=tmp_path)
     workstreams = (
         Workstream(id="acme", name="Store rollout"),
         Workstream(id="contoso", name="Device delivery"),
@@ -217,7 +225,7 @@ def test_ai_m365_topic_router_returns_fallback_without_calling_ai_when_invocatio
     assert client.calls == 0
 
 
-def test_ai_m365_topic_router_caps_confidence_when_ai_and_fallback_disagree() -> None:
+def test_ai_m365_topic_router_caps_confidence_when_ai_and_fallback_disagree(tmp_path: Path) -> None:
     router = M365TopicRouter(
         client=_FakeAIClient(
             {
@@ -228,6 +236,8 @@ def test_ai_m365_topic_router_caps_confidence_when_ai_and_fallback_disagree() ->
             }
         ),
         fallback_router=_FakeFallbackRouter(),
+        program_id="acme",
+        programs_root=tmp_path,
     )
     workstreams = (
         Workstream(id="acme", name="Store rollout"),
@@ -249,7 +259,7 @@ def test_ai_m365_topic_router_caps_confidence_when_ai_and_fallback_disagree() ->
     assert "confidence was capped at 0.79 for review" in decision.reasoning
 
 
-def test_ai_m365_topic_router_prompt_uses_relevant_confirmed_examples_beyond_first_three() -> None:
+def test_ai_m365_topic_router_prompt_uses_relevant_confirmed_examples_beyond_first_three(tmp_path: Path) -> None:
     client = _FakeAIClient(
         {
             "workstream_id": "contoso",
@@ -258,7 +268,7 @@ def test_ai_m365_topic_router_prompt_uses_relevant_confirmed_examples_beyond_fir
             "reasoning": "Firmware sign-off language aligns with Contoso.",
         }
     )
-    router = M365TopicRouter(client=client, fallback_router=_FakeFallbackRouter())
+    router = M365TopicRouter(client=client, fallback_router=_FakeFallbackRouter(), program_id="acme", programs_root=tmp_path)
     workstreams = (
         Workstream(id="acme", name="Store rollout"),
         Workstream(id="contoso", name="Device delivery"),
@@ -325,7 +335,7 @@ def test_ai_m365_topic_router_from_program_does_not_require_env_when_invocation_
     assert decision.confidence_source in {"keyword", "discovered"}
 
 
-def test_ai_m365_topic_router_prompt_includes_relevant_rejected_examples() -> None:
+def test_ai_m365_topic_router_prompt_includes_relevant_rejected_examples(tmp_path: Path) -> None:
     client = _FakeAIClient(
         {
             "workstream_id": "contoso",
@@ -334,7 +344,7 @@ def test_ai_m365_topic_router_prompt_includes_relevant_rejected_examples() -> No
             "reasoning": "Networking language aligns with Contoso.",
         }
     )
-    router = M365TopicRouter(client=client, fallback_router=_FakeFallbackRouter())
+    router = M365TopicRouter(client=client, fallback_router=_FakeFallbackRouter(), program_id="acme", programs_root=tmp_path)
     workstreams = (
         Workstream(id="acme", name="Store rollout"),
         Workstream(id="contoso", name="Device delivery"),
@@ -359,7 +369,7 @@ def test_ai_m365_topic_router_prompt_includes_relevant_rejected_examples() -> No
     assert "recent_rejected_examples: Finance planning was rejected as off-topic for store rollout." in client.last_user
 
 
-def test_ai_m365_topic_router_prompt_includes_structured_reassign_corrections() -> None:
+def test_ai_m365_topic_router_prompt_includes_structured_reassign_corrections(tmp_path: Path) -> None:
     client = _FakeAIClient(
         {
             "workstream_id": "contoso",
@@ -368,7 +378,7 @@ def test_ai_m365_topic_router_prompt_includes_structured_reassign_corrections() 
             "reasoning": "Networking language aligns with Contoso.",
         }
     )
-    router = M365TopicRouter(client=client, fallback_router=_FakeFallbackRouter())
+    router = M365TopicRouter(client=client, fallback_router=_FakeFallbackRouter(), program_id="acme", programs_root=tmp_path)
     workstreams = (
         Workstream(id="acme", name="Store rollout"),
         Workstream(id="contoso", name="Device delivery"),
@@ -397,8 +407,8 @@ def test_ai_m365_topic_router_prompt_includes_structured_reassign_corrections() 
     assert "recent_reassign_corrections: from=acme to=contoso artifact=DD pilot readiness thread reason=Belongs with DD pilot execution." in client.last_user
 
 
-def test_ai_m365_topic_router_falls_back_on_ai_error() -> None:
-    router = M365TopicRouter(client=_FailingAIClient(), fallback_router=_FakeFallbackRouter())
+def test_ai_m365_topic_router_falls_back_on_ai_error(tmp_path: Path) -> None:
+    router = M365TopicRouter(client=_FailingAIClient(), fallback_router=_FakeFallbackRouter(), program_id="acme", programs_root=tmp_path)
     workstreams = (Workstream(id="acme", name="Store rollout"),)
 
     decision = router.route_artifact(
@@ -494,6 +504,78 @@ def test_ai_m365_topic_router_skips_ai_when_high_confidence_comes_from_responsib
     assert decision.confidence_source == "keyword"
     assert "AI routing was skipped" in decision.reasoning
     assert client.calls == 0
+
+
+def test_ai_m365_topic_router_records_released_audit_trail(tmp_path: Path) -> None:
+    # specs/backlog.md BL-C2: m365_topic_router is production-classified; a
+    # successful AI route must leave a durable ai_release_audit trail
+    # ending in a RELEASED terminal, not just an ephemeral trace.
+    router = M365TopicRouter(
+        client=_FakeAIClient(
+            {
+                "workstream_id": "contoso",
+                "confidence": 0.83,
+                "topics": ["pilot readiness"],
+                "reasoning": "Repeated pilot readiness language aligns with Contoso.",
+            }
+        ),
+        fallback_router=_FakeFallbackRouter(),
+        program_id="acme",
+        programs_root=tmp_path,
+    )
+    workstreams = (
+        Workstream(id="acme", name="Store rollout"),
+        Workstream(id="contoso", name="Device delivery"),
+    )
+
+    router.route_artifact(
+        display_name="Pilot readiness mail",
+        subject_or_title="Firmware sign-off follow-up",
+        participant_aliases=("operator",),
+        sample_text="Pilot readiness owners are waiting on firmware sign-off.",
+        workstream_profiles=workstreams,
+    )
+
+    events = read_events("acme", programs_root=tmp_path)
+    event_types = [event.event_type for event in events]
+    assert event_types.count("ai.run_lifecycle.v1") == 5
+    assert event_types.count("ai.release_decision.v1") == 1
+    release_event = next(event for event in events if event.event_type == "ai.release_decision.v1")
+    assert release_event.payload["terminal"] == "released"
+
+
+def test_ai_m365_topic_router_records_rejected_audit_trail_on_unknown_workstream(tmp_path: Path) -> None:
+    client = _FakeAIClient(
+        {
+            "workstream_id": "fabricated",
+            "confidence": 0.83,
+            "topics": ["pilot readiness"],
+            "reasoning": "Repeated pilot readiness language aligns with the fabricated workstream.",
+        }
+    )
+    router = M365TopicRouter(client=client, fallback_router=_FakeFallbackRouter(), program_id="acme", programs_root=tmp_path)
+    workstreams = (
+        Workstream(id="acme", name="Store rollout"),
+        Workstream(id="contoso", name="Device delivery"),
+    )
+
+    decision = router.route_artifact(
+        display_name="Pilot readiness mail",
+        subject_or_title="Firmware sign-off follow-up",
+        participant_aliases=("operator",),
+        sample_text="Pilot readiness owners are waiting on firmware sign-off.",
+        workstream_profiles=workstreams,
+    )
+
+    assert decision.reasoning == "Fallback router decision."  # gracefully degraded, never raised
+
+    events = read_events("acme", programs_root=tmp_path)
+    release_event = next(event for event in events if event.event_type == "ai.release_decision.v1")
+    assert release_event.payload["terminal"] == "rejected"
+    lifecycle_states = {
+        event.payload["state"] for event in events if event.event_type == "ai.run_lifecycle.v1"
+    }
+    assert "semantically_validated" not in lifecycle_states
 
 
 def test_ai_m365_topic_router_from_program_builds_client(monkeypatch) -> None:
