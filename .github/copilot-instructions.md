@@ -45,7 +45,7 @@ vertex freshness --edition acme_weekly
 ## Build and Test
 
 ```bash
-pip install -r requirements.txt
+pip install -e ".[dev,ai,ai-local,m365,kusto,render]"
 python -m pytest tests/ -q
 ```
 

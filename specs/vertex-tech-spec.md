@@ -771,7 +771,7 @@ class KustoClient:
     def execute(self, cluster, database, kql, timeout=120, max_retries=3) -> list[dict]
 ```
 
-Auth via `DefaultAzureCredential`. Caches client instances per cluster URI. Timeout as `timedelta`. Dependencies: `requirements.txt`.
+Auth via `DefaultAzureCredential`. Caches client instances per cluster URI. Timeout as `timedelta`. Dependencies: `pyproject.toml`'s `kusto` extra (`azure-kusto-data`).
 
 Safety defaults: `kusto_client.py` injects `max_memory_consumption_per_query_per_node` (8 GB) and `request_timeout` (5 min) by default. Per-query opt-out is allowed via `kusto_no_safety: true` on `KustoQuery`.
 
@@ -3126,32 +3126,43 @@ Latest full-suite execution evidence is recorded in `governance/test-evidence.md
 
 ## §18 Dependencies & Build
 
-### 18.1 Core Dependencies (`requirements.txt`)
+**BL-C5 (2026-07-22): `pyproject.toml` is the sole packaging authority.** The
+former flat `requirements.txt` is retired; a base install (`pip install -e
+.`) gets §18.1 only, and each optional integration is an extra a caller
+opts into explicitly (§18.2).
+
+### 18.1 Core Dependencies (`pyproject.toml` — `[project.dependencies]`)
 
 ```
-jsonschema>=4.23.0    # Config schema validation
-portalocker>=3.1.1    # Cross-platform file locking
-PyYAML>=6.0.2         # YAML parsing
-typer>=0.12.3         # CLI framework
-requests>=2.32.3      # HTTP client
-Jinja2>=3.1.4         # Template rendering
-azure-identity>=1.17.1 # Azure auth
-pytest>=8.3.0         # Test framework (dev)
-cryptography>=43.0.0  # Encrypted profile storage
-keyring>=25.3.0       # OS-backed secret storage
+azure-identity>=1.17.1   # Azure auth
+cryptography>=43.0.0     # Encrypted profile storage
+Jinja2>=3.1.4            # Template rendering
+jsonschema>=4.23.0       # Config schema validation
+keyring>=25.3.0          # OS-backed secret storage
+beautifulsoup4>=4.12     # HTML parsing
+icalendar>=5.0           # Calendar (.ics) parsing
+portalocker>=3.1.1       # Cross-platform file locking
+pypdf>=5.7.0             # PDF text extraction
+python-docx>=1.1         # Word document generation
+PyYAML>=6.0.2            # YAML parsing
+requests>=2.32.3         # HTTP client
+rich>=13.7.1             # CLI output formatting
+python-dotenv>=1.0.0     # .env file loading
+typer>=0.12.3,<0.26      # CLI framework (upper-bounded — see pyproject.toml's own comment)
+click>=8.1.7,<8.4        # typer's dependency (same upper-bound reasoning)
 ```
 
-Current repo-managed dependency count: 19 packages in `requirements.txt`.
+Current repo-managed base dependency count: 16 packages in `pyproject.toml`'s `[project.dependencies]`.
 
-### 18.2 All Dependencies (`requirements.txt`)
+### 18.2 Optional Dependencies (`pyproject.toml` — `[project.optional-dependencies]`)
 
-All capabilities ship in a single requirements file:
 ```
-openai>=1.30.0        # Azure OpenAI (Zone B)
-tiktoken>=0.7.0       # Token counting (Zone B)
-azure-kusto-data>=4.3  # Azure Data Explorer (Zone A/C)
-matplotlib>=3.8        # Chart generation (Zone A)
-msgraph-sdk>=1.15.0    # Microsoft Graph (Zone C)
+dev       = pip-audit, pytest, pytest-cov, pytest-xdist, pytest-mock, mypy   # Test/lint/supply-chain tooling
+ai        = openai, tiktoken             # Azure OpenAI + tokenizer (Zone B)
+ai-local  = rapidfuzz                    # Tier-1 local fuzzy-match seam
+m365      = msgraph-sdk                  # Microsoft Graph (Zone C; declared, not yet imported — see WO-8)
+kusto     = azure-kusto-data              # Azure Data Explorer (Zone A/C)
+render    = matplotlib                    # Chart generation (Zone A)
 ```
 
 ### 18.3 Package Config (`pyproject.toml`)
@@ -3161,7 +3172,7 @@ msgraph-sdk>=1.15.0    # Microsoft Graph (Zone C)
 name = "vertex"
 version = "0.1.0"
 requires-python = ">=3.11"
-dependencies = ["cryptography>=43.0.0", "jsonschema>=4.23.0", "keyring>=25.3.0", "PyYAML>=6.0.2", "typer>=0.12.3"]
+# See §18.1 for the full [project.dependencies] list and §18.2 for extras.
 
 [project.scripts]
 vx = "cli:app"

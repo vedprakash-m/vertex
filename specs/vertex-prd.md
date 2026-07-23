@@ -162,7 +162,7 @@ BL-C1: complete (2026-07-22)
 BL-C2: complete (2026-07-22)
 BL-C3: complete (2026-07-15)
 BL-C4: complete (2026-07-15)
-BL-C5: in-progress (2026-07-22)
+BL-C5: complete (2026-07-22)
 BL-C6: deferred (2026-07-22)
 BL-C7: complete (2026-07-22)
 BL-D1: complete (2026-07-15)
@@ -2170,30 +2170,45 @@ Evidence refresh: full execution evidence is recorded in `governance/test-eviden
 
 ## §20 Dependencies & Infrastructure
 
-### 20.1 Core Dependencies
+**BL-C5 (2026-07-22): `pyproject.toml` is now the sole packaging authority.** The
+former flat `requirements.txt` (a single list mixing base, dev, and every
+optional integration) is retired; base install requirements and each optional
+integration's dependencies are declared separately, below.
 
+### 20.1 Core Dependencies (`pyproject.toml` — `[project.dependencies]`)
+
+Installed unconditionally by `pip install -e .`:
 ```
-jsonschema>=4.23.0    # Config schema validation
-portalocker>=3.1.1    # Cross-platform file locking for journal/trajectory writes
-PyYAML>=6.0.2         # YAML config parsing
-typer>=0.12.3         # CLI framework
-requests>=2.32.3      # HTTP client for ADO REST API
-Jinja2>=3.1.4         # Template rendering
-azure-identity>=1.17.1 # Azure auth (CLI + managed identity)
-pytest>=8.3.0         # Local validation and test execution
-cryptography>=43.0.0  # Encrypted profile storage
-keyring>=25.3.0       # OS-backed secret storage for encrypted profiles
+azure-identity>=1.17.1  # Azure auth (CLI + managed identity)
+cryptography>=43.0.0    # Encrypted profile storage
+Jinja2>=3.1.4           # Template rendering
+jsonschema>=4.23.0      # Config schema validation
+keyring>=25.3.0         # OS-backed secret storage for encrypted profiles
+beautifulsoup4>=4.12    # HTML parsing (EML/report content extraction)
+icalendar>=5.0          # Calendar (.ics) parsing
+portalocker>=3.1.1      # Cross-platform file locking for journal/trajectory writes
+pypdf>=5.7.0            # PDF text extraction
+python-docx>=1.1        # Word document generation
+PyYAML>=6.0.2           # YAML config parsing
+requests>=2.32.3        # HTTP client for ADO REST API
+rich>=13.7.1            # CLI output formatting
+python-dotenv>=1.0.0    # .env file loading
+typer>=0.12.3,<0.26     # CLI framework (upper-bounded, see pyproject.toml's own comment)
+click>=8.1.7,<8.4       # typer's dependency (same upper-bound reasoning)
 ```
 
-### 20.2 All Dependencies (`requirements.txt`)
+### 20.2 Optional Dependencies (`pyproject.toml` — `[project.optional-dependencies]`)
 
-All capabilities are shipped in a single requirements file:
+Six named extras, each installed on demand (e.g. `pip install -e ".[ai]"`);
+every package is imported lazily/defensively at its call site so a base
+install never needs any of them:
 ```
-openai>=1.30.0        # Azure OpenAI client (AI layer)
-tiktoken>=0.7.0       # Token counting for context budget (AI layer)
-azure-kusto-data>=4.3  # Azure Data Explorer client (Kusto layer)
-matplotlib>=3.8        # Chart generation (Kusto layer)
-msgraph-sdk>=1.15.0    # Microsoft Graph API client (M365 layer)
+dev       = pip-audit, pytest, pytest-cov, pytest-xdist, pytest-mock, mypy
+ai        = openai, tiktoken               # Azure OpenAI client + tokenizer (AI layer)
+ai-local  = rapidfuzz                      # Tier-1 local fuzzy-match seam
+m365      = msgraph-sdk                    # Microsoft Graph client (declared, not yet imported — see WO-8)
+kusto     = azure-kusto-data                # Azure Data Explorer client (Kusto layer)
+render    = matplotlib                      # Chart generation (Kusto layer)
 ```
 
 ### 20.3 External Services

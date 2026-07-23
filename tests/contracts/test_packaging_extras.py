@@ -94,25 +94,17 @@ def test_known_optional_import_site_resolves_to_expected_extra(substring: str, e
     assert package in declared, f"{package!r} (import site: {matches[0]}) is not declared in the {expected_extra!r} extra"
 
 
-def test_typer_and_click_upper_bounds_match_between_pyproject_and_requirements() -> None:
-    """WO-8 found pyproject.toml's typer pin was missing the <0.26 upper
-    bound that requirements.txt already carries (a known breaking-change
-    cap for CLI group introspection) -- pin this so the two manifests can't
-    drift apart again without a test catching it."""
-    requirements_text = (_REPO_ROOT / "requirements.txt").read_text(encoding="utf-8")
+def test_typer_and_click_retain_upper_bounds() -> None:
+    """WO-8 found pyproject.toml's typer pin was once missing the <0.26
+    upper bound (a known breaking-change cap for CLI group introspection).
+    BL-C5 retired requirements.txt (pyproject.toml is now the sole packaging
+    authority, so there is no second manifest to cross-check against) --
+    this pins the bound directly so it can't silently regress."""
     pyproject_deps = _PYPROJECT["project"]["dependencies"]
 
-    for package in ("typer", "click"):
-        requirements_line = next(
-            (line for line in requirements_text.splitlines() if line.strip().startswith(package)),
-            None,
-        )
+    for package, expected_bound in (("typer", "<0.26"), ("click", "<8.4")):
         pyproject_line = next((dep for dep in pyproject_deps if dep.startswith(package)), None)
-        assert requirements_line is not None, f"{package} missing from requirements.txt"
         assert pyproject_line is not None, f"{package} missing from pyproject.toml [project.dependencies]"
-        assert "<0.26" in requirements_line or "<8.4" in requirements_line, (
-            f"requirements.txt's {package} pin lost its upper bound: {requirements_line!r}"
-        )
-        assert "<0.26" in pyproject_line or "<8.4" in pyproject_line, (
-            f"pyproject.toml's {package} pin is missing its upper bound: {pyproject_line!r}"
+        assert expected_bound in pyproject_line, (
+            f"pyproject.toml's {package} pin is missing its {expected_bound} upper bound: {pyproject_line!r}"
         )

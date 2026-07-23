@@ -1,9 +1,10 @@
 """Contract tests for the WS-7 pip-audit CI step.
 
 Ratchets the supply-chain audit surface so it cannot silently regress:
-- The dep manifest MUST list pip-audit.
+- pyproject.toml's `dev` extra MUST list pip-audit.
 - The CI workflow MUST invoke pip-audit after `pip install`.
 - The local-dev script `scripts/run_pip_audit.py` MUST exist + be importable.
+- requirements.txt (retired by BL-C5) MUST NOT come back.
 
 If any of these checks fail, the PR cannot land.
 """
@@ -25,13 +26,17 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def test_pip_audit_in_requirements_txt() -> None:
-    """`pip-audit` must be a declared dependency (dev or runtime)."""
-    assert REQUIREMENTS.exists(), "requirements.txt missing — repo layout changed?"
-    text = _read(REQUIREMENTS)
-    # Match `pip-audit` or `pip_audit` with a version specifier.
-    assert "pip-audit" in text or "pip_audit" in text, (
-        "pip-audit not declared in requirements.txt — WS-7 acceptance broken"
+def test_requirements_txt_stays_retired() -> None:
+    """BL-C5: requirements.txt was removed in favor of pyproject.toml's
+    [project.dependencies] + [project.optional-dependencies] extras being the
+    sole packaging authority. A regression guard, not a stale check -- if
+    this file reappears, every consumer this migration updated (CI's two
+    install steps, run_pip_audit.py, README, this test file's sibling
+    packaging tests) would silently go back out of sync with it."""
+    assert not REQUIREMENTS.exists(), (
+        "requirements.txt has reappeared -- BL-C5 retired it in favor of pyproject.toml's "
+        "extras being the sole packaging authority. If this is intentional, the CI install "
+        "steps, scripts/run_pip_audit.py, and README.md all need to be updated back, not just this file restored."
     )
 
 

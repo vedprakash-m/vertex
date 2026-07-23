@@ -209,9 +209,9 @@ Clone the repository and initialize the Python virtual environment:
 python -m venv .venv
 source .venv/bin/activate  # On Windows: .\.venv\Scripts\activate
 
-# Install dependencies and editable platform package
-pip install -r requirements.txt
-pip install -e . --no-deps
+# Install the platform (editable) plus every optional integration and dev tool.
+# Drop extras you don't need, e.g. `pip install -e .` for a minimal core install.
+pip install -e ".[dev,ai,ai-local,m365,kusto,render]"
 ```
 
 Configure your local environment by copying the example:

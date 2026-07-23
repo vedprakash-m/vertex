@@ -12,8 +12,17 @@ Exit codes mirror pip-audit's own:
 - 2: invalid arguments / setup error
 - 3+: pip-audit internal error (raised)
 
+BL-C5: requirements.txt is retired (pyproject.toml + its extras are now the
+sole packaging authority). By default this audits the CURRENTLY INSTALLED
+environment (pip-audit's own default with no `-r`/`--requirement` flag),
+which is correct as long as the environment was set up via `pip install -e
+".[dev,ai,ai-local,m365,kusto,render]"` (CI's install step). Pass
+`--requirement <path>` explicitly if you want to audit a specific
+requirements file instead (e.g. a generated lock file).
+
 Usage:
-    python scripts/run_pip_audit.py --strict --requirement requirements.txt
+    python scripts/run_pip_audit.py --strict
+    python scripts/run_pip_audit.py --strict --requirement some-lock-file.txt
     python scripts/run_pip_audit.py --help
 """
 from __future__ import annotations
@@ -44,8 +53,8 @@ def _build_argparser() -> argparse.ArgumentParser:
         "--requirement",
         "-r",
         type=Path,
-        default=Path("requirements.txt"),
-        help="Audit this requirements file (default: requirements.txt).",
+        default=None,
+        help="Audit this requirements file instead of the current environment.",
     )
     parser.add_argument(
         "--vulnerability-service",
@@ -59,7 +68,7 @@ def _build_argparser() -> argparse.ArgumentParser:
 def main(argv: tuple[str, ...] | None = None) -> int:
     args = _build_argparser().parse_args(argv)
 
-    if not args.requirement.exists():
+    if args.requirement is not None and not args.requirement.exists():
         print(
             f"ERROR: requirements file not found: {args.requirement}",
             file=sys.stderr,
@@ -69,7 +78,9 @@ def main(argv: tuple[str, ...] | None = None) -> int:
     # We invoke pip-audit as a subprocess so the local run reports findings
     # the same way the CI step does. `python -m pip_audit` is the canonical
     # entry point; we pass our args through verbatim after the module name.
-    extra: list[str] = ["--requirement", str(args.requirement)]
+    # No `--requirement` means pip-audit falls back to its own default:
+    # audit the currently installed environment.
+    extra: list[str] = ["--requirement", str(args.requirement)] if args.requirement is not None else []
     if args.strict:
         extra.append("--strict")
     if args.vulnerability_service:

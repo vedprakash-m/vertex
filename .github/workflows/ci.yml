@@ -22,20 +22,23 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
+        # BL-C5: requirements.txt is retired. This installs the base package
+        # plus every optional extra (dev/ai/ai-local/m365/kusto/render) --
+        # the same superset requirements.txt + `pip install -e .` used to
+        # provide, now declared in one place (pyproject.toml).
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install -e ".[dev,ai,ai-local,m365,kusto,render]"
 
       - name: Supply-chain audit (WS-7 — pip-audit against OSV)
-        # Runs `pip-audit --strict` against the manifest. `--strict` makes
-        # pip-audit exit non-zero on ANY known vulnerability. OSV is the
-        # default keyless vulnerability service; no GitHub/GHSA token is
-        # needed for public PRs. Findings block the PR (continue-on-error
-        # is intentionally false). The `requirements-dev` deps are scoped
-        # via the `-r requirements.txt` flag (dev-deps are added in
-        # pyproject.toml under [project.optional-dependencies] dev).
+        # Runs `pip-audit --strict` against the currently installed
+        # environment (no --requirement flag; requirements.txt is retired).
+        # `--strict` makes pip-audit exit non-zero on ANY known
+        # vulnerability. OSV is the default keyless vulnerability service;
+        # no GitHub/GHSA token is needed for public PRs. Findings block the
+        # PR (continue-on-error is intentionally false).
         run: |
-          python scripts/run_pip_audit.py --strict --requirement requirements.txt
+          python scripts/run_pip_audit.py --strict
 
       - name: Regenerate CLI reference (keeps specs/cli-reference.md current for this Python version)
         run: python scripts/generate_cli_reference.py
@@ -121,10 +124,11 @@ jobs:
           python-version: "3.11"
 
       - name: "Install dependencies (no cache, mirrors a fresh pip install)"
+        # BL-C5: requirements.txt is retired; extras replace the old
+        # `-r requirements.txt` + `pip install -e .` two-step.
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-          pip install -e .
+          python -m pip install -e ".[dev,ai,ai-local,m365,kusto,render]"
 
       - name: "Confirm vertex entry point is installed and CLI loads"
         # `--help` must exit 0; any non-zero exit means the Typer tree is broken

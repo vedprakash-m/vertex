@@ -26,10 +26,7 @@ dependencies = [
   # Upper bounds: typer 0.26.x / click 8.4.x changed CLI group introspection and
   # broke scripts/generate_intent_routes._click_root() ("Vertex CLI root is not
   # a Click group") plus root NL routing / typer.Exit handling. Cap below the
-  # breaking releases until the introspection is made forward-compatible (same
-  # pins as requirements.txt -- WO-8 found this cap was missing here, so a
-  # plain `pip install -e .` without requirements.txt could pull a broken
-  # typer/click pair).
+  # breaking releases until the introspection is made forward-compatible.
   "typer>=0.12.3,<0.26",
   "click>=8.1.7,<8.4",
 ]
@@ -39,12 +36,20 @@ vx = "cli:app"
 vertex = "cli:app"
 
 [project.optional-dependencies]
-# Dev-only supply-chain assurance (WS-7). `pip install -e ".[dev]"` to enable.
+# Dev/CI tooling (WS-7 pip-audit + the test/lint stack). BL-C5: these five
+# used to live only in the now-removed requirements.txt, meaning `pip
+# install -e ".[dev]"` could not by itself set up a working dev environment.
+# `pip install -e ".[dev]"` to enable.
 dev = [
   "pip-audit>=2.7.0",
+  "pytest>=8.3.0",
+  "pytest-cov>=7.1.0",
+  "pytest-xdist>=3.6.0",
+  "pytest-mock>=3.14.0",
+  "mypy>=1.10.0",
 ]
 # WO-8 (specs/backlog.md BL-C5): named extras for optional integration
-# surfaces, split out of the single flat requirements.txt so a base install
+# surfaces, split out of the retired flat requirements.txt so a base install
 # doesn't need to compile pydantic-core (an openai transitive dependency) or
 # pull in integrations most deployments don't use. Every package here is
 # already imported lazily/defensively at its call site (try/except ImportError
