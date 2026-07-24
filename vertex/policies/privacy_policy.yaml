@@ -41,3 +41,28 @@ fact_type_classifications:
   # financial commitments). Add fact types here when data sensitivity demands it.
   # Example (add when needed):
   # personnel.decision: sensitive
+
+# ---------------------------------------------------------------------------
+# specs/backlog.md BL-E1 (DIR-08A/08B): graded PII retention/encryption/reveal
+# policy for the people registry. Operator-approved 2026-07-24 -- see
+# src/core/people_registry_privacy_policy.py's module docstring for the full
+# decision record and rationale. Workspace-global; override via
+# knowledge/policies/privacy_policy.yaml's privacy_policy_override.people_registry
+# key (see knowledge/people_registry_policy.example.yaml).
+# ---------------------------------------------------------------------------
+people_registry:
+  # Days after PersonDirectory.departed_at before a departed person's PII
+  # fields (contacts/title/department -- not entity_id or fact lineage,
+  # which are never subject to this clock) must be redacted.
+  retention_days: 365
+  # Required floor: PII-bearing fields must be encrypted at rest. Below
+  # this is a policy violation (DIR-08B, FAIL).
+  default_encryption: sensitive_only
+  # Aspirational bar. Meeting the required floor but not this bar is
+  # DIR-08A (WARN), not a FAIL. "all" is not currently achievable with
+  # today's code -- no encryption mechanism exists yet for
+  # people_directory.yaml/teams.yaml, only for the sensitive-profile file.
+  recommended_encryption: all
+  # Always required, no WARN tier -- a missing/disabled pii_reveal_principals
+  # allowlist is a FAIL, not a matter of degree.
+  reveal_requires_principal_allowlist: true

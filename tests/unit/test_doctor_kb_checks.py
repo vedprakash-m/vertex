@@ -199,6 +199,167 @@ def test_run_kb_doctor_legacy_reference_check_warns_on_recorded_legacy_lookups(t
     assert "DIR-16" in legacy_check.detail
 
 
+class _FakeKeyring:
+    """Minimal in-memory keyring double, mirroring the pattern already used
+    in tests/unit/test_people_registry_privacy_operations.py."""
+
+    def __init__(self) -> None:
+        self.values: dict[tuple[str, str], str] = {}
+
+    def get_password(self, service_name: str, username: str) -> str | None:
+        return self.values.get((service_name, username))
+
+    def set_password(self, service_name: str, username: str, password: str) -> None:
+        self.values[(service_name, username)] = password
+
+    def delete_password(self, service_name: str, username: str) -> None:
+        del self.values[(service_name, username)]
+
+
+def _bootstrap_registry_with_pii_principals(knowledge_root: Path, *, principals: tuple[str, ...] = ()) -> None:
+    from dataclasses import replace as _replace
+    from src.core.people_registry_identity import load_registry_config, write_registry_config
+
+    bootstrap_registry_identity(knowledge_root=knowledge_root, customer_boundary_id="test-boundary", apply=True)
+    config = load_registry_config(knowledge_root)
+    assert config is not None
+    write_registry_config(knowledge_root / "registry.yaml", _replace(config, pii_reveal_principals=principals))
+
+
+def test_registry_dir08_ok_when_registry_not_adopted_at_all(tmp_path: Path) -> None:
+    """No registry.yaml and no people_profiles.yaml -- nothing to check yet,
+    same bypass DIR-05 already applies for an unadopted shared registry.
+    A workspace that has never turned the feature on has no privacy posture
+    to be non-compliant with."""
+    from src.commands.doctor_checks.kb_checks import _load_shared_registry_snapshot, registry_dir08_pii_policy_check
+
+    programs_root = tmp_path / "programs"
+    snapshot = _load_shared_registry_snapshot(programs_root)
+    check = registry_dir08_pii_policy_check(programs_root=programs_root, snapshot=snapshot)
+
+    assert check.status == "ok"
+
+
+def test_registry_dir08_fails_when_nothing_configured(tmp_path: Path) -> None:
+    """DIR-08B: a workspace with a registry.yaml (adopted) but no
+    pii_reveal_principals, plus a plaintext people_profiles.yaml, violates
+    both required-tier policy floors."""
+    from src.commands.doctor_checks.kb_checks import _load_shared_registry_snapshot, registry_dir08_pii_policy_check
+
+    programs_root = tmp_path / "programs"
+    knowledge_root = tmp_path / "knowledge"
+    _bootstrap_registry_with_pii_principals(knowledge_root, principals=())
+    (knowledge_root / "people_profiles.yaml").write_text("{}\n", encoding="utf-8")
+
+    snapshot = _load_shared_registry_snapshot(programs_root)
+    check = registry_dir08_pii_policy_check(programs_root=programs_root, snapshot=snapshot)
+
+    assert check.status == "fail"
+    assert check.code == "DIR-08B"
+    assert "pii_reveal_principals allowlist" in check.detail
+    assert "encryption posture" in check.detail
+
+
+def test_registry_dir08_warns_when_floor_met_but_not_recommended(tmp_path: Path, monkeypatch) -> None:
+    """DIR-08A: reveal allowlist configured and profiles encrypted (meets the
+    required `sensitive_only` floor) but the platform default's recommended
+    posture ('all') is not achievable/met -- WARN, not FAIL."""
+    from src.core.profile_encryption import encrypt_people_profiles_file
+    from src.commands.doctor_checks.kb_checks import _load_shared_registry_snapshot, registry_dir08_pii_policy_check
+
+    programs_root = tmp_path / "programs"
+    knowledge_root = tmp_path / "knowledge"
+    _bootstrap_registry_with_pii_principals(knowledge_root, principals=("dpo@example.com",))
+
+    profiles_path = knowledge_root / "people_profiles.yaml"
+    profiles_path.write_text("{}\n", encoding="utf-8")
+    fake_keyring = _FakeKeyring()
+    monkeypatch.setattr("src.core.profile_encryption._get_keyring_backend", lambda: fake_keyring)
+    encrypt_people_profiles_file(profiles_path)
+
+    snapshot = _load_shared_registry_snapshot(programs_root)
+    check = registry_dir08_pii_policy_check(programs_root=programs_root, snapshot=snapshot)
+
+    assert check.status == "warn"
+    assert check.code == "DIR-08A"
+    assert "not currently achievable" in check.detail
+
+
+def test_registry_dir08_ok_when_override_matches_achievable_posture(tmp_path: Path, monkeypatch) -> None:
+    """A knowledge-root override that sets recommended_encryption to the
+    same achievable floor demonstrates the fully-compliant ('ok') path is
+    real and reachable, not merely unreachable dead code."""
+    from src.core.profile_encryption import encrypt_people_profiles_file
+    from src.commands.doctor_checks.kb_checks import _load_shared_registry_snapshot, registry_dir08_pii_policy_check
+
+    programs_root = tmp_path / "programs"
+    knowledge_root = tmp_path / "knowledge"
+    _bootstrap_registry_with_pii_principals(knowledge_root, principals=("dpo@example.com",))
+
+    profiles_path = knowledge_root / "people_profiles.yaml"
+    profiles_path.write_text("{}\n", encoding="utf-8")
+    fake_keyring = _FakeKeyring()
+    monkeypatch.setattr("src.core.profile_encryption._get_keyring_backend", lambda: fake_keyring)
+    encrypt_people_profiles_file(profiles_path)
+
+    policies_dir = knowledge_root / "policies"
+    policies_dir.mkdir(parents=True, exist_ok=True)
+    (policies_dir / "privacy_policy.yaml").write_text(
+        "privacy_policy_override:\n"
+        "  people_registry:\n"
+        "    recommended_encryption: sensitive_only\n",
+        encoding="utf-8",
+    )
+
+    snapshot = _load_shared_registry_snapshot(programs_root)
+    check = registry_dir08_pii_policy_check(programs_root=programs_root, snapshot=snapshot)
+
+    assert check.status == "ok"
+    assert check.code == "DIR-08A"
+
+
+def test_registry_dir08_fails_on_departed_person_past_retention_deadline(tmp_path: Path, monkeypatch) -> None:
+    """DIR-08B: a departed person past the retention deadline who still
+    carries PII fields is a required-policy violation, independent of the
+    encryption/reveal posture."""
+    from datetime import datetime, timedelta, timezone
+    from src.core.people_directory_schema import PersonDirectory, PersonStatus, write_people_directory
+    from src.core.profile_encryption import encrypt_people_profiles_file
+    from src.commands.doctor_checks.kb_checks import _load_shared_registry_snapshot, registry_dir08_pii_policy_check
+
+    programs_root = tmp_path / "programs"
+    knowledge_root = tmp_path / "knowledge"
+    _bootstrap_registry_with_pii_principals(knowledge_root, principals=("dpo@example.com",))
+
+    profiles_path = knowledge_root / "people_profiles.yaml"
+    profiles_path.write_text("{}\n", encoding="utf-8")
+    fake_keyring = _FakeKeyring()
+    monkeypatch.setattr("src.core.profile_encryption._get_keyring_backend", lambda: fake_keyring)
+    encrypt_people_profiles_file(profiles_path)
+
+    long_departed = datetime.now(timezone.utc) - timedelta(days=400)
+    write_people_directory(
+        knowledge_root / "people_directory.yaml",
+        (
+            PersonDirectory(
+                entity_id="person:departed-alice",
+                alias="alice",
+                title="Former PM",
+                status=PersonStatus.DEPARTED,
+                departed_at=long_departed,
+            ),
+        ),
+    )
+
+    snapshot = _load_shared_registry_snapshot(programs_root)
+    check = registry_dir08_pii_policy_check(programs_root=programs_root, snapshot=snapshot)
+
+    assert check.status == "fail"
+    assert check.code == "DIR-08B"
+    assert "retention deadline" in check.detail
+    assert "person:departed-alice" in check.detail
+
+
 def test_knowledge_predicate_registry_check_warns_when_threshold_exceeded(monkeypatch) -> None:
     monkeypatch.setattr("src.commands.doctor_checks.kb_checks.predicate_count", lambda: 101)
 

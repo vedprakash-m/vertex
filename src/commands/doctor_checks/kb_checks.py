@@ -31,7 +31,9 @@ from src.core.knowledge_store import (
     get_shared_knowledge_root,
 )
 from src.core.people_entity_schema import check_dir11_compliance, is_legacy_schema_0_entities_document, load_entities_document
-from src.core.people_directory_schema import load_people_directory, load_teams
+from src.core.people_directory_schema import PersonStatus, load_people_directory, load_teams
+from src.core.profile_encryption import inspect_people_profiles_file
+from src.core.people_registry_privacy_policy import encryption_rank, load_people_registry_privacy_policy
 from src.core.people_membership_schema import read_all_memberships
 from src.core.people_registry_directory_checks import (
     find_conflict_accountability_findings,
@@ -164,6 +166,7 @@ def run_kb_doctor(
     checks.append(registry_dir09a_provider_capability_health_check(programs_root=programs_root))
     checks.append(registry_dir09b_provider_configuration_check(programs_root=programs_root))
     checks.append(registry_dir10_audience_scope_check(known_program_ids=known_program_ids, programs_root=programs_root))
+    checks.append(registry_dir08_pii_policy_check(programs_root=programs_root, snapshot=shared_registry_snapshot))
     # Loaded ONCE and shared by DIR-04/DIR-12A/DIR-12B -- see
     # _load_program_stakeholder_aliases's own docstring (PPL-W3.2b).
     program_stakeholder_aliases = _load_program_stakeholder_aliases(known_program_ids=known_program_ids, programs_root=programs_root)
@@ -999,6 +1002,85 @@ def registry_legacy_reference_check(*, programs_root: Path) -> DoctorCheck:
             "schema_3_0_horizon_met": horizon.met,
         },
         code="DIR-16",
+    )
+
+
+def registry_dir08_pii_policy_check(*, programs_root: Path, snapshot: "_SharedRegistrySnapshot") -> DoctorCheck:
+    """specs/backlog.md BL-E1 (DIR-08A/08B): compares the people registry's
+    actual encryption/reveal/retention posture against the loaded,
+    workspace-global privacy policy (`vertex/policies/privacy_policy.yaml`'s
+    `people_registry` section, operator-approved 2026-07-24). FAIL
+    (DIR-08B) for any required-tier violation (missing reveal allowlist,
+    encryption below the required floor, or a departed person past the
+    retention deadline still carrying PII fields). WARN (DIR-08A) for
+    meeting the required floor but not the recommended (aspirational) bar.
+    """
+    knowledge_root = get_shared_knowledge_root(programs_root)
+    policy = load_people_registry_privacy_policy(knowledge_root=knowledge_root)
+
+    failures: list[str] = []
+    warnings: list[str] = []
+
+    # Registry not adopted at all (no registry.yaml) -- nothing to check,
+    # same as DIR-05's "no shared file yet" bypass. A workspace that has
+    # never turned on the shared people registry has no privacy posture to
+    # be non-compliant with.
+    effective_config = load_effective_registry_config(knowledge_root)
+    if policy.reveal_requires_principal_allowlist and effective_config is not None:
+        principals = effective_config.persisted.pii_reveal_principals
+        if not principals:
+            failures.append(
+                "policy requires a non-empty pii_reveal_principals allowlist, "
+                "but none is configured (knowledge/registry.yaml)"
+            )
+
+    # people_profiles.yaml not created yet -- nothing to check, same reasoning.
+    profiles_path = knowledge_root / "people_profiles.yaml"
+    profile_status = inspect_people_profiles_file(profiles_path)
+    if profile_status.storage != "missing":
+        actual_encryption = "sensitive_only" if profile_status.storage == "encrypted" else "none"
+        if encryption_rank(actual_encryption) < encryption_rank(policy.default_encryption):
+            failures.append(
+                f"actual encryption posture ({actual_encryption!r}) is below the required floor "
+                f"({policy.default_encryption!r}); {profiles_path.name} storage={profile_status.storage!r}"
+            )
+        elif encryption_rank(actual_encryption) < encryption_rank(policy.recommended_encryption):
+            warnings.append(
+                f"actual encryption posture ({actual_encryption!r}) meets the required floor but is below the "
+                f"recommended posture ({policy.recommended_encryption!r}); 'all' is not currently achievable -- "
+                "no encryption mechanism exists yet for people_directory.yaml/teams.yaml"
+            )
+
+    now = datetime.now(timezone.utc)
+    overdue: list[str] = []
+    for person in snapshot.people:
+        if person.status == PersonStatus.DEPARTED and person.departed_at is not None:
+            deadline = person.departed_at + timedelta(days=policy.retention_days)
+            has_pii = bool(person.contacts) or person.title is not None or person.department is not None
+            if now >= deadline and has_pii:
+                overdue.append(person.entity_id)
+    if overdue:
+        failures.append(
+            f"{len(overdue)} departed person(s) past the {policy.retention_days}-day retention deadline "
+            f"still have PII fields populated: {', '.join(sorted(overdue)[:5])}"
+        )
+
+    if failures:
+        return DoctorCheck(
+            "Registry DIR-08", "fail",
+            f"DIR-08B: {'; '.join(failures)}",
+            metadata={"failures": failures, "warnings": warnings}, code="DIR-08B",
+        )
+    if warnings:
+        return DoctorCheck(
+            "Registry DIR-08", "warn",
+            f"DIR-08A: {'; '.join(warnings)}",
+            metadata={"warnings": warnings}, code="DIR-08A",
+        )
+    return DoctorCheck(
+        "Registry DIR-08", "ok",
+        "PII retention/encryption/reveal posture meets policy.",
+        metadata={}, code="DIR-08A",
     )
 
 
