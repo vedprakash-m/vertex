@@ -1304,6 +1304,18 @@ Multipart MIME: HTML body (the full newsletter) + plain text body (Teams Markdow
 
 ## §14 Outlook HTML Constraints
 
+### 14.0 Supported / Best-Effort Client Matrix (specs/backlog.md BL-H2 action 1, decided 2026-07-24)
+
+Formalizes what §17.1's C-1..C-10 checklist already tests implicitly, so a rendering
+break has an explicit answer for "is this a real regression or an accepted gap."
+
+| Tier | Clients | What it means |
+|------|---------|----------------|
+| **Supported** | Outlook Desktop (Windows), Outlook on the Web, Outlook Mobile (iOS) | Actively tested per §17.1's C-1..C-10; a rendering break here is a real regression and blocks release. |
+| **Best-effort** | Outlook Desktop (Mac), Outlook Mobile (Android), any other email client a recipient might forward/open the newsletter in (Gmail, Apple Mail, etc.) | Not actively tested; no rendering-parity guarantee. May work — the Outlook-safe HTML constraints below (table layout, inline styles, no `<div>`/media queries) tend to degrade gracefully elsewhere — but a break here is not treated as a regression. |
+
+This is a policy statement, not a claim that manual evidence has been captured for every Supported client — see BL-H2's own remaining actions (3)/(4) (dated manual evidence capture, independent WCAG audit) for what's still open.
+
 These constraints apply to ALL HTML email output (detailed, continuity, narrative, lookback archetypes).
 
 | Constraint | Value |
@@ -1432,6 +1444,8 @@ Horizontal scroll with `-webkit-overflow-scrolling: touch`.
 | Alt text uses `{title} chart` pattern | §15.3 |
 
 ### 17.1 Email Client Tests
+
+Covers the **Supported** tier declared in §14.0. Best-effort clients (Outlook Mac, Outlook Mobile Android, Gmail, Apple Mail, etc.) are not part of this checklist.
 
 | # | Test | Client | Pass Criteria |
 |---|------|--------|--------------|
