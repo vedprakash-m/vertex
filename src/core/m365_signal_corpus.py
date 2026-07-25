@@ -49,7 +49,7 @@ def build_m365_corpus_texts_by_workstream(
         corpus_texts.extend(
             signal.text
             for signal in approved_signals
-            if signal.workstream_id == workstream.id and signal.text
+            if workstream.id in signal.workstream_ids and signal.text
         )
         if corpus_texts:
             corpus_texts_by_workstream[workstream.id] = tuple(corpus_texts)

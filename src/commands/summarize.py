@@ -235,7 +235,7 @@ def _summarize_workstream(
     generator: SummaryGenerator,
 ) -> WorkstreamSummaryResult:
     path = get_summary_path(program_id, workstream.id, programs_root)
-    workstream_signals = tuple(signal for signal in approved_signals if signal.workstream_id == workstream.id)
+    workstream_signals = tuple(signal for signal in approved_signals if workstream.id in signal.workstream_ids)
 
     if reset:
         candidate_signals = workstream_signals

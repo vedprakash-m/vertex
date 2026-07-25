@@ -178,7 +178,7 @@ def build_dependency_signals(
                 if signal.source == "ado/dependency"
                 and signal.metadata is not None
                 and signal.metadata.get("dependency_label") == group.label
-                and signal.workstream_id == workstream_id
+                and workstream_id in signal.workstream_ids
             ),
             expected_max_age_hours=stale_warn_days * 24,
             previous_state=(previous_query_states or {}).get(ado_dependency_query_state_id(group)),

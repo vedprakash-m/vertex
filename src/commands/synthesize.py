@@ -285,7 +285,7 @@ def synthesize_workstream(
     )
     knowledge = load_program_knowledge(resolved_program_id, programs_root=resolved_programs_root)
     workstream_signals = sort_signals_for_ai_context(
-        tuple(signal for signal in approved_signals if signal.workstream_id == workstream.id),
+        tuple(signal for signal in approved_signals if workstream.id in signal.workstream_ids),
         people_directory=knowledge.people_directory,
         as_of=current_time,
         source_confidence_order=program.source_confidence_order,
