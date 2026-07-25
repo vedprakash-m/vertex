@@ -231,6 +231,42 @@ def test_dedupe_signals_semantically_dedupes_workiq_near_duplicates_at_l2() -> N
     assert kept == (original,)
 
 
+def test_dedupe_signals_semantically_dedupes_when_workstream_ids_merely_overlap_at_l2() -> None:
+    """BL-F2 decision (2026-07-24): "same workstream" for dedup means ANY
+    shared workstream, not an exact scalar match -- a signal explicitly
+    shared across two workstreams (one of which matches the other signal's
+    single workstream) must still be treated as a potential duplicate."""
+    original = Signal(
+        id="sig-workiq-1",
+        timestamp=datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc),
+        source="workiq/email",
+        program_id="acme",
+        workstream_id="deployment_readiness",
+        entity_refs=("WI:1001",),
+        text="Deployment readiness remains blocked because diagnostics telemetry is still incomplete for the staged rollout review.",
+        raw_ref="workiq:msg-1",
+        confidence=Confidence.HIGH,
+        metadata={"message_id": "msg-1"},
+    )
+    repeated = Signal(
+        id="sig-workiq-2",
+        timestamp=datetime(2026, 5, 8, 12, 30, tzinfo=timezone.utc),
+        source="workiq/teams",
+        program_id="acme",
+        workstream_id="rollout_safety",
+        workstream_ids=("rollout_safety", "deployment_readiness"),
+        entity_refs=("WI:1001",),
+        text="Deployment readiness is still blocked because diagnostics telemetry remains incomplete for the staged rollout review.",
+        raw_ref="workiq:msg-2",
+        confidence=Confidence.HIGH,
+        metadata={"message_id": "msg-2"},
+    )
+
+    kept = dedupe_signals((original, repeated), program_maturity_level=2)
+
+    assert kept == (original,)
+
+
 def test_dedupe_signals_keeps_workiq_near_duplicates_with_different_entities_at_l2() -> None:
     original = Signal(
         id="sig-workiq-1",

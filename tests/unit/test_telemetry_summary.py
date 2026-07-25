@@ -4,7 +4,45 @@ from datetime import datetime, timezone
 
 from src.core.models import Confidence
 from src.core.models_v2 import Signal
-from src.core.telemetry_summary import build_approved_telemetry_summary
+from src.core.telemetry_summary import _shares_workstream, build_approved_telemetry_summary
+
+
+def _telemetry_signal(signal_id: str, **overrides: object) -> Signal:
+    defaults: dict[str, object] = dict(
+        id=signal_id,
+        timestamp=datetime(2026, 5, 10, 10, 0, tzinfo=timezone.utc),
+        source="ado/sprint",
+        program_id="acme",
+        workstream_id="deployment_readiness",
+        entity_refs=(),
+        text="",
+        raw_ref=None,
+        confidence=Confidence.HIGH,
+    )
+    defaults.update(overrides)
+    return Signal(**defaults)  # type: ignore[arg-type]
+
+
+def test_shares_workstream_true_on_exact_match() -> None:
+    a = _telemetry_signal("a", workstream_id="deployment_readiness")
+    b = _telemetry_signal("b", workstream_id="deployment_readiness")
+    assert _shares_workstream(a, b) is True
+
+
+def test_shares_workstream_true_on_partial_overlap() -> None:
+    """BL-F2 decision (2026-07-24): any shared workstream is enough, even if
+    the two signals' full sets differ."""
+    a = _telemetry_signal("a", workstream_id="deployment_readiness")
+    b = _telemetry_signal(
+        "b", workstream_id="rollout_safety", workstream_ids=("rollout_safety", "deployment_readiness")
+    )
+    assert _shares_workstream(a, b) is True
+
+
+def test_shares_workstream_false_when_disjoint() -> None:
+    a = _telemetry_signal("a", workstream_id="deployment_readiness")
+    b = _telemetry_signal("b", workstream_id="rollout_safety")
+    assert _shares_workstream(a, b) is False
 
 
 def test_build_approved_telemetry_summary_includes_sprint_pace_when_available() -> None:

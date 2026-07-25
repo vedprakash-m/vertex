@@ -197,6 +197,30 @@ def test_widen_signal_is_frozen_dataclass_returns_new_instance() -> None:
     assert "WI:4001" in result.entity_refs
 
 
+def test_widen_enriches_from_all_associated_workstreams_not_just_first() -> None:
+    """BL-F2 decision (2026-07-24): a signal shared across multiple
+    workstreams enriches from every associated workstream's configured
+    sources, not just the primary one -- purely additive, no loss of
+    linkage information for the secondary association(s)."""
+    sig = Signal(
+        id="sig-shared",
+        timestamp=datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc),
+        source="workiq/teams",
+        program_id="test",
+        workstream_id="ws-a",
+        workstream_ids=("ws-a", "ws-b"),
+        entity_refs=(),
+        text="Some collaboration message",
+        raw_ref=None,
+        confidence=Confidence.MEDIUM,
+    )
+    ws_a = _workstream(ws_id="ws-a", meeting_wi=(1001,))
+    ws_b = _workstream(ws_id="ws-b", chat_wi=(2001,))
+    result = widen_ws_wi_refs(sig, (ws_a, ws_b))
+    wi_refs = [r for r in result.entity_refs if r.startswith("WI:")]
+    assert wi_refs == ["WI:1001", "WI:2001"]
+
+
 def test_widen_only_ws_ref_no_text_wi_gets_widened() -> None:
     """The canonical FR-SG-08 case: Teams message bound to workstream but no explicit WI text."""
     ws = _workstream(meeting_wi=(9001, 9002))

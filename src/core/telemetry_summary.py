@@ -64,10 +64,19 @@ def _with_signal_confidence(summary: str, signal: Signal) -> str:
     return f"{summary} ({signal.confidence.value.lower()} confidence)"
 
 
+def _shares_workstream(a: Signal, b: Signal) -> bool:
+    """BL-F2 decision (2026-07-24): "same workstream" between two signals
+    means their workstream_ids sets share ANY common workstream, not that
+    the full sets match exactly. One shared helper for all three
+    signal-to-signal workstream comparisons in this module, rather than
+    each reimplementing the same set-overlap test independently."""
+    return bool(set(a.workstream_ids) & set(b.workstream_ids))
+
+
 def _focus_telemetry_signals(signals: tuple[Signal, ...]) -> tuple[Signal, ...]:
     anchor_candidates = [signal for signal in signals if signal.source in {"ado/analytics", "ado/wiql", "ado/sprint"}]
     latest_signal = max(anchor_candidates or list(signals), key=lambda signal: (signal.timestamp, signal.id))
-    return tuple(signal for signal in signals if signal.workstream_id == latest_signal.workstream_id)
+    return tuple(signal for signal in signals if _shares_workstream(signal, latest_signal))
 
 
 def _latest_signal_by_source(signals: tuple[Signal, ...], source: str) -> Signal | None:
@@ -83,7 +92,7 @@ def _previous_sprint_signal_for_workstream(signals: tuple[Signal, ...], current_
         signal
         for signal in signals
         if signal.source == "ado/sprint"
-        and signal.workstream_id == current_signal.workstream_id
+        and _shares_workstream(signal, current_signal)
         and signal.id != current_signal.id
     ]
     if not matching:
@@ -101,7 +110,7 @@ def _recent_sprint_signals_for_workstream(
     matching = [
         signal
         for signal in signals
-        if signal.source == "ado/sprint" and signal.workstream_id == current_signal.workstream_id
+        if signal.source == "ado/sprint" and _shares_workstream(signal, current_signal)
     ]
     if not matching:
         return ()

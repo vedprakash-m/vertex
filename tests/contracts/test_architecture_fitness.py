@@ -38,7 +38,7 @@ LINE_BUDGETS = {
     # run_telemetry.jsonl sidecar is populated by gather runs.
     # WS-3 / v1.14 (2026-06-10): +21 for _emit_credential_expired_banner helper
     # + CredentialExpired import + 3 banner call sites (WorkIQ/Kusto/IcM).
-    "src/commands/gather.py": 5436,  # +11 (2026-07-15): ADF-W1.4 remainder -- overall WorkIQ phase (all query plans combined) bounded by program.m365.retrieval.max_wall_clock_seconds, threaded into _build_workiq_signals
+    "src/commands/gather.py": 5439,  # +3 (2026-07-25): BL-F2 M365 re-routing now explicitly replaces Signal.workstream_ids too, not just workstream_id -- +11 (2026-07-15): ADF-W1.4 remainder -- overall WorkIQ phase (all query plans combined) bounded by program.m365.retrieval.max_wall_clock_seconds, threaded into _build_workiq_signals
     # +36 (2026-07-21, specs/armada.md D-19/AG-2.12): completeness-oracle
     # reconciliation -- resolve_oracle_result import/application at the
     # QueryResultEntry construction site, source_export_counts param on

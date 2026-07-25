@@ -60,20 +60,27 @@ def widen_ws_wi_refs(signal: Signal, workstreams: tuple[Workstream, ...]) -> Sig
     email_threads). This closes the exit bar for lower-confidence artifacts that arrive
     via keyword-discovery without explicit @WI text mentions.
     """
-    if not signal.workstream_id:
+    if not signal.workstream_ids:
         return signal
     if any(r.startswith("WI:") for r in signal.entity_refs):
         return signal
-    ws = next((w for w in workstreams if w.id == signal.workstream_id), None)
-    if ws is None or ws.signal_sources is None:
+    # BL-F2 decision (2026-07-24): enrich from EVERY associated workstream's
+    # configured sources, not just the first/primary one -- purely additive
+    # (only ever adds more WI: refs), so under-enriching a shared signal
+    # would silently lose real linkage information for its other
+    # workstream(s).
+    matched_workstreams = [w for w in workstreams if w.id in signal.workstream_ids and w.signal_sources is not None]
+    if not matched_workstreams:
         return signal
     wi_ids: set[int] = set()
-    for series in ws.signal_sources.teams_meeting_series:
-        wi_ids.update(series.work_item_ids)
-    for chat in ws.signal_sources.teams_chats:
-        wi_ids.update(chat.work_item_ids)
-    for thread in ws.signal_sources.email_threads:
-        wi_ids.update(thread.work_item_ids)
+    for ws in matched_workstreams:
+        assert ws.signal_sources is not None
+        for series in ws.signal_sources.teams_meeting_series:
+            wi_ids.update(series.work_item_ids)
+        for chat in ws.signal_sources.teams_chats:
+            wi_ids.update(chat.work_item_ids)
+        for thread in ws.signal_sources.email_threads:
+            wi_ids.update(thread.work_item_ids)
     if not wi_ids:
         return signal
     wi_refs = tuple(f"WI:{wid}" for wid in sorted(wi_ids))

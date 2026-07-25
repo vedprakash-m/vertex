@@ -216,7 +216,13 @@ def _is_semantic_near_duplicate_with_score(candidate: Signal, existing: Signal) 
         return False, 0.0
     if candidate.program_id != existing.program_id:
         return False, 0.0
-    if candidate.workstream_id != existing.workstream_id:
+    # BL-F2 decision (2026-07-24): "same workstream" for dedup purposes means
+    # the two signals' workstream_ids sets share ANY common workstream, not
+    # that the full sets match exactly -- under-triggering (missing a real
+    # duplicate because unrelated extra associations differ) is worse than
+    # over-triggering, and the semantic-similarity check below is a second,
+    # independent filter that still has to agree before this counts as a dup.
+    if not (set(candidate.workstream_ids) & set(existing.workstream_ids)):
         return False, 0.0
 
     candidate_refs = _normalized_entity_refs(candidate)

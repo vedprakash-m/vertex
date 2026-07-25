@@ -123,13 +123,16 @@ def test_build_report_aggregates_across_files(tmp_path: Path) -> None:
 
 
 def test_build_report_against_real_repo_matches_bl_f2_reconnaissance_counts() -> None:
-    """Adversarial/regression guard: the 2026-07-22 backlog reconnaissance
-    pass hand-counted 119 files with a `.workstream_id` reference, 43 of
-    which also import `Signal`. This pins that this script reproduces those
-    exact figures against the real tree today -- if it drifts, either the
-    codebase changed (expected, and this test should be updated alongside a
+    """Adversarial/regression guard, updated 2026-07-25 after BL-F2's plural
+    Signal.workstream_ids implementation converted 12 of the original 42
+    comparison/assignment sites from `==`/`!=` to `in`/`not in` (now counted
+    as `membership`, not `comparison`) and moved 2 files' worth of matches to
+    only reference `.workstream_ids` (the new plural field, not matched by
+    this script's `.workstream_id\\b` pattern). Real counts today: 117 files,
+    40 also importing `Signal`. If it drifts further, either the codebase
+    changed again (expected, and this test should be updated alongside a
     fresh reconnaissance note in specs/bklg.md's BL-F2 row) or the script's
     classification logic regressed (a real bug)."""
     report = build_report()
-    assert report["total_files_with_matches"] == 119
-    assert report["signal_importing_file_count"] == 43
+    assert report["total_files_with_matches"] == 117
+    assert report["signal_importing_file_count"] == 40

@@ -1040,7 +1040,7 @@ def _build_section_evidence_bundle(
     ado_comments: list[JournalSignal] = []
     reference_signals: list[JournalSignal] = []
     for signal in ai_context.approved_signals:
-        if signal.workstream_id != lane_id:
+        if lane_id not in signal.workstream_ids:
             continue
         source = (signal.source or "").lower()
         if source == "ado/comment":

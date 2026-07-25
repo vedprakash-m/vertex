@@ -181,7 +181,7 @@ def _detect_stale_workstream_findings(
         if workstream.total_items <= 0:
             continue
         recent_signal_exists = any(
-            signal.workstream_id == workstream.section_id and _ensure_utc(signal.timestamp) >= cutoff
+            workstream.section_id in signal.workstream_ids and _ensure_utc(signal.timestamp) >= cutoff
             for signal in approved_signals
         )
         if recent_signal_exists:

@@ -943,6 +943,18 @@ class Signal:
     # committed runs only. None for signals predating this field or written
     # outside a lifecycle-managed gather run.
     gather_run_id: str | None = None
+    # BL-F2 (specs/backlog.md, D-19): the plural companion to workstream_id,
+    # added additively so a fact/signal can visibly belong to more than one
+    # workstream. Defaults to a single-element tuple mirroring workstream_id
+    # via __post_init__ below -- every existing construction/deserialization
+    # site that only ever set workstream_id keeps working unchanged, with no
+    # call-site migration required. A caller that wants genuine sharing
+    # passes workstream_ids explicitly (e.g. workstream_ids=(a, b)).
+    workstream_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.workstream_ids and self.workstream_id is not None:
+            object.__setattr__(self, "workstream_ids", (self.workstream_id,))
 
 
 @dataclass(frozen=True, slots=True)

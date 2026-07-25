@@ -4411,11 +4411,13 @@ def _reroute_low_confidence_registry_artifacts(
             provider_refs=tuple(ref for ref in signal.entity_refs if not ref.startswith("WS:")),
             workstream_id=found_workstream_id,
         )
+        # BL-F2: rerouting REPLACES workstream_ids too (replace() otherwise carries the old plural set forward).
         if not isinstance(message_id, str) or not message_id.strip():
             rerouted_signals.append(
                 replace(
                     signal,
                     workstream_id=found_workstream_id,
+                    workstream_ids=(found_workstream_id,),
                     entity_refs=next_entity_refs,
                 )
             )
@@ -4438,6 +4440,7 @@ def _reroute_low_confidence_registry_artifacts(
                     )
                 ),
                 workstream_id=found_workstream_id,
+                workstream_ids=(found_workstream_id,),
                 entity_refs=next_entity_refs,
                 metadata=metadata,
             )
