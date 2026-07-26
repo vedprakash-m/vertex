@@ -139,7 +139,15 @@ def build_kusto_signal(
         return None
 
     timestamp = kusto_event_timestamp(rows, as_of=as_of)
-    workstream_id = query.workstream_ids[0] if len(query.workstream_ids) == 1 else None
+    # BL-F2 (D-19) real fan-out fix, 2026-07-25: previously `None` whenever a
+    # query was genuinely shared (len > 1), which meant a shared query's
+    # signal matched NO section's workstream filter, not just "every other"
+    # section -- a real bug, not the documented "one section gets it"
+    # behavior. workstream_id (scalar) keeps the first entry as the primary
+    # for backward-compat readers; workstream_ids (plural) carries the full
+    # configured set so every associated workstream can see this signal via
+    # the now-set-aware read paths (report_ai.py, summarize.py, etc.).
+    workstream_id = query.workstream_ids[0] if query.workstream_ids else None
     entity_refs = merge_entity_refs(
         provider_refs=_extract_kusto_entity_refs(rows),
         workstream_id=workstream_id,
@@ -152,6 +160,7 @@ def build_kusto_signal(
         source="kusto",
         program_id=program_id,
         workstream_id=workstream_id,
+        workstream_ids=query.workstream_ids,
         entity_refs=entity_refs,
         text=summarize_kusto_rows(query, rows),
         raw_ref=raw_ref,
