@@ -13987,6 +13987,38 @@ def test_gather_program_scopes_kusto_queries_by_workstream_signal_sources(monkey
     assert "unscoped-query" not in signals_by_query
 
 
+def test_build_kusto_kpi_signal_shares_across_all_configured_workstreams() -> None:
+    """BL-F2 (D-19) real fan-out fix, 2026-07-25: same fix and rationale as
+    kusto_query_helpers.build_kusto_signal -- a KPI query genuinely shared
+    across multiple workstreams previously produced a signal with
+    workstream_id=None, invisible to every section's filter."""
+    from src.core.models_v2 import KustoQuery
+
+    shared_query = KustoQuery(
+        id="velocity-p50",
+        cluster="https://adventure.kusto.windows.net",
+        database="xdataanalytics",
+        kql="Metrics | take 1",
+        section="Deployment Velocity",
+        render_as="metric_highlight",
+        confidence="high",
+        engine="kusto",
+        result_column="P50",
+        workstream_ids=("acme", "dd_on_pf"),
+    )
+
+    signal = gather._build_kusto_kpi_signal(
+        query=shared_query,
+        rows=[{"P50": 4.2}],
+        program_id="acme",
+        as_of=datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc),
+    )
+
+    assert signal is not None
+    assert signal.workstream_id == "acme"
+    assert signal.workstream_ids == ("acme", "dd_on_pf")
+
+
 def test_gather_program_appends_refresh_on_gather_kusto_kpi_signals(monkeypatch, tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     program_dir = programs_root / "acme"

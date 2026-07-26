@@ -3129,7 +3129,8 @@ def _build_kusto_kpi_signal(
     result_value = _kusto_kpi_value(query, first_row)
     label = query.label or query.section or query.id
     value_label = result_value if result_value is not None else "rows available"
-    workstream_id = query.workstream_ids[0] if len(query.workstream_ids) == 1 else None
+    # BL-F2 (D-19): see kusto_query_helpers.build_kusto_signal for this fix's rationale.
+    workstream_id = query.workstream_ids[0] if query.workstream_ids else None
     signal_entity_refs = merge_entity_refs(
         provider_refs=entity_refs if entity_refs is not None else _extract_kusto_entity_refs(rows),
         workstream_id=workstream_id,
@@ -3140,6 +3141,7 @@ def _build_kusto_kpi_signal(
         source="kusto_kpi",
         program_id=program_id,
         workstream_id=workstream_id,
+        workstream_ids=query.workstream_ids,
         entity_refs=signal_entity_refs,
         text=_truncate_signal_text(f"KPI {label}: {value_label}"),
         raw_ref=raw_ref,
