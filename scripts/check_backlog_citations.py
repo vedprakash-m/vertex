@@ -14,12 +14,7 @@ PATH_PATTERN = re.compile(
 SKIP_MARKERS = ("<", "*", "{", "}", "[", "]")
 VALIDATED_PREFIXES = (
     ".github/",
-    ".archive/specs/",
-    "docs/adrs/",
-    "docs/contributing.md",
-    "docs/runbook.md",
     "editions/",
-    "knowledge/",
     "scripts/",
     "specs/vertex-",
     "src/",
@@ -31,6 +26,19 @@ VALIDATED_PREFIXES = (
 # Neither may exist in a fresh clone, so neither is in VALIDATED_PREFIXES:
 # a citation to either is never flagged as unresolved either way.
 #
+# 2026-07-27 (first real run of backlog-protection.yml on GitHub -- this
+# checker had never actually been exercised against a genuine fresh clone
+# before): .archive/, docs/, and knowledge/ (except *.example.yaml) are
+# ENTIRELY gitignored -- see .gitignore. A citation under any of those
+# prefixes can never resolve on a fresh checkout, full stop, so validating
+# them was a latent bug baked in from this script's first version, not
+# something that ever worked. Removed ".archive/specs/", "docs/adrs/",
+# "docs/contributing.md", "docs/runbook.md", and "knowledge/" from
+# VALIDATED_PREFIXES entirely, matching the same never-checked treatment
+# already given to specs/backlog.md and specs/bklg.md above. scripts/ stays
+# validated (most scripts are tracked); the specific gitignored ones a spec
+# cites are named in KNOWN_FUTURE_PATHS below instead.
+#
 # A backlog/changelog is, by definition, full of references to things that
 # don't exist -- either not YET (planned work) or not ANYMORE (a changelog
 # entry correctly describing a file that was later archived/deleted). A
@@ -40,9 +48,8 @@ VALIDATED_PREFIXES = (
 # line per path with the reason -- remove the line once it's no longer true
 # (the BL-* item ships, or the historical prose is deleted/rewritten).
 KNOWN_FUTURE_PATHS = {
-    "knowledge/policies/privacy_policy.yaml": "BL-E1 (DIR-08A/08B PII policy override path) — DRI-decision-gated, not yet built.",
-    ".archive/specs/acme-onboard.md": "vertex-prd.md's 2026-06-16 changelog line describes this archival; the file was apparently removed in a later cleanup pass. Historical prose, not a live reference.",
     "src/ai/local_tier.py": "vertex-tech-spec.md's 2026-07-13 changelog line describes deleting this file (ADF-W5.3's gate was never cleared) -- correctly citing something that no longer exists on purpose.",
+    "scripts/backfill_archive_to_journal.py": "Gitignored local-only script (scripts/backfill_*.py) -- never exists in a fresh clone.",
 }
 VALIDATED_TOP_LEVEL = {"README.md", "cli.py", "pyproject.toml", "vertex.py"}
 VALIDATED_EXTENSIONS = {
