@@ -494,6 +494,13 @@ def _parse_criteria(raw: dict[str, Any], section_id: str) -> NudgeSectionCriteri
     tags = tuple(_str_list(raw.get("tags")))
     area_path_filter = tuple(_str_list(raw.get("area_path_filter")))
     required_tags = tuple(_str_list(raw.get("required_tags")))
+    work_item_types = tuple(_str_list(raw.get("work_item_types")))
+    supplemental_workstream_ids = tuple(_str_list(raw.get("supplemental_workstream_ids")))
+    if supplemental_workstream_ids and source not in ("tag", "area_path"):
+        raise ConfigError(
+            f"Section {section_id!r}: supplemental_workstream_ids is only valid for "
+            "criteria.source tag/area_path"
+        )
     legacy = bool(raw.get("legacy_scope_override", False))
     if legacy:
         raise ConfigError(
@@ -506,6 +513,8 @@ def _parse_criteria(raw: dict[str, Any], section_id: str) -> NudgeSectionCriteri
         area_path_filter=area_path_filter,
         required_tags=required_tags,
         legacy_scope_override=False,
+        work_item_types=work_item_types,
+        supplemental_workstream_ids=supplemental_workstream_ids,
     )
 
 

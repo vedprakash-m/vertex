@@ -210,6 +210,7 @@ class KpiTile:
     reference_url: str | None = None
     catalog_source: dict[str, str] | None = None
     result_payload: dict[str, Any] | None = None
+    shared: bool = False
 
 
 @dataclass(frozen=True, slots=True)

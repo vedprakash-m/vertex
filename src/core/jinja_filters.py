@@ -407,6 +407,7 @@ def kusto_tile_data(value: KpiTile | Mapping[str, Any] | None) -> dict[str, Any]
             reference_url=value.get("reference_url") if isinstance(value.get("reference_url"), str) else None,
             catalog_source=value.get("catalog_source") if isinstance(value.get("catalog_source"), dict) else None,
             result_payload=value.get("result_payload") if isinstance(value.get("result_payload"), dict) else None,
+            shared=bool(value.get("shared", False)),
         )
 
     aggregate = _aggregate_incident_tile_data(tile)
@@ -420,6 +421,7 @@ def kusto_tile_data(value: KpiTile | Mapping[str, Any] | None) -> dict[str, Any]
             "owner": tile.owner_alias,
             "reference_url": tile.reference_url,
             "catalog_source": tile.catalog_source,
+            "shared": tile.shared,
         }
     if not tile.validated and tile.refresh_on_gather:
         return {
@@ -428,6 +430,7 @@ def kusto_tile_data(value: KpiTile | Mapping[str, Any] | None) -> dict[str, Any]
             "status": "Awaiting validation - gather pending",
             "reference_url": tile.reference_url,
             "catalog_source": tile.catalog_source,
+            "shared": tile.shared,
         }
     if tile.render_mode == "table" and tile.refresh_on_gather:
         return {
@@ -436,6 +439,7 @@ def kusto_tile_data(value: KpiTile | Mapping[str, Any] | None) -> dict[str, Any]
             "status": f"Data available - see CLI inspector (python cli.py inspect kusto --query {tile.query_id}).",
             "reference_url": tile.reference_url,
             "catalog_source": tile.catalog_source,
+            "shared": tile.shared,
         }
     return {
         "variant": "metric",
@@ -444,6 +448,7 @@ def kusto_tile_data(value: KpiTile | Mapping[str, Any] | None) -> dict[str, Any]
         "as_of": tile.as_of,
         "reference_url": tile.reference_url,
         "catalog_source": tile.catalog_source,
+        "shared": tile.shared,
     }
 
 
@@ -467,6 +472,7 @@ def _aggregate_incident_tile_data(tile: KpiTile) -> dict[str, Any] | None:
             "status": f"\u2713 No active Sev 0-2{suffix}",
             "reference_url": tile.reference_url,
             "catalog_source": tile.catalog_source,
+            "shared": tile.shared,
         }
 
     return {
@@ -481,6 +487,7 @@ def _aggregate_incident_tile_data(tile: KpiTile) -> dict[str, Any] | None:
         "footer_href": oldest_url,
         "reference_url": tile.reference_url,
         "catalog_source": tile.catalog_source,
+        "shared": tile.shared,
     }
 
 

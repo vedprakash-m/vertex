@@ -13,6 +13,7 @@ Every function returns an ``OutcomeMetricResult`` carrying an honest
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from src.core.cockpit_models import ValueConfidence
@@ -191,4 +192,42 @@ def compute_all_outcome_metrics(
         compute_om2_duplicate_entities(program_id, programs_root=programs_root),
         compute_om4_audit_coverage(program_id, programs_root=programs_root),
         compute_om5_operator_friction(program_id, programs_root=programs_root),
+    )
+
+
+#: specs/backlog.md BL-C6, decided with the operator 2026-07-26: the
+#: mandatory re-baseline gate's live-canary observation window starts today
+#: rather than being backdated to 2026-07-22 (when its preconditions,
+#: BL-C2/C3/C4, actually shipped) -- backdating would credit interim usage
+#: nobody deliberately observed as "the canary," so the clock starts clean.
+CANARY_WINDOW_START = date(2026, 7, 26)
+
+#: arch-fix.md's re-baseline gate (A.RE) and its arch-data-fix.md successor
+#: (ADF-W6.4) both specify an 8-week live-canary window.
+CANARY_WINDOW_WEEKS = 8
+
+
+@dataclass(frozen=True, slots=True)
+class CanaryWindowStatus:
+    start_date: date
+    window_weeks: int
+    elapsed_weeks: float
+    elapsed: bool
+
+
+def canary_window_status(*, today: date | None = None) -> CanaryWindowStatus:
+    """BL-C6: how far into the re-baseline gate's live-canary window we are.
+
+    ``elapsed`` becoming True is necessary, not sufficient, for the gate --
+    the row's own Action still requires actually measuring OM-1/2/4/5
+    against arch-fix.md's DoD once the window closes, not just waiting out
+    the calendar."""
+    as_of = today if today is not None else datetime.now(timezone.utc).date()
+    elapsed_days = (as_of - CANARY_WINDOW_START).days
+    elapsed_weeks = max(0.0, elapsed_days / 7)
+    return CanaryWindowStatus(
+        start_date=CANARY_WINDOW_START,
+        window_weeks=CANARY_WINDOW_WEEKS,
+        elapsed_weeks=elapsed_weeks,
+        elapsed=elapsed_weeks >= CANARY_WINDOW_WEEKS,
     )

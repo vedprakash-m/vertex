@@ -298,6 +298,17 @@ def _optional_probability(value: object, *, default: float, field_name: str) -> 
     return probability
 
 
+def _optional_positive_int(section: object, key: str, *, default: int | None) -> int | None:
+    if not isinstance(section, dict) or key not in section:
+        return default
+    value = section[key]
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ConfigError(f"{key} must be a positive integer or null in {FRESHNESS_POLICY_PATH}")
+    return value
+
+
 def _bool_with_default(value: object, *, default: bool, field_name: str) -> bool:
     if value is None:
         return default
@@ -310,6 +321,19 @@ def _bool_with_default(value: object, *, default: bool, field_name: str) -> bool
 class FreshnessPolicy:
     fact_type_ttl_days: dict[str, int]
     gather_cadence_hours: dict[str, float]
+    #: specs/people.md §7/DIR-03: the real, governed people-registry
+    #: field-staleness SLA. Ratified 2026-07-26 at 90 days -- the same
+    #: number `people_query.py`'s `DEFAULT_STALE_FRESHNESS_DAYS` had
+    #: already been using as an admitted "v1 placeholder"; formalizing it
+    #: here (rather than picking a different number) avoids introducing a
+    #: second, inconsistent threshold with no evidence to justify a change.
+    people_registry_stale_after_days: int = 90
+    #: BL-E4 activation, 2026-07-26: the operator explicitly rejected an
+    #: OS-level (wall-clock, Task Scheduler) cadence for people-registry
+    #: enrichment reminders, wanting the trigger tied to Vertex's own
+    #: operational rhythm instead. `None` disables that trigger kind.
+    people_registry_enrichment_nudge_every: int | None = 5
+    people_registry_enrichment_report_every: int | None = 3
 
 
 def load_freshness_policy(
@@ -327,6 +351,15 @@ def load_freshness_policy(
         k: float(v)
         for k, v in (base.get("gather_cadence_hours") or {}).items()
     }
+    people_registry_section = base.get("people_registry") or {}
+    stale_after_days = (
+        int(people_registry_section["stale_after_days"])
+        if isinstance(people_registry_section, dict) and isinstance(people_registry_section.get("stale_after_days"), int)
+        else 90
+    )
+    trigger_section = people_registry_section.get("enrichment_trigger") if isinstance(people_registry_section, dict) else None
+    nudge_every = _optional_positive_int(trigger_section, "nudge_run_every", default=5)
+    report_every = _optional_positive_int(trigger_section, "report_run_every", default=3)
     if override_path is not None and override_path.exists():
         try:
             import yaml as _yaml
@@ -342,9 +375,20 @@ def load_freshness_policy(
                 for k, v in doc["gather_cadence_hours"].items():
                     if isinstance(v, (int, float)):
                         base_cadence[str(k)] = float(v)
+            override_people_registry = doc.get("people_registry")
+            if isinstance(override_people_registry, dict):
+                if isinstance(override_people_registry.get("stale_after_days"), int):
+                    stale_after_days = int(override_people_registry["stale_after_days"])
+                override_trigger = override_people_registry.get("enrichment_trigger")
+                if isinstance(override_trigger, dict):
+                    nudge_every = _optional_positive_int(override_trigger, "nudge_run_every", default=nudge_every)
+                    report_every = _optional_positive_int(override_trigger, "report_run_every", default=report_every)
     return FreshnessPolicy(
         fact_type_ttl_days=base_ttl,
         gather_cadence_hours=base_cadence,
+        people_registry_stale_after_days=stale_after_days,
+        people_registry_enrichment_nudge_every=nudge_every,
+        people_registry_enrichment_report_every=report_every,
     )
 
 

@@ -94,15 +94,19 @@ from src.core.people_directory_schema import (
 )
 from src.core.people_entity_schema import (
     ORG_SCOPE_ONLY_ENTITY_TYPES,
+    AliasStatus,
     CanonicalEntity,
     EntitiesDocument,
+    EntityAlias,
     EntityRedirect,
+    EntityStatus,
     ENTITIES_SCHEMA_VERSION,
     is_legacy_schema_0_entities_document,
     load_entities_document,
     preview_entities_migration,
     write_entities_document,
 )
+from src.core.ledger.ulid import new_ulid
 from src.core.people_registry_identity import load_registry_config, load_registry_manifest
 from src.core.people_registry_governance import require_adopted_registry
 from src.core.people_registry_transaction import (
@@ -1123,3 +1127,272 @@ def bootstrap_shared_factual_files(
     if not apply:
         return preview_shared_migration(program_id, programs_root=programs_root, as_of=as_of)
     return apply_shared_migration(program_id, programs_root=programs_root, actor=actor, as_of=as_of)
+
+
+# ---------------------------------------------------------------------------
+# specs/bklg.md BL-E3: one-time entity_id backfill.
+#
+# `people_directory_schema.py`'s `_person_from_payload`/`_team_from_payload`
+# already anticipate this exact state and emit a WARN diagnostic for it:
+# "record ... has no entity_id -- a migration gap, not a new identity."
+# It arises when `knowledge/people_directory.yaml`/`teams.yaml` were
+# populated directly (predating `entities.yaml`'s introduction) rather than
+# through `migrate-shared`'s program-local promotion path -- so there is no
+# canonical `CanonicalEntity` for any of these real records yet, and
+# `vertex kb people show`/`find_person` cannot resolve them even though the
+# raw directory data is real and complete. `build_shared_migration_plan`'s
+# merge machinery does not fit this case (its `_plan_people`/`_plan_entities`
+# assume "new incoming data from elsewhere" and would flag every record as
+# an `alias_collision` against itself), so this is a separate, simpler
+# planner: mint one canonical entity per orphaned record and patch that
+# record's own `entity_id` field in place -- never touching any other field.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class EntityIdBackfillPlan:
+    entities_to_write: tuple[CanonicalEntity, ...]
+    people_to_write: tuple[PersonDirectory, ...]
+    teams_to_write: tuple[Team, ...]
+    new_entity_ids: tuple[str, ...]
+    people_backfilled: tuple[str, ...]  # aliases
+    teams_backfilled: tuple[str, ...]  # team ids
+    diagnostics: tuple[str, ...]
+    transaction_id: str | None = None
+    generation_id: str | None = None
+
+    @property
+    def is_noop(self) -> bool:
+        return not self.people_backfilled and not self.teams_backfilled
+
+
+_BACKFILL_SOURCE = "directory_backfill"
+_BACKFILL_UNVERIFIED_PRINCIPAL = "<unverified -- entity_id backfill from existing shared directory>"
+
+
+def _backfill_alias(*, value: str, kind: str, now: datetime) -> EntityAlias:
+    return EntityAlias(
+        value=value,
+        kind=kind,
+        status=AliasStatus.ACTIVE,
+        valid_from=now,
+        valid_until=None,
+        source=_BACKFILL_SOURCE,
+        source_ref=None,
+        recorded_at=now,
+        verified_at=now,
+        verified_by_principal=_BACKFILL_UNVERIFIED_PRINCIPAL,
+    )
+
+
+def _build_entity_id_backfill_plan(
+    *,
+    workspace_id: str,
+    existing_entities: tuple[CanonicalEntity, ...],
+    existing_people: tuple[PersonDirectory, ...],
+    existing_teams: tuple[Team, ...],
+    now: datetime,
+) -> EntityIdBackfillPlan:
+    existing_entity_ids = {entity.entity_id for entity in existing_entities}
+    new_entities: list[CanonicalEntity] = []
+    new_entity_ids: list[str] = []
+    updated_people: list[PersonDirectory] = []
+    updated_teams: list[Team] = []
+    backfilled_people: list[str] = []
+    backfilled_teams: list[str] = []
+
+    for person in existing_people:
+        if person.entity_id and person.entity_id in existing_entity_ids:
+            updated_people.append(person)
+            continue
+        new_id = f"person:{new_ulid(now)}"
+        aliases = (_backfill_alias(value=person.alias, kind="vertex::alias", now=now),) if person.alias.strip() else ()
+        new_entities.append(
+            CanonicalEntity(
+                workspace_id=workspace_id,
+                entity_id=new_id,
+                entity_type="person",
+                canonical_name=person.display_name or person.alias,
+                aliases=aliases,
+                scope="org",
+                created_at=now,
+                status=EntityStatus.ACTIVE,
+            )
+        )
+        new_entity_ids.append(new_id)
+        updated_people.append(dataclasses.replace(person, entity_id=new_id))
+        backfilled_people.append(person.alias)
+
+    for team in existing_teams:
+        if team.entity_id and team.entity_id in existing_entity_ids:
+            updated_teams.append(team)
+            continue
+        new_id = f"team:{new_ulid(now)}"
+        aliases = (_backfill_alias(value=team.id, kind="vertex::team_key", now=now),) if team.id.strip() else ()
+        new_entities.append(
+            CanonicalEntity(
+                workspace_id=workspace_id,
+                entity_id=new_id,
+                entity_type="team",
+                canonical_name=team.name or team.id,
+                aliases=aliases,
+                scope="org",
+                created_at=now,
+                status=EntityStatus.ACTIVE,
+            )
+        )
+        new_entity_ids.append(new_id)
+        updated_teams.append(dataclasses.replace(team, entity_id=new_id))
+        backfilled_teams.append(team.id)
+
+    if new_entities:
+        diagnostics = (
+            f"{len(backfilled_people)} person and {len(backfilled_teams)} team record(s) would get a "
+            "freshly-minted canonical entity_id; no other field changes.",
+        )
+    else:
+        diagnostics = ("Every people_directory.yaml/teams.yaml record already carries a valid entity_id; nothing to backfill.",)
+
+    return EntityIdBackfillPlan(
+        entities_to_write=tuple(existing_entities) + tuple(new_entities),
+        people_to_write=tuple(updated_people),
+        teams_to_write=tuple(updated_teams),
+        new_entity_ids=tuple(new_entity_ids),
+        people_backfilled=tuple(backfilled_people),
+        teams_backfilled=tuple(backfilled_teams),
+        diagnostics=diagnostics,
+    )
+
+
+def preview_entity_id_backfill(*, programs_root: Path, as_of: datetime | None = None) -> EntityIdBackfillPlan:
+    now = as_of or datetime.now(timezone.utc)
+    knowledge_root = get_shared_knowledge_root(programs_root)
+    config = load_registry_config(knowledge_root)
+    if config is None:
+        raise ConfigError(
+            "The registry has not been bootstrapped yet. Run 'vertex kb registry bootstrap --apply "
+            "--customer-boundary-id <id>' first -- the entity_id backfill needs a minted workspace_id."
+        )
+    existing_entities, _redirects, existing_people, existing_teams = _read_existing_shared(knowledge_root)
+    return _build_entity_id_backfill_plan(
+        workspace_id=config.workspace_id,
+        existing_entities=existing_entities,
+        existing_people=existing_people,
+        existing_teams=existing_teams,
+        now=now,
+    )
+
+
+def apply_entity_id_backfill(*, programs_root: Path, actor: str, as_of: datetime | None = None) -> EntityIdBackfillPlan:
+    """Apply through the canonical staged multi-file registry writer --
+    the same `prepare_registry_files_transaction`/`commit_registry_files_transaction`
+    path `apply_shared_migration` uses, so this backfill is lease-governed,
+    checkpointed, and journaled identically to every other shared-registry
+    mutation, not a special-cased raw file write."""
+    now = as_of or datetime.now(timezone.utc)
+    knowledge_root = get_shared_knowledge_root(programs_root)
+    config = load_registry_config(knowledge_root)
+    if config is None or load_registry_manifest(knowledge_root) is None:
+        raise ConfigError(
+            "The registry has not been bootstrapped yet. Run 'vertex kb registry bootstrap --apply "
+            "--customer-boundary-id <id>' first -- the entity_id backfill needs a minted workspace_id."
+        )
+    require_adopted_registry(knowledge_root, consumer="Entity-id backfill")
+
+    plan = preview_entity_id_backfill(programs_root=programs_root, as_of=now)
+    if plan.is_noop:
+        return plan
+
+    changed_paths = ("entities.yaml", "people_directory.yaml", "teams.yaml")
+    baseline: dict[str, dict[str, object]] = {}
+    committed_plan: EntityIdBackfillPlan | None = None
+
+    def write_staged_files(staged_dir: Path) -> None:
+        nonlocal committed_plan
+        # Re-derived after the lease is held, closing the preview/apply TOCTOU
+        # the same way apply_shared_migration's write_staged_files does.
+        current_entities, _redirects, current_people, current_teams = _read_existing_shared(knowledge_root)
+        current_plan = _build_entity_id_backfill_plan(
+            workspace_id=config.workspace_id,
+            existing_entities=current_entities,
+            existing_people=current_people,
+            existing_teams=current_teams,
+            now=now,
+        )
+        if (current_plan.people_backfilled, current_plan.teams_backfilled) != (plan.people_backfilled, plan.teams_backfilled):
+            raise ConfigError(
+                "The shared directory changed while waiting for the registry lease; re-run the preview."
+            )
+        baseline["people"] = {person.alias: person for person in current_people}
+        baseline["teams"] = {team.id: team for team in current_teams}
+        write_entities_document(
+            staged_dir / "entities.yaml",
+            EntitiesDocument(
+                schema_version=ENTITIES_SCHEMA_VERSION,
+                entities=tuple(sorted(current_plan.entities_to_write, key=lambda entity: entity.entity_id)),
+                redirects=(),
+            ),
+        )
+        write_people_directory(staged_dir / "people_directory.yaml", current_plan.people_to_write)
+        write_teams(staged_dir / "teams.yaml", current_plan.teams_to_write)
+        committed_plan = current_plan
+
+    def validate_staged_files(staged_dir: Path) -> None:
+        assert committed_plan is not None
+        entities_doc = load_entities_document(staged_dir / "entities.yaml")
+        expected_entities = tuple(sorted(committed_plan.entities_to_write, key=lambda entity: entity.entity_id))
+        if entities_doc is None or entities_doc.entities != expected_entities:
+            raise ConfigError("Staged entities.yaml did not round-trip through the production loader.")
+        people_result = load_people_directory(staged_dir / "people_directory.yaml")
+        expected_people = tuple(sorted(committed_plan.people_to_write, key=lambda person: person.entity_id or person.alias))
+        if people_result is None or people_result.people != expected_people:
+            raise ConfigError("Staged people_directory.yaml did not round-trip through the production loader.")
+        teams_result = load_teams(staged_dir / "teams.yaml")
+        expected_teams = tuple(sorted(committed_plan.teams_to_write, key=lambda team: team.entity_id or team.id))
+        if teams_result is None or teams_result.teams != expected_teams:
+            raise ConfigError("Staged teams.yaml did not round-trip through the production loader.")
+
+    prepared = prepare_registry_files_transaction(
+        knowledge_root,
+        changed_paths,
+        owner=actor,
+        write_staged_files=write_staged_files,
+        validate_staged_files=validate_staged_files,
+        as_of=now,
+    )
+    committed = commit_registry_files_transaction(prepared, knowledge_root=knowledge_root, as_of=now)
+    assert committed_plan is not None
+    result = dataclasses.replace(
+        committed_plan,
+        transaction_id=committed.transaction_id,
+        generation_id=committed.manifest.generation_id,
+    )
+
+    assert result.transaction_id is not None
+    assert result.generation_id is not None
+    reason = "one-time entity_id backfill for pre-existing knowledge/people_directory.yaml + teams.yaml records"
+    new_entity_id_set = frozenset(result.new_entity_ids)
+    for entity in result.entities_to_write:
+        if entity.entity_id in new_entity_id_set:
+            _append_record_field_changes(
+                record=entity, before=None, entity_id=entity.entity_id,
+                transaction_id=result.transaction_id, generation_id=result.generation_id, workspace_id=config.workspace_id,
+                knowledge_root=knowledge_root, actor=actor, reason=reason, as_of=now,
+            )
+    backfilled_person_aliases = frozenset(result.people_backfilled)
+    for person in result.people_to_write:
+        if person.alias in backfilled_person_aliases:
+            _append_record_field_changes(
+                record=person, before=baseline["people"].get(person.alias), entity_id=person.entity_id,
+                transaction_id=result.transaction_id, generation_id=result.generation_id, workspace_id=config.workspace_id,
+                knowledge_root=knowledge_root, actor=actor, reason=reason, as_of=now,
+            )
+    backfilled_team_ids = frozenset(result.teams_backfilled)
+    for team in result.teams_to_write:
+        if team.id in backfilled_team_ids:
+            _append_record_field_changes(
+                record=team, before=baseline["teams"].get(team.id), entity_id=team.entity_id,
+                transaction_id=result.transaction_id, generation_id=result.generation_id, workspace_id=config.workspace_id,
+                knowledge_root=knowledge_root, actor=actor, reason=reason, as_of=now,
+            )
+    return result

@@ -37,7 +37,7 @@ from src.core.context_proposal_review import load_pending_context_proposal_rows
 from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.fact_lineage_coverage import compute_lineage_coverage
 from src.core.maturity_engine import load_earned_autonomy_state
-from src.core.outcome_metrics import compute_om4_audit_coverage
+from src.core.outcome_metrics import canary_window_status, compute_om4_audit_coverage
 from src.core.program_synthesis import load_latest_released_program_synthesis
 from src.core.ledger.event_log import read_events
 from src.core.measurement_store import read_measurements, tier_decision_store_path
@@ -595,6 +595,28 @@ def _build_reliability_summary(
             owner=None,
             next_command=None,
             evidence_refs=om4.evidence_refs,
+            observed_at=observed_at,
+        )
+    )
+    canary = canary_window_status(today=observed_at.date())
+    findings.append(
+        CockpitFinding(
+            finding_id="reliability.bl_c6_canary_window",
+            area="reliability",
+            status="ok" if canary.elapsed else "info",
+            summary=(
+                f"BL-C6 re-baseline gate: {canary.elapsed_weeks:.1f}/{canary.window_weeks} live-canary weeks elapsed "
+                f"(started {canary.start_date.isoformat()})."
+            ),
+            detail=(
+                "The re-baseline gate for arch-fix.md Part B (AF-4..AF-10B) requires an 8-week live-canary "
+                "observation window before OM-1/2/4/5 are measured against the DoD and each phase is "
+                "re-authorized/re-scoped/cancelled. Reaching the window is necessary, not sufficient -- "
+                "the actual OM-1/2/4/5 measurement and re-authorization decision still happens once elapsed=True."
+            ),
+            owner=None,
+            next_command=None if not canary.elapsed else "See specs/bklg.md BL-C6 for the re-authorization steps.",
+            evidence_refs=(),
             observed_at=observed_at,
         )
     )

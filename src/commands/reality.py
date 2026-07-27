@@ -790,6 +790,12 @@ def reality_explain_command(
                 "family": conflict.family,
                 "open": conflict.open,
                 "description": conflict.description,
+                "winning_source": conflict.winning_source,
+                "losing_source": conflict.losing_source,
+                "winning_value": conflict.winning_value,
+                "losing_value": conflict.losing_value,
+                "resolution": conflict.resolution,
+                "detected_at": conflict.detected_at,
             }
             for conflict in explanation.open_conflicts
         ],
@@ -814,6 +820,12 @@ def reality_explain_command(
             lines.append(
                 f"- {conflict.conflict_id} | family={conflict.family} | {conflict.description}"
             )
+            if conflict.winning_source or conflict.losing_source:
+                lines.append(
+                    f"    {conflict.winning_source or '?'} ({conflict.winning_value or '?'}) beat "
+                    f"{conflict.losing_source or '?'} ({conflict.losing_value or '?'})"
+                    + (f" -- {conflict.resolution}" if conflict.resolution else "")
+                )
         typer.echo("\n".join(lines))
 
 
