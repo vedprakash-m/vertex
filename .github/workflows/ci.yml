@@ -26,8 +26,16 @@ jobs:
         # plus every optional extra (dev/ai/ai-local/m365/kusto/render) --
         # the same superset requirements.txt + `pip install -e .` used to
         # provide, now declared in one place (pyproject.toml).
+        #
+        # setuptools upgrade (2026-07-27, first real CI run): pyproject.toml's
+        # [build-system].requires only governs the ephemeral, discarded build
+        # isolation env `pip install -e .` uses to build the wheel -- it does
+        # NOT touch the setuptools already present in THIS target environment,
+        # which actions/setup-python@v5 ships pre-installed (79.0.1 as of this
+        # writing, vulnerable per PYSEC-2026-3447). Must upgrade it here
+        # explicitly or the pip-audit step below fails on every run.
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip setuptools
           python -m pip install -e ".[dev,ai,ai-local,m365,kusto,render]"
 
       - name: Supply-chain audit (WS-7 — pip-audit against OSV)
