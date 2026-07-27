@@ -21,16 +21,15 @@ VALIDATED_PREFIXES = (
     "editions/",
     "knowledge/",
     "scripts/",
-    "specs/bklg.md",
     "specs/vertex-",
     "src/",
     "templates/",
 )
-# BL-K1 (2026-07-22): specs/backlog.md is the actively-edited, gitignored
-# working copy specs/bklg.md is periodically sanitized-and-resynced from --
-# it may legitimately not exist in a fresh clone, so (unlike specs/bklg.md
-# itself) it is NOT in VALIDATED_PREFIXES: a citation to it is never
-# flagged as unresolved either way.
+# specs/backlog.md is the actively-edited, gitignored working copy.
+# specs/bklg.md (2026-07-27: also gitignored -- local-only, never synced to
+# the public GitHub remote) is periodically sanitized-and-resynced from it.
+# Neither may exist in a fresh clone, so neither is in VALIDATED_PREFIXES:
+# a citation to either is never flagged as unresolved either way.
 #
 # A backlog/changelog is, by definition, full of references to things that
 # don't exist -- either not YET (planned work) or not ANYMORE (a changelog

@@ -123,16 +123,18 @@ def test_build_report_aggregates_across_files(tmp_path: Path) -> None:
 
 
 def test_build_report_against_real_repo_matches_bl_f2_reconnaissance_counts() -> None:
-    """Adversarial/regression guard, updated 2026-07-25 after BL-F2's plural
-    Signal.workstream_ids implementation converted 12 of the original 42
-    comparison/assignment sites from `==`/`!=` to `in`/`not in` (now counted
-    as `membership`, not `comparison`) and moved 2 files' worth of matches to
-    only reference `.workstream_ids` (the new plural field, not matched by
-    this script's `.workstream_id\\b` pattern). Real counts today: 117 files,
-    40 also importing `Signal`. If it drifts further, either the codebase
-    changed again (expected, and this test should be updated alongside a
-    fresh reconnaissance note in specs/bklg.md's BL-F2 row) or the script's
-    classification logic regressed (a real bug)."""
+    """Adversarial/regression guard, updated 2026-07-25 (second pass, same
+    day) after BL-F2 action (b) converted `assemble_stage.py`'s
+    `_kpi_tiles_for_section` filter from `signal.workstream_id !=
+    workstream_id` to `workstream_id not in signal.workstream_ids` -- the
+    file's one remaining `.workstream_id\\b` match (the WO-5-pinned site)
+    disappeared entirely, since the new expression only references the
+    plural `.workstream_ids` field. That drops the file out of this
+    script's `.workstream_id\\b`-pattern count. Real counts today: 116
+    files, 39 also importing `Signal`. If it drifts further, either the
+    codebase changed again (expected, and this test should be updated
+    alongside a fresh reconnaissance note in specs/bklg.md's BL-F2 row) or
+    the script's classification logic regressed (a real bug)."""
     report = build_report()
-    assert report["total_files_with_matches"] == 117
-    assert report["signal_importing_file_count"] == 40
+    assert report["total_files_with_matches"] == 116
+    assert report["signal_importing_file_count"] == 39

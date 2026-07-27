@@ -17,7 +17,13 @@
       <td align="center" style="padding:24px 12px;">
         <table role="presentation" width="680" cellpadding="0" cellspacing="0" border="0" style="width:680px; max-width:680px; border-collapse:collapse; background-color:#FFFFFF; border:1px solid #E5E7EB;">
           <tr>
-            <td align="center" style="padding:0;">
+            {# specs/bklg.md BL-H2 action (2), 2026-07-26: role="main" on this
+               cell (not the nested layout table -- it already needs its own
+               role="presentation") satisfies axe-core's landmark-one-main and
+               region rules for the whole document in one place, zero visual
+               effect in any browser/email client, same risk class as the
+               existing role="presentation" convention. #}
+            <td align="center" role="main" style="padding:0;">
               <table role="presentation" width="640" cellpadding="0" cellspacing="0" border="0" style="width:640px; max-width:640px; border-collapse:collapse;">
                 <tr>
                   <td style="padding:24px 0 16px 0; border-bottom:1px solid #E5E7EB;">

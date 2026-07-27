@@ -61,6 +61,8 @@ class _FullHygieneFakeADOClient:
                     "System.Tags": "RAMPP1",
                     "Custom.RiskAssessment": "On Track",
                     "Custom.RiskAssessmentComment": "",
+                    # Committed for items ending in 1 (mirrors the comment fixture below)
+                    "Custom.CommitmentStatus": "Committed" if str(wid).endswith("1") else "",
                     "System.Description": "Description for work item.",
                 },
             })
@@ -430,23 +432,24 @@ def test_generate_full_hygiene_nudges_row_signals_set_correctly(
     )
 
     _, section_b, _ = artifacts.sections
-    # Item 801001 ends in 1 — has comment with "on track"
+    # Item 801001 ends in 1 — committed and has comment with "on track"
     all_b_rows = [r for g in section_b.groups for r in g.rows]
     row_1 = next(r for r in all_b_rows if r.work_item_id == 801001)
     assert row_1.has_valid_target_date is True   # target_date 2026-06-30 > 2026-05-22
-    assert row_1.has_committed is True            # target_date set
+    assert row_1.has_committed is True            # CommitmentStatus="Committed"
     assert row_1.has_risk_assessment is True      # "On Track"
     assert row_1.risk_is_on_track is True
     assert row_1.has_risk_reason is None          # N/A (on track)
     assert row_1.has_recent_comment is True       # fake returns comment for ids ending in 1
     assert row_1.comment_has_status_keyword is True  # "on track" in comment
-    assert row_1.is_ready is True                 # all green
+    assert row_1.is_ready is True                 # target date + committed + risk assessment all green
 
-    # Item 801002 ends in 2 — no comment returned
+    # Item 801002 ends in 2 — not committed, no comment returned
     row_2 = next(r for r in all_b_rows if r.work_item_id == 801002)
+    assert row_2.has_committed is False           # no CommitmentStatus set
     assert row_2.has_recent_comment is False
     assert row_2.comment_has_status_keyword is False
-    assert row_2.is_ready is False
+    assert row_2.is_ready is False                # not committed (recent comment/keyword don't count)
 
 
 def test_generate_full_hygiene_nudges_writes_eml_file(
@@ -585,7 +588,7 @@ def test_generate_full_hygiene_nudges_section_ready_count(
     )
 
     _, section_b, _ = artifacts.sections
-    # 801001 (ends in 1) has comment → is_ready=True; 801002 has no comment → is_ready=False
+    # 801001 (ends in 1) is committed → is_ready=True; 801002 is not committed → is_ready=False
     assert section_b.ready_count == 1
     assert section_b.total_count == 2
 

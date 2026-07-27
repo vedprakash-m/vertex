@@ -1,10 +1,13 @@
 """Unit tests for scripts/check_backlog_citations.py (BL-K1, specs/backlog.md).
 
-Covers the two behavior changes made when specs/bklg.md became the tracked
-canonical backlog: specs/backlog.md is no longer validated (it may
-legitimately not exist in a fresh clone), and KNOWN_FUTURE_PATHS lets a
-handful of documented not-built-yet/no-longer-exists paths pass without
-disabling the checker for every real backlog reference.
+Covers the behavior changes made across the backlog's lifecycle:
+specs/backlog.md was never validated (it may legitimately not exist in a
+fresh clone); specs/bklg.md was briefly the tracked canonical mirror but
+was untracked/gitignored again on 2026-07-27 (BL-K1 follow-up) and so is
+now treated identically -- neither may exist in a fresh clone/CI checkout.
+KNOWN_FUTURE_PATHS separately lets a handful of documented
+not-built-yet/no-longer-exists paths pass without disabling the checker
+for every real backlog reference.
 """
 
 from __future__ import annotations
@@ -19,8 +22,12 @@ def test_specs_backlog_md_is_not_a_validated_prefix() -> None:
     assert _validate_path("specs/backlog.md") is None
 
 
-def test_specs_bklg_md_is_a_validated_prefix() -> None:
-    assert any(prefix.startswith("specs/bklg.md") for prefix in VALIDATED_PREFIXES)
+def test_specs_bklg_md_is_not_a_validated_prefix() -> None:
+    """specs/bklg.md is gitignored (2026-07-27, BL-K1 follow-up) -- like
+    specs/backlog.md, it may not exist in a fresh clone, so a citation to
+    it must never be flagged either way."""
+    assert not any(prefix.startswith("specs/bklg.md") for prefix in VALIDATED_PREFIXES)
+    assert _validate_path("specs/bklg.md") is None
 
 
 def test_known_future_paths_never_flagged() -> None:

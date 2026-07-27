@@ -737,6 +737,91 @@ def merge_people(
     return committed
 
 
+def merge_people_batch(
+    knowledge_root: Path,
+    *,
+    merges: tuple[tuple[str, str], ...],
+    reason: str,
+    actor: str,
+    apply: bool,
+    as_of: datetime | None = None,
+) -> PeopleCorrectionResult:
+    """specs/bklg.md BL-E3 DIR-01: resolve multiple duplicate-alias pairs in
+    ONE commit.
+
+    ``merge_people``'s own ``_commit_state`` validates the FULL document
+    after every single commit (``_validate_state`` checks every entity, not
+    just the pair just merged) -- so with N unrelated duplicate-alias pairs
+    present, merging pair 1 alone always fails on pair 2..N still being
+    unresolved, regardless of order. Chaining ``_collect_merge_paths``
+    across all pairs in memory before ever calling ``_commit_state`` lets
+    every pair resolve together, so the final state that gets validated has
+    none left. ``merges`` entries must be exact canonical entity_ids (not
+    aliases) since every pair here shares an ambiguous alias by
+    construction -- alias-based resolution would not uniquely resolve.
+    """
+    if not reason.strip():
+        raise ConfigError("A non-empty steward review reason is required for a merge.")
+    if not merges:
+        raise ConfigError("merge_people_batch requires at least one (source_id, target_id) pair.")
+    state = _load_state(knowledge_root)
+    touched_paths: set[str] = set()
+    all_conflicts: list[CorrectionConflict] = []
+    resolved_pairs: list[tuple[str, str]] = []
+    for source_id, target_id in merges:
+        if source_id == target_id:
+            raise ConfigError(f"Merge source and target must be different canonical people: {source_id!r}")
+        target_person = _person_by_entity_id(state.people, target_id)
+        state, paths, conflicts = _collect_merge_paths(
+            state, source_id=source_id, target_id=target_id, target_alias=target_person.alias
+        )
+        if conflicts:
+            all_conflicts.extend(conflicts)
+            continue
+        touched_paths.update(paths)
+        resolved_pairs.append((source_id, target_id))
+
+    result = PeopleCorrectionResult(
+        "merge_batch",
+        source_entity_id=None,
+        target_entity_id=", ".join(f"{s}->{t}" for s, t in resolved_pairs) or "<none resolved>",
+        affected_paths=tuple(sorted(touched_paths)),
+        conflicts=tuple(all_conflicts),
+    )
+    if all_conflicts or not apply or not resolved_pairs:
+        return result
+
+    config, manifest = _require_steward(knowledge_root, actor)
+    resolved_source_ids = frozenset(source_id for source_id, _ in resolved_pairs)
+    state = replace(
+        state,
+        document=EntitiesDocument(
+            schema_version=state.document.schema_version,
+            entities=state.document.entities,
+            redirects=tuple(
+                replace(redirect, principal_id=actor, reason=reason)
+                if redirect.from_entity_id in resolved_source_ids
+                else redirect
+                for redirect in state.document.redirects
+            ),
+        ),
+    )
+    committed = _commit_state(
+        knowledge_root=knowledge_root,
+        config=config,
+        manifest=manifest,
+        state=state,
+        paths=tuple(sorted(touched_paths)),
+        result=result,
+        actor=actor,
+        reason=reason,
+        before={"restorable_paths": sorted(touched_paths)},
+        after={"merged_pairs": [f"{s}->{t}" for s, t in resolved_pairs], "source_hashes": {}},
+        as_of=_now(as_of),
+    )
+    return committed
+
+
 def bind_person_identifier(
     knowledge_root: Path,
     *,

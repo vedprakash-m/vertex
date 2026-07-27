@@ -226,6 +226,7 @@ from src.core.delta_engine import build_deltas
 from src.core.adoption_telemetry import GoldenWorkflow, record_adoption
 from src.core.alerts import append_or_suppress_alert
 from src.core.operation_trace import REF_TYPE_OUTPUT, record_trace_link
+from src.core.people_enrichment import maybe_alert_enrichment_due
 from src.core.edition_resolver import filter_workstreams, resolve_edition, get_program_output_dir
 from src.core.eml_writer import write_eml
 from src.core.evidence_engine import build_evidence
@@ -623,6 +624,22 @@ def report_command(
     if not dry_run:
         try:
             record_adoption(load_result.bundle.program.id, GoldenWorkflow.WEEKLY_REPORT, programs_root=PROGRAMS_ROOT)
+        except (OSError, StateError):
+            pass
+
+        # BL-E4: a completed report run is one tick of the people-registry
+        # enrichment reminder cadence (Vertex's own operational rhythm,
+        # not an OS-level wall-clock schedule -- see people_enrichment.py's
+        # maybe_alert_enrichment_due docstring). This only ever raises a
+        # between-runs alert; it never calls WorkIQ inline, same INV-ADF-2
+        # discipline as _maybe_auto_run_workiq_enrich above.
+        try:
+            fired = maybe_alert_enrichment_due(program_id=load_result.bundle.program.id, kind="report_run", programs_root=PROGRAMS_ROOT)
+            if fired and not stdout:
+                typer.echo(
+                    f"[People] Routine WorkIQ enrichment is due. Run 'vertex kb people enrich "
+                    f"--program {load_result.bundle.program.id}' when convenient."
+                )
         except (OSError, StateError):
             pass
 

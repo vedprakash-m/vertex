@@ -80,7 +80,7 @@ def _make_section(
 
 
 def _make_program(
-    organization: str = "msazure",
+    organization: str = "contoso",
     project: str = "One",
     area_paths: tuple[str, ...] = ("One\\Xstore",),
     work_item_types: tuple[str, ...] = (),

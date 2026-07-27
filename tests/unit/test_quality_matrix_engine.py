@@ -593,8 +593,8 @@ def _nova_deployment_item(as_of: datetime) -> WorkItem:
         type="Feature",
         title="Deployment velocity telemetry stabilization",
         state="Active",
-        assigned_to="Isaiah Gregory",
-        assigned_to_email="isaiah@example.com",
+        assigned_to="Jordan Rivera",
+        assigned_to_email="jordan@example.com",
         area_path="One\\Adventure\\Acme\\Deployment",
         iteration_path="FY26\\Sprint 20",
         target_date=date(2026, 5, 20),
@@ -605,8 +605,8 @@ def _nova_deployment_item(as_of: datetime) -> WorkItem:
             Revision(
                 work_item_id=920100,
                 rev_number=2,
-                changed_by="Isaiah Gregory",
-                changed_by_email="isaiah@example.com",
+                changed_by="Jordan Rivera",
+                changed_by_email="jordan@example.com",
                 changed_date=as_of,
                 fields_changed={"State": ("New", "Active")},
             )

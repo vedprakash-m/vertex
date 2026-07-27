@@ -441,7 +441,7 @@ class TestResolveAdoClientFn:
         monkeypatch.setattr(
             "src.core.edition_resolver.load_program",
             lambda program_id, programs_root: SimpleNamespace(
-                ado={"organization": "msazure", "project": "One"}
+                ado={"organization": "contoso", "project": "One"}
             ),
         )
         monkeypatch.setenv("ADO_PAT", "fake-pat-for-test")
@@ -461,7 +461,7 @@ class TestResolveAdoClientFn:
         builder = _resolve_ado_client_fn(reality)
         assert builder is not None
         client = builder()
-        assert client.organization == "msazure"
+        assert client.organization == "contoso"
         assert client.project == "One"
 
     def test_returns_none_when_pat_env_missing(self, tmp_path, monkeypatch):
@@ -472,7 +472,7 @@ class TestResolveAdoClientFn:
         monkeypatch.setattr(
             "src.core.edition_resolver.load_program",
             lambda program_id, programs_root: SimpleNamespace(
-                ado={"organization": "msazure", "project": "One"}
+                ado={"organization": "contoso", "project": "One"}
             ),
         )
         monkeypatch.delenv("ADO_PAT", raising=False)
@@ -491,7 +491,7 @@ class TestResolveAdoClientFn:
         monkeypatch.setattr(
             "src.core.edition_resolver.load_program",
             lambda program_id, programs_root: SimpleNamespace(
-                ado={"organization": "msazure", "project": None}
+                ado={"organization": "contoso", "project": None}
             ),
         )
         monkeypatch.setenv("ADO_PAT", "fake-pat-for-test")

@@ -16,16 +16,16 @@ def test_build_freshness_report_emits_core_findings() -> None:
             101,
             state="Active",
             target_date=date(2026, 5, 1),
-            assigned_to="Isaiah Gregory",
-            assigned_to_email="isaiah@example.com",
+            assigned_to="Jordan Rivera",
+            assigned_to_email="jordan@example.com",
             changed_date=AS_OF - timedelta(days=10),
         ),
         _work_item(
             102,
             state="Active",
             target_date=date(2026, 6, 1),
-            assigned_to="Isaiah Gregory",
-            assigned_to_email="isaiah@example.com",
+            assigned_to="Jordan Rivera",
+            assigned_to_email="jordan@example.com",
             changed_date=AS_OF - timedelta(days=20),
         ),
         _work_item(
@@ -91,8 +91,8 @@ def test_build_freshness_report_emits_core_findings() -> None:
         ),
     )
     previous_snapshot = _snapshot(
-        _snapshot_item(101, state="Active", risk_level=RiskLevel.LOW, target_date=date(2026, 5, 10), assigned_to="Isaiah Gregory"),
-        _snapshot_item(102, state="Active", risk_level=RiskLevel.LOW, target_date=date(2026, 6, 1), assigned_to="Isaiah Gregory"),
+        _snapshot_item(101, state="Active", risk_level=RiskLevel.LOW, target_date=date(2026, 5, 10), assigned_to="Jordan Rivera"),
+        _snapshot_item(102, state="Active", risk_level=RiskLevel.LOW, target_date=date(2026, 6, 1), assigned_to="Jordan Rivera"),
         _snapshot_item(103, state="Active", risk_level=RiskLevel.LOW, target_date=None, assigned_to="Priya Mehta"),
         _snapshot_item(104, state="Active", risk_level=RiskLevel.MEDIUM, target_date=None, assigned_to="Vertex Maintainer"),
         _snapshot_item(106, state="Proposed", risk_level=RiskLevel.LOW, target_date=None, assigned_to="Sam Rivera"),
@@ -134,16 +134,16 @@ def test_build_dri_summaries_groups_findings_by_owner() -> None:
             201,
             state="Active",
             target_date=date(2026, 5, 1),
-            assigned_to="Isaiah Gregory",
-            assigned_to_email="isaiah@example.com",
+            assigned_to="Jordan Rivera",
+            assigned_to_email="jordan@example.com",
             changed_date=AS_OF - timedelta(days=16),
         ),
         _work_item(
             202,
             state="At Risk",
             risk_level=RiskLevel.MEDIUM,
-            assigned_to="Isaiah Gregory",
-            assigned_to_email="isaiah@example.com",
+            assigned_to="Jordan Rivera",
+            assigned_to_email="jordan@example.com",
             changed_date=AS_OF - timedelta(days=1),
             description="Need update",
         ),
@@ -177,8 +177,8 @@ def test_build_dri_summaries_groups_findings_by_owner() -> None:
             workstreams=(),
             people=(
                 ProgramPerson(
-                    email="isaiah@example.com",
-                    display_name="Isaiah Gregory",
+                    email="jordan@example.com",
+                    display_name="Jordan Rivera",
                     role=None,
                     workstreams=(),
                 ),
@@ -193,10 +193,10 @@ def test_build_dri_summaries_groups_findings_by_owner() -> None:
     )
 
     by_email = {summary.dri_email: summary for summary in summaries}
-    assert by_email["isaiah@example.com"].dri_name == "Isaiah Gregory"
-    assert by_email["isaiah@example.com"].open_count == 2
-    assert by_email["isaiah@example.com"].overdue_count == 1
-    assert by_email["isaiah@example.com"].stale_count == 1
+    assert by_email["jordan@example.com"].dri_name == "Jordan Rivera"
+    assert by_email["jordan@example.com"].open_count == 2
+    assert by_email["jordan@example.com"].overdue_count == 1
+    assert by_email["jordan@example.com"].stale_count == 1
     assert by_email["priya@example.com"].dri_name == "Priya Mehta"
     assert by_email["priya@example.com"].open_count == 1
 

@@ -215,7 +215,7 @@ def _rich_cli_inputs() -> list[str]:
         "Decision-oriented.",
         "verbosity",
         "1",
-        "Isaiah Gregory",
+        "Jordan Rivera",
         "Platform, OS",
         "Needs editing for exec audience",
         "America/Los_Angeles",
@@ -468,7 +468,7 @@ def _seed_existing_v2_edition(
                 ],
                 "workstream_owners": [
                     {
-                        "name": "Isaiah Gregory",
+                        "name": "Jordan Rivera",
                         "areas": ["Platform"],
                         "style_note": "Preserve this style note",
                         "timezone": "America/Los_Angeles",
@@ -697,7 +697,7 @@ def test_onboard_cli_bootstraps_new_edition(monkeypatch, tmp_path: Path) -> None
     assert bundle.program_context.glossary["SLA"] == "Service Level Agreement"
     assert bundle.program_context.leadership_readers[0].name == "Jordan Lee"
     assert bundle.program_context.leadership_readers[0].cares_about == ("ramp timeline", "commitment risk")
-    assert bundle.program_context.workstream_owners[0].name == "Isaiah Gregory"
+    assert bundle.program_context.workstream_owners[0].name == "Jordan Rivera"
     assert bundle.program_context.workstream_owners[0].areas == ("Platform", "OS")
     assert bundle.program_context.writing_style is not None
     assert bundle.program_context.writing_style.voice == "Confident but honest."

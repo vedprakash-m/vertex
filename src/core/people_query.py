@@ -29,16 +29,13 @@ with scores/ambiguity, never automatic bindings") -- exact/prefix/
 substring matching over normalized alias and display_name, in that
 priority order, capped at `limit`.
 
-`list_stale_people` (`people stale`) implements a v1 placeholder
-freshness threshold (`DEFAULT_STALE_FRESHNESS_DAYS`), explicitly NOT the
-"configured freshness SLA" §8.3's DIR-03 and §7's `freshness_policy.yaml`
-`people_registry` section describe -- that governed config doesn't exist
-yet (grepped `vertex/policies/freshness_policy.yaml` before writing this:
-no `people_registry` section). DIR-03 (PPL-W3.2) is the item that wires a
-real configured SLA in; this function's job is proving the STALENESS
-QUERY shape is right, matching this session's established "build the
-query/primitive, the harder governed-config version is a later item's
-named scope" precedent (e.g. PPL-W2A.3's `DEFAULT_HOT_WINDOW_DAYS`).
+`list_stale_people` (`people stale`) uses `DEFAULT_STALE_FRESHNESS_DAYS`,
+now sourced live from `freshness_policy.yaml`'s `people_registry.
+stale_after_days` (specs/bklg.md BL-E3, 2026-07-26) -- the real, governed
+SLA §8.3's DIR-03 and §7 always intended, not the earlier hardcoded "v1
+placeholder" this docstring used to describe. Ratified at 90 days, the
+same number the placeholder had already been using, so this change is
+purely "read it from policy" -- no threshold value actually moved.
 
 `list_conflicts` (`people conflicts --status open|resolved`) reads
 `people_conflicts.jsonl` (PPL-W1.7, first real multi-writer populated at
@@ -86,12 +83,15 @@ from src.core.people_legacy_affiliation import LegacyAffiliationEdge
 from src.core.people_legacy_reference_metrics import record_legacy_alias_reference
 from src.core.people_membership_schema import TeamMembership, read_all_memberships, read_memberships_as_of
 from src.core.people_namespace_bridge import normalize_alias_for_lookup, resolve_ref_to_canonical_entity_id
+from src.core.policy_loader import load_freshness_policy
 
 QUERY_SCHEMA_VERSION = "people-query.v1"
 DEFAULT_QUERY_LIMIT = 50
-#: v1 placeholder pending a real `people_registry` section in
-#: `freshness_policy.yaml` (§7, DIR-03's actual scope -- PPL-W3.2).
-DEFAULT_STALE_FRESHNESS_DAYS = 90
+#: specs/bklg.md BL-E3 (2026-07-26): the real, governed SLA from
+#: `freshness_policy.yaml`'s `people_registry.stale_after_days`, not a
+#: hardcoded placeholder. Resolved once at import time, matching every
+#: other module-level default-constant convention in this codebase.
+DEFAULT_STALE_FRESHNESS_DAYS = load_freshness_policy().people_registry_stale_after_days
 
 _RESOLVING_DECISIONS = frozenset({"merge", "split", "bind", "unmerge"})
 _OPEN_DECISIONS = frozenset({"quarantined", "conflict"})

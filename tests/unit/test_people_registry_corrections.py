@@ -29,7 +29,7 @@ from src.core.people_entity_schema import (
 )
 from src.core.people_membership_schema import TeamMembership, load_memberships, write_memberships
 from src.core.people_namespace_bridge import resolve_ref_to_canonical_entity_id
-from src.core.people_registry_corrections import bind_person_identifier, merge_people, split_person, unmerge_people
+from src.core.people_registry_corrections import bind_person_identifier, merge_people, merge_people_batch, split_person, unmerge_people
 from src.core.people_registry_identity import bootstrap_registry_identity, load_registry_config, write_registry_config
 from src.core.people_registry_transaction import commit_registry_files_transaction, prepare_registry_files_transaction
 from src.core.profile_encryption import encrypt_people_profiles_file, inspect_people_profiles_file
@@ -438,3 +438,125 @@ def test_cli_bind_split_and_unmerge_preview_routes(monkeypatch, tmp_path: Path) 
     assert "Preview: would apply split" in split.stdout
     assert "Applied merge" in merged.stdout
     assert "Preview: would apply unmerge" in unmerge.stdout
+
+
+# ---------------------------------------------------------------------------
+# specs/bklg.md BL-E3 DIR-01: batch merge for multiple independent
+# duplicate-alias pairs that must resolve together.
+# ---------------------------------------------------------------------------
+
+
+def _seed_two_duplicate_pairs(knowledge_root: Path) -> None:
+    """Reproduces the real bug this batch function fixes: two UNRELATED
+    duplicate-alias pairs (alice x2, bob x2) coexist. merge_people's own
+    commit-time _validate_state checks the WHOLE document, so resolving
+    one pair alone always fails on the other pair still being duplicated."""
+    bootstrap_registry_identity(knowledge_root=knowledge_root, customer_boundary_id="synthetic", apply=True, as_of=_NOW)
+    config = load_registry_config(knowledge_root)
+    assert config is not None
+    write_registry_config(knowledge_root / "registry.yaml", replace(config, directory_steward_principals=("test_steward",)))
+    entities = (
+        CanonicalEntity(workspace_id=config.workspace_id, entity_id="person:alice-1", entity_type="person", canonical_name="Alice", aliases=(_alias("alice"),), scope="org", created_at=_NOW),
+        CanonicalEntity(workspace_id=config.workspace_id, entity_id="person:alice-2", entity_type="person", canonical_name="Alice", aliases=(_alias("alice"),), scope="org", created_at=_NOW),
+        CanonicalEntity(workspace_id=config.workspace_id, entity_id="person:bob-1", entity_type="person", canonical_name="Bob", aliases=(_alias("bob"),), scope="org", created_at=_NOW),
+        CanonicalEntity(workspace_id=config.workspace_id, entity_id="person:bob-2", entity_type="person", canonical_name="Bob", aliases=(_alias("bob"),), scope="org", created_at=_NOW),
+    )
+    people = (
+        PersonDirectory(entity_id="person:alice-1", alias="alice", title="TPM", status=PersonStatus.ACTIVE),
+        PersonDirectory(entity_id="person:alice-2", alias="alice", status=PersonStatus.ACTIVE),
+        PersonDirectory(entity_id="person:bob-1", alias="bob", status=PersonStatus.ACTIVE),
+        PersonDirectory(entity_id="person:bob-2", alias="bob", title="Eng", status=PersonStatus.ACTIVE),
+    )
+
+    def write_staged(staged_dir: Path) -> None:
+        write_entities_document(staged_dir / "entities.yaml", EntitiesDocument(schema_version="2.0", entities=entities))
+        write_people_directory(staged_dir / "people_directory.yaml", people)
+
+    def validate_staged(staged_dir: Path) -> None:
+        assert load_entities_document(staged_dir / "entities.yaml") is not None
+        assert load_people_directory(staged_dir / "people_directory.yaml") is not None
+
+    prepared = prepare_registry_files_transaction(
+        knowledge_root, ("entities.yaml", "people_directory.yaml"), owner="seed",
+        write_staged_files=write_staged, validate_staged_files=validate_staged, as_of=_NOW,
+    )
+    commit_registry_files_transaction(prepared, knowledge_root=knowledge_root, as_of=_NOW)
+
+
+def test_single_merge_fails_when_an_unrelated_duplicate_pair_remains(tmp_path: Path) -> None:
+    """Documents the real bug: merge_people's commit-time validation checks
+    the FULL document, so resolving alice's duplicate alone fails because
+    bob's is still unresolved elsewhere -- this is why merge_people_batch
+    exists, not a design flaw in this test."""
+    knowledge_root = tmp_path / "knowledge"
+    _seed_two_duplicate_pairs(knowledge_root)
+
+    with pytest.raises(ConfigError, match="bob"):
+        merge_people(
+            knowledge_root, source_ref="person:alice-2", target_ref="person:alice-1",
+            reason="dedupe", actor="test_steward", apply=True, as_of=_NOW,
+        )
+
+
+def test_merge_people_batch_resolves_both_pairs_in_one_commit(tmp_path: Path) -> None:
+    knowledge_root = tmp_path / "knowledge"
+    _seed_two_duplicate_pairs(knowledge_root)
+
+    result = merge_people_batch(
+        knowledge_root,
+        merges=(("person:alice-2", "person:alice-1"), ("person:bob-1", "person:bob-2")),
+        reason="BL-E3 DIR-01 dedupe",
+        actor="test_steward",
+        apply=True,
+        as_of=_NOW,
+    )
+    assert not result.conflicts
+    assert result.transaction_id is not None
+
+    entities_doc = load_entities_document(knowledge_root / "entities.yaml")
+    assert entities_doc is not None
+    active_entities = [e for e in entities_doc.entities if e.status.value == "active"]
+    assert {e.entity_id for e in active_entities} == {"person:alice-1", "person:bob-2"}
+    tombstoned = {e.entity_id for e in entities_doc.entities if e.status.value == "tombstoned"}
+    assert tombstoned == {"person:alice-2", "person:bob-1"}
+
+    people_result = load_people_directory(knowledge_root / "people_directory.yaml")
+    assert people_result is not None
+    remaining_ids = {p.entity_id for p in people_result.people}
+    assert remaining_ids == {"person:alice-1", "person:bob-2"}
+    # Complementary fields preserved from whichever side had them populated.
+    alice = next(p for p in people_result.people if p.entity_id == "person:alice-1")
+    bob = next(p for p in people_result.people if p.entity_id == "person:bob-2")
+    assert alice.title == "TPM"
+    assert bob.title == "Eng"
+
+    redirects = {r.from_entity_id: r.to_entity_id for r in entities_doc.redirects}
+    assert redirects["person:alice-2"] == "person:alice-1"
+    assert redirects["person:bob-1"] == "person:bob-2"
+
+
+def test_merge_people_batch_preview_does_not_write(tmp_path: Path) -> None:
+    knowledge_root = tmp_path / "knowledge"
+    _seed_two_duplicate_pairs(knowledge_root)
+
+    result = merge_people_batch(
+        knowledge_root,
+        merges=(("person:alice-2", "person:alice-1"), ("person:bob-1", "person:bob-2")),
+        reason="preview only",
+        actor="test_steward",
+        apply=False,
+        as_of=_NOW,
+    )
+    assert result.transaction_id is None
+
+    entities_doc = load_entities_document(knowledge_root / "entities.yaml")
+    assert entities_doc is not None
+    assert len(entities_doc.entities) == 4  # nothing written yet
+
+
+def test_merge_people_batch_requires_at_least_one_pair(tmp_path: Path) -> None:
+    knowledge_root = tmp_path / "knowledge"
+    _seed_two_duplicate_pairs(knowledge_root)
+
+    with pytest.raises(ConfigError, match="at least one"):
+        merge_people_batch(knowledge_root, merges=(), reason="x", actor="test_steward", apply=True, as_of=_NOW)

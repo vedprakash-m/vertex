@@ -2733,7 +2733,7 @@ def _kpi_tiles_for_section(
         if not isinstance(query_id, str) or not query_id.strip():
             continue
         if workstream_id is not None:
-            if signal.workstream_id != workstream_id:
+            if workstream_id not in signal.workstream_ids:
                 continue
         elif query_id not in chapter_query_ids:
             continue
@@ -2810,6 +2810,7 @@ def _kpi_tile_from_signal(signal: Signal, *, query: Any | None = None) -> KpiTil
         reference_url=query.reference_url if query is not None else None,
         catalog_source=query.catalog_source if query is not None else None,
         result_payload=result_payload,
+        shared=_is_shared_kpi(query=query, signal=signal),
     )
 
 
@@ -2830,7 +2831,22 @@ def _kpi_tile_from_query(query: Any) -> KpiTile:
         reference_url=query.reference_url,
         catalog_source=query.catalog_source,
         result_payload=None,
+        shared=_is_shared_kpi(query=query, signal=None),
     )
+
+
+def _is_shared_kpi(*, query: Any | None, signal: Signal | None) -> bool:
+    """D-19: a KPI is "shared" when its source is configured across (or a
+    live signal is attributed to) more than one workstream. Prefer the
+    configured query's declared ``workstream_ids`` when a query is known --
+    it reflects the operator's intent even before any signal has answered
+    it -- and fall back to the signal's own ``workstream_ids`` for
+    ad hoc/unconfigured queries with no matching ``KustoQuery`` entry."""
+    if query is not None:
+        return len(query.workstream_ids) > 1
+    if signal is not None:
+        return len(signal.workstream_ids) > 1
+    return False
 
 
 def _signal_result_payload(metadata: dict[str, str | int | float | bool | None]) -> dict[str, Any] | None:

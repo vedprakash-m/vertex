@@ -221,6 +221,8 @@ def _render_open_conflicts(reality: ProgramReality) -> str:
     for c in items:
         refs = ", ".join(c.entity_refs) if c.entity_refs else "—"
         lines.append(f"  • [{c.family}] {c.description} | refs={refs}")
+        if c.winning_source or c.losing_source:
+            lines.append(f"      {c.winning_source or '?'} vs {c.losing_source or '?'} | resolution={c.resolution or 'unresolved'}")
     return "\n".join(lines)
 
 

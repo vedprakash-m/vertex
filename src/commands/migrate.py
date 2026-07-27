@@ -94,7 +94,7 @@ def migrate_command(
         typer.echo("Dry-run: sqlite database and program.yaml were not updated.")
     else:
         typer.echo(f"SQLite store: {migration_artifacts.database_path}")
-        typer.echo("Program storage_backend updated to sqlite.")
+        typer.echo(f"Program storage_backend updated to {migration_artifacts.target_backend}.")
     raise typer.Exit(code=0)
 
 

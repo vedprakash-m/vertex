@@ -64,6 +64,15 @@ class NudgeSectionCriteria:
     area_path_filter: tuple[str, ...] = ()
     required_tags: tuple[str, ...] = ()
     legacy_scope_override: bool = False
+    # Section-level override of program.ado.work_item_types. Empty = use the
+    # shared program default. Lets a tag/area_path section narrow scope (e.g.
+    # to Feature-only, matching a saved ADO query) without touching the global
+    # setting used by gather/freshness/owner_pack/report_fetch/doctor checks.
+    work_item_types: tuple[str, ...] = ()
+    # For tag/area_path sections only: workstream_registry.yaml IDs whose
+    # key_ado_items should be merged in alongside the live query results, for
+    # workstreams whose items don't reliably carry the section's tag(s).
+    supplemental_workstream_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

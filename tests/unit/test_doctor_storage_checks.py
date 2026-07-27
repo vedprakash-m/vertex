@@ -753,7 +753,7 @@ def test_armada_leakage_check_ok_with_no_sla_violations(tmp_path: Path, monkeypa
 
     monkeypatch.setattr(storage_checks, "find_leakage_query", lambda *_a, **_k: object())
     sync_leakage_candidates(
-        "armada", org="msazure", project="One",
+        "armada", org="contoso", project="One",
         raw_candidates=(RawAdoCandidate(1, "Bug", "T1", "Active", "alice"),),
         discovery_run_id="run-1", query_version="v1", programs_root=tmp_path,
         now=datetime(2026, 7, 22, 12, 0, 0, tzinfo=_timezone.utc),
@@ -774,7 +774,7 @@ def test_armada_leakage_check_warns_on_sla_violations(tmp_path: Path, monkeypatc
     monkeypatch.setattr(storage_checks, "find_leakage_query", lambda *_a, **_k: object())
     old_now = datetime(2026, 6, 1, 12, 0, 0)
     sync_leakage_candidates(
-        "armada", org="msazure", project="One",
+        "armada", org="contoso", project="One",
         raw_candidates=(RawAdoCandidate(1, "Bug", "T1", "Active", "alice"),),
         discovery_run_id="run-1", query_version="v1", programs_root=tmp_path, now=old_now,
     )

@@ -668,6 +668,48 @@ def _resolve_family_for_obs(
     return family
 
 
+def _extract_display_value(obs: Any, family: str) -> str | None:
+    """GAP-37 (specs/bklg.md BL-H1): a human-readable rendering of the field(s)
+    each digest function above compares, for the EXPLAIN drill-down surface.
+
+    Three of the four digest functions already produce a mostly-readable
+    string (state, "severity:state", "entity:date:status") -- those are
+    reused directly rather than re-extracted, so this function's output
+    never disagrees with what the digest actually compared. Only
+    ``text.human`` needs real new extraction: its digest is a genuinely
+    opaque ``hash(frozenset(...))``, unusable for display, so this pulls a
+    short snippet of the actual text instead. ``metric``'s raw (non-bucketed)
+    value is also extracted here rather than reusing the tolerance-bucketed
+    digest, since showing "18.95" is more honest than showing a rounded
+    bucket boundary."""
+    payload = getattr(obs, "payload", {}) or {}
+    if family == "workitem.state":
+        state = payload.get("state") or payload.get("status")
+        return str(state) if state is not None else None
+    if family == "metric":
+        value = payload.get("value")
+        return str(value) if value is not None else None
+    if family == "incident":
+        severity = payload.get("severity")
+        state = payload.get("state") or payload.get("status")
+        if severity is None and state is None:
+            return None
+        return f"{severity or 'unknown'} / {state or 'unknown'}"
+    if family == "commitment":
+        promised_date = payload.get("due_date") or payload.get("promised_date")
+        status = payload.get("status")
+        if promised_date is None and status is None:
+            return None
+        return f"{promised_date or 'no date'} / {status or 'no status'}"
+    if family in ("narrative", "judgment"):
+        text = payload.get("text") or payload.get("body") or payload.get("content")
+        if not text:
+            return None
+        snippet = str(text).strip()
+        return snippet if len(snippet) <= 200 else snippet[:197] + "..."
+    return None
+
+
 def _compute_obs_digest(obs: Any, family: str, registry: Any) -> str | None:
     """Compute the comparison digest for an observation, keyed by family."""
     payload = getattr(obs, "payload", {}) or {}
@@ -745,6 +787,7 @@ def detect_corroboration_and_conflicts(
         prov_class: str
         digest: str | None
         source: str | None
+        display_value: str | None
 
     obs_infos: list[_ObsInfo] = []
     for obs in observations:
@@ -771,8 +814,9 @@ def detect_corroboration_and_conflicts(
         source = _get_fact_source(obs)
         prov_class = authority.provenance_classes.get(source, "unknown") if source else "unknown"
         digest = _compute_obs_digest(obs, family, registry)
+        display_value = _extract_display_value(obs, family)
 
-        obs_infos.append(_ObsInfo(obs, entity_id, family, prov_class, digest, source))
+        obs_infos.append(_ObsInfo(obs, entity_id, family, prov_class, digest, source, display_value))
 
     # --- Step 2: Group by (entity_id, family) ---
     from collections import defaultdict
@@ -903,13 +947,16 @@ def _detect_conflict(
 
     # (1) Primary-authority precedence (only if primary ∉ ctx.suspended_sources)
     winner_source: str | None = None
+    winner_rule: str | None = None
     if authority_entry is not None:
         primary = authority_entry.primary
         if primary and primary not in ctx.suspended_sources:
             if a.source == primary:
                 winner_source = a.source
+                winner_rule = "primary_authority"
             elif b.source == primary:
                 winner_source = b.source
+                winner_rule = "primary_authority"
 
     # (2) Trust-gap precedence (if no primary winner yet)
     if winner_source is None and trust_ledger:
@@ -918,6 +965,7 @@ def _detect_conflict(
         gap = abs(score_a - score_b)
         if gap >= authority.conflict_trust_gap_threshold:
             winner_source = a.source if score_a > score_b else b.source
+            winner_rule = "trust_gap"
 
     # Identify winning/losing observations
     if winner_source is not None:
@@ -943,6 +991,13 @@ def _detect_conflict(
             "losing_source": losing_obs.source or "unknown",
             "observed_value": winning_obs.digest,
             "expected_value": losing_obs.digest,
+            # GAP-37 (BL-H1): human-readable values for the EXPLAIN drill-down --
+            # observed_value/expected_value above stay digests (comparison keys,
+            # unchanged) since 3 of 4 families' digests are already readable;
+            # these two are the one genuinely new addition, needed for the
+            # text.human family whose digest is an opaque hash.
+            "winning_value": winning_obs.display_value,
+            "losing_value": losing_obs.display_value,
             "material": False,
             "resolution": "unresolved_minor",
             "resolved": False,
@@ -957,8 +1012,11 @@ def _detect_conflict(
 
         if winner_source is not None:
             # (3) Open conflict only when no winner could be determined
-            # Winner resolved → still record conflict for tracking, but mark with resolution
-            conflict_resolution = f"precedence:{winner_source}"
+            # Winner resolved → still record conflict for tracking, but mark with
+            # resolution -- GAP-37: distinguish which of the two precedence rules
+            # actually fired (previously both collapsed into "precedence:X",
+            # losing the "why it won" distinction a drill-down needs).
+            conflict_resolution = f"{winner_rule or 'precedence'}:{winner_source}"
         else:
             conflict_resolution = "unresolved"
 
@@ -972,6 +1030,8 @@ def _detect_conflict(
             "losing_source": losing_obs.source or "unknown",
             "observed_value": winning_obs.digest,
             "expected_value": losing_obs.digest,
+            "winning_value": winning_obs.display_value,
+            "losing_value": losing_obs.display_value,
             "material": True,
             "resolution": conflict_resolution,
             "resolved": winner_source is not None,

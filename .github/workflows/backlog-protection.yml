@@ -1,10 +1,18 @@
 name: Backlog Protection
 
-# BL-K1 (specs/bklg.md, resolved 2026-07-22): restores the CI protection
-# docs/contributing.md has claimed exists since before this workflow was
-# ever actually created. Runs the citation checker against the tracked
-# canonical backlog + companion specs, and fails the job if any protected
-# spec's line count drops by more than 50% versus the previous commit.
+# BL-K1 (originally specs/bklg.md, resolved 2026-07-22): restores the CI
+# protection docs/contributing.md has claimed exists since before this
+# workflow was ever actually created. Runs the citation checker against the
+# tracked canonical specs, and fails the job if any protected spec's line
+# count drops by more than 50% versus the previous commit.
+#
+# 2026-07-27: specs/bklg.md is now gitignored too (never synced to the
+# public GitHub remote, alongside specs/backlog.md) -- removed from both
+# checks below since it will never exist in this checkout. docs/runbook.md
+# was also removed: nothing under docs/ has ever been tracked (see
+# .gitignore), so that citation-check argument could never have resolved on
+# a real fresh clone -- a latent bug from before this workflow's first run,
+# not a change in scope.
 
 on:
   pull_request:
@@ -28,13 +36,13 @@ jobs:
 
       - name: Citation check (concrete file/directory references must resolve)
         run: |
-          python scripts/check_backlog_citations.py specs/bklg.md specs/vertex-prd.md specs/vertex-tech-spec.md specs/vertex-ux-spec.md docs/runbook.md
+          python scripts/check_backlog_citations.py specs/vertex-prd.md specs/vertex-tech-spec.md specs/vertex-ux-spec.md
 
       - name: Bulk-deletion guard (fail on >50% line-count drop vs previous commit)
         shell: bash
         run: |
           set -euo pipefail
-          protected_files="specs/bklg.md specs/vertex-prd.md specs/vertex-tech-spec.md specs/vertex-ux-spec.md"
+          protected_files="specs/vertex-prd.md specs/vertex-tech-spec.md specs/vertex-ux-spec.md"
           if ! git cat-file -e HEAD~1 2>/dev/null; then
             echo "No previous commit to compare against (shallow or first-ever commit) -- skipping."
             exit 0

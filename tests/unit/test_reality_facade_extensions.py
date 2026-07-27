@@ -132,6 +132,53 @@ def test_program_reality_explain_surfaces_evidence_and_open_conflicts() -> None:
     assert explanation.open_conflicts[0].description == "ADO says done, Teams says in-progress"
 
 
+def test_program_reality_conflicts_reads_the_real_conflict_description_field() -> None:
+    """GAP-37 real-data bug: fact_bridge.py's _append_conflict_fact writes
+    "conflict_description" (the schema-required field), not "description" --
+    conflicts() must read the real field or every production conflict has an
+    empty description."""
+    from src.core.program_reality import ProgramReality
+
+    conflict_fact = _fact(
+        fact_id="fact-conflict-real-shape",
+        fact_type="fact.conflict",
+        natural_key="conflict:action:2",
+        entity_refs=("ACTION:2",),
+        payload={
+            "family": "action",
+            "conflict_description": "action: done → in-progress",
+            "resolved": False,
+            "winning_source": "ado",
+            "losing_source": "teams",
+            "winning_value": "Done",
+            "losing_value": "In Progress",
+            "resolution": "primary_authority:ado",
+            "detected_at": "2026-07-26T12:00:00+00:00",
+        },
+    )
+    snapshot = ProgramFactSnapshot(
+        program_id="demo", as_of=datetime(2026, 6, 17, 10, 0, tzinfo=timezone.utc), facts=(conflict_fact,),
+    )
+    reality = ProgramReality(
+        program_id="demo", snapshot=snapshot, sor_mode="primary",
+        as_of=datetime(2026, 6, 17, 10, 0, tzinfo=timezone.utc),
+        _entity_fact_index={}, _actions=(), _risks=(), _decisions=(), _dependencies=(),
+        _milestones=(), _assumptions=(), _workstreams=(), _claims=(),
+    )
+
+    conflicts = reality.conflicts(open_only=True)
+
+    assert len(conflicts) == 1
+    conflict = conflicts[0]
+    assert conflict.description == "action: done → in-progress"
+    assert conflict.winning_source == "ado"
+    assert conflict.losing_source == "teams"
+    assert conflict.winning_value == "Done"
+    assert conflict.losing_value == "In Progress"
+    assert conflict.resolution == "primary_authority:ado"
+    assert conflict.detected_at == "2026-07-26T12:00:00+00:00"
+
+
 def test_fleet_reality_aggregates_attention_conflicts_actuation_and_freshness() -> None:
     class _FakeProgram:
         def __init__(
@@ -296,6 +343,61 @@ def test_reality_explain_command_renders_json(monkeypatch) -> None:
     assert payload["truth_level"] == "corroborated"
     assert payload["disputed"] is True
     assert payload["open_conflicts"][0]["conflict_id"] == "conf-1"
+
+
+def test_reality_explain_command_renders_conflict_resolution_fields_when_present(monkeypatch) -> None:
+    """GAP-37: `vertex reality explain` surfaces winning/losing source+value
+    and the resolution reason, not just the conflict's bare description."""
+    explanation = FactExplanation(
+        program_id="demo",
+        fact_id="fact-1",
+        fact_type="action.item",
+        natural_key="action:1",
+        truth_level=TruthLevel.CORROBORATED,
+        disputed=True,
+        stale=False,
+        provisional_inputs=True,
+        evidence=(),
+        open_conflicts=(
+            RealityConflict(
+                conflict_id="conf-1",
+                entity_refs=("ACTION:1",),
+                family="action",
+                open=True,
+                description="ado: done -> in-progress",
+                winning_source="ado",
+                losing_source="teams",
+                winning_value="Done",
+                losing_value="In Progress",
+                resolution="primary_authority:ado",
+                detected_at="2026-07-26T12:00:00+00:00",
+            ),
+        ),
+        source_signal_ids=(),
+        entity_refs=("ACTION:1",),
+    )
+
+    class _FakeReality:
+        def explain(self, fact_id: str) -> FactExplanation | None:
+            return explanation if fact_id == "fact-1" else None
+
+    monkeypatch.setattr(
+        "src.core.program_reality.ProgramReality.load",
+        lambda program_id, programs_root=Path("."): _FakeReality(),
+    )
+
+    json_result = runner.invoke(app, ["reality", "explain", "--program", "demo", "--fact-id", "fact-1", "--format", "json"])
+    payload = json.loads(json_result.stdout)
+    conflict_payload = payload["open_conflicts"][0]
+    assert conflict_payload["winning_source"] == "ado"
+    assert conflict_payload["losing_source"] == "teams"
+    assert conflict_payload["winning_value"] == "Done"
+    assert conflict_payload["losing_value"] == "In Progress"
+    assert conflict_payload["resolution"] == "primary_authority:ado"
+
+    text_result = runner.invoke(app, ["reality", "explain", "--program", "demo", "--fact-id", "fact-1", "--format", "text"])
+    assert "ado (Done) beat teams (In Progress)" in text_result.stdout
+    assert "primary_authority:ado" in text_result.stdout
 
 
 def test_build_fleet_status_payload_aggregates_facade_counts(monkeypatch, tmp_path: Path) -> None:

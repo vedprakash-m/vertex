@@ -188,7 +188,7 @@ Query {{ subgroup.query_id }} · {{ subgroup.source_label }} · Confidence {{ su
 {% if ws.blurb %}{{ ws.blurb | linkify_ado_tokens_markdown }}
 {% endif %}
 {% if ws.kpi_tiles %}KPIs:
-{% for tile in ws.kpi_tiles %}- **{{ tile.label }}**: {{ tile.value }}{% if tile.confidence %} ({{ tile.confidence | lower }} confidence){% endif %}{% if tile.as_of %} | as of {{ tile.as_of | format_date("%b %d") }}{% endif %}
+{% for tile in ws.kpi_tiles %}- **{{ tile.label }}**{% if tile.shared %} _(shared)_{% endif %}: {{ tile.value }}{% if tile.confidence %} ({{ tile.confidence | lower }} confidence){% endif %}{% if tile.as_of %} | as of {{ tile.as_of | format_date("%b %d") }}{% endif %}
 {% endfor %}{% endif %}
 {% if ws.significant_findings %}ADO findings:
 {% for finding in ws.significant_findings %}- {{ finding | linkify_ado_tokens_markdown }}

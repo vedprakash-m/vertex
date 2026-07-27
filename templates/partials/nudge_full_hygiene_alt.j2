@@ -1,5 +1,5 @@
 {# Full Hygiene Heat-map — single-section program ADO readiness (alt layout) #}
-{# Columns: ADO# · Title · Owner · Hygiene (📅 Date · 📌 Committed · 🎯 Risk · 📋 Reason · 💬 Update · 📰 Status, packed as one icon strip; order documented in the visible Legend above the sections) · Stale · ✨ Ready? #}
+{# Columns: ADO# · Title · Owner · Hygiene (📅 Date · 📌 Committed · 🎯 Risk — required for readiness, bold with a divider · 📋 Reason · 💬 Update · 📰 Status — muted "FYI" signals, informational only) · Stale · Fix this (plain-English gap tags, auto-generated from the 3 required checks; "✓ Ready" when all pass) #}
 {# Column header row repeats after every workstream sub-header (so it stays nearby during long scrolls), except immediately under a section's own top header, to avoid a redundant back-to-back repeat for the first group. #}
 {# Within each section: all leader portfolios' active (non-empty) workstream groups render first, then a single consolidated "no open items" block for fully-quiet portfolios at the end — rather than interleaving active tables with empty-portfolio one-liners leader by leader. #}
 
@@ -20,14 +20,28 @@
   {%- endif -%}
 {%- endmacro -%}
 
-{%- macro hygiene_strip(cells, size) -%}
-  <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 auto;border-collapse:collapse;">
-    <tr>
-      {%- for cell in cells %}
-      <td style="width:18px;text-align:center;font-size:{{ size }};line-height:1;">{{ cell }}</td>
-      {%- endfor %}
-    </tr>
-  </table>
+{#- The single "no thinking required" column: states the exact action, or confirms
+    ready. Auto-generated from the 3 scorecard checks only (recent comment / status
+    keyword never appear here — they're informational and never block readiness,
+    per explicit direction to stop docking teams for a missing comment/keyword).
+    Never requires the reader to cross-reference the icon grid or a legend. -#}
+{%- macro fix_this(row) -%}
+  {%- if row.is_ready -%}
+    <span style="color:#16A34A;font-weight:600;font-size:11px;white-space:nowrap;">&#10003; Ready</span>
+    {#- Ready items still get a muted, non-blocking nudge when an FYI-only signal
+        is missing, so hygiene gaps aren't hidden just because they don't count
+        against the scorecard. Grey (not red) signals "good practice", not "fix required". -#}
+    {%- if row.has_recent_comment == false %}<span style="display:inline-block;padding:1px 6px;margin-left:4px;border-radius:8px;font-size:10px;font-weight:500;background-color:#F3F4F6;color:#6B7280;white-space:nowrap;">💬 No recent comment</span>{% endif -%}
+    {%- if row.comment_has_status_keyword == false %}<span style="display:inline-block;padding:1px 6px;margin-left:4px;border-radius:8px;font-size:10px;font-weight:500;background-color:#F3F4F6;color:#6B7280;white-space:nowrap;">📰 No status keyword</span>{% endif -%}
+  {%- else -%}
+    {%- set ns = namespace(gaps=[]) -%}
+    {%- if not row.has_valid_target_date %}{% set ns.gaps = ns.gaps + ["Target date"] %}{% endif -%}
+    {%- if not row.has_committed %}{% set ns.gaps = ns.gaps + ["Commitment"] %}{% endif -%}
+    {%- if not row.has_risk_assessment %}{% set ns.gaps = ns.gaps + ["Risk assessment"] %}{% endif -%}
+    {%- for gap in ns.gaps -%}
+      <span style="display:inline-block;padding:1px 6px;margin:0 3px 2px 0;border-radius:8px;font-size:10px;font-weight:600;background-color:#FEE2E2;color:#991B1B;white-space:nowrap;">{{ gap }}</span>
+    {%- endfor -%}
+  {%- endif -%}
 {%- endmacro -%}
 
 {%- macro column_header_row() -%}
@@ -35,12 +49,24 @@
     <td style="padding:4px 6px;color:#374151;font-weight:600;white-space:nowrap;">ADO#</td>
     <td style="padding:4px 6px;color:#374151;font-weight:600;">Title</td>
     <td style="padding:4px 6px;color:#374151;font-weight:600;white-space:nowrap;">Owner</td>
-    <td style="padding:4px 6px;color:#374151;font-weight:600;text-align:center;white-space:nowrap;" title="Left to right: 📅 Date set &amp; future · 📌 Committed · 🎯 Risk assessment · 📋 Risk reason (if not On Track) · 💬 Recent comment · 📰 Status keyword in comment">
-      Hygiene
-      {{ hygiene_strip(["📅", "📌", "🎯", "📋", "💬", "📰"], "10px") }}
+    <td style="padding:4px 6px;color:#374151;font-weight:600;text-align:center;white-space:nowrap;" title="Required for readiness: 📅 Date set &amp; future · 📌 Committed · 🎯 Risk assessment. FYI only, never blocks readiness: 📋 Risk reason (if not On Track) · 💬 Recent comment · 📰 Status keyword in comment">
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 auto;border-collapse:collapse;">
+        <tr>
+          <td style="width:20px;text-align:center;font-size:12px;font-weight:700;color:#1F2937;">📅</td>
+          <td style="width:20px;text-align:center;font-size:12px;font-weight:700;color:#1F2937;">📌</td>
+          <td style="width:20px;text-align:center;font-size:12px;font-weight:700;color:#1F2937;border-right:2px solid #D1D5DB;">🎯</td>
+          <td style="width:16px;text-align:center;font-size:11px;color:#9CA3AF;padding-left:4px;">📋</td>
+          <td style="width:16px;text-align:center;font-size:11px;color:#9CA3AF;">💬</td>
+          <td style="width:16px;text-align:center;font-size:11px;color:#9CA3AF;">📰</td>
+        </tr>
+        <tr>
+          <td colspan="3" style="text-align:center;font-size:8px;font-weight:400;color:#6B7280;">required</td>
+          <td colspan="3" style="text-align:center;font-size:8px;font-weight:400;color:#9CA3AF;">fyi only</td>
+        </tr>
+      </table>
     </td>
     <td style="padding:4px 6px;color:#374151;font-weight:600;text-align:center;">Stale</td>
-    <td style="padding:4px 6px;color:#374151;font-weight:600;text-align:center;" title="date+committed+risk+reason+update+status all green">✨</td>
+    <td style="padding:4px 6px;color:#374151;font-weight:600;text-align:left;white-space:nowrap;">Fix this</td>
   </tr>
 {%- endmacro -%}
 
@@ -64,7 +90,7 @@
   </tr>
   {% if not skip_header %}{{ column_header_row() }}{% endif %}
   {% for row in group.rows %}
-  <tr style="background:{% if loop.index is odd %}#FFFFFF{% else %}#F9FAFB{% endif %};">
+  <tr style="background:{% if row.is_ready == false %}#FFF8F8{% elif loop.index is odd %}#FFFFFF{% else %}#F9FAFB{% endif %};">
     <td style="padding:3px 6px;white-space:nowrap;">
       <a href="{{ row.item_url }}" style="color:#2563EB;text-decoration:none;font-size:11px;">{{ row.work_item_id }}</a>
       {% if row.is_overdue %}<span style="color:#DC2626;" title="OVERDUE in registry">⚠</span>{% endif %}
@@ -82,10 +108,19 @@
       {% endif %}
     </td>
     <td style="padding:3px 6px;text-align:center;white-space:nowrap;">
-      {{ hygiene_strip([check(row.has_valid_target_date), check(row.has_committed), check(row.has_risk_assessment), check(row.has_risk_reason), check(row.has_recent_comment), check(row.comment_has_status_keyword)], "11px") }}
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 auto;border-collapse:collapse;">
+        <tr>
+          <td style="width:20px;text-align:center;font-size:11px;">{{ check(row.has_valid_target_date) }}</td>
+          <td style="width:20px;text-align:center;font-size:11px;">{{ check(row.has_committed) }}</td>
+          <td style="width:20px;text-align:center;font-size:11px;border-right:2px solid #E5E7EB;">{{ check(row.has_risk_assessment) }}</td>
+          <td style="width:16px;text-align:center;font-size:10px;opacity:0.5;padding-left:4px;">{{ check(row.has_risk_reason) }}</td>
+          <td style="width:16px;text-align:center;font-size:10px;opacity:0.5;">{{ check(row.has_recent_comment) }}</td>
+          <td style="width:16px;text-align:center;font-size:10px;opacity:0.5;">{{ check(row.comment_has_status_keyword) }}</td>
+        </tr>
+      </table>
     </td>
     <td style="padding:3px 6px;text-align:center;">{{ stale_badge(row.stale_business_days, section.stale_threshold_days) }}</td>
-    <td style="padding:3px 6px;text-align:center;">{{ check(row.is_ready) }}</td>
+    <td style="padding:3px 6px;text-align:left;white-space:nowrap;">{{ fix_this(row) }}</td>
   </tr>
   {% endfor %}
 {%- endmacro -%}
@@ -111,11 +146,11 @@
           <strong>{% if sections | length > 1 %}Section {{ section.letter }} — {% endif %}{{ section.title }}:</strong>
           {% if section.description %}{{ section.description | e }}. {% endif %}
           Ensure each item has a current <strong>Target Date</strong>{% if section.deadline %} (by {% if section.deadline_uncertain %}~{% endif %}{{ section.deadline }}){% endif %},
-          a <strong>Risk Assessment</strong>, and a <strong>status comment within the last {{ comment_window_days }} days</strong>.
+          is marked <strong>Committed</strong>, and has a <strong>Risk Assessment</strong> set.
         </li>
         {% endfor %}
       </ol>
-      <p style="margin:0 0 8px 0;color:#374151;"><strong>Action needed from all assignees:</strong> For each item you own, (1) confirm or update the Target Date, (2) set Risk Assessment, (3) add a brief status comment. Items already green (<span style="color:#16A34A;font-weight:600;">✓</span> across all columns) need no action.</p>
+      <p style="margin:0 0 8px 0;color:#374151;"><strong>Action needed from all assignees:</strong> For each item you own, (1) confirm or update the Target Date, (2) set Commitment status, (3) set Risk Assessment. Items already marked <span style="color:#16A34A;font-weight:600;">✓ Ready</span> need no action. A recent status comment (within {{ comment_window_days }} days) is good practice but is informational only — it will never hold an item back from being marked ready.</p>
       {#- A section's tag vocabulary comes from either scope_tags (source=registry
           sections with an aspirational required tag, e.g. Armada's ArmadaM1) or
           selection_tags (source=tag sections, where the tag(s) already define
@@ -211,14 +246,16 @@
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;border-collapse:collapse;">
   <tr>
     <td style="background:#F3F4F6;padding:8px 12px;border-radius:4px;font-size:11px;color:#374151;font-family:Segoe UI,-apple-system,Roboto,Helvetica,Arial,sans-serif;">
-      <strong>Hygiene column key (left to right):</strong>&nbsp;
-      1) 📅 Date set &amp; future&nbsp;&nbsp;2) 📌 Committed&nbsp;&nbsp;3) 🎯 Risk assessment&nbsp;&nbsp;4) 📋 Risk reason (if ≠ On Track)&nbsp;&nbsp;5) 💬 Recent comment (within window)&nbsp;&nbsp;6) 📰 Status keyword in comment
+      <strong>Fix this</strong> column already tells you exactly what to do per item — the icon grid below is for reference only.
+      <br>
+      <strong>Required (bold, left of the divider):</strong>&nbsp;📅 Date set &amp; future&nbsp;&nbsp;📌 Committed&nbsp;&nbsp;🎯 Risk assessment — all 3 must be ✓ for an item to be marked <span style="color:#16A34A;font-weight:600;">✓ Ready</span>.
+      <br>
+      <strong>FYI only (muted, right of the divider — never blocks readiness):</strong>&nbsp;📋 Risk reason (if ≠ On Track)&nbsp;&nbsp;💬 Recent comment&nbsp;&nbsp;📰 Status keyword in comment
       <br>
       <span style="color:#16A34A;font-weight:600;">✓</span> = present&nbsp;&nbsp;
       <span style="color:#DC2626;font-weight:600;">✗</span> = missing&nbsp;&nbsp;
       <span style="color:#9CA3AF;">—</span> = N/A or not evaluated&nbsp;&nbsp;&nbsp;&nbsp;
-      <strong>Stale</strong> = business days since last update&nbsp;&nbsp;
-      <strong>✨</strong> = all 6 green
+      <strong>Stale</strong> = business days since last update
     </td>
   </tr>
 </table>

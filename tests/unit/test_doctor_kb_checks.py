@@ -112,6 +112,45 @@ def test_run_kb_doctor_dir11_check_fails_on_a_program_scoped_person_entity(tmp_p
     assert "program_scoped_org_only_type" in dir11_check.detail
 
 
+def test_run_kb_doctor_dir11_skips_a_schema1_program_local_entities_file(tmp_path: Path) -> None:
+    """Regression: real programs commonly carry a pre-existing, unrelated
+    schema-1.0 entities.yaml (src/core/entity_registry.py's generic
+    program-local entity-alias registry -- milestone/risk/product/person/
+    team types used for report-text linking, deliberately never migrated
+    into schema-2.0's person/team-only concern). Once a real shared
+    schema-2.0 entities.yaml exists, DIR-11 must skip that file entirely,
+    not hard-fail trying to load it as schema 2.0."""
+    from src.core.people_entity_schema import EntitiesDocument, write_entities_document
+    import yaml as yaml_module
+
+    programs_root = tmp_path / "programs"
+    knowledge_root = tmp_path / "knowledge"
+    write_entities_document(knowledge_root / "entities.yaml", EntitiesDocument(schema_version="2.0", entities=()))
+
+    program_dir = programs_root / "xpf"
+    program_dir.mkdir(parents=True, exist_ok=True)
+    (program_dir / "program.yaml").write_text('schema_version: "1.0"\nid: "xpf"\nname: "XPF"\n', encoding="utf-8")
+    program_knowledge = program_dir / "knowledge"
+    program_knowledge.mkdir(parents=True, exist_ok=True)
+    (program_knowledge / "entities.yaml").write_text(
+        yaml_module.safe_dump(
+            {
+                "schema_version": 1.0,
+                "entities": [
+                    {"id": "sample_owner", "type": "person", "name": "Sample Owner", "aliases": ["owner"], "scope": "program:xpf"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = run_kb_doctor(editions_root=tmp_path / "editions", programs_root=programs_root)
+
+    dir11_check = next(check for check in report.checks if check.label == "Entities DIR-11")
+    assert dir11_check.status == "ok"
+    assert "could not load" not in dir11_check.detail.lower()
+
+
 def test_run_kb_doctor_dir05_check_ok_with_no_shared_people_directory(tmp_path: Path) -> None:
     report = run_kb_doctor(
         editions_root=tmp_path / "editions",
@@ -461,6 +500,40 @@ def test_run_kb_doctor_dir03_check_warns_on_stale_field(tmp_path: Path) -> None:
     check = next(c for c in report.checks if c.label == "Registry DIR-03")
     assert check.status == "warn"
     assert check.code == "DIR-03"
+
+
+def test_run_kb_doctor_people_enrichment_check_ok_when_no_candidates_pending(tmp_path: Path) -> None:
+    report = run_kb_doctor(editions_root=tmp_path / "editions", programs_root=tmp_path / "programs")
+
+    check = next(c for c in report.checks if c.label == "Registry people enrichment")
+    assert check.status == "ok"
+    assert check.code == "PEOPLE-ENRICHMENT"
+
+
+def test_run_kb_doctor_people_enrichment_check_reports_pending_candidates(tmp_path: Path) -> None:
+    from datetime import datetime, timezone
+    from src.core.people_enrichment import EnrichmentCandidateEvent, record_enrichment_event
+
+    programs_root = tmp_path / "programs"
+    prog_dir = programs_root / "xpf"
+    prog_dir.mkdir(parents=True, exist_ok=True)
+    (prog_dir / "program.yaml").write_text('schema_version: "3.0"\nid: "xpf"\nname: "XPF"\n', encoding="utf-8")
+    now = datetime(2026, 7, 26, 12, 0, tzinfo=timezone.utc)
+    record_enrichment_event(
+        EnrichmentCandidateEvent(
+            recorded_at=now, program_id="xpf", candidate_id="cand-1", entity_id="person:alice",
+            alias="alice", field_name="title", current_value=None, event="proposed",
+            workiq_question="What is alice's title?", workiq_answer="Senior TPM",
+        ),
+        programs_root=programs_root,
+    )
+
+    report = run_kb_doctor(editions_root=tmp_path / "editions", programs_root=programs_root)
+
+    check = next(c for c in report.checks if c.label == "Registry people enrichment")
+    assert check.status == "info"
+    assert check.metadata is not None
+    assert check.metadata["pending_count"] == 1
 
 
 def test_run_kb_doctor_dir06_check_fails_on_manager_cycle(tmp_path: Path) -> None:

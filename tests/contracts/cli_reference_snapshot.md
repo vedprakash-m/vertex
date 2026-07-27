@@ -3763,6 +3763,7 @@ specs/people.md Phase 0c: read-only, alias-based legacy cross-program queries.
 | `attest` | Record human verification for explicitly named, currently populated person fields. |
 | `lifecycle-set` | specs/people.md PPL-W6.3a: transition a person's lifecycle status (§7.6: "Departure/inactivation is represented explicitly"). |
 | `merge` | Merge two reviewed people and redirect current mutable references through the canonical writer. |
+| `merge-batch` | specs/bklg.md BL-E3 DIR-01: merge multiple independent duplicate-alias pairs in one commit. |
 | `bind` | Bind an exact stable provider subject to a reviewed canonical person. |
 | `split` | Split explicitly partitioned aliases/provider IDs; ambiguous authored references remain conflicts. |
 | `unmerge` | Reverse a known merge only when its mutable generation remains unchanged. |
@@ -3770,6 +3771,9 @@ specs/people.md Phase 0c: read-only, alias-based legacy cross-program queries.
 | `show` | specs/people.md PPL-W3.1: show one canonical person's directory record, profile, and current memberships. |
 | `find` | specs/people.md PPL-W3.1/§8.2: bounded, scored candidate lookup -- never an automatic binding. |
 | `stale` | specs/people.md PPL-W3.1: people whose verified fields/contacts are older than the freshness window. |
+| `enrich` | specs/bklg.md BL-E3: demand-driven WorkIQ enrichment pass. |
+| `enrichment-list` | specs/bklg.md BL-E3: list pending WorkIQ enrichment candidates awaiting steward review. |
+| `enrichment-resolve` | specs/bklg.md BL-E3: human-in-the-loop resolution of one WorkIQ enrichment candidate. |
 | `conflicts` | specs/people.md PPL-W3.1: quarantined identity/source conflicts from people_conflicts.jsonl (§8.3 DIR-12). |
 | `delegate` | specs/people.md PPL-W5b.2: steward-authorized delegation lifecycle (create/revoke/list). |
 
@@ -3883,6 +3887,21 @@ Merge two reviewed people and redirect current mutable references through the ca
 | --apply | boolean | No | False | Commit the reviewed merge. Without this flag, preview only. |
 | --format TEXT | text | No | human | Output format: human or json. |
 
+#### `vertex kb people merge-batch`
+
+**Usage:** `vertex kb people merge-batch [OPTIONS]`
+
+specs/bklg.md BL-E3 DIR-01: merge multiple independent duplicate-alias pairs in one commit.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --pair TEXT | text | Yes |  | A 'source_entity_id->target_entity_id' pair to merge (source tombstoned into target). Repeatable. Uses '->', not ':', as the separator since entity_ids themselves contain a colon (e.g. 'person:01H...'). |
+| --reason TEXT | text | Yes |  | Required steward review rationale, applied to every pair. |
+| --apply | boolean | No | False | Commit the reviewed merges. Without this flag, preview only. |
+| --format TEXT | text | No | human | Output format: human or json. |
+
 #### `vertex kb people bind`
 
 **Usage:** `vertex kb people bind [OPTIONS]`
@@ -3991,8 +4010,63 @@ specs/people.md PPL-W3.1: people whose verified fields/contacts are older than t
 
 | Option | Type | Required | Default | Description |
 |---|---|---|---|---|
-| --freshness-days INTEGER | integer | No | 90 | v1 placeholder freshness window pending a real people_registry freshness_policy.yaml section (DIR-03). |
+| --freshness-days INTEGER | integer | No | 90 | Freshness window in days (default: freshness_policy.yaml's people_registry.stale_after_days, DIR-03). |
 | --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex kb people enrich`
+
+**Usage:** `vertex kb people enrich [OPTIONS]`
+
+specs/bklg.md BL-E3: demand-driven WorkIQ enrichment pass.
+
+Selects real stakeholders of --program whose title/department/manager
+is stale or was never verified, asks WorkIQ one targeted question per
+field, and records each answer as a PENDING review candidate --
+nothing is ever written to the registry here. Run 'vertex kb people
+enrichment resolve' to review and, if accepted, apply a candidate.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | Yes |  | Program ID whose currently-referenced stakeholders are checked for stale/missing enrichable fields. |
+| --max-candidates INTEGER | integer | No | 5 | Cap on WorkIQ round-trips this run (each is slow, 36-180s) -- keeps one invocation bounded. |
+| --freshness-days INTEGER | integer | No | 90 | Freshness window in days (default: freshness_policy.yaml's people_registry.stale_after_days). |
+| --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex kb people enrichment-list`
+
+**Usage:** `vertex kb people enrichment-list [OPTIONS]`
+
+specs/bklg.md BL-E3: list pending WorkIQ enrichment candidates awaiting steward review.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | Yes |  | Program ID. |
+| --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex kb people enrichment-resolve`
+
+**Usage:** `vertex kb people enrichment-resolve [OPTIONS]`
+
+specs/bklg.md BL-E3: human-in-the-loop resolution of one WorkIQ enrichment candidate.
+
+A WorkIQ answer is NEVER auto-applied -- 'accept' requires an explicit
+steward decision (and --apply to actually commit it); 'reject' just
+closes the candidate with no registry write at all.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | Yes |  | Program ID. |
+| --candidate-id TEXT | text | Yes |  | The pending candidate to resolve. |
+| --decision TEXT | text | Yes |  | 'accept' or 'reject'. |
+| --value TEXT | text | No |  | Accepted value to write (defaults to WorkIQ's raw answer if omitted on accept). |
+| --reason TEXT | text | Yes |  | Required steward review rationale. |
+| --apply | boolean | No | False | Commit an accepted candidate through the staged writer. Without this flag, preview only. |
 
 #### `vertex kb people conflicts`
 
@@ -4122,6 +4196,7 @@ specs/people.md Phase 1: workspace people-registry identity and lifecycle.
 |---|---|
 | `bootstrap` | Create the shared registry root; unlike top-level `vertex bootstrap`, this |
 | `migrate-shared` | Merge program-local factual records into the shared people registry; unlike top-level `vertex migrate`, this is conflict-aware. |
+| `backfill-entity-ids` | specs/bklg.md BL-E3: mint canonical entity_ids for people_directory.yaml/teams.yaml records that predate entities.yaml. |
 | `adopt` | Adopt direct managed-registry YAML edits through the canonical staged writer. |
 | `status` | specs/people.md PPL-W1.1: report the current workspace registry identity and generation, if any. |
 | `storage-status` | specs/people.md PPL-W1.3: report the shared knowledge/ root's storage-class qualification |
@@ -4149,6 +4224,19 @@ initializes people-registry identity and may migrate one selected program's fact
 **Usage:** `vertex kb registry migrate-shared [OPTIONS] PROGRAM_ID`
 
 Merge program-local factual records into the shared people registry; unlike top-level `vertex migrate`, this is conflict-aware.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --apply | boolean | No | False | Commit the fenced shared-registry transaction. Without this flag, preview only. |
+| --format TEXT | text | No | human | Output format: human or json. |
+
+#### `vertex kb registry backfill-entity-ids`
+
+**Usage:** `vertex kb registry backfill-entity-ids [OPTIONS]`
+
+specs/bklg.md BL-E3: mint canonical entity_ids for people_directory.yaml/teams.yaml records that predate entities.yaml.
 
 **Options**
 

@@ -22,3 +22,18 @@ gather_cadence_hours:
   workiq: 168
   teams: 168
   default: 24
+
+# specs/people.md §7/DIR-03, specs/bklg.md BL-E3: the real, governed
+# people-registry field-staleness SLA. Ratified 2026-07-26 at 90 days --
+# formalizing the number people_query.py's DEFAULT_STALE_FRESHNESS_DAYS
+# had already been using as a "v1 placeholder", not introducing a new one.
+people_registry:
+  stale_after_days: 90
+  # BL-E4 activation, 2026-07-26: reminder cadence for routine WorkIQ
+  # people-registry enrichment, tied to Vertex's own operational rhythm
+  # (nudge/report run counts) rather than an OS-level wall-clock schedule
+  # -- the operator explicitly rejected a Task Scheduler dependency here.
+  # Set either to null to disable that trigger kind.
+  enrichment_trigger:
+    nudge_run_every: 5
+    report_run_every: 3

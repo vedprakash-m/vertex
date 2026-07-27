@@ -105,8 +105,9 @@ def build_nudge_wiql(*, program: Any, section: NudgeSectionSpec) -> str:
         "WHERE [System.TeamProject] = @project",
     ]
 
-    # Work-item types predicate
-    wit_raw = getattr(ado, "work_item_types", None) or ()
+    # Work-item types predicate — section-level override takes precedence over
+    # the shared program.ado default (see NudgeSectionCriteria.work_item_types).
+    wit_raw = crit.work_item_types or (getattr(ado, "work_item_types", None) or ())
     wit_types: list[str] = [str(w).strip() for w in wit_raw if str(w).strip()]
     if wit_types:
         escaped = [f"'{escape_wiql_literal(w, field_name='work_item_type')}'" for w in wit_types]
@@ -325,6 +326,16 @@ def _fetch_wiql_candidates(
             ws_id = _resolve_ws(item.area_path, workstreams)
         candidates.append(NudgeCandidate(item=item, workstream_id=ws_id or None))
 
+    # Supplemental registry hydration: merge in key_ado_items for workstreams
+    # whose items don't reliably carry this section's tag(s) (e.g. armada_core_runtime).
+    if crit.supplemental_workstream_ids:
+        supp_ids = frozenset(crit.supplemental_workstream_ids)
+        for cand in _fetch_supplemental_registry_candidates(supp_ids, authored_registry, client, as_of):
+            cand_item_id = getattr(cand.item, "id", 0)
+            if cand_item_id not in seen:
+                seen.add(cand_item_id)
+                candidates.append(cand)
+
     candidates.sort(key=lambda c: getattr(c.item, "id", 0))
     return NudgeSectionFetchResult(section_id=section.id, candidates=tuple(candidates))
 
@@ -335,6 +346,46 @@ def _batch_hydrate(ids: list[int], client: NudgeADOClient) -> list[dict[str, obj
         batch = ids[start : start + NUDGE_BATCH_SIZE]
         rows.extend(client.query_work_items_batch(batch, NUDGE_BATCH_FIELDS))
     return rows
+
+
+def _fetch_supplemental_registry_candidates(
+    workstream_ids: frozenset[str],
+    authored_registry: tuple[Any, ...],
+    client: NudgeADOClient,
+    as_of: datetime,
+) -> list[NudgeCandidate]:
+    """Hydrate key_ado_items for specific workstream(s) to merge into a tag/area_path
+    section's live results (see NudgeSectionCriteria.supplemental_workstream_ids).
+
+    Used for workstreams whose ADO items don't reliably carry the section's tag(s),
+    so a pure live-query fetch would otherwise silently drop them.
+    """
+    from src.core.ado_hydration import _work_item_from_batch_row  # noqa: PLC0415
+
+    item_to_ws: dict[int, str] = {}
+    for entry in authored_registry:
+        if getattr(entry, "lifecycle_state", "active") != "active":
+            continue
+        entry_id = getattr(entry, "id", None)
+        if entry_id not in workstream_ids:
+            continue
+        for item_id in getattr(entry, "key_ado_items", ()):
+            if isinstance(item_id, int) and item_id > 0 and item_id not in item_to_ws:
+                item_to_ws[item_id] = entry_id
+
+    if not item_to_ws:
+        return []
+
+    rows = _batch_hydrate(sorted(item_to_ws.keys()), client)
+    out: list[NudgeCandidate] = []
+    for row in rows:
+        item = _work_item_from_batch_row(row, revision_rows=[], comment_rows=[], fetched_at=as_of)
+        if item.id <= 0:
+            continue
+        if item.state.strip().lower() in _terminal_states_lower():
+            continue
+        out.append(NudgeCandidate(item=item, workstream_id=item_to_ws.get(item.id)))
+    return out
 
 
 def _terminal_states_lower() -> frozenset[str]:

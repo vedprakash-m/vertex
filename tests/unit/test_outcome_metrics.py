@@ -12,6 +12,9 @@ from pathlib import Path
 
 from src.core.cockpit_models import ValueConfidence
 from src.core.outcome_metrics import (
+    CANARY_WINDOW_START,
+    CANARY_WINDOW_WEEKS,
+    canary_window_status,
     compute_all_outcome_metrics,
     compute_om1_hallucination_rate,
     compute_om2_duplicate_entities,
@@ -52,6 +55,37 @@ def test_om4_unavailable_when_no_ai_consumption_recorded(tmp_path: Path) -> None
     result = compute_om4_audit_coverage("acme", programs_root=tmp_path / "programs")
     assert result.confidence == ValueConfidence.UNAVAILABLE
     assert result.value is None
+
+
+def test_canary_window_not_elapsed_on_start_date() -> None:
+    status = canary_window_status(today=CANARY_WINDOW_START)
+    assert status.start_date == CANARY_WINDOW_START
+    assert status.window_weeks == CANARY_WINDOW_WEEKS
+    assert status.elapsed_weeks == 0.0
+    assert status.elapsed is False
+
+
+def test_canary_window_elapsed_exactly_at_eight_weeks() -> None:
+    from datetime import timedelta
+
+    eight_weeks_later = CANARY_WINDOW_START + timedelta(weeks=CANARY_WINDOW_WEEKS)
+    status = canary_window_status(today=eight_weeks_later)
+    assert status.elapsed_weeks == CANARY_WINDOW_WEEKS
+    assert status.elapsed is True
+
+
+def test_canary_window_partway_reports_fractional_weeks_not_yet_elapsed() -> None:
+    from datetime import timedelta
+
+    halfway = CANARY_WINDOW_START + timedelta(weeks=4)
+    status = canary_window_status(today=halfway)
+    assert status.elapsed_weeks == 4.0
+    assert status.elapsed is False
+
+
+def test_canary_window_defaults_to_real_today_when_not_supplied() -> None:
+    status = canary_window_status()
+    assert status.elapsed_weeks >= 0.0
 
 
 def _record_full_run(

@@ -1,6 +1,8 @@
 """Nudge health checks.
 
 Existing checks: NQ-1..NQ-10 (reserved IDs from fix-nudge.md)
+NQ-11  doctor_local   leadership_rollup must not be a program execution TPM/PM
+NQ-12  doctor_local   Active/ADO-tracked workstreams must declare linked_milestone_ids
 New governance framework: NQD-1..NQD-12 (specs/nudge-gaps.md §10)
 
 NQD execution classes:
@@ -77,6 +79,11 @@ def run_nudge_doctor(
                 status="fail",
                 detail=f"Parse error: {exc}",
             ))
+
+    # NQ-11 and NQ-12 validate workstream_registry.yaml / milestones.yaml directly and
+    # do not depend on the nudge edition file, so they run even if NQ-1 failed above.
+    checks.append(_check_leadership_rollup_ownership(program_id, programs_root=programs_root))
+    checks.append(_check_workstream_milestone_linkage(program_id, programs_root=programs_root))
 
     if not edition_ok:
         # Skip all further edition-dependent checks
@@ -388,6 +395,141 @@ def _stub_checks(checks: list[DoctorCheck], indices: range) -> None:
             status="warn",
             detail="Skipped — edition file not available.",
         ))
+
+
+def _check_leadership_rollup_ownership(program_id: str, *, programs_root: Path) -> DoctorCheck:
+    """NQ-11: leadership_rollup stakeholders must not be the program's execution TPM/PM.
+
+    Root cause of a real incident: a workstream's `leadership_rollup` was set to the
+    program's own execution TPM (per `program.yaml`'s `people` directory role text),
+    not an engineering owner — which surfaced as the TPM wrongly credited with
+    engineering ownership on the Leadership Rollup card of a nudge draft. This check
+    makes that error class structurally impossible: any leadership_rollup alias whose
+    program.yaml `role` contains "TPM" (or "program manager") fails, regardless of
+    whether it also matches that workstream's primary_owner — some lanes (e.g.
+    armada_core_runtime) legitimately have a leadership_rollup distinct from
+    primary_owner, as long as it's an engineering role, not a program-management role.
+    """
+    from src.core.workstream_registry import load_authored_workstream_registry  # noqa: PLC0415
+
+    program_path = programs_root / program_id / "program.yaml"
+    if not program_path.exists():
+        return DoctorCheck(
+            label="NQ-11 leadership_rollup ownership",
+            status="warn",
+            detail=f"Missing {program_path}; cannot cross-check leadership_rollup roles.",
+        )
+    try:
+        program_raw = load_yaml_mapping(program_path, required=True)
+        entries = load_authored_workstream_registry(program_id=program_id, programs_root=programs_root)
+    except (ConfigError, Exception) as exc:
+        return DoctorCheck(
+            label="NQ-11 leadership_rollup ownership",
+            status="warn",
+            detail=f"Could not load program.yaml/workstream_registry.yaml: {exc}",
+        )
+
+    people_raw = program_raw.get("people") or []
+    role_by_alias: dict[str, str] = {}
+    if isinstance(people_raw, list):
+        for person in people_raw:
+            if not isinstance(person, dict):
+                continue
+            email = str(person.get("email") or "").strip().lower()
+            alias = email.split("@", 1)[0] if email else ""
+            if alias:
+                role_by_alias[alias] = str(person.get("role") or "")
+
+    violations: list[str] = []
+    unresolved: list[str] = []
+    for entry in entries:
+        if entry.lifecycle_state != "active":
+            continue
+        for stakeholder in entry.stakeholders:
+            if stakeholder.role != "leadership_rollup":
+                continue
+            alias = (stakeholder.alias or "").strip().lower()
+            if not alias:
+                continue
+            role = role_by_alias.get(alias)
+            if role is None:
+                unresolved.append(f"{entry.id}:{alias}")
+                continue
+            if "tpm" in role.lower() or "program manager" in role.lower():
+                violations.append(f"{entry.id} leadership_rollup={alias} ({role})")
+
+    if violations:
+        return DoctorCheck(
+            label="NQ-11 leadership_rollup ownership",
+            status="fail",
+            detail=(
+                "leadership_rollup set to a program execution TPM/PM, not an engineering "
+                "owner: " + "; ".join(violations)
+            ),
+        )
+    detail = "All leadership_rollup aliases resolve to non-TPM/PM roles."
+    if unresolved:
+        detail += f" Unresolved (not in program.yaml people[]), could not verify: {', '.join(unresolved)}."
+    return DoctorCheck(
+        label="NQ-11 leadership_rollup ownership",
+        status="warn" if unresolved else "ok",
+        detail=detail,
+    )
+
+
+def _check_workstream_milestone_linkage(program_id: str, *, programs_root: Path) -> DoctorCheck:
+    """NQ-12: active, ADO-tracked workstream_registry.yaml lanes must declare
+    linked_milestone_ids, and every declared id must be a real milestones.yaml entry.
+
+    Closes a documented modeling gap: milestones.yaml's own header states that the
+    granular, ADO-tag-scoped lanes in workstream_registry.yaml (used by the nudge) are
+    "not milestone-linkable under this schema" — only the coarse workstreams.yaml
+    namespace could be linked via linked_workstream_ids. That left every xHealth
+    hygiene lane with zero formal tie to any milestone, so "is this M1?" was answered
+    differently (and could silently disagree) between the nudge (ADO tag) and the
+    weekly report / milestones.yaml (coarse lane membership). This check requires each
+    actively-tracked lane to declare which milestone(s) its ADO items roll up to.
+    """
+    from src.core.workstream_registry import load_authored_workstream_registry  # noqa: PLC0415
+    from src.core.milestone_engine import load_milestones  # noqa: PLC0415
+
+    try:
+        entries = load_authored_workstream_registry(program_id=program_id, programs_root=programs_root)
+        milestones = load_milestones(program_id, programs_root=programs_root)
+    except (ConfigError, Exception) as exc:
+        return DoctorCheck(
+            label="NQ-12 workstream milestone linkage",
+            status="warn",
+            detail=f"Could not load workstream_registry.yaml/milestones.yaml: {exc}",
+        )
+
+    milestone_ids = {m.id for m in milestones}
+    tracked_entries = [e for e in entries if e.lifecycle_state == "active" and e.key_ado_items]
+    missing_link = [e.id for e in tracked_entries if not e.linked_milestone_ids]
+    unknown_ids = [
+        f"{e.id}->{mid}"
+        for e in tracked_entries
+        for mid in e.linked_milestone_ids
+        if mid not in milestone_ids
+    ]
+
+    issues: list[str] = []
+    if missing_link:
+        issues.append(f"no linked_milestone_ids: {', '.join(missing_link)}")
+    if unknown_ids:
+        issues.append(f"references unknown milestone id(s): {', '.join(unknown_ids)}")
+
+    if issues:
+        return DoctorCheck(
+            label="NQ-12 workstream milestone linkage",
+            status="fail",
+            detail="; ".join(issues) + ". Add/fix linked_milestone_ids in workstream_registry.yaml.",
+        )
+    return DoctorCheck(
+        label="NQ-12 workstream milestone linkage",
+        status="ok",
+        detail=f"All {len(tracked_entries)} ADO-tracked active workstream(s) declare valid linked_milestone_ids.",
+    )
 
 
 def _check_recipient_in_directory(alias: str, *, programs_root: Path) -> bool:

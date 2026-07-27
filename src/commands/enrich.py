@@ -19,7 +19,7 @@ from typing import Any, Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from src.core.evidence_models import WorkstreamEvidence
     from src.core.circuit_breaker import CircuitBreaker
-    from src.core.cost_guard import CostGuard
+    from src.ai.cost_guard import CostGuard
 from uuid import uuid4
 import typer
 

@@ -40,6 +40,7 @@ class WorkstreamRegistryEntry:
     stakeholders: tuple[WorkstreamStakeholder, ...] = ()
     key_ado_items: tuple[int, ...] = ()
     overdue_ado_item_ids: frozenset[int] = frozenset()
+    linked_milestone_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -575,6 +576,9 @@ def _parse_registry_entry_authored(raw_entry: Any, path: Path) -> WorkstreamRegi
         stakeholders=stakeholders,
         key_ado_items=tuple(key_ado_items),
         overdue_ado_item_ids=frozenset(overdue_ids),
+        linked_milestone_ids=_string_tuple(
+            raw_entry.get("linked_milestone_ids", []), path, workstream_id, "linked_milestone_ids"
+        ),
     )
 
 
@@ -622,6 +626,9 @@ def _parse_registry_entry(raw_entry: Any, path: Path) -> WorkstreamRegistryEntry
         history_summary=_optional_string(raw_entry.get("history_summary")),
         reporting_guidance=_optional_string(raw_entry.get("reporting_guidance")),
         stakeholders=tuple(_parse_stakeholder(stakeholder, path, workstream_id) for stakeholder in stakeholders),
+        linked_milestone_ids=_string_tuple(
+            raw_entry.get("linked_milestone_ids", []), path, workstream_id, "linked_milestone_ids"
+        ),
     )
 
 
@@ -662,6 +669,7 @@ def _merge_registry_entry(
         stakeholders=override_entry.stakeholders or base_entry.stakeholders,
         key_ado_items=override_entry.key_ado_items or base_entry.key_ado_items,
         overdue_ado_item_ids=override_entry.overdue_ado_item_ids or base_entry.overdue_ado_item_ids,
+        linked_milestone_ids=override_entry.linked_milestone_ids or base_entry.linked_milestone_ids,
     )
 
 

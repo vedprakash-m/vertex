@@ -55,7 +55,7 @@ def test_leakage_query_version_is_stable_and_sensitive_to_text_change() -> None:
 
 def test_sync_discovers_new_candidates(tmp_path: Path) -> None:
     result = sync_leakage_candidates(
-        "armada", org="msazure", project="One",
+        "armada", org="contoso", project="One",
         raw_candidates=(_candidate(1), _candidate(2)),
         discovery_run_id="run-1", query_version="v1", programs_root=tmp_path, now=NOW,
     )
@@ -68,14 +68,14 @@ def test_sync_discovers_new_candidates(tmp_path: Path) -> None:
 
 def test_sync_reseens_unresolved_candidates_without_changing_disposition(tmp_path: Path) -> None:
     sync_leakage_candidates(
-        "armada", org="msazure", project="One", raw_candidates=(_candidate(1),),
+        "armada", org="contoso", project="One", raw_candidates=(_candidate(1),),
         discovery_run_id="run-1", query_version="v1", programs_root=tmp_path, now=NOW,
     )
     dispose_leakage_candidate(
-        "armada", 1, org="msazure", project="One", disposition="owner_assigned", programs_root=tmp_path, now=NOW,
+        "armada", 1, org="contoso", project="One", disposition="owner_assigned", programs_root=tmp_path, now=NOW,
     )
     result = sync_leakage_candidates(
-        "armada", org="msazure", project="One", raw_candidates=(_candidate(1),),
+        "armada", org="contoso", project="One", raw_candidates=(_candidate(1),),
         discovery_run_id="run-2", query_version="v1", programs_root=tmp_path, now=NOW + timedelta(days=1),
     )
     assert result.reseen == (1,)
@@ -85,11 +85,11 @@ def test_sync_reseens_unresolved_candidates_without_changing_disposition(tmp_pat
 
 def test_sync_auto_resolves_candidates_that_drop_out_of_the_query(tmp_path: Path) -> None:
     sync_leakage_candidates(
-        "armada", org="msazure", project="One", raw_candidates=(_candidate(1), _candidate(2)),
+        "armada", org="contoso", project="One", raw_candidates=(_candidate(1), _candidate(2)),
         discovery_run_id="run-1", query_version="v1", programs_root=tmp_path, now=NOW,
     )
     result = sync_leakage_candidates(
-        "armada", org="msazure", project="One", raw_candidates=(_candidate(1),),  # 2 no longer matches
+        "armada", org="contoso", project="One", raw_candidates=(_candidate(1),),  # 2 no longer matches
         discovery_run_id="run-2", query_version="v1", programs_root=tmp_path, now=NOW + timedelta(days=1),
     )
     assert result.auto_resolved == (2,)
@@ -100,14 +100,14 @@ def test_sync_auto_resolves_candidates_that_drop_out_of_the_query(tmp_path: Path
 
 def test_sync_reopens_a_previously_resolved_candidate_that_reappears(tmp_path: Path) -> None:
     sync_leakage_candidates(
-        "armada", org="msazure", project="One", raw_candidates=(_candidate(1),),
+        "armada", org="contoso", project="One", raw_candidates=(_candidate(1),),
         discovery_run_id="run-1", query_version="v1", programs_root=tmp_path, now=NOW,
     )
     dispose_leakage_candidate(
-        "armada", 1, org="msazure", project="One", disposition="correctly_untagged", programs_root=tmp_path, now=NOW,
+        "armada", 1, org="contoso", project="One", disposition="correctly_untagged", programs_root=tmp_path, now=NOW,
     )
     result = sync_leakage_candidates(
-        "armada", org="msazure", project="One", raw_candidates=(_candidate(1),),
+        "armada", org="contoso", project="One", raw_candidates=(_candidate(1),),
         discovery_run_id="run-2", query_version="v1", programs_root=tmp_path, now=NOW + timedelta(days=2),
     )
     assert result.reopened == (1,)
@@ -118,13 +118,13 @@ def test_sync_reopens_a_previously_resolved_candidate_that_reappears(tmp_path: P
 def test_dispose_unknown_candidate_raises(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="not a known leakage candidate"):
         dispose_leakage_candidate(
-            "armada", 999, org="msazure", project="One", disposition="resolved", programs_root=tmp_path,
+            "armada", 999, org="contoso", project="One", disposition="resolved", programs_root=tmp_path,
         )
 
 
 def test_compute_leakage_rate_unavailable_without_committed_gather_run(tmp_path: Path) -> None:
     sync_leakage_candidates(
-        "armada", org="msazure", project="One", raw_candidates=(_candidate(1),),
+        "armada", org="contoso", project="One", raw_candidates=(_candidate(1),),
         discovery_run_id="run-1", query_version="v1", programs_root=tmp_path, now=NOW,
     )
     result = compute_leakage_rate("armada", programs_root=tmp_path)
@@ -158,7 +158,7 @@ def _commit_manifest(programs_root: Path, *, raw_count: int) -> None:
 
 def test_compute_leakage_rate_measured_with_committed_gather_run(tmp_path: Path) -> None:
     sync_leakage_candidates(
-        "armada", org="msazure", project="One", raw_candidates=(_candidate(1), _candidate(2)),
+        "armada", org="contoso", project="One", raw_candidates=(_candidate(1), _candidate(2)),
         discovery_run_id="run-1", query_version="v1", programs_root=tmp_path, now=NOW,
     )
     _commit_manifest(tmp_path, raw_count=18)
@@ -173,11 +173,11 @@ def test_compute_leakage_rate_measured_with_committed_gather_run(tmp_path: Path)
 
 def test_compute_leakage_rate_excludes_settled_dispositions(tmp_path: Path) -> None:
     sync_leakage_candidates(
-        "armada", org="msazure", project="One", raw_candidates=(_candidate(1), _candidate(2)),
+        "armada", org="contoso", project="One", raw_candidates=(_candidate(1), _candidate(2)),
         discovery_run_id="run-1", query_version="v1", programs_root=tmp_path, now=NOW,
     )
     dispose_leakage_candidate(
-        "armada", 1, org="msazure", project="One", disposition="correctly_untagged", programs_root=tmp_path, now=NOW,
+        "armada", 1, org="contoso", project="One", disposition="correctly_untagged", programs_root=tmp_path, now=NOW,
     )
     _commit_manifest(tmp_path, raw_count=8)
 
@@ -189,7 +189,7 @@ def test_compute_leakage_rate_excludes_settled_dispositions(tmp_path: Path) -> N
 
 def test_sla_violations_flag_owner_disposition_overdue_after_7_days(tmp_path: Path) -> None:
     sync_leakage_candidates(
-        "armada", org="msazure", project="One", raw_candidates=(_candidate(1),),
+        "armada", org="contoso", project="One", raw_candidates=(_candidate(1),),
         discovery_run_id="run-1", query_version="v1", programs_root=tmp_path, now=NOW,
     )
     violations = leakage_sla_violations("armada", programs_root=tmp_path, now=NOW + timedelta(days=8))
@@ -200,7 +200,7 @@ def test_sla_violations_flag_owner_disposition_overdue_after_7_days(tmp_path: Pa
 
 def test_sla_violations_flag_no_unresolved_candidate_after_14_days(tmp_path: Path) -> None:
     sync_leakage_candidates(
-        "armada", org="msazure", project="One", raw_candidates=(_candidate(1),),
+        "armada", org="contoso", project="One", raw_candidates=(_candidate(1),),
         discovery_run_id="run-1", query_version="v1", programs_root=tmp_path, now=NOW,
     )
     violations = leakage_sla_violations("armada", programs_root=tmp_path, now=NOW + timedelta(days=15))
@@ -211,7 +211,7 @@ def test_sla_violations_flag_no_unresolved_candidate_after_14_days(tmp_path: Pat
 
 def test_sla_violations_none_within_window(tmp_path: Path) -> None:
     sync_leakage_candidates(
-        "armada", org="msazure", project="One", raw_candidates=(_candidate(1),),
+        "armada", org="contoso", project="One", raw_candidates=(_candidate(1),),
         discovery_run_id="run-1", query_version="v1", programs_root=tmp_path, now=NOW,
     )
     violations = leakage_sla_violations("armada", programs_root=tmp_path, now=NOW + timedelta(days=2))
@@ -220,11 +220,11 @@ def test_sla_violations_none_within_window(tmp_path: Path) -> None:
 
 def test_sla_violations_skip_settled_candidates(tmp_path: Path) -> None:
     sync_leakage_candidates(
-        "armada", org="msazure", project="One", raw_candidates=(_candidate(1),),
+        "armada", org="contoso", project="One", raw_candidates=(_candidate(1),),
         discovery_run_id="run-1", query_version="v1", programs_root=tmp_path, now=NOW,
     )
     dispose_leakage_candidate(
-        "armada", 1, org="msazure", project="One", disposition="resolved", programs_root=tmp_path, now=NOW,
+        "armada", 1, org="contoso", project="One", disposition="resolved", programs_root=tmp_path, now=NOW,
     )
     violations = leakage_sla_violations("armada", programs_root=tmp_path, now=NOW + timedelta(days=30))
     assert violations == ()
@@ -232,7 +232,7 @@ def test_sla_violations_skip_settled_candidates(tmp_path: Path) -> None:
 
 def _golden_query(**overrides: Any) -> KustoQuery:
     defaults: dict[str, Any] = dict(
-        id=LEAKAGE_QUERY_ID, cluster="https://analytics.dev.azure.com/msazure/One", database="WorkItems",
+        id=LEAKAGE_QUERY_ID, cluster="https://analytics.dev.azure.com/contoso/One", database="WorkItems",
         kql="", section="Armada xHealth Backlog", render_as="table", confidence="high", engine="ado_odata",
         ado_filter="Tags/any(t: t/TagName eq 'Armada')", ado_select="WorkItemId,WorkItemType,Title,State,AssignedTo",
     )
@@ -288,7 +288,7 @@ schema_version: '3.0'
 id: {program_id}
 name: Armada
 ado:
-  organization: msazure
+  organization: contoso
   project: One
   area_paths: [One\\Xstore\\Armada]
   work_item_types: [Feature]

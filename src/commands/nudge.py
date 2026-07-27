@@ -467,12 +467,15 @@ def _orchestrate(
         for idx, sec in enumerate(active_sections)
     }
 
-    # Build candidate map per section, applying staleness filter.
-    # An item is included only when it has NOT been updated in ADO for >= stale threshold
-    # business days — keeping bothering until compliance, as opposed to a time-based cooldown.
+    # Build candidate map per section. Every in-scope, owned item is always included in
+    # the rendered report — the stale threshold no longer excludes items from output.
+    # It only drives the visual "needs action" flag (stale badge / stale_count in the
+    # summary), so leadership always sees the full scope, with attention-worthy items
+    # (>= stale threshold business days since last ADO update) called out distinctly
+    # rather than freshly-touched items being silently omitted from the nudge entirely.
     filtered_candidates: dict[int, list[Any]] = defaultdict(list)  # section_idx → [NudgeCandidate]
     dedup_by_section: dict[int, int] = defaultdict(int)  # G-5: cross-section dedup counter
-    stale_filtered_by_section: dict[int, int] = defaultdict(int)  # items too fresh to nag
+    stale_filtered_by_section: dict[int, int] = defaultdict(int)  # included but below threshold (fresh, on track)
     for result in fetch_results:
         for idx, sec in enumerate(active_sections):
             if result.section_id == sec.id:
@@ -483,7 +486,6 @@ def _orchestrate(
                         stale_bd = _business_days_for_item(cand.item, now_utc)
                         if stale_bd < stale_threshold:
                             stale_filtered_by_section[idx] += 1
-                            continue
                         filtered_candidates[idx].append(cand)
                     elif item_id not in exempt_ids and item_id not in active_waiver_ids:
                         # Item exists in this section but was claimed by a higher-priority section
@@ -644,10 +646,14 @@ def _orchestrate(
             compressed_title = title_map.get(item_id, _word_truncate_title(getattr(item, "title", "")))
             has_recent, latest_text = comment_cache.get(item_id, (None, None))
             ckw: bool | None = None
-            if has_recent is True:
-                ckw = _comment_has_keyword(latest_text, status_keywords)
-            elif has_recent is False:
-                ckw = False
+            # No status_keywords configured => this check is disabled entirely (not just
+            # "no keyword found"): leave ckw=None so it is excluded from required_checks
+            # in _build_full_hygiene_row instead of counting as a failure.
+            if status_keywords:
+                if has_recent is True:
+                    ckw = _comment_has_keyword(latest_text, status_keywords)
+                elif has_recent is False:
+                    ckw = False
 
             rows.append(_build_full_hygiene_row(
                 item,
@@ -1935,14 +1941,15 @@ def _build_full_hygiene_row(
     else:
         has_risk_reason = None
 
-    # Three-valued readiness
+    # Three-valued readiness. Scorecard = target date, commitment, risk assessment only.
+    # Recent-comment and status-keyword are informational columns (still surfaced to
+    # readers) but are not required for is_ready — teams should not be docked points
+    # for a missing comment/keyword when the three substantive fields are in order.
     required_checks: list[bool | None] = [
         has_valid_target_date,
+        has_committed,
         has_risk_assessment,
-        has_recent_comment,
     ]
-    if comment_has_status_keyword is not None:
-        required_checks.append(comment_has_status_keyword)
 
     is_ready: bool | None
     if any(c is False for c in required_checks):

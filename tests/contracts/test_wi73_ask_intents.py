@@ -141,6 +141,26 @@ def test_render_includes_truth_citation() -> None:
     assert "as_of=" in output
 
 
+def test_render_open_conflicts_includes_resolution_when_present() -> None:
+    """GAP-37: `vertex ask` "open conflicts" surfaces winning/losing source
+    and resolution reason, not just the bare description."""
+    from src.core.program_reality import RealityConflict
+
+    reality = _make_reality()
+    reality.conflicts.return_value = (
+        RealityConflict(
+            conflict_id="conf-1", entity_refs=("ACTION:1",), family="action", open=True,
+            description="ado: done -> in-progress", winning_source="ado", losing_source="teams",
+            winning_value="Done", losing_value="In Progress", resolution="primary_authority:ado",
+        ),
+    )
+
+    output = render_named_intent("open_conflicts", reality)
+
+    assert "ado vs teams" in output
+    assert "resolution=primary_authority:ado" in output
+
+
 def test_render_all_10_intents_run_without_error() -> None:
     reality = _make_reality()
     for intent in NAMED_INTENTS:

@@ -388,7 +388,7 @@ def test_load_vitality_items_avoids_raw_area_path_fields(monkeypatch, tmp_path) 
         id="acme",
         name="Acme",
         ado=ADOConfig(
-            organization="msazure",
+            organization="contoso",
             project="One",
             area_paths=("One\\Adventure\\Acme",),
             work_item_types=("Feature",),

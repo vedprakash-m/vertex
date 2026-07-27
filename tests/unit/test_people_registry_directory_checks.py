@@ -58,6 +58,24 @@ def test_find_duplicate_identifiers_clean_data_has_no_violations() -> None:
     assert violations == ()
 
 
+def test_find_duplicate_identifiers_ignores_a_tombstoned_entitys_alias() -> None:
+    """specs/bklg.md BL-E3 DIR-01 regression: a completed merge tombstones
+    the source entity but correctly leaves its historical alias records in
+    place for audit purposes (people_registry_corrections.py never rewrites
+    append-only history) -- that must not read back as a live collision
+    against the surviving entity the alias was consolidated onto. Before
+    this fix, find_duplicate_identifiers never checked entity.status at
+    all, so every real post-merge duplicate stayed permanently flagged."""
+    entities = (
+        _entity("person:survivor", aliases=("vikarora",), status=EntityStatus.ACTIVE),
+        _entity("person:tombstoned", aliases=("vikarora",), status=EntityStatus.TOMBSTONED),
+    )
+
+    violations = find_duplicate_identifiers(entities=entities, people=(), teams=())
+
+    assert violations == ()
+
+
 def test_find_unresolved_references_flags_person_without_active_entity() -> None:
     people = (PersonDirectory(entity_id="person:ghost", alias="ghost"),)
 

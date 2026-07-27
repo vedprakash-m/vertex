@@ -13,12 +13,20 @@ Section 10.3, verbatim requirements this module implements:
 - system-health status uses labels/icons, not program-risk colors;
 - program risk continues to use color.
 
-WCAG 2.2 AA is a *target*, not independently audited by this module (no
-automated accessibility-testing tool is wired in) -- semantic HTML5,
-landmark roles, a skip link, visible focus styles, and sufficient color
-contrast are applied deliberately, but a real assistive-technology pass is
-explicitly out of this module's scope (Section 10.3's own note: "must be
-reconciled into vertex-ux-spec.md before cockpit enforce mode").
+WCAG 2.2 AA is a *target*; semantic HTML5, landmark roles, a skip link,
+visible focus styles, and sufficient color contrast are applied
+deliberately. specs/bklg.md BL-H2 action (4), 2026-07-26: a real automated
+scan (axe-core 4.4.3, run against actual rendered output, not this file's
+source) found and this module fixed one genuine bug -- ``code`` had a fixed
+light background with no explicit foreground color, so a client rendering
+in dark mode (this file opts into ``color-scheme: light dark``) auto-
+inverted the text to white on a near-white chip, an interaction invisible
+to any static source scan. Every element that sets a fixed ``background``
+now also pins its ``color`` explicitly, rather than leaving it to
+scheme-dependent inheritance. An automated scan is not a substitute for a
+full independent audit (screen-reader task flows, keyboard-only end-to-end
+navigation, and cognitive-load review still need a human) -- that larger
+scope is still explicitly out of this module's reach.
 
 Zone A -- no AI or M365 imports.
 """
@@ -125,7 +133,7 @@ def render_cockpit_html(snapshot: CockpitSnapshot) -> str:
   li.finding-info {{ border-left: 4px solid #57606a; }}
   dl {{ display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 1rem; font-size: 0.9em; }}
   dt {{ font-weight: bold; }}
-  code {{ background: #f6f8fa; padding: 0.1em 0.3em; border-radius: 0.2em; }}
+  code {{ background: #f6f8fa; color: #1f2328; padding: 0.1em 0.3em; border-radius: 0.2em; }}
   .confidence {{ color: #57606a; font-size: 0.85em; }}
   @media (max-width: 40rem) {{ dl {{ grid-template-columns: 1fr; }} }}
 </style>

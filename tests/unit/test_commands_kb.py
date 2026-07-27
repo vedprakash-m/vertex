@@ -1191,3 +1191,218 @@ def test_kb_people_refresh_cli_reports_kill_switch_disabled(monkeypatch, tmp_pat
 
     assert result.exit_code == 0
     assert "disabled" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# specs/bklg.md BL-E3: routine people-registry enrichment CLI (enrich /
+# enrichment-list / enrichment-resolve).
+# ---------------------------------------------------------------------------
+
+
+def _seed_enrichment_fixture(monkeypatch, tmp_path: Path) -> Path:
+    """A bootstrapped registry, one program with 'alice' as a real
+    stakeholder, and 'alice' present in BOTH the shared entities.yaml
+    (canonical identity -- required for apply_shared_registry_patch's
+    _resolve_person to find her) and people_directory.yaml (profile, empty
+    title) -- exactly the "never verified and empty" gap
+    select_enrichment_candidates looks for."""
+    from src.core.people_directory_schema import PersonDirectory, PersonStatus, write_people_directory
+    from src.core.people_entity_schema import (
+        AliasStatus,
+        CanonicalEntity,
+        EntitiesDocument,
+        EntityAlias,
+        EntityStatus,
+        write_entities_document,
+    )
+
+    programs_root = _seed_bootstrapped_registry(monkeypatch, tmp_path)
+    knowledge_root = programs_root.parent / "knowledge"
+    now = datetime(2026, 7, 26, 12, 0, tzinfo=timezone.utc)
+    write_entities_document(
+        knowledge_root / "entities.yaml",
+        EntitiesDocument(
+            schema_version="2.0",
+            entities=(
+                CanonicalEntity(
+                    workspace_id="ws-1", entity_id="person:alice", entity_type="person", canonical_name="Alice Adams",
+                    aliases=(
+                        EntityAlias(
+                            value="alice", kind="alias", status=AliasStatus.ACTIVE, valid_from=None, valid_until=None,
+                            source="test", source_ref=None, recorded_at=now, verified_at=now, verified_by_principal="steward",
+                        ),
+                    ),
+                    scope="org", created_at=now, status=EntityStatus.ACTIVE,
+                ),
+            ),
+        ),
+    )
+    write_people_directory(
+        knowledge_root / "people_directory.yaml",
+        (PersonDirectory(entity_id="person:alice", alias="alice", display_name="Alice Adams", status=PersonStatus.ACTIVE),),
+    )
+    prog_dir = programs_root / "xpf"
+    prog_dir.mkdir(parents=True, exist_ok=True)
+    (prog_dir / "program.yaml").write_text(
+        'schema_version: "3.0"\nid: "xpf"\nname: "XPF"\nstakeholder_register:\n  - alias: alice\n    email: alice@microsoft.com\n',
+        encoding="utf-8",
+    )
+    return programs_root
+
+
+class _FakeAgencyCapabilities:
+    available = True
+    has_workiq = True
+    has_workiq_cli = True
+
+
+class _FakeAgencyBridge:
+    """Deterministic stand-in for AgencyBridge -- no live WorkIQ call, no
+    36-180s latency, matching this codebase's established client_factory
+    injection convention (e.g. armada_leakage.py's ADOClient factory)."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+    def probe(self):
+        return _FakeAgencyCapabilities()
+
+    def ask_workiq(self, question: str, **kwargs):
+        return {"response": "Senior TPM"}
+
+    def last_mcp_error(self):
+        return None
+
+
+def test_kb_people_enrich_cli_proposes_candidates_from_mocked_workiq(monkeypatch, tmp_path: Path) -> None:
+    programs_root = _seed_enrichment_fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr("src.commands.kb.AgencyBridge", _FakeAgencyBridge)
+
+    result = runner.invoke(app, ["kb", "people", "enrich", "--program", "xpf", "--format", "json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert len(payload) >= 1
+    assert any(item["field_name"] == "title" and item["workiq_answer"] == "Senior TPM" for item in payload)
+
+    from src.core.people_enrichment import list_pending_enrichment_candidates
+    pending = list_pending_enrichment_candidates("xpf", programs_root=programs_root)
+    assert any(state.field_name == "title" for state in pending)
+
+
+def test_kb_people_enrich_cli_resolves_a_pending_cadence_reminder(monkeypatch, tmp_path: Path) -> None:
+    """BL-E4 activation: running 'enrich' itself satisfies whatever
+    nudge/report-run cadence reminder was open, regardless of outcome."""
+    from src.core.alerts import AlertSeverity, append_or_suppress_alert, read_alerts
+
+    programs_root = _seed_enrichment_fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr("src.commands.kb.AgencyBridge", _FakeAgencyBridge)
+    append_or_suppress_alert(
+        program_id="xpf", category="people_enrichment_due", entity_type="registry", entity_id="people_directory",
+        severity=AlertSeverity.INFO, message="Routine people-registry enrichment is due.",
+        next_command="vertex kb people enrich --program xpf", programs_root=programs_root,
+    )
+    assert len(read_alerts("xpf", programs_root=programs_root)) == 1
+
+    result = runner.invoke(app, ["kb", "people", "enrich", "--program", "xpf"])
+
+    assert result.exit_code == 0
+    assert read_alerts("xpf", programs_root=programs_root) == ()
+
+
+def test_kb_people_enrichment_list_cli_shows_pending_candidates(monkeypatch, tmp_path: Path) -> None:
+    _seed_enrichment_fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr("src.commands.kb.AgencyBridge", _FakeAgencyBridge)
+    enrich = runner.invoke(app, ["kb", "people", "enrich", "--program", "xpf"])
+    assert enrich.exit_code == 0
+
+    result = runner.invoke(app, ["kb", "people", "enrichment-list", "--program", "xpf"])
+
+    assert result.exit_code == 0
+    assert "alice/title" in result.stdout
+    assert "Senior TPM" in result.stdout
+
+
+def test_kb_people_enrichment_resolve_cli_reject_writes_nothing_to_registry(monkeypatch, tmp_path: Path) -> None:
+    programs_root = _seed_enrichment_fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr("src.commands.kb.AgencyBridge", _FakeAgencyBridge)
+    enrich = runner.invoke(app, ["kb", "people", "enrich", "--program", "xpf", "--format", "json"])
+    candidate_id = json.loads(enrich.stdout)[0]["candidate_id"]
+
+    result = runner.invoke(
+        app,
+        ["kb", "people", "enrichment-resolve", "--program", "xpf", "--candidate-id", candidate_id,
+         "--decision", "reject", "--reason", "not credible", "--apply"],
+    )
+
+    assert result.exit_code == 0
+    assert "Rejected" in result.stdout
+    from src.core.people_directory_schema import load_people_directory
+    knowledge_root = programs_root.parent / "knowledge"
+    people_result = load_people_directory(knowledge_root / "people_directory.yaml")
+    alice = next(p for p in people_result.people if p.alias == "alice")
+    assert alice.title is None  # nothing was written
+
+
+def test_kb_people_enrichment_resolve_cli_accept_apply_commits_the_field(monkeypatch, tmp_path: Path) -> None:
+    programs_root = _seed_enrichment_fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr("src.commands.kb.AgencyBridge", _FakeAgencyBridge)
+    enrich = runner.invoke(app, ["kb", "people", "enrich", "--program", "xpf", "--format", "json"])
+    title_candidate = next(item for item in json.loads(enrich.stdout) if item["field_name"] == "title")
+
+    result = runner.invoke(
+        app,
+        ["kb", "people", "enrichment-resolve", "--program", "xpf", "--candidate-id", title_candidate["candidate_id"],
+         "--decision", "accept", "--reason", "confirmed via org chart", "--apply"],
+    )
+
+    assert result.exit_code == 0
+    assert "Accepted and applied" in result.stdout
+    from src.core.people_directory_schema import load_people_directory
+    knowledge_root = programs_root.parent / "knowledge"
+    people_result = load_people_directory(knowledge_root / "people_directory.yaml")
+    alice = next(p for p in people_result.people if p.alias == "alice")
+    assert alice.title == "Senior TPM"
+
+    from src.core.people_enrichment import list_pending_enrichment_candidates
+    # alice also has empty department/manager_entity_id -- those remain
+    # separate, still-pending candidates; only the resolved title one is gone.
+    remaining = list_pending_enrichment_candidates("xpf", programs_root=programs_root)
+    assert not any(state.candidate_id == title_candidate["candidate_id"] for state in remaining)
+    assert {state.field_name for state in remaining} == {"department", "manager_entity_id"}
+
+
+def test_kb_people_enrichment_resolve_cli_accept_preview_does_not_write(monkeypatch, tmp_path: Path) -> None:
+    programs_root = _seed_enrichment_fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr("src.commands.kb.AgencyBridge", _FakeAgencyBridge)
+    enrich = runner.invoke(app, ["kb", "people", "enrich", "--program", "xpf", "--format", "json"])
+    title_candidate = next(item for item in json.loads(enrich.stdout) if item["field_name"] == "title")
+
+    result = runner.invoke(
+        app,
+        ["kb", "people", "enrichment-resolve", "--program", "xpf", "--candidate-id", title_candidate["candidate_id"],
+         "--decision", "accept", "--reason", "confirmed"],
+    )
+
+    assert result.exit_code == 0
+    assert "Preview" in result.stdout
+    from src.core.people_directory_schema import load_people_directory
+    knowledge_root = programs_root.parent / "knowledge"
+    people_result = load_people_directory(knowledge_root / "people_directory.yaml")
+    alice = next(p for p in people_result.people if p.alias == "alice")
+    assert alice.title is None
+
+    from src.core.people_enrichment import list_pending_enrichment_candidates
+    assert list_pending_enrichment_candidates("xpf", programs_root=programs_root)  # still pending
+
+
+def test_kb_people_enrich_cli_reports_no_candidates(monkeypatch, tmp_path: Path) -> None:
+    programs_root = _seed_bootstrapped_registry(monkeypatch, tmp_path)
+    prog_dir = programs_root / "xpf"
+    prog_dir.mkdir(parents=True, exist_ok=True)
+    (prog_dir / "program.yaml").write_text('schema_version: "3.0"\nid: "xpf"\nname: "XPF"\n', encoding="utf-8")
+
+    result = runner.invoke(app, ["kb", "people", "enrich", "--program", "xpf"])
+
+    assert result.exit_code == 0
+    assert "No enrichment candidates found" in result.stdout

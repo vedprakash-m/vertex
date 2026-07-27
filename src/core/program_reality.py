@@ -135,6 +135,13 @@ class EvidenceRef:
     source: str | None
 
 
+def _optional_str(value: object) -> str | None:
+    """None stays None (a genuinely absent/undisplayable value, e.g.
+    truth_model.py's `_extract_display_value` for an unknown family) rather
+    than being coerced to the literal string "None"."""
+    return None if value is None else str(value)
+
+
 @dataclass(frozen=True, slots=True)
 class FactExplanation:
     program_id: str
@@ -158,6 +165,17 @@ class RealityConflict:
     family: str
     open: bool
     description: str
+    #: GAP-37: the underlying `fact.conflict` payload (truth_model.py's
+    #: detect_corroboration_and_conflicts) already carries these -- this
+    #: facade just wasn't surfacing them. All optional/None-default so
+    #: existing construction sites (tests, FleetReality aggregation) are
+    #: unaffected.
+    winning_source: str | None = None
+    losing_source: str | None = None
+    winning_value: str | None = None
+    losing_value: str | None = None
+    resolution: str | None = None
+    detected_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1292,11 +1310,21 @@ class ProgramReality:
         assessment = _find_assessment_by_fact_id(self._all_assessments(), fact_id)
         if assessment is None:
             return None
+        # GAP-37 real-data bug: `conflict.conflict_id` is the *conflict*
+        # fact's own fact_id (see conflicts(), below), never the natural_key
+        # of the fact being explained here -- fact_id is a hash of
+        # (program_id, natural_key), so `fact.natural_key == conflict.conflict_id`
+        # can never be true for any real data. Removed rather than left as
+        # dead-but-harmless: the entity_ref overlap below is the only real
+        # join key. Known remaining imprecision, not fixed here: this does
+        # not also filter by family, so a fact could show a same-entity
+        # conflict from an unrelated family -- narrower than a full fix
+        # (would need family resolution wired into this facade) but no
+        # worse than before.
         open_conflicts = tuple(
             conflict
             for conflict in self.conflicts(open_only=True)
-            if fact.natural_key == conflict.conflict_id
-            or any(entity_ref in fact.entity_refs for entity_ref in conflict.entity_refs)
+            if any(entity_ref in fact.entity_refs for entity_ref in conflict.entity_refs)
         )
         return FactExplanation(
             program_id=self._program_id,
@@ -1332,7 +1360,20 @@ class ProgramReality:
                 entity_refs=fact.entity_refs,
                 family=str(payload.get("family", "unknown")),
                 open=not is_resolved,
-                description=str(payload.get("description", "")),
+                # GAP-37 real-data bug: fact_bridge.py's _append_conflict_fact
+                # writes the schema-required "conflict_description" field, not
+                # "description" -- reading only "description" here meant every
+                # real production conflict had an empty description (masked by
+                # a unit-test fixture that hand-writes "description" directly,
+                # bypassing the real append path). Prefer the real field, fall
+                # back to "description" for that fixture/any other caller.
+                description=str(payload.get("conflict_description") or payload.get("description", "")),
+                winning_source=_optional_str(payload.get("winning_source")),
+                losing_source=_optional_str(payload.get("losing_source")),
+                winning_value=_optional_str(payload.get("winning_value")),
+                losing_value=_optional_str(payload.get("losing_value")),
+                resolution=_optional_str(payload.get("resolution")),
+                detected_at=_optional_str(payload.get("detected_at")),
             ))
         return tuple(results)
 

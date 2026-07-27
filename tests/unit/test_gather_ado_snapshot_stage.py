@@ -58,7 +58,7 @@ def test_load_analytics_signals_retries_without_last_revision_on_vs403522() -> N
         work_item_types=("Feature",),
         excluded_states=("Removed",),
         api_timeout_seconds=30,
-        organization="msazure",
+        organization="contoso",
         project="One",
         date_window_days=14,
     )
@@ -68,7 +68,7 @@ def test_load_analytics_signals_retries_without_last_revision_on_vs403522() -> N
         work_item_types = ("Feature",)
         excluded_states = ("Removed",)
         api_timeout_seconds = 30
-        organization = "msazure"
+        organization = "contoso"
         project = "One"
         date_window_days = 14
 
@@ -115,7 +115,7 @@ def test_load_analytics_signals_retries_across_multiple_unavailable_fields() -> 
         work_item_types = ("Feature",)
         excluded_states = ("Removed",)
         api_timeout_seconds = 30
-        organization = "msazure"
+        organization = "contoso"
         project = "One"
         date_window_days = 14
 
@@ -168,7 +168,7 @@ def test_load_analytics_signals_reraises_when_vs403522_field_already_removed() -
         work_item_types = ("Feature",)
         excluded_states = ("Removed",)
         api_timeout_seconds = 30
-        organization = "msazure"
+        organization = "contoso"
         project = "One"
         date_window_days = 14
 

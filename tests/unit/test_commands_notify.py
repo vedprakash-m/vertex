@@ -36,7 +36,7 @@ def test_notify_cli_dry_run_previews_email_bodies(monkeypatch, repo_root: Path, 
 
     assert result.exit_code == 0
     assert "NOTIFY PREVIEW" in result.stdout
-    assert "To: isaiah@example.com" in result.stdout
+    assert "To: jordan@example.com" in result.stdout
     assert "Deployment safety remediation" in result.stdout
     assert "Dry run: no notifications sent." in result.stdout
     assert not (tmp_path / "programs" / "acme" / "publications" / EDITION_NAME / "notifications").exists()
@@ -235,8 +235,8 @@ def _sample_items(as_of: datetime) -> tuple[WorkItem, ...]:
             type="Feature",
             title="Deployment safety remediation",
             state="Active",
-            assigned_to="Isaiah Gregory",
-            assigned_to_email="isaiah@example.com",
+            assigned_to="Jordan Rivera",
+            assigned_to_email="jordan@example.com",
             area_path="One\\Adventure\\Acme\\Deployment",
             iteration_path="FY26\\Sprint 20",
             target_date=date(2026, 5, 1),

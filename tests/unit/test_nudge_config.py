@@ -79,7 +79,7 @@ def _make_mock_program(has_ado: bool = False) -> Any:
     program.ado = None
     if has_ado:
         ado = MagicMock()
-        ado.organization = "msazure"
+        ado.organization = "contoso"
         ado.project = "One"
         ado.area_paths = ["One\\Xstore"]
         ado.work_item_types = []

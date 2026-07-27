@@ -65,7 +65,7 @@ def _make_program(
 ) -> Any:
     program = MagicMock()
     ado = MagicMock()
-    ado.organization = "msazure"
+    ado.organization = "contoso"
     ado.project = "One"
     ado.area_paths = list(area_paths)
     ado.work_item_types = list(work_item_types)

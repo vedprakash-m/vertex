@@ -497,7 +497,7 @@ scorecards:
         self.assertEqual(config.edition.name, "acme_weekly")
         self.assertEqual(config.edition.type, "detailed")
         self.assertEqual(config.layout_mode, "dashboard")
-        self.assertEqual(config.ado.organization, "msazure")
+        self.assertEqual(config.ado.organization, "contoso")
         self.assertEqual(config.ado.api_timeout_seconds, 60)
         self.assertEqual(config.ado_fetch_timeout_seconds, 60)
         self.assertTrue(config.forecast_enabled)
@@ -867,7 +867,7 @@ people:
       role: "Director"
       cares_about: ["ramp timeline"]
   workstream_owners:
-    - name: "Isaiah Gregory"
+    - name: "Jordan Rivera"
       areas: ["Deployment", "OS"]
       style_note: "Needs editing for exec audience"
       timezone: "America/Los_Angeles"
@@ -894,7 +894,7 @@ writing_style:
         self.assertEqual(program_context.workstreams[0].history_summary, "High risk for 3 consecutive issues.")
         self.assertEqual(program_context.workstreams[0].leadership_sensitivity, "critical")
         self.assertEqual(program_context.workstreams[0].current_blocker, "Awaiting LT sign-off")
-        self.assertEqual(program_context.workstream_owners[0].name, "Isaiah Gregory")
+        self.assertEqual(program_context.workstream_owners[0].name, "Jordan Rivera")
         self.assertEqual(program_context.workstream_owners[0].areas, ("Deployment", "OS"))
         self.assertIsNotNone(program_context.writing_style)
         assert program_context.writing_style is not None

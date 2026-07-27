@@ -129,6 +129,43 @@ registry mode rollback` for a mode-flip reversal.
 
 ---
 
+## Real pilot evidence, 2026-07-27 — PPL-W6.4 CLOSED
+
+Ran this runbook end to end for real, against the real shared registry
+(not a scratch copy), completing the one gate `specs/people.md` Phase 6
+left open. **Real test subject, not a real employee**: no existing person
+in the registry is marked `departed` (confirmed via DIR-04's own 2026-07-26
+audit — 0 of 167), so there was no safe-by-data candidate for a real
+erasure test among actual Microsoft employees. Rather than fabricate a
+departure event for a real colleague, onboarded one new, clearly-fictional
+test person (`zzz_dsar_pilot_test`, "ZZZ DSAR Pilot Test Person",
+`@example.invalid` contact) through the exact real pipeline this runbook
+documents — this exercises the identical real mechanism end-to-end with
+zero risk to real employee PII, and is arguably closer to Phase 6's
+original "onboard one new person" design than repurposing an existing real
+record would have been.
+
+**Real bug found during onboarding**: `migrate-shared`'s conflict check
+(`missing_entity_binding`) correctly quarantined the person on the first
+attempt because the program-local `people_directory.yaml` entry referenced
+an `entity_id` with no matching `CanonicalEntity` in a program-local
+`entities.yaml` -- the runbook's step 1 doesn't spell out that a new
+onboarding needs *both* files, only implies it. A second attempt with a
+matching `entities.yaml` entry (`scope: org`, required -- an initial
+`scope: program` attempt was correctly rejected too) succeeded cleanly.
+Both real bugs are in this runbook's own instructions, not the code --
+worth a future revision of step 1 to spell out both prerequisites
+explicitly.
+
+1. **Onboarded for real**: `programs/armada/knowledge/{entities,people_directory}.yaml` staged, `vertex kb registry migrate-shared armada --apply` — 0 conflicts, `person:01KYGYVA7FGT7XFK4HCWM3RF2J` added (generation `01KYGYXZGZNWK8M2MHGAPQS0T4`, tx `registry-tx-01KYGYXZGZNWK8M2MHGAPQS0T3`). Verified: `vertex kb people show --person zzz_dsar_pilot_test` resolved the real canonical record.
+2. **Backward compatibility [DONE]**: `vertex doctor --kb` against the real, evolved state — same pre-existing failures as before onboarding (armada workstream stakeholder-name gaps, accepted DIR-08B plaintext), nothing new introduced.
+3. **Backup/restore [DONE]**: `vertex backup --to <dir>` (real repo, 11,682 files) taken *before* the forget step specifically so it doubled as the forget's safety net; `vertex backup --verify <dir>` confirmed `is_valid: true`, 0 mismatched/missing paths.
+4. **Privacy/DSAR export [DONE]**: `vertex privacy people export --person zzz_dsar_pilot_test --reason "..."` — real audited export (`audit_event_id: 01KYGZ7B274WVR2TRD5G9ZEK64`), returned the real record. Surfaced a genuine, correct compliance disclosure worth knowing about: `external_backup_action_required: true` — any customer-managed backup copy outside the shared knowledge root must be separately erased/shredded by its owner (acted on in step 6 below).
+5. **Privacy/DSAR forget [DONE]**: preview then `--apply` (`vertex privacy people forget ... --apply`) — generation `01KYGZ8AQKVQSFVAFY0NFME3AY`, tx `registry-tx-01KYGZ8AQKVQSFVAFY0NFME3AX`, 19 journal records redacted. Verified for real, not just trusted the exit code: `vertex kb people show` now returns `items: []`; `knowledge/people_directory.yaml` no longer contains the entity_id at all; `knowledge/entities.yaml`'s entity is `status: tombstoned` with `canonical_name: erased-person-<hash>` and `aliases: []` — genuine redaction, not query-layer filtering.
+6. **Rollback [DONE]**: restored the step-3 backup into a fresh scratch destination (`vertex backup --restore <dest> --from <dir>`, `preflight_verified: true`) and confirmed the pre-forget fictional person's full, un-redacted data was recoverable there — proving the platform can reverse a DSAR forget from backup if ever needed in error. Per the export step's own disclosure, the scratch backup/restore copies (which now held a pre-forget PII copy of a since-forgotten person) were erased immediately after verification, not left on disk.
+
+**All four PPL-W6.4 proofs (backward-compat, restore, privacy/DSAR, rollback) evidenced against real registry state. `specs/bklg.md` BL-E3 closed.**
+
 ## Findings this runbook is built from
 
 Produced by a fully synthetic smoke test (fake people, scratch temp

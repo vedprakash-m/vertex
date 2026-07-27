@@ -290,6 +290,94 @@ class TestMaterialityRouting:
 
 
 # ---------------------------------------------------------------------------
+# Tests — GAP-37 (specs/bklg.md BL-H1): winning_value/losing_value on the
+# emitted fact.conflict, and resolution labels distinguishing which
+# precedence rule actually fired.
+# ---------------------------------------------------------------------------
+
+class TestDisplayValuesAndResolutionLabels:
+    def test_minor_conflict_carries_raw_display_values(self):
+        """Minor (workitem.state) conflicts get winning_value/losing_value
+        too -- sharedness of a fact/value isn't gated on materiality."""
+        policy = _make_policy()
+        obs_ado = _make_obs(
+            fact_type="action.item",
+            payload={"state": "Active"},
+            source_signal_ids=("ado_100",),
+            natural_key="nk-ado",
+        )
+        obs_icm = _make_obs(
+            fact_type="action.item",
+            payload={"state": "Done"},
+            source_signal_ids=("icm_200",),
+            natural_key="nk-icm",
+        )
+        result = detect_corroboration_and_conflicts(
+            [obs_ado, obs_icm], policy, None, None, ctx=_empty_ctx(), now=_NOW,
+        )
+        assert len(result.conflicts) == 1
+        conflict = result.conflicts[0]
+        # ado is primary for workitem.state, so it's the winning side here
+        assert conflict["winning_value"] == "Active"
+        assert conflict["losing_value"] == "Done"
+
+    def test_material_conflict_via_primary_authority_labels_resolution(self):
+        policy = _make_policy()
+        obs_human = _make_obs(
+            entity_refs=("COMMIT-1",),
+            fact_type="commitment.entry",
+            payload={"source": "human", "due_date": "2026-08-01", "status": "on-track", "entity_ref": "COMMIT-1"},
+            source_signal_ids=("workiq_10",),
+            natural_key="nk-commit-human",
+        )
+        obs_ado = _make_obs(
+            entity_refs=("COMMIT-1",),
+            fact_type="commitment.entry",
+            payload={"due_date": "2026-08-15", "status": "at-risk", "entity_ref": "COMMIT-1"},
+            source_signal_ids=("ado_20",),
+            natural_key="nk-commit-ado",
+        )
+        result = detect_corroboration_and_conflicts(
+            [obs_human, obs_ado], policy, None, None, ctx=_empty_ctx(), now=_NOW,
+        )
+        assert len(result.conflicts) == 1
+        conflict = result.conflicts[0]
+        assert conflict["winning_source"] == "human"
+        assert conflict["resolution"] == "primary_authority:human"
+        assert conflict["winning_value"] == "2026-08-01 / on-track"
+        assert conflict["losing_value"] == "2026-08-15 / at-risk"
+
+    def test_material_conflict_via_trust_gap_labels_resolution_distinctly(self):
+        """Neither source is commitment's primary ("human"), so rule 1 never
+        fires -- the trust-gap rule decides, and the label says so (not the
+        generic "precedence:" this row's own investigation found collapsed
+        both rules together)."""
+        policy = _make_policy()
+        obs_ado = _make_obs(
+            entity_refs=("COMMIT-1",),
+            fact_type="commitment.entry",
+            payload={"due_date": "2026-08-01", "status": "on-track", "entity_ref": "COMMIT-1"},
+            source_signal_ids=("ado_100",),
+            natural_key="nk-ado",
+        )
+        obs_workiq = _make_obs(
+            entity_refs=("COMMIT-1",),
+            fact_type="commitment.entry",
+            payload={"due_date": "2026-08-15", "status": "at-risk", "entity_ref": "COMMIT-1"},
+            source_signal_ids=("workiq_200",),
+            natural_key="nk-workiq",
+        )
+        trust_ledger = {"ado": 0.8, "workiq": 0.3}  # gap=0.5 >= 0.15 threshold
+        result = detect_corroboration_and_conflicts(
+            [obs_ado, obs_workiq], policy, trust_ledger, None, ctx=_empty_ctx(), now=_NOW,
+        )
+        assert len(result.conflicts) == 1
+        conflict = result.conflicts[0]
+        assert conflict["winning_source"] == "ado"
+        assert conflict["resolution"] == "trust_gap:ado"
+
+
+# ---------------------------------------------------------------------------
 # Tests — suspended primary
 # ---------------------------------------------------------------------------
 

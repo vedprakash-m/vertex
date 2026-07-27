@@ -376,7 +376,7 @@ def _normalize_program_org(program_root: Path) -> None:
         return
     payload = yaml.safe_load(program_path.read_text(encoding="utf-8")) or {}
     ado_block = payload.get("ado")
-    if isinstance(ado_block, dict) and ado_block.get("organization") == "msazure":
+    if isinstance(ado_block, dict) and ado_block.get("organization") == "contoso":
         ado_block["organization"] = "your-org"
     program_path.write_text(
         yaml.safe_dump(_sanitize_yaml_values(payload), sort_keys=False, allow_unicode=True),

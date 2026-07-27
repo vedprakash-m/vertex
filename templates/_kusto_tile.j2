@@ -13,7 +13,7 @@
 {% set tile_bg = "#F0FFF4" %}
 {% endif %}
 <td width="{{ tile_width }}" style="width:{{ tile_width }}px; padding:10px 12px; border:{{ tile_border }}; border-radius:8px; background-color:{{ tile_bg }}; vertical-align:top;">
-  <div style="margin:0 0 4px 0; font-size:11px; line-height:1.4; font-weight:600; letter-spacing:0.04em; text-transform:uppercase; color:#6B7280;">{{ tile_data.label }}</div>
+  <div style="margin:0 0 4px 0; font-size:11px; line-height:1.4; font-weight:600; letter-spacing:0.04em; text-transform:uppercase; color:#6B7280;">{{ tile_data.label }}{% if tile_data.shared %} <span style="display:inline-block; margin-left:4px; padding:1px 5px; border-radius:999px; background-color:#EEF2FF; color:#4338CA; font-size:9px; font-weight:700; letter-spacing:0.03em; text-transform:uppercase; vertical-align:middle;" title="This fact is attributed to more than one workstream.">Shared</span>{% endif %}</div>
   {% if tile_variant == "metric" %}
   <div style="margin:0; font-size:18px; line-height:1.3; font-weight:700; color:#111827;">{{ tile_data.value }}</div>
   <div style="margin:4px 0 0 0; font-size:11px; line-height:1.4; color:#6B7280;">Confidence {{ tile.confidence | upper }}</div>

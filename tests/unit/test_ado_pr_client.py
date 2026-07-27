@@ -11,7 +11,7 @@ from src.core.ado_pr_client import ADOPRClient, PullRequestSummary
 def test_ado_pr_client_list_pull_requests() -> None:
     # 1. Setup mock client
     mock_client = MagicMock(spec=ADOClient)
-    mock_client.organization = "msazure"
+    mock_client.organization = "contoso"
     mock_client.project = "One"
     
     mock_response = {
@@ -52,13 +52,13 @@ def test_ado_pr_client_list_pull_requests() -> None:
     # Verify mock client call
     mock_client._request_json.assert_called_once_with(
         "GET",
-        "https://dev.azure.com/msazure/One/_apis/git/repositories/repo-adventure/pullrequests?api-version=7.1",
+        "https://dev.azure.com/contoso/One/_apis/git/repositories/repo-adventure/pullrequests?api-version=7.1",
         params={"searchCriteria.status": "active", "$top": "50", "$skip": "0"},
     )
 
 def _pr_client_with_value(value: list[dict]) -> ADOPRClient:
     mock_client = MagicMock(spec=ADOClient)
-    mock_client.organization = "msazure"
+    mock_client.organization = "contoso"
     mock_client.project = "One"
     mock_client._request_json.return_value = {"value": value}
     return ADOPRClient(mock_client)
@@ -168,7 +168,7 @@ def test_list_pull_requests_pages_across_multiple_requests() -> None:
     """ADF-W2.1: a full first page (top rows) followed by a short page is
     seen as >1-page and not truncated."""
     mock_client = MagicMock(spec=ADOClient)
-    mock_client.organization = "msazure"
+    mock_client.organization = "contoso"
     mock_client.project = "One"
     mock_client._request_json.side_effect = [
         {"value": [_pr_row(1), _pr_row(2)]},  # full page (top=2)
@@ -191,7 +191,7 @@ def test_list_pull_requests_pages_across_multiple_requests() -> None:
 
 def test_list_pull_requests_reports_truncation_at_safety_cap() -> None:
     mock_client = MagicMock(spec=ADOClient)
-    mock_client.organization = "msazure"
+    mock_client.organization = "contoso"
     mock_client.project = "One"
     mock_client._request_json.return_value = {"value": [_pr_row(1), _pr_row(2)]}  # always full
 

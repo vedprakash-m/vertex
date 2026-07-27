@@ -1,5 +1,13 @@
 <a id="health"></a>
 {% from "partials/truth_badge.j2" import disputed_badge, truth_badge, unconfirmed_sources_footer %}
+{# specs/bklg.md BL-H2 action (2), 2026-07-26: state_fg is WCAG-2-AA-verified
+   per state (>=4.5:1 against its own state_bg; #FFFFFF only clears that bar
+   against CRITICAL's dark red -- every other state needs #000000, including
+   AT RISK/ON TRACK, which a real axe-core scan against rendered output
+   caught wrongly set to white). Every body-text line below inherits
+   state_fg rather than a fixed literal so this stays correct as health_state
+   changes; do not reintroduce a hardcoded color here without re-checking
+   contrast against all 5 state_bg values. #}
 {% if health %}
 {% if health.high_count == 0 and health.medium_count == 0 and health.total_count > 0 %}
 {% set health_state = "HEALTHY" %}
@@ -12,11 +20,11 @@
 {% elif health.high_count > 0 %}
 {% set health_state = "AT RISK" %}
 {% set state_bg = "#E97132" %}
-{% set state_fg = "#FFFFFF" %}
+{% set state_fg = "#000000" %}
 {% elif health.medium_count > 0 %}
 {% set health_state = "ON TRACK" %}
 {% set state_bg = "#BF8F00" %}
-{% set state_fg = "#FFFFFF" %}
+{% set state_fg = "#000000" %}
 {% else %}
 {% set health_state = "NEEDS INPUT" %}
 {% set state_bg = "#BFBFBF" %}
@@ -27,19 +35,19 @@
     <td style="padding:16px 20px; background-color:{{ state_bg }}; color:{{ state_fg }}; border-bottom:1px solid #E5E7EB;">
       <p style="margin:0 0 6px 0; font-size:12px; line-height:1.4; font-weight:700; letter-spacing:0.05em; text-transform:uppercase;">Program Health: {{ health_state }}, {{ health.trajectory | upper }}</p>
       {% if health_state == "HEALTHY" %}
-      <p style="margin:0 0 6px 0; font-size:14px; line-height:1.5; font-weight:400; color:#111827;">All {{ health.total_count }} dimensions at Low or Done.{% if health.healthy_streak >= 2 %} {{ health.healthy_streak | ordinal }} consecutive healthy week.{% endif %}</p>
-      {% elif health.bluf %}<p style="margin:0 0 6px 0; font-size:14px; line-height:1.5; font-weight:400; color:#111827;">{{ health.bluf }}</p>{% endif %}
+      <p style="margin:0 0 6px 0; font-size:14px; line-height:1.5; font-weight:400; color:{{ state_fg }};">All {{ health.total_count }} dimensions at Low or Done.{% if health.healthy_streak >= 2 %} {{ health.healthy_streak | ordinal }} consecutive healthy week.{% endif %}</p>
+      {% elif health.bluf %}<p style="margin:0 0 6px 0; font-size:14px; line-height:1.5; font-weight:400; color:{{ state_fg }};">{{ health.bluf }}</p>{% endif %}
       {% if health.risk_render_warning %}<p style="margin:0 0 8px 0; padding:8px 10px; background-color:#FEE2E2; border:1px solid #DC2626; font-size:13px; line-height:1.5; color:#991B1B;">{{ health.risk_render_warning }}</p>{% endif %}
       {% if health.risk_register_summary %}
-      <p style="margin:0 0 6px 0; font-size:13px; line-height:1.5; color:#111827;">{{ health.risk_register_summary }}{{ truth_badge(health.risk_register_truth_level) }}{{ disputed_badge(health.risk_register_disputed) }}</p>
+      <p style="margin:0 0 6px 0; font-size:13px; line-height:1.5; color:{{ state_fg }};">{{ health.risk_register_summary }}{{ truth_badge(health.risk_register_truth_level) }}{{ disputed_badge(health.risk_register_disputed) }}</p>
       {{ unconfirmed_sources_footer(health.risk_register_includes_unconfirmed_sources) }}
       {% endif %}
-      {% if health.milestone_summary %}<p style="margin:0 0 6px 0; font-size:13px; line-height:1.5; color:#111827;">{{ health.milestone_summary }}</p>{% endif %}
-      {% if health.telemetry_summary %}<p style="margin:0 0 6px 0; font-size:13px; line-height:1.5; color:#111827;"><span style="font-weight:600;">Telemetry</span>: {{ health.telemetry_summary }}{% if health.telemetry_confidence %} ({{ health.telemetry_confidence | lower }} confidence){% endif %}</p>{% endif %}
+      {% if health.milestone_summary %}<p style="margin:0 0 6px 0; font-size:13px; line-height:1.5; color:{{ state_fg }};">{{ health.milestone_summary }}</p>{% endif %}
+      {% if health.telemetry_summary %}<p style="margin:0 0 6px 0; font-size:13px; line-height:1.5; color:{{ state_fg }};"><span style="font-weight:600;">Telemetry</span>: {{ health.telemetry_summary }}{% if health.telemetry_confidence %} ({{ health.telemetry_confidence | lower }} confidence){% endif %}</p>{% endif %}
       {% include "partials/milestone_rows.j2" %}
-      {% if health.forecast_summary %}<p style="margin:0 0 6px 0; font-size:13px; line-height:1.5; color:#111827;">{{ health.forecast_summary }}{% if health.forecast_confidence %} ({{ health.forecast_confidence | lower }} confidence){% endif %}</p>{% endif %}
-      <p style="margin:0 0 6px 0; font-size:14px; line-height:1.5; font-weight:700; color:#374151;">{{ health.leadership_ask }}</p>
-      <p style="margin:0; font-size:12px; line-height:1.5; color:#4B5563;">~{{ health.read_time_minutes }} min read · {{ health.edition_label }}</p>
+      {% if health.forecast_summary %}<p style="margin:0 0 6px 0; font-size:13px; line-height:1.5; color:{{ state_fg }};">{{ health.forecast_summary }}{% if health.forecast_confidence %} ({{ health.forecast_confidence | lower }} confidence){% endif %}</p>{% endif %}
+      <p style="margin:0 0 6px 0; font-size:14px; line-height:1.5; font-weight:700; color:{{ state_fg }};">{{ health.leadership_ask }}</p>
+      <p style="margin:0; font-size:12px; line-height:1.5; color:{{ state_fg }};">~{{ health.read_time_minutes }} min read · {{ health.edition_label }}</p>
     </td>
   </tr>
   <tr>
@@ -54,16 +62,16 @@
             <p style="margin:0; font-size:18px; font-weight:700; color:#FFFFFF;">{{ health.high_count }}{% if health.prior_counts %}({% if high_delta >= 0 %}+{% endif %}{{ high_delta }}){% endif %}</p>
           </td>
           <td style="width:72px; background-color:#BF8F00; border:1px solid #E5E7EB; padding:8px; text-align:center;">
-            <p style="margin:0 0 4px 0; font-size:11px; font-weight:700; color:#FFFFFF;">Med</p>
-            <p style="margin:0; font-size:18px; font-weight:700; color:#FFFFFF;">{{ health.medium_count }}{% if health.prior_counts %}({% if medium_delta >= 0 %}+{% endif %}{{ medium_delta }}){% endif %}</p>
+            <p style="margin:0 0 4px 0; font-size:11px; font-weight:700; color:#000000;">Med</p>
+            <p style="margin:0; font-size:18px; font-weight:700; color:#000000;">{{ health.medium_count }}{% if health.prior_counts %}({% if medium_delta >= 0 %}+{% endif %}{{ medium_delta }}){% endif %}</p>
           </td>
           <td style="width:72px; background-color:#B4E5A2; border:1px solid #E5E7EB; padding:8px; text-align:center;">
             <p style="margin:0 0 4px 0; font-size:11px; font-weight:700; color:#000000;">Low</p>
             <p style="margin:0; font-size:18px; font-weight:700; color:#000000;">{{ health.low_count }}{% if health.prior_counts %}({% if low_delta >= 0 %}+{% endif %}{{ low_delta }}){% endif %}</p>
           </td>
           <td style="width:72px; background-color:#4EA72E; border:1px solid #E5E7EB; padding:8px; text-align:center;">
-            <p style="margin:0 0 4px 0; font-size:11px; font-weight:700; color:#FFFFFF;">Done</p>
-            <p style="margin:0; font-size:18px; font-weight:700; color:#FFFFFF;">{{ health.done_count }}</p>
+            <p style="margin:0 0 4px 0; font-size:11px; font-weight:700; color:#000000;">Done</p>
+            <p style="margin:0; font-size:18px; font-weight:700; color:#000000;">{{ health.done_count }}</p>
           </td>
           <td style="padding:4px 0 4px 8px; vertical-align:middle;">
             <p style="margin:0 0 6px 0; font-size:12px; line-height:1.4; color:#6B7280;">Risk Load: {{ '%.1f'|format(health.risk_load) }}{% if health.prior_risk_load is not none %} (was {{ '%.1f'|format(health.prior_risk_load) }}){% endif %}</p>

@@ -27,6 +27,9 @@ build/
 .coverage_session/
 .pytest-temp-codex*/
 .pytest-temp-*/
+.pytest-cache-codex/
+.pytest-tmp-codex/
+.tiktoken-cache-codex/
 .vertex/setup_session_*.json
 .vertex/*.lock
 
@@ -86,13 +89,13 @@ specs/*
 !specs/vertex-prd.md
 !specs/vertex-tech-spec.md
 !specs/vertex-ux-spec.md
-!specs/bklg.md
-# specs/bklg.md (BL-K1, resolved 2026-07-22): the tracked, sanitized canonical
-# remaining-work backlog. specs/backlog.md (still gitignored below) remains
-# the actively-edited working copy with full, unsanitized operational detail
-# (e.g. real annotator identities) — see specs/bklg.md's own header for the
-# resync convention between the two.
-# Canonical specs tracked: PRD, Tech, UX only.
+# specs/bklg.md (2026-07-27): un-tracked. Previously the tracked, sanitized
+# mirror of specs/backlog.md (BL-K1, resolved 2026-07-22), but kept
+# real internal detail (program names, real work-item context) that has no
+# reason to be public. Both bklg.md and backlog.md are now local-only,
+# actively-edited working copies -- bklg.md is the closer-to-sanitized one,
+# backlog.md carries full unsanitized operational detail; neither leaves
+# this machine. Canonical specs tracked on GitHub: PRD, Tech, UX only.
 # Other specs, including consolidated.md, are local-only implementation notes.
 # The generated CLI reference snapshot lives in tests/contracts/cli_reference_snapshot.md.
 

@@ -132,6 +132,15 @@ def find_duplicate_identifiers(
 
     alias_owner: dict[str, str] = {}
     for entity in entities:
+        if entity.status is not EntityStatus.ACTIVE:
+            # A tombstoned entity's aliases are historical, not live bindings
+            # -- e.g. a completed merge correctly leaves the tombstoned
+            # source's own alias records in place for audit purposes, and
+            # that must not read back as a live collision against the
+            # surviving entity that alias was consolidated onto. Mirrors
+            # people_registry_corrections.py's _validate_state, which
+            # already applies this exact same status filter.
+            continue
         for alias in entity.aliases:
             normalized_alias = _normalize(alias.value)
             if not normalized_alias:

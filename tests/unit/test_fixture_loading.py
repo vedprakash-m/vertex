@@ -15,7 +15,7 @@ def test_nova_ado_sample_fixture_loads() -> None:
     area_paths = {item["AreaPath"] for item in payload["work_items"]}
     work_item_types = {item["WorkItemType"] for item in payload["work_items"]}
 
-    assert payload["metadata"]["organization"] == "msazure"
+    assert payload["metadata"]["organization"] == "contoso"
     assert payload["metadata"]["source"] == "phase0-canonical-fixture"
     assert payload["metadata"]["item_count"] == 184
     assert len(payload["work_items"]) == 184

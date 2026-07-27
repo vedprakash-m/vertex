@@ -11,7 +11,16 @@ from typer.testing import CliRunner
 from cli import app
 from src.core.operator_identity import OperatorIdentity
 from src.core.people_change_journal import STREAM_PEOPLE_CHANGES, STREAM_PEOPLE_CONFLICTS, read_journal_records
-from src.core.people_directory_schema import FieldVerification, PersonDirectory, Team, TeamKind, write_people_directory, write_teams
+from src.core.people_directory_schema import (
+    FieldVerification,
+    PersonDirectory,
+    Team,
+    TeamKind,
+    load_people_directory,
+    load_teams,
+    write_people_directory,
+    write_teams,
+)
 from src.core.people_entity_schema import (
     AliasStatus,
     CanonicalEntity,
@@ -324,3 +333,144 @@ def test_registry_cli_selected_bootstrap_and_migrate_help_are_distinct(monkeypat
     assert "Applied first shared factual root" in applied.stdout
     assert "top-level `vertex bootstrap`" in _RUNNER.invoke(app, ["kb", "registry", "bootstrap", "--help"]).stdout
     assert "top-level `vertex migrate`" in _RUNNER.invoke(app, ["kb", "registry", "migrate-shared", "--help"]).stdout
+
+
+# ---------------------------------------------------------------------------
+# specs/bklg.md BL-E3: entity_id backfill for pre-existing shared directory
+# records (knowledge/people_directory.yaml + teams.yaml populated directly,
+# predating entities.yaml).
+# ---------------------------------------------------------------------------
+
+from src.core.people_entity_schema import load_entities_document
+from src.core.people_shared_migration import apply_entity_id_backfill, preview_entity_id_backfill
+
+
+def _write_shared_directory_directly(
+    knowledge_root: Path, *, people: tuple[PersonDirectory, ...], teams: tuple[Team, ...]
+) -> None:
+    """Simulates the real state this backfill exists for: people_directory.yaml/
+    teams.yaml populated at the SHARED root directly (not via migrate-shared),
+    so every record's entity_id is blank -- entities.yaml never existed."""
+    knowledge_root.mkdir(parents=True, exist_ok=True)
+    write_people_directory(knowledge_root / "people_directory.yaml", people)
+    write_teams(knowledge_root / "teams.yaml", teams)
+
+
+def test_preview_entity_id_backfill_requires_bootstrapped_registry(tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    knowledge_root = programs_root.parent / "knowledge"
+    _write_shared_directory_directly(knowledge_root, people=(_person("", "alice", "TPM"),), teams=())
+    try:
+        preview_entity_id_backfill(programs_root=programs_root, as_of=_NOW)
+        assert False, "expected ConfigError before bootstrap"
+    except Exception as exc:
+        assert "has not been bootstrapped" in str(exc)
+
+
+def test_entity_id_backfill_mints_entities_for_orphaned_directory_records(tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    knowledge_root = programs_root.parent / "knowledge"
+    _write_shared_directory_directly(
+        knowledge_root,
+        people=(_person("", "alice", "Senior TPM"),),
+        teams=(_team("", "platform"),),
+    )
+    bootstrap_registry_identity(knowledge_root=knowledge_root, customer_boundary_id="synthetic", apply=True, as_of=_NOW)
+
+    preview = preview_entity_id_backfill(programs_root=programs_root, as_of=_NOW)
+    assert preview.people_backfilled == ("alice",)
+    assert preview.teams_backfilled == ("platform",)
+    assert len(preview.new_entity_ids) == 2
+    assert not (knowledge_root / "entities.yaml").exists(), "preview must not write anything"
+
+    result = apply_entity_id_backfill(programs_root=programs_root, actor="tester", as_of=_NOW)
+    assert result.people_backfilled == ("alice",)
+    assert result.teams_backfilled == ("platform",)
+    assert result.transaction_id is not None
+
+    entities_doc = load_entities_document(knowledge_root / "entities.yaml")
+    assert entities_doc is not None
+    assert {e.entity_type for e in entities_doc.entities} == {"person", "team"}
+    person_entity = next(e for e in entities_doc.entities if e.entity_type == "person")
+    team_entity = next(e for e in entities_doc.entities if e.entity_type == "team")
+    assert person_entity.canonical_name == "Senior TPM" or person_entity.canonical_name == "alice"
+    assert {alias.value for alias in person_entity.aliases} == {"alice"}
+    assert {alias.value for alias in team_entity.aliases} == {"platform"}
+
+    people_result = load_people_directory(knowledge_root / "people_directory.yaml")
+    assert people_result is not None
+    alice = next(p for p in people_result.people if p.alias == "alice")
+    assert alice.entity_id == person_entity.entity_id
+    assert alice.title == "Senior TPM"  # untouched field proves this is a pure entity_id patch
+
+    teams_result = load_teams(knowledge_root / "teams.yaml")
+    assert teams_result is not None
+    platform = next(t for t in teams_result.teams if t.id == "platform")
+    assert platform.entity_id == team_entity.entity_id
+
+
+def test_entity_id_backfill_preserves_already_canonical_records(tmp_path: Path) -> None:
+    """A mixed real-world state: one record already has a valid entity_id
+    (already resolved via some earlier path), one doesn't. Only the
+    orphaned one should be touched."""
+    programs_root = tmp_path / "programs"
+    knowledge_root = programs_root.parent / "knowledge"
+    bootstrap_registry_identity(knowledge_root=knowledge_root, customer_boundary_id="synthetic", apply=True, as_of=_NOW)
+    write_entities_document(
+        knowledge_root / "entities.yaml",
+        EntitiesDocument(schema_version="2.0", entities=(_entity("person:already-canonical", "person", "bob"),)),
+    )
+    _write_shared_directory_directly(
+        knowledge_root,
+        people=(
+            PersonDirectory(entity_id="person:already-canonical", alias="bob", title="Already canonical"),
+            _person("", "carol", "Orphaned"),
+        ),
+        teams=(),
+    )
+
+    result = apply_entity_id_backfill(programs_root=programs_root, actor="tester", as_of=_NOW)
+    assert result.people_backfilled == ("carol",)
+
+    people_result = load_people_directory(knowledge_root / "people_directory.yaml")
+    assert people_result is not None
+    bob = next(p for p in people_result.people if p.alias == "bob")
+    carol = next(p for p in people_result.people if p.alias == "carol")
+    assert bob.entity_id == "person:already-canonical"  # untouched
+    assert carol.entity_id and carol.entity_id != ""
+
+    entities_doc = load_entities_document(knowledge_root / "entities.yaml")
+    assert entities_doc is not None
+    assert len(entities_doc.entities) == 2  # bob's pre-existing entity + carol's newly minted one
+
+
+def test_entity_id_backfill_is_idempotent_noop_on_second_run(tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    knowledge_root = programs_root.parent / "knowledge"
+    _write_shared_directory_directly(knowledge_root, people=(_person("", "alice", "TPM"),), teams=())
+    bootstrap_registry_identity(knowledge_root=knowledge_root, customer_boundary_id="synthetic", apply=True, as_of=_NOW)
+
+    first = apply_entity_id_backfill(programs_root=programs_root, actor="tester", as_of=_NOW)
+    assert first.people_backfilled == ("alice",)
+
+    second = apply_entity_id_backfill(programs_root=programs_root, actor="tester", as_of=_NOW)
+    assert second.is_noop is True
+    assert second.transaction_id is None  # no transaction was opened for a no-op
+
+    entities_doc = load_entities_document(knowledge_root / "entities.yaml")
+    assert entities_doc is not None
+    assert len(entities_doc.entities) == 1  # no duplicate minted on the second run
+
+
+def test_entity_id_backfill_appends_journal_change_records(tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    knowledge_root = programs_root.parent / "knowledge"
+    _write_shared_directory_directly(knowledge_root, people=(_person("", "alice", "TPM"),), teams=())
+    bootstrap_registry_identity(knowledge_root=knowledge_root, customer_boundary_id="synthetic", apply=True, as_of=_NOW)
+
+    apply_entity_id_backfill(programs_root=programs_root, actor="tester", as_of=_NOW)
+
+    changes = read_journal_records(knowledge_root, STREAM_PEOPLE_CHANGES)
+    entity_id_changes = [c for c in changes if c["field"] == "entity_id"]
+    assert entity_id_changes, "expected at least one entity_id field-change record"
+    assert any(c["after"] and c["after"] != "" for c in entity_id_changes)

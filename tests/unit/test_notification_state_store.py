@@ -17,8 +17,8 @@ def test_load_confirmed_notification_events_round_trips_appended_run(tmp_path: P
         confirmed_at=datetime(2026, 5, 7, 9, 30, tzinfo=timezone.utc),
         notifications=(
             ConfirmedNotification(
-                dri_email="isaiah@example.com",
-                to=("isaiah@example.com",),
+                dri_email="jordan@example.com",
+                to=("jordan@example.com",),
                 cc=("lead@example.com",),
                 subject="Escalate missing rollout evidence",
                 work_item_ids=(901010, 901011),
@@ -99,7 +99,7 @@ def test_load_confirmed_notification_events_rejects_non_string_dri_email(tmp_pat
                         "notifications": [
                             {
                                 "dri_email": 1,
-                                "to": ["isaiah@example.com"],
+                                "to": ["jordan@example.com"],
                                 "cc": [],
                                 "subject": "Escalate missing rollout evidence",
                                 "work_item_ids": [901010],
@@ -132,8 +132,8 @@ def test_load_latest_notification_state_rejects_numeric_string_work_item_id(tmp_
                         "mode": "preview_confirmed",
                         "notifications": [
                             {
-                                "dri_email": "isaiah@example.com",
-                                "to": ["isaiah@example.com"],
+                                "dri_email": "jordan@example.com",
+                                "to": ["jordan@example.com"],
                                 "cc": [],
                                 "subject": "Escalate missing rollout evidence",
                                 "work_item_ids": ["901010"],

@@ -28,8 +28,8 @@ def test_admin_notifications_command_aggregates_program_editions_since_date(tmp_
         confirmed_at=datetime(2026, 5, 4, 10, 0, tzinfo=timezone.utc),
         notifications=(
             ConfirmedNotification(
-                dri_email="isaiah@example.com",
-                to=("isaiah@example.com",),
+                dri_email="jordan@example.com",
+                to=("jordan@example.com",),
                 cc=(),
                 subject="Deployment safety remediation",
                 work_item_ids=(901001,),
@@ -101,8 +101,8 @@ def test_admin_notifications_command_emits_json_payload(tmp_path: Path) -> None:
         confirmed_at=datetime(2026, 5, 7, 9, 30, tzinfo=timezone.utc),
         notifications=(
             ConfirmedNotification(
-                dri_email="isaiah@example.com",
-                to=("isaiah@example.com",),
+                dri_email="jordan@example.com",
+                to=("jordan@example.com",),
                 cc=("lead@example.com",),
                 subject="Escalate missing rollout evidence",
                 work_item_ids=(901010, 901011),

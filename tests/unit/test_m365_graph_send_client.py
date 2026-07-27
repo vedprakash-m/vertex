@@ -48,7 +48,7 @@ def test_graph_send_client_posts_expected_payload(monkeypatch) -> None:
     client = GraphSendClient(tenant_id="tenant-1", client_id="client-1")
     client.send_mail(
         GraphMailMessage(
-            to=("isaiah@example.com",),
+            to=("jordan@example.com",),
             cc=("author@example.com",),
             subject="Need your update",
             html_body="<p>Hello</p>",
@@ -67,7 +67,7 @@ def test_graph_send_client_posts_expected_payload(monkeypatch) -> None:
                 "contentType": "HTML",
                 "content": "<p>Hello</p>",
             },
-            "toRecipients": [{"emailAddress": {"address": "isaiah@example.com"}}],
+            "toRecipients": [{"emailAddress": {"address": "jordan@example.com"}}],
             "ccRecipients": [{"emailAddress": {"address": "author@example.com"}}],
         },
         "saveToSentItems": True,
@@ -85,7 +85,7 @@ def test_graph_send_client_surfaces_graph_errors(monkeypatch) -> None:
     client = GraphSendClient(tenant_id="tenant-1", client_id="client-1")
 
     with pytest.raises(AuthError, match="Mail.Send"):
-        client.send_mail(GraphMailMessage(to=("isaiah@example.com",), cc=(), subject="Need your update", html_body="<p>Hello</p>"))
+        client.send_mail(GraphMailMessage(to=("jordan@example.com",), cc=(), subject="Need your update", html_body="<p>Hello</p>"))
 
 
 def test_graph_send_client_surfaces_retryable_errors(monkeypatch) -> None:
@@ -98,4 +98,4 @@ def test_graph_send_client_surfaces_retryable_errors(monkeypatch) -> None:
     client = GraphSendClient(tenant_id="tenant-1", client_id="client-1")
 
     with pytest.raises(QueryError, match="Retry-After: 7"):
-        client.send_mail(GraphMailMessage(to=("isaiah@example.com",), cc=(), subject="Need your update", html_body="<p>Hello</p>"))
+        client.send_mail(GraphMailMessage(to=("jordan@example.com",), cc=(), subject="Need your update", html_body="<p>Hello</p>"))

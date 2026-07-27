@@ -30,7 +30,7 @@ from src.core.knowledge_store import (
     find_unknown_team_program_references,
     get_shared_knowledge_root,
 )
-from src.core.people_entity_schema import check_dir11_compliance, is_legacy_schema_0_entities_document, load_entities_document
+from src.core.people_entity_schema import ENTITIES_SCHEMA_VERSION, check_dir11_compliance, is_legacy_schema_0_entities_document, load_entities_document
 from src.core.people_directory_schema import PersonStatus, load_people_directory, load_teams
 from src.core.profile_encryption import inspect_people_profiles_file
 from src.core.people_registry_privacy_policy import encryption_rank, load_people_registry_privacy_policy
@@ -159,6 +159,7 @@ def run_kb_doctor(
     checks.append(registry_dir01_duplicate_identifiers_check(snapshot=shared_registry_snapshot))
     checks.append(registry_dir02_unresolved_references_check(snapshot=shared_registry_snapshot))
     checks.append(registry_dir03_stale_fields_check(programs_root=programs_root))
+    checks.append(registry_people_enrichment_check(known_program_ids=known_program_ids, programs_root=programs_root))
     checks.append(registry_dir06_hierarchy_cycles_check(snapshot=shared_registry_snapshot))
     checks.append(registry_dir07_journal_integrity_check(programs_root=programs_root))
     checks.append(registry_dir15_shadow_divergence_check(known_program_ids=known_program_ids, programs_root=programs_root))
@@ -865,6 +866,22 @@ def registry_manifest_integrity_check(*, programs_root: Path) -> DoctorCheck:
     )
 
 
+def _entities_schema_version(path: Path) -> str | None:
+    """Raw peek at an entities.yaml's `schema_version` key without going
+    through `load_entities_document` (which raises on anything but exactly
+    ``ENTITIES_SCHEMA_VERSION``). Returns ``None`` for a missing key,
+    unparseable YAML, or a non-mapping top level -- callers treat that the
+    same as "not schema 2.0", not as an error."""
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (yaml.YAMLError, OSError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    value = raw.get("schema_version")
+    return str(value) if value is not None else None
+
+
 def entities_dir11_check(*, known_program_ids: tuple[str, ...], programs_root: Path) -> DoctorCheck:
     """specs/people.md §8.3 DIR-11: "Person/org-team entity is program-
     scoped or overrides an org binding." Only meaningful once a program
@@ -888,7 +905,15 @@ def entities_dir11_check(*, known_program_ids: tuple[str, ...], programs_root: P
     checked_program_count = 0
     for program_id in known_program_ids:
         program_entities_path = programs_root / program_id / "knowledge" / "entities.yaml"
-        if not program_entities_path.exists() or is_legacy_schema_0_entities_document(program_entities_path):
+        if not program_entities_path.exists() or _entities_schema_version(program_entities_path) != ENTITIES_SCHEMA_VERSION:
+            # Not a schema-2.0 program-local entities.yaml -- either true
+            # legacy schema 0 (no schema_version key) or some OTHER,
+            # unrelated schema (e.g. the pre-existing generic program-local
+            # entity-alias registry's schema 1.0, which src/core/entity_registry.py
+            # documents as DELIBERATELY out of DIR-11's/schema-2.0's scope --
+            # it carries entity_type values like milestone/risk/product with
+            # no schema-2.0 equivalent at all). Either way, DIR-11 has
+            # nothing to check against this file.
             continue
         try:
             program_document = load_entities_document(program_entities_path)
@@ -1166,22 +1191,52 @@ def registry_dir02_unresolved_references_check(*, snapshot: _SharedRegistrySnaps
 
 def registry_dir03_stale_fields_check(*, programs_root: Path) -> DoctorCheck:
     """specs/people.md §8.3 DIR-03: required field/membership older than its
-    freshness SLA. v1 placeholder threshold (people_query.py's own
-    documented caveat -- a real "configured" SLA needs a new
-    people_registry section in freshness_policy.yaml, not built yet)."""
+    freshness SLA. Real, governed threshold as of specs/bklg.md BL-E3
+    (2026-07-26): `freshness_policy.yaml`'s `people_registry.stale_after_days`,
+    read via `DEFAULT_STALE_FRESHNESS_DAYS`."""
     knowledge_root = get_shared_knowledge_root(programs_root)
     stale = list_stale_people(knowledge_root=knowledge_root)
     if not stale:
         return DoctorCheck(
             "Registry DIR-03", "ok",
-            f"No fields older than the v1 placeholder freshness window ({DEFAULT_STALE_FRESHNESS_DAYS}d).",
+            f"No fields older than the configured freshness window ({DEFAULT_STALE_FRESHNESS_DAYS}d).",
             code="DIR-03",
         )
     return DoctorCheck(
         "Registry DIR-03", "warn",
-        f"DIR-03: {len(stale)} field(s) older than the v1 placeholder freshness window ({DEFAULT_STALE_FRESHNESS_DAYS}d); "
-        "run 'vertex kb people stale' for the full list.",
+        f"DIR-03: {len(stale)} field(s) older than the configured freshness window ({DEFAULT_STALE_FRESHNESS_DAYS}d); "
+        "run 'vertex kb people stale' for the full list, or 'vertex kb people enrich' to queue WorkIQ-sourced review candidates for currently-referenced stale people.",
         metadata={"stale_count": len(stale)}, code="DIR-03",
+    )
+
+
+def registry_people_enrichment_check(*, known_program_ids: tuple[str, ...], programs_root: Path) -> DoctorCheck:
+    """specs/bklg.md BL-E3: surfaces WorkIQ-sourced enrichment candidates
+    awaiting steward review. Info-only, never a publish gate -- mirrors
+    BL-A3's `_rev_extraction_precision_regression_check`/DIR-03's own
+    non-blocking pattern: a pending candidate reflects a real, but
+    advisory and unverified, WorkIQ answer, not a data-quality defect."""
+    from src.core.people_enrichment import list_pending_enrichment_candidates
+
+    total_pending = 0
+    per_program: dict[str, int] = {}
+    for program_id in known_program_ids:
+        pending = list_pending_enrichment_candidates(program_id, programs_root=programs_root)
+        if pending:
+            per_program[program_id] = len(pending)
+            total_pending += len(pending)
+    if total_pending == 0:
+        return DoctorCheck(
+            "Registry people enrichment", "ok",
+            "No WorkIQ enrichment candidates awaiting review.",
+            code="PEOPLE-ENRICHMENT",
+        )
+    detail = ", ".join(f"{program_id}: {count}" for program_id, count in sorted(per_program.items()))
+    return DoctorCheck(
+        "Registry people enrichment", "info",
+        f"{total_pending} WorkIQ enrichment candidate(s) awaiting steward review ({detail}); "
+        "run 'vertex kb people enrichment-list --program <id>' then 'enrichment-resolve'.",
+        metadata={"pending_count": total_pending}, code="PEOPLE-ENRICHMENT",
     )
 
 

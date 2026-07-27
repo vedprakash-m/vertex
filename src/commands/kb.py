@@ -20,7 +20,7 @@ from src.ai.deployment_fallback import FallbackAIClient, LEGACY_DEPLOYMENT_ALIAS
 from src.ai.llm_trace import AITraceContext, use_trace_context
 from src.ai.provider import LLMProvider
 from src.core.config_loader import PROGRAMS_ROOT
-from src.core.exceptions import ConfigError
+from src.core.exceptions import ConfigError, StateError
 from src.core.kb_changelog import build_kb_changelog_report, render_kb_changelog_report
 from src.core.kb_updates import KbUpdatePlan, apply_kb_update, parse_deterministic_kb_correction
 from src.core.kb_updates import parse_kb_update_operations, prepare_kb_update, read_program_kb_documents
@@ -37,6 +37,7 @@ from src.core.people_registry_corrections import (
     PeopleCorrectionResult,
     bind_person_identifier,
     merge_people,
+    merge_people_batch,
     split_person,
     unmerge_people,
 )
@@ -55,9 +56,12 @@ from src.core.people_registry_promotion import (
     record_program_rollback_restore_drill,
 )
 from src.core.people_shared_migration import (
+    EntityIdBackfillPlan,
     SharedMigrationPlan,
+    apply_entity_id_backfill,
     apply_shared_migration,
     bootstrap_shared_factual_files,
+    preview_entity_id_backfill,
     preview_shared_migration,
 )
 from src.core.people_shadow_parity import compute_and_record_shadow_parity_if_in_shadow_mode, compute_shadow_parity
@@ -82,6 +86,19 @@ from src.core.people_registry_writer import (
     shared_registry_is_active,
 )
 from src.core.identity_provider_refresh import RefreshResult, refresh_people_from_provider
+from src.core.ledger.ulid import new_ulid
+from src.m365.agency_bridge import AgencyBridge
+from src.m365.workiq_ask_support import prose_text_from_payload
+from src.core.people_enrichment import (
+    EnrichmentCandidateEvent,
+    EnrichmentCandidateState,
+    build_workiq_question,
+    list_pending_enrichment_candidates,
+    read_enrichment_events,
+    record_enrichment_event,
+    resolve_enrichment_due_alert,
+    select_enrichment_candidates,
+)
 from src.core.people_delegation_lifecycle import create_delegation, list_delegations, revoke_delegation
 from src.core.people_delegation_schema import Delegation, delegation_to_payload
 from src.core.profile_encryption import decrypt_people_profiles_file, encrypt_people_profiles_file, inspect_people_profiles_file
@@ -707,6 +724,37 @@ def kb_registry_migrate_shared_command(
     raise typer.Exit(code=0)
 
 
+@registry_app.command(
+    "backfill-entity-ids",
+    help="specs/bklg.md BL-E3: mint canonical entity_ids for people_directory.yaml/teams.yaml records that predate entities.yaml.",
+)
+def kb_registry_backfill_entity_ids_command(
+    apply: bool = typer.Option(False, "--apply", help="Commit the fenced shared-registry transaction. Without this flag, preview only."),
+    format: str = typer.Option("human", "--format", help="Output format: human or json."),
+) -> None:
+    """One-time backfill for shared people_directory.yaml/teams.yaml records
+    that were populated directly (predating entities.yaml) and so carry no
+    canonical entity_id -- the exact "migration gap, not a new identity"
+    state people_directory_schema.py's loader already diagnoses. Never
+    touches a record that already carries a valid entity_id; idempotent."""
+    try:
+        if not apply:
+            plan = preview_entity_id_backfill(programs_root=PROGRAMS_ROOT)
+            _echo_entity_id_backfill_plan(plan, format=format, heading="Entity-id backfill preview")
+            if format == "human" and not plan.is_noop:
+                typer.echo("Preview only. Re-run with --apply to mint canonical entity_ids for the records above.")
+            raise typer.Exit(code=0)
+        principal = _resolve_operator_principal("kb-registry-backfill-entity-ids")
+        plan = apply_entity_id_backfill(programs_root=PROGRAMS_ROOT, actor=principal)
+    except ConfigError as error:
+        raise typer.BadParameter(str(error)) from error
+
+    _echo_entity_id_backfill_plan(plan, format=format, heading="Applied entity-id backfill")
+    if format == "human" and not plan.is_noop:
+        typer.echo(f"Committed transaction {plan.transaction_id}, generation {plan.generation_id}.")
+    raise typer.Exit(code=0)
+
+
 @registry_app.command("adopt")
 def kb_registry_adopt_command(
     reason: str = typer.Option(..., "--reason", help="Why the manually edited managed registry content is being adopted."),
@@ -973,6 +1021,50 @@ def kb_people_merge_command(
             target_ref=target,
             reason=reason,
             actor=_resolve_operator_principal("kb-people-merge") if apply else "<preview>",
+            apply=apply,
+        )
+    except ConfigError as error:
+        raise typer.BadParameter(str(error)) from error
+    _echo_correction_result(result, apply=apply, format=format)
+    raise typer.Exit(code=0)
+
+
+@people_app.command(
+    "merge-batch",
+    help="specs/bklg.md BL-E3 DIR-01: merge multiple independent duplicate-alias pairs in one commit.",
+)
+def kb_people_merge_batch_command(
+    pair: list[str] = typer.Option(
+        ...,
+        "--pair",
+        help="A 'source_entity_id->target_entity_id' pair to merge (source tombstoned into target). Repeatable. "
+        "Uses '->', not ':', as the separator since entity_ids themselves contain a colon (e.g. 'person:01H...').",
+    ),
+    reason: str = typer.Option(..., "--reason", help="Required steward review rationale, applied to every pair."),
+    apply: bool = typer.Option(False, "--apply", help="Commit the reviewed merges. Without this flag, preview only."),
+    format: str = typer.Option("human", "--format", help="Output format: human or json."),
+) -> None:
+    """Merge N independent duplicate-alias pairs in a single commit. Needed
+    because a single `merge` commit validates the WHOLE registry document,
+    not just the pair being merged -- with more than one unrelated
+    duplicate present, resolving them one at a time always fails on
+    whichever pair hasn't been reached yet. Every pair must reference exact
+    canonical entity_ids (not aliases), since aliases here are ambiguous by
+    construction."""
+    parsed_pairs: list[tuple[str, str]] = []
+    for entry in pair:
+        if "->" not in entry:
+            raise typer.BadParameter(f"--pair {entry!r} must be 'source_entity_id->target_entity_id'.")
+        source_id, target_id = entry.split("->", 1)
+        parsed_pairs.append((source_id.strip(), target_id.strip()))
+
+    knowledge_root = get_shared_knowledge_root(PROGRAMS_ROOT)
+    try:
+        result = merge_people_batch(
+            knowledge_root,
+            merges=tuple(parsed_pairs),
+            reason=reason,
+            actor=_resolve_operator_principal("kb-people-merge-batch") if apply else "<preview>",
             apply=apply,
         )
     except ConfigError as error:
@@ -1358,7 +1450,7 @@ def kb_people_find_command(
 
 @people_app.command("stale")
 def kb_people_stale_command(
-    freshness_days: int = typer.Option(DEFAULT_STALE_FRESHNESS_DAYS, "--freshness-days", help="v1 placeholder freshness window pending a real people_registry freshness_policy.yaml section (DIR-03)."),
+    freshness_days: int = typer.Option(DEFAULT_STALE_FRESHNESS_DAYS, "--freshness-days", help="Freshness window in days (default: freshness_policy.yaml's people_registry.stale_after_days, DIR-03)."),
     format: str = typer.Option("human", "--format", help="Output format: human or json."),
 ) -> None:
     """specs/people.md PPL-W3.1: people whose verified fields/contacts are older than the freshness window."""
@@ -1378,6 +1470,178 @@ def kb_people_stale_command(
     for entry in entries:
         typer.echo(f"  - {entry.alias} ({entry.entity_id}): {entry.field_name} last verified {entry.age_days}d ago")
     raise typer.Exit(code=0)
+
+
+@people_app.command("enrich")
+def kb_people_enrich_command(
+    program: str = typer.Option(..., "--program", help="Program ID whose currently-referenced stakeholders are checked for stale/missing enrichable fields."),
+    max_candidates: int = typer.Option(5, "--max-candidates", help="Cap on WorkIQ round-trips this run (each is slow, 36-180s) -- keeps one invocation bounded."),
+    freshness_days: int = typer.Option(DEFAULT_STALE_FRESHNESS_DAYS, "--freshness-days", help="Freshness window in days (default: freshness_policy.yaml's people_registry.stale_after_days)."),
+    format: str = typer.Option("human", "--format", help="Output format: human or json."),
+) -> None:
+    """specs/bklg.md BL-E3: demand-driven WorkIQ enrichment pass.
+
+    Selects real stakeholders of --program whose title/department/manager
+    is stale or was never verified, asks WorkIQ one targeted question per
+    field, and records each answer as a PENDING review candidate --
+    nothing is ever written to the registry here. Run 'vertex kb people
+    enrichment resolve' to review and, if accepted, apply a candidate.
+    """
+    try:
+        resolve_enrichment_due_alert(program_id=program, programs_root=PROGRAMS_ROOT)
+    except (OSError, StateError):
+        pass
+    try:
+        selected = select_enrichment_candidates(
+            program_id=program, programs_root=PROGRAMS_ROOT, freshness_days=freshness_days,
+        )
+    except ConfigError as error:
+        raise typer.BadParameter(str(error)) from error
+    if not selected:
+        typer.echo(f"No enrichment candidates found for program {program!r} (nothing stale/missing among current stakeholders).")
+        raise typer.Exit(code=0)
+    selected = selected[:max_candidates]
+
+    bridge = AgencyBridge()
+    capabilities = bridge.probe()
+    if not capabilities.available and not capabilities.has_workiq_cli:
+        typer.echo("Agency CLI is unavailable; cannot run WorkIQ enrichment right now.")
+        raise typer.Exit(code=1)
+    if not capabilities.has_workiq and not capabilities.has_workiq_cli:
+        typer.echo("WorkIQ is not available via Agency CLI right now.")
+        raise typer.Exit(code=1)
+
+    now = datetime.now(timezone.utc)
+    proposed: list[EnrichmentCandidateEvent] = []
+    for person, entry in selected:
+        question = build_workiq_question(display_name=person.display_name, alias=person.alias, field_name=entry.field_name)
+        payload = bridge.ask_workiq(question)
+        answer = prose_text_from_payload(payload)
+        if answer is None:
+            detail = bridge.last_mcp_error() or "no response"
+            typer.echo(f"  - {person.alias}/{entry.field_name}: WorkIQ query failed ({detail}); skipped.")
+            continue
+        candidate_id = f"enrich-{new_ulid(now)}"
+        event = EnrichmentCandidateEvent(
+            recorded_at=now, program_id=program, candidate_id=candidate_id, entity_id=person.entity_id,
+            alias=person.alias, field_name=entry.field_name, current_value=getattr(person, entry.field_name, None),
+            event="proposed", workiq_question=question, workiq_answer=answer,
+        )
+        record_enrichment_event(event, programs_root=PROGRAMS_ROOT)
+        proposed.append(event)
+
+    if format == "json":
+        typer.echo(json.dumps([_enrichment_event_payload(e) for e in proposed], indent=2, sort_keys=True))
+        raise typer.Exit(code=0)
+    typer.echo(f"{len(proposed)} enrichment candidate(s) proposed for program {program!r}:")
+    for event in proposed:
+        typer.echo(f"  - {event.candidate_id}: {event.alias}/{event.field_name} -> WorkIQ says: {event.workiq_answer!r}")
+    if proposed:
+        typer.echo("Run 'vertex kb people enrichment resolve --program <id> --candidate-id <id> --decision accept|reject --reason <text>' to review.")
+    raise typer.Exit(code=0)
+
+
+@people_app.command("enrichment-list")
+def kb_people_enrichment_list_command(
+    program: str = typer.Option(..., "--program", help="Program ID."),
+    format: str = typer.Option("human", "--format", help="Output format: human or json."),
+) -> None:
+    """specs/bklg.md BL-E3: list pending WorkIQ enrichment candidates awaiting steward review."""
+    pending = list_pending_enrichment_candidates(program, programs_root=PROGRAMS_ROOT)
+    if format == "json":
+        typer.echo(json.dumps([_enrichment_state_payload(s) for s in pending], indent=2, sort_keys=True))
+        raise typer.Exit(code=0)
+    if not pending:
+        typer.echo(f"No pending enrichment candidates for program {program!r}.")
+        raise typer.Exit(code=0)
+    typer.echo(f"{len(pending)} pending enrichment candidate(s) for program {program!r}:")
+    for state in pending:
+        current = state.current_value if state.current_value else "<empty>"
+        typer.echo(f"  - {state.candidate_id}: {state.alias}/{state.field_name} (current: {current})")
+        typer.echo(f"      WorkIQ Q: {state.workiq_question}")
+        typer.echo(f"      WorkIQ A: {state.workiq_answer!r}")
+    raise typer.Exit(code=0)
+
+
+@people_app.command("enrichment-resolve")
+def kb_people_enrichment_resolve_command(
+    program: str = typer.Option(..., "--program", help="Program ID."),
+    candidate_id: str = typer.Option(..., "--candidate-id", help="The pending candidate to resolve."),
+    decision: str = typer.Option(..., "--decision", help="'accept' or 'reject'."),
+    value: str | None = typer.Option(None, "--value", help="Accepted value to write (defaults to WorkIQ's raw answer if omitted on accept)."),
+    reason: str = typer.Option(..., "--reason", help="Required steward review rationale."),
+    apply: bool = typer.Option(False, "--apply", help="Commit an accepted candidate through the staged writer. Without this flag, preview only."),
+) -> None:
+    """specs/bklg.md BL-E3: human-in-the-loop resolution of one WorkIQ enrichment candidate.
+
+    A WorkIQ answer is NEVER auto-applied -- 'accept' requires an explicit
+    steward decision (and --apply to actually commit it); 'reject' just
+    closes the candidate with no registry write at all.
+    """
+    if decision not in {"accept", "reject"}:
+        raise typer.BadParameter("--decision must be 'accept' or 'reject'.")
+    pending = {state.candidate_id: state for state in list_pending_enrichment_candidates(program, programs_root=PROGRAMS_ROOT)}
+    state = pending.get(candidate_id)
+    if state is None:
+        raise typer.BadParameter(f"No pending candidate {candidate_id!r} for program {program!r}.")
+
+    now = datetime.now(timezone.utc)
+    actor = _resolve_operator_principal("kb-people-enrichment-resolve") if apply else "<preview>"
+    resolved_value = value if value is not None else state.workiq_answer
+    applied = False
+
+    if decision == "accept":
+        if not apply:
+            typer.echo(f"Preview: would accept {candidate_id} and set {state.field_name}={resolved_value!r} for {state.alias}.")
+            raise typer.Exit(code=0)
+        result = apply_shared_registry_patch(
+            operations=(
+                RegistryPatchOperation(
+                    relative_path="knowledge/people_directory.yaml", action="set_fields",
+                    match_value=state.alias, fields=((state.field_name, resolved_value),),
+                ),
+            ),
+            programs_root=PROGRAMS_ROOT, actor=actor,
+            reason=f"BL-E3 enrichment candidate {candidate_id} accepted: {reason}",
+            source="workiq_enrichment_reviewed", source_ref=candidate_id, apply=True,
+        )
+        if result.conflicts:
+            typer.echo(f"Conflicts, not applied: {result.conflicts}")
+            raise typer.Exit(code=1)
+        applied = True
+    else:
+        if not apply:
+            typer.echo(f"Preview: would reject {candidate_id} (no registry write).")
+            raise typer.Exit(code=0)
+
+    record_enrichment_event(
+        EnrichmentCandidateEvent(
+            recorded_at=now, program_id=program, candidate_id=candidate_id, entity_id=state.entity_id,
+            alias=state.alias, field_name=state.field_name, current_value=state.current_value,
+            event="accepted" if decision == "accept" else "rejected",
+            reviewed_value=resolved_value if decision == "accept" else None,
+            reviewed_by=actor, reviewed_reason=reason, applied=applied,
+        ),
+        programs_root=PROGRAMS_ROOT,
+    )
+    typer.echo(f"{'Accepted and applied' if applied else 'Rejected'}: {candidate_id} ({state.alias}/{state.field_name}).")
+    raise typer.Exit(code=0)
+
+
+def _enrichment_event_payload(event: EnrichmentCandidateEvent) -> dict[str, Any]:
+    return {
+        "candidate_id": event.candidate_id, "entity_id": event.entity_id, "alias": event.alias,
+        "field_name": event.field_name, "workiq_question": event.workiq_question, "workiq_answer": event.workiq_answer,
+    }
+
+
+def _enrichment_state_payload(state: EnrichmentCandidateState) -> dict[str, Any]:
+    return {
+        "candidate_id": state.candidate_id, "entity_id": state.entity_id, "alias": state.alias,
+        "field_name": state.field_name, "current_value": state.current_value,
+        "workiq_question": state.workiq_question, "workiq_answer": state.workiq_answer,
+        "status": state.status, "proposed_at": state.proposed_at.isoformat(),
+    }
 
 
 @people_app.command("conflicts")
@@ -1512,6 +1776,31 @@ def _echo_shared_migration_plan(plan: SharedMigrationPlan, *, format: str, headi
     typer.echo(f"Conflicts quarantined: {len(plan.conflicts)}")
     for conflict in plan.conflicts:
         typer.echo(f"  - {conflict.record_kind}/{conflict.kind}: {conflict.detail}")
+    for diagnostic in plan.diagnostics:
+        typer.echo(f"Diagnostic: {diagnostic}")
+
+
+def _entity_id_backfill_plan_payload(plan: EntityIdBackfillPlan) -> dict[str, Any]:
+    return {
+        "people_backfilled": list(plan.people_backfilled),
+        "teams_backfilled": list(plan.teams_backfilled),
+        "new_entity_ids": list(plan.new_entity_ids),
+        "diagnostics": list(plan.diagnostics),
+        "transaction_id": plan.transaction_id,
+        "generation_id": plan.generation_id,
+        "is_noop": plan.is_noop,
+    }
+
+
+def _echo_entity_id_backfill_plan(plan: EntityIdBackfillPlan, *, format: str, heading: str) -> None:
+    if format == "json":
+        typer.echo(json.dumps(_entity_id_backfill_plan_payload(plan), indent=2, sort_keys=True))
+        return
+    if format != "human":
+        raise typer.BadParameter("--format must be 'human' or 'json'.")
+    typer.echo(heading)
+    typer.echo(f"People backfilled: {len(plan.people_backfilled)} ({', '.join(plan.people_backfilled) or 'none'})")
+    typer.echo(f"Teams backfilled: {len(plan.teams_backfilled)} ({', '.join(plan.teams_backfilled) or 'none'})")
     for diagnostic in plan.diagnostics:
         typer.echo(f"Diagnostic: {diagnostic}")
 

@@ -33,7 +33,7 @@ def test_staged_action_cannot_be_routed(tmp_path: Path) -> None:
     action = _staged_action()
     with pytest.raises(MeetingActionRoutingError, match="not 'approved'"):
         route_meeting_action_to_ado_proposal(
-            action, org="msazure", project="One", programs_root=tmp_path / "programs"
+            action, org="contoso", project="One", programs_root=tmp_path / "programs"
         )
 
 
@@ -41,7 +41,7 @@ def test_rejected_action_cannot_be_routed(tmp_path: Path) -> None:
     action = reject_meeting_action(_staged_action(), reason="duplicate of an existing task")
     with pytest.raises(MeetingActionRoutingError):
         route_meeting_action_to_ado_proposal(
-            action, org="msazure", project="One", programs_root=tmp_path / "programs"
+            action, org="contoso", project="One", programs_root=tmp_path / "programs"
         )
 
 
@@ -50,7 +50,7 @@ def test_approved_action_is_routed_with_correct_payload(tmp_path: Path) -> None:
     action = approve_meeting_action(_staged_action(), approved_by="pm@example.com")
 
     entry = route_meeting_action_to_ado_proposal(
-        action, org="msazure", project="One", area_path="One\\XPF", iteration_path="Sprint 5",
+        action, org="contoso", project="One", area_path="One\\XPF", iteration_path="Sprint 5",
         programs_root=programs_root,
     )
 
@@ -68,8 +68,8 @@ def test_routing_the_same_approved_action_twice_is_duplicate_safe(tmp_path: Path
     programs_root = tmp_path / "programs"
     action = approve_meeting_action(_staged_action(), approved_by="pm@example.com")
 
-    first = route_meeting_action_to_ado_proposal(action, org="msazure", project="One", programs_root=programs_root)
-    second = route_meeting_action_to_ado_proposal(action, org="msazure", project="One", programs_root=programs_root)
+    first = route_meeting_action_to_ado_proposal(action, org="contoso", project="One", programs_root=programs_root)
+    second = route_meeting_action_to_ado_proposal(action, org="contoso", project="One", programs_root=programs_root)
 
     assert first.outbox_id == second.outbox_id
     assert first.correlation_id == second.correlation_id
@@ -80,8 +80,8 @@ def test_different_actions_get_different_outbox_entries(tmp_path: Path) -> None:
     action_a = approve_meeting_action(_staged_action(action_id="det-action-1"), approved_by="pm@example.com")
     action_b = approve_meeting_action(_staged_action(action_id="det-action-2"), approved_by="pm@example.com")
 
-    entry_a = route_meeting_action_to_ado_proposal(action_a, org="msazure", project="One", programs_root=programs_root)
-    entry_b = route_meeting_action_to_ado_proposal(action_b, org="msazure", project="One", programs_root=programs_root)
+    entry_a = route_meeting_action_to_ado_proposal(action_a, org="contoso", project="One", programs_root=programs_root)
+    entry_b = route_meeting_action_to_ado_proposal(action_b, org="contoso", project="One", programs_root=programs_root)
 
     assert entry_a.outbox_id != entry_b.outbox_id
 
@@ -91,7 +91,7 @@ def test_title_is_truncated_when_commitment_is_very_long(tmp_path: Path) -> None
     action = approve_meeting_action(
         replace(_staged_action(), commitment="x" * 400), approved_by="pm@example.com"
     )
-    entry = route_meeting_action_to_ado_proposal(action, org="msazure", project="One", programs_root=programs_root)
+    entry = route_meeting_action_to_ado_proposal(action, org="contoso", project="One", programs_root=programs_root)
     payload = json.loads(entry.payload_json)
     assert len(payload["title"]) <= 255
 
@@ -103,7 +103,7 @@ def test_payload_omits_absent_optional_fields(tmp_path: Path) -> None:
         owner_alias=None, due_date=None, linked_work_item_id=None, blocks=(), source_span="Action: Follow up",
         extraction_method="deterministic", status="approved",
     )
-    entry = route_meeting_action_to_ado_proposal(minimal, org="msazure", project="One", programs_root=programs_root)
+    entry = route_meeting_action_to_ado_proposal(minimal, org="contoso", project="One", programs_root=programs_root)
     payload = json.loads(entry.payload_json)
     assert "assigned_to" not in payload
     assert "area_path" not in payload

@@ -107,7 +107,7 @@ class _FakeTeamsReader:
                 TeamsMessageRecord(
                     source_id="teams-1",
                     channel=channel,
-                    sender="isaiah@example.com",
+                    sender="jordan@example.com",
                     sent_at="2026-05-07T15:00:00Z",
                     web_url="https://teams.microsoft.com/l/message/1",
                     preview="ignored chat preview",

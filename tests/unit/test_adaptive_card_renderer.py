@@ -10,8 +10,8 @@ from src.m365.adaptive_card_renderer import AdaptiveCardRenderer, NudgeCardItem
 def test_render_freshness_alert_card_includes_actions() -> None:
     renderer = AdaptiveCardRenderer()
     summary = DRISummary(
-        dri_email="isaiah@example.com",
-        dri_name="Isaiah Gregory",
+        dri_email="jordan@example.com",
+        dri_name="Jordan Rivera",
         open_count=2,
         overdue_count=1,
         stale_count=1,
@@ -32,8 +32,8 @@ def test_render_freshness_alert_card_includes_actions() -> None:
         type="Feature",
         title="Deployment safety remediation",
         state="Active",
-        assigned_to="Isaiah Gregory",
-        assigned_to_email="isaiah@example.com",
+        assigned_to="Jordan Rivera",
+        assigned_to_email="jordan@example.com",
         area_path="One\\Adventure\\Acme\\Deployment",
         iteration_path="FY26\\Sprint 20",
         target_date=date(2026, 5, 1),

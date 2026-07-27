@@ -180,7 +180,7 @@ def test_session_save_uses_atomic_write(tmp_path: Path, monkeypatch) -> None:
 def test_to_onboard_draft_returns_all_five_stage_fields() -> None:
     """T7: to_onboard_draft() returns (identity, ado, structure, people, style)."""
     identity = SimpleNamespace(program_name="Test", author_email="t@t.com")
-    ado = SimpleNamespace(organization="msazure", project="One")
+    ado = SimpleNamespace(organization="contoso", project="One")
     structure = SimpleNamespace(scorecards=())
     people = SimpleNamespace(workstreams=())
     style = SimpleNamespace(voice="direct")

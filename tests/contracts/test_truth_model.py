@@ -433,6 +433,83 @@ class TestDigestFunctions:
 
 
 # ---------------------------------------------------------------------------
+# GAP-37 (specs/bklg.md BL-H1): human-readable display values for EXPLAIN
+# ---------------------------------------------------------------------------
+
+class TestExtractDisplayValue:
+    """`_extract_display_value` feeds fact.conflict's new `winning_value`/
+    `losing_value` fields. Three families' digests are already readable
+    (asserted here to differ only in exactness, not in kind, from the
+    digest); `narrative`/`judgment` is the one family whose digest is a
+    genuinely opaque hash, where display extraction adds real new info."""
+
+    def test_workitem_state_shows_raw_unlowered_value(self):
+        from src.core.truth_model import _extract_display_value
+
+        obs = MagicMock(payload={"state": "Active"})
+        assert _extract_display_value(obs, "workitem.state") == "Active"
+
+    def test_metric_shows_exact_value_not_tolerance_bucket(self):
+        from src.core.truth_model import _extract_display_value
+
+        obs = MagicMock(payload={"value": 18.95})
+        assert _extract_display_value(obs, "metric") == "18.95"
+
+    def test_incident_shows_raw_severity_and_state(self):
+        from src.core.truth_model import _extract_display_value
+
+        obs = MagicMock(payload={"severity": "High", "state": "Active"})
+        assert _extract_display_value(obs, "incident") == "High / Active"
+
+    def test_commitment_shows_raw_date_and_status(self):
+        from src.core.truth_model import _extract_display_value
+
+        obs = MagicMock(payload={"due_date": "2026-08-01", "status": "on-track"})
+        assert _extract_display_value(obs, "commitment") == "2026-08-01 / on-track"
+
+    def test_narrative_shows_real_text_where_digest_is_an_opaque_hash(self):
+        """The one family where this genuinely adds new information.
+        compute_text_human_digest excludes text/body/content from what it
+        hashes (it compares surrounding structured metadata, not the prose
+        itself) -- so two observations differing only in a metadata field
+        produce two different opaque `hash()` ints, unusable for display,
+        while _extract_display_value returns the actual readable text."""
+        from src.core.truth_model import _extract_display_value, compute_text_human_digest
+
+        obs_a = MagicMock(payload={"text": "Deployment on track for Aug 1", "url": "https://a.example.com"})
+        obs_b = MagicMock(payload={"text": "Deployment slipped to Aug 15", "url": "https://b.example.com"})
+
+        digest_a = compute_text_human_digest(obs_a.payload, resolved_entity_id="e1")
+        digest_b = compute_text_human_digest(obs_b.payload, resolved_entity_id="e1")
+        assert digest_a is not None and digest_b is not None
+        assert digest_a != digest_b
+        assert "Deployment" not in str(digest_a)  # the digest is opaque, not readable
+
+        assert _extract_display_value(obs_a, "narrative") == "Deployment on track for Aug 1"
+        assert _extract_display_value(obs_b, "narrative") == "Deployment slipped to Aug 15"
+
+    def test_narrative_truncates_long_text_to_a_snippet(self):
+        from src.core.truth_model import _extract_display_value
+
+        obs = MagicMock(payload={"text": "x" * 500})
+        value = _extract_display_value(obs, "narrative")
+        assert value is not None
+        assert len(value) == 200
+        assert value.endswith("...")
+
+    def test_none_when_relevant_fields_missing(self):
+        from src.core.truth_model import _extract_display_value
+
+        assert _extract_display_value(MagicMock(payload={}), "workitem.state") is None
+        assert _extract_display_value(MagicMock(payload={}), "narrative") is None
+
+    def test_unknown_family_returns_none(self):
+        from src.core.truth_model import _extract_display_value
+
+        assert _extract_display_value(MagicMock(payload={"state": "Active"}), "unknown") is None
+
+
+# ---------------------------------------------------------------------------
 # MATERIALITY_PREDICATES completeness
 # ---------------------------------------------------------------------------
 

@@ -92,7 +92,11 @@ LINE_BUDGETS = {
     # (closes the half-finished _build_stage_request_context regression the substrate pass left open).
     # +23 (2026-07-17, specs/armada.md D-17): _pin_gather_run_lineage() helper resolving
     # gather_run_id/gather_run_hash once after ResolutionStage, threaded into DraftState/_generate_lookback_draft.
-    "src/commands/report.py": 1556,
+    # +17 (2026-07-26, specs/bklg.md BL-E4 activation): a completed (non-dry-run) report
+    # run now ticks the people-registry enrichment reminder cadence (maybe_alert_enrichment_due,
+    # kind="report_run") right next to the existing record_adoption() call -- never calls
+    # WorkIQ itself (INV-ADF-2 is unaffected; only a between-runs alert row is written).
+    "src/commands/report.py": 1573,
     "src/core/reality_store.py": 2339,  # +6 (2026-07-13): ADF root-cause fix for the PS-14 split-brain -- _resolve_reality_db_root now defaults to programs_root.parent/"vertex-db" instead of ~/.vertex
     "src/core/channel_registry_store.py": 1976,  # +79: discovery registration persistence helpers already present on branch (2026-06-02)
 }
