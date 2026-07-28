@@ -21,6 +21,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.ai.client import AIClientError, BudgetExceeded
+from src.core.ledger.event_log import read_events
 from src.ai.rev.extractor import (
     MATERIAL_EVENT_TYPES,
     DeterministicRevExtractor,
@@ -425,6 +426,121 @@ class TestLLMRevExtractor:
                 assert span.excerpt_text in text, (
                     f"Claim excerpt_text {span.excerpt_text!r} not found in canonical text"
                 )
+
+
+# ---------------------------------------------------------------------------
+# AISchemaGateway / ai_release_audit wiring (specs/backlog.md BL-C2 caveat,
+# resolved 2026-07-27 — rev_extractor's LLM tier is a production-consequence
+# call site: its output becomes candidate program facts staged for human
+# triage, the same shape as risk_proposal_generator, which already carries
+# this exact wiring under the same "advisory" classification.)
+# ---------------------------------------------------------------------------
+
+
+class TestLLMRevExtractorAuditTrail:
+    def test_records_released_audit_trail_on_grounded_extraction(self, tmp_path: Path) -> None:
+        text = "The rollout deployment completed on 2026-06-20."
+        excerpt = "rollout deployment completed"
+        llm_response = {
+            "events": [{
+                "event_type": "deployment.completed",
+                "payload": {"status": "completed"},
+                "excerpt": excerpt,
+                "excerpt_start": text.index(excerpt),
+                "extraction_confidence": 0.95,
+            }]
+        }
+        extractor = LLMRevExtractor(
+            client=FakeClient(llm_response),
+            cache_program_id="testprog",
+            cache_programs_root=tmp_path,
+        )
+        from src.core.rev.result import Success
+        result = extractor.extract(_hydrated(text, program_id="testprog"), correlation_id="test-released")
+        assert isinstance(result, Success)
+
+        events = read_events("testprog", programs_root=tmp_path)
+        event_types = [event.event_type for event in events]
+        assert event_types.count("ai.run_lifecycle.v1") == 5
+        assert event_types.count("ai.release_decision.v1") == 1
+        release_event = next(event for event in events if event.event_type == "ai.release_decision.v1")
+        assert release_event.payload["terminal"] == "released"
+        lifecycle_states = [
+            event.payload["state"] for event in events if event.event_type == "ai.run_lifecycle.v1"
+        ]
+        assert lifecycle_states == ["planned", "requested", "responded", "schema_validated", "semantically_validated"]
+
+    def test_records_rejected_audit_trail_on_oversized_payload(self, tmp_path: Path) -> None:
+        # A payload violating AISchemaGateway's bounds (array length > 1000)
+        # must be rejected before _parse_llm_rev_payload ever inspects it,
+        # and must still fall back to the deterministic baseline (never raise).
+        text = "The deployment completed successfully."
+        oversized_response = {"events": [{"event_type": "deployment.completed"}] * 1001}
+        extractor = LLMRevExtractor(
+            client=FakeClient(oversized_response),
+            cache_program_id="testprog",
+            cache_programs_root=tmp_path,
+        )
+        from src.core.rev.result import Success
+        result = extractor.extract(_hydrated(text, program_id="testprog"), correlation_id="test-rejected")
+        assert isinstance(result, Success)
+        # Deterministic extractor still finds the completion from regex.
+        assert any(c.event_type == "deployment.completed" for c in result.value)
+
+        events = read_events("testprog", programs_root=tmp_path)
+        release_event = next(event for event in events if event.event_type == "ai.release_decision.v1")
+        assert release_event.payload["terminal"] == "rejected"
+        assert "AISchemaGateway" in release_event.payload["reason"]
+        lifecycle_states = {
+            event.payload["state"] for event in events if event.event_type == "ai.run_lifecycle.v1"
+        }
+        assert "schema_validated" not in lifecycle_states
+        assert "semantically_validated" not in lifecycle_states
+
+    def test_records_discarded_audit_trail_on_provider_error(self, tmp_path: Path) -> None:
+        text = "The deployment completed successfully."
+        extractor = LLMRevExtractor(
+            client=FakeClient(None, raise_exc=BudgetExceeded("budget")),
+            cache_program_id="testprog",
+            cache_programs_root=tmp_path,
+        )
+        from src.core.rev.result import Success
+        result = extractor.extract(_hydrated(text, program_id="testprog"), correlation_id="test-discarded")
+        assert isinstance(result, Success)
+        assert any(c.event_type == "deployment.completed" for c in result.value)
+
+        events = read_events("testprog", programs_root=tmp_path)
+        release_event = next(event for event in events if event.event_type == "ai.release_decision.v1")
+        assert release_event.payload["terminal"] == "discarded"
+        assert "provider call failed" in release_event.payload["reason"]
+        lifecycle_states = [
+            event.payload["state"] for event in events if event.event_type == "ai.run_lifecycle.v1"
+        ]
+        assert lifecycle_states == ["planned", "requested"]
+
+    def test_skips_audit_trail_when_program_id_unknown(self, tmp_path: Path) -> None:
+        # scripts/run_rev_judge.py's bare from_env() construction has no
+        # program to attribute a trail to -- the same honest limitation
+        # already accepted for anticipation_engine's no-program_id branch.
+        # Must not crash, and must not write anything.
+        text = "The rollout deployment completed on 2026-06-20."
+        excerpt = "rollout deployment completed"
+        llm_response = {
+            "events": [{
+                "event_type": "deployment.completed",
+                "payload": {"status": "completed"},
+                "excerpt": excerpt,
+                "excerpt_start": text.index(excerpt),
+                "extraction_confidence": 0.95,
+            }]
+        }
+        extractor = _llm_extractor(llm_response)  # no cache_program_id/programs_root
+        from src.core.rev.result import Success
+        result = extractor.extract(_hydrated(text), correlation_id="test-no-program")
+        assert isinstance(result, Success)
+        assert any(c.event_type == "deployment.completed" for c in result.value)
+        # No program context was ever supplied, so there is no ledger to read
+        # from at all -- the absence of a crash here is the assertion.
 
 
 # ---------------------------------------------------------------------------
