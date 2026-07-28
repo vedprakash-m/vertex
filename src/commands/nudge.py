@@ -73,6 +73,7 @@ from src.core.nudge_state_store import (
     reset_nudge_item_state,
     update_nudge_state,
 )
+from src.core.people_enrichment import maybe_alert_enrichment_due
 from src.core.program_fact_store import append_nudge_event
 from src.core.program_reality import ProgramReality
 from src.core.work_item_states import TERMINAL_WORK_ITEM_STATES
@@ -223,6 +224,23 @@ def nudge_command(
     except (AuthError, ConfigError, QueryError, StateError, RenderError, typer.BadParameter) as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(code=2)
+
+    # BL-E4: a completed nudge run is one tick of the people-registry
+    # enrichment reminder cadence (Vertex's own operational rhythm, not an
+    # OS-level wall-clock schedule -- see people_enrichment.py's
+    # maybe_alert_enrichment_due docstring). This only ever raises a
+    # between-runs alert; it never calls WorkIQ inline, mirroring
+    # report.py's own INV-ADF-2-respecting call site.
+    if not dry_run:
+        try:
+            fired = maybe_alert_enrichment_due(program_id=program, kind="nudge_run", programs_root=programs_root)
+            if fired:
+                typer.echo(
+                    f"[People] Routine WorkIQ enrichment is due. Run 'vertex kb people enrich "
+                    f"--program {program}' when convenient."
+                )
+        except (OSError, StateError):
+            pass
 
     if artifacts.degraded_section_ids:
         degraded_str = ", ".join(artifacts.degraded_section_ids)

@@ -301,6 +301,17 @@ vertex triage    --full --edition my_weekly # prioritized checklist of every att
 
 For the full weekly authoring loop (`gather` → `enrich` → `override` → `report` → `review-full` → `confirm`) and all flags, see [The Full Authoring Loop](#-the-full-authoring-loop) above and the `vertex --help` tree. The canonical command reference is regenerated from the live CLI into `specs/cli-reference.md` (local-only).
 
+### Keeping it running: recurring operational tasks
+
+Vertex has no daemon and nothing runs itself — a short list of things need to happen on a cadence you choose, either by hand or via OS scheduling:
+
+| Task | Why | Cadence | Reference |
+|---|---|---|---|
+| `vertex doctor --edition <edition>` | Catches config drift, stale/missing sources, and schema issues before they silently degrade a report | Before each report cycle (at minimum) | — |
+| `vertex gather --program <id>` | Refreshes tracked evidence (ADO/Kusto/M365) | Daily is typical; any cadence works | Manual runbook: [`governance/runbooks/armada-manual-gather-runbook.md`](governance/runbooks/armada-manual-gather-runbook.md) (Armada-specific example; the same manual pattern applies to any program). OS-scheduled alternative: [`governance/runbooks/scheduled-tasks-runbook.md`](governance/runbooks/scheduled-tasks-runbook.md) |
+| People-registry enrichment | Keeps the shared people/team directory (title, manager, etc.) from silently going stale | Event-driven, not wall-clock — Vertex reminds you automatically every few `nudge`/`report` runs | Run `vertex kb people enrich --program <id>` when the printed reminder appears |
+| `vertex backup --to <dir>` | Local safety net before a risky or irreversible operation (registry forget/DSAR, storage migration) | Before any destructive operation, and periodically otherwise | `vertex backup --verify <dir>` confirms integrity; `vertex backup --restore <dest> --from <dir>` recovers |
+
 ---
 
 ## 🔒 High-Confidence Security & Design Invariants
@@ -328,7 +339,7 @@ Vertex ships a tracked `governance/` directory with the following compliance art
 | `governance/decisions/` | Architectural Decision Records (ADR) templates and signed decisions |
 | `governance/graduations/` | AI feature graduation records (co-signed before a feature is promoted to `frontier_eligible: true`) |
 | `governance/nfr-budgets.yaml` | Non-functional/cost budget candidates pending ratification (latency, capacity, reliability, OpEx ceilings) |
-| `governance/runbooks/` | Tracked, generic operator runbooks (SoR cutover rehearsal, ledger backfill) |
+| `governance/runbooks/` | Tracked operator runbooks: SoR cutover rehearsal, ledger backfill, OS-scheduled tasks, manual Armada gather |
 
 ---
 

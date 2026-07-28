@@ -16,7 +16,9 @@ from src.commands.nudge import (
     _word_truncate_title,
     _comment_has_keyword,
 )
+from src.core.alerts import read_alerts
 from src.core.models import RiskLevel, WorkItem
+from src.core.policy_loader import FreshnessPolicy
 from tests.support.report_test_setup import stage_v2_report_workspace
 
 runner = CliRunner()
@@ -669,4 +671,41 @@ def test_nudge_cli_dry_run_exits_zero(
     result = runner.invoke(app, ["nudge", "--program", "acme", "--dry-run"])
 
     assert result.exit_code == 0, result.output
+
+
+def test_nudge_cli_real_run_fires_enrichment_cadence_alert(
+    monkeypatch,
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    """BL-E4 activation: a real (non-dry-run) 'vertex nudge' run ticks the
+    people-registry enrichment cadence and raises a between-runs alert once
+    the configured threshold is crossed -- the nudge_run side of the same
+    trigger report.py's own real-run site already exercises."""
+    stage_v2_report_workspace(repo_root, tmp_path, edition_names=("acme_weekly", "nova_nudge"))
+    programs_root = tmp_path / "programs"
+    _seed_full_hygiene_config(tmp_path / "programs")
+    _seed_people(tmp_path / "knowledge")
+    _seed_registry(programs_root)
+
+    monkeypatch.setattr("src.commands.nudge.PROGRAMS_ROOT", programs_root)
+    monkeypatch.setattr("src.commands.nudge.ADOClient", _FullHygieneFakeADOClient)
+    monkeypatch.setattr(
+        "src.core.people_enrichment.load_freshness_policy",
+        lambda: FreshnessPolicy(
+            fact_type_ttl_days={}, gather_cadence_hours={},
+            people_registry_enrichment_nudge_every=1, people_registry_enrichment_report_every=None,
+        ),
+    )
+
+    assert read_alerts("acme", programs_root=programs_root) == ()
+
+    result = runner.invoke(app, ["nudge", "--program", "acme"])
+
+    assert result.exit_code == 0, result.output
+    assert "Routine WorkIQ enrichment is due" in result.output
+    alerts = read_alerts("acme", programs_root=programs_root)
+    assert len(alerts) == 1
+    assert alerts[0].category == "people_enrichment_due"
+    assert "vertex kb people enrich --program acme" in alerts[0].next_command
     assert "Dry run:" in result.output

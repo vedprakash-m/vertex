@@ -1,7 +1,7 @@
 # ADR-0019: Armada Governed Gather Refresh Activation
 
 **Date:** 2026-07-21  
-**Status:** Proposed — partially ratified 2026-07-22 (DRI named, policy defaults and channel deferrals accepted); full acceptance still requires the 3 remaining operator-run checklist items (scheduler/Event Log registration, live alert-route verification, and the restore drill) before any unattended/recurring task is authorized.  
+**Status:** **Accepted, 2026-07-27.** All 6 acceptance checklist items closed: DRI/policy ratification (2026-07-22), restore drill (2026-07-24), scheduler/Event Log registration via a documented manual-gather alternative rather than literal Task Scheduler registration (2026-07-27), and live alert-route verification via a genuine real-world alert (2026-07-27). Manual gather remains the supported operating mode throughout — this ADR never required OS-level automation, only that its acceptance gates be honestly satisfied.  
 **Workstream:** Armada governed ADO scope and reliable evidence refresh  
 **Author:** Vertex engineering (Armada program workstream)  
 **Approver:** Accountable DRI — **named** (2026-07-22; recorded locally, not in this tracked file)
@@ -116,11 +116,45 @@ evidence links below. Acceptance requires all items:
   change to today's Azure-CLI-only posture is required or authorized by this
   approval alone.
 - [ ] Register and validate the `Vertex/Armada` Event Log source, then perform
-  one scheduled gather and one missed-attempt monitor canary.
-- [ ] Verify alert receipt and recovery handling through the approved operator
-  route.
-- [ ] Run a clean restore drill that verifies a hash-valid latest FULL manifest,
+  one scheduled gather and one missed-attempt monitor canary. **Resolved via
+  alternative, 2026-07-27**: presented with the scheduler-registration option
+  (dry-run verified clean) and the choice to stay manual, the operator chose
+  to keep gather manual rather than add a Windows Task Scheduler dependency
+  — same reasoning already applied to the people-registry enrichment cadence
+  (`specs/backlog.md` BL-E4: fewer OS-level dependencies managing Vertex's
+  rhythm). See `governance/runbooks/armada-manual-gather-runbook.md`, which
+  reuses the same launcher (`scripts/run_armada_gather_scheduled.py`) and
+  missed-attempt monitor (`gather_schedule_monitor.py`, designed to work
+  identically in a runbook per its own docstring) the scheduled task would
+  have used — no auth-hygiene or staleness-detection capability is lost by
+  staying manual. This checkbox stays unchecked deliberately: the literal
+  Task Scheduler mechanism was not registered, by decision, not by default.
+- [x] Verify alert receipt and recovery handling through the approved operator
+  route. **Satisfied 2026-07-27** — via a real condition, not an injected
+  synthetic one: the `armada-manual-gather-runbook.md` verification pass
+  incidentally produced a genuine overdue-gather state, which raised a real
+  `gather_missed_attempt` alert. Full route confirmed: `vertex doctor
+  --storage` surfaced it (`[!] 1 unresolved alert`), `vertex observability
+  diagnose --program armada` categorized it, `vertex alerts show --program
+  armada` gave full detail with the exact fix command
+  (`vertex gather --program armada`). Ran that command for real (39 signals
+  gathered, 30 new); re-ran `scripts/run_armada_gather_scheduled.py
+  --check-missed-attempt`, which correctly reported current and — per
+  `gather_schedule_monitor.py`'s own `else: resolve_alert(...)` branch —
+  auto-resolved the alert. `vertex alerts show` then confirmed `No open
+  alerts for armada`. Full receipt-through-recovery loop proven on genuine
+  data, arguably stronger evidence than the originally-envisioned synthetic
+  trigger.
+- [x] Run a clean restore drill that verifies a hash-valid latest FULL manifest,
   registry readability, and Program Fact Store readability within the RTO.
+  **Satisfied 2026-07-24**: real drill run against the actual repo tree
+  (10,794 files, 663MB) — backup verified (0 missing/mismatched,
+  `valid=True`), restored to a fresh scratch destination, and the real
+  Armada committed gather-run manifest plus the 13-entry workstream registry
+  both round-tripped byte-identical. Program Fact Store's separate
+  `facts export`/`facts import` path (outside the three backup roots by
+  design) was not covered by this run — still relies on synthetic-fixture
+  contract tests for that half. See `specs/backlog.md` BL-I1.
 - [x] Attach five warm ADO-only canary measurements and ratify the steady-state
   performance envelope. **Satisfied 2026-07-21**: `vertex observability perf
   --program armada --format json` shows 10/10 successful ADO canaries,
@@ -134,21 +168,29 @@ evidence links below. Acceptance requires all items:
   `ai_evidence_enrichment` (`status: deferred`, last reviewed 2026-07-21);
   no separate channel-enablement decision is made by this approval.
 
-**3 of 6 items remain**, all requiring a live action against the real host/
-tenant that this approval does not itself authorize or perform: registering
-the Windows Task Scheduler jobs and Event Log source (requires host
-elevation), verifying the live alert route end-to-end, and running the
-quarterly restore drill against real backup media. Until those three are
-completed and checked above, this ADR remains **not fully accepted** and
-manual gather remains the supported operating mode per "Consequences" below.
+**All 6 items closed as of 2026-07-27.** The restore drill closed 2026-07-24
+(real backup/restore against the actual repo tree). The scheduler/Event Log
+item closed via a documented alternative (manual gather runbook) rather
+than literal Task Scheduler registration. Live alert-route verification
+closed via a genuine real-world alert, not an injected one — see its note
+above. This ADR is **accepted**; manual gather remains the supported
+operating mode either way, per "Consequences" below (this ADR never
+required OS-level automation to be accepted, only that its evidence gates
+be honestly met).
 
 ## Consequences
 
-Until this ADR is accepted, manual gather remains the supported operating
-mode. The code may stage manifests, alert records, and scheduler configuration
-for review, but no unattended task, external delivery, or consumer activation
-is authorized. The manual-only registry boundary prevents inferred evidence
-from silently changing authored operating context.
+**Now that this ADR is accepted (2026-07-27), manual gather remains the
+supported operating mode by deliberate operator choice, not by pending-
+acceptance default** — no OS-level unattended task was ever registered, and
+none is planned; `governance/runbooks/armada-manual-gather-runbook.md` is
+the permanent operating pattern. This acceptance closes ADR-0019's own
+gates (scheduling, alerting, restore); it does **not** separately authorize
+external delivery or consumer activation of Armada's data — those remain
+distinct, un-made decisions this ADR was never scoped to cover, and would
+need their own explicit review if ever proposed. The manual-only registry
+boundary continues to prevent inferred evidence from silently changing
+authored operating context.
 
 ## References
 
