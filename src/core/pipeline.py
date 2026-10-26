@@ -7,7 +7,7 @@ from time import perf_counter
 from typing import Any, Callable, Protocol
 
 from src.core.models import ArchiveEntry, ArchiveIndex, EditionType, Snapshot, WorkItem
-from src.core.program_fact_store import ProgramFactSnapshot
+from src.core.program_fact_store import FactSnapshotPin, ProgramFactSnapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +98,9 @@ class StageContext:
     validation_state: Any = None
     artifacts: Any = None
     fact_snapshot: ProgramFactSnapshot | None = None
+    fact_snapshot_pin: FactSnapshotPin | None = None
+    report_reality: Any = None
+    report_reality_scope: tuple[Any, ...] | None = None
     # ADF-W2.12 (Section 8.2.6): cross-stage correlation identity, generated
     # once at report_command entry and threaded through every stage so each
     # artifact-producing stage can record a trace link sharing the same id.

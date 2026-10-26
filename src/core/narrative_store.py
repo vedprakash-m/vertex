@@ -14,6 +14,7 @@ log = logging.getLogger(__name__)
 
 from src.core.archive_store import read_archive_index
 from src.core.edition_resolver import resolve_edition_paths
+from src.core.exceptions import ConfigError
 from src.core.jinja_filters import build_anchor
 from src.core.published_narrative_store import load_published_narratives
 from src.core.snapshot_store import ARCHIVE_ROOT, get_archive_root
@@ -108,6 +109,8 @@ def load_archived_narratives(
     edition: str,
     issue_number: int,
     archive_root: Path = ARCHIVE_ROOT,
+    *,
+    reports_root: Path | None = None,
 ) -> dict[str, str]:
     directory = get_archive_root(edition, archive_root) / "narratives" / f"issue_{issue_number:03d}"
     if not directory.exists():
@@ -116,7 +119,8 @@ def load_archived_narratives(
         path.name: strip_scaffold_comments(path.read_text(encoding="utf-8"))
         for path in sorted(directory.glob("*.md"))
     }
-    return inject_narrative_placeholders(edition, issue_number, narratives, reports_root=REPORTS_ROOT)
+    resolved_reports_root = reports_root if reports_root is not None else archive_root.parent / "reports"
+    return inject_narrative_placeholders(edition, issue_number, narratives, reports_root=resolved_reports_root)
 
 
 def inject_narrative_placeholders(
@@ -173,7 +177,7 @@ def inject_narrative_placeholders(
 
     metric_map = {}
     try:
-        metric_map = load_metric_definition_map()
+        metric_map = load_metric_definition_map(metrics_root=reports_root.parent / "knowledge" / "metrics")
     except Exception as exc:  # noqa: BLE001 — best-effort metric map
         # WS-13 PB-29: metric map is advisory; absence is non-fatal.
         log.debug("narrative_store: metric map not loaded: %s", exc)
@@ -193,9 +197,6 @@ def inject_narrative_placeholders(
                 return "[value pending]"
             obs = obs_list[-1]
 
-            m_def = metric_map.get(metric_id)
-            unit = m_def.unit.strip().lower() if (m_def and m_def.unit) else "count"
-
             if obs.value_num is not None:
                 val = obs.value_num
                 if isinstance(val, float):
@@ -206,6 +207,14 @@ def inject_narrative_placeholders(
                 formatted_val = obs.value_text
             else:
                 return "[value pending]"
+
+            m_def = metric_map.get(metric_id)
+            if m_def is None or not m_def.unit.strip():
+                raise ConfigError(
+                    f"Metric {metric_id!r} requires a definition with an explicit unit; "
+                    "repair the selected metric registry before rendering."
+                )
+            unit = m_def.unit.strip().lower()
 
             if unit == "pct":
                 return f"{formatted_val}%"
@@ -514,6 +523,8 @@ def build_workstream_narrative_history(
     workstream_names: Iterable[str],
     current_workstream_blurbs: Mapping[str, str],
     archive_root: Path = ARCHIVE_ROOT,
+    *,
+    reports_root: Path | None = None,
 ) -> dict[str, tuple[str, ...]]:
     archive_index = read_archive_index(edition, archive_root=archive_root)
     previous_confirmed_issue_numbers = [
@@ -525,7 +536,10 @@ def build_workstream_narrative_history(
         return {}
 
     archived_narratives_by_issue = {
-        previous_issue_number: load_archived_narratives(edition, previous_issue_number, archive_root=archive_root)
+        previous_issue_number: load_archived_narratives(
+            edition, previous_issue_number, archive_root=archive_root,
+            **({"reports_root": reports_root} if reports_root is not None else {}),
+        )
         for previous_issue_number in previous_confirmed_issue_numbers
     }
     history: dict[str, tuple[str, ...]] = {}
@@ -686,7 +700,7 @@ def _load_seed_source_narratives(
     archive_root: Path,
 ) -> tuple[dict[str, str], str | None]:
     published = load_published_narratives(edition, issue_number, archive_root=archive_root)
-    archived = load_archived_narratives(edition, issue_number, archive_root=archive_root)
+    archived = load_archived_narratives(edition, issue_number, archive_root=archive_root, reports_root=reports_root)
     if published:
         merged = dict(archived)
         merged.update(published)
@@ -706,7 +720,7 @@ def _load_fallback_source_narratives(
     reports_root: Path,
     archive_root: Path,
 ) -> tuple[dict[str, str], str | None]:
-    archived = load_archived_narratives(edition, issue_number, archive_root=archive_root)
+    archived = load_archived_narratives(edition, issue_number, archive_root=archive_root, reports_root=reports_root)
     if archived:
         return archived, "archive"
     local = load_narratives(edition, issue_number, reports_root=reports_root)

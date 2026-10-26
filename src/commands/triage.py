@@ -82,6 +82,7 @@ from src.core.archive_store import get_dimension_history, read_archive_index
 from src.core.edition_resolver import get_nudge_paths, get_program_output_dir, resolve_edition, PROGRAMS_ROOT
 from src.core.freshness_engine import build_freshness_report
 from src.core.vitality_reporting import vitality_settings_from_program
+from src.core.workspace_paths import validate_report_workspace
 
 
 WorkItemLoader = report_command_helpers.WorkItemLoader
@@ -94,10 +95,19 @@ class TriageArtifacts:
     gather_integration_details: tuple[dict[str, str | bool | None], ...] = ()
 
 
+def _preflight_triage_workspace() -> None:
+    try:
+        validate_report_workspace(programs_root=PROGRAMS_ROOT, reports_root=REPORTS_ROOT, archive_root=ARCHIVE_ROOT)
+    except ConfigError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=2) from error
+
+
 def triage_command(
     edition: str = typer.Option(..., "--edition", help="Edition id, e.g. myprogram_weekly."),
     format: str = typer.Option("human", "--format", help="Output format: human, json, or csv."),
 ) -> None:
+    _preflight_triage_workspace()
     artifacts = generate_triage_report(edition)
     if format == "human":
         _echo_console_safe(render_triage_report(artifacts.report))
@@ -373,9 +383,14 @@ def generate_triage_report(
     work_item_loader: WorkItemLoader | None = None,
     vitality_loader: vitality_command_helpers.VitalityLoader | None = None,
 ) -> TriageArtifacts:
-    resolved_reports_root = reports_root or REPORTS_ROOT
-    resolved_archive_root = archive_root or ARCHIVE_ROOT
-    programs_root = resolved_reports_root.parent / "programs"
+    resolved_reports_root = reports_root if reports_root is not None else REPORTS_ROOT
+    resolved_archive_root = archive_root if archive_root is not None else ARCHIVE_ROOT
+    programs_root = reports_root.parent / "programs" if reports_root is not None else PROGRAMS_ROOT
+    validate_report_workspace(
+        programs_root=programs_root,
+        reports_root=resolved_reports_root,
+        archive_root=resolved_archive_root,
+    )
     current_time = as_of or datetime.now(timezone.utc)
 
     load_result = load_bundle_with_mode(
@@ -609,7 +624,7 @@ def generate_triage_report(
             if points
         }
         drift_patterns = analyze_trajectories(populated_trajectories, as_of=current_time.date()) if populated_trajectories else ()
-        _reality = ProgramReality.load(program_id, programs_root=programs_root)
+        _reality = ProgramReality.load(program_id, programs_root=programs_root, archive_root=resolved_archive_root)
         program_facts = _reality._snapshot
         # .record strips are intentional here: triage's downstream consumers
         # (cascade detection, critical-path graph, _build_*_triage_lines) consume
@@ -696,6 +711,7 @@ def generate_triage_report(
         milestone_summaries, milestone_attention = _build_milestone_triage_lines(
             program_id=program_id,
             programs_root=programs_root,
+            archive_root=resolved_archive_root,
             items=items,
             dependencies=dependencies,
             as_of=current_time,
@@ -727,6 +743,7 @@ def generate_triage_report(
         assumption_summaries, assumption_attention = _build_assumption_triage_lines(
             program_id=program_id,
             programs_root=programs_root,
+            archive_root=resolved_archive_root,
             as_of=current_time,
         )
         integration_diagnostics, gather_integration_details = _load_gather_integration_diagnostics(
@@ -876,6 +893,7 @@ def generate_triage_report(
             scorecards=resolved_scorecards,
             archive_root=resolved_archive_root,
             programs_root=programs_root,
+            reports_root=resolved_reports_root,
         ),
     )
 
@@ -1370,6 +1388,7 @@ def _build_milestone_triage_lines(
     *,
     program_id: str,
     programs_root: Path,
+    archive_root: Path,
     items: tuple[WorkItem, ...],
     dependencies: tuple,
     as_of: datetime,
@@ -1377,7 +1396,7 @@ def _build_milestone_triage_lines(
     try:
         milestones = tuple(
             a.record
-            for a in ProgramReality.load(program_id, programs_root=programs_root).milestones()
+            for a in ProgramReality.load(program_id, programs_root=programs_root, archive_root=archive_root).milestones()
         )
     except ConfigError as exc:
         return (), (f"Milestones skipped: {exc}",)
@@ -1715,6 +1734,7 @@ def _build_assumption_triage_lines(
     *,
     program_id: str,
     programs_root: Path,
+    archive_root: Path,
     as_of: datetime,
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     assumptions = tuple(
@@ -1722,6 +1742,7 @@ def _build_assumption_triage_lines(
         for a in ProgramReality.load(
             program_id,
             programs_root=programs_root,
+            archive_root=archive_root,
         ).assumptions()
     )
     if not assumptions:

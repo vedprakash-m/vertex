@@ -7,9 +7,9 @@ from pathlib import Path
 import yaml
 
 from src.core.exceptions import ConfigError
+from src.core.workspace_paths import PROGRAMS_ROOT
 
 
-PROGRAMS_ROOT = Path(__file__).resolve().parents[2] / "programs"
 
 # Valid modes for program-level and per-family SoR state.
 _VALID_MODES = frozenset({"legacy", "shadow", "primary"})

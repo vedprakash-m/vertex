@@ -176,6 +176,7 @@ def evaluate_phase_1b_gates(
     programs_root: Path = PROGRAMS_ROOT,
     budget_usd_per_run: float = 0.0,
     stale_claim_ids: Collection[str] = (),
+    reports_root: Path | None = None,
 ) -> QualityGateReport:
     resolved_items = tuple(items)
     resolved_publishable_item_ids = (
@@ -225,6 +226,7 @@ def evaluate_phase_1b_gates(
             workstream_blurbs=workstream_blurbs,
             program_context=program_context,
             archive_root=archive_root,
+            reports_root=reports_root,
         ),
         _evaluate_claim_contradiction_gate(
             items=resolved_items,
@@ -287,6 +289,7 @@ def evaluate_phase_1b_gates(
         _evaluate_exec_summary_staleness_gate(
             edition_name=edition_name,
             issue_number=issue_number,
+            reports_root=reports_root if reports_root is not None else programs_root.parent / "reports",
         ),
         _evaluate_email_signal_coverage_gate(
             channel_states=channel_states,
@@ -297,6 +300,7 @@ def evaluate_phase_1b_gates(
             program_id=program_id,
             narratives=narratives,
             items=resolved_items,
+            programs_root=programs_root,
         ),
         _evaluate_external_dependency_gate(
             program_id=program_id,
@@ -387,6 +391,17 @@ def _evaluate_hash_chain_integrity_gate(*, program_id: str | None, programs_root
 
     verification = verify_event_log(program_id, programs_root=programs_root)
     if verification.ok:
+        if verification.imported_event_count:
+            return GateEvaluation(
+                "QG-DM-1",
+                True,
+                (
+                    f"Hash-chain integrity gate passed "
+                    f"({verification.checked_event_count - verification.imported_event_count} sealed event(s) verified; "
+                    f"{verification.imported_event_count} imported pre-history event(s) verified by content hash)."
+                ),
+                3,
+            )
         return GateEvaluation(
             "QG-DM-1",
             True,
@@ -394,10 +409,29 @@ def _evaluate_hash_chain_integrity_gate(*, program_id: str | None, programs_root
             3,
         )
 
+    linkage_only = verification.content_hash_issue_count == 0
+    if linkage_only:
+        return GateEvaluation(
+            "QG-DM-1",
+            False,
+            (
+                f"Hash-chain linkage failed for {len(verification.issues)} event(s); "
+                f"all {verification.checked_event_count} content hashes verify, so payloads are intact. "
+                f"Declare a chain baseline before publication: "
+                f"{'; '.join(verification.issues[:5])}"
+                + (" ..." if len(verification.issues) > 5 else "")
+            ),
+            3,
+        )
+
     return GateEvaluation(
         "QG-DM-1",
         False,
-        f"Hash-chain integrity failed: {'; '.join(verification.issues)}",
+        (
+            f"Hash-chain integrity failed with {verification.content_hash_issue_count} content-hash "
+            f"mismatch(es) (payload tampering): {'; '.join(verification.issues[:5])}"
+            + (" ..." if len(verification.issues) > 5 else "")
+        ),
         3,
     )
 
@@ -738,4 +772,3 @@ def _coerce_date(value: date | datetime) -> date:
 
 def _coerce_datetime(value: date | datetime) -> datetime:
     return _coerce_datetime_impl(value)
-

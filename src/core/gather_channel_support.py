@@ -18,14 +18,17 @@ def integration_operator_action(source: str) -> str | None:
     return None
 
 
-def build_integration_error(*, source: str, stage: str, error: str) -> IntegrationError:
+def build_integration_error(
+    *, source: str, stage: str, error: str, retryable: bool = True,
+    operator_action: str | None = None,
+) -> IntegrationError:
     normalized_error = error.strip() or "Unknown integration error"
     return IntegrationError(
         source=source,
         stage=stage,
-        retryable=True,
+        retryable=retryable,
         message=normalized_error,
-        operator_action=integration_operator_action(source),
+        operator_action=operator_action if operator_action is not None else integration_operator_action(source),
     )
 
 
@@ -35,10 +38,15 @@ def append_integration_error_once(
     source: str,
     stage: str,
     error: str,
+    retryable: bool = True,
+    operator_action: str | None = None,
 ) -> bool:
     if sink is None:
         return False
-    detail = build_integration_error(source=source, stage=stage, error=error)
+    detail = build_integration_error(
+        source=source, stage=stage, error=error, retryable=retryable,
+        operator_action=operator_action,
+    )
     identity = (detail.source.strip().lower(), detail.stage.strip().lower(), detail.message)
     for existing in sink:
         if (existing.source.strip().lower(), existing.stage.strip().lower(), existing.message) == identity:

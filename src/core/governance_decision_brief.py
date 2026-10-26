@@ -45,6 +45,11 @@ class GovernanceDecisionBriefError(Exception):
 class GovernanceDecisionOption:
     label: str
     tradeoffs: str
+    # RELO-W4.6 (Sec 8.4.7 "evidence and unknowns per option"): at least one
+    # of these two must be populated for a released brief -- an option that
+    # states neither has said nothing about its evidentiary basis.
+    evidence_refs: tuple[str, ...] = ()
+    unknowns: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +77,14 @@ class GovernanceDecisionBriefProposal:
     ai_run_id: str
     status: GovernanceDecisionStatus = "staged"
     rejection_reason: str | None = None
+    # RELO-W4.6 (Sec 8.4.7 "follow-up action and source references"): the
+    # concrete next step once the decision is made. Defaulted (not a hard
+    # dataclass-required field) so legacy/persisted records without it still
+    # round-trip; "required" is enforced at the generation/release boundary
+    # in governance_decision_brief_generator.py's _validate_semantics, the
+    # same place owner_alias/due_date are now enforced -- consistent with
+    # this codebase's tolerant-reader-at-storage, strict-at-release pattern.
+    follow_up_action: str = ""
     # ADF-W2.11/W4.8 (ADR-0017): additive workflow-measurement timestamps.
     proposed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     decided_at: datetime | None = None

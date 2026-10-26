@@ -14,9 +14,9 @@ from src.core.backup import _hash_file
 from src.core.exceptions import ConfigError
 from src.core.knowledge_store import get_shared_knowledge_root
 from src.core.yaml_utils import load_yaml_mapping
+from src.core.workspace_paths import PROGRAMS_ROOT
 
 
-PROGRAMS_ROOT = Path(__file__).resolve().parents[3] / "programs"
 
 
 @dataclass(frozen=True, slots=True)

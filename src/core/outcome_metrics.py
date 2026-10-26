@@ -18,8 +18,9 @@ from pathlib import Path
 
 from src.core.cockpit_models import ValueConfidence
 from src.core.edition_resolver import PROGRAMS_ROOT
-from src.core.ledger.event_log import read_events
-from src.core.quality_gates.ai_release_audit import ReleaseTerminal, released_terminal_for_run
+from src.core.exceptions import ConfigError
+from src.core.ledger.event_log import EventEnvelope, read_events
+from src.core.quality_gates.ai_release_audit import ReleaseTerminal
 
 #: ai.application_receipt.v1 receipt values that mean the AI output was
 #: genuinely consumed (as opposed to "not_applied"/"failed", where nothing
@@ -62,7 +63,30 @@ def compute_om1_hallucination_rate(program_id: str, *, programs_root: Path = PRO
     )
 
 
-def compute_om2_duplicate_entities(program_id: str, *, programs_root: Path = PROGRAMS_ROOT) -> OutcomeMetricResult:
+def _metric_events(
+    program_id: str, *, programs_root: Path, events: tuple[EventEnvelope, ...] | None = None,
+) -> tuple[EventEnvelope, ...]:
+    if events is None:
+        events = read_events(program_id, programs_root=programs_root, repair_corruption=False)
+    if any(event.program_id != program_id for event in events):
+        raise ConfigError("Event snapshot does not match the requested program.")
+    return events
+
+
+def _unavailable_ledger_metric(metric_id: str, unit: str) -> OutcomeMetricResult:
+    return OutcomeMetricResult(
+        metric_id=metric_id,
+        value=None,
+        unit=unit,
+        confidence=ValueConfidence.UNAVAILABLE,
+        detail="Could not read this program's event ledger.",
+        evidence_refs=(),
+    )
+
+
+def compute_om2_duplicate_entities(
+    program_id: str, *, programs_root: Path = PROGRAMS_ROOT, events: tuple[EventEnvelope, ...] | None = None,
+) -> OutcomeMetricResult:
     """OM-2: zero duplicate ADO entities created.
 
     Unavailable: src/core/actuation_outbox.py is not yet wired to a live
@@ -75,9 +99,9 @@ def compute_om2_duplicate_entities(program_id: str, *, programs_root: Path = PRO
     measures prevention attempts, not this outcome.
     """
     try:
-        events = read_events(program_id, programs_root=programs_root)
-    except Exception:
-        events = ()
+        events = _metric_events(program_id, programs_root=programs_root, events=events)
+    except (OSError, ConfigError, UnicodeError):
+        return _unavailable_ledger_metric("om2_duplicate_entities", "count")
     duplicate_preventions = sum(1 for event in events if event.event_type == "actuation.duplicate_prevented.v1")
     return OutcomeMetricResult(
         metric_id="om2_duplicate_entities",
@@ -94,25 +118,21 @@ def compute_om2_duplicate_entities(program_id: str, *, programs_root: Path = PRO
     )
 
 
-def compute_om4_audit_coverage(program_id: str, *, programs_root: Path = PROGRAMS_ROOT) -> OutcomeMetricResult:
+def compute_om4_audit_coverage(
+    program_id: str, *, programs_root: Path = PROGRAMS_ROOT, events: tuple[EventEnvelope, ...] | None = None,
+) -> OutcomeMetricResult:
     """OM-4: zero unaudited AI outputs consumed.
 
     Measured: ai.application_receipt.v1 / ai.release_decision.v1 are real,
     SOURCE_AUTHORITATIVE ledger events BL-C3 writes on every AI consumption
     it covers. audit_coverage = (consumed AI runs with a durable 'released'
     terminal) / (all consumed AI runs). 1.0 == fully compliant.
+    Reuse a supplied event tuple, or read without repairing the ledger.
     """
     try:
-        events = read_events(program_id, programs_root=programs_root)
-    except Exception:
-        return OutcomeMetricResult(
-            metric_id="om4_audit_coverage",
-            value=None,
-            unit="ratio",
-            confidence=ValueConfidence.UNAVAILABLE,
-            detail="Could not read this program's event ledger.",
-            evidence_refs=(),
-        )
+        events = _metric_events(program_id, programs_root=programs_root, events=events)
+    except (OSError, ConfigError, UnicodeError):
+        return _unavailable_ledger_metric("om4_audit_coverage", "ratio")
 
     consumed_run_ids: set[str] = set()
     for event in events:
@@ -133,12 +153,14 @@ def compute_om4_audit_coverage(program_id: str, *, programs_root: Path = PROGRAM
             evidence_refs=(),
         )
 
-    released_count = sum(
-        1
-        for ai_run_id in consumed_run_ids
-        if released_terminal_for_run(ai_run_id, program_id=program_id, programs_root=programs_root)
-        is ReleaseTerminal.RELEASED
-    )
+    latest_terminals: dict[str, ReleaseTerminal] = {}
+    for event in events:
+        if event.event_type != "ai.release_decision.v1":
+            continue
+        ai_run_id = event.payload.get("ai_run_id")
+        if isinstance(ai_run_id, str) and ai_run_id in consumed_run_ids:
+            latest_terminals[ai_run_id] = ReleaseTerminal(event.payload["terminal"])
+    released_count = sum(latest_terminals.get(run_id) is ReleaseTerminal.RELEASED for run_id in consumed_run_ids)
     coverage = released_count / len(consumed_run_ids)
     unaudited = len(consumed_run_ids) - released_count
     detail = (
@@ -187,10 +209,18 @@ def compute_all_outcome_metrics(
 ) -> tuple[OutcomeMetricResult, ...]:
     """OM-1, OM-2, OM-4, OM-5 in that order. OM-3 (frontier $/cycle cost) is
     explicitly out of BL-C7's scope -- see governance/outcome-metrics.md."""
+    try:
+        events = _metric_events(program_id, programs_root=programs_root)
+    except (OSError, ConfigError, UnicodeError):
+        om2 = _unavailable_ledger_metric("om2_duplicate_entities", "count")
+        om4 = _unavailable_ledger_metric("om4_audit_coverage", "ratio")
+    else:
+        om2 = compute_om2_duplicate_entities(program_id, programs_root=programs_root, events=events)
+        om4 = compute_om4_audit_coverage(program_id, programs_root=programs_root, events=events)
     return (
         compute_om1_hallucination_rate(program_id, programs_root=programs_root),
-        compute_om2_duplicate_entities(program_id, programs_root=programs_root),
-        compute_om4_audit_coverage(program_id, programs_root=programs_root),
+        om2,
+        om4,
         compute_om5_operator_friction(program_id, programs_root=programs_root),
     )
 

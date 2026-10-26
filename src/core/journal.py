@@ -14,10 +14,10 @@ from typing import Any, Literal, cast
 from src.core.models import Confidence
 from src.core.models_v2 import ReviewPolicy, Signal, SignalReviewDecision, SignalThreadLink, SignalUsageMarker
 from src.core.signal_classification import classify_signal
+from src.core.workspace_paths import PROGRAMS_ROOT
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PROGRAMS_ROOT = REPO_ROOT / "programs"
 
 # High-risk append-only files — grow with every review decision / usage marker
 # (reviews.jsonl) and every signal thread link (signal_threads.jsonl).  The

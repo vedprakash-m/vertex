@@ -203,7 +203,7 @@ def build_forecast_assessment(
         )
         closure_velocity = sum(
             1
-            for item in active_items
+            for item in workstream.items
             for delta in delta_lookup.get(item.id, ())
             if delta.kind == DeltaKind.CLOSED
         )

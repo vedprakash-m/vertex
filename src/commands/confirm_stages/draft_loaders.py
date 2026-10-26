@@ -11,17 +11,54 @@ under their historical private aliases; ``load_optional_yaml_mapping`` and
 
 from __future__ import annotations
 
-import json
+from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Any
 
 import typer
 import yaml
 
 from src.core.edition_resolver import find_edition_yaml, get_program_output_dir, PROGRAMS_ROOT
+from src.core.draft_artifact_store import load_draft_state as load_optional_draft_state
+from src.core.draft_artifact_store import load_draft_manifest as load_optional_draft_manifest
+from src.core.exceptions import StateError
 from src.core.models import ReviewSection, ReviewState, ReviewStatus
 from src.core.overrides_store import OverridesDocument, load_overrides, merge_overrides
 from src.core.review_status_store import load_review_status
+
+
+@dataclass(frozen=True, slots=True)
+class ConfirmDraftManifest:
+    edition_name: str
+    issue_number: int
+    programs_root: Path
+    manifest_id: str
+    config_hash: str
+    ai_safety: dict[str, Any] | None
+    draft_readiness: dict[str, Any] | None
+
+
+def load_confirm_draft_manifest(
+    edition_name: str, issue_number: int, *, programs_root: Path = PROGRAMS_ROOT,
+) -> ConfirmDraftManifest:
+    payload = _load_manifest(edition_name, issue_number, programs_root=programs_root)
+    manifest_id = _require_manifest_id(payload, edition_name, issue_number, programs_root=programs_root)
+    config_hash = payload.get("config_hash") if payload is not None else None
+    if not isinstance(config_hash, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", config_hash) is None:
+        raise typer.BadParameter(
+            f"Invalid or missing draft config hash for edition {edition_name!r}, issue {issue_number:03d}. "
+            "Preserve the existing artifacts and re-run `vertex report --dry-run` before confirming."
+        )
+    return ConfirmDraftManifest(
+        edition_name=edition_name,
+        issue_number=issue_number,
+        programs_root=programs_root.absolute(),
+        manifest_id=manifest_id,
+        config_hash=config_hash,
+        ai_safety=_project_draft_metadata_field(payload, "ai_safety", edition_name, issue_number),
+        draft_readiness=_project_draft_metadata_field(payload, "draft_readiness", edition_name, issue_number),
+    )
 
 
 def load_confirm_overrides(edition_name: str, issue_number: int, bundle, reports_root: Path) -> OverridesDocument:
@@ -46,18 +83,49 @@ def load_draft_readiness_metadata(
     issue_number: int,
     programs_root: Path = PROGRAMS_ROOT,
 ) -> dict[str, Any] | None:
-    manifest_path = get_program_output_dir(edition_name, programs_root=programs_root) / f"issue_{issue_number:03d}" / f"issue_{issue_number:03d}.manifest.json"
-    if not manifest_path.exists():
-        return None
+    return _load_draft_metadata_field(
+        "draft_readiness", edition_name=edition_name, issue_number=issue_number, programs_root=programs_root,
+    )
+
+
+def _load_manifest(
+    edition_name: str, issue_number: int, *, programs_root: Path,
+) -> dict[str, Any] | None:
     try:
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        return load_optional_draft_manifest(edition_name, issue_number, programs_root=programs_root)
+    except StateError as error:
+        raise typer.BadParameter(str(error)) from error
+
+
+def _load_draft_metadata_field(
+    field: str, *, edition_name: str, issue_number: int, programs_root: Path,
+) -> dict[str, Any] | None:
+    payload = _load_manifest(edition_name, issue_number, programs_root=programs_root)
+    return _project_draft_metadata_field(payload, field, edition_name, issue_number)
+
+
+def _project_draft_metadata_field(
+    payload: dict[str, Any] | None, field: str, edition_name: str, issue_number: int,
+) -> dict[str, Any] | None:
+    if payload is None:
         return None
     metadata = payload.get("metadata")
-    if not isinstance(metadata, dict):
+    if metadata is None:
         return None
-    draft_readiness = metadata.get("draft_readiness")
-    return dict(draft_readiness) if isinstance(draft_readiness, dict) else None
+    if not isinstance(metadata, dict):
+        raise typer.BadParameter(
+            f"Invalid draft manifest metadata for edition {edition_name!r}, issue {issue_number:03d}: "
+            "expected a JSON object. Preserve the existing artifact and review it before retrying."
+        )
+    value = metadata.get(field)
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise typer.BadParameter(
+            f"Invalid draft manifest {field} metadata for edition {edition_name!r}, issue {issue_number:03d}: "
+            "expected a JSON object. Preserve the existing artifact and review it before retrying."
+        )
+    return dict(value)
 
 
 def load_readiness_gate_settings(
@@ -71,35 +139,76 @@ def load_readiness_gate_settings(
     snapshot_max_age_days: int | None = None
 
     if program_id is not None:
-        program_document = load_optional_yaml_mapping(programs_root / program_id / "program.yaml")
+        program_path = programs_root / program_id / "program.yaml"
+        program_document = load_optional_yaml_mapping(program_path) or {}
         readiness_document = program_document.get("readiness")
-        if isinstance(readiness_document, dict):
-            program_enabled = bool(readiness_document.get("gate", False))
-            snapshot_max_age_days = coerce_optional_int(readiness_document.get("snapshot_max_age_days"))
+        if readiness_document is not None:
+            if not isinstance(readiness_document, dict):
+                raise typer.BadParameter(
+                    f"Invalid readiness settings in {program_path}: expected a mapping. "
+                    "Preserve the file and review it before retrying."
+                )
+            program_enabled = _readiness_gate_enabled(readiness_document, "gate", program_path)
+            snapshot_max_age_days = _readiness_age(readiness_document, "snapshot_max_age_days", program_path)
 
     edition_yaml_path = editions_root / f"{edition_name}.yaml"
-    if not edition_yaml_path.exists():
-        # Fallback to the programs tree when the legacy flat editions_root is empty
-        # (editions now live under programs/<id>/editions/).
-        candidate = find_edition_yaml(edition_name, programs_root=programs_root)
-        if candidate.exists():
-            edition_yaml_path = candidate
     edition_document = load_optional_yaml_mapping(edition_yaml_path)
-    edition_enabled = bool(edition_document.get("readiness_gate", False))
+    if edition_document is None:
+        edition_yaml_path = find_edition_yaml(edition_name, programs_root=programs_root)
+        edition_document = load_optional_yaml_mapping(edition_yaml_path) or {}
+    edition_enabled = _readiness_gate_enabled(edition_document, "readiness_gate", edition_yaml_path)
     if snapshot_max_age_days is None:
-        snapshot_max_age_days = coerce_optional_int(edition_document.get("readiness_snapshot_max_age_days"))
+        snapshot_max_age_days = _readiness_age(edition_document, "readiness_snapshot_max_age_days", edition_yaml_path)
 
     return program_enabled or edition_enabled, snapshot_max_age_days
 
 
-def load_optional_yaml_mapping(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {}
+def load_optional_yaml_mapping(path: Path) -> dict[str, Any] | None:
     try:
-        document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError):
-        return {}
-    return document if isinstance(document, dict) else {}
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as error:
+        raise typer.BadParameter(
+            f"Cannot read readiness settings at {path} ({type(error).__name__}). "
+            "Preserve the file; check access and UTF-8 before retrying."
+        ) from error
+    try:
+        document = yaml.safe_load(text)
+    except (yaml.YAMLError, ValueError) as error:
+        raise typer.BadParameter(
+            f"Cannot parse readiness settings at {path} ({type(error).__name__}). "
+            "Preserve the file; check YAML syntax and values before retrying."
+        ) from error
+    if not isinstance(document, dict):
+        raise typer.BadParameter(
+            f"Invalid readiness settings at {path}: expected a YAML mapping. "
+            "Preserve the file and review it before retrying."
+        )
+    return document
+
+
+def _readiness_gate_enabled(document: dict[str, Any], field: str, path: Path) -> bool:
+    value = document.get(field)
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise typer.BadParameter(
+            f"Invalid readiness setting {field} in {path}: expected a boolean. "
+            "Preserve the file and review it before retrying."
+        )
+    return value
+
+
+def _readiness_age(document: dict[str, Any], field: str, path: Path) -> int | None:
+    value = document.get(field)
+    age = coerce_optional_int(value)
+    if value is not None and age is None:
+        raise typer.BadParameter(
+            f"Invalid readiness setting {field} in {path}: expected an integer age in days. "
+            "Preserve the file and review it before retrying."
+        )
+    return age
 
 
 def coerce_optional_int(value: Any) -> int | None:
@@ -110,7 +219,10 @@ def coerce_optional_int(value: Any) -> int | None:
     if isinstance(value, float) and value.is_integer():
         return int(value)
     if isinstance(value, str) and value.strip().isdigit():
-        return int(value.strip())
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
     return None
 
 
@@ -120,18 +232,9 @@ def load_draft_ai_safety_metadata(
     issue_number: int,
     programs_root: Path = PROGRAMS_ROOT,
 ) -> dict[str, Any] | None:
-    manifest_path = get_program_output_dir(edition_name, programs_root=programs_root) / f"issue_{issue_number:03d}" / f"issue_{issue_number:03d}.manifest.json"
-    if not manifest_path.exists():
-        return None
-    try:
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    metadata = payload.get("metadata")
-    if not isinstance(metadata, dict):
-        return None
-    ai_safety = metadata.get("ai_safety")
-    return dict(ai_safety) if isinstance(ai_safety, dict) else None
+    return _load_draft_metadata_field(
+        "ai_safety", edition_name=edition_name, issue_number=issue_number, programs_root=programs_root,
+    )
 
 
 def load_confirm_review_status(
@@ -176,31 +279,35 @@ def load_confirm_review_status(
 
 
 def load_draft_state(edition_name: str, issue_number: int, *, programs_root: Path = PROGRAMS_ROOT) -> dict[str, Any]:
-    path = get_program_output_dir(edition_name, programs_root=programs_root) / f"issue_{issue_number:03d}" / f"issue_{issue_number:03d}.draft.json"
-    if not path.exists():
+    try:
+        payload = load_optional_draft_state(edition_name, issue_number, programs_root=programs_root)
+    except StateError as error:
+        raise typer.BadParameter(str(error)) from error
+    if payload is None:
+        path = get_program_output_dir(edition_name, programs_root=programs_root) / f"issue_{issue_number:03d}" / f"issue_{issue_number:03d}.draft.json"
         raise typer.BadParameter(
             f"Draft state not found at {path}. Run `vertex report --dry-run --edition {edition_name} --issue {issue_number}` first."
         )
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise typer.BadParameter(f"Draft state at {path} is invalid.") from error
-    if not isinstance(payload, dict):
-        raise typer.BadParameter(f"Draft state at {path} is invalid.")
     return payload
 
 
 def load_current_draft_manifest_id(edition_name: str, issue_number: int, *, programs_root: Path = PROGRAMS_ROOT) -> str:
-    path = get_program_output_dir(edition_name, programs_root=programs_root) / f"issue_{issue_number:03d}" / f"issue_{issue_number:03d}.manifest.json"
-    if not path.exists():
+    payload = _load_manifest(edition_name, issue_number, programs_root=programs_root)
+    return _require_manifest_id(payload, edition_name, issue_number, programs_root=programs_root)
+
+
+def _require_manifest_id(
+    payload: dict[str, Any] | None, edition_name: str, issue_number: int, *, programs_root: Path,
+) -> str:
+    if payload is None:
+        path = get_program_output_dir(edition_name, programs_root=programs_root) / f"issue_{issue_number:03d}" / f"issue_{issue_number:03d}.manifest.json"
         raise typer.BadParameter(
             f"Manifest not found at {path}. Run `vertex report --dry-run --edition {edition_name} --issue {issue_number}` first."
         )
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise typer.BadParameter(f"Manifest at {path} is invalid.") from error
-    manifest_id = payload.get("manifest_id") if isinstance(payload, dict) else None
-    if not manifest_id:
-        raise typer.BadParameter(f"Manifest at {path} is invalid.")
-    return str(manifest_id)
+    manifest_id = payload.get("manifest_id")
+    if not isinstance(manifest_id, str) or not manifest_id.strip():
+        raise typer.BadParameter(
+            f"Invalid draft manifest for edition {edition_name!r}, issue {issue_number:03d}: "
+            "manifest_id must be a nonblank string. Preserve the existing artifact and review it before retrying."
+        )
+    return manifest_id

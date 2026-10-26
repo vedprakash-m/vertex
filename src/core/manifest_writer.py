@@ -87,9 +87,12 @@ def hash_content(content: str | bytes) -> str:
     return f"sha256:{hashlib.sha256(raw_bytes).hexdigest()}"
 
 
-def _hash_jsonable(value: Any) -> str:
+def hash_jsonable(value: Any) -> str:
     payload = json.dumps(_to_jsonable(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hash_content(payload)
+
+
+_hash_jsonable = hash_jsonable
 
 
 def _write_atomic_json(path: Path, payload: dict[str, Any]) -> None:

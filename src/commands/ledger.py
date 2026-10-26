@@ -23,6 +23,7 @@ from src.core.knowledge.vault import load_all_vault_entries, load_shared_vault_v
 from src.core.knowledge.vault_integrity import summarize_knowledge_vault_integrity
 from src.core.ledger.evidence_vault import delete_evidence_vault_entry, evidence_vault_entry_status, evidence_vault_paths, load_evidence_vault_entries
 from src.core.ledger.redaction import load_redaction_registry, redact_event
+from src.core.ledger.chain_baseline import ChainBaseline, load_chain_baseline, write_chain_baseline
 from src.core.ledger.event_type_registry import EventDisposition, lookup_event_spec
 from src.core.ledger.fact_bridge import append_bridged_assumption_event, append_bridged_commitment_event, append_bridged_decision_event, append_bridged_dependency_event, append_bridged_milestone_event, append_bridged_risk_event, append_bridged_workstream_event, sync_bridged_risk_corroboration
 from src.core.rev.privacy import run_local_checks
@@ -1355,6 +1356,91 @@ def import_command(
     typer.echo(f"Staged {len(candidates)} candidates in batch {batch_id}.")
     typer.echo(
         f"Review with: vertex ledger triage list --program {program} --batch-id {batch_id}"
+    )
+
+
+@app.command("baseline")
+def ledger_baseline(
+    program: str = typer.Option(..., "--program", "-p", help="Program ID."),
+    show: bool = typer.Option(False, "--show", help="Show the current chain baseline and exit."),
+    at_event_id: str | None = typer.Option(None, "--at-event-id", help="Event ID where the sealed chain starts."),
+    at_first_event_on_or_after: str | None = typer.Option(
+        None,
+        "--at-first-event-on-or-after",
+        help="ISO date/datetime; the first event recorded at or after it starts the sealed chain.",
+    ),
+    reason: str | None = typer.Option(None, "--reason", help="Why the earlier segment is imported pre-history."),
+    actor: str | None = typer.Option(None, "--actor", help="Operator declaring the baseline."),
+    programs_root: Path = typer.Option(PROGRAMS_ROOT, "--programs-root", hidden=True),
+) -> None:
+    """Declare where a program's verified hash chain starts.
+
+    Events before the baseline are imported pre-history: they are still verified
+    by content hash, but their chain linkage is not checked. Use this when a
+    bootstrap/bulk-ingest segment was never sealed consistently, instead of
+    re-sealing the chain (which would rewrite history and invalidate every
+    recorded snapshot head hash).
+    """
+    existing = load_chain_baseline(program, programs_root=programs_root)
+    if show:
+        if existing is None:
+            typer.echo(f"No chain baseline declared for {program!r}.")
+            return
+        typer.echo(
+            f"program={existing.program_id} baseline_event_id={existing.baseline_event_id} "
+            f"imported_event_count={existing.imported_event_count} "
+            f"declared_at={existing.declared_at.isoformat().replace('+00:00', 'Z')} "
+            f"actor={existing.actor} reason={existing.reason}"
+        )
+        return
+
+    if existing is not None:
+        typer.echo(
+            f"Chain baseline already declared for {program!r} at event {existing.baseline_event_id}. "
+            "Remove it deliberately before declaring a new one."
+        )
+        raise typer.Exit(code=3)
+    if not reason or not actor:
+        raise typer.BadParameter("--reason and --actor are required when declaring a baseline.")
+    if bool(at_event_id) == bool(at_first_event_on_or_after):
+        raise typer.BadParameter("Provide exactly one of --at-event-id or --at-first-event-on-or-after.")
+
+    events = read_events(program, programs_root=programs_root)
+    if not events:
+        typer.echo(f"Program {program!r} has no events.")
+        raise typer.Exit(code=3)
+
+    if at_event_id:
+        index = next((i for i, event in enumerate(events) if event.event_id == at_event_id), None)
+        if index is None:
+            typer.echo(f"Event {at_event_id!r} not found in program {program!r}.")
+            raise typer.Exit(code=3)
+    else:
+        cutoff = datetime.fromisoformat(str(at_first_event_on_or_after).replace("Z", "+00:00"))
+        if cutoff.tzinfo is None:
+            cutoff = cutoff.replace(tzinfo=timezone.utc)
+        index = next((i for i, event in enumerate(events) if event.recorded_at >= cutoff), None)
+        if index is None:
+            typer.echo(f"No event recorded at or after {cutoff.isoformat()}.")
+            raise typer.Exit(code=3)
+
+    baseline = ChainBaseline(
+        program_id=program,
+        baseline_event_id=events[index].event_id,
+        imported_event_count=index,
+        declared_at=datetime.now(timezone.utc),
+        actor=actor,
+        reason=reason,
+    )
+    path = write_chain_baseline(baseline, programs_root=programs_root)
+    verification = verify_event_log(program, programs_root=programs_root)
+    typer.echo(
+        f"Declared chain baseline at event {baseline.baseline_event_id} "
+        f"({baseline.imported_event_count} imported pre-history event(s)) -> {path}"
+    )
+    typer.echo(
+        f"verify: ok={verification.ok} checked={verification.checked_event_count} "
+        f"imported={verification.imported_event_count} issues={len(verification.issues)}"
     )
 
 

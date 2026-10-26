@@ -253,6 +253,7 @@ class ADOHydrationProvider:
                     )
                     relations = traversal.edges
                     relation_truncation = traversal.truncation
+                    errors.extend(traversal.errors)
                 except QueryError as error:
                     errors.append(
                         IntegrationError(

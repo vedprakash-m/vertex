@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">  <title>Acme Issue 1</title>
+</head>
+<body style="margin:0; padding:0; background-color:#F9FAFB; font-family:Segoe UI, -apple-system, Roboto, Helvetica, Arial, sans-serif; color:#111827;">
+  <div style="display:none; max-height:0; overflow:hidden; opacity:0; mso-hide:all; color:transparent;">
+    0 High risks, Risk Load 0.0 stable. No new leadership decisions this week.
+  </div>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; background-color:#F9FAFB; margin:0; padding:0;">
+    <tr>
+      <td align="center" style="padding:24px 12px;">
+        <table role="presentation" width="680" cellpadding="0" cellspacing="0" border="0" style="width:680px; max-width:680px; border-collapse:collapse; background-color:#FFFFFF; border:1px solid #E5E7EB;">
+          <tr>
+            <td align="center" role="main" style="padding:0;">
+              <table role="presentation" width="640" cellpadding="0" cellspacing="0" border="0" style="width:640px; max-width:640px; border-collapse:collapse;">
+                <tr>
+                  <td style="padding:24px 0 16px 0; border-bottom:1px solid #E5E7EB;">
+<h1 style="margin:0; font-size:20px; line-height:1.3; font-weight:600; color:#111827;">Acme Issue 1</h1>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:24px 0; font-size:14px; line-height:1.6; color:#374151;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" data-vertex-block="cadence-note" style="width:100%; border-collapse:collapse; margin:0 0 16px 0;">
+  <tr>
+    <td style="padding:0; font-size:13px; line-height:1.6; color:#374151;">Detailed weekly update</td>
+  </tr>
+</table><a id="ado-vitality"></a>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 16px 0; border:1px solid #E5E7EB; background-color:#FFFFFF;">
+  <tr>
+    <td style="padding:16px 20px; border-bottom:1px solid #E5E7EB; background-color:#F9FAFB;">
+      <p style="margin:0; font-size:16px; line-height:1.4; font-weight:700; color:#111827;">ADO Vitality This Week</p>
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:16px 20px; font-size:14px; line-height:1.6; color:#374151;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse;">
+        <tr>
+          <td style="padding:0 0 8px 0; font-weight:600; color:#111827;">Items updated in ADO</td>
+          <td style="padding:0 0 8px 0; text-align:right; color:#111827;">0 of 4 active (0%)</td>
+        </tr>
+        <tr>
+          <td style="padding:0 0 8px 0; font-weight:600; color:#111827;">Avg days since last update</td>
+          <td style="padding:0 0 8px 0; text-align:right; color:#111827;">9999.0 days</td>
+        </tr>
+        <tr>
+          <td style="padding:0; font-weight:600; color:#111827;">Items with leakage signals</td>
+          <td style="padding:0; text-align:right; color:#111827;">0 items discussed outside ADO without a later ADO update in the same 7-day window</td>
+        </tr>
+      </table>
+      <p style="margin:16px 0 0 0; font-size:14px; line-height:1.6; color:#111827;"><strong>Best documented:</strong> WI:910001 — 0 ADO touches in the last 7 days by Example Owner</p>
+      <p style="margin:8px 0 0 0; font-size:14px; line-height:1.6; color:#111827;"><strong>Trend:</strong> 19% (baseline issue)</p>
+      <p style="margin:16px 0 8px 0; font-size:14px; line-height:1.6; color:#111827;"><strong>Needs ADO update:</strong></p>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0; border:1px solid #E5E7EB; table-layout:fixed;">
+        <tr style="background-color:#F3F4F6;">
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; font-size:12px; line-height:1.4; font-weight:600; color:#111827; width:20%;">Workstream</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; font-size:12px; line-height:1.4; font-weight:600; color:#111827; width:28%;">Workstream Owner + ADO Assignee</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; font-size:12px; line-height:1.4; font-weight:600; color:#111827; width:26%;">Stale or Missing ADOs</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; font-size:12px; line-height:1.4; font-weight:600; color:#111827; width:26%;">What Field Needs Update</td>
+        </tr>
+        <tr>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">Networking</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">ADO assignee: Example Owner</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;"><strong>ADO#910002</strong><br/>Networking example dependency</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">Meaningful ADO update (9999d stale); Owner update or comment; Description; Blocker clarity; Next step</td>
+        </tr>
+        <tr>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">Deployment Readiness</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">ADO assignee: Example Owner</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;"><strong>ADO#910001</strong><br/>Deployment example feature</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">Meaningful ADO update (9999d stale); Owner update or comment; Description; Next step</td>
+        </tr>
+        <tr>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">Artifact Service</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">ADO assignee: Example Owner</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;"><strong>ADO#910003</strong><br/>Service validation example</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">Meaningful ADO update (9999d stale); Owner update or comment; Description; Next step</td>
+        </tr>
+        <tr>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">Package Currency</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">ADO assignee: Example Owner</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;"><strong>ADO#910004</strong><br/>Package readiness example</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">Meaningful ADO update (9999d stale); Owner update or comment; Description; Next step</td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>
+<a id="exec-summary"></a>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" data-vertex-block="exec-summary" style="width:100%; border-collapse:collapse; margin:0 0 16px 0; border:1px solid #E5E7EB; background-color:#FFFFFF;">
+  <tr>
+    <td style="padding:12px 16px 8px 16px; font-size:12px; line-height:1.4; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color:#6B7280;">Executive Summary</td>
+  </tr>
+  <tr>
+    <td style="padding:0 16px 16px 16px; font-size:14px; line-height:1.6; color:#374151;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 10px 0; border:1px solid #E5E7EB; background-color:#F9FAFB;">
+        <tr>
+          <td style="padding:10px 12px;">
+            <p style="margin:0 0 6px 0; font-size:10px; line-height:1.4; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color:#6B7280;">Milestone Health</p>
+            <p style="margin:0; font-size:14px; line-height:1.65; color:#111827;">Milestones: 1 at risk, 2 on track. Critical path: Design, M3 - Code Complete.</p>
+          </td>
+        </tr>
+      </table>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 10px 0; border:1px solid #E5E7EB; background-color:#F9FAFB;">
+  <tr>
+    <td style="padding:10px 12px;">
+      <p style="margin:0 0 6px 0; font-size:10px; line-height:1.4; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color:#6B7280;">Tracked Milestones</p>
+      <p style="margin:0 0 8px 0; font-size:13px; line-height:1.55; color:#111827;">Validation | on track | target May 18<br>no blocked signals; 15% slip probability; low confidence</p>
+      <p style="margin:0 0 8px 0; font-size:13px; line-height:1.55; color:#111827;">Design | on track (critical path) | target May 18<br>no blocked signals; 15% slip probability; low confidence</p>
+      <p style="margin:0 0 0 0; font-size:13px; line-height:1.55; color:#111827;">M3 - Code Complete | at risk (critical path) | target May 18<br>1 blocked signal; 30% slip probability; low confidence</p>
+      
+    </td>
+  </tr>
+</table>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 0 0; border:1px solid #E5E7EB; background-color:#F9FAFB;">
+        <tr>
+          <td style="padding:10px 12px;">
+            <p style="margin:0; font-size:14px; line-height:1.65; color:#111827;">acme_weekly tracks 4 in-scope items. 0 dimensions are High and 0 are Medium. Current summary is based on current-state inventory; prior-issue deltas are unavailable.</p>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 16px 0; border:1px dashed #D1D5DB; background-color:#F9FAFB;">
+  <tr>
+    <td style="padding:10px 12px; font-size:11px; line-height:1.5; color:#6B7280;">
+      <strong style="color:#111827;">DRY RUN - NOT PUBLISHED</strong><br>
+      Status warn · Data as of May 05 2026, 18:00 UTC
+    </td>
+  </tr>
+</table>
+<!-- vertex: manifest=11111111111111111111111111111111 qg=warn gather_run= generated=2026-05-05T18:00:00+00:00 -->                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

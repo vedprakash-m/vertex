@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from src.core.truth_model import TruthContext
 
 from src.core.truth_levels import TruthLevel
+from src.core.exceptions import ConfigError
 from src.core.archive_store import find_latest_confirmed_entry, read_archive_index
 from src.core.people_legacy_affiliation import LegacyAffiliationEdge
 from src.core.knowledge_claim_store import KnowledgeContext, load_program_knowledge_claims, load_program_knowledge_scopes, resolve_knowledge_context, summarize_knowledge_status
@@ -36,7 +37,7 @@ from src.core.ledger.event_log import ConfidenceTier, EventEnvelope, read_events
 from src.core.ledger.program_views import collapse_orphan_links, collapse_shadow_links, project_events_to_memory
 from src.core.ledger.source_refs import source_document_key, source_ref_priority
 from src.core.section_proposal_store import load_archived_stale_claim_ids, load_stale_claim_ids
-from src.core.snapshot_store import ARCHIVE_ROOT, get_archive_root
+from src.core.snapshot_store import get_archive_root
 from src.core.program_fact_store import (
     PROGRAMS_ROOT,
     FactLineage,
@@ -770,10 +771,12 @@ class ProgramReality:
         programs_root: Path = PROGRAMS_ROOT,
         as_of: datetime | None = None,
         edition_name: str | None = None,
-        archive_root: Path = ARCHIVE_ROOT,
+        archive_root: Path | None = None,
         domains: tuple[str, ...] | None = None,
         entity_registry: EntityRegistry | None = None,
         require_committed_gather_run: bool | None = None,
+        fact_snapshot: ProgramFactSnapshot | None = None,
+        assessment_as_of: datetime | None = None,
     ) -> "ProgramReality":
         """Load program reality from disk. The ONLY disk-touching point.
 
@@ -785,8 +788,13 @@ class ProgramReality:
             programs_root: Root directory for all programs.
             as_of: If provided, loads historical facts up to this timestamp.
             domains: If provided, restricts loaded fact types to these families.
+            fact_snapshot: Retained facts for fully-primary programs only.
+                Other reality inputs remain live; this is not whole-reality replay.
+            assessment_as_of: Assessment clock only; does not select historical facts.
         """
-        resolved_as_of = as_of or datetime.now(timezone.utc)
+        if fact_snapshot is not None and fact_snapshot.program_id != program_id:
+            raise ConfigError("Fact snapshot program does not match ProgramReality.")
+        resolved_as_of = assessment_as_of or as_of or datetime.now(timezone.utc)
 
         # Resolve SoR mode (single point, per rule 3)
         from src.core.program_fact_store import resolve_fact_sor_mode
@@ -810,13 +818,21 @@ class ProgramReality:
         )
 
         # Load the fact snapshot (single I/O point) — pass sor_state for S-5a per-family shim filtering
-        snapshot = load_program_facts(
-            program_id,
-            as_of=as_of,
-            programs_root=programs_root,
-            sor_state=_sor_state,
-            require_committed_gather_run=require_committed_gather_run,
-        )
+        if (
+            fact_snapshot is not None
+            and sor_mode == "primary"
+            and all(mode == "primary" for mode in _family_sor_modes.values())
+        ):
+            snapshot = fact_snapshot
+        else:
+            snapshot = load_program_facts(
+                program_id,
+                as_of=as_of,
+                programs_root=programs_root,
+                archive_root=archive_root,
+                sor_state=_sor_state,
+                require_committed_gather_run=require_committed_gather_run,
+            )
 
         # Project domain views from snapshot
         action_items = project_action_items(snapshot)
@@ -1024,8 +1040,16 @@ class ProgramReality:
                             )
                         return _a
 
-                    for _idx, _a in enumerate(all_assessments):
-                        all_assessments[_idx] = _patch_approval_event_id(_a)
+                    enriched = {id(_a): _patch_approval_event_id(_a) for _a in all_assessments}
+                    actions = tuple(enriched[id(_a)] for _a in actions)
+                    risks = tuple(enriched[id(_a)] for _a in risks)
+                    decisions = tuple(enriched[id(_a)] for _a in decisions)
+                    deps = tuple(enriched[id(_a)] for _a in deps)
+                    mstones = tuple(enriched[id(_a)] for _a in mstones)
+                    assum = tuple(enriched[id(_a)] for _a in assum)
+                    wstreams = tuple(enriched[id(_a)] for _a in wstreams)
+                    claims = tuple(enriched[id(_a)] for _a in claims)
+                    all_assessments = list(enriched.values())
                     commitments_assessed = tuple(_patch_approval_event_id(_a) for _a in commitments_assessed)
             except Exception:
                 # Never let a lineage-enrichment failure break ProgramReality.load()
@@ -1110,6 +1134,7 @@ class ProgramReality:
             _archived_knowledge_claim_freshness=_load_latest_archived_claim_freshness(
                 edition_name,
                 archive_root=archive_root,
+                programs_root=programs_root,
             ),
             _knowledge_claim_freshness=_load_latest_live_claim_freshness(program_id, programs_root=programs_root),
             _knowledge_vault_integrity_issues=tuple(knowledge_vault_integrity.issue_records()),
@@ -2043,14 +2068,21 @@ def _load_latest_live_claim_freshness(
 def _load_latest_archived_claim_freshness(
     edition_name: str | None,
     *,
-    archive_root: Path,
+    archive_root: Path | None,
+    programs_root: Path = PROGRAMS_ROOT,
 ) -> KnowledgeClaimFreshnessRecord | None:
     if not edition_name:
         return None
-    latest_confirmed_entry = find_latest_confirmed_entry(read_archive_index(edition_name, archive_root=archive_root))
+    resolved_archive_root = archive_root if archive_root is not None else programs_root.parent / "archive"
+    selected_programs_root = programs_root if archive_root is None else None
+    latest_confirmed_entry = find_latest_confirmed_entry(read_archive_index(
+        edition_name, archive_root=resolved_archive_root, programs_root=selected_programs_root,
+    ))
     if latest_confirmed_entry is None:
         return None
-    archive_narratives_dir = get_archive_root(edition_name, archive_root) / "narratives" / f"issue_{latest_confirmed_entry.issue_number:03d}"
+    archive_narratives_dir = get_archive_root(
+        edition_name, resolved_archive_root, programs_root=selected_programs_root,
+    ) / "narratives" / f"issue_{latest_confirmed_entry.issue_number:03d}"
     stale_claim_ids = load_archived_stale_claim_ids(archive_narratives_dir)
     if not stale_claim_ids:
         return None

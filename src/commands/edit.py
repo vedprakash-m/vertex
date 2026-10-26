@@ -91,6 +91,7 @@ def run_edit(
         issue_number=resolved_issue_number,
         reports_root=reports_root,
         read_only=read_only,
+        programs_root=programs_root,
     )
 
     opened_in_editor = False
@@ -120,6 +121,7 @@ def _prepare_edit_target(
     issue_number: int,
     reports_root: Path,
     read_only: bool = False,
+    programs_root: Path = PROGRAMS_ROOT,
 ) -> tuple[Path, str, bool]:
     narratives_dir = get_narratives_dir(edition_name, issue_number, reports_root=reports_root)
     narratives_dir.mkdir(parents=True, exist_ok=True)
@@ -128,6 +130,7 @@ def _prepare_edit_target(
         section=section,
         reports_root=reports_root,
         issue_number=issue_number,
+        programs_root=programs_root,
     )
     target_path = narratives_dir / filename
     created = False
@@ -139,6 +142,7 @@ def _prepare_edit_target(
                 section_title=section_title,
                 edition_name=edition_name,
                 reports_root=reports_root,
+                programs_root=programs_root,
             ),
             encoding="utf-8",
         )
@@ -152,10 +156,11 @@ def _resolve_edit_section_target(
     section: str,
     reports_root: Path,
     issue_number: int,
+    programs_root: Path = PROGRAMS_ROOT,
 ) -> tuple[str, str, str | None]:
     if section.strip() == "exec_summary":
         return "exec_summary", "exec_summary.md", None
-    bundle = load_bundle(edition_name, reports_root=reports_root)
+    bundle = load_bundle(edition_name, reports_root=reports_root, programs_root=programs_root)
     if _is_continuity_layout(bundle):
         edition_type = EditionType.from_string(bundle.config.edition.type)
         assert bundle.chapter_contract is not None
@@ -214,9 +219,10 @@ def _scaffold_content(
     section_title: str | None,
     edition_name: str,
     reports_root: Path,
+    programs_root: Path = PROGRAMS_ROOT,
 ) -> str:
     if section_id == "exec_summary":
-        bundle = load_bundle(edition_name, reports_root=reports_root)
+        bundle = load_bundle(edition_name, reports_root=reports_root, programs_root=programs_root)
         return _build_exec_summary_template(issue_number, layout_mode=bundle.config.layout_mode)
     if section_title is not None:
         return "\n".join(

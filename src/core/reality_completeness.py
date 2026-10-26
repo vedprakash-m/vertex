@@ -60,7 +60,8 @@ class SourceVisibility:
 class ContextCoverageArea:
     """Area 1 — cross-source acquisition health.
 
-    enumeration_completeness = observed_required_surfaces / expected_required_surfaces.
+    enumeration_completeness is unknown while any applicable surface is unknown
+    or partial; acquisition activity alone does not prove enumeration.
     Stable denominator: count of sources configured in program.yaml as non-optional.
     oldest_unprocessed_source_age_seconds: not "queue age" (no scheduler) — age of
     the oldest pending file in the EML inbox root.
@@ -185,6 +186,55 @@ class RealityCompletenessVector:
 # Computation helpers
 # ---------------------------------------------------------------------------
 
+def _structured_source_visibility(
+    program_id: str, *, programs_root: Path, surfaces: tuple[str, ...],
+) -> tuple[SourceVisibility, ...]:
+    from src.core.gather_run_manifest import (
+        SCHEMA_VERSION, GatherRunStatus, resolve_latest_committed_manifest,
+    )
+
+    if not surfaces:
+        return ()
+    try:
+        manifest = resolve_latest_committed_manifest(program_id, programs_root=programs_root)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        if isinstance(exc, AttributeError) and (
+            exc.name != "get" or not isinstance(exc.obj, (list, str, int, float, bool, type(None)))
+        ):
+            raise
+        return tuple(
+            SourceVisibility(surface, "unknown", f"{surface} gather evidence unreadable or invalid ({type(exc).__name__}); retry gather")
+            for surface in surfaces
+        )
+    if manifest is None:
+        reason = "no valid committed gather evidence; run gather"
+    elif (
+        manifest.program_id != program_id
+        or manifest.status != GatherRunStatus.COMMITTED
+        or manifest.schema_version != SCHEMA_VERSION
+    ):
+        reason = "gather evidence program/status/schema mismatch; run gather"
+    else:
+        reason = None
+    visibilities: list[SourceVisibility] = []
+    for surface in surfaces:
+        if reason is not None:
+            visibilities.append(SourceVisibility(surface, "unknown", f"{surface}: {reason}"))
+            continue
+        assert manifest is not None
+        outcomes = tuple(entry for entry in manifest.channel_outcomes if entry.channel == surface)
+        if len(outcomes) != 1 or not isinstance(outcomes[0].degraded, bool):
+            visibilities.append(SourceVisibility(surface, "unknown", f"{surface} gather execution missing or ambiguous; run gather"))
+        else:
+            outcome = outcomes[0]
+            detail = "degraded execution" if outcome.degraded else "execution recorded"
+            visibilities.append(SourceVisibility(
+                surface, "partial",
+                f"{surface} {detail} in gather {manifest.run_id}; bounded scope completeness unproven; not bound to current assessment",
+            ))
+    return tuple(visibilities)
+
+
 def _determine_source_visibility(
     program_id: str,
     *,
@@ -228,19 +278,20 @@ def _determine_source_visibility(
     else:
         visibilities.append(SourceVisibility("ics", "partial", "ICS wired but quality floor not established"))
 
-    # --- ADO ---
     ado_enabled = prog is not None and prog.ado is not None
-    if ado_enabled:
-        visibilities.append(SourceVisibility("ado", "complete", "ADO configured; gather-arm provides structured pull"))
-    else:
-        visibilities.append(SourceVisibility("ado", "unavailable", "ADO not configured in program.yaml"))
-
-    # --- Kusto ---
     kusto_enabled = prog is not None and prog.kusto is not None
-    if kusto_enabled:
-        visibilities.append(SourceVisibility("kusto", "complete", "Kusto configured; gather-arm provides structured pull"))
-    else:
-        visibilities.append(SourceVisibility("kusto", "unavailable", "Kusto not configured in program.yaml"))
+    structured = {
+        entry.surface: entry
+        for entry in _structured_source_visibility(
+            program_id,
+            programs_root=programs_root,
+            surfaces=tuple(surface for surface, enabled in (("ado", ado_enabled), ("kusto", kusto_enabled)) if enabled),
+        )
+    }
+    for surface in ("ado", "kusto"):
+        visibilities.append(structured.get(
+            surface, SourceVisibility(surface, "unavailable", f"{surface.upper()} not configured in program.yaml"),
+        ))
 
     # --- IcM ---
     icm_enabled = (
@@ -383,7 +434,9 @@ def compute_reality_completeness_vector(
         1 for sv in source_visibility if sv.status in ("complete", "partial")
     )
     completeness: float | None = None
-    if expected_surfaces > 0:
+    if expected_surfaces > 0 and all(
+        sv.status in ("complete", "unavailable") for sv in source_visibility
+    ):
         completeness = observed_surfaces / expected_surfaces
     else:
         unknown_metrics.append("enumeration_completeness")

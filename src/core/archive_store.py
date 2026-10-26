@@ -44,8 +44,10 @@ class _RollbackEntry:
 def read_archive_index(
     edition: str,
     archive_root: Path = ARCHIVE_ROOT,
+    *,
+    programs_root: Path | None = None,
 ) -> ArchiveIndex:
-    path = get_archive_root(edition, archive_root) / "index.json"
+    path = get_archive_root(edition, archive_root, programs_root=programs_root) / "index.json"
     if not path.exists():
         return ArchiveIndex(edition=edition, issues=())
     payload = json.loads(path.read_text(encoding="utf-8"))
@@ -74,12 +76,17 @@ def load_skipped_issues_for_program(
     *,
     editions_root: Path | None = None,
     programs_root: Path = PROGRAMS_ROOT,
-    archive_root: Path = ARCHIVE_ROOT,
+    archive_root: Path | None = None,
 ) -> tuple[SkippedIssueEntry, ...]:
     del editions_root
     entries: list[SkippedIssueEntry] = []
     for edition_id in list_editions_for_program(program_id, programs_root=programs_root):
-        archive_index = read_archive_index(edition_id, archive_root=archive_root)
+        if archive_root is None:
+            archive_index = read_archive_index(
+                edition_id, archive_root=programs_root.parent / "archive", programs_root=programs_root,
+            )
+        else:
+            archive_index = read_archive_index(edition_id, archive_root=archive_root)
         entries.extend(
             SkippedIssueEntry(
                 edition_id=edition_id,

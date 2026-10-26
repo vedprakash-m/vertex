@@ -77,14 +77,23 @@ def _build_preview_eml_bytes(
     markdown_body: str,
     suggested_subject: str,
     generated_at: datetime,
+    blocking_gate_ids: tuple[str, ...] = (),
 ) -> bytes:
+    blocked = bool(blocking_gate_ids)
+    subject = _resolve_email_subject(
+        suggested_subject=suggested_subject,
+        default_subject=bundle.config.edition.name if suggested_subject.strip() else bundle.config.edition.name,
+    )
+    if blocked:
+        subject = f"[BLOCKED DRAFT] {subject}"
+        gate_summary = ", ".join(blocking_gate_ids)
+        warning = f"BLOCKED DRAFT — publication is prohibited until quality gates pass: {gate_summary}."
+        markdown_body = f"{warning}\n\n{markdown_body}"
+        html_body = f"<p><strong>{warning}</strong></p>{html_body}"
     return build_eml_bytes(
-        to=(bundle.config.author.email,),
+        to=() if blocked else (bundle.config.author.email,),
         cc=(),
-        subject=_resolve_email_subject(
-            suggested_subject=suggested_subject,
-            default_subject=bundle.config.edition.name if suggested_subject.strip() else bundle.config.edition.name,
-        ),
+        subject=subject,
         html_body=html_body,
         text_body=markdown_body,
         from_display_name=bundle.config.author.display_name,

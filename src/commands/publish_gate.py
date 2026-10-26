@@ -10,6 +10,7 @@ import typer
 
 from src.commands.confirm import ConfirmResult, confirm_issue
 from src.core.archive_store import find_latest_confirmed_entry, read_archive_index
+from src.core.config_loader import REPORTS_ROOT
 from src.core.edition_resolver import get_program_output_dir, PROGRAMS_ROOT
 from src.core.snapshot_store import ARCHIVE_ROOT
 
@@ -84,11 +85,15 @@ def publish_gate_command(
         issue_number=resolved_issue,
         dry_run=True,
         force=force,
+        reports_root=REPORTS_ROOT,
+        archive_root=ARCHIVE_ROOT,
+        programs_root=PROGRAMS_ROOT,
     )
 
     persona_failures, persona_warnings = _load_persona_signal_failures(
         edition=edition,
         issue=resolved_issue,
+        programs_root=PROGRAMS_ROOT,
     )
 
     all_failures = result.failures + persona_failures

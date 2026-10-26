@@ -141,8 +141,27 @@ def append_ai_telemetry(
 ) -> None:
     """Append one telemetry record (portalocker-guarded, fsync'd, PB-37)."""
     path = ai_telemetry_path(record.program_id, programs_root=programs_root)
+    synthetic = record.deployment_id == "trace-model" or record.feature == "unit-test"
+    # Test fixtures must use an isolated root. Production program trees are a
+    # measurement authority and synthetic rows would corrupt cost/avoidance data.
+    if synthetic and _is_live_program_tree(path, programs_root=programs_root):
+        raise ValueError("Synthetic AI telemetry cannot be written under a program tree.")
     path.parent.mkdir(parents=True, exist_ok=True)
     append_jsonl_line(path, json.dumps(record.to_dict(), default=str) + os.linesep)
+
+
+def _is_live_program_tree(path: Path, *, programs_root: Path) -> bool:
+    """Distinguish the real repository program tree from an isolated test root."""
+    try:
+        if programs_root.resolve() != PROGRAMS_ROOT.resolve():
+            return False
+    except OSError:
+        return False
+    try:
+        path.resolve().relative_to(programs_root.resolve())
+    except ValueError:
+        return False
+    return True
 
 
 # --------------------------------------------------------------------------- #

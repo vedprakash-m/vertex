@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from src.core.evidence_models import WorkstreamEvidence
@@ -41,6 +41,41 @@ _FIX_HINT_MAP: dict[str, str] = {
     "KB-02": "Fix: set schema_version in the file header; check specs/program-context-maturity.md §4 for required versions.",
     "KB-03": "Fix: ensure the edition YAML references a valid program_id that matches a directory under programs/.",
 }
+
+
+def run_rev_health(
+    *,
+    edition: str | None,
+    rev_program: str | None,
+    programs_root: Path,
+    editions_root: Path,
+    format: str,
+    resolve_edition_paths_fn: Callable[..., Any],
+) -> None:
+    """``doctor --rev-health`` — print the REV subsystem health summary.
+
+    Resolves the target program from ``--rev-program`` or the resolved edition,
+    then aggregates run-state + verification + evidence-vault health (read-only).
+    """
+    import json as _json
+
+    from src.core.rev.health import build_rev_health_report, render_rev_health_human
+
+    program_id = rev_program
+    if program_id is None:
+        ed_paths = resolve_edition_paths_fn(edition or "", editions_root=editions_root, programs_root=programs_root)
+        if ed_paths is None:
+            typer.echo("rev-health: pass --rev-program <id> or --edition <name> to resolve a program.")
+            raise typer.Exit(code=2)
+        program_id = ed_paths.program_id
+    report = build_rev_health_report(program_id, programs_root=programs_root)
+    if format == "json":
+        typer.echo(_json.dumps(report.to_dict(), indent=2, sort_keys=True))
+    else:
+        typer.echo(render_rev_health_human(report), nl=False)
+    # Non-zero when shield degrade is active (Azure Prompt Shields not wired) so
+    # the operator sees the visible-degrade state in CI/exit code.
+    raise typer.Exit(code=1 if report.shield_degrade else 0)
 
 
 def run_ranked_gaps(*, edition_name: str | None, programs_root: Path, editions_root: Path) -> None:
@@ -188,11 +223,12 @@ def run_context_doctor(
     if stale_flags:
         first_flag = stale_flags[0]
         entity = f" / {first_flag.entity_id}" if first_flag.entity_id else ""
-        flag_desc = f"{first_flag.file}{entity}: {first_flag.days_stale}d stale ({first_flag.field})"
+        age = "review date unknown or invalid" if first_flag.days_stale is None else f"{first_flag.days_stale}d stale"
+        flag_desc = f"{first_flag.file}{entity}: {age} ({first_flag.field})"
         checks.append(DoctorCheck(
             "Staleness",
             "warn",
-            f"{len(stale_flags)} stale {'file' if len(stale_flags) == 1 else 'files'}: {flag_desc}"
+            f"{len(stale_flags)} stale or unreviewed {'entry' if len(stale_flags) == 1 else 'entries'}: {flag_desc}"
             + (f"; +{len(stale_flags) - 1} more" if len(stale_flags) > 1 else ""),
         ))
     else:

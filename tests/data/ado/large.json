@@ -1,0 +1,17 @@
+{
+  "fixture_kind": "authored_synthetic",
+  "generator": {
+    "template": "large_mixed",
+    "item_count": 540,
+    "base_id": 930000,
+    "area_paths": [
+      "ExampleProject\\Acme\\Deployment",
+      "ExampleProject\\Contoso\\Networking",
+      "ExampleProject\\Fabrikam\\Scenarios",
+      "ExampleProject\\Acme\\Packages"
+    ],
+    "work_item_types": ["Feature", "Risk", "Scenario", "Key Result"],
+    "states": ["Active", "Proposed", "At Risk", "Blocked"],
+    "tag_sets": [["Safety"], ["Readiness"], ["Blocked"], []]
+  }
+}

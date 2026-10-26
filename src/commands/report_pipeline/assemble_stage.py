@@ -65,7 +65,7 @@ from src.ai._pipeline import AIPipelineError
 from src.ai.blurb_generator import generate_workstream_blurb
 from src.ai.client import AIClient
 from src.ai.client import AIClientError
-from src.ai.llm_trace import AITraceContext, use_trace_context
+from src.ai.llm_trace import AITraceContext, default_trace_path, use_trace_context
 from src.ai.exec_summary_drafter import draft_exec_summary
 from src.ai.draft_reviewer import build_review_artifact, render_review_markdown, render_review_summary, review_draft
 from src.commands.report_ai import _AIGeneratedSection, _AISynthesisResult, _DraftAIContext
@@ -229,7 +229,7 @@ from src.core.config_loader import PROGRAMS_ROOT, REPORTS_ROOT, NarrativeProgram
 from src.core.continuation_contract import build_bridge_section_roster_ids, build_continuation_contract, get_continuation_contract_path, load_inherited_scorecard_dimensions
 from src.core.decision_register import assess_proposed_decision_staleness
 from src.core.delta_engine import build_deltas
-from src.core.edition_resolver import filter_workstreams, get_program_output_dir, resolve_edition
+from src.core.edition_resolver import filter_workstreams, get_program_output_dir, get_program_output_root, resolve_edition
 from src.core.eml_writer import write_eml
 from src.core.evidence_engine import build_evidence
 from src.core.exceptions import AuthError, ConfigError, QueryError, QueryTimeoutError
@@ -256,7 +256,7 @@ from src.core.narrative_store import REMOVED_SECTION_MARKER, get_narratives_dir,
 from src.core.overrides_store import DecisionStripAck, DimensionOverride, OverridesDocument, ScorecardOverrides, Top3NowEntry
 from src.core.overrides_store import apply_pending_overrides, get_overrides_path, load_overrides, merge_overrides
 from src.core.pipeline import StageContext, run_pipeline
-from src.core.program_fact_store import ProgramFactStore
+from src.core.program_fact_store import FactSnapshotPin, ProgramFactStore, _resolve_fact_db_root
 from src.core.quality_gates import QualityGateReport, combine_gate_reports, evaluate_continuity_gates, evaluate_phase_1a_gates, evaluate_phase_1b_gates, evaluate_phase_1c_gates
 from src.core.quality_gates import evaluate_workiq_budget_gate
 from src.core.quality_matrix_engine import QualityMatrix, build_quality_matrix, render_quality_matrix_markdown
@@ -383,17 +383,28 @@ def _pin_program_fact_snapshot(
     issue_number: int,
     generated_at: datetime,
     db_root: Path | None = None,
+    pin: FactSnapshotPin | None = None,
 ) -> ProgramFactSnapshotDraftState | None:
     if program_id is None:
         return None
     store = ProgramFactStore(program_id, db_root=db_root)
-    pin = store.pin_snapshot(
-        metadata={
-            "edition_name": edition_name,
-            "issue_number": issue_number,
-        },
-        created_at=generated_at,
-    )
+    if pin is None:
+        pin = store.pin_snapshot(
+            metadata={
+                "edition_name": edition_name,
+                "issue_number": issue_number,
+            },
+            created_at=generated_at,
+        )
+    else:
+        if (
+            pin.program_id != program_id
+            or pin.metadata.get("edition_name") != edition_name
+            or pin.metadata.get("issue_number") != issue_number
+        ):
+            raise ConfigError("Report fact snapshot scope changed. Re-run the report.")
+        if store.detect_drift(pin.snapshot_id):
+            raise ConfigError("Program fact snapshot changed during report generation. Re-run the report.")
     return ProgramFactSnapshotDraftState(
         snapshot_id=pin.snapshot_id,
         program_id=pin.program_id,
@@ -405,7 +416,7 @@ def _pin_program_fact_snapshot(
 def _runtime_db_root_for_reports(reports_root: Path | None) -> Path | None:
     if reports_root is None:
         return None
-    return reports_root.parent / "vertex-db"
+    return _resolve_fact_db_root(reports_root.parent / "programs")
 
 
 _RISK_LOAD_WEIGHTS = {
@@ -633,6 +644,7 @@ def _risk_rank(level: RiskLevel) -> int:
         RiskLevel.LOW: 2,
         RiskLevel.MEDIUM: 3,
         RiskLevel.HIGH: 4,
+        RiskLevel.BLOCKED: 5,
     }[level]
 
 
@@ -643,21 +655,20 @@ def _spark_char(level: RiskLevel) -> str:
         RiskLevel.UNKNOWN: "▅",
         RiskLevel.MEDIUM: "▄",
         RiskLevel.HIGH: "▇",
+        RiskLevel.BLOCKED: "█",
     }
     return mapping[level]
 
 
 def _derive_risk_sparkline(risk: RiskLevel, prior_risk: RiskLevel | None) -> tuple[str | None, str | None]:
-    if prior_risk is None:
+    if prior_risk is None or RiskLevel.UNKNOWN in {prior_risk, risk}:
         return None, None
-    history = (_spark_char(prior_risk), _spark_char(prior_risk), _spark_char(risk), _spark_char(risk))
+    history = _spark_char(prior_risk) + _spark_char(risk)
     if _risk_rank(risk) > _risk_rank(prior_risk):
-        return "".join(history), "rising 4w"
+        return history, "rising vs prior issue"
     if _risk_rank(risk) < _risk_rank(prior_risk):
-        return "".join(history), "falling 4w"
-    if risk == RiskLevel.HIGH:
-        return _spark_char(risk) * 4, "chronic high"
-    return _spark_char(risk) * 4, "stable"
+        return history, "falling vs prior issue"
+    return history, "unchanged vs prior issue"
 
 
 WorkItemLoader = Callable[[ReportBundle, datetime], tuple[tuple[WorkItem, ...], int]]
@@ -848,6 +859,7 @@ def _generate_report_draft_from_context(ctx: StageContext) -> DraftArtifacts:
             as_of=data_as_of,
             previous_snapshot=previous_snapshot,
             reports_root=resolved_reports_root,
+            archive_root=resolved_archive_root,
         )
         default_exec_summary = _build_exec_summary_text(
             bundle,
@@ -993,6 +1005,7 @@ def _generate_report_draft_from_context(ctx: StageContext) -> DraftArtifacts:
                 workstream_names=tuple(workstream.name for workstream in bundle.program_context.workstreams) if bundle.program_context is not None else (),
                 current_workstream_blurbs=workstream_blurbs,
                 archive_root=resolved_archive_root,
+                reports_root=resolved_reports_root,
             )
         )
 
@@ -1056,6 +1069,8 @@ def _generate_report_draft_from_context(ctx: StageContext) -> DraftArtifacts:
             visible_section_ids=visible_section_ids,
             ai_program_context=bundle.program_context,
             ai_context=ai_context,
+            trace_file=default_trace_path(edition_name, programs_root=programs_root),
+            archive_root=resolved_archive_root,
         )
         render_exec_summary_text = ai_synthesis.exec_summary_text
         render_workstream_blurbs = ai_synthesis.workstream_blurbs
@@ -1129,6 +1144,17 @@ def _generate_report_draft_from_context(ctx: StageContext) -> DraftArtifacts:
             ado_lines=ado_lines,
         )
 
+    draft_program_id = resolved_v2.program.id if resolved_v2 is not None else None
+    if resolved_v2 is not None and ctx.fact_snapshot_pin is None:
+        raise ConfigError("Report fact snapshot baseline is missing. Re-run the report.")
+    draft_fact_snapshot = _pin_program_fact_snapshot(
+        draft_program_id,
+        edition_name=edition_name,
+        issue_number=resolved_issue_number,
+        generated_at=started_at,
+        db_root=_runtime_db_root_for_reports(resolved_reports_root),
+        pin=ctx.fact_snapshot_pin,
+    )
     html_path: Path | None = None
     md_path: Path | None = None
     manifest_path: Path | None = None
@@ -1178,6 +1204,7 @@ def _generate_report_draft_from_context(ctx: StageContext) -> DraftArtifacts:
                 markdown_body=markdown_body,
                 suggested_subject=email_subject,
                 generated_at=started_at,
+                blocking_gate_ids=tuple(result.gate_id for result in report.failing_results),
             ),
         )
         html_path = _write_output_text(issue_dir / f"issue_{resolved_issue_number:03d}.html", html_body)
@@ -1211,7 +1238,6 @@ def _generate_report_draft_from_context(ctx: StageContext) -> DraftArtifacts:
         if continuation_contract is not None
         else None
     )
-    draft_program_id = resolved_v2.program.id if resolved_v2 is not None else None
     _write_output_json(
         issue_dir / f"issue_{resolved_issue_number:03d}.draft.json",
         DraftState(
@@ -1226,13 +1252,7 @@ def _generate_report_draft_from_context(ctx: StageContext) -> DraftArtifacts:
             ai_trace_run_id=ai_synthesis.trace_run_id,
             kusto_sections=kusto_sections,
             override_snapshot=override_snapshot,
-            program_fact_snapshot=_pin_program_fact_snapshot(
-                draft_program_id,
-                edition_name=edition_name,
-                issue_number=resolved_issue_number,
-                generated_at=started_at,
-                db_root=_runtime_db_root_for_reports(resolved_reports_root),
-            ),
+            program_fact_snapshot=draft_fact_snapshot,
             top_3_now=top_3_now,
             exec_summary_text=render_exec_summary_text,
         ),
@@ -1312,7 +1332,11 @@ def _write_report_adaptive_cards(
         output_root=program_output_dir,
         item_urls=_build_item_urls(bundle, report.items),
         report_html_url=(
-            _artifact_url(bundle, output_root=program_output_dir, artifact_path=report_html_path)
+            _artifact_url(
+                bundle,
+                output_root=get_program_output_root(bundle.program.id, programs_root=programs_root),
+                artifact_path=report_html_path,
+            )
             if report_html_path is not None
             else None
         ),
@@ -1582,6 +1606,7 @@ def _generate_lookback_draft(
         workstream_urls={},
         mobile_safe_scorecards=bundle.config.mobile_safe_scorecards,
         type_scale_v2=bundle.config.type_scale_v2,
+        executive_style=bundle.config.executive_style,
     )
 
     html_body = HTMLRenderer(edition_name, reports_root=reports_root).render(render_context)
@@ -1720,6 +1745,7 @@ def _generate_lookback_draft(
         scorecards=(resolved_edition.scorecards if resolved_edition is not None else ()),
         archive_root=archive_root,
         programs_root=programs_root,
+        reports_root=reports_root,
         stale_claim_ids=(
             load_stale_claim_ids(resolved_edition.program.id, resolved_issue_number, programs_root=programs_root)
             if resolved_edition is not None
@@ -1750,6 +1776,7 @@ def _generate_lookback_draft(
             evaluate_continuity_gates(
                 html_content=html_body,
                 issue_number=resolved_issue_number,
+                scorecard_band_block_ids=(),
             )
         )
     qg_report = combine_gate_reports(*qg_reports)
@@ -1851,6 +1878,7 @@ def _generate_lookback_draft(
             markdown_body=markdown_body,
             suggested_subject="",
             generated_at=started_at,
+            blocking_gate_ids=tuple(result.gate_id for result in qg_report.failing_results),
         ),
     )
     html_path = _write_output_text(issue_dir / f"issue_{resolved_issue_number:03d}.html", html_body)
@@ -1887,6 +1915,7 @@ def _generate_lookback_draft(
         edition_name,
         resolved_issue_number,
         final_manifest,
+        programs_root=programs_root,
     )
     if open_browser and html_path is not None:
         webbrowser.open(html_path.resolve().as_uri())
@@ -1971,6 +2000,7 @@ def _load_report_signal_context(
     as_of: datetime,
     previous_snapshot: Snapshot | None,
     reports_root: Path,
+    archive_root: Path | None = None,
 ) -> _ReportSignalContext | None:
     return _load_report_signal_context_impl(
         edition_name=edition_name,
@@ -1980,6 +2010,7 @@ def _load_report_signal_context(
         previous_snapshot=previous_snapshot,
         reports_root=reports_root,
         item_trajectory_points=_item_trajectory_points,
+        **({"archive_root": archive_root} if archive_root is not None else {}),
     )
 
 
@@ -1993,6 +2024,7 @@ def _load_guarded_review_evidence(
     as_of: datetime,
     previous_snapshot: Snapshot | None,
     reports_root: Path,
+    archive_root: Path | None = None,
 ) -> _GuardedReviewEvidence:
     return _load_guarded_review_evidence_impl(
         edition_name=edition_name,
@@ -2002,6 +2034,7 @@ def _load_guarded_review_evidence(
         previous_snapshot=previous_snapshot,
         reports_root=reports_root,
         load_report_signal_context=_load_report_signal_context,
+        **({"archive_root": archive_root} if archive_root is not None else {}),
     )
 
 
@@ -2025,6 +2058,8 @@ def _synthesize_v2_ai_content(
     visible_section_ids: set[str] | tuple[str, ...],
     ai_program_context: NarrativeProgramContext | None,
     ai_context: _DraftAIContext | None,
+    trace_file: Path | None = None,
+    archive_root: Path | None = None,
 ) -> _AISynthesisResult:
     return _synthesize_v2_ai_content_impl(
         bundle=bundle,
@@ -2045,6 +2080,8 @@ def _synthesize_v2_ai_content(
         visible_section_ids=visible_section_ids,
         ai_program_context=ai_program_context,
         ai_context=ai_context,
+        trace_file=trace_file,
+        archive_root=archive_root,
         create_ai_client=_create_ai_client,
         draft_exec_summary_runner=draft_exec_summary,
         generate_workstream_blurb_runner=generate_workstream_blurb,

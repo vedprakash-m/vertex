@@ -32,21 +32,18 @@ def resolve_sor_aware_backend(
     1. explicit_backend (caller override) wins if provided.
     2. No program_id → default to "file".
     3. SoR mode "primary" → "sqlite".
-    4. SoR mode "legacy" → program config's storage_backend (defaults to "file").
-    5. SoR resolution failure → fall back to "file".
+    4. SoR mode "legacy"/"shadow" → program config's storage_backend (defaults to "file").
+    Authority-resolution errors propagate; they never select another backend.
     """
     if explicit_backend is not None:
         return resolve_storage_backend(explicit_backend)
     if program_id is None:
         return "file"
-    try:
-        from src.core import program_fact_store as _program_fact_store
+    from src.core import program_fact_store as _program_fact_store
 
-        mode = _program_fact_store.resolve_fact_sor_mode(
-            program_id=program_id, programs_root=programs_root
-        )
-    except Exception:
-        return "file"
+    mode = _program_fact_store.resolve_fact_sor_mode(
+        program_id=program_id, programs_root=programs_root
+    )
     if mode == "primary":
         return "sqlite"
     program = load_program(program_id, programs_root=programs_root)

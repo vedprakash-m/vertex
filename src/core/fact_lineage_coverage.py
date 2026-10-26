@@ -90,10 +90,12 @@ def compute_lineage_coverage(
     program_id: str,
     *,
     programs_root: Path = PROGRAMS_ROOT,
+    archive_root: Path | None = None,
     now: datetime | None = None,
 ) -> LineageCoverageReport:
     resolved_now = now or datetime.now(timezone.utc)
-    snapshot = load_program_facts(program_id, programs_root=programs_root)
+    resolved_archive_root = archive_root if archive_root is not None else programs_root.parent / "archive"
+    snapshot = load_program_facts(program_id, programs_root=programs_root, archive_root=resolved_archive_root)
     waivers = load_fact_lineage_waivers(program_id, programs_root=programs_root)
     waivers_by_key = {waiver.natural_key: waiver for waiver in waivers}
 

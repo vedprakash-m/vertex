@@ -25,6 +25,33 @@ def fast_safe_load(text: str) -> Any:
     return yaml.load(text, Loader=_FAST_YAML_LOADER)
 
 
+def load_yaml_document_strict(path: Path) -> Any:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise
+    except (OSError, UnicodeDecodeError) as error:
+        raise ConfigError(
+            f"Cannot read configuration at {path} ({type(error).__name__}). "
+            "Preserve the file; check access and UTF-8 before retrying."
+        ) from error
+    try:
+        document = yaml.safe_load(text)
+    except (yaml.YAMLError, ValueError) as error:
+        raise ConfigError(
+            f"Cannot parse configuration at {path} ({type(error).__name__}). "
+            "Preserve the file; check YAML syntax and values before retrying."
+        ) from error
+    return document
+
+
+def load_yaml_mapping_strict(path: Path) -> dict[str, Any]:
+    document = load_yaml_document_strict(path)
+    if not isinstance(document, dict):
+        raise ConfigError(f"Expected mapping at top-level in {path}.")
+    return document
+
+
 def load_yaml_mapping(
     path: Path,
     *,

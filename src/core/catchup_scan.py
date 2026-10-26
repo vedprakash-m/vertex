@@ -8,10 +8,10 @@ from typing import Callable
 
 from src.core.models import WorkItem
 from src.core.models_v2 import CatchupEvent, Program, Signal, Workstream
+from src.core.workspace_paths import PROGRAMS_ROOT
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PROGRAMS_ROOT = REPO_ROOT / "programs"
 
 WatchLoader = Callable[[Program, tuple[Workstream, ...], datetime, datetime | None], tuple[tuple[WorkItem, ...], int]]
 SignalTransform = Callable[[Signal], Signal]

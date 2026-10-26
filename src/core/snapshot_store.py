@@ -52,10 +52,12 @@ class ArchiveLock:
         self._owned = False
 
 
-def get_archive_root(edition: str, archive_root: Path = ARCHIVE_ROOT) -> Path:
+def get_archive_root(
+    edition: str, archive_root: Path = ARCHIVE_ROOT, *, programs_root: Path | None = None,
+) -> Path:
     resolved_paths = resolve_edition_paths(
         edition,
-        programs_root=archive_root.parent / "programs",
+        programs_root=programs_root if programs_root is not None else archive_root.parent / "programs",
     )
     if resolved_paths is not None:
         return resolved_paths.archive_dir

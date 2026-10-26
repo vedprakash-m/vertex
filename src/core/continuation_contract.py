@@ -447,7 +447,7 @@ def _load_inherited_sections(
     reports_root: Path,
     archive_root: Path,
 ) -> tuple[tuple[str, ...], str | None]:
-    archived = load_archived_narratives(edition_name, trusted_issue, archive_root=archive_root)
+    archived = load_archived_narratives(edition_name, trusted_issue, archive_root=archive_root, reports_root=reports_root)
     if archived:
         return tuple(sorted(archived)), "archive"
     local = load_narratives(edition_name, trusted_issue, reports_root=reports_root)
@@ -463,7 +463,7 @@ def _build_source_hashes(
     reports_root: Path,
     archive_root: Path,
 ) -> dict[str, str]:
-    archived = load_archived_narratives(edition_name, trusted_issue, archive_root=archive_root)
+    archived = load_archived_narratives(edition_name, trusted_issue, archive_root=archive_root, reports_root=reports_root)
     source = archived if archived else load_narratives(edition_name, trusted_issue, reports_root=reports_root)
     return {
         filename: f"sha256:{hashlib.sha256(content.encode('utf-8')).hexdigest()}"

@@ -20,7 +20,7 @@ import typer
 
 from src.commands.report import _artifact_url, _build_item_urls, _write_output_json
 from src.core.archive_store import ConfirmedIssueArchivePaths
-from src.core.edition_resolver import get_program_output_dir, PROGRAMS_ROOT
+from src.core.edition_resolver import get_program_output_dir, get_program_output_root, PROGRAMS_ROOT
 from src.core.models import EditionType, ReportData
 from src.m365.adaptive_card_renderer import AdaptiveCardRenderer
 from src.m365.teams_webhook_client import TeamsWebhookClient
@@ -79,7 +79,11 @@ def write_confirm_weekly_summary_card(
     program_output_dir = get_program_output_dir(edition_name, programs_root=programs_root)
     output_html_path = program_output_dir / f"issue_{issue_number:03d}" / f"issue_{issue_number:03d}.html"
     report_html_url = (
-        _artifact_url(bundle, output_root=program_output_dir, artifact_path=output_html_path)
+        _artifact_url(
+            bundle,
+            output_root=get_program_output_root(bundle.program.id, programs_root=programs_root),
+            artifact_path=output_html_path,
+        )
         if output_html_path.exists()
         else archive_paths.html_path.resolve().as_uri()
     )

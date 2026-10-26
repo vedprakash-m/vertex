@@ -38,10 +38,10 @@ from src.core.coverage_gap import CoverageGap, build_coverage_gaps, coverage_gap
 from src.core.decision_register import assess_proposed_decision_staleness
 from src.core.dependency_graph import load_inbound_cross_program_dependencies
 from src.core.delta_engine import build_deltas
-from src.core.edition_resolver import resolve_edition, get_program_output_dir, PROGRAMS_ROOT
+from src.core.edition_resolver import resolve_edition, get_program_output_dir, get_program_output_root, PROGRAMS_ROOT
 from src.core.engms_content import summarize_engms_page
 from src.core.evidence_engine import build_evidence
-from src.core.exceptions import AuthError, QueryError
+from src.core.exceptions import AuthError, ConfigError, QueryError
 from src.core.forecast_engine import ETAForecast, build_forecast_assessment
 from src.core.freshness_engine import build_freshness_report
 from src.core.issue_projection import IssueProjection, build_issue_projection, issue_projection_confidence_label, issue_projection_source_label
@@ -86,6 +86,7 @@ from src.core.trusted_baseline_store import load_trusted_baseline_issue
 from src.core.trajectory_analyzer import DriftPattern
 from src.core.vitality_reporting import vitality_settings_from_program
 from src.core.vitality_scorer import aggregate_vitality
+from src.core.workspace_paths import validate_report_workspace
 from src.core.view_models import WorkstreamData
 from src.core.models_v2 import RiskEntry, RiskStatus
 from src.m365.adaptive_card_renderer import AdaptiveCardRenderer
@@ -157,6 +158,16 @@ def _semantic_similarity_threshold(raw_program: dict[str, Any] | None) -> float:
     except (TypeError, ValueError):
         return 0.92
     return max(0.0, min(1.0, threshold))
+
+
+def _preflight_review_full_workspace() -> None:
+    try:
+        validate_report_workspace(programs_root=PROGRAMS_ROOT, reports_root=REPORTS_ROOT, archive_root=ARCHIVE_ROOT)
+    except ConfigError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=2) from error
+
+
 def review_full_command(
     edition: str = typer.Option(..., "--edition", help="Edition name, e.g. myprogram_weekly."),
     issue: int | None = typer.Option(None, "--issue", help="Issue number to render. Defaults to the active issue."),
@@ -168,6 +179,7 @@ def review_full_command(
         help="Post generated section review adaptive cards to Teams when a webhook is configured.",
     ),
 ) -> None:
+    _preflight_review_full_workspace()
     try:
         artifacts = generate_review_full(
             edition_name=edition,
@@ -241,15 +253,22 @@ def generate_review_full(
     post_adaptive_cards: bool = False,
 ) -> ReviewFullArtifacts:
     resolved_reports_root = reports_root or REPORTS_ROOT
+    resolved_archive_root = archive_root or ARCHIVE_ROOT
+    resolved_programs_root = programs_root or (resolved_reports_root.parent / "programs" if reports_root is not None else PROGRAMS_ROOT)
+    validate_report_workspace(
+        programs_root=resolved_programs_root,
+        reports_root=resolved_reports_root,
+        archive_root=resolved_archive_root,
+    )
     review_data = prepare_review_full_context(
         edition_name=edition_name,
         issue_number=issue_number,
         reports_root=resolved_reports_root,
-        archive_root=archive_root,
+        archive_root=resolved_archive_root,
+        programs_root=resolved_programs_root,
         m365_enricher=m365_enricher,
     )
     reviewer_html = ReviewerRenderer(edition_name, reports_root=resolved_reports_root).render(review_data.reviewer_context)
-    resolved_programs_root = programs_root or PROGRAMS_ROOT
     reviewer_path = _write_output_text(
         get_program_output_dir(edition_name, programs_root=resolved_programs_root) / "review" / f"issue_{review_data.issue_number:03d}.html",
         reviewer_html,
@@ -292,7 +311,12 @@ def prepare_review_full_context(
     resolved_reports_root = reports_root or REPORTS_ROOT
     resolved_archive_root = archive_root or ARCHIVE_ROOT
     repo_root = resolved_reports_root.parent
-    programs_root = programs_root if programs_root is not None else (repo_root / "programs")
+    programs_root = programs_root or (repo_root / "programs" if reports_root is not None else PROGRAMS_ROOT)
+    validate_report_workspace(
+        programs_root=programs_root,
+        reports_root=resolved_reports_root,
+        archive_root=resolved_archive_root,
+    )
 
     bundle = load_bundle(
         edition_name,
@@ -329,7 +353,7 @@ def prepare_review_full_context(
     trusted_baseline_issue_number = load_trusted_baseline_issue(
         edition_name,
         before_issue_number=resolved_issue_number,
-        programs_root=resolved_reports_root.parent / "programs",
+        programs_root=programs_root,
     )
     previous_snapshot, previous_issue_number = _load_previous_snapshot(
         edition_name=edition_name,
@@ -356,6 +380,7 @@ def prepare_review_full_context(
         as_of=data_as_of,
         previous_snapshot=previous_snapshot,
         reports_root=resolved_reports_root,
+        archive_root=resolved_archive_root,
     )
 
     overrides_document = load_overrides(
@@ -414,7 +439,7 @@ def prepare_review_full_context(
     item_urls = _build_item_urls(bundle, items)
     resolved_v2 = resolve_edition(edition_name, programs_root=programs_root)
     program_facts = (
-        load_program_facts(resolved_v2.program.id, db_root=repo_root, programs_root=programs_root)
+        load_program_facts(resolved_v2.program.id, db_root=repo_root, programs_root=programs_root, archive_root=resolved_archive_root)
         if resolved_v2 is not None
         else None
     )
@@ -533,7 +558,11 @@ def _write_section_review_adaptive_cards(
 
     program_output_dir = get_program_output_dir(edition_name, programs_root=programs_root)
     renderer = AdaptiveCardRenderer()
-    review_html_url = _artifact_url(bundle, output_root=program_output_dir, artifact_path=reviewer_html_path)
+    review_html_url = _artifact_url(
+        bundle,
+        output_root=get_program_output_root(bundle.program.id, programs_root=programs_root),
+        artifact_path=reviewer_html_path,
+    )
     card_paths: list[Path] = []
     for section in sections:
         filename = _sanitize_review_filename_component(section.section_id)
@@ -646,6 +675,7 @@ def _build_reviewer_context(
         review_status=review_status,
         evidence_by_item=evidence_by_item,
         item_urls=item_urls,
+        programs_root=programs_root,
     )
     forecast = build_forecast_assessment(
         enabled=bundle.config.forecast_enabled,
@@ -783,6 +813,7 @@ def _build_reviewer_context(
         items=items,
         as_of=data_as_of,
         programs_root=programs_root,
+        archive_root=archive_root,
     )
     milestone_timeline_rows = _build_milestone_timeline_rows(milestone_assessments)
     milestone_rows = _build_milestone_rows(milestone_assessments)
@@ -794,6 +825,7 @@ def _build_reviewer_context(
         program_id,
         as_of=data_as_of,
         programs_root=programs_root,
+        archive_root=archive_root,
     )
     action_rows = _build_action_rows(
         active_actions,
@@ -1234,13 +1266,16 @@ def _build_milestone_assessments(
     items: tuple[WorkItem, ...],
     as_of: datetime,
     programs_root: Path,
+    archive_root: Path | None = None,
 ) -> tuple[tuple[Milestone, MilestoneAssessment, bool, str | None, str | None, str | None], ...]:
     if program_id is None:
         return ()
     milestones = project_milestones(
         load_program_facts(
             program_id,
+            db_root=programs_root.parent,
             programs_root=programs_root,
+            archive_root=archive_root,
             fact_types=("milestone.entry",),
         )
     )
@@ -1527,6 +1562,7 @@ def _build_assumption_rows(
     *,
     as_of: datetime,
     programs_root: Path,
+    archive_root: Path | None = None,
 ) -> tuple[ReviewerTrackedEntryRow, ...]:
     if program_id is None:
         return ()
@@ -1535,6 +1571,7 @@ def _build_assumption_rows(
             program_id,
             db_root=programs_root.parent,
             programs_root=programs_root,
+            archive_root=archive_root,
             fact_types=("assumption.entry",),
         )
     )

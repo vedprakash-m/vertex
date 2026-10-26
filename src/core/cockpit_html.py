@@ -99,6 +99,7 @@ def render_cockpit_html(snapshot: CockpitSnapshot) -> str:
     findings_html = "".join(_render_finding(f) for f in snapshot.findings) or "<li>No findings.</li>"
     edition_label = escape(snapshot.edition_id) if snapshot.edition_id else "(all editions)"
     readiness = f"{program.readiness_percent}%" if program.readiness_percent is not None else "not measured yet"
+    blocker_count = str(program.blocker_count) if program.blocker_count is not None else "unknown"
     value_metrics = (
         "".join(
             f"<li>{escape(m.label)}: {escape(str(m.value))} {escape(m.unit)} "
@@ -148,7 +149,7 @@ def render_cockpit_html(snapshot: CockpitSnapshot) -> str:
   <section aria-labelledby="program-health">
     <h2 id="program-health">Program health</h2>
     <p><span class="risk-badge">{escape(program.overall_risk.upper())}</span>
-       readiness {escape(readiness)} · {program.blocker_count} blocker(s)</p>
+       readiness {escape(readiness)} · {blocker_count} blocker(s)</p>
     <p>Next action: {escape(program.next_action) if program.next_action else "none"}</p>
   </section>
   <section aria-labelledby="source-health">

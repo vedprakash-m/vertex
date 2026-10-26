@@ -1,12 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+import yaml
 
 from src.core.exceptions import ConfigError
 from src.core.yaml_utils import load_yaml_mapping
+
+if TYPE_CHECKING:
+    from src.core.freshness_engine import ContextReviewPolicy
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -16,6 +21,52 @@ FRESHNESS_POLICY_PATH = REPO_ROOT / "vertex" / "policies" / "freshness_policy.ya
 POLICY_SCHEMA_VERSION = "1"
 
 _VALID_MODEL_TIERS = frozenset({"standard", "premium", "mini"})
+
+
+class _FreshnessPolicyLoader(yaml.SafeLoader):
+    def __init__(self, stream: str) -> None:
+        super().__init__(stream)
+        self._checked_mappings: set[yaml.MappingNode] = set()
+
+    def flatten_mapping(self, node: yaml.MappingNode) -> None:
+        # Check authored keys before merges expand; aliased nodes may be revisited.
+        if node not in self._checked_mappings:
+            self._checked_mappings.add(node)
+            keys: set[Any] = set()
+            for key_node, _ in node.value:
+                if key_node.tag in {"tag:yaml.org,2002:merge", "tag:yaml.org,2002:value"}:
+                    key = key_node.value
+                else:
+                    key = self.construct_object(key_node)
+                try:
+                    if key in keys:
+                        raise yaml.constructor.ConstructorError(problem="duplicate explicit mapping key")
+                    keys.add(key)
+                except TypeError as error:
+                    raise yaml.constructor.ConstructorError(problem="unhashable mapping key") from error
+        super().flatten_mapping(node)
+
+
+def _read_freshness_policy_document(path: Path) -> dict[str, Any]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise
+    except (OSError, UnicodeDecodeError) as error:
+        raise ConfigError(
+            f"Cannot read configuration at {path} ({type(error).__name__}). "
+            "Preserve the file; check access and UTF-8 before retrying."
+        ) from error
+    try:
+        document = yaml.load(text, Loader=_FreshnessPolicyLoader)
+    except (yaml.YAMLError, ValueError) as error:
+        raise ConfigError(
+            f"Cannot parse configuration at {path} ({type(error).__name__}). "
+            "Preserve the file; check YAML syntax and values before retrying."
+        ) from error
+    if not isinstance(document, dict):
+        raise ConfigError(f"Expected mapping at top-level in {path}.")
+    return document
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,6 +368,12 @@ def _bool_with_default(value: object, *, default: bool, field_name: str) -> bool
     raise ConfigError(f"{field_name} must be a boolean in {DEFAULT_POLICY_PATH}")
 
 
+def _default_context_review_policy() -> ContextReviewPolicy:
+    from src.core.freshness_engine import parse_context_review_policy
+
+    return parse_context_review_policy()
+
+
 @dataclass(frozen=True, slots=True)
 class FreshnessPolicy:
     fact_type_ttl_days: dict[str, int]
@@ -334,6 +391,7 @@ class FreshnessPolicy:
     #: operational rhythm instead. `None` disables that trigger kind.
     people_registry_enrichment_nudge_every: int | None = 5
     people_registry_enrichment_report_every: int | None = 3
+    context_review: ContextReviewPolicy = field(default_factory=_default_context_review_policy)
 
 
 def load_freshness_policy(
@@ -343,9 +401,10 @@ def load_freshness_policy(
     """Load freshness TTLs and gather cadence from policy YAML.
 
     *override_path* allows per-program policy files to merge over the defaults.
-    Unknown keys in override files are silently ignored (additive-only).
+    Context-review rules are strict; legacy non-context merge semantics remain.
     """
     base = _load_freshness_policy_document()
+    context_sections = [base["context_review"]] if "context_review" in base else []
     base_ttl: dict[str, int] = dict(base.get("fact_type_ttl_days") or {})
     base_cadence: dict[str, float] = {
         k: float(v)
@@ -360,13 +419,17 @@ def load_freshness_policy(
     trigger_section = people_registry_section.get("enrichment_trigger") if isinstance(people_registry_section, dict) else None
     nudge_every = _optional_positive_int(trigger_section, "nudge_run_every", default=5)
     report_every = _optional_positive_int(trigger_section, "report_run_every", default=3)
-    if override_path is not None and override_path.exists():
+    doc: dict[str, Any] | None = None
+    if override_path is not None:
         try:
-            import yaml as _yaml
-            doc = _yaml.safe_load(override_path.read_text(encoding="utf-8")) or {}
-        except Exception:
-            doc = {}
-        if isinstance(doc, dict):
+            doc = _read_freshness_policy_document(override_path)
+        except FileNotFoundError:
+            pass
+        if doc is not None:
+            if "policy_schema_version" in doc and str(doc["policy_schema_version"]).strip() != POLICY_SCHEMA_VERSION:
+                raise ConfigError(f"Policy schema mismatch at {override_path}: expected {POLICY_SCHEMA_VERSION}.")
+            if "context_review" in doc:
+                context_sections.append(doc["context_review"])
             if isinstance(doc.get("fact_type_ttl_days"), dict):
                 for k, v in doc["fact_type_ttl_days"].items():
                     if isinstance(v, int):
@@ -383,20 +446,24 @@ def load_freshness_policy(
                 if isinstance(override_trigger, dict):
                     nudge_every = _optional_positive_int(override_trigger, "nudge_run_every", default=nudge_every)
                     report_every = _optional_positive_int(override_trigger, "report_run_every", default=report_every)
+    from src.core.freshness_engine import parse_context_review_policy
+
     return FreshnessPolicy(
         fact_type_ttl_days=base_ttl,
         gather_cadence_hours=base_cadence,
         people_registry_stale_after_days=stale_after_days,
         people_registry_enrichment_nudge_every=nudge_every,
         people_registry_enrichment_report_every=report_every,
+        context_review=parse_context_review_policy(*context_sections),
     )
 
 
 @lru_cache(maxsize=1)
 def _load_freshness_policy_document() -> dict[str, Any]:
-    if not FRESHNESS_POLICY_PATH.exists():
-        raise ConfigError(f"Missing required file: {FRESHNESS_POLICY_PATH}")
-    document = load_yaml_mapping(FRESHNESS_POLICY_PATH)
+    try:
+        document = _read_freshness_policy_document(FRESHNESS_POLICY_PATH)
+    except FileNotFoundError as error:
+        raise ConfigError(f"Missing required file: {FRESHNESS_POLICY_PATH}") from error
     version = str(document.get("policy_schema_version") or "").strip()
     if version != POLICY_SCHEMA_VERSION:
         raise ConfigError(

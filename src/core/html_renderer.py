@@ -89,6 +89,7 @@ class RenderContext:
     workspace_root: str | None = None
     mobile_safe_scorecards: str | None = None
     type_scale_v2: bool = False
+    executive_style: bool = False
     continuity: ContinuityRenderData | None = None
     exec_summary_chart: KustoSectionData | None = None
     show_footer: bool = True
@@ -162,6 +163,7 @@ def build_render_payload(context: RenderContext) -> dict[str, Any]:
         "workspace_root": context.workspace_root,
         "mobile_safe_scorecards": context.mobile_safe_scorecards,
         "type_scale_v2": context.type_scale_v2,
+        "executive_style": context.executive_style,
         "continuity": context.continuity,
         "show_footer": context.show_footer,
         "hidden_render_sections": context.hidden_render_sections,

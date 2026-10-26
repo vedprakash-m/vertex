@@ -1,0 +1,10 @@
+# Vertex Freshness Report — acme_weekly
+Generated: 2026-05-05T18:00:00+00:00 | vs. Issue 001
+
+> STALE DATA: Live ADO is unavailable; using confirmed snapshot from issue 001 captured 2026-05-04T18:00:00+00:00.
+
+Summary: 0 findings across 0 DRIs.
+Blocks: 0 | Warns: 0 | Infos: 0
+
+
+NCFL: 0 pending context proposals

@@ -33,10 +33,46 @@ helper is the mandatory implementation of.
 from __future__ import annotations
 
 import os
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, TYPE_CHECKING
 
 from src.core.exceptions import ConfigError
-from src.core.fact_sor_state import resolve_family_sor_mode
+from src.core.fact_sor_state import load_fact_sor_state, resolve_family_sor_mode
+from src.core.program_fact_store import ProgramFactSnapshot, resolve_fact_sor_mode
+
+if TYPE_CHECKING:
+    from src.core.pipeline import StageContext
+
+
+def retained_report_fact_snapshot(ctx: StageContext, program_id: str) -> ProgramFactSnapshot | None:
+    """Select retained facts without removing authored non-primary sources."""
+    snapshot = ctx.fact_snapshot
+    if snapshot is not None and snapshot.program_id != program_id:
+        raise ConfigError("Fact snapshot program does not match report.")
+    assert ctx.programs_root is not None
+    state = load_fact_sor_state(program_id, programs_root=ctx.programs_root)
+    if (
+        resolve_fact_sor_mode(program_id=program_id, programs_root=ctx.programs_root) != "primary"
+        or (state is not None and any(mode != "primary" for mode in state.family_modes.values()))
+    ):
+        return None
+    if snapshot is None and (ctx.bundle is not None or ctx.fact_snapshot_pin is not None):
+        raise ConfigError("Missing fact snapshot for primary report assessments.")
+    return snapshot
+
+
+def report_reality_scope(
+    ctx: StageContext, program_id: str, fact_snapshot: ProgramFactSnapshot | None,
+) -> tuple[Any, ...] | None:
+    if fact_snapshot is None:
+        return None
+    loader = getattr(ctx.stage_support, "load_program_reality", None)
+    # Retain identity anchors so a later capture cannot recycle their ids.
+    return (
+        program_id, ctx.programs_root, ctx.archive_root, ctx.edition_name,
+        ctx.data_as_of, ctx.started_at, ctx.run_id,
+        id(fact_snapshot), fact_snapshot,
+        id(ctx.fact_snapshot_pin), ctx.fact_snapshot_pin, id(loader), loader,
+    )
 
 
 def sor_gated_family_load(
@@ -52,6 +88,8 @@ def sor_gated_family_load(
     as_of: Any = None,
     edition_name: str | None = None,
     archive_root: Any = None,
+    fact_snapshot: ProgramFactSnapshot | None = None,
+    reality: Any = None,
 ) -> tuple[tuple[Any, ...], tuple[Any, ...] | None, tuple[str, ...], dict[str, dict[str, str | None]] | None]:
     """Load one fact family through the SoR-gated overlay pattern.
 
@@ -102,7 +140,7 @@ def sor_gated_family_load(
         return records, None, (), None
 
     try:
-        if load_program_reality is None:
+        if reality is None and load_program_reality is None:
             from src.core.program_reality import ProgramReality  # noqa: PLC0415
 
             kwargs: dict[str, Any] = {
@@ -112,14 +150,18 @@ def sor_gated_family_load(
             }
             if archive_root is not None:
                 kwargs["archive_root"] = archive_root
+            if fact_snapshot is not None:
+                kwargs["fact_snapshot"] = fact_snapshot
             reality = ProgramReality.load(program_id, **kwargs)
-        else:
+        elif reality is None:
+            assert load_program_reality is not None
             reality = load_program_reality(
                 program_id,
                 programs_root=programs_root,
                 as_of=as_of,
                 edition_name=edition_name,
                 archive_root=archive_root,
+                **({"fact_snapshot": fact_snapshot} if fact_snapshot is not None else {}),
             )
         assessments = tuple(reality_accessor(reality))
         records = tuple(assessment.record for assessment in assessments)

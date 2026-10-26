@@ -10,6 +10,7 @@ from src.commands.gather_pipeline.ado_wiql_stage import TeamNameNormalizer, reco
 from src.core.ado_client import ADO_WIQL_DEFAULT_TOP, ADOClient
 from src.core.exceptions import QueryError
 from src.core.m365_payload_support import optional_string as _optional_string
+from src.core.metric_binding_validator import kusto_metric_result_error
 from src.core.models_v2 import KustoQuery, Program, Signal, Workstream
 
 KustoQueryExecutor = Callable[[KustoQuery], list[dict[str, Any]]]
@@ -154,14 +155,21 @@ def build_kusto_kpi_signals(
             )
             entity_refs = entity_refs_from_ado_pr_kpi_rows(rows)
         else:
+            cardinality_error = kusto_metric_result_error(
+                query.id, query.expected_cardinality, rows,
+                metric_id=query.metric_id, result_column=query.result_column,
+            )
             record_kusto_query_state_fn(
                 query_state_sink,
                 query,
                 rows=rows,
                 as_of=as_of,
                 duration_ms=duration_ms,
+                error=cardinality_error,
                 previous_state=previous_states.get(query.id),
             )
+            if cardinality_error is not None:
+                continue
             entity_refs = None
         signal = build_kusto_kpi_signal_fn(
             query=query,

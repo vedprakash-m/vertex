@@ -22,7 +22,7 @@ from src.core.ado_client import ADOClient
 from src.core.exceptions import QueryError
 from src.core.m365_payload_support import optional_string as _optional_string
 from src.core.models import WorkItem
-from src.core.models_v2 import Program, Signal, Workstream
+from src.core.models_v2 import IntegrationError, Program, Signal, Workstream
 
 
 log = logging.getLogger(__name__)
@@ -53,6 +53,7 @@ def load_analytics_signals(
     programs_root: Path,
     query_state_sink: dict[str, dict[str, Any]] | None = None,
     previous_query_states: dict[str, dict[str, Any]] | None = None,
+    integration_error_sink: list[IntegrationError] | None = None,
     ado_client_factory: Callable[..., ADOClient],
     date_to_sk_fn: Callable[[date], int],
     analytics_snapshot_fields: tuple[str, ...],
@@ -154,6 +155,7 @@ def load_analytics_signals(
         programs_root=programs_root,
         query_state_sink=query_state_sink,
         previous_query_states=previous_query_states,
+        integration_error_sink=integration_error_sink,
     )
     return ((*analytics_signals, *wiql_signals), ado_calls + wiql_ado_calls)
 
@@ -552,4 +554,3 @@ def _parse_iso_date(value: str | None) -> date | None:
         return date.fromisoformat(value)
     except ValueError:
         return None
-

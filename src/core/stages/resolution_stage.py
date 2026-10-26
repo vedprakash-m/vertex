@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -8,15 +7,18 @@ from typing import Any
 
 from src.core.archive_store import find_latest_confirmed_entry, load_previous_confirmed_snapshot, read_archive_index
 from src.core.config_loader import REPORTS_ROOT, load_bundle
-from src.core.edition_resolver import find_edition_yaml, resolve_edition, get_program_output_dir
+from src.core.draft_artifact_store import load_draft_state
+from src.core.edition_resolver import find_edition_yaml, resolve_edition
 from src.core.models import ArchiveIndex, EditionType
 from src.core.narrative_store import delete_narratives_dir
 from src.core.overrides_store import seed_overrides_from_prior
 from src.core.overrides_store import delete_seedable_overrides
 from src.core.pipeline import StageContext
+from src.core.program_fact_store import ProgramFactStore, _resolve_fact_db_root
 from src.core.snapshot_store import ARCHIVE_ROOT
 from src.core.snapshot_store import read_snapshot
 from src.core.trusted_baseline_store import load_trusted_baseline_issue
+from src.core.workspace_paths import PROGRAMS_ROOT, validate_report_workspace
 
 
 _NATIVE_DATETIME = datetime
@@ -31,7 +33,10 @@ class ResolutionStage:
         resolved_reports_root = ctx.reports_root or REPORTS_ROOT
         resolved_archive_root = ctx.archive_root or ARCHIVE_ROOT
         repo_root = resolved_reports_root.parent
-        programs_root = repo_root / "programs"
+        programs_root = ctx.programs_root if ctx.programs_root is not None else PROGRAMS_ROOT
+        validate_report_workspace(
+            programs_root=programs_root, reports_root=resolved_reports_root, archive_root=resolved_archive_root,
+        )
         editions_root = repo_root / "editions"
         data_as_of = ctx.data_as_of
         if data_as_of is None:
@@ -103,6 +108,17 @@ class ResolutionStage:
             if trusted_baseline_issue_number is not None
             else None
         )
+        fact_snapshot_pin = None
+        fact_snapshot = None
+        if resolved_v2 is not None and resolved_edition_type != EditionType.LOOKBACK:
+            fact_store = ProgramFactStore(
+                resolved_v2.program.id, db_root=_resolve_fact_db_root(programs_root),
+            )
+            fact_snapshot_pin = fact_store.pin_snapshot(
+                metadata={"edition_name": ctx.edition_name, "issue_number": resolved_issue_number},
+                created_at=started_at,
+            )
+            fact_snapshot = fact_store.load_pinned_snapshot(fact_snapshot_pin.snapshot_id)
 
         return replace(
             ctx,
@@ -124,6 +140,8 @@ class ResolutionStage:
             trusted_baseline_issue_number=trusted_baseline_issue_number,
             resolved_edition_type=resolved_edition_type,
             overrides_seeding=overrides_seeding,
+            fact_snapshot_pin=fact_snapshot_pin,
+            fact_snapshot=fact_snapshot,
         )
 
 
@@ -139,11 +157,8 @@ def _load_previous_dry_run_state(
     issue_number: int,
     programs_root: Path | None = None,
 ) -> dict[str, Any] | None:
-    path = get_program_output_dir(edition_name, programs_root=programs_root) / f"issue_{issue_number:03d}" / f"issue_{issue_number:03d}.draft.json"  # type: ignore[arg-type]
-    if not path.exists():
-        return None
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    return payload if isinstance(payload, dict) else None
+    resolved_root = PROGRAMS_ROOT if programs_root is None else programs_root
+    return load_draft_state(edition_name, issue_number, programs_root=resolved_root)
 
 
 def _resolve_previous_snapshot(

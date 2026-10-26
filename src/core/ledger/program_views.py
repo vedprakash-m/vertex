@@ -15,9 +15,9 @@ from src.core.ledger.event_index import load_entity_event_ids, load_event_entity
 from src.core.ledger.event_types import get_event_schema, support_table_update
 from src.core.projections.program_projection import FieldCandidate, choose_field_winner
 from src.core.protection.supersession import apply_supersession, find_tombstoned_targets
+from src.core.workspace_paths import PROGRAMS_ROOT
 
 
-PROGRAMS_ROOT = Path(__file__).resolve().parents[3] / "programs"
 PROJECTION_SCHEMA_VERSION = "1"
 # Bumped when projection logic changes (independent of schema_version).
 # Incremental logic forces a full rebuild when the stored projector_version differs.

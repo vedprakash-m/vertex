@@ -10,10 +10,10 @@ from src.core.exceptions import ConfigError
 from src.core.models_v2 import EngMsPage, KustoQuery, PersonDirectory, PersonProfile, Product, Team
 from src.core.profile_encryption import load_people_profiles_document
 from src.core.yaml_utils import fast_safe_load
+from src.core.workspace_paths import PROGRAMS_ROOT
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PROGRAMS_ROOT = REPO_ROOT / "programs"
 SHARED_KNOWLEDGE_ROOT = REPO_ROOT / "knowledge"
 
 
@@ -98,6 +98,29 @@ def load_knowledge(
         fallback_path=fallback_root / "engms_pages.yaml" if fallback_root is not None else None,
         document_cache=document_cache,
     )
+
+    return parse_knowledge_documents(
+        {
+            "people_directory.yaml": people_directory_doc,
+            "people_profiles.yaml": people_profiles_doc,
+            "teams.yaml": teams_doc,
+            "products.yaml": products_doc,
+            "golden_queries.yaml": queries_doc,
+            "engms_pages.yaml": engms_doc,
+        },
+        knowledge_root=knowledge_root,
+    )
+
+
+def parse_knowledge_documents(
+    documents: dict[str, dict[str, Any]], *, knowledge_root: Path,
+) -> KnowledgeStore:
+    people_directory_doc = documents.get("people_directory.yaml", {})
+    people_profiles_doc = documents.get("people_profiles.yaml", {})
+    teams_doc = documents.get("teams.yaml", {})
+    products_doc = documents.get("products.yaml", {})
+    queries_doc = documents.get("golden_queries.yaml", {})
+    engms_doc = documents.get("engms_pages.yaml", {})
 
     people_directory = tuple(
         PersonDirectory(

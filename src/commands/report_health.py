@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Literal, TypedDict
 from pathlib import Path
 
-from src.core.exceptions import ConfigError
 from src.core.forecast_engine import ForecastAssessment
 from src.core.milestone_engine import describe_milestone_schedule_variance, load_milestone_completion_date_history_map, load_milestone_target_date_history_map, summarize_milestone_completion_date_history, summarize_milestone_target_date_history
 from src.core.models import Confidence, DimensionRisk, EditionType, RiskLevel, Snapshot, WorkItem
@@ -25,6 +24,10 @@ _RISK_LOAD_WEIGHTS = {
     RiskLevel.DONE: 0,
     RiskLevel.UNKNOWN: 0,
 }
+
+
+class _ArchiveOptions(TypedDict, total=False):
+    archive_root: Path
 
 
 def _compute_risk_load(dimension_risks: tuple[DimensionRisk, ...]) -> float:
@@ -137,6 +140,7 @@ def _build_health_summary(
     stale_risk_ids: tuple[str, ...] = (),
     program_id: str | None = None,
     programs_root: Path | None = None,
+    archive_root: Path | None = None,
     as_of: datetime | None = None,
     reality: ProgramReality | None = None,
     severe_ack_required: bool = False,
@@ -203,12 +207,13 @@ def _build_health_summary(
     resolved_stale_risk_ids = stale_risk_ids
     resolved_risk_assessments: tuple[FactAssessment, ...] = risk_assessments
     if not resolved_risks and program_id is not None and programs_root is not None:
-        try:
-            resolved_reality = reality or ProgramReality.load(program_id, programs_root=programs_root)
-            resolved_risk_assessments = tuple(resolved_reality.risks())
-            resolved_risks = tuple(assessment.record for assessment in resolved_risk_assessments)
-        except ConfigError:
-            resolved_risks = ()
+        archive_options: _ArchiveOptions = {"archive_root": archive_root} if archive_root is not None else {}
+        resolved_reality = reality or ProgramReality.load(
+            program_id, programs_root=programs_root,
+            **archive_options,
+        )
+        resolved_risk_assessments = tuple(resolved_reality.risks())
+        resolved_risks = tuple(assessment.record for assessment in resolved_risk_assessments)
         if not resolved_stale_risk_ids and as_of is not None:
             resolved_stale_risk_ids = tuple(
                 risk.id

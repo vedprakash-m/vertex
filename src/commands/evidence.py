@@ -154,7 +154,7 @@ def _load_lineage_context(
     archive_root: Path,
     programs_root: Path = PROGRAMS_ROOT,
 ) -> dict[str, Any]:
-    bundle = load_bundle(edition_name, reports_root=reports_root)
+    bundle = load_bundle(edition_name, reports_root=reports_root, programs_root=programs_root)
     try:
         draft_state = _load_draft_state(edition_name, issue_number, programs_root=programs_root)
         items = _deserialize_items(tuple(draft_state.get("items", [])))
@@ -175,7 +175,9 @@ def _load_lineage_context(
         items = tuple(_snapshot_item_to_work_item(item, fetched_at=snapshot.ado_data_as_of) for item in snapshot.items)
         data_as_of = snapshot.ado_data_as_of
         overrides_document = load_archived_overrides(edition_name, issue_number, archive_root=archive_root)
-        loaded_narratives = load_archived_narratives(edition_name, issue_number, archive_root=archive_root)
+        loaded_narratives = load_archived_narratives(
+            edition_name, issue_number, archive_root=archive_root, reports_root=reports_root,
+        )
         edition_type = snapshot.edition_type
         evidence_by_item = {
             item.id: _build_lookback_evidence(
@@ -188,7 +190,7 @@ def _load_lineage_context(
     trusted_baseline_issue_number = load_trusted_baseline_issue(
         edition_name,
         before_issue_number=issue_number,
-        programs_root=reports_root.parent / "programs",
+        programs_root=programs_root,
     )
     previous_snapshot, previous_issue_number = _load_previous_snapshot(
         edition_name=edition_name,

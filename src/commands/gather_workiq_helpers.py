@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
+import logging
 from typing import Any
-from uuid import NAMESPACE_URL, uuid5
 
 from src.ai.safety.pii_scrubber import filter_text
 from src.core.m365_payload_support import optional_string as _optional_string
@@ -14,6 +14,7 @@ from src.m365.workiq_ask_support import DiscoveryRequest, build_structured_disco
 
 
 _WORKIQ_SIGNAL_TEXT_LIMIT = 4000
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +79,12 @@ def apply_structured_workiq_discovery(
         if structured_key in emitted_structured_keys:
             continue
         emitted_structured_keys.add(structured_key)
+        if union_runs != 1:
+            logger.warning(
+                "WorkIQ discovery union_runs=%s is containment-clamped to 1 for workstream=%s",
+                union_runs,
+                workstream.id,
+            )
         structured_plan = replace(
             plan,
             question=question,
@@ -87,7 +94,7 @@ def apply_structured_workiq_discovery(
         )
         expanded.extend(
             replace(structured_plan, bypass_ask_cache=repetition > 0)
-            for repetition in range(union_runs)
+            for repetition in range(1)
         )
     return tuple(expanded)
 
@@ -101,29 +108,22 @@ def workiq_source_type(query_name: str) -> str:
     return "email"
 
 
-def workiq_timestamp(record: dict[str, Any], *, as_of: datetime) -> datetime:
+def workiq_timestamp(record: dict[str, Any]) -> datetime | None:
     return _parse_datetime(
         record.get("receivedDateTime")
         or record.get("sentDateTime")
         or record.get("createdDateTime")
         or record.get("timestamp")
-    ) or as_of
+        or record.get("startDateTime")
+    )
 
 
-def workiq_message_id(
-    record: dict[str, Any],
-    *,
-    program_id: str,
-    query_name: str,
-    question: str,
-    index: int,
-    fallback_text: str,
-    timestamp: datetime,
-) -> str:
-    existing = _optional_string(record.get("id") or record.get("messageId") or record.get("emailId") or record.get("conversationId") or record.get("meetingId"))
-    if existing is not None:
-        return existing
-    return str(uuid5(NAMESPACE_URL, f"{program_id}|{query_name}|{question}|{index}|{fallback_text}|{timestamp.isoformat()}"))
+def workiq_message_id(record: dict[str, Any]) -> str | None:
+    value = (
+        record.get("id") or record.get("messageId") or record.get("emailId")
+        or record.get("eventId") or record.get("transcriptId")
+    )
+    return value if isinstance(value, str) and value.strip() else None
 
 
 def build_workiq_signal_text(*, source_type: str, subject: str | None, preview: str | None) -> str:
@@ -169,9 +169,9 @@ def _parse_datetime(value: Any) -> datetime | None:
     if value in (None, ""):
         return None
     if isinstance(value, datetime):
-        return value.astimezone(timezone.utc) if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc) if value.tzinfo is not None else None
     try:
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
         return None
-    return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else None

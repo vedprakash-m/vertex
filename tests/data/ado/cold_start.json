@@ -1,0 +1,49 @@
+{
+  "fixture_kind": "authored_synthetic",
+  "work_items": [
+    {
+      "WorkItemId": 910001,
+      "WorkItemType": "Feature",
+      "Title": "Deployment example feature",
+      "State": "Active",
+      "AssignedTo": "Example Owner",
+      "AssignedToEmail": "owner@example.com",
+      "AreaPath": "ExampleProject\\Acme\\Deployment",
+      "TargetDate": "2026-05-10",
+      "Tags": "Safety"
+    },
+    {
+      "WorkItemId": 910002,
+      "WorkItemType": "Risk",
+      "Title": "Networking example dependency",
+      "State": "At Risk",
+      "AssignedTo": "Example Owner",
+      "AssignedToEmail": "owner@example.com",
+      "AreaPath": "ExampleProject\\Contoso\\Networking",
+      "TargetDate": "2026-05-08",
+      "Tags": "Readiness"
+    },
+    {
+      "WorkItemId": 910003,
+      "WorkItemType": "Scenario",
+      "Title": "Service validation example",
+      "State": "Proposed",
+      "AssignedTo": "Example Owner",
+      "AssignedToEmail": "owner@example.com",
+      "AreaPath": "ExampleProject\\Fabrikam\\Scenarios",
+      "TargetDate": "2026-05-12",
+      "Tags": ""
+    },
+    {
+      "WorkItemId": 910004,
+      "WorkItemType": "Feature",
+      "Title": "Package readiness example",
+      "State": "Active",
+      "AssignedTo": "Example Owner",
+      "AssignedToEmail": "owner@example.com",
+      "AreaPath": "ExampleProject\\Acme\\Packages",
+      "TargetDate": "2026-05-15",
+      "Tags": "Readiness"
+    }
+  ]
+}

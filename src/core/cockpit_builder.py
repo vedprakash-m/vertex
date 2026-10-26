@@ -11,11 +11,12 @@ owns it. No field is ever a fabricated or formula-guessed placeholder
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
-from src.core.adf_config import ArchDataFixConfig, ExecutionMode, load_arch_data_fix
+from src.core.adf_config import ArchDataFixConfig, load_arch_data_fix
 from src.core.ai_telemetry import read_ai_telemetry
 from src.core.cockpit_models import (
     COCKPIT_SCHEMA_VERSION,
@@ -35,11 +36,12 @@ from src.core.cockpit_models import (
 )
 from src.core.context_proposal_review import load_pending_context_proposal_rows
 from src.core.edition_resolver import PROGRAMS_ROOT
+from src.core.exceptions import ConfigError
 from src.core.fact_lineage_coverage import compute_lineage_coverage
 from src.core.maturity_engine import load_earned_autonomy_state
 from src.core.outcome_metrics import canary_window_status, compute_om4_audit_coverage
 from src.core.program_synthesis import load_latest_released_program_synthesis
-from src.core.ledger.event_log import read_events
+from src.core.ledger.event_log import EventEnvelope, read_events
 from src.core.measurement_store import read_measurements, tier_decision_store_path
 from src.core.proposal_autonomy_ladder import PROPOSAL_CLASSES, resolve_ceiling
 from src.core.risk_register_engine import compute_risk_score, load_risk_register
@@ -70,7 +72,8 @@ def build_cockpit_snapshot(
     now: datetime | None = None,
 ) -> CockpitSnapshot:
     generated_at = now or datetime.now(timezone.utc)
-    config = _load_config_safely(program_id, programs_root)
+    config = load_arch_data_fix(program_id, programs_root=programs_root)
+    events = read_events(program_id, programs_root=programs_root, repair_corruption=False)
 
     findings: list[CockpitFinding] = []
 
@@ -98,7 +101,7 @@ def build_cockpit_snapshot(
     findings.extend(value_findings)
 
     reliability_summary, reliability_findings = _build_reliability_summary(
-        program_id, programs_root=programs_root, observed_at=generated_at
+        program_id, programs_root=programs_root, observed_at=generated_at, events=events,
     )
     findings.extend(reliability_findings)
 
@@ -156,13 +159,6 @@ def build_cockpit_snapshot(
         trust_summary=trust_summary,
     )
     return finalize_cockpit_snapshot(snapshot)
-
-
-def _load_config_safely(program_id: str, programs_root: Path) -> ArchDataFixConfig:
-    try:
-        return load_arch_data_fix(program_id, programs_root=programs_root)
-    except Exception:
-        return ArchDataFixConfig(program_id=program_id, mode=ExecutionMode.OFF)
 
 
 def _build_context_proposal_findings(
@@ -257,21 +253,63 @@ def _build_program_summary(
     findings: list[CockpitFinding] = []
     try:
         risks = load_risk_register(program_id, programs_root=programs_root)
-    except Exception:
-        risks = ()
+    except (OSError, ConfigError, UnicodeError) as error:
+        findings.append(
+            CockpitFinding(
+                finding_id="program.risk.read_failed",
+                area="program",
+                status="blocked",
+                summary="Risk register unavailable; program risk is unknown.",
+                detail=(
+                    f"The risk register could not be read ({type(error).__name__}). "
+                    "Restore or correct the register before relying on its risk summary."
+                ),
+                owner=None,
+                next_command=f"vertex risks list --program {program_id}",
+                evidence_refs=(),
+                observed_at=observed_at,
+            )
+        )
+        return ProgramCockpitSummary(
+            overall_risk="unknown",
+            readiness_percent=None,
+            blocker_count=None,
+            top_three_candidates=(),
+            next_action=None,
+        ), findings
 
     active_risks = [risk for risk in risks if getattr(risk.status, "value", risk.status).lower() in _ACTIVE_RISK_STATUS_VALUES]
     high_risk_ids: list[str] = []
+    failed_risk_ids: list[str] = []
     for risk in active_risks:
         try:
             score = compute_risk_score(risk)
-        except Exception:
+        except (KeyError, TypeError, ValueError):
+            failed_risk_ids.append(str(risk.id))
             continue
         if score >= _HIGH_RISK_SCORE_THRESHOLD:
             high_risk_ids.append(str(risk.id))
     high_risk_count = len(high_risk_ids)
 
-    if high_risk_count > 0:
+    if failed_risk_ids:
+        overall_risk = "unknown"
+        findings.append(
+            CockpitFinding(
+                finding_id="program.risk.score_failed",
+                area="program",
+                status="blocked",
+                summary=f"{len(failed_risk_ids)} active risk(s) could not be scored; program risk is unknown.",
+                detail=(
+                    "The total high-risk count is unavailable. Successfully scored high risks "
+                    "remain visible separately; review the referenced entries before relying on the summary."
+                ),
+                owner=None,
+                next_command=f"vertex risks list --program {program_id}",
+                evidence_refs=tuple(failed_risk_ids),
+                observed_at=observed_at,
+            )
+        )
+    elif high_risk_count > 0:
         overall_risk = "red"
     elif active_risks:
         overall_risk = "yellow"
@@ -291,7 +329,7 @@ def _build_program_summary(
                     "new risk judgment (INV-ADF-13)."
                 ),
                 owner=None,
-                next_command=f"vertex doctor --edition {program_id}",
+                next_command=f"vertex risks list --program {program_id}",
                 evidence_refs=tuple(high_risk_ids),
                 observed_at=observed_at,
             )
@@ -300,7 +338,7 @@ def _build_program_summary(
     summary = ProgramCockpitSummary(
         overall_risk=overall_risk,
         readiness_percent=None,
-        blocker_count=high_risk_count,
+        blocker_count=None if failed_risk_ids else high_risk_count,
         top_three_candidates=(),
         next_action=None,
     )
@@ -469,19 +507,35 @@ def _build_intelligence_summary(
             )
         )
 
+    summary = IntelligenceCockpitSummary(
+        lineage_coverage=None,
+        verification_coverage=None,
+        extraction_quality=(),
+        contradiction_count=0,
+        **synthesis_kwargs,
+    )
     try:
         report = compute_lineage_coverage(program_id, programs_root=programs_root, now=observed_at)
-    except Exception:
-        report = None
-
-    if report is None or report.total_count == 0:
-        summary = IntelligenceCockpitSummary(
-            lineage_coverage=None,
-            verification_coverage=None,
-            extraction_quality=(),
-            contradiction_count=0,
-            **synthesis_kwargs,
+    except (OSError, ConfigError, UnicodeError, sqlite3.OperationalError) as error:
+        findings.append(
+            CockpitFinding(
+                finding_id="intelligence.lineage.read_failed",
+                area="intelligence",
+                status="blocked",
+                summary="Lineage evaluation failed; coverage is unavailable.",
+                detail=(
+                    f"Lineage evaluation failed ({type(error).__name__}); this is not an empty fact set. "
+                    "Inspect fact-store access and lineage waivers before retrying. No lineage repair was attempted."
+                ),
+                owner=None,
+                next_command=None,
+                evidence_refs=(),
+                observed_at=observed_at,
+            )
         )
+        return summary, findings
+
+    if report.total_count == 0:
         findings.append(
             CockpitFinding(
                 finding_id="intelligence.lineage.no_facts",
@@ -542,7 +596,7 @@ def _build_intelligence_summary(
 
 
 def _build_reliability_summary(
-    program_id: str, *, programs_root: Path, observed_at: datetime
+    program_id: str, *, programs_root: Path, observed_at: datetime, events: tuple[EventEnvelope, ...],
 ) -> tuple[ReliabilityCockpitSummary, list[CockpitFinding]]:
     """ADF-W1.11: actuation safety state. ``duplicate_preventions`` is real
     (counts ``actuation.duplicate_prevented.v1`` ledger events emitted by the
@@ -554,13 +608,9 @@ def _build_reliability_summary(
     hardcoded ``None`` placeholder -- see governance/outcome-metrics.md.
     """
     findings: list[CockpitFinding] = []
-    try:
-        events = read_events(program_id, programs_root=programs_root)
-    except Exception:
-        events = ()
     duplicate_preventions = sum(1 for event in events if event.event_type == "actuation.duplicate_prevented.v1")
 
-    om4 = compute_om4_audit_coverage(program_id, programs_root=programs_root)
+    om4 = compute_om4_audit_coverage(program_id, programs_root=programs_root, events=events)
     summary = ReliabilityCockpitSummary(
         outbox_pending=0,
         uncertain_remote_state=0,

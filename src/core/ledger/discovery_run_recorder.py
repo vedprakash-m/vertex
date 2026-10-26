@@ -7,9 +7,9 @@ from pathlib import Path
 from src.core.ledger.candidate_store import load_pending_candidates
 from src.core.ledger.event_log import ConfidenceTier, EventEnvelope, TemporalConfidence, build_event_envelope, write_event
 from src.core.ledger.source_refs import OperatorAssertionRef
+from src.core.workspace_paths import PROGRAMS_ROOT
 
 
-PROGRAMS_ROOT = Path(__file__).resolve().parents[3] / "programs"
 
 
 @dataclass(frozen=True, slots=True)

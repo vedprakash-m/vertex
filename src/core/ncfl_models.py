@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
+import json
 from typing import Any
 
 
@@ -78,15 +80,19 @@ class DecisionRecord:
     from_status: str
     to_status: str
     note: str | None     # e.g. dismiss reason, supersession link, reconciliation marker
+    payload_digest: str | None = None  # acceptance binding: proposal.approval_payload_digest()
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "timestamp": _normalize_datetime(self.timestamp).isoformat().replace("+00:00", "Z"),
             "actor": self.actor,
             "from_status": self.from_status,
             "to_status": self.to_status,
             "note": self.note,
         }
+        if self.payload_digest is not None:
+            payload["payload_digest"] = self.payload_digest
+        return payload
 
     @staticmethod
     def from_json(d: dict[str, Any]) -> DecisionRecord:
@@ -96,6 +102,7 @@ class DecisionRecord:
             from_status=str(d.get("from_status", "pending")),
             to_status=str(d.get("to_status", "pending")),
             note=d.get("note") or None,
+            payload_digest=d.get("payload_digest"),
         )
 
 
@@ -196,6 +203,31 @@ class ContextUpdateProposal:
     # Serialization
     # ------------------------------------------------------------------
 
+    def approval_payload_digest(self) -> str:
+        """SHA-256 of the extraction identity, evidence and target update an acceptance approves.
+
+        Decision/apply metadata is excluded so status transitions do not change the digest.
+        """
+        payload = {key: value for key, value in self.to_json().items() if key not in _DECISION_STATE_KEYS}
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+    def acceptance_binding_error(self) -> str | None:
+        """Return why the current payload lacks a valid acceptance, or None."""
+        if self.status != "accepted":
+            return f"proposal status is {self.status!r}, not 'accepted'"
+        acceptance = next(
+            (
+                record for record in reversed(self.decision_history)
+                if record.to_status == "accepted" and record.from_status != "accepted"
+            ),
+            None,
+        )
+        if acceptance is None or acceptance.payload_digest is None:
+            return "acceptance has no payload binding"
+        if acceptance.payload_digest != self.approval_payload_digest():
+            return "proposal payload changed after acceptance"
+        return None
+
     def to_json(self) -> dict[str, Any]:
         return {
             "proposal_id": self.proposal_id,
@@ -272,6 +304,12 @@ class ContextUpdateProposal:
             dismissed_at=_parse_datetime(str(d["dismissed_at"])) if d.get("dismissed_at") else None,
             dismissed_by=d.get("dismissed_by"),
         )
+
+
+_DECISION_STATE_KEYS = frozenset({
+    "status", "superseded_by", "decision_history", "rationale",
+    "applied_at", "applied_by", "dismissed_at", "dismissed_by",
+})
 
 
 # ---------------------------------------------------------------------------

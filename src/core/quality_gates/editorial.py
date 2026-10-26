@@ -380,6 +380,8 @@ def evaluate_projection_freshness_gate(
 def evaluate_exec_summary_staleness_gate(
     edition_name: str | None,
     issue_number: int | None,
+    *,
+    reports_root: Path | None = None,
 ) -> GateEvaluation:
     if edition_name is None or issue_number is None:
         return GateEvaluation(
@@ -397,7 +399,7 @@ def evaluate_exec_summary_staleness_gate(
         findings = check_exec_summary_staleness(
             edition=edition_name,
             issue_number=issue_number,
-            reports_root=REPORTS_ROOT,
+            reports_root=reports_root if reports_root is not None else REPORTS_ROOT,
         )
         stale_findings = [finding for finding in findings if finding.is_stale]
         if not stale_findings:
@@ -436,6 +438,7 @@ def evaluate_metric_injection_and_ado_hygiene_gate(
     program_id: str | None,
     narratives: Mapping[str, str] | Iterable[str],
     items: tuple[WorkItem, ...] | list[WorkItem] = (),
+    programs_root: Path = PROGRAMS_ROOT,
 ) -> GateEvaluation:
     if program_id is None:
         return GateEvaluation(
@@ -448,7 +451,7 @@ def evaluate_metric_injection_and_ado_hygiene_gate(
 
     try:
         from src.core.ado_enrichment import ADO_RISK_ASSESSMENT_COMMENT_FIELD, ADO_RISK_ASSESSMENT_FIELD
-        from src.core.reality_store import RealityStore
+        from src.core.reality_store import RealityStore, get_program_reality_db_path
 
         metric_ids: set[str] = set()
         narrative_texts = list(narratives.values()) if isinstance(narratives, Mapping) else list(narratives)
@@ -457,7 +460,10 @@ def evaluate_metric_injection_and_ado_hygiene_gate(
             for match in metric_pattern.finditer(text):
                 metric_ids.add(match.group(1).strip())
 
-        store = RealityStore(program_id)
+        store = RealityStore(
+            program_id,
+            db_root=get_program_reality_db_path(program_id, programs_root=programs_root),
+        )
         store.initialize()
 
         missing_metrics = [metric_id for metric_id in metric_ids if not store.list_metric_observations(metric_id)]

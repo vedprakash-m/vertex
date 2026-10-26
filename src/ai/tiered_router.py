@@ -106,6 +106,7 @@ class RouteResult(Generic[T]):
 _DECISION_LOG: deque[TierDecision] = deque(maxlen=2048)
 _DECISION_LOCK = Lock()
 _DECISION_SINKS: list[Callable[[TierDecision], None]] = []
+_SINK_FAILURE_COUNT = 0
 
 
 def register_decision_sink(sink: Callable[[TierDecision], None]) -> None:
@@ -129,11 +130,32 @@ def recorded_decisions() -> tuple[TierDecision, ...]:
 
 def reset_recorded_decisions() -> None:
     """Clear the in-process decision log (test isolation / per-run reset)."""
+    global _SINK_FAILURE_COUNT
     with _DECISION_LOCK:
         _DECISION_LOG.clear()
+        _SINK_FAILURE_COUNT = 0
+
+
+def sink_failure_count() -> int:
+    """Return failed durable-sink writes for this process.
+
+    The ring buffer is diagnostic-only. A non-zero value means durable routing
+    telemetry is incomplete and invalidates the affected measurement window.
+    Routing deliberately remains available when observability storage is down.
+    """
+    with _DECISION_LOCK:
+        return _SINK_FAILURE_COUNT
+
+
+def reset_sink_failure_count() -> None:
+    """Reset sink-failure telemetry; intended for process/test boundaries."""
+    global _SINK_FAILURE_COUNT
+    with _DECISION_LOCK:
+        _SINK_FAILURE_COUNT = 0
 
 
 def _record(decision: TierDecision) -> None:
+    global _SINK_FAILURE_COUNT
     with _DECISION_LOCK:
         _DECISION_LOG.append(decision)
         sinks = tuple(_DECISION_SINKS)
@@ -141,8 +163,9 @@ def _record(decision: TierDecision) -> None:
     for sink in sinks:
         try:
             sink(decision)
-        except Exception:  # pragma: no cover - a sink must never break routing
-            pass
+        except Exception:  # a sink must never break routing
+            with _DECISION_LOCK:
+                _SINK_FAILURE_COUNT += 1
 
 
 def _current_trace_id() -> Optional[str]:

@@ -185,11 +185,13 @@ def _dispatch_execution(proposal: object, reality: object, policy: object) -> "A
     """Route proposal to the appropriate adapter and execute.
 
     WI-7.2: AdoAdapter dispatches state_transition, comment, and
-    work_item_create (gap-fix rules only).  AdoAdapter.execute() is live;
-    lineage is written via reality's fact writer when available.
+    work_item_create (gap-fix rules only). Direct live execution is contained
+    behind ``VERTEX_ALLOW_DIRECT_ACTUATION=1`` until RELO-W5.1 moves every
+    external effect through the durable outbox and reconciliation chain.
     """
+    import os
+
     from src.core.integration_protocol import ActuationResult
-    from src.core.ado_actuation_adapter import AdoActuationAdapter
 
     adapter_name = getattr(proposal, "adapter", "")
     operation = getattr(proposal, "operation", "")
@@ -197,7 +199,18 @@ def _dispatch_execution(proposal: object, reality: object, policy: object) -> "A
     payload["entity_ref"] = getattr(proposal, "entity_ref", "")
     payload["rule_id"] = getattr(proposal, "rule_id", "")
 
+    if os.environ.get("VERTEX_ALLOW_DIRECT_ACTUATION", "").strip().lower() not in {"1", "true", "yes"}:
+        return ActuationResult(
+            success=False,
+            error_message=(
+                "Direct live actuation is disabled by the RELO containment kill switch "
+                "(VERTEX_ALLOW_DIRECT_ACTUATION). Run `vertex actuate execute --dry-run` "
+                "to inspect the effect; live writes must use the durable outbox."
+            ),
+        )
+
     if adapter_name == "ado":
+        from src.core.ado_actuation_adapter import AdoActuationAdapter
         # Inject live ADO client if available via reality (Zone C path)
         ado_client_fn = None
         try:

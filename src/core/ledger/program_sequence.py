@@ -18,8 +18,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from src.core._db import open_program_db_with_retry as open_program_db
+from src.core.workspace_paths import PROGRAMS_ROOT
 
-PROGRAMS_ROOT = Path(__file__).resolve().parents[3] / "programs"
 _DB_FILENAME = "program_sequence.sqlite3"
 
 _SCHEMA_SQL = """

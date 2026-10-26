@@ -1,0 +1,63 @@
+{
+  "metadata": {"program": "contoso", "note": "Authored synthetic nudge fixture; no operational source data."},
+  "work_items_by_tag": {},
+  "work_items": [
+    {"id": 201, "fields": {
+      "System.Id": 201, "System.WorkItemType": "Feature",
+      "System.Title": "Contoso validation", "System.State": "Active",
+      "System.AssignedTo": {"displayName": "Validation Owner", "uniqueName": "validation@nudge-synth.local"},
+      "System.AreaPath": "ExampleProject\\Contoso", "System.IterationPath": "Example Sprint",
+      "System.ChangedDate": "2026-06-18T18:00:00+00:00",
+      "Microsoft.VSTS.Scheduling.TargetDate": "2026-07-15",
+      "System.Tags": "PRIORITY", "Custom.RiskAssessment": "On Track",
+      "Custom.RiskAssessmentComment": "", "Custom.CommitmentStatus": "Committed",
+      "System.Description": "Validate the synthetic service."
+    }},
+    {"id": 202, "fields": {
+      "System.Id": 202, "System.WorkItemType": "Feature",
+      "System.Title": "Contoso checklist", "System.State": "Active",
+      "System.AssignedTo": {"displayName": "Checklist Owner", "uniqueName": "checklist@nudge-synth.local"},
+      "System.AreaPath": "ExampleProject\\Contoso", "System.IterationPath": "Example Sprint",
+      "System.ChangedDate": "2026-06-10T18:00:00+00:00",
+      "Microsoft.VSTS.Scheduling.TargetDate": "2026-07-16",
+      "System.Tags": "PRIORITY", "Custom.RiskAssessment": "On Track",
+      "Custom.RiskAssessmentComment": "", "System.Description": "Review the synthetic service checklist."
+    }},
+    {"id": 203, "fields": {
+      "System.Id": 203, "System.WorkItemType": "Feature",
+      "System.Title": "Contoso schedule", "System.State": "Active",
+      "System.AssignedTo": {"displayName": "Schedule Owner", "uniqueName": "schedule@nudge-synth.local"},
+      "System.AreaPath": "ExampleProject\\Contoso", "System.IterationPath": "Example Sprint",
+      "System.ChangedDate": "2026-06-09T18:00:00+00:00",
+      "System.Tags": "PRIORITY", "Custom.RiskAssessment": "On Track",
+      "Custom.RiskAssessmentComment": "", "System.Description": "Set the synthetic service target date."
+    }},
+    {"id": 204, "fields": {
+      "System.Id": 204, "System.WorkItemType": "Feature",
+      "System.Title": "Contoso dependency", "System.State": "Active",
+      "System.AssignedTo": {"displayName": "Dependency Owner", "uniqueName": "dependency@nudge-synth.local"},
+      "System.AreaPath": "ExampleProject\\Contoso", "System.IterationPath": "Example Sprint",
+      "System.ChangedDate": "2026-06-19T18:00:00+00:00",
+      "Microsoft.VSTS.Scheduling.TargetDate": "2026-07-17",
+      "System.Tags": "PRIORITY", "Custom.RiskAssessment": "At Risk",
+      "Custom.RiskAssessmentComment": "Blocked on a synthetic dependency; ETA next milestone.",
+      "System.Description": "Resolve the synthetic service dependency."
+    }},
+    {"id": 205, "fields": {
+      "System.Id": 205, "System.WorkItemType": "Feature",
+      "System.Title": "Contoso documentation", "System.State": "Active",
+      "System.AssignedTo": {"displayName": "Documentation Owner", "uniqueName": "documentation@nudge-synth.local"},
+      "System.AreaPath": "ExampleProject\\Contoso", "System.IterationPath": "Example Sprint",
+      "System.ChangedDate": "2026-06-17T18:00:00+00:00",
+      "Microsoft.VSTS.Scheduling.TargetDate": "2026-07-18",
+      "System.Tags": "PRIORITY", "Custom.RiskAssessment": "On Track",
+      "Custom.RiskAssessmentComment": "", "Custom.CommitmentStatus": "Committed",
+      "System.Description": "Document the synthetic service."
+    }}
+  ],
+  "comments_by_id": {
+    "201": [{"createdDate": "2026-06-18T18:00:00+00:00", "text": "Status: on track, no blockers."}],
+    "204": [{"createdDate": "2026-06-19T18:00:00+00:00", "text": "Blocked on a synthetic dependency."}],
+    "205": [{"createdDate": "2026-06-17T18:00:00+00:00", "text": "Complete, on track."}]
+  }
+}

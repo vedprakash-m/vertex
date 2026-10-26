@@ -46,6 +46,7 @@ from src.core.signal_ranking import signal_source_family
 from src.core.store_factory import build_signal_store_for_program_id
 from src.core.telemetry_summary import build_approved_telemetry_summary
 from src.core.trusted_baseline_store import load_trusted_baseline_issue
+from src.core.workspace_paths import PROGRAMS_ROOT, validate_report_workspace
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,10 +55,19 @@ class PrepBriefArtifacts:
     markdown_path: Path
 
 
+def _preflight_prep_workspace() -> None:
+    try:
+        validate_report_workspace(programs_root=PROGRAMS_ROOT, reports_root=REPORTS_ROOT, archive_root=ARCHIVE_ROOT)
+    except ConfigError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=2) from error
+
+
 def prep_command(
     edition: str = typer.Option(..., "--edition", help="Edition name (e.g. myprogram_lt_deck)."),
     format: str = typer.Option("human", "--format", help="Output format: human, json, or csv."),
 ) -> None:
+    _preflight_prep_workspace()
     try:
         artifacts = generate_prep_brief(edition_name=edition)
     except typer.BadParameter as error:
@@ -98,8 +108,13 @@ def generate_prep_brief(
 ) -> PrepBriefArtifacts:
     resolved_reports_root = reports_root or REPORTS_ROOT
     resolved_archive_root = archive_root or ARCHIVE_ROOT
+    programs_root = programs_root or (resolved_reports_root.parent / "programs" if reports_root is not None else PROGRAMS_ROOT)
+    validate_report_workspace(
+        programs_root=programs_root,
+        reports_root=resolved_reports_root,
+        archive_root=resolved_archive_root,
+    )
     generated_at = as_of or datetime.now(timezone.utc)
-    programs_root = resolved_reports_root.parent / "programs"
 
     resolved_v2 = resolve_edition(edition_name, programs_root=programs_root)
     if resolved_v2 is None or resolved_v2.edition.altitude != "satellite":
@@ -144,6 +159,7 @@ def generate_prep_brief(
         as_of=draft_as_of,
         previous_snapshot=previous_snapshot,
         reports_root=resolved_reports_root,
+        archive_root=resolved_archive_root,
     )
     overrides_document = load_overrides(
         edition_name,
@@ -164,9 +180,15 @@ def generate_prep_brief(
         overrides_document=overrides_document,
         edition_name=edition_name,
         reports_root=resolved_reports_root,
+        archive_root=resolved_archive_root,
     )
     item_urls = _build_item_urls(bundle, items)
-    program_facts = load_program_facts(resolved_v2.program.id, db_root=resolved_reports_root.parent, programs_root=programs_root)
+    program_facts = load_program_facts(
+        resolved_v2.program.id,
+        db_root=resolved_reports_root.parent,
+        programs_root=programs_root,
+        archive_root=resolved_archive_root,
+    )
     projected_dependencies = project_dependencies(program_facts)
     projected_risks = project_risk_entries(program_facts)
     projected_actions = project_action_items(program_facts)
@@ -186,6 +208,7 @@ def generate_prep_brief(
         review_status=review_status,
         evidence_by_item={},
         item_urls=item_urls,
+        programs_root=programs_root,
     )
     dependencies = projected_dependencies
     summary_lookup = _load_reviewer_summaries(resolved_v2=resolved_v2, programs_root=programs_root)
@@ -258,6 +281,7 @@ def generate_prep_brief(
         dependency_diagram_lines=_build_prep_dependency_diagram_lines(
             program_id=resolved_v2.program.id,
             programs_root=programs_root,
+            archive_root=resolved_archive_root,
         ),
         milestone_lines=_build_prep_milestone_lines(
             edition_name=edition_name,
@@ -268,6 +292,7 @@ def generate_prep_brief(
             program_id=resolved_v2.program.id,
             as_of=generated_at,
             programs_root=programs_root,
+            archive_root=resolved_archive_root,
         ),
         reference_doc_lines=_build_prep_reference_doc_lines(
             program_id=resolved_v2.program.id,
@@ -500,11 +525,13 @@ def _build_prep_dependency_diagram_lines(
     program_id: str,
     programs_root: Path,
     max_hops: int = 3,
+    archive_root: Path | None = None,
 ) -> tuple[str, ...]:
     reachable_dependencies = _load_reachable_cross_program_dependencies(
         program_id=program_id,
         programs_root=programs_root,
         max_hops=max_hops,
+        archive_root=archive_root,
     )
     if not reachable_dependencies:
         return ()
@@ -547,12 +574,13 @@ def _load_reachable_cross_program_dependencies(
     program_id: str,
     programs_root: Path,
     max_hops: int,
+    archive_root: Path | None = None,
 ) -> tuple[Dependency, ...]:
     if max_hops < 1:
         return ()
 
     adjacency: dict[str, tuple[Dependency, ...]] = {}
-    for dependency in _load_all_cross_program_dependencies(programs_root=programs_root):
+    for dependency in _load_all_cross_program_dependencies(programs_root=programs_root, archive_root=archive_root):
         adjacency[dependency.from_program_id] = (*adjacency.get(dependency.from_program_id, ()), dependency)
 
     reachable: list[Dependency] = []
@@ -573,14 +601,19 @@ def _load_reachable_cross_program_dependencies(
     return tuple(reachable)
 
 
-def _load_all_cross_program_dependencies(*, programs_root: Path) -> tuple[Dependency, ...]:
+def _load_all_cross_program_dependencies(*, programs_root: Path, archive_root: Path | None = None) -> tuple[Dependency, ...]:
     dependencies: list[Dependency] = []
     for program_dir in sorted(programs_root.iterdir(), key=lambda entry: entry.name.lower()):
         if not program_dir.is_dir() or not (program_dir / "program.yaml").exists():
             continue
         try:
             loaded_dependencies = project_dependencies(
-                load_program_facts(program_dir.name, db_root=programs_root.parent, programs_root=programs_root)
+                load_program_facts(
+                    program_dir.name,
+                    db_root=programs_root.parent,
+                    programs_root=programs_root,
+                    archive_root=archive_root,
+                )
             )
         except ConfigError:
             continue
@@ -657,6 +690,7 @@ def _build_prep_assumption_lines(
     program_id: str,
     as_of: datetime,
     programs_root: Path,
+    archive_root: Path | None = None,
 ) -> tuple[str, ...]:
     assumptions = tuple(
         entry
@@ -665,6 +699,7 @@ def _build_prep_assumption_lines(
                 program_id,
                 db_root=programs_root.parent,
                 programs_root=programs_root,
+                archive_root=archive_root,
                 fact_types=("assumption.entry",),
             )
         )

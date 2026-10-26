@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, TypedDict
 
 import yaml
 
@@ -27,6 +27,10 @@ from src.core.view_models import ScorecardData
 
 
 _DEPENDENCY_RISK_MAX_HOPS = 3
+
+
+class _ArchiveOptions(TypedDict, total=False):
+    archive_root: Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +110,7 @@ def _build_scorecard_data(
     dependency_uplifts = _build_dependency_risk_uplifts(
         program_id=program_id,
         programs_root=programs_root,
+        archive_root=archive_root,
         raw_program=raw_program,
         scorecards=resolved_scorecards,
         risk_rank=risk_rank,
@@ -329,6 +334,7 @@ def _build_dependency_risk_uplifts(
     raw_program: Mapping[str, object] | None,
     scorecards: tuple[Scorecard, ...],
     risk_rank: Callable[[RiskLevel], int],
+    archive_root: Path | None = None,
 ) -> dict[str, _DependencyRiskUplift]:
     if (
         program_id is None
@@ -342,7 +348,10 @@ def _build_dependency_risk_uplifts(
     if not dimension_workstream_ids:
         return {}
 
-    dependency_network = _load_reachable_dependency_network(program_id, programs_root=programs_root)
+    dependency_network = _load_reachable_dependency_network(
+        program_id, programs_root=programs_root,
+        **({"archive_root": archive_root} if archive_root is not None else {}),
+    )
     if not dependency_network:
         return {}
 
@@ -379,11 +388,14 @@ def _build_dependency_risk_uplifts(
     return uplifts
 
 
-def _load_reachable_dependency_network(program_id: str, *, programs_root: Path) -> tuple[Dependency, ...]:
+def _load_reachable_dependency_network(
+    program_id: str, *, programs_root: Path, archive_root: Path | None = None,
+) -> tuple[Dependency, ...]:
     queue: deque[str] = deque((program_id,))
     visited_program_ids: set[str] = set()
     seen_dependency_keys: set[tuple[str, str]] = set()
     dependencies: list[Dependency] = []
+    archive_options: _ArchiveOptions = {"archive_root": archive_root} if archive_root is not None else {}
 
     while queue:
         current_program_id = queue.popleft()
@@ -403,6 +415,7 @@ def _load_reachable_dependency_network(program_id: str, *, programs_root: Path) 
                 a.record for a in ProgramReality.load(
                     current_program_id,
                     programs_root=programs_root,
+                    **archive_options,
                 ).dependencies()
             )
         except ConfigError:

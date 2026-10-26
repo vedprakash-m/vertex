@@ -11,9 +11,9 @@ from typing import Any, Iterable
 
 from src.core.ledger.event_log import ConfidenceTier, EventEnvelope, TemporalConfidence, build_event_envelope, compute_envelope_hash
 from src.core.ledger.source_refs import SourceRef
+from src.core.workspace_paths import PROGRAMS_ROOT
 
 
-PROGRAMS_ROOT = Path(__file__).resolve().parents[3] / "programs"
 PROJECTION_SCHEMA_VERSION = "1"
 
 

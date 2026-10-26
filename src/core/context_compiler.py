@@ -209,12 +209,31 @@ class DeterministicContextCompiler:
         start = time.perf_counter()
         excluded: list[ExcludedSpan] = []
 
-        # Step 2: injection screening.
-        required_spans = [self._screen_span(span) for span in request.required_evidence]
-        screened_optional = [self._screen_span(span) for span in request.optional_evidence]
+        # Step 2: injection screening. RELO-W1.2 (Sec 8.2.1): every span's
+        # token_estimate is recomputed here from its actual rendered
+        # representation (header + text, matching _render_prompt exactly) --
+        # a caller-supplied token_estimate is advisory only and never trusted
+        # for budget math from this point on.
+        required_spans = [self._recompute_tokens(self._screen_span(span)) for span in request.required_evidence]
+        screened_optional = [self._recompute_tokens(self._screen_span(span)) for span in request.optional_evidence]
 
-        # Step 3: required evidence is never dropped (Section 8.7.3) -- only
-        # optional evidence can actually be excluded for an injection verdict.
+        # RELO-W1.2 (Sec 8.2.1): a required span carrying a hard-injection
+        # verdict rejects the whole compilation with an evidence-gap record,
+        # rather than either silently including it (a prompt-injection risk)
+        # or silently excluding it (arch-data-fix.md's older "required is
+        # never dropped" rule, which predates this stricter RELO contract).
+        hard_excluded_required = [span for span in required_spans if span.injection_screen == "excluded"]
+        if hard_excluded_required:
+            raise ContextCompileRejected(
+                "required evidence "
+                f"{', '.join(span.evidence_id for span in hard_excluded_required)} "
+                f"carries a hard prompt-injection verdict for feature {request.feature!r}; "
+                "compilation rejected rather than including or silently dropping required evidence (evidence_gap)"
+            )
+
+        # Step 3: required evidence is never dropped for any other reason
+        # (Section 8.7.3) -- only optional evidence can be excluded for a
+        # (non-hard) injection verdict.
         optional_after_injection: list[EvidenceSpan] = []
         for span in screened_optional:
             if span.injection_screen == "excluded":
@@ -311,6 +330,14 @@ class DeterministicContextCompiler:
             return replace(span, injection_screen="excluded")
         return replace(span, injection_screen="flagged", origin=ContentOrigin.EXTERNAL_UNVERIFIED, trust_level="downgraded")
 
+    def _recompute_tokens(self, span: EvidenceSpan) -> EvidenceSpan:
+        """RELO-W1.2 (Sec 8.2.1): a caller-supplied ``token_estimate`` is
+        advisory only. Recompute centrally from the span's actual rendered
+        representation (the same header+text `_render_span_text` builds),
+        so accounting reflects what is truly emitted into the prompt, not
+        raw span text alone."""
+        return replace(span, token_estimate=self._token_estimator.estimate(_render_span_text(span)))
+
 
 def _content_hash(text: str) -> str:
     """Appendix B.3: sha256 of NFKC-normalized, lowercased,
@@ -400,14 +427,20 @@ def _pack_within_budget(
     return packed, excluded
 
 
+def _render_span_text(span: EvidenceSpan) -> str:
+    """The exact per-span text `_render_prompt` emits (header + body) --
+    shared so RELO-W1.2's centralized token recomputation counts the same
+    rendered representation that actually lands in the prompt, not raw
+    span text alone."""
+    marker = "REQUIRED" if span.required else "EVIDENCE"
+    header = f"[{marker} {span.evidence_id} origin={span.origin.value} trust={span.trust_level} verification={span.verification_state}]"
+    return f"{header}\n{span.text}"
+
+
 def _render_prompt(request: ContextCompileRequest, included: tuple[EvidenceSpan, ...]) -> str:
     parts = [request.system_instructions.strip(), request.output_schema_text.strip()]
     if included:
-        evidence_lines = []
-        for span in included:
-            marker = "REQUIRED" if span.required else "EVIDENCE"
-            header = f"[{marker} {span.evidence_id} origin={span.origin.value} trust={span.trust_level} verification={span.verification_state}]"
-            evidence_lines.append(f"{header}\n{span.text}")
+        evidence_lines = [_render_span_text(span) for span in included]
         parts.append("Evidence:\n\n" + "\n\n".join(evidence_lines))
     return "\n\n".join(part for part in parts if part)
 

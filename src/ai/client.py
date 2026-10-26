@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, TypeVar
 
 from src.ai.ai_mode import AIMode, get_ai_mode
+from src.ai.context_tokenizers import resolve_token_estimator
 from src.ai.llm_trace import AITraceContext, get_current_trace_context, llm_trace
 from src.ai.request_router import AIRequestRouter
 from src.core.policy_loader import load_ai_model_cost_policy
@@ -141,13 +142,17 @@ class AIClient:
         )
         return parser(self._extract_json_object(response))
 
-    def _check_budget(self) -> None:
+    def _reserve_budget(self, *, system: str, user: str, max_tokens: int) -> Any:
         if self._spent_usd >= self._budget_usd:
             raise BudgetExceeded(f"Spent ${self._spent_usd:.3f} of ${self._budget_usd:.2f}")
+        reservation = None
         if self._run_cost_guard is not None:
-            self._run_cost_guard.check()
+            estimated_prompt_tokens = resolve_token_estimator(self._deployment).estimate(f"{system}\n{user}")
+            estimated_cost_usd = self._estimate_cost(estimated_prompt_tokens, max_tokens)
+            reservation = self._run_cost_guard.reserve_call(estimated_cost_usd)
+        return reservation
 
-    def _record_usage(self, response: Any) -> tuple[int, int, float, BudgetExceeded | None]:
+    def _record_usage(self, response: Any, *, reservation: Any) -> tuple[int, int, float, BudgetExceeded | None]:
         usage = getattr(response, "usage", None)
         prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
         completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
@@ -155,8 +160,8 @@ class AIClient:
         cost_usd = self._estimate_cost(prompt_tokens, completion_tokens)
         self._spent_usd += cost_usd
         budget_error: BudgetExceeded | None = None
-        if self._run_cost_guard is not None:
-            run_state = self._run_cost_guard.record_actual(cost_usd)
+        if self._run_cost_guard is not None and reservation is not None:
+            run_state = self._run_cost_guard.settle_call(reservation, cost_usd)
             if run_state.spent_usd > run_state.budget_usd:
                 budget_error = BudgetExceeded(
                     f"Spent ${run_state.spent_usd:.3f} of ${run_state.budget_usd:.2f}; actual AI spend exceeded the run ceiling."
@@ -179,6 +184,11 @@ class AIClient:
         mode: str,
         response_format: dict[str, Any] | None = None,
     ) -> Any:
+        if self._trace_context is None:
+            raise AIClientError(
+                "A trace context is required for every remote AI provider call; "
+                "untraced calls cannot be budgeted or attributed."
+            )
         if get_ai_mode() == AIMode.OBSERVE_ONLY:
             message = "AI request router is in observe-only mode; frontier calls are blocked."
             self._write_trace(
@@ -187,7 +197,7 @@ class AIClient:
                 error=message,
             )
             raise AIClientError(message)
-        self._check_budget()
+        reservation = self._reserve_budget(system=system, user=user, max_tokens=max_tokens)
         started = time.perf_counter()
         try:
             response = self._router.route(
@@ -198,7 +208,10 @@ class AIClient:
                 max_tokens=max_tokens,
                 response_format=response_format,
             )
-            prompt_tokens, completion_tokens, cost_usd, budget_error = self._record_usage(response)
+            prompt_tokens, completion_tokens, cost_usd, budget_error = self._record_usage(
+                response,
+                reservation=reservation,
+            )
             self._write_trace(
                 prompt_version=prompt_version,
                 prompt_tokens=prompt_tokens,

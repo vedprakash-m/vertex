@@ -22,8 +22,8 @@ from pathlib import Path
 from typing import Any
 
 from src.core._db import open_program_db
+from src.core.workspace_paths import PROGRAMS_ROOT
 
-PROGRAMS_ROOT = Path(__file__).resolve().parents[3] / "programs"
 _DB_FILENAME = "projection_checkpoints.sqlite3"
 
 _SCHEMA_SQL = """

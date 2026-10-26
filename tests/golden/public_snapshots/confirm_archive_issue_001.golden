@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">  <title>Acme Issue 1</title>
+</head>
+<body style="margin:0; padding:0; background-color:#F9FAFB; font-family:Segoe UI, -apple-system, Roboto, Helvetica, Arial, sans-serif; color:#111827;">
+  <div style="display:none; max-height:0; overflow:hidden; opacity:0; mso-hide:all; color:transparent;">
+    0 High risks, Risk Load 1.0 stable. No new leadership decisions this week.
+  </div>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; background-color:#F9FAFB; margin:0; padding:0;">
+    <tr>
+      <td align="center" style="padding:24px 12px;">
+        <table role="presentation" width="680" cellpadding="0" cellspacing="0" border="0" style="width:680px; max-width:680px; border-collapse:collapse; background-color:#FFFFFF; border:1px solid #E5E7EB;">
+          <tr>
+            <td align="center" role="main" style="padding:0;">
+              <table role="presentation" width="640" cellpadding="0" cellspacing="0" border="0" style="width:640px; max-width:640px; border-collapse:collapse;">
+                <tr>
+                  <td style="padding:24px 0 16px 0; border-bottom:1px solid #E5E7EB;">
+<h1 style="margin:0; font-size:20px; line-height:1.3; font-weight:600; color:#111827;">Acme Issue 1</h1>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:24px 0; font-size:14px; line-height:1.6; color:#374151;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" data-vertex-block="cadence-note" style="width:100%; border-collapse:collapse; margin:0 0 16px 0;">
+  <tr>
+    <td style="padding:0; font-size:13px; line-height:1.6; color:#374151;">Detailed weekly update</td>
+  </tr>
+</table><a id="scorecard-example-release-readiness"></a>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" data-vertex-block="scorecard-band-example-release-readiness" style="width:100%; border-collapse:separate; border-spacing:0; margin:0 0 14px 0; border:1px solid #E5E7EB; background-color:#FFFFFF; table-layout:fixed;">
+  <tr>
+    <td colspan="5" style="padding:8px 10px 6px 10px; font-size:12px; line-height:1.4; font-weight:700; color:#374151;">Example Release Readiness (Risk levels)</td>
+  </tr>
+  <tr>
+    <td width="20.0%" style="width:20.0%; padding:6px 4px 8px 4px; border-top:1px solid #E5E7EB; border-right:1px solid #FFFFFF; background-color:#B4E5A2; vertical-align:top; text-align:center;">
+      <p style="margin:0 0 4px 0; font-size:10px; line-height:1.2; font-weight:700; color:#000000; text-transform:uppercase; letter-spacing:0.02em;"><a href="#chapter-deployment_readiness" style="color:#000000; text-decoration:none;">Deployment Velocity</a></p>
+<p style="margin:0 0 4px 0; font-size:10px; line-height:1.2; color:#000000;">05/10</p>      <p style="margin:0; font-size:12px; line-height:1.2; font-weight:800; color:#000000;">Low</p>
+    </td>
+    <td width="20.0%" style="width:20.0%; padding:6px 4px 8px 4px; border-top:1px solid #E5E7EB; border-right:1px solid #FFFFFF; background-color:#B4E5A2; vertical-align:top; text-align:center;">
+      <p style="margin:0 0 4px 0; font-size:10px; line-height:1.2; font-weight:700; color:#000000; text-transform:uppercase; letter-spacing:0.02em;"><a href="#chapter-deployment_readiness" style="color:#000000; text-decoration:none;">Deployment Safety</a></p>
+<p style="margin:0 0 4px 0; font-size:10px; line-height:1.2; color:#000000;">05/10</p>      <p style="margin:0; font-size:12px; line-height:1.2; font-weight:800; color:#000000;">Low</p>
+    </td>
+    <td width="20.0%" style="width:20.0%; padding:6px 4px 8px 4px; border-top:1px solid #E5E7EB; border-right:1px solid #FFFFFF; background-color:#B4E5A2; vertical-align:top; text-align:center;">
+      <p style="margin:0 0 4px 0; font-size:10px; line-height:1.2; font-weight:700; color:#000000; text-transform:uppercase; letter-spacing:0.02em;"><a href="#chapter-network_delivery_checks" style="color:#000000; text-decoration:none;">Networking</a></p>
+<p style="margin:0 0 4px 0; font-size:10px; line-height:1.2; color:#000000;">05/08</p>      <p style="margin:0; font-size:12px; line-height:1.2; font-weight:800; color:#000000;">Low</p>
+    </td>
+    <td width="20.0%" style="width:20.0%; padding:6px 4px 8px 4px; border-top:1px solid #E5E7EB; border-right:1px solid #FFFFFF; background-color:#B4E5A2; vertical-align:top; text-align:center;">
+      <p style="margin:0 0 4px 0; font-size:10px; line-height:1.2; font-weight:700; color:#000000; text-transform:uppercase; letter-spacing:0.02em;"><a href="#chapter-artifact_service" style="color:#000000; text-decoration:none;">Service Validation</a></p>
+<p style="margin:0 0 4px 0; font-size:10px; line-height:1.2; color:#000000;">05/12</p>      <p style="margin:0; font-size:12px; line-height:1.2; font-weight:800; color:#000000;">Low</p>
+    </td>
+    <td width="20.0%" style="width:20.0%; padding:6px 4px 8px 4px; border-top:1px solid #E5E7EB; border-right:0; background-color:#B4E5A2; vertical-align:top; text-align:center;">
+      <p style="margin:0 0 4px 0; font-size:10px; line-height:1.2; font-weight:700; color:#000000; text-transform:uppercase; letter-spacing:0.02em;"><a href="#chapter-package_currency" style="color:#000000; text-decoration:none;">Package Currency</a></p>
+<p style="margin:0 0 4px 0; font-size:10px; line-height:1.2; color:#000000;">05/15</p>      <p style="margin:0; font-size:12px; line-height:1.2; font-weight:800; color:#000000;">Low</p>
+    </td>
+  </tr>
+</table><a id="scorecard-example-service-readiness"></a>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" data-vertex-block="scorecard-band-example-service-readiness" style="width:100%; border-collapse:separate; border-spacing:0; margin:0 0 14px 0; border:1px solid #E5E7EB; background-color:#FFFFFF; table-layout:fixed;">
+  <tr>
+    <td colspan="3" style="padding:8px 10px 6px 10px; font-size:12px; line-height:1.4; font-weight:700; color:#374151;">Example Service Readiness (Risk levels)</td>
+  </tr>
+  <tr>
+    <td width="33.33%" style="width:33.33%; padding:6px 4px 8px 4px; border-top:1px solid #E5E7EB; border-right:1px solid #FFFFFF; background-color:#B4E5A2; vertical-align:top; text-align:center;">
+      <p style="margin:0 0 4px 0; font-size:10px; line-height:1.2; font-weight:700; color:#000000; text-transform:uppercase; letter-spacing:0.02em;"><a href="#chapter-service_checks" style="color:#000000; text-decoration:none;">Performance</a></p>
+<p style="margin:0 0 4px 0; font-size:10px; line-height:1.2; color:#000000;">05/08</p>      <p style="margin:0; font-size:12px; line-height:1.2; font-weight:800; color:#000000;">Low</p>
+    </td>
+    <td width="33.33%" style="width:33.33%; padding:6px 4px 8px 4px; border-top:1px solid #E5E7EB; border-right:1px solid #FFFFFF; background-color:#B4E5A2; vertical-align:top; text-align:center;">
+      <p style="margin:0 0 4px 0; font-size:10px; line-height:1.2; font-weight:700; color:#000000; text-transform:uppercase; letter-spacing:0.02em;"><a href="#chapter-service_checks" style="color:#000000; text-decoration:none;">Safety</a></p>
+<p style="margin:0 0 4px 0; font-size:10px; line-height:1.2; color:#000000;">05/08</p>      <p style="margin:0; font-size:12px; line-height:1.2; font-weight:800; color:#000000;">Low</p>
+    </td>
+    <td width="33.33%" style="width:33.33%; padding:6px 4px 8px 4px; border-top:1px solid #E5E7EB; border-right:0; background-color:#B4E5A2; vertical-align:top; text-align:center;">
+      <p style="margin:0 0 4px 0; font-size:10px; line-height:1.2; font-weight:700; color:#000000; text-transform:uppercase; letter-spacing:0.02em;">Pilot Readiness</p>
+<p style="margin:0 0 4px 0; font-size:10px; line-height:1.2; color:#000000;">05/08</p>      <p style="margin:0; font-size:12px; line-height:1.2; font-weight:800; color:#000000;">Low</p>
+    </td>
+  </tr>
+</table><a id="ado-vitality"></a>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 16px 0; border:1px solid #E5E7EB; background-color:#FFFFFF;">
+  <tr>
+    <td style="padding:16px 20px; border-bottom:1px solid #E5E7EB; background-color:#F9FAFB;">
+      <p style="margin:0; font-size:16px; line-height:1.4; font-weight:700; color:#111827;">ADO Vitality This Week</p>
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:16px 20px; font-size:14px; line-height:1.6; color:#374151;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse;">
+        <tr>
+          <td style="padding:0 0 8px 0; font-weight:600; color:#111827;">Items updated in ADO</td>
+          <td style="padding:0 0 8px 0; text-align:right; color:#111827;">0 of 4 active (0%)</td>
+        </tr>
+        <tr>
+          <td style="padding:0 0 8px 0; font-weight:600; color:#111827;">Avg days since last update</td>
+          <td style="padding:0 0 8px 0; text-align:right; color:#111827;">9999.0 days</td>
+        </tr>
+        <tr>
+          <td style="padding:0; font-weight:600; color:#111827;">Items with leakage signals</td>
+          <td style="padding:0; text-align:right; color:#111827;">0 items discussed outside ADO without a later ADO update in the same 7-day window</td>
+        </tr>
+      </table>
+      <p style="margin:16px 0 0 0; font-size:14px; line-height:1.6; color:#111827;"><strong>Best documented:</strong> WI:910001 — 0 ADO touches in the last 7 days by Example Owner</p>
+      <p style="margin:8px 0 0 0; font-size:14px; line-height:1.6; color:#111827;"><strong>Trend:</strong> 19% (baseline issue)</p>
+      <p style="margin:16px 0 8px 0; font-size:14px; line-height:1.6; color:#111827;"><strong>Needs ADO update:</strong></p>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0; border:1px solid #E5E7EB; table-layout:fixed;">
+        <tr style="background-color:#F3F4F6;">
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; font-size:12px; line-height:1.4; font-weight:600; color:#111827; width:20%;">Workstream</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; font-size:12px; line-height:1.4; font-weight:600; color:#111827; width:28%;">Workstream Owner + ADO Assignee</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; font-size:12px; line-height:1.4; font-weight:600; color:#111827; width:26%;">Stale or Missing ADOs</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; font-size:12px; line-height:1.4; font-weight:600; color:#111827; width:26%;">What Field Needs Update</td>
+        </tr>
+        <tr>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">Networking</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">ADO assignee: Example Owner</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;"><strong>ADO#910002</strong><br/>Networking example dependency</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">Meaningful ADO update (9999d stale); Owner update or comment; Description; Blocker clarity; Next step</td>
+        </tr>
+        <tr>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">Deployment Readiness</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">ADO assignee: Example Owner</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;"><strong>ADO#910001</strong><br/>Deployment example feature</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">Meaningful ADO update (9999d stale); Owner update or comment; Description; Next step</td>
+        </tr>
+        <tr>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">Artifact Service</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">ADO assignee: Example Owner</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;"><strong>ADO#910003</strong><br/>Service validation example</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">Meaningful ADO update (9999d stale); Owner update or comment; Description; Next step</td>
+        </tr>
+        <tr>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">Package Currency</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">ADO assignee: Example Owner</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;"><strong>ADO#910004</strong><br/>Package readiness example</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">Meaningful ADO update (9999d stale); Owner update or comment; Description; Next step</td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>
+<a id="exec-summary"></a>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" data-vertex-block="exec-summary" style="width:100%; border-collapse:collapse; margin:0 0 16px 0; border:1px solid #E5E7EB; background-color:#FFFFFF;">
+  <tr>
+    <td style="padding:12px 16px 8px 16px; font-size:12px; line-height:1.4; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color:#6B7280;">Executive Summary</td>
+  </tr>
+  <tr>
+    <td style="padding:0 16px 16px 16px; font-size:14px; line-height:1.6; color:#374151;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 0 0; border:1px solid #E5E7EB; background-color:#F9FAFB;">
+        <tr>
+          <td style="padding:10px 12px;">
+            <p style="margin:0; font-size:14px; line-height:1.65; color:#111827;">Confirmed executive summary.</p>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" data-vertex-block="jump-to-section" style="width:100%; border-collapse:collapse; margin:0 0 16px 0;">
+  <tr>
+    <td style="padding:0 0 8px 0; font-size:13px; line-height:1.5; font-weight:700; color:#111827; text-transform:uppercase; letter-spacing:0.04em;">Jump to section</td>
+  </tr>
+  <tr>
+    <td style="padding:0;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:separate; border-spacing:0; table-layout:fixed;">
+        <tr>
+          <td style="width:33.33%; padding:0 8px 8px 0; vertical-align:top;">
+            <a href="#chapter-deployment_readiness" style="display:block; padding:8px 10px; border:1px solid #E5E7EB; background-color:#F9FAFB; font-size:12px; line-height:1.4; font-weight:600; color:#374151; text-decoration:none;">Deployment Readiness</a>
+          </td>
+          <td style="width:33.33%; padding:0 8px 8px 0; vertical-align:top;">
+            <a href="#chapter-network_delivery_checks" style="display:block; padding:8px 10px; border:1px solid #E5E7EB; background-color:#F9FAFB; font-size:12px; line-height:1.4; font-weight:600; color:#374151; text-decoration:none;">Network Delivery Checks</a>
+          </td>
+          <td style="width:33.33%; padding:0 8px 8px 0; vertical-align:top;">
+            <a href="#chapter-artifact_service" style="display:block; padding:8px 10px; border:1px solid #E5E7EB; background-color:#F9FAFB; font-size:12px; line-height:1.4; font-weight:600; color:#374151; text-decoration:none;">Artifact Service</a>
+          </td>
+        </tr>
+        <tr>
+          <td style="width:33.33%; padding:0 8px 8px 0; vertical-align:top;">
+            <a href="#chapter-package_currency" style="display:block; padding:8px 10px; border:1px solid #E5E7EB; background-color:#F9FAFB; font-size:12px; line-height:1.4; font-weight:600; color:#374151; text-decoration:none;">Package Currency</a>
+          </td>
+          <td style="width:33.33%; padding:0 8px 8px 0; vertical-align:top;">
+            <a href="#chapter-service_checks" style="display:block; padding:8px 10px; border:1px solid #E5E7EB; background-color:#F9FAFB; font-size:12px; line-height:1.4; font-weight:600; color:#374151; text-decoration:none;">Service Checks</a>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>
+<a id="chapter-deployment_readiness"></a>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" data-vertex-block="chapter-deployment_readiness" style="width:100%; border-collapse:collapse; margin:0 0 18px 0; border:1px solid #E5E7EB; background-color:#FFFFFF;">
+  <tr>
+    <td style="padding:14px 16px 10px 16px; font-size:18px; line-height:1.4; font-weight:600; color:#111827;">Deployment Readiness</td>
+  </tr>
+  <tr>
+    <td style="padding:0 16px 16px 16px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; table-layout:fixed;">
+        <tr>
+          <td style="width:32px; padding:8px 8px 8px 0; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">#</td>
+          <td style="width:23%; padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">Workstream</td>
+          <td style="padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">Status / Business Impact</td>
+          <td style="width:84px; padding:8px 0 8px 8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280; text-align:right;">Risk</td>
+        </tr>
+        <tr>
+          <td style="padding:10px 8px 10px 0; border-bottom:1px solid #E5E7EB; font-size:13px; line-height:1.5; color:#111827; vertical-align:top;">1</td>
+          <td style="padding:10px 8px; border-bottom:1px solid #E5E7EB; font-size:13px; line-height:1.5; color:#111827; vertical-align:top;">
+            <p style="margin:0 0 6px 0; font-weight:600;">Deployment Velocity</p>
+<p style="margin:0; color:#6B7280;">owner@example.com</p>          </td>
+          <td style="padding:10px 8px; border-bottom:1px solid #E5E7EB; font-size:13px; line-height:1.6; color:#374151; vertical-align:top;">
+            <p style="margin:0 0 6px 0; color:#111827;">1 items tracked.</p>
+<p style="margin:0 0 6px 0; color:#4B5563;">Current state: Active. Next checkpoint: May 10.</p><p style="margin:0 0 6px 0; color:#6B7280;">Active · ETA May 10</p><p style="margin:0;"><a href="https://dev.azure.com/your-org/ExampleProject/_workitems/edit/910001" style="color:#2563EB; text-decoration:underline;">&rarr; ADO #910001</a></p>          </td>
+          <td style="padding:10px 0 10px 8px; border-bottom:1px solid #E5E7EB; text-align:right; vertical-align:top;">
+            <span style="display:inline-block; padding:4px 8px; border-radius:999px; background-color:#B4E5A2; color:#000000; font-size:12px; line-height:1.2; font-weight:700;">Low</span>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:10px 8px 10px 0; border-bottom:1px solid #E5E7EB; font-size:13px; line-height:1.5; color:#111827; vertical-align:top;">2</td>
+          <td style="padding:10px 8px; border-bottom:1px solid #E5E7EB; font-size:13px; line-height:1.5; color:#111827; vertical-align:top;">
+            <p style="margin:0 0 6px 0; font-weight:600;">Deployment Safety</p>
+<p style="margin:0; color:#6B7280;">owner@example.com</p>          </td>
+          <td style="padding:10px 8px; border-bottom:1px solid #E5E7EB; font-size:13px; line-height:1.6; color:#374151; vertical-align:top;">
+            <p style="margin:0 0 6px 0; color:#111827;">1 items tracked.</p>
+<p style="margin:0 0 6px 0; color:#4B5563;">Current state: Active. Next checkpoint: May 10.</p><p style="margin:0 0 6px 0; color:#6B7280;">Active · ETA May 10</p><p style="margin:0;"><a href="https://dev.azure.com/your-org/ExampleProject/_workitems/edit/910001" style="color:#2563EB; text-decoration:underline;">&rarr; ADO #910001</a></p>          </td>
+          <td style="padding:10px 0 10px 8px; border-bottom:1px solid #E5E7EB; text-align:right; vertical-align:top;">
+            <span style="display:inline-block; padding:4px 8px; border-radius:999px; background-color:#B4E5A2; color:#000000; font-size:12px; line-height:1.2; font-weight:700;">Low</span>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table><a id="chapter-network_delivery_checks"></a>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" data-vertex-block="chapter-network_delivery_checks" style="width:100%; border-collapse:collapse; margin:0 0 18px 0; border:1px solid #E5E7EB; background-color:#FFFFFF;">
+  <tr>
+    <td style="padding:14px 16px 10px 16px; font-size:18px; line-height:1.4; font-weight:600; color:#111827;">Network Delivery Checks</td>
+  </tr>
+  <tr>
+    <td style="padding:0 16px 16px 16px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; table-layout:fixed;">
+        <tr>
+          <td style="width:32px; padding:8px 8px 8px 0; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">#</td>
+          <td style="width:23%; padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">Workstream</td>
+          <td style="padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">Status / Business Impact</td>
+          <td style="width:84px; padding:8px 0 8px 8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280; text-align:right;">Risk</td>
+        </tr>
+        <tr>
+          <td style="padding:10px 8px 10px 0; border-bottom:1px solid #E5E7EB; font-size:13px; line-height:1.5; color:#111827; vertical-align:top;">1</td>
+          <td style="padding:10px 8px; border-bottom:1px solid #E5E7EB; font-size:13px; line-height:1.5; color:#111827; vertical-align:top;">
+            <p style="margin:0 0 6px 0; font-weight:600;">Networking</p>
+<p style="margin:0; color:#6B7280;">owner@example.com</p>          </td>
+          <td style="padding:10px 8px; border-bottom:1px solid #E5E7EB; font-size:13px; line-height:1.6; color:#374151; vertical-align:top;">
+            <p style="margin:0 0 6px 0; color:#111827;">1 items tracked.</p>
+<p style="margin:0 0 6px 0; color:#4B5563;">Current state: At Risk. Next checkpoint: May 08.</p><p style="margin:0 0 6px 0; color:#6B7280;">At Risk · ETA May 08</p><p style="margin:0;"><a href="https://dev.azure.com/your-org/ExampleProject/_workitems/edit/910002" style="color:#2563EB; text-decoration:underline;">&rarr; ADO #910002</a></p>          </td>
+          <td style="padding:10px 0 10px 8px; border-bottom:1px solid #E5E7EB; text-align:right; vertical-align:top;">
+            <span style="display:inline-block; padding:4px 8px; border-radius:999px; background-color:#B4E5A2; color:#000000; font-size:12px; line-height:1.2; font-weight:700;">Low</span>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table><a id="chapter-artifact_service"></a>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" data-vertex-block="chapter-artifact_service" style="width:100%; border-collapse:collapse; margin:0 0 18px 0; border:1px solid #E5E7EB; background-color:#FFFFFF;">
+  <tr>
+    <td style="padding:14px 16px 10px 16px; font-size:18px; line-height:1.4; font-weight:600; color:#111827;">Artifact Service</td>
+  </tr>
+  <tr>
+    <td style="padding:0 16px 16px 16px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; table-layout:fixed;">
+        <tr>
+          <td style="width:32px; padding:8px 8px 8px 0; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">#</td>
+          <td style="width:23%; padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">Workstream</td>
+          <td style="padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">Status / Business Impact</td>
+          <td style="width:84px; padding:8px 0 8px 8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280; text-align:right;">Risk</td>
+        </tr>
+        <tr>
+          <td style="padding:10px 8px 10px 0; border-bottom:1px solid #E5E7EB; font-size:13px; line-height:1.5; color:#111827; vertical-align:top;">1</td>
+          <td style="padding:10px 8px; border-bottom:1px solid #E5E7EB; font-size:13px; line-height:1.5; color:#111827; vertical-align:top;">
+            <p style="margin:0 0 6px 0; font-weight:600;">Service Validation</p>
+<p style="margin:0; color:#6B7280;">owner@example.com</p>          </td>
+          <td style="padding:10px 8px; border-bottom:1px solid #E5E7EB; font-size:13px; line-height:1.6; color:#374151; vertical-align:top;">
+            <p style="margin:0 0 6px 0; color:#111827;">1 items tracked.</p>
+<p style="margin:0 0 6px 0; color:#4B5563;">Current state: Proposed. Next checkpoint: May 12.</p><p style="margin:0 0 6px 0; color:#6B7280;">Proposed · ETA May 12</p><p style="margin:0;"><a href="https://dev.azure.com/your-org/ExampleProject/_workitems/edit/910003" style="color:#2563EB; text-decoration:underline;">&rarr; ADO #910003</a></p>          </td>
+          <td style="padding:10px 0 10px 8px; border-bottom:1px solid #E5E7EB; text-align:right; vertical-align:top;">
+            <span style="display:inline-block; padding:4px 8px; border-radius:999px; background-color:#B4E5A2; color:#000000; font-size:12px; line-height:1.2; font-weight:700;">Low</span>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table><a id="chapter-package_currency"></a>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" data-vertex-block="chapter-package_currency" style="width:100%; border-collapse:collapse; margin:0 0 18px 0; border:1px solid #E5E7EB; background-color:#FFFFFF;">
+  <tr>
+    <td style="padding:14px 16px 10px 16px; font-size:18px; line-height:1.4; font-weight:600; color:#111827;">Package Currency</td>
+  </tr>
+  <tr>
+    <td style="padding:0 16px 16px 16px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; table-layout:fixed;">
+        <tr>
+          <td style="width:32px; padding:8px 8px 8px 0; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">#</td>
+          <td style="width:23%; padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">Workstream</td>
+          <td style="padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">Status / Business Impact</td>
+          <td style="width:84px; padding:8px 0 8px 8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280; text-align:right;">Risk</td>
+        </tr>
+        <tr>
+          <td style="padding:10px 8px 10px 0; border-bottom:1px solid #E5E7EB; font-size:13px; line-height:1.5; color:#111827; vertical-align:top;">1</td>
+          <td style="padding:10px 8px; border-bottom:1px solid #E5E7EB; font-size:13px; line-height:1.5; color:#111827; vertical-align:top;">
+            <p style="margin:0 0 6px 0; font-weight:600;">Package Currency</p>
+<p style="margin:0; color:#6B7280;">owner@example.com</p>          </td>
+          <td style="padding:10px 8px; border-bottom:1px solid #E5E7EB; font-size:13px; line-height:1.6; color:#374151; vertical-align:top;">
+            <p style="margin:0 0 6px 0; color:#111827;">1 items tracked.</p>
+<p style="margin:0 0 6px 0; color:#4B5563;">Current state: Active. Next checkpoint: May 15.</p><p style="margin:0 0 6px 0; color:#6B7280;">Active · ETA May 15</p><p style="margin:0;"><a href="https://dev.azure.com/your-org/ExampleProject/_workitems/edit/910004" style="color:#2563EB; text-decoration:underline;">&rarr; ADO #910004</a></p>          </td>
+          <td style="padding:10px 0 10px 8px; border-bottom:1px solid #E5E7EB; text-align:right; vertical-align:top;">
+            <span style="display:inline-block; padding:4px 8px; border-radius:999px; background-color:#B4E5A2; color:#000000; font-size:12px; line-height:1.2; font-weight:700;">Low</span>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table><a id="chapter-service_checks"></a>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" data-vertex-block="chapter-service_checks" style="width:100%; border-collapse:collapse; margin:0 0 18px 0; border:1px solid #E5E7EB; background-color:#FFFFFF;">
+  <tr>
+    <td style="padding:14px 16px 10px 16px; font-size:18px; line-height:1.4; font-weight:600; color:#111827;">Service Checks</td>
+  </tr>
+  <tr>
+    <td style="padding:0 16px 16px 16px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; table-layout:fixed;">
+        <tr>
+          <td style="width:32px; padding:8px 8px 8px 0; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">#</td>
+          <td style="width:23%; padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">Workstream</td>
+          <td style="padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">Status / Business Impact</td>
+          <td style="width:84px; padding:8px 0 8px 8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280; text-align:right;">Risk</td>
+        </tr>
+        <tr>
+          <td style="padding:10px 8px 10px 0; border-bottom:1px solid #E5E7EB; font-size:13px; line-height:1.5; color:#111827; vertical-align:top;">1</td>
+          <td style="padding:10px 8px; border-bottom:1px solid #E5E7EB; font-size:13px; line-height:1.5; color:#111827; vertical-align:top;">
+            <p style="margin:0 0 6px 0; font-weight:600;">Performance</p>
+<p style="margin:0; color:#6B7280;">owner@example.com</p>          </td>
+          <td style="padding:10px 8px; border-bottom:1px solid #E5E7EB; font-size:13px; line-height:1.6; color:#374151; vertical-align:top;">
+            <p style="margin:0 0 6px 0; color:#111827;">1 items tracked.</p>
+<p style="margin:0 0 6px 0; color:#4B5563;">Current state: At Risk. Next checkpoint: May 08.</p><p style="margin:0 0 6px 0; color:#6B7280;">At Risk · ETA May 08</p><p style="margin:0;"><a href="https://dev.azure.com/your-org/ExampleProject/_workitems/edit/910002" style="color:#2563EB; text-decoration:underline;">&rarr; ADO #910002</a></p>          </td>
+          <td style="padding:10px 0 10px 8px; border-bottom:1px solid #E5E7EB; text-align:right; vertical-align:top;">
+            <span style="display:inline-block; padding:4px 8px; border-radius:999px; background-color:#B4E5A2; color:#000000; font-size:12px; line-height:1.2; font-weight:700;">Low</span>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:10px 8px 10px 0; border-bottom:1px solid #E5E7EB; font-size:13px; line-height:1.5; color:#111827; vertical-align:top;">2</td>
+          <td style="padding:10px 8px; border-bottom:1px solid #E5E7EB; font-size:13px; line-height:1.5; color:#111827; vertical-align:top;">
+            <p style="margin:0 0 6px 0; font-weight:600;">Safety</p>
+<p style="margin:0; color:#6B7280;">owner@example.com</p>          </td>
+          <td style="padding:10px 8px; border-bottom:1px solid #E5E7EB; font-size:13px; line-height:1.6; color:#374151; vertical-align:top;">
+            <p style="margin:0 0 6px 0; color:#111827;">1 items tracked.</p>
+<p style="margin:0 0 6px 0; color:#4B5563;">Current state: At Risk. Next checkpoint: May 08.</p><p style="margin:0 0 6px 0; color:#6B7280;">At Risk · ETA May 08</p><p style="margin:0;"><a href="https://dev.azure.com/your-org/ExampleProject/_workitems/edit/910002" style="color:#2563EB; text-decoration:underline;">&rarr; ADO #910002</a></p>          </td>
+          <td style="padding:10px 0 10px 8px; border-bottom:1px solid #E5E7EB; text-align:right; vertical-align:top;">
+            <span style="display:inline-block; padding:4px 8px; border-radius:999px; background-color:#B4E5A2; color:#000000; font-size:12px; line-height:1.2; font-weight:700;">Low</span>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table><!-- vertex: manifest=11111111111111111111111111111111 qg=pass gather_run= generated=2026-05-05T18:00:00+00:00 -->                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

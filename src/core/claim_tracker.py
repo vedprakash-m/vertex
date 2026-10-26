@@ -26,10 +26,10 @@ from src.core.jsonl_utils import (
 from src.core.models import Confidence
 from src.core.models import WorkItem
 from src.core.models_v2 import ClaimEntry, ClaimStatusUpdate, DecisionAsk, ResurfacingPolicy
+from src.core.workspace_paths import PROGRAMS_ROOT
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PROGRAMS_ROOT = REPO_ROOT / "programs"
 MAX_CLAIMS_PER_CONFIRM = 20
 _DUE_DATE_DEDUP_WINDOW_DAYS = 7
 _SIMILARITY_THRESHOLD = 0.82

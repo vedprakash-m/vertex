@@ -13,11 +13,13 @@ testable without constructing a real ``AgencyBridge``.
 from __future__ import annotations
 
 from datetime import datetime
+import logging
 from pathlib import Path
 from typing import Any, Callable
 
 from src.core.journal import signal_from_record, signal_to_record
-from src.core.models_v2 import Signal
+from src.core.gather_channel_support import append_integration_error_once
+from src.core.models_v2 import IntegrationError, Signal
 from src.core.prefetch_store import (
     PrefetchSnapshotManifest,
     read_snapshot_payload,
@@ -25,6 +27,7 @@ from src.core.prefetch_store import (
 )
 
 WORKIQ_PREFETCH_CHANNEL = "workiq"
+logger = logging.getLogger(__name__)
 
 
 def workiq_signals_to_payload(signals: tuple[Signal, ...]) -> dict[str, Any]:
@@ -35,7 +38,15 @@ def workiq_signals_from_payload(payload: dict[str, Any]) -> tuple[Signal, ...]:
     records = payload.get("signals")
     if not isinstance(records, list):
         return ()
-    return tuple(signal_from_record(record) for record in records)
+    signals = tuple(signal_from_record(record) for record in records)
+    for signal in signals:
+        metadata = signal.metadata or {}
+        if metadata.get("quarantined") is True and metadata.get("integration_source") == "workiq":
+            error = metadata.get("error")
+            if not isinstance(error, str) or not error.strip():
+                logger.warning("WorkIQ quarantine diagnostic is missing its error; cached observations cannot be used.")
+                raise ValueError("WorkIQ quarantine diagnostic is missing its error.")
+    return signals
 
 
 def resolve_workiq_signals(
@@ -44,6 +55,7 @@ def resolve_workiq_signals(
     programs_root: Path | None,
     live_fetch_fn: Callable[[], tuple[Signal, ...]],
     now: datetime | None = None,
+    integration_error_sink: list[IntegrationError] | None = None,
 ) -> tuple[Signal, ...]:
     """Section 10.6's ordering, exactly: prefer an unexpired committed
     prefetch snapshot; only call ``live_fetch_fn`` (the live WorkIQ path)
@@ -58,6 +70,17 @@ def resolve_workiq_signals(
         if manifest is not None:
             signals = _try_read_snapshot_signals(program_id, manifest, programs_root=programs_root)
             if signals is not None:
+                for signal in signals:
+                    metadata = signal.metadata or {}
+                    if (
+                        signal.source == "system" and metadata.get("quarantined") is True
+                        and metadata.get("integration_source") == "workiq"
+                    ):
+                        append_integration_error_once(
+                            integration_error_sink, source="workiq", stage="quarantine",
+                            error=metadata["error"], retryable=False,
+                            operator_action="Obtain native observation IDs and timezone-qualified source times before reviewing these records.",
+                        )
                 return signals
     return live_fetch_fn()
 

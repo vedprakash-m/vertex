@@ -11,10 +11,10 @@ import portalocker
 
 from src.core.models import Confidence
 from src.core.models_v2 import IncidentEntry
+from src.core.workspace_paths import PROGRAMS_ROOT
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PROGRAMS_ROOT = REPO_ROOT / "programs"
 
 
 def get_incident_journal_path(program_id: str, programs_root: Path = PROGRAMS_ROOT) -> Path:

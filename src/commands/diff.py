@@ -16,7 +16,8 @@ from src.commands.report_narratives import _active_workstream_blurbs
 from src.commands.report import _build_scorecard_packets, _humanize_anchor, _load_previous_dry_run_state, _load_report_signal_context, _parse_datetime
 from src.core.config_loader import REPORTS_ROOT, load_bundle
 from src.core.archive_store import ARCHIVE_ROOT, find_latest_confirmed_entry, read_archive_index
-from src.core.edition_resolver import get_program_output_dir, PROGRAMS_ROOT
+from src.core.edition_resolver import get_program_output_dir
+from src.core.exceptions import ConfigError, StateError
 from src.core.jinja_filters import build_anchor, risk_label
 from src.core.evidence_engine import build_evidence
 from src.core.narrative_store import load_archived_narratives, load_narratives
@@ -24,6 +25,15 @@ from src.core.overrides_store import OverridesDocument, load_overrides
 from src.core.publish_diff import build_publish_diff_report, render_publish_diff_report
 from src.core.scorecard_trends import load_scorecard_trends
 from src.core.snapshot_store import read_snapshot
+from src.core.workspace_paths import PROGRAMS_ROOT, validate_report_workspace
+
+
+def _preflight_diff_workspace() -> None:
+    try:
+        validate_report_workspace(programs_root=PROGRAMS_ROOT, reports_root=REPORTS_ROOT, archive_root=ARCHIVE_ROOT)
+    except ConfigError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=2) from error
 
 
 def diff_command(
@@ -33,28 +43,33 @@ def diff_command(
     section: str | None = typer.Option(None, "--section", help="Optional section id or dimension name to diff."),
     format: str = typer.Option("human", "--format", help="Output format: human, json, or csv."),
 ) -> None:
-    resolved_issue_number = issue or _latest_draft_issue_number(edition, programs_root=PROGRAMS_ROOT)
-    if since.strip().lower() == "last-draft":
-        summary = build_offline_diff_summary(
-            edition_name=edition,
-            issue_number=resolved_issue_number,
-            section=section,
-            reports_root=REPORTS_ROOT,
-            programs_root=PROGRAMS_ROOT,
-        )
-        mode = "last-draft"
-    else:
-        if section is not None:
-            raise typer.BadParameter("Section filtering is only supported with --since last-draft.")
-        summary = build_publish_diff_summary(
-            edition_name=edition,
-            issue_number=resolved_issue_number,
-            since=since,
-            reports_root=REPORTS_ROOT,
-            archive_root=ARCHIVE_ROOT,
-            programs_root=PROGRAMS_ROOT,
-        )
-        mode = "publish"
+    _preflight_diff_workspace()
+    try:
+        resolved_issue_number = issue or _latest_draft_issue_number(edition, programs_root=PROGRAMS_ROOT)
+        if since.strip().lower() == "last-draft":
+            summary = build_offline_diff_summary(
+                edition_name=edition,
+                issue_number=resolved_issue_number,
+                section=section,
+                reports_root=REPORTS_ROOT,
+                programs_root=PROGRAMS_ROOT,
+            )
+            mode = "last-draft"
+        else:
+            if section is not None:
+                raise typer.BadParameter("Section filtering is only supported with --since last-draft.")
+            summary = build_publish_diff_summary(
+                edition_name=edition,
+                issue_number=resolved_issue_number,
+                since=since,
+                reports_root=REPORTS_ROOT,
+                archive_root=ARCHIVE_ROOT,
+                programs_root=PROGRAMS_ROOT,
+            )
+            mode = "publish"
+    except StateError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=2) from error
     typer.echo(
         render_diff_output(
             {
@@ -96,6 +111,7 @@ def build_publish_diff_summary(
     archive_root: Path,
     programs_root: Path = PROGRAMS_ROOT,
 ) -> str:
+    validate_report_workspace(programs_root=programs_root, reports_root=reports_root, archive_root=archive_root)
     resolved_issue_number = issue_number or _latest_draft_issue_number(edition_name, programs_root=programs_root)
     current_draft_state = _load_draft_state(
         edition_name=edition_name,
@@ -117,7 +133,7 @@ def build_publish_diff_summary(
         return f"VERTEX DIFF - Confirmed snapshot for Issue {reference_entry.issue_number:03d} is missing.\n"
     reference_snapshot = read_snapshot(snapshot_path)
 
-    bundle = load_bundle(edition_name, reports_root=reports_root)
+    bundle = load_bundle(edition_name, reports_root=reports_root, programs_root=programs_root)
     current_items = _deserialize_current_items(current_draft_state)
     current_data_as_of = _parse_datetime(current_draft_state.get("ado_data_as_of"))
     if current_data_as_of is None:
@@ -156,6 +172,7 @@ def build_publish_diff_summary(
         overrides_document,
         edition_name=edition_name,
         reports_root=reports_root,
+        archive_root=archive_root,
     )
     current_dimension_risks = {
         (scorecard.scorecard_name, dimension.name): dimension.risk
@@ -177,6 +194,7 @@ def build_publish_diff_summary(
         edition_name,
         reference_entry.issue_number,
         archive_root=archive_root,
+        reports_root=reports_root,
     )
     signal_context = _load_report_signal_context(
         edition_name=edition_name,
@@ -185,6 +203,7 @@ def build_publish_diff_summary(
         as_of=current_data_as_of,
         previous_snapshot=reference_snapshot,
         reports_root=reports_root,
+        archive_root=archive_root,
     )
 
     report = build_publish_diff_report(
@@ -213,6 +232,8 @@ def build_offline_diff_summary(
     reports_root: Path,
     programs_root: Path = PROGRAMS_ROOT,
 ) -> str:
+    # Offline diffs have no archive input; only their report mapping needs validation.
+    validate_report_workspace(programs_root=programs_root, reports_root=reports_root, archive_root=reports_root)
     resolved_issue_number = issue_number or _latest_draft_issue_number(edition_name, programs_root=programs_root)
     _load_draft_state(
         edition_name=edition_name,
@@ -227,7 +248,7 @@ def build_offline_diff_summary(
     if previous_dry_run_state is None:
         return f"VERTEX DIFF - No previous dry-run found for Issue {resolved_issue_number:03d}.\n"
 
-    bundle = load_bundle(edition_name, reports_root=reports_root)
+    bundle = load_bundle(edition_name, reports_root=reports_root, programs_root=programs_root)
     loaded_narratives = load_narratives(edition_name, resolved_issue_number, reports_root=reports_root)
     current_exec_summary_text = loaded_narratives.get("exec_summary.md", "").strip()
     current_workstream_blurbs = _active_workstream_blurbs(loaded_narratives)

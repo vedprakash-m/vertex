@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, TypedDict
 
 from src.ai.blurb_generator import BlurbGenerationError
 from src.ai.ai_mode import AIMode, get_ai_mode
@@ -70,6 +70,10 @@ _REPORT_AI_EXEC_BACKUP_FALLBACK_ENVS = (
     "VERTEX_EXEC_BACKUP_DEPLOYMENT",
     "VERTEX_AI_BACKUP_DEPLOYMENT",
 )
+
+
+class _ArchiveOptions(TypedDict, total=False):
+    archive_root: Path
 
 
 def _report_ai_budget_per_client(bundle: ReportBundle) -> float:
@@ -394,6 +398,7 @@ def _load_report_signal_context(
     as_of: datetime,
     previous_snapshot: Snapshot | None,
     reports_root: Path,
+    archive_root: Path | None = None,
     item_trajectory_points: Callable[..., tuple] | None = None,
 ) -> _ReportSignalContext | None:
     if item_trajectory_points is None:
@@ -447,9 +452,11 @@ def _load_report_signal_context(
     # Track J (PR-11b): load ProgramReality once and reuse it for both the
     # dependency-cascade computation and the reality-substrate context summary
     # fed to the AI drafters (avoids a redundant load; Track E discipline).
+    archive_options: _ArchiveOptions = {"archive_root": archive_root} if archive_root is not None else {}
     program_reality = ProgramReality.load(
         resolved.program.id,
         programs_root=programs_root,
+        **archive_options,
     )
     dependency_cascades = detect_dependency_cascades(
         # .record strip is intentional: cascade detection consumes only structural
@@ -588,6 +595,7 @@ def _load_guarded_review_evidence(
     as_of: datetime,
     previous_snapshot: Snapshot | None,
     reports_root: Path,
+    archive_root: Path | None = None,
     load_report_signal_context: Callable[..., _ReportSignalContext | None] | None = None,
 ) -> _GuardedReviewEvidence:
     if load_report_signal_context is None:
@@ -600,6 +608,7 @@ def _load_guarded_review_evidence(
         as_of=as_of,
         previous_snapshot=previous_snapshot,
         reports_root=reports_root,
+        **({"archive_root": archive_root} if archive_root is not None else {}),
     )
     if signal_context is None:
         return _GuardedReviewEvidence(approved_signals=(), drift_patterns=())
@@ -771,6 +780,8 @@ def _synthesize_v2_ai_content(
     visible_section_ids: set[str] | tuple[str, ...],
     ai_program_context: NarrativeProgramContext | None,
     ai_context: _DraftAIContext | None,
+    trace_file: Path | None = None,
+    archive_root: Path | None = None,
     create_ai_client: Callable[..., LLMProvider] | None = None,
     draft_exec_summary_runner: Callable[..., Any] | None = None,
     generate_workstream_blurb_runner: Callable[..., Any] | None = None,
@@ -795,6 +806,7 @@ def _synthesize_v2_ai_content(
 
     generated_sections = iter_ai_generated_sections or _iter_ai_generated_sections
     relevant_deltas = relevant_item_deltas or _relevant_item_deltas
+    archive_options: _ArchiveOptions = {"archive_root": archive_root} if archive_root is not None else {}
 
     warnings: list[str] = []
     client_cache: dict[_ReportAIClientCacheKey, LLMProvider | None] = {}
@@ -808,6 +820,7 @@ def _synthesize_v2_ai_content(
             started_at=started_at,
         ),
         caller="src.commands.report._synthesize_v2_ai_content",
+        trace_file=trace_file,
         metadata={"run_budget_usd": bundle.config.ai.budget_usd_per_run},
     )
     budget_per_client = _report_ai_budget_per_client(bundle)
@@ -849,6 +862,7 @@ def _synthesize_v2_ai_content(
                     + _program_synthesis_exec_summary_context_lines(
                         ai_context.program_id,
                         ai_context.programs_root,
+                        **archive_options,
                     )
                 ),
                 programs_root=ai_context.programs_root,
@@ -931,6 +945,7 @@ def _synthesize_v2_ai_content(
                         ai_context.programs_root,
                         workstream_ids=_matching_program_workstream_ids(section.items, ai_context.workstreams),
                         item_ids={item.id for item in section.items},
+                        **archive_options,
                     )
                 ),
                 workstream_evidence_bundle=section_bundle,
@@ -1434,6 +1449,7 @@ def _exec_ai_context_lines(
 
 def _program_synthesis_exec_summary_context_lines(
     program_id: str, programs_root: Path, *, limit: int = 4,
+    archive_root: Path | None = None,
 ) -> tuple[str, ...]:
     """ADF-W2.9: supplements the exec summary's narrow view (up to 3 ranked
     WorkItem deltas only, see `_rank_changes` in exec_summary_drafter.py)
@@ -1453,7 +1469,11 @@ def _program_synthesis_exec_summary_context_lines(
     try:
         from src.core.program_synthesis import assemble_program_synthesis_request
 
-        request = assemble_program_synthesis_request(program_id, programs_root=programs_root)
+        archive_options: _ArchiveOptions = {"archive_root": archive_root} if archive_root is not None else {}
+        request = assemble_program_synthesis_request(
+            program_id, programs_root=programs_root,
+            **archive_options,
+        )
     except Exception:
         return ()
 
@@ -1489,6 +1509,7 @@ def _program_synthesis_blurb_context_lines(
     workstream_ids: tuple[str, ...],
     item_ids: set[int],
     limit: int = 3,
+    archive_root: Path | None = None,
 ) -> tuple[str, ...]:
     """ADF-W2.9: workstream-scoped analog of
     `_program_synthesis_exec_summary_context_lines` for per-workstream
@@ -1511,8 +1532,12 @@ def _program_synthesis_blurb_context_lines(
 
         workstream_id_set = set(workstream_ids)
         lines: list[str] = []
+        archive_options: _ArchiveOptions = {"archive_root": archive_root} if archive_root is not None else {}
 
-        reality = ProgramReality.load(program_id, programs_root=programs_root)
+        reality = ProgramReality.load(
+            program_id, programs_root=programs_root,
+            **archive_options,
+        )
         matched_risks = [
             assessment.record
             for assessment in reality.risks()

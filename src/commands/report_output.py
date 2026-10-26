@@ -6,14 +6,90 @@ from dataclasses import fields, is_dataclass
 from datetime import date, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urljoin
 
 from src.core.config_loader import ReportBundle
 from src.core.models import EditionType, ReportData, WorkItem
+from src.core.pipeline import StageContext
 from src.core.quality_matrix_engine import QualityMatrix
 from src.core.workstream_registry import build_workstream_association_records, build_workstream_issue_snapshot, load_workstream_registry, render_workstream_issue_snapshot_markdown
 from src.m365.adaptive_card_renderer import AdaptiveCardRenderer
+
+
+def format_report_pipeline_progress_detail(
+    stage_name: str, ctx: StageContext, *, safe_length: Callable[[object], int | None],
+) -> str:
+    details: list[str] = []
+    if stage_name == "resolution":
+        if ctx.resolved_issue_number is not None:
+            details.append(f"issue={ctx.resolved_issue_number:03d}")
+        if ctx.resolved_edition_type is not None:
+            details.append(f"type={ctx.resolved_edition_type.value}")
+    elif stage_name == "fetch":
+        details.append(f"items={len(ctx.items)}")
+        if ctx.ado_calls is not None:
+            details.append(f"ado_calls={ctx.ado_calls}")
+        if ctx.offline_source_label is not None:
+            details.append(ctx.offline_source_label)
+    elif stage_name == "compute":
+        details.append(f"items={len(ctx.items)}")
+        scorecard_count = safe_length(ctx.scorecards)
+        if scorecard_count is not None:
+            details.append(f"scorecards={scorecard_count}")
+    elif stage_name == "milestone":
+        milestone_count = safe_length(ctx.milestone_assessments)
+        if milestone_count is not None:
+            details.append(f"milestones={milestone_count}")
+        details.append(f"warnings={len(ctx.milestone_warnings)}")
+    elif stage_name == "risk":
+        risk_count = safe_length(ctx.risks)
+        if risk_count is not None:
+            details.append(f"risks={risk_count}")
+        details.append(f"stale={len(ctx.stale_risk_ids)}")
+        details.append(f"warnings={len(ctx.risk_warnings)}")
+    elif stage_name == "action":
+        action_count = safe_length(ctx.actions)
+        if action_count is not None:
+            details.append(f"actions={action_count}")
+        details.append(f"overdue={len(ctx.overdue_action_ids)}")
+    elif stage_name == "narrative":
+        section_count = safe_length(ctx.visible_section_ids)
+        if section_count is not None:
+            details.append(f"sections={section_count}")
+        details.append(f"top_items={len(ctx.top_3_now)}")
+    elif stage_name == "ai":
+        blurb_count = safe_length(ctx.render_workstream_blurbs)
+        if blurb_count is not None:
+            details.append(f"blurbs={blurb_count}")
+        if ctx.offline:
+            details.append("offline")
+    elif stage_name == "render":
+        if ctx.render_exec_summary_text is not None:
+            details.append("exec_summary=ready")
+        blurb_count = safe_length(ctx.render_workstream_blurbs)
+        if blurb_count is not None:
+            details.append(f"blurbs={blurb_count}")
+    elif stage_name == "validation":
+        warning_count = safe_length(getattr(ctx.validation_state, "warnings", None))
+        if warning_count is not None:
+            details.append(f"warnings={warning_count}")
+        exit_code = getattr(ctx.validation_state, "exit_code", None)
+        if exit_code is not None:
+            details.append(f"exit={exit_code}")
+        persona_coverage = getattr(ctx.validation_state, "persona_coverage", None)
+        if persona_coverage is not None:
+            details.append(
+                "persona="
+                f"{len(persona_coverage.passed)}/{persona_coverage.total_evaluations}"
+            )
+    elif stage_name in {"output", "lookback"}:
+        if ctx.artifacts is not None:
+            details.append(f"issue={ctx.artifacts.issue_number:03d}")
+            details.append(f"warnings={len(ctx.artifacts.warnings)}")
+            details.append(f"exit={ctx.artifacts.exit_code}")
+    return ", ".join(details)
+
 
 
 def _build_item_urls(bundle: ReportBundle, items: tuple[WorkItem, ...]) -> dict[int, str]:

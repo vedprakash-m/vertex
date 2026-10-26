@@ -26,13 +26,13 @@ from src.core.persona_models import (
 from src.core.slice_contract_loader import SliceContract, load_slice_contract, load_slice_contract_for_edition
 from src.core.template_contract_loader import TemplateContract, load_template_contract, load_template_contract_for_edition
 from src.core.yaml_utils import load_yaml_mapping
+from src.core.workspace_paths import PROGRAMS_ROOT
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REPORTS_ROOT = REPO_ROOT / "reports"
 # Legacy compatibility alias. Edition YAMLs now live under programs/<id>/editions/.
 EDITIONS_ROOT = REPO_ROOT / "editions"
-PROGRAMS_ROOT = REPO_ROOT / "programs"
 SCHEMAS_ROOT = REPORTS_ROOT / "schemas"
 CORE_SCHEMAS_ROOT = REPO_ROOT / "src" / "core" / "schemas"
 _ENV_VAR_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
@@ -259,6 +259,7 @@ class ReportConfig:
     forecast_enabled: bool = False
     mobile_safe_scorecards: str | None = None
     type_scale_v2: bool = False
+    executive_style: bool = False
     calibration_pilot: bool = False
     charts: ChartEditionSettings | None = None
 
@@ -1545,6 +1546,7 @@ def _parse_report_config(raw_config: dict[str, Any]) -> ReportConfig:
         forecast_enabled=bool(raw_config.get("forecast_enabled", False)),
         mobile_safe_scorecards=_parse_mobile_safe_scorecards(raw_config.get("mobile_safe_scorecards")),
         type_scale_v2=bool(raw_config.get("type_scale_v2", False)),
+        executive_style=bool(raw_config.get("executive_style", False)),
         calibration_pilot=bool(raw_config.get("calibration_pilot", False)),
     )
 

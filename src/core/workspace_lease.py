@@ -32,8 +32,8 @@ from threading import Event, RLock, Thread, current_thread
 from typing import Callable
 
 from src.core._db import open_program_db_with_retry as open_program_db
+from src.core.workspace_paths import PROGRAMS_ROOT
 
-PROGRAMS_ROOT = Path(__file__).resolve().parents[2] / "programs"
 _DB_FILENAME = "workspace_lease.sqlite3"
 _DEFAULT_TTL_SECONDS = 300
 

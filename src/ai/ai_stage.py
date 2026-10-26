@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from src.ai.ai_mode import AIMode, get_ai_mode
+from src.ai.llm_trace import default_trace_path
 from src.core.models import EditionType
 from src.core.pipeline import StageContext
 
@@ -75,6 +76,8 @@ class AIStage:
             visible_section_ids=ctx.visible_section_ids,
             ai_program_context=ctx.bundle.program_context,
             ai_context=ai_context,
+            trace_file=default_trace_path(ctx.edition_name, programs_root=ctx.programs_root),
+            archive_root=ctx.archive_root,
         )
         return replace(
             ctx,

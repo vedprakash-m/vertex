@@ -12,7 +12,7 @@ from src.core.exceptions import ConfigError, QueryError
 from src.core.kusto_query_loader import load_kpi_queries
 from src.core.metric_binding_validator import MetricBindingProbe, compute_metric_binding_validation_hash, validate_metric_source_binding
 from src.core.metric_models import MetricDefinition
-from src.core.metric_registry import METRICS_ROOT, load_metric_definition_map
+from src.core.metric_registry import load_metric_definition_map
 from src.core.reality_store import RealityStore
 
 
@@ -38,7 +38,9 @@ def run_metric_binding_doctor(
     store = RealityStore(resolved.program.id, db_root=reality_db_root)
     store.initialize()
     bindings = store.list_active_metric_source_bindings()
-    definition_map = metric_definitions or load_metric_definition_map(metrics_root=METRICS_ROOT, as_of=current_now)
+    definition_map = metric_definitions if metric_definitions is not None else load_metric_definition_map(
+        metrics_root=programs_root.parent / "knowledge" / "metrics", as_of=current_now,
+    )
     rollout_statuses = tuple(
         _build_metric_rollout_status(store, query, definition_map)
         for query in load_kpi_queries(resolved.program.id, programs_root=programs_root)

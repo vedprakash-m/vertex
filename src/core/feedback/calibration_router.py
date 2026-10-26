@@ -11,10 +11,10 @@ from src.core.calibration_engine import CalibrationRollup
 from src.core.feedback._advisory_yaml import load_advisory_yaml, write_advisory_yaml
 from src.core.models import Confidence
 from src.core.models_v2 import ForecastCalibrationModifier, WorkstreamCalibration
+from src.core.workspace_paths import PROGRAMS_ROOT
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-PROGRAMS_ROOT = REPO_ROOT / "programs"
 SCHEMA_VERSION = "1.0"
 
 

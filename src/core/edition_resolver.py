@@ -33,12 +33,13 @@ from src.core.models_v2 import (
     RevRetrievalProfile,
 )
 from src.core.yaml_utils import load_yaml_mapping
+from src.core.workspace_paths import PROGRAMS_ROOT
+from src.core.workspace_paths import is_bare_identifier
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 # Legacy compatibility alias. Edition YAMLs now live under programs/<id>/editions/.
 EDITIONS_ROOT = REPO_ROOT / "editions"
-PROGRAMS_ROOT = Path(os.environ.get("VERTEX_PROGRAMS_ROOT", str(REPO_ROOT / "programs")))
 _EXAMPLE_EDITION_PREFIX = "example_"
 _TEMPLATE_PROGRAM_PREFIX = "template:"
 
@@ -173,6 +174,8 @@ def get_nudge_paths(program_id: str, *, programs_root: Path = PROGRAMS_ROOT) -> 
     - ``published_eml/`` — sent EML files (trusted baseline)
       - ``index.json`` — schema 1.0 manifest of sent nudges
     """
+    if not is_bare_identifier(program_id):
+        raise ConfigError("Nudge requires a bare program identifier, not a path, wildcard or control value.")
     nudge_root = programs_root / program_id / "nudge"
     return NudgePaths(
         nudge_root=nudge_root,
@@ -191,10 +194,9 @@ def get_program_output_dir(edition_id_or_program_id: str, *, programs_root: Path
     edition_path = find_edition_yaml(edition_id_or_program_id, programs_root=programs_root)
     if edition_path.exists():
         raw_edition = load_yaml_mapping(edition_path)
-        raw_program_id = raw_edition.get("program_id")
-        if isinstance(raw_program_id, str):
-            program_dir = _program_dir_for_reference(raw_program_id, programs_root=programs_root)
-            return _resolve_output_dir(program_dir, edition_id_or_program_id)
+        raw_program_id = _required_program_reference(raw_edition.get("program_id"), edition_path)
+        program_dir = _program_dir_for_edition(edition_path, raw_program_id, programs_root=programs_root)
+        return _resolve_output_dir(program_dir, edition_id_or_program_id)
 
     # Fallback/default: treat as program_id
     program_dir = _program_dir_for_reference(edition_id_or_program_id, programs_root=programs_root)
@@ -248,9 +250,9 @@ def resolve_edition_paths(
     if not edition_path.exists():
         return None
     raw_edition = load_yaml_mapping(edition_path)
-    raw_program_id = _required_string(raw_edition.get("program_id"), edition_path, "program_id")
+    raw_program_id = _required_program_reference(raw_edition.get("program_id"), edition_path)
     program_id = _normalized_program_id(raw_program_id)
-    program_dir = _program_dir_for_reference(raw_program_id, programs_root=programs_root)
+    program_dir = _program_dir_for_edition(edition_path, raw_program_id, programs_root=programs_root)
     return ResolvedEditionPaths(
         edition_id=edition_id,
         edition_path=edition_path,
@@ -391,12 +393,17 @@ def list_editions_for_program(
 
 
 def find_edition_yaml(edition_id: str, *, programs_root: Path = PROGRAMS_ROOT) -> Path:
-    direct_programs = sorted(programs_root.glob(f"*/editions/{edition_id}.yaml"))
-    if direct_programs:
-        return direct_programs[0]
-    template_programs = sorted(programs_root.glob(f"_templates/*/editions/{edition_id}.yaml"))
-    if template_programs:
-        return template_programs[0]
+    if not is_bare_identifier(edition_id):
+        raise ConfigError("Invalid edition identifier: use a bare filename stem without paths or wildcard characters.")
+    for pattern in (f"*/editions/{edition_id}.yaml", f"_templates/*/editions/{edition_id}.yaml"):
+        candidates = sorted(programs_root.glob(pattern))
+        if len(candidates) > 1:
+            raise ConfigError(
+                f"Ambiguous edition {edition_id!r}: found {len(candidates)} matching program editions. "
+                "Use unique edition IDs in this workspace before retrying."
+            )
+        if candidates:
+            return candidates[0]
     # Legacy flat-editions fallback: check sibling editions/ folder (backward compatibility).
     legacy_path = programs_root.parent / "editions" / f"{edition_id}.yaml"
     if legacy_path.exists():
@@ -404,10 +411,33 @@ def find_edition_yaml(edition_id: str, *, programs_root: Path = PROGRAMS_ROOT) -
     return programs_root / "_missing" / "editions" / f"{edition_id}.yaml"
 
 
+def _program_dir_for_edition(edition_path: Path, program_id: str, *, programs_root: Path) -> Path:
+    program_dir = _program_dir_for_reference(program_id, programs_root=programs_root)
+    owner_dir = edition_path.parent.parent
+    if edition_path.parent.name == "editions" and owner_dir.parent in (programs_root, programs_root / "_templates"):
+        if program_dir != owner_dir:
+            raise ConfigError(
+                f"Edition {edition_path.stem!r} program_id {program_id!r} does not match its owning program "
+                f"directory {owner_dir.name!r}. Correct the edition's program_id before retrying."
+            )
+    return program_dir
+
+
 def _normalized_program_id(program_id: str) -> str:
-    if program_id.startswith(_TEMPLATE_PROGRAM_PREFIX):
-        return program_id.removeprefix(_TEMPLATE_PROGRAM_PREFIX).strip()
-    return program_id.strip()
+    normalized = program_id.removeprefix(_TEMPLATE_PROGRAM_PREFIX)
+    if not is_bare_identifier(normalized):
+        raise ConfigError(
+            "Invalid program identifier/reference: program_id must be a bare identifier "
+            "or template:<bare identifier>, without paths, trailing aliases, controls or wildcards."
+        )
+    return normalized.strip()
+
+
+def _required_program_reference(value: Any, path: Path) -> str:
+    _required_string(value, path, "program_id")
+    reference = cast(str, value)
+    _normalized_program_id(reference)
+    return reference
 
 
 def _program_dir_for_reference(program_id: str, *, programs_root: Path) -> Path:
@@ -473,6 +503,7 @@ def _parse_edition_config(raw_edition: dict[str, Any], path: Path) -> EditionCon
         forecast_enabled=bool(raw_edition.get("forecast_enabled", False)),
         mobile_safe_scorecards=_optional_string(raw_edition.get("mobile_safe_scorecards")),
         type_scale_v2=bool(raw_edition.get("type_scale_v2", False)),
+        executive_style=bool(raw_edition.get("executive_style", False)),
         calibration_pilot=bool(raw_edition.get("calibration_pilot", False)),
         audience_scope_ids=tuple(str(scope_id) for scope_id in (raw_edition.get("audience_scope_ids") or ())),
     )

@@ -19,10 +19,10 @@ from src.core.jsonl_utils import (
 from src.core.models_v2 import ActionItem, ActionSourceType, ActionStatus, ActionStatusUpdate, TrajectoryPoint
 from src.core.operation_trace import REF_TYPE_FACT, record_trace_link
 from src.core.store_factory import build_trajectory_store_for_program_id
+from src.core.workspace_paths import PROGRAMS_ROOT
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PROGRAMS_ROOT = REPO_ROOT / "programs"
 
 # High-risk append-only file — grows with every action and every status update.
 # Rotated at 10 MB (spec §11.3 Phase 5 / D-23) to bound on-disk footprint.

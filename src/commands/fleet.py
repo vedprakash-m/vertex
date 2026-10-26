@@ -41,10 +41,10 @@ from src.core.program_fact_store import (
     project_risk_entries,
 )
 from src.core.telemetry_summary import build_program_telemetry_summary
+from src.core.workspace_paths import PROGRAMS_ROOT
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PROGRAMS_ROOT = REPO_ROOT / "programs"
 _MANIFEST_NAME_RE = __import__("re").compile(r"^issue_(\d{3})\.manifest\.json$")
 
 _DEFAULT_STALE_WINDOW = timedelta(days=7)
@@ -958,7 +958,9 @@ def _build_active_issue_projections(
     programs_root: Path,
 ) -> tuple[IssueProjection, ...]:
     snapshot_items = _load_snapshot_work_items(latest_confirmed)
-    program_facts = load_program_facts(program_id, programs_root=programs_root)
+    program_facts = load_program_facts(
+        program_id, programs_root=programs_root, archive_root=programs_root.parent / "archive",
+    )
     freshness_report = build_freshness_report(
         current_items=snapshot_items,
         issue_number=latest_confirmed.issue_number,
@@ -1012,7 +1014,9 @@ def _build_fleet_risk_register_summary(
     as_of: datetime,
     programs_root: Path,
 ) -> FleetRiskRegisterSummary:
-    program_facts = load_program_facts(program_id, programs_root=programs_root)
+    program_facts = load_program_facts(
+        program_id, programs_root=programs_root, archive_root=programs_root.parent / "archive",
+    )
     active_risks = tuple(
         risk
         for risk in project_risk_entries(program_facts)
@@ -1186,7 +1190,9 @@ def _load_cross_program_dependencies(programs_root: Path) -> tuple[Dependency, .
             continue
         try:
             loaded_dependencies = project_dependencies(
-                load_program_facts(program_dir.name, programs_root=programs_root)
+                load_program_facts(
+                    program_dir.name, programs_root=programs_root, archive_root=programs_root.parent / "archive",
+                )
             )
         except ConfigError:
             continue

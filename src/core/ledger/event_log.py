@@ -10,14 +10,15 @@ import os
 from pathlib import Path
 from typing import Any
 
+from src.core.exceptions import ConfigError
 from src.core.jsonl_utils import append_jsonl_line, append_jsonl_lines, quarantine_and_rewrite_jsonl
 from src.core.ledger.event_index import index_event, index_events
 from src.core.ledger.event_types import validate_event_payload
 from src.core.ledger.source_refs import SourceRef, source_document_key, source_ref_from_dict, source_ref_to_dict, validate_typed_source_ref
 from src.core.ledger.ulid import new_ulid
+from src.core.workspace_paths import PROGRAMS_ROOT
 
 
-PROGRAMS_ROOT = Path(__file__).resolve().parents[3] / "programs"
 DEFAULT_MAX_BYTES = 10 * 1024 * 1024
 
 
@@ -132,6 +133,8 @@ class EventLogVerification:
     ok: bool
     checked_event_count: int
     issues: tuple[str, ...]
+    imported_event_count: int = 0
+    content_hash_issue_count: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -453,7 +456,10 @@ def _validate_grounded_in_claim_refs(
             raise ValueError(f"Unknown grounded_in claim id: {claim_id}")
 
 
-def read_events(program_id: str, *, programs_root: Path = PROGRAMS_ROOT) -> tuple[EventEnvelope, ...]:
+def read_events(
+    program_id: str, *, programs_root: Path = PROGRAMS_ROOT, repair_corruption: bool = True,
+) -> tuple[EventEnvelope, ...]:
+    """Read envelopes; disable legacy repair to fail without changing damaged files."""
     events_dir = get_event_logs_dir(program_id, programs_root=programs_root)
     if not events_dir.exists():
         return ()
@@ -461,7 +467,10 @@ def read_events(program_id: str, *, programs_root: Path = PROGRAMS_ROOT) -> tupl
     event_paths = _list_event_paths(events_dir)
     events: list[EventEnvelope] = []
     for path in event_paths:
-        events.extend(_read_events_from_path(path))
+        records = _read_events_from_path(path, repair_corruption=repair_corruption)
+        if not repair_corruption and any(event.program_id != program_id for event in records):
+            raise ConfigError(f"Event ledger {path.name} contains a mismatched program; no repair attempted.")
+        events.extend(records)
     return tuple(events)
 
 
@@ -485,33 +494,60 @@ def latest_event_chain_state(
 
 def verify_event_log(program_id: str, *, programs_root: Path = PROGRAMS_ROOT) -> EventLogVerification:
     from src.core.ledger.redaction import load_redaction_registry
+    from src.core.ledger.chain_baseline import load_chain_baseline
     events = read_events(program_id, programs_root=programs_root)
     redaction_registry = load_redaction_registry(program_id, programs_root=programs_root)
+    baseline = load_chain_baseline(program_id, programs_root=programs_root)
     issues: list[str] = []
+    content_hash_issues = 0
     previous_hash = genesis_prev_hash(program_id)
     previous_recorded_at: datetime | None = None
 
+    # Events before a declared chain baseline are imported pre-history: their
+    # payloads are still verified by content hash, but their chain linkage was
+    # never sealed consistently and is not recoverable (see chain_baseline).
+    baseline_index: int | None = None
+    if baseline is not None:
+        for index, event in enumerate(events):
+            if event.event_id == baseline.baseline_event_id:
+                baseline_index = index
+                break
+        if baseline_index is None:
+            issues.append(
+                f"chain baseline event {baseline.baseline_event_id} not found in the event log"
+            )
+
     for index, event in enumerate(events, start=1):
+        is_imported = baseline_index is not None and (index - 1) < baseline_index
+        is_baseline_event = baseline_index is not None and (index - 1) == baseline_index
         is_redacted = event.event_id in redaction_registry
         if is_redacted:
             # §10.8: content-hash mismatch is expected and benign for redacted events.
             # Chain continuity uses the recorded original_envelope_hash instead of rehashing.
             original_hash = redaction_registry[event.event_id].original_envelope_hash
-            if event.prev_event_hash != previous_hash:
+            if not is_imported and not is_baseline_event and event.prev_event_hash != previous_hash:
                 issues.append(f"event {index} prev hash mismatch (redacted)")
             previous_hash = original_hash
         else:
             expected_content_hash = compute_content_hash(event.event_type, event.occurred_at, event.payload)
             if event.content_hash != expected_content_hash:
                 issues.append(f"event {index} content hash mismatch")
-            if event.prev_event_hash != previous_hash:
+                content_hash_issues += 1
+            if not is_imported and not is_baseline_event and event.prev_event_hash != previous_hash:
                 issues.append(f"event {index} prev hash mismatch")
             previous_hash = compute_envelope_hash(event)
         if previous_recorded_at is not None and event.recorded_at < previous_recorded_at:
             issues.append(f"event {index} recorded_at regressed")
         previous_recorded_at = event.recorded_at
 
-    return EventLogVerification(ok=not issues, checked_event_count=len(events), issues=tuple(issues))
+    imported_count = baseline_index if baseline_index is not None else 0
+    return EventLogVerification(
+        ok=not issues,
+        checked_event_count=len(events),
+        issues=tuple(issues),
+        imported_event_count=imported_count,
+        content_hash_issue_count=content_hash_issues,
+    )
 
 
 def canonical_json(payload: Any) -> str:
@@ -562,11 +598,11 @@ def iter_event_records(program_id: str, *, programs_root: Path = PROGRAMS_ROOT) 
     return tuple(records)
 
 
-def _read_events_from_path(path: Path) -> tuple[EventEnvelope, ...]:
+def _read_events_from_path(path: Path, *, repair_corruption: bool = True) -> tuple[EventEnvelope, ...]:
     valid_lines: list[str] = []
     events: list[EventEnvelope] = []
     invalid_found = False
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
+    for line_number, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         stripped = raw_line.strip()
         if not stripped:
             continue
@@ -575,11 +611,16 @@ def _read_events_from_path(path: Path) -> tuple[EventEnvelope, ...]:
             if not isinstance(payload, dict):
                 raise ValueError("event row must be an object")
             envelope = EventEnvelope.from_dict(payload)
-        except (json.JSONDecodeError, ValueError):
+        except (json.JSONDecodeError, ValueError) as error:
+            if not repair_corruption:
+                raise ConfigError(
+                    f"Invalid event record in {path.name} at line {line_number}; no repair attempted."
+                ) from error
             invalid_found = True
             continue
         events.append(envelope)
-        valid_lines.append(stripped + "\n")
+        if repair_corruption:
+            valid_lines.append(stripped + "\n")
     if invalid_found:
         quarantine_and_rewrite_jsonl(path, valid_lines)
     return tuple(events)

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -13,6 +15,58 @@ from src.core.ncfl_models import ContextUpdateProposal
 
 class ManualRegistryDiffError(ValueError):
     """The proposed manual change cannot be rendered safely."""
+
+
+_NESTED_FIELDS = frozenset({"deep_context.why", "deep_context.what", "deep_context.how"})
+_BASELINE_PREFIX = "intake-v1:"
+
+
+def read_registry_baseline(
+    program_id: str, target_key: str, target_field: str, *, programs_root: Path
+) -> tuple[str, str]:
+    """Capture a typed scalar baseline, including absence, without writing."""
+    current, state = _read_registry_value(program_id, target_key, target_field, programs_root=programs_root)
+    return current, _baseline_hash(current, state)
+
+
+def _baseline_hash(current: str, state: str) -> str:
+    serialized = json.dumps((state, current), ensure_ascii=False)
+    return _BASELINE_PREFIX + hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _read_registry_value(
+    program_id: str, target_key: str, target_field: str, *, programs_root: Path
+) -> tuple[str, str]:
+    if not program_id or program_id in {".", ".."} or any(char in program_id for char in "/\\:"):
+        raise ManualRegistryDiffError("invalid program identifier")
+    if not target_key.strip() or not target_field.strip():
+        raise ManualRegistryDiffError("manual registry diffs require a target key and field")
+    if "." in target_field and target_field not in _NESTED_FIELDS:
+        raise ManualRegistryDiffError("unsupported nested field path")
+    path = programs_root / program_id / "workstream_registry.yaml"
+    if not path.resolve().is_relative_to((programs_root / program_id).resolve()):
+        raise ManualRegistryDiffError("registry path leaves the selected program")
+    payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(payload, dict) or not isinstance(payload.get("workstreams"), list):
+        raise ManualRegistryDiffError(f"{path} must contain a workstreams list")
+    entries = [entry for entry in payload["workstreams"] if isinstance(entry, dict) and entry.get("id") == target_key]
+    if len(entries) != 1:
+        raise ManualRegistryDiffError(f"workstream {target_key!r} was not found uniquely in {path}")
+    entry = entries[0]
+    field = target_field
+    if target_field in _NESTED_FIELDS:
+        field = target_field.split(".")[1]
+        entry = entry.get("deep_context", {})
+        if not isinstance(entry, dict):
+            raise ManualRegistryDiffError("deep_context must be a mapping")
+    if field not in entry:
+        if target_field not in _NESTED_FIELDS:
+            raise ManualRegistryDiffError(f"field {field!r} was not found for workstream {target_key!r}")
+        return "<missing>", "missing"
+    value = entry[field]
+    if value is None:
+        return "<null>", "null"
+    return _scalar_value(value, field=target_field), type(value).__name__
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,51 +90,56 @@ def render_workstream_registry_manual_diff(
     """
     if proposal.target_store != "workstream_registry":
         raise ManualRegistryDiffError("manual registry diffs require target_store='workstream_registry'")
-    if not proposal.target_key.strip() or not proposal.target_field.strip():
-        raise ManualRegistryDiffError("manual registry diffs require a target key and field")
-    if "." in proposal.target_field:
-        raise ManualRegistryDiffError("manual registry diffs support one scalar field, not a nested field path")
-
+    if proposal.source_type == "context_gap_reply" and (
+        not isinstance(proposal.current_value_hash, str)
+        or re.fullmatch(r"intake-v1:[0-9a-f]{64}", proposal.current_value_hash) is None
+    ):
+        raise ManualRegistryDiffError("reply manual diffs require a canonical intake-v1:<sha256> baseline")
     path = programs_root / proposal.program_id / "workstream_registry.yaml"
     try:
-        payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        current_value, state = _read_registry_value(
+            proposal.program_id, proposal.target_key, proposal.target_field, programs_root=programs_root,
+        )
     except OSError as exc:
         raise ManualRegistryDiffError(f"could not read {path}: {exc}") from exc
-    if not isinstance(payload, dict) or not isinstance(payload.get("workstreams"), list):
-        raise ManualRegistryDiffError(f"{path} must contain a workstreams list")
-    entry = next(
-        (
-            candidate for candidate in payload["workstreams"]
-            if isinstance(candidate, dict) and candidate.get("id") == proposal.target_key
-        ),
-        None,
-    )
-    if entry is None:
-        raise ManualRegistryDiffError(f"workstream {proposal.target_key!r} was not found in {path}")
-    if proposal.target_field not in entry:
-        raise ManualRegistryDiffError(
-            f"field {proposal.target_field!r} was not found for workstream {proposal.target_key!r}"
-        )
-    current_value = _scalar_value(entry[proposal.target_field], field=proposal.target_field)
     if proposal.current_value_hash is not None:
-        current_hash = hashlib.sha256(current_value.encode("utf-8")).hexdigest()
+        current_hash = (
+            _baseline_hash(current_value, state) if proposal.current_value_hash.startswith(_BASELINE_PREFIX)
+            else hashlib.sha256(("" if state == "null" else current_value).encode("utf-8")).hexdigest()
+        )
         if current_hash != proposal.current_value_hash:
             raise ManualRegistryDiffError(
                 "proposal is stale: the current registry value no longer matches its recorded hash"
             )
 
-    old_line = _yaml_scalar_line(proposal.target_field, current_value)
-    new_line = _yaml_scalar_line(proposal.target_field, proposal.source_value)
+    nested = proposal.target_field in _NESTED_FIELDS
+    if nested:
+        leaf = proposal.target_field.split(".")[1]
+        old_line = (
+            f"# {leaf}: <missing>" if state == "missing"
+            else f"{leaf}: null" if state == "null"
+            else f"{leaf}: " + yaml.safe_dump(current_value, default_style='"', width=float("inf")).strip()
+        )
+        new_line = f"{leaf}: " + yaml.safe_dump(proposal.source_value, default_style='"', width=float("inf")).strip()
+    else:
+        if state == "null":
+            current_value = ""
+        old_line = _yaml_scalar_line(proposal.target_field, current_value)
+        new_line = _yaml_scalar_line(proposal.target_field, proposal.source_value)
     text = "\n".join(
         (
             f"# Manual-only change; do not use NCFL apply (proposal {proposal.proposal_id}).",
             f"# Target: {path} → workstreams[id={proposal.target_key!r}].{proposal.target_field}",
             f"# Evidence: {proposal.source_artifact}#{proposal.source_field}",
+            *(
+                (f"# {proposal.extraction_method_rationale}",)
+                if proposal.source_type == "context_gap_reply" else ()
+            ),
             f"--- {path}",
             f"+++ {path} (manual proposal)",
-            f"@@ workstreams[id={proposal.target_key!r}] @@",
-            f"-  {old_line}",
-            f"+  {new_line}",
+            f"@@ workstreams[id={proposal.target_key!r}]{'.deep_context' if nested else ''} @@",
+            f"-{'    ' if nested else '  '}{old_line}",
+            f"+{'    ' if nested else '  '}{new_line}",
         )
     ) + "\n"
     return ManualRegistryDiff(

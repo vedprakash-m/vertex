@@ -1,0 +1,8 @@
+{
+  "content": "{\"summary\": \"Deployment velocity is stable and the fleet pilot remains on track.\", \"risk\": \"medium\"}",
+  "usage": {
+    "prompt_tokens": 180,
+    "completion_tokens": 60,
+    "total_tokens": 240
+  }
+}

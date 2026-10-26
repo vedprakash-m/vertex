@@ -214,7 +214,12 @@ def facts_parity_check(
     program: str = typer.Option(..., "--program", help="Program id."),
 ) -> None:
     """Compare current legacy projections against current fact-store projections."""
-    assessment = run_facts_parity_check(program_id=program, programs_root=PROGRAMS_ROOT)
+    assessment = run_facts_parity_check(
+        program_id=program,
+        programs_root=PROGRAMS_ROOT,
+        editions_root=EDITIONS_ROOT,
+        archive_root=ARCHIVE_ROOT,
+    )
     pending = ",".join(assessment.pending_zero_tolerance_families) or "none"
     mismatches = ", ".join(result.family for result in assessment.family_results if not result.matches) or "none"
     typer.echo(
@@ -251,6 +256,7 @@ def run_facts_parity_check(
     trusted_baseline = load_trusted_baseline_for_program(program_id, programs_root=programs_root)
     legacy_skip_issues = load_skipped_issues_for_program(
         program_id,
+        programs_root=programs_root,
         editions_root=editions_root,
         archive_root=archive_root,
     )

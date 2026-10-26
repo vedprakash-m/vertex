@@ -16,8 +16,10 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from src.core.integration_types import (
+    IntegrationError,
     PaginationOutcome,
     RelationKind,
     RelationTargetKind,
@@ -29,37 +31,57 @@ from src.core.integration_types import (
 # Raw -> typed parsing
 # --------------------------------------------------------------------------------------
 
+#: RELO-W2.1 (specs/relo.md Sec 8.3.2): the current provider reference name
+#: for this link type is ``System.LinkTypes.Dependency-Forward``/
+#: ``Dependency-Reverse`` (the same ``-Forward``/``-Reverse`` suffix
+#: convention every other ADO link-type family in this map already uses --
+#: Hierarchy, and, per Microsoft's public work-item link-type reference,
+#: Dependency too). ``DependencyPredecessor``/``DependencySuccessor`` (no
+#: ``-Forward``/``-Reverse`` suffix at all) do not match that convention and
+#: are not a real ADO ``System.LinkTypes.*`` reference name; kept below,
+#: unchanged, only because this repo's own existing fixtures/tests already
+#: encode them and removing a recognized type is a regression this fix does
+#: not need to make. Before this fix, a real dependency edge using the
+#: correct reference name was silently classified UNKNOWN -- not merely
+#: mis-directed, but not recognized as a dependency at all.
+#:
+#: Direction mirrors the already-verified Hierarchy convention (module
+#: docstring; also independently confirmed against
+#: ``dependency_graph.py:889-901``'s own worked example): ``-Forward`` is
+#: not flipped (source's own view -- "I am the predecessor/parent"),
+#: ``-Reverse`` is expressed from the other side and flipped at parse
+#: ("I am the successor/child").
+_DEPENDENCY_FORWARD_NAME = "System.LinkTypes.Dependency-Forward"
+_DEPENDENCY_REVERSE_NAME = "System.LinkTypes.Dependency-Reverse"
+
 #: ADO ``rel`` attribute prefixes mapped to typed kinds. ``-Reverse`` suffix
 #: means the edge is expressed from the child/successor side (flipped at parse).
 _LINK_TYPE_MAP: dict[str, tuple[RelationKind, str]] = {
     "System.LinkTypes.Hierarchy-Forward": (RelationKind.HIERARCHY_PARENT, "forward"),
     "System.LinkTypes.Hierarchy-Reverse": (RelationKind.HIERARCHY_CHILD, "reverse"),
     "System.LinkTypes.Related": (RelationKind.RELATED, "forward"),
+    _DEPENDENCY_FORWARD_NAME: (RelationKind.PREDECESSOR, "forward"),
+    _DEPENDENCY_REVERSE_NAME: (RelationKind.SUCCESSOR, "reverse"),
     "System.LinkTypes.DependencyPredecessor": (RelationKind.PREDECESSOR, "forward"),
     "System.LinkTypes.DependencySuccessor": (RelationKind.SUCCESSOR, "forward"),
     "System.LinkTypes.ArtifactLink": (RelationKind.ARTIFACT_LINK, "forward"),
     "System.LinkTypes.ExternalLink": (RelationKind.EXTERNAL_LINK, "forward"),
 }
 
+#: RELO-W2.1: "enumerate and version the provider's relation-types
+#: metadata" (Sec 8.3.2). A raw ``rel`` name outside this set is UNKNOWN
+#: and must not be silently absent. Parsing preserves the raw name; traversal
+#: retains the edge as evidence, reports quarantine, and does not follow it.
+KNOWN_RELATION_TYPES_VERSION = "1"
+KNOWN_RELATION_TYPES: frozenset[str] = frozenset(_LINK_TYPE_MAP)
+
 
 def _classify_rel(rel_type_name: str) -> tuple[RelationKind, str]:
     """Map a raw ADO ``rel`` to (kind, direction). Unknown rels -> UNKNOWN/forward."""
     if rel_type_name in _LINK_TYPE_MAP:
         return _LINK_TYPE_MAP[rel_type_name]
-    # Handle the fully-qualified vs short form (ADO sometimes omits the prefix).
-    short = rel_type_name.split(".", 1)[-1] if "." in rel_type_name else rel_type_name
-    for suffix, mapped in (
-        ("Hierarchy-Forward", (RelationKind.HIERARCHY_PARENT, "forward")),
-        ("Hierarchy-Reverse", (RelationKind.HIERARCHY_CHILD, "reverse")),
-        ("Related", (RelationKind.RELATED, "forward")),
-        ("DependencyPredecessor", (RelationKind.PREDECESSOR, "forward")),
-        ("DependencySuccessor", (RelationKind.SUCCESSOR, "forward")),
-        ("ArtifactLink", (RelationKind.ARTIFACT_LINK, "forward")),
-        ("ExternalLink", (RelationKind.EXTERNAL_LINK, "forward")),
-    ):
-        if short.endswith(suffix):
-            return mapped
-    return (RelationKind.UNKNOWN, "forward")
+    # Exact short names are aliases; a custom name sharing a suffix is unseen.
+    return _LINK_TYPE_MAP.get(f"System.LinkTypes.{rel_type_name}", (RelationKind.UNKNOWN, "forward"))
 
 
 def _parse_target(url: str | None) -> tuple[RelationTargetKind, str, str | None]:
@@ -67,16 +89,30 @@ def _parse_target(url: str | None) -> tuple[RelationTargetKind, str, str | None]
 
     ADO relation URLs look like:
       - ``vstfs:///WorkItemTracking/WorkItem/123``  -> work item 123
+      - ``https://.../_apis/wit/workItems/123``     -> work item 123
       - ``vstfs:///Git/Commit/...``                  -> artifact
       - ``https://...``                              -> external
     """
     if not url:
         return (RelationTargetKind.EXTERNAL, url or "", None)
     lowered = url.lower()
-    if "workitemtracking/workitem" in lowered:
-        # The id is the last path segment.
-        wid = url.rstrip("/").rsplit("/", 1)[-1]
-        return (RelationTargetKind.WORK_ITEM, wid, None)
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return (RelationTargetKind.EXTERNAL, url, None)
+    parts = parsed.path.rstrip("/").split("/")
+    is_vstfs_work_item = (
+        parsed.scheme.lower() == "vstfs"
+        and not parsed.netloc
+        and [part.lower() for part in parts[:-1]] == ["", "workitemtracking", "workitem"]
+    )
+    is_rest_work_item = (
+        parsed.scheme.lower() in {"http", "https"}
+        and bool(parsed.netloc)
+        and [part.lower() for part in parts[-4:-1]] == ["_apis", "wit", "workitems"]
+    )
+    if (is_vstfs_work_item or is_rest_work_item) and parts[-1].isdigit():
+        return (RelationTargetKind.WORK_ITEM, parts[-1], None)
     if lowered.startswith("vstfs:///"):
         # vstfs:///<Category>/<Type>/<id> -- capture the type segment.
         parts = url.split("/")
@@ -155,6 +191,27 @@ def parse_relations_payload(
     return tuple(all_relations)
 
 
+def relation_quarantine_errors(relations: Iterable[WorkItemRelation]) -> tuple[IntegrationError, ...]:
+    """Describe unseen relation types without authorizing their semantics."""
+    return tuple(
+        IntegrationError(
+            source="ado",
+            stage="relations",
+            message=(
+                f"Relation {edge.rel_type_name!r} from work item {edge.source_work_item_id} "
+                f"to {edge.target_kind.value}:{edge.target_id} quarantined: "
+                f"unrecognized by relation inventory v{KNOWN_RELATION_TYPES_VERSION}"
+            ),
+            retryable=False,
+            operator_action="Review provider relation metadata and captured fixtures before enabling this relation type.",
+            ref_id=str(edge.source_work_item_id),
+            ref_kind="work_item",
+        )
+        for edge in relations
+        if edge.relation_kind is RelationKind.UNKNOWN
+    )
+
+
 # --------------------------------------------------------------------------------------
 # Budgeted traversal
 # --------------------------------------------------------------------------------------
@@ -167,12 +224,14 @@ class RelationTraversalResult:
     ``edges`` carries the discovered typed edges with ``depth`` populated.
     ``visited_ids`` is the set of work-item ids reached. ``truncation`` is
     non-None when a budget (max depth, max nodes, max edges) was hit while the
-    frontier still had unreached nodes.
+    frontier still had unreached nodes. ``errors`` reports unknown edges retained
+    in ``edges`` as quarantined evidence, never followed to another work item.
     """
 
     edges: tuple[WorkItemRelation, ...]
     visited_ids: frozenset[int]
     truncation: PaginationOutcome | None
+    errors: tuple[IntegrationError, ...] = ()
 
 
 def _edge_target_work_item_id(edge: WorkItemRelation) -> int | None:
@@ -237,7 +296,11 @@ def traverse_relations(
                 rel_type_name=edge.rel_type_name,
                 depth=depth + 1,
             ))
-            target_wid = _edge_target_work_item_id(edge)
+            target_wid = (
+                _edge_target_work_item_id(edge)
+                if edge.relation_kind is not RelationKind.UNKNOWN
+                else None
+            )
             if target_wid is not None and target_wid not in visited:
                 frontier.append((target_wid, depth + 1))
         if len(out_edges) >= max_edges:
@@ -253,12 +316,16 @@ def traverse_relations(
         edges=tuple(out_edges),
         visited_ids=frozenset(visited),
         truncation=truncation,
+        errors=relation_quarantine_errors(out_edges),
     )
 
 
 __all__ = [
+    "KNOWN_RELATION_TYPES",
+    "KNOWN_RELATION_TYPES_VERSION",
     "RelationTraversalResult",
     "parse_relations_for_work_item",
     "parse_relations_payload",
+    "relation_quarantine_errors",
     "traverse_relations",
 ]

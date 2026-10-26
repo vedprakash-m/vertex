@@ -1,7 +1,6 @@
 from __future__ import annotations
 from src.core.edition_resolver import get_program_output_dir, PROGRAMS_ROOT
 
-import json
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -10,6 +9,7 @@ from typing import Any
 
 from src.core.archive_store import find_latest_confirmed_entry, load_previous_confirmed_snapshot, read_archive_index
 from src.core.delta_engine import build_deltas
+from src.core.draft_artifact_store import load_draft_state
 from src.core.exceptions import QueryError
 from src.core.jinja_filters import risk_label
 from src.core.models import Comment, DeltaKind, EditionType, EvidencePacket, ItemDelta, Revision, RiskLevel, Snapshot, SnapshotItem, WorkItem
@@ -47,14 +47,8 @@ def _load_previous_dry_run_state(
     issue_number: int,
     programs_root: Path | None = None,
 ) -> dict[str, Any] | None:
-    path = get_program_output_dir(edition_name, programs_root=programs_root) / f"issue_{issue_number:03d}" / f"issue_{issue_number:03d}.draft.json"  # type: ignore[arg-type]
-    if not path.exists():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return payload if isinstance(payload, dict) else None
+    resolved_root = PROGRAMS_ROOT if programs_root is None else programs_root
+    return load_draft_state(edition_name, issue_number, programs_root=resolved_root)
 
 
 def _find_offline_snapshot_cache(

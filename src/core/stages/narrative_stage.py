@@ -288,6 +288,7 @@ class NarrativeStage:
                 ),
                 current_workstream_blurbs=workstream_blurbs,
                 archive_root=ctx.archive_root,
+                reports_root=ctx.reports_root,
             )
             section_roster_current_ids = tuple(sorted(("exec_summary", *diagnostic_section_ids)))
 

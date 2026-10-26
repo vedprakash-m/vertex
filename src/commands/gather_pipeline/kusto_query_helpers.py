@@ -16,6 +16,7 @@ from src.commands.gather_pipeline.support import (
 )
 from src.commands.gather_workiq_helpers import _truncate_signal_text
 from src.core.kusto_ref_utils import extract_kusto_entity_refs as _extract_kusto_entity_refs
+from src.core.metric_binding_validator import coerce_metric_value, kusto_metric_result_error
 from src.core.models_v2 import KustoQuery, Signal
 from src.core.signal_ref_utils import merge_entity_refs
 
@@ -63,9 +64,13 @@ def record_kusto_query_state(
 ) -> None:
     if query_state_sink is None:
         return
+    error = error or kusto_metric_result_error(
+        query.id, query.expected_cardinality, rows,
+        metric_id=query.metric_id, result_column=query.result_column,
+    )
     timestamp = as_of.astimezone(timezone.utc)
     max_data_timestamp = extract_kusto_max_data_timestamp(rows)
-    numeric_value = extract_kusto_query_numeric_value(query, rows)
+    numeric_value = extract_kusto_query_numeric_value(query, rows) if error is None else None
     value_last_4 = roll_query_value_history(previous_state, numeric_value)
     state: dict[str, Any] = {
         "last_attempted_at": timestamp,
@@ -117,9 +122,14 @@ def extract_kusto_max_data_timestamp(rows: list[dict[str, Any]]) -> datetime | N
 
 
 def extract_kusto_query_numeric_value(query: KustoQuery, rows: list[dict[str, Any]]) -> float | None:
-    if not rows:
+    if not rows or kusto_metric_result_error(
+        query.id, query.expected_cardinality, rows,
+        metric_id=query.metric_id, result_column=query.result_column,
+    ):
         return None
     value = kusto_kpi_value(query, rows[0])
+    if query.metric_id is not None:
+        return coerce_metric_value(value)
     if value is None:
         return None
     try:
@@ -135,7 +145,10 @@ def build_kusto_signal(
     program_id: str,
     as_of: datetime,
 ) -> Signal | None:
-    if not rows:
+    if not rows or kusto_metric_result_error(
+        query.id, query.expected_cardinality, rows,
+        metric_id=query.metric_id, result_column=query.result_column,
+    ):
         return None
 
     timestamp = kusto_event_timestamp(rows, as_of=as_of)

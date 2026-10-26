@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
+from typing import TypedDict
 
 from src.core.ai_proposal_store import load_ai_proposals
 from src.core.edition_resolver import PROGRAMS_ROOT, load_program
@@ -67,6 +68,10 @@ _ASSEMBLED_CATEGORIES: frozenset[str] = frozenset(
         "source_degradation",
     }
 )
+
+
+class _ArchiveOptions(TypedDict, total=False):
+    archive_root: Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +131,7 @@ def assemble_program_synthesis_request(
     *,
     programs_root: Path = PROGRAMS_ROOT,
     as_of: datetime | None = None,
+    archive_root: Path | None = None,
 ) -> ProgramSynthesisRequest:
     """Deterministic, Zone-A-only assembly of Section 8.10.5's input list
     from accessors that already exist elsewhere in the codebase:
@@ -173,7 +179,11 @@ def assemble_program_synthesis_request(
         )
     coverage_notes.append(f"verified_workstream_synthesis: {len(proposals)} accepted proposal(s) assembled.")
 
-    reality = ProgramReality.load(program_id, programs_root=programs_root, as_of=resolved_as_of)
+    archive_options: _ArchiveOptions = {"archive_root": archive_root} if archive_root is not None else {}
+    reality = ProgramReality.load(
+        program_id, programs_root=programs_root, as_of=resolved_as_of,
+        **archive_options,
+    )
 
     active_milestone_statuses = {"on_track", "at_risk", "missed", "deferred"}
     milestone_count = 0

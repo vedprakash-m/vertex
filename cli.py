@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import sys
 import uuid
+from copy import copy
 from pathlib import Path
 
 try:
@@ -56,12 +57,12 @@ from src.commands.calibration import app as calibration_app
 from src.commands.catchup import build_catchup_event_builder, catchup_command
 from src.commands.capture_lt_deck import capture_lt_deck_command
 from src.commands.commitment import app as commitment_app
-from src.commands.confirm import confirm_command
+from src.commands.confirm import _preflight_confirm_workspace, confirm_command
 from src.commands.context import app as context_app
 from src.commands.config import app as config_app
 from src.commands.connectors import app as connectors_app
 from src.commands.deck_companion import deck_companion_command
-from src.commands.diff import diff_command
+from src.commands.diff import _preflight_diff_workspace, diff_command
 from src.commands.context_diff import context_diff as _context_diff_cmd
 from src.commands.db import app as db_app, maybe_run_scheduled_compaction
 from src.commands.doctor import doctor_command
@@ -71,7 +72,7 @@ from src.commands.escalate import escalate_command
 from src.commands.evidence import evidence_command
 from src.commands.enrich import enrich_command
 from src.commands.facts import app as facts_app
-from src.commands.freshness import freshness_command
+from src.commands.freshness import _preflight_freshness_workspace, freshness_command
 from src.commands.fleet import fleet_command
 from src.commands.gather import gather_command
 from src.commands.history import history_command
@@ -101,7 +102,7 @@ from src.commands.onboard import onboard_command
 from src.commands.owner_pack import owner_pack_command
 from src.commands.policy import app as policy_app
 from src.commands.override import override_command
-from src.commands.prep import prep_command
+from src.commands.prep import _preflight_prep_workspace, prep_command
 from src.commands.privacy import privacy_app
 from src.commands.observability import observability_app, alerts_app
 from src.commands.decision_brief import decision_brief_command
@@ -119,9 +120,9 @@ from src.commands.readiness import app as readiness_app
 from src.commands.registry import app as registry_app
 from src.commands.reality import app as reality_app
 from src.commands.reconcile import reconcile_command
-from src.commands.report import apply_overrides_command, report_command
+from src.commands.report import _preflight_report_workspace, apply_overrides_command, report_command
 from src.commands.review_debrief import review_debrief_command
-from src.commands.review_full import review_full_command
+from src.commands.review_full import _preflight_review_full_workspace, review_full_command
 from src.commands.review_sections import app as review_sections_app
 from src.commands.rev import app as rev_app
 from src.commands.risks import app as risks_app
@@ -134,7 +135,7 @@ from src.commands.stubs import register_phase_stubs
 from src.commands.hints import hints_command
 from src.commands.summarize import summarize_command
 from src.commands.synthesize import synthesize_command
-from src.commands.triage import triage_command
+from src.commands.triage import _preflight_triage_workspace, triage_command
 from src.commands.trust import trust_command, trust_bootstrap_command
 from src.commands.vitality import vitality_command
 from src.commands.watch import watch_command
@@ -144,6 +145,11 @@ from src.core.adf_config import load_arch_data_fix
 from src.core.measurement_store import TierDecisionSinkConfig, make_tier_decision_sink
 
 
+# One CLI process may invoke the callback more than once in embedded/test use.
+# Keep exactly one durable routing sink per program/edition for its lifetime.
+_REGISTERED_TIER_SINKS: set[tuple[str, str | None]] = set()
+
+
 class VertexRootGroup(TyperGroup):
     def resolve_command(
         self,
@@ -151,7 +157,30 @@ class VertexRootGroup(TyperGroup):
         args: list[str],
     ) -> tuple[str | None, click.Command | None, list[str]]:
         try:
-            return super().resolve_command(ctx, args)
+            resolved = super().resolve_command(ctx, args)
+            if resolved[0] == "context" and resolved[2] and resolved[2][0] in {"import-reply", "solicit"}:
+                ctx.meta["offline_context_command"] = True
+            elif resolved[0] == "nudge" and resolved[1] is not None:
+                probe_command = copy(resolved[1])
+                probe_command.params = [copy(parameter) for parameter in resolved[1].params]
+                for parameter in probe_command.params:
+                    if isinstance(parameter.type, click.Path):
+                        parameter.type = click.STRING
+                try:
+                    probe = probe_command.make_context(
+                        "nudge", list(resolved[2]), parent=ctx,
+                        help_option_names=[], ignore_unknown_options=True, allow_extra_args=True,
+                    )
+                except click.ClickException:
+                    # The actual invocation reports parse errors without preceding startup writes.
+                    ctx.meta["offline_nudge_command"] = True
+                else:
+                    with probe:
+                        ctx.meta["offline_nudge_command"] = any(
+                            probe.get_parameter_source(name) is click.core.ParameterSource.COMMANDLINE
+                            for name in ("approve_draft", "mark_sent")
+                        )
+            return resolved
         except click.ClickException:
             ask_group = self.commands.get("ask")
             if ask_group is None or not args:
@@ -186,6 +215,26 @@ def main(
     if ctx.invoked_subcommand is not None:
         if skip_issue_flag:
             raise typer.BadParameter("--skip-issue cannot be combined with a subcommand.")
+        if ctx.invoked_subcommand in {"report", "draft"}:
+            _preflight_report_workspace()
+        elif ctx.invoked_subcommand == "confirm":
+            _preflight_confirm_workspace()
+        elif ctx.invoked_subcommand == "freshness":
+            _preflight_freshness_workspace()
+        elif ctx.invoked_subcommand == "triage":
+            _preflight_triage_workspace()
+        elif ctx.invoked_subcommand == "prep":
+            _preflight_prep_workspace()
+        elif ctx.invoked_subcommand == "review-full":
+            _preflight_review_full_workspace()
+        elif ctx.invoked_subcommand == "diff":
+            _preflight_diff_workspace()
+        elif ctx.invoked_subcommand == "config" or (
+            ctx.invoked_subcommand == "context" and ctx.meta.get("offline_context_command") is True
+        ) or (
+            ctx.invoked_subcommand == "nudge" and ctx.meta.get("offline_nudge_command") is True
+        ):
+            return
         _maybe_register_tier_decision_sink(ctx)
         _maybe_run_scheduled_db_maintenance(ctx)
         _maybe_run_session_catchup(ctx, no_catchup=no_catchup)
@@ -234,6 +283,9 @@ def _maybe_register_tier_decision_sink(ctx: typer.Context) -> None:
         return
     try:
         edition_id = _extract_option(sys.argv[1:], "--edition")
+        sink_key = (program_id, edition_id)
+        if sink_key in _REGISTERED_TIER_SINKS:
+            return
         try:
             execution_mode = load_arch_data_fix(program_id, programs_root=PROGRAMS_ROOT).mode.value
         except Exception:
@@ -246,6 +298,7 @@ def _maybe_register_tier_decision_sink(ctx: typer.Context) -> None:
             programs_root=PROGRAMS_ROOT,
         )
         register_decision_sink(make_tier_decision_sink(sink_config))
+        _REGISTERED_TIER_SINKS.add(sink_key)
     except Exception:  # pragma: no cover - registration must never break the CLI
         logging.getLogger(__name__).warning("tier decision sink registration failed", exc_info=True)
 

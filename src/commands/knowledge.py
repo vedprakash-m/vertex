@@ -26,11 +26,11 @@ from src.core.ledger.event_log import ConfidenceTier
 from src.core.ledger.source_refs import OperatorAssertionRef
 from src.core.ledger.ulid import new_ulid
 from src.core.program_reality import ProgramReality
+from src.core.workspace_paths import PROGRAMS_ROOT
 
 
 app = typer.Typer(help="Knowledge plane authoring and inspection commands.")
 triage_app = typer.Typer(help="Review staged knowledge claim candidates.")
-PROGRAMS_ROOT = Path(__file__).resolve().parents[2] / "programs"
 
 
 @app.command("assert")

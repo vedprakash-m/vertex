@@ -15,22 +15,24 @@ import portalocker
 import yaml
 
 from src.core.edition_resolver import _parse_scorecards
-from src.core.exceptions import ConfigError
+from src.core.dependency_graph import _load_shared_dependencies, build_dependency_dag, load_dependencies
+from src.core.exceptions import ConfigError, StateError
 from src.core.knowledge_store import (
     KnowledgeStore,
     find_unknown_team_program_references,
     get_shared_knowledge_root,
-    load_knowledge,
-    validate_knowledge,
+    parse_knowledge_documents,
 )
 from src.core.profile_encryption import dump_people_profiles_document, load_people_profiles_document
 from src.core.people_directory_schema import ContactKind, load_people_directory, load_teams
 from src.core.people_membership_schema import MembershipStatus, load_memberships
+from src.core.milestone_engine import load_milestones
 from src.core.workstream_documents import _parse_workstreams
+from src.core.workspace_paths import PROGRAMS_ROOT
+from src.core.yaml_utils import load_yaml_mapping_strict
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PROGRAMS_ROOT = REPO_ROOT / "programs"
 
 OperationAction = Literal["set_fields", "add_list_value", "remove_list_value", "remove_entry"]
 PlannerKind = Literal["deterministic", "ai"]
@@ -84,6 +86,7 @@ class KbFileChange:
     after_text: str
     before_document: dict[str, Any]
     after_document: dict[str, Any]
+    before_exists: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -396,10 +399,10 @@ def validate_program_kb(
     document_cache: dict[Path, dict[str, Any]] | None = None,
     shared_knowledge_cache: "SharedKnowledgeTempCache | None" = None,
 ) -> KnowledgeStore:
+    """Validate in memory; shared_knowledge_cache is retained only for caller compatibility."""
     documents = read_program_kb_documents(program_id, programs_root=programs_root, document_cache=document_cache)
     return _validate_program_documents(
         program_id=program_id, documents=documents, programs_root=programs_root,
-        shared_knowledge_cache=shared_knowledge_cache, document_cache=document_cache,
     )
 
 
@@ -441,12 +444,32 @@ def prepare_kb_update(
     )
 
 
+def preflight_kb_update(preview: KbUpdatePreview) -> None:
+    """Reject stale preview targets before any application side effects."""
+    for change in preview.changes:
+        try:
+            current_text = change.absolute_path.read_text(encoding="utf-8")
+            current_exists = True
+        except FileNotFoundError:
+            current_text = ""
+            current_exists = False
+        except (OSError, UnicodeError):
+            raise StateError(
+                f"Cannot read KB target {change.relative_path}; restore access and generate a new preview before applying."
+            ) from None
+        if current_exists != change.before_exists or current_text != change.before_text:
+            raise StateError(
+                f"KB target {change.relative_path} changed since preview; generate and review a new preview before applying."
+            )
+
+
 def apply_kb_update(
     preview: KbUpdatePreview,
     *,
     programs_root: Path = PROGRAMS_ROOT,
     edited_by: str = "vertex kb update",
 ) -> KbUpdateApplyResult:
+    preflight_kb_update(preview)
     for change in preview.changes:
         change.absolute_path.parent.mkdir(parents=True, exist_ok=True)
         change.absolute_path.write_text(change.after_text, encoding="utf-8")
@@ -533,7 +556,12 @@ def _build_changes(
             continue
 
         absolute_path = _resolve_document_path(relative_path, program_dir=program_dir, programs_root=program_dir.parent)
-        before_text = absolute_path.read_text(encoding="utf-8") if absolute_path.exists() else ""
+        try:
+            before_text = absolute_path.read_text(encoding="utf-8")
+            before_exists = True
+        except FileNotFoundError:
+            before_text = ""
+            before_exists = False
         after_text = _dump_document(relative_path, after_document, existing_path=absolute_path)
         changes.append(
             KbFileChange(
@@ -543,6 +571,7 @@ def _build_changes(
                 after_text=after_text,
                 before_document=deepcopy(before_document),
                 after_document=deepcopy(after_document),
+                before_exists=before_exists,
             )
         )
     return tuple(changes)
@@ -577,41 +606,7 @@ def _resolve_document_path(relative_path: str, *, program_dir: Path, programs_ro
 
 
 class SharedKnowledgeTempCache:
-    """specs/people.md PPL-W3.5c (§8.5's scoped/lazy-loading lever).
-
-    A "knowledge/*.yaml" document (`people_directory`, `people_profiles`,
-    `teams`, `products`, `golden_queries`, `engms_pages`) resolves to the
-    SAME shared-root file for every program sharing that root (barring a
-    program-local override -- only `engms_pages.yaml` supports one, per
-    `_resolve_document_path`). `_validate_program_documents` previously
-    re-dumped that ENTIRE shared subset to a fresh temp directory and
-    re-parsed it via `load_knowledge` on EVERY call -- profiled with
-    cProfile against the real 10,000-person/2,000-team/100-program §8.6
-    scale fixture and found to be the dominant real-scale cost, not a
-    redundant-parse issue in the four typed loaders themselves: ~85% of a
-    full `doctor --kb` run's wall time was `yaml.safe_dump`/`yaml.safe_load`
-    re-serializing and re-parsing the SAME shared files 100 times (781s of
-    ~1030s in `_validate_program_documents` alone, cProfile-measured).
-
-    This cache dumps the shared subset to ONE stable temp directory once
-    per instance lifetime and reuses it as `load_knowledge`'s existing
-    `fallback_root` parameter for every subsequent call --
-    `_load_optional_yaml` already implements exactly the needed "read
-    `knowledge_root` first, fall back to `fallback_root` only for a file
-    absent from `knowledge_root`" resolution, so no change to
-    `knowledge_store.py` (30+ other callers) was needed or made. `None`
-    (the default `shared_knowledge_cache` parameter on
-    `_validate_program_documents`/`validate_program_kb`) is a true no-op:
-    every existing caller keeps its original always-fresh, single-temp-dir
-    behavior byte-for-byte unchanged; only `run_kb_doctor`'s multi-program
-    loop opts in.
-
-    Cleanup is the caller's responsibility (`close()`, or use as a context
-    manager) -- the underlying `TemporaryDirectory` is created lazily on
-    first use and must outlive every `_validate_program_documents` call
-    that references its `fallback_root`, so it cannot self-clean per call
-    the way the original inline `with TemporaryDirectory()` did.
-    """
+    """Legacy explicit temp-file API; KB validation no longer uses it."""
 
     def __init__(self) -> None:
         self._temp_dir: TemporaryDirectory | None = None
@@ -646,80 +641,35 @@ def _validate_program_documents(
     program_id: str,
     documents: dict[str, dict[str, Any]],
     programs_root: Path,
-    shared_knowledge_cache: SharedKnowledgeTempCache | None = None,
-    document_cache: dict[Path, dict[str, Any]] | None = None,
 ) -> KnowledgeStore:
     for relative_path, spec in _SUPPORTED_DOCUMENTS.items():
         _validate_document_shape(relative_path, documents[relative_path], spec)
 
     program_dir = programs_root / program_id
     shared_knowledge_root = get_shared_knowledge_root(programs_root)
-    # Recomputed per call (not assumed static across programs) so a
-    # program with its own local engms_pages.yaml override is still
-    # handled correctly -- only that ONE document falls back to the
-    # always-fresh per-call path for that program; every other program
-    # (and every other document) still uses the stable shared cache.
-    shared_relative_paths = tuple(
-        relative_path
-        for relative_path in documents
-        if relative_path.startswith("knowledge/")
-        and _resolve_document_path(relative_path, program_dir=program_dir, programs_root=programs_root).parent == shared_knowledge_root
-    ) if shared_knowledge_cache is not None else ()
-
-    with TemporaryDirectory() as temp_dir_name:
-        temp_root = Path(temp_dir_name)
-        temp_program_dir = temp_root / program_id
-        temp_knowledge_dir = temp_program_dir / "knowledge"
-        temp_knowledge_dir.mkdir(parents=True, exist_ok=True)
-        for relative_path, document in documents.items():
-            if relative_path in shared_relative_paths:
-                continue
-            target = temp_program_dir / relative_path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(_dump_yaml(document), encoding="utf-8")
-
-        known_program_ids = tuple(
-            sorted(
-                path.name
-                for path in programs_root.iterdir()
-                if path.is_dir() and (path / "program.yaml").exists()
-            )
-        ) if programs_root.exists() else ()
-        uses_shared_knowledge = shared_knowledge_root.exists()
-
-        fallback_root = None
-        if shared_relative_paths:
-            assert shared_knowledge_cache is not None
-            fallback_root = shared_knowledge_cache.shared_root_path(relative_paths=shared_relative_paths, documents=documents)
-        # Reuses the SAME `document_cache` `read_program_kb_documents`
-        # populated (keyed by resolved Path -- the temp fallback path is a
-        # DIFFERENT physical path than the real production path already
-        # cached there, so there is no key collision): once
-        # `shared_knowledge_cache`'s stable fallback_root is dumped on the
-        # first call, every subsequent call's `load_knowledge` would
-        # otherwise still re-parse that same on-disk file text from
-        # scratch on every one of the other 99 calls -- this closes that
-        # second, separately-profiled cost.
-        knowledge = load_knowledge(knowledge_root=temp_knowledge_dir, fallback_root=fallback_root, document_cache=document_cache)
-        validate_knowledge(knowledge)
-        if known_program_ids and not uses_shared_knowledge:
-            unknown_program_references = find_unknown_team_program_references(
-                knowledge,
-                known_program_ids=known_program_ids,
-            )
-            if unknown_program_references:
-                raise ConfigError("; ".join(unknown_program_references))
-
-        raw_workstreams = _read_yaml_or_default(
-            temp_program_dir / "workstreams.yaml",
-            _SUPPORTED_DOCUMENTS["workstreams.yaml"],
+    uses_shared_knowledge = shared_knowledge_root.exists()
+    knowledge = parse_knowledge_documents(
+        {Path(relative_path).name: document for relative_path, document in documents.items()
+         if relative_path.startswith("knowledge/")},
+        knowledge_root=shared_knowledge_root if uses_shared_knowledge else program_dir / "knowledge",
+    )
+    known_program_ids = tuple(
+        sorted(
+            path.name
+            for path in programs_root.iterdir()
+            if path.is_dir() and (path / "program.yaml").exists()
         )
-        raw_scorecards = _read_yaml_or_default(
-            temp_program_dir / "scorecards.yaml",
-            _SUPPORTED_DOCUMENTS["scorecards.yaml"],
+    ) if programs_root.exists() else ()
+    if known_program_ids and not uses_shared_knowledge:
+        unknown_program_references = find_unknown_team_program_references(
+            knowledge, known_program_ids=known_program_ids,
         )
-        workstreams = _parse_workstreams(raw_workstreams, temp_program_dir / "workstreams.yaml")
-        scorecards = _parse_scorecards(raw_scorecards, temp_program_dir / "scorecards.yaml")
+        if unknown_program_references:
+            raise ConfigError("; ".join(unknown_program_references))
+
+    raw_workstreams = documents["workstreams.yaml"]
+    workstreams = _parse_workstreams(raw_workstreams, program_dir / "workstreams.yaml")
+    scorecards = _parse_scorecards(documents["scorecards.yaml"], program_dir / "scorecards.yaml")
 
     raw_program = _read_required_yaml_document(programs_root / program_id / "program.yaml")
     aliases = {person.alias for person in knowledge.people_directory}
@@ -758,22 +708,103 @@ def _validate_program_documents(
                     f"Unknown workstream_id '{workstream_id}' referenced by golden query '{query.id}'."
                 )
 
+    problems.extend(
+        _validate_authored_context_references(
+            program_id=program_id, programs_root=programs_root,
+            aliases=aliases, workstream_ids=workstream_ids,
+        )
+    )
+
     if problems:
         raise ConfigError("; ".join(problems))
     return knowledge
 
 
+def _validate_authored_context_references(
+    *,
+    program_id: str,
+    programs_root: Path,
+    aliases: set[str],
+    workstream_ids: set[str],
+) -> list[str]:
+    program_dir = programs_root / program_id
+    milestones = load_milestones(program_id, programs_root=programs_root)
+    problems: list[str] = []
+    for milestone in milestones:
+        if milestone.owner_alias not in aliases:
+            problems.append(
+                f"Unknown owner_alias '{milestone.owner_alias}' referenced by milestone '{milestone.id}'."
+            )
+        for workstream_id in milestone.linked_workstream_ids:
+            if workstream_id not in workstream_ids:
+                problems.append(
+                    f"Unknown linked_workstream_id '{workstream_id}' referenced by milestone '{milestone.id}'."
+                )
+
+    local_dependencies_path = program_dir / "dependencies.yaml"
+    for path in (local_dependencies_path, programs_root / "dependencies.yaml"):
+        if path.exists():
+            load_yaml_mapping_strict(path)
+    if local_dependencies_path.exists():
+        dependencies = load_dependencies(program_id, programs_root=programs_root)
+    else:
+        # Legacy key_dependencies endpoints are free text, not authored entity IDs.
+        dependencies = tuple(
+            dependency for dependency in _load_shared_dependencies(programs_root=programs_root)
+            if dependency.from_program_id == program_id
+        )
+    build_dependency_dag(dependencies)
+
+    workstream_cache = {program_id: workstream_ids}
+    milestone_cache: dict[str, set[str] | None] = {
+        program_id: {milestone.id for milestone in milestones}
+        if (program_dir / "milestones.yaml").exists() else None,
+    }
+    for dependency in dependencies:
+        for side in ("from", "to"):
+            side_program_id = getattr(dependency, f"{side}_program_id")
+            side_program_dir = programs_root / side_program_id
+            if not side_program_dir.exists():
+                problems.append(
+                    f"Unknown {side}_program_id '{side_program_id}' referenced by dependency '{dependency.id}'."
+                )
+                continue
+            workstream_id = getattr(dependency, f"{side}_workstream_id")
+            if workstream_id is not None:
+                if side_program_id not in workstream_cache:
+                    path = side_program_dir / "workstreams.yaml"
+                    document = _read_yaml_or_default(path, _SUPPORTED_DOCUMENTS["workstreams.yaml"])
+                    workstream_cache[side_program_id] = {
+                        workstream.id for workstream in _parse_workstreams(document, path)
+                    }
+                if workstream_id not in workstream_cache[side_program_id]:
+                    problems.append(
+                        f"Unknown {side}_workstream_id '{workstream_id}' referenced by dependency '{dependency.id}'."
+                    )
+            milestone_id = getattr(dependency, f"{side}_milestone_id")
+            if milestone_id is not None:
+                if side_program_id not in milestone_cache:
+                    milestone_cache[side_program_id] = {
+                        milestone.id for milestone in load_milestones(side_program_id, programs_root=programs_root)
+                    } if (side_program_dir / "milestones.yaml").exists() else None
+                milestone_ids = milestone_cache[side_program_id]
+                if milestone_ids is None:
+                    problems.append(
+                        f"programs/{side_program_id}/milestones.yaml is missing but dependency '{dependency.id}' "
+                        f"references milestone '{milestone_id}'."
+                    )
+                elif milestone_id not in milestone_ids:
+                    problems.append(
+                        f"Unknown {side}_milestone_id '{milestone_id}' referenced by dependency '{dependency.id}'."
+                    )
+    return problems
+
+
 def _read_required_yaml_document(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        raise ConfigError(f"Missing required KB document: {path}")
-    with path.open("r", encoding="utf-8") as handle:
-        try:
-            document = yaml.safe_load(handle) or {}
-        except yaml.YAMLError as error:
-            raise ConfigError(f"Invalid YAML in {path}: {error}") from error
-    if not isinstance(document, dict):
-        raise ConfigError(f"Expected mapping at top-level in {path}.")
-    return document
+    try:
+        return load_yaml_mapping_strict(path)
+    except FileNotFoundError as error:
+        raise ConfigError(f"Missing required KB document: {path}") from error
 
 
 def _validate_charter_references(*, program_id: str, raw_program: dict[str, Any], aliases: set[str]) -> list[str]:
@@ -864,17 +895,12 @@ def _validate_workstream_registry_references(
     people_directory: tuple[Any, ...],
 ) -> list[str]:
     registry_path = programs_root / program_id / "workstream_registry.yaml"
-    if not registry_path.exists():
+    try:
+        document = load_yaml_mapping_strict(registry_path)
+    except FileNotFoundError:
         return []
 
-    try:
-        document = yaml.safe_load(registry_path.read_text(encoding="utf-8")) or {}
-    except yaml.YAMLError as error:
-        raise ConfigError(f"Invalid YAML in {registry_path}: {error}") from error
-    if not isinstance(document, dict):
-        raise ConfigError(f"Expected mapping at top-level in {registry_path}.")
-
-    raw_workstreams = document.get("workstreams") or []
+    raw_workstreams = document.get("workstreams", [])
     if not isinstance(raw_workstreams, list):
         raise ConfigError(f"Expected 'workstreams' list in {registry_path}.")
 
@@ -892,7 +918,7 @@ def _validate_workstream_registry_references(
     problems: list[str] = []
     for index, entry in enumerate(raw_workstreams, start=1):
         if not isinstance(entry, dict):
-            continue
+            raise ConfigError(f"Registry workstream entry #{index} in {registry_path} must be a mapping.")
         workstream_id = str(entry.get("id") or "").strip() or f"entry #{index}"
         raw_stakeholders = entry.get("stakeholders")
         if raw_stakeholders in (None, ""):
@@ -955,17 +981,24 @@ def _validate_document_shape(relative_path: str, document: dict[str, Any], spec:
     collection = document.get(spec.collection_key)
     if not isinstance(collection, list):
         raise ConfigError(f"{spec.collection_key} must be a list in {relative_path}.")
+    for index, entry in enumerate(collection, start=1):
+        if not isinstance(entry, dict):
+            raise ConfigError(f"{spec.collection_key} entry #{index} in {relative_path} must be a mapping.")
 
 
 def _read_yaml_or_default(path: Path, spec: KbDocumentSpec) -> dict[str, Any]:
-    if not path.exists():
+    try:
+        document = load_yaml_mapping_strict(path)
+    except FileNotFoundError:
         return spec.default_document()
     if spec.relative_path == "knowledge/people_profiles.yaml":
-        return load_people_profiles_document(path)
-    with path.open("r", encoding="utf-8") as handle:
-        document = yaml.safe_load(handle) or {}
-    if not isinstance(document, dict):
-        raise ConfigError(f"Expected mapping at top-level in {path}.")
+        try:
+            return load_people_profiles_document(path)
+        except ConfigError as error:
+            raise ConfigError(
+                f"Cannot load profiles at {path} ({type(error).__name__}). "
+                "Check the profile schema, encryption envelope and key access before retrying."
+            ) from error
     if spec.relative_path == "knowledge/people_directory.yaml" and str(document.get("schema_version")) == "2.0":
         loaded = load_people_directory(path)
         if loaded is None:

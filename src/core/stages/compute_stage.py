@@ -94,6 +94,7 @@ class ComputeStage:
             as_of=ctx.data_as_of,
             previous_snapshot=ctx.previous_snapshot,
             reports_root=ctx.reports_root,
+            archive_root=ctx.archive_root,
         )
         default_exec_summary = support.build_exec_summary_text(
             ctx.bundle,

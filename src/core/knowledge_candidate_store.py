@@ -11,9 +11,9 @@ from src.core.jsonl_utils import append_jsonl_line, read_jsonl_records, validate
 from src.core.knowledge.predicate_registry import validate_predicate_value
 from src.core.ledger.event_log import ConfidenceTier
 from src.core.ledger.source_refs import SourceRef, source_document_key, source_ref_from_dict, source_ref_to_dict
+from src.core.workspace_paths import PROGRAMS_ROOT
 
 
-PROGRAMS_ROOT = Path(__file__).resolve().parents[2] / "programs"
 SKIP_EXPIRY_DAYS = 90
 PENDING_MAX_BYTES = 10 * 1024 * 1024
 TRIAGED_MAX_BYTES = 10 * 1024 * 1024

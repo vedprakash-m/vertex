@@ -6,7 +6,8 @@ acceptance.  It replaces the blocked stub in ``src/commands/context.py``.
 Apply strategy: ``reuse_beta_outbox_plus_minimal_apply_journal``
   - Beta outbox (S-1 / ``projection_outbox``) handles ledger idempotency.
   - A minimal per-proposal apply journal (``programs/<prog>/_ncfl_apply/``)
-    covers YAML/changelog recovery if the process crashes mid-write.
+    retains YAML/changelog progress if the process crashes mid-write;
+    uncertain intermediate states require reconciliation before retry.
 
 State machine (§23.1.5 / ADR-0006 S-NC-apply):
   proposed → write_started → yaml_written → changelog_written
@@ -30,14 +31,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import portalocker
+
 from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.ncfl_apply_policy import (
+    NCFL_APPLY_STATES,
     NCFL_APPLY_TRANSITIONS,
     NcflApplyState,
     is_valid_apply_transition,
 )
 from src.core.ncfl_models import ContextUpdateProposal
-from src.core.ncfl_proposal_store import update_proposal_status
+from src.core.exceptions import StateError
+from src.core.ncfl_proposal_store import _queue_lock, _update_proposal_status, load_proposals
 from src.core.ncfl_store_policy import is_ncfl_apply_writable_target_store
 from src.core.people_registry_writer import (
     RegistryPatchOperation,
@@ -81,21 +86,18 @@ def _read_journal_state(
     program_id: str, proposal_id: str, *, programs_root: Path
 ) -> NcflApplyState | None:
     path = _journal_path(program_id, proposal_id, programs_root=programs_root)
-    if not path.exists():
-        return None
     try:
         doc = json.loads(path.read_text(encoding="utf-8"))
-        return doc.get("state")
-    except Exception:  # noqa: BLE001
+    except FileNotFoundError:
         return None
-
-
-def _clear_journal(program_id: str, proposal_id: str, *, programs_root: Path) -> None:
-    path = _journal_path(program_id, proposal_id, programs_root=programs_root)
-    try:
-        path.unlink(missing_ok=True)
-    except OSError:
-        pass
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise StateError("NCFL apply journal is unreadable or invalid; repair before retrying.") from exc
+    if not isinstance(doc, dict) or doc.get("proposal_id") != proposal_id:
+        raise StateError("NCFL apply journal identity is invalid; repair before retrying.")
+    state = doc.get("state")
+    if state not in NCFL_APPLY_STATES:
+        raise StateError("NCFL apply journal state is invalid; repair before retrying.")
+    return state
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +110,7 @@ class NcflApplyResult:
     target_store: str
     target_key: str
     target_field: str
-    action: str   # "applied" | "skipped_not_writable" | "skipped_stale" | "skipped_already_applied" | "needs_repair"
+    action: str   # "applied" | "skipped_not_writable" | "skipped_stale" | "skipped_already_applied" | "refused_unbound_approval" | "needs_repair"
     note: str
 
 
@@ -126,8 +128,8 @@ def apply_proposal(
     """Apply one accepted NCFL proposal to its target Plane 1 store.
 
     Returns an ``NcflApplyResult`` describing what happened.  Writes a
-    journal entry before each step so recovery can resume from the last
-    completed state on retry.
+    journal entry for each step. Retained intermediate states require
+    reconciliation, because they do not prove which writes completed.
 
     Raises nothing — failures are recorded in the journal + result.
     """
@@ -158,8 +160,98 @@ def apply_proposal(
             note=f"proposal status is {proposal.status!r}, not 'accepted'",
         )
 
-    # Guard 3: check idempotency via journal
-    prior_state = _read_journal_state(proposal.program_id, pid, programs_root=programs_root)
+    # Guard 2b: the latest acceptance must bind this exact proposal payload
+    reason = proposal.acceptance_binding_error()
+    if reason is not None:
+        return NcflApplyResult(
+            proposal_id=pid,
+            target_store=target_store,
+            target_key=target_key,
+            target_field=target_field,
+            action="refused_unbound_approval",
+            note=f"{reason}; re-review the current proposal and record a new acceptance before applying",
+        )
+
+    if dry_run:
+        return _apply_retained_proposal(proposal, actor=actor, programs_root=programs_root, dry_run=True)
+    lock_path = programs_root / proposal.program_id / _APPLY_JOURNAL_DIR / "_apply.lock"
+    lock = portalocker.Lock(lock_path, mode="a+", timeout=30)
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock.acquire()
+    except (OSError, portalocker.exceptions.LockException) as exc:
+        log.error("NCFL apply lock unavailable for %s: %s", pid, exc)
+        return NcflApplyResult(
+            proposal_id=pid, target_store=target_store, target_key=target_key,
+            target_field=target_field, action="needs_repair",
+            note="Context apply is busy or unavailable; retry after checking the apply lock.",
+        )
+    try:
+        with _queue_lock(proposal.program_id, programs_root):
+            return _apply_retained_proposal(proposal, actor=actor, programs_root=programs_root, dry_run=False)
+    except (OSError, ValueError) as exc:
+        log.error("NCFL apply queue admission failed for %s: %s", pid, exc)
+        return NcflApplyResult(
+            proposal_id=pid, target_store=target_store, target_key=target_key,
+            target_field=target_field, action="needs_repair",
+            note="Context proposal queue is busy or unavailable; inspect it before retrying.",
+        )
+    finally:
+        lock.release()
+
+
+def _apply_retained_proposal(
+    proposal: ContextUpdateProposal, *, actor: str, programs_root: Path, dry_run: bool,
+) -> NcflApplyResult:
+    try:
+        matches = [
+            current for current in load_proposals(
+                proposal.program_id, issue_number=proposal.issue_number, programs_root=programs_root,
+            )
+            if current.proposal_id == proposal.proposal_id
+        ]
+    except (OSError, ValueError) as exc:
+        log.error("NCFL retained approval unavailable for %s: %s", proposal.proposal_id, exc)
+        return NcflApplyResult(
+            proposal_id=proposal.proposal_id, target_store=proposal.target_store,
+            target_key=proposal.target_key, target_field=proposal.target_field,
+            action="needs_repair", note="Retained proposal approval is unavailable; inspect the queue before retrying.",
+        )
+    if (
+        len(matches) != 1
+        or matches[0].acceptance_binding_error() is not None
+        or matches[0].approval_payload_digest() != proposal.approval_payload_digest()
+    ):
+        return NcflApplyResult(
+            proposal_id=proposal.proposal_id, target_store=proposal.target_store,
+            target_key=proposal.target_key, target_field=proposal.target_field,
+            action="refused_unbound_approval",
+            note="Retained proposal acceptance changed or is unavailable; re-review before applying.",
+        )
+    return _apply_bound_proposal(matches[0], actor=actor, programs_root=programs_root, dry_run=dry_run)
+
+
+def _apply_bound_proposal(
+    proposal: ContextUpdateProposal, *, actor: str, programs_root: Path, dry_run: bool,
+) -> NcflApplyResult:
+    pid = proposal.proposal_id
+    target_store = proposal.target_store
+    target_key = proposal.target_key
+    target_field = proposal.target_field
+
+    # Recheck completion inside the cooperative writer lock.
+    try:
+        prior_state = _read_journal_state(proposal.program_id, pid, programs_root=programs_root)
+    except StateError as exc:
+        log.error("NCFL apply journal admission failed for %s: %s", pid, exc)
+        return NcflApplyResult(
+            proposal_id=pid,
+            target_store=target_store,
+            target_key=target_key,
+            target_field=target_field,
+            action="needs_repair",
+            note=str(exc),
+        )
     if prior_state == "applied":
         return NcflApplyResult(
             proposal_id=pid,
@@ -169,27 +261,37 @@ def apply_proposal(
             action="skipped_already_applied",
             note="apply journal shows already applied",
         )
+    if prior_state in {
+        "write_started", "yaml_written", "changelog_written", "ledger_written", "needs_repair",
+    }:
+        return NcflApplyResult(
+            proposal_id=pid, target_store=target_store, target_key=target_key,
+            target_field=target_field, action="needs_repair",
+            note="A previous apply requires reconciliation; preserve its journal and resolve it before retrying.",
+        )
 
     journal = _journal_path(proposal.program_id, pid, programs_root=programs_root)
 
     try:
-        if not dry_run:
-            _write_journal(journal, pid, "write_started", note="apply started")
-
         # Guard 4: optimistic concurrency — verify current_value_hash matches live YAML
         if proposal.current_value_hash is not None:
             current_raw = _read_current_value(proposal, programs_root=programs_root)
-            if current_raw is not None:
-                live_hash = hashlib.sha256(str(current_raw).encode()).hexdigest()
-                if live_hash != proposal.current_value_hash:
-                    return NcflApplyResult(
-                        proposal_id=pid,
-                        target_store=target_store,
-                        target_key=target_key,
-                        target_field=target_field,
-                        action="skipped_stale",
-                        note=f"current_value_hash mismatch: live={live_hash[:8]} expected={proposal.current_value_hash[:8]}",
-                    )
+            if current_raw is None:
+                return NcflApplyResult(
+                    proposal_id=pid, target_store=target_store, target_key=target_key,
+                    target_field=target_field, action="skipped_stale",
+                    note="Current target value is unavailable; re-review before applying.",
+                )
+            live_hash = hashlib.sha256(str(current_raw).encode()).hexdigest()
+            if live_hash != proposal.current_value_hash:
+                return NcflApplyResult(
+                    proposal_id=pid,
+                    target_store=target_store,
+                    target_key=target_key,
+                    target_field=target_field,
+                    action="skipped_stale",
+                    note=f"current_value_hash mismatch: live={live_hash[:8]} expected={proposal.current_value_hash[:8]}",
+                )
 
         if dry_run:
             return NcflApplyResult(
@@ -201,6 +303,8 @@ def apply_proposal(
                 note="dry_run: would apply",
             )
 
+        _write_journal(journal, pid, "write_started", note="apply started")
+
         # Step 1: write YAML (store-specific)
         _write_to_store(proposal, actor=actor, programs_root=programs_root)
         _write_journal(journal, pid, "yaml_written", note="YAML updated")
@@ -210,7 +314,7 @@ def apply_proposal(
         _write_journal(journal, pid, "changelog_written", note="changelog updated")
 
         # Step 3: update proposal status → applied
-        update_proposal_status(
+        _update_proposal_status(
             proposal.program_id,
             proposal_id=pid,
             new_status="accepted",
@@ -221,9 +325,8 @@ def apply_proposal(
         )
         _write_journal(journal, pid, "ledger_written", note="proposal status updated")
 
-        # Final: mark applied and clear journal
+        # Retain completion so subsequent invocations cannot replay the write.
         _write_journal(journal, pid, "applied", note="complete")
-        _clear_journal(proposal.program_id, pid, programs_root=programs_root)
 
         log.info(
             "NCFL apply: program=%s proposal=%s store=%s key=%s field=%s",
@@ -297,6 +400,14 @@ def _read_current_value(
             target_key=proposal.target_key,
             target_field=proposal.target_field,
         )
+    if proposal.target_store == "knowledge_doc":
+        doc_path = _knowledge_doc_target_path(
+            proposal.program_id, proposal.target_key, proposal.target_field, programs_root,
+        )
+        try:
+            return doc_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            return None
     if target_pol is None or target_pol.root_yaml is None:
         return None
     yaml_path = programs_root / proposal.program_id / target_pol.root_yaml
@@ -333,16 +444,6 @@ def _read_current_value(
                 if isinstance(ws, dict) and ws.get("id") == proposal.target_key:
                     return str(ws.get(proposal.target_field, ""))
             return None
-
-        if store_name == "knowledge_doc":
-            # target_key is the knowledge-doc filename; target_field is "body".
-            doc_path = programs_root / proposal.program_id / "knowledge" / proposal.target_key
-            if not doc_path.exists():
-                return None
-            try:
-                return doc_path.read_text(encoding="utf-8")
-            except Exception:  # noqa: BLE001
-                return None
 
         return None
     except Exception:  # noqa: BLE001
@@ -533,21 +634,11 @@ def _apply_to_workstreams(
     save_workstreams_document(prog_id, doc, programs_root=programs_root)
 
 
-def _apply_to_knowledge_doc(
-    prog_id: str, target_key: str, target_field: str, source_value: str, programs_root: Path
-) -> None:
-    """Apply a Zone B knowledge-doc synthesis proposal (§24.6 Phase 5).
-
-    Writes ``knowledge/<target_key>`` with a dated ``.bak`` of the prior content.
-    ``target_key`` is the doc filename (e.g. ``nova_program_context.md``);
-    ``target_field`` is ``body``. The whole document body is replaced (it is a
-    synthesized patch, not a field-level record store).
-    """
+def _knowledge_doc_target_path(
+    prog_id: str, target_key: str, target_field: str, programs_root: Path,
+) -> Path:
     knowledge_dir = programs_root / prog_id / "knowledge"
-    knowledge_dir.mkdir(parents=True, exist_ok=True)
     doc_path = knowledge_dir / target_key
-
-    # INV: never write outside the knowledge dir; reject path-traversal keys.
     try:
         doc_path.resolve().relative_to(knowledge_dir.resolve())
     except ValueError as error:
@@ -559,6 +650,21 @@ def _apply_to_knowledge_doc(
         raise ValueError(
             f"Unknown knowledge_doc target_field: {target_field!r} (only 'body' is supported)"
         )
+    return doc_path
+
+
+def _apply_to_knowledge_doc(
+    prog_id: str, target_key: str, target_field: str, source_value: str, programs_root: Path
+) -> None:
+    """Apply a Zone B knowledge-doc synthesis proposal (§24.6 Phase 5).
+
+    Writes ``knowledge/<target_key>`` with a dated ``.bak`` of the prior content.
+    ``target_key`` is the doc filename (e.g. ``program_context.md``);
+    ``target_field`` is ``body``. The whole document body is replaced (it is a
+    synthesized patch, not a field-level record store).
+    """
+    doc_path = _knowledge_doc_target_path(prog_id, target_key, target_field, programs_root)
+    doc_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Dated .bak of the prior content (only the last .bak pattern is kept).
     if doc_path.exists():

@@ -1,0 +1,10 @@
+{
+  "columns": [
+    {"name": "Snapshot", "type_name": "string"},
+    {"name": "P50Hours", "type_name": "real"}
+  ],
+  "rows": [
+    {"Snapshot": "Current", "P50Hours": 4.2},
+    {"Snapshot": "Prior", "P50Hours": 4.8}
+  ]
+}

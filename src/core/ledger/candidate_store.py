@@ -12,9 +12,9 @@ from src.core.ledger import candidate_sqlite_store as _sqls
 from src.core.ledger.event_types import validate_event_payload
 from src.core.ledger.rev_evidence import EvidenceRef, evidence_refs_from_dict, evidence_refs_to_dict
 from src.core.ledger.source_refs import SourceRef, source_ref_from_dict, source_ref_to_dict, validate_typed_source_ref
+from src.core.workspace_paths import PROGRAMS_ROOT
 
 
-PROGRAMS_ROOT = Path(__file__).resolve().parents[3] / "programs"
 SKIP_EXPIRY_DAYS = 90
 PENDING_MAX_BYTES = 10 * 1024 * 1024
 TRIAGED_MAX_BYTES = 10 * 1024 * 1024

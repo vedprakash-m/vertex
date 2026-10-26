@@ -16,6 +16,7 @@ from src.commands.gather_pipeline.support import (
     parse_date,
 )
 from src.core.m365_payload_support import optional_string as _optional_string
+from src.core.metric_binding_validator import coerce_metric_value
 from src.core.metric_models import MetricObservation, MetricQualityState, MetricSourceBinding
 from src.core.models_v2 import KustoQuery, Signal
 from src.core.reality_store import RealityStore
@@ -101,7 +102,10 @@ def project_kpi_signals_to_observations(
         )
         observation_error: str | None = None
         observation: MetricObservation | None = None
-        if signal is not None and binding is not None:
+        query_failed = query_state.get("last_cycle_succeeded") is False or bool(query_state.get("last_error"))
+        if query_failed:
+            observation_error = f"KPI query {query.id} failed; skipping MetricObservation projection."
+        elif signal is not None and binding is not None:
             observation = build_metric_observation_from_kpi_signal(
                 program_id=program_id,
                 query=query,
@@ -245,21 +249,6 @@ def load_kpi_result_row(metadata: dict[str, Any]) -> dict[str, Any]:
     return loaded
 
 
-def coerce_metric_value(value: Any) -> float | None:
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return float(value)
-    if isinstance(value, dict):
-        return None
-    text = _optional_string(value)
-    if text is None:
-        return None
-    normalized = text.replace(",", "").rstrip("%")
-    try:
-        return float(normalized)
-    except ValueError:
-        return None
-
-
 def resolve_kpi_measurement_period_start(row: dict[str, Any], *, fallback: datetime) -> datetime:
     for key, value in row.items():
         normalized = key.strip().lower()
@@ -355,8 +344,10 @@ def classify_kpi_ingestion_run_status(
     query_state: dict[str, Any],
     error_message: str | None,
 ) -> Literal["running", "success", "partial", "failed"]:
+    if query_state.get("last_cycle_succeeded") is False or query_state.get("last_error"):
+        return "failed"
     if error_message is not None:
-        return "failed" if query_state.get("last_cycle_succeeded") is False else "partial"
+        return "partial"
     if signal is None or observation is None:
         return "partial"
     return "success"

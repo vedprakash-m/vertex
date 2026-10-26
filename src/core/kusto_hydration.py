@@ -22,6 +22,7 @@ from src.core.integration_types import (
 from src.core.kusto_client import build_live_kusto_query_executor
 from src.core.kusto_query_loader import load_kpi_queries
 from src.core.kusto_templates import KustoTemplateContext, render_kusto_query
+from src.core.metric_binding_validator import coerce_metric_value, kusto_metric_result_error
 from src.core.models_v2 import KustoQuery, Program, Workstream
 
 
@@ -157,6 +158,23 @@ class KustoHydrationProvider:
                 )
                 continue
             api_call_count += 1
+            cardinality_error = kusto_metric_result_error(
+                query.id, query.expected_cardinality, execution.rows or (),
+                metric_id=query.metric_id, result_column=query.result_column,
+            )
+            if cardinality_error is not None:
+                failed_ref_ids.append((registration.ref_id, registration.ref_kind))
+                errors.append(
+                    IntegrationError(
+                        source="kusto",
+                        stage="hydration",
+                        retryable=False,
+                        message=cardinality_error,
+                        ref_id=registration.ref_id,
+                        ref_kind=registration.ref_kind,
+                    )
+                )
+                continue
             normalized_rows = tuple(_normalize_kusto_row(row) for row in execution.rows or ())
             observed_value = _extract_observed_value(normalized_rows, query.result_column)
             result_sets.append(
@@ -311,13 +329,7 @@ def _extract_observed_value(
     so callers can distinguish "no semantic value" from "value is zero"."""
     if not result_column or not rows:
         return None
-    raw = rows[0].get(result_column)
-    if raw is None or isinstance(raw, bool):
-        return None
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return None
+    return coerce_metric_value(rows[0].get(result_column))
 
 
 def _compute_is_breach(observed_value: float | None, slo_target: float | None, comparison: str | None) -> bool | None:

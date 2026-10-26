@@ -93,7 +93,7 @@ class CockpitFinding:
 class ProgramCockpitSummary:
     overall_risk: str
     readiness_percent: int | None
-    blocker_count: int
+    blocker_count: int | None
     top_three_candidates: tuple[str, ...]
     next_action: str | None
 

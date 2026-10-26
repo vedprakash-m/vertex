@@ -16,10 +16,10 @@ from src.core.exceptions import AuthError, ConfigError, QueryError
 from src.core.models import WorkItem
 from src.core.models_v2 import KustoQuery, Program, Workstream
 from src.m365.agency_bridge import AgencyBridge, AgencyCapabilities
+from src.core.workspace_paths import PROGRAMS_ROOT
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PROGRAMS_ROOT = REPO_ROOT / "programs"
 
 NowProvider = Callable[[], datetime]
 SleepFunc = Callable[[float], None]

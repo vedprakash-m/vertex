@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from datetime import date, datetime, timezone
-from html import escape
+from html import escape, unescape
 from typing import Any
 
 from markupsafe import Markup
@@ -324,7 +324,7 @@ def rich_text_html(value: str | None) -> Markup:
     def flush_paragraph() -> None:
         if not paragraph_lines:
             return
-        body = " ".join(paragraph_lines)
+        body = unescape(" ".join(paragraph_lines))
         fragments.append(f'<p style="margin:0 0 10px 0;">{_render_inline_links(body)}</p>')
         paragraph_lines.clear()
 
@@ -333,7 +333,7 @@ def rich_text_html(value: str | None) -> Markup:
             return
         fragments.append('<ul style="margin:0 0 10px 18px; padding:0;">')
         for item in list_items:
-            fragments.append(f'<li style="margin:0 0 6px 0;">{_render_inline_links(item)}</li>')
+            fragments.append(f'<li style="margin:0 0 6px 0;">{_render_inline_links(unescape(item))}</li>')
         fragments.append('</ul>')
         list_items.clear()
 
@@ -382,6 +382,72 @@ def rich_text_html(value: str | None) -> Markup:
     flush_paragraph()
     flush_list()
     return Markup("".join(fragments))
+
+
+_EXEC_FONT = "font-family:Segoe UI, -apple-system, Roboto, Helvetica, Arial, sans-serif;"
+_EXEC_TABLE_STYLE = (
+    "width:{w}px; max-width:{w}px; table-layout:fixed; border-collapse:collapse; mso-table-lspace:0pt; mso-table-rspace:0pt; "
+    + _EXEC_FONT
+    + " font-size:13px; line-height:18px; color:#374151; border-top:1px solid #d1d5db; border-bottom:1px solid #d1d5db;"
+)
+_EXEC_TH_STYLE = "padding:7px 8px; background-color:#f9fafb; border-bottom:1px solid #d1d5db; font-size:12px; line-height:16px; font-weight:600; color:#4b5563; text-align:left; vertical-align:bottom;"
+_EXEC_GROUP_STYLE = "padding:10px 8px 6px 8px; background-color:#f3f4f6; border-bottom:1px solid #e5e7eb; font-size:12px; line-height:16px; font-weight:600; color:#111827; text-align:left;"
+_EXEC_TD_STYLE = "padding:7px 8px; border-bottom:1px solid #e5e7eb; font-size:13px; line-height:18px; color:#374151; vertical-align:top;"
+_EXEC_TABLE_RE = re.compile(r"<table\b[^>]*>.*?</table>", re.IGNORECASE | re.DOTALL)
+_EXEC_CELL_RE = re.compile(r"<(th|td)\b([^>]*)>", re.IGNORECASE)
+_EXEC_TR_RE = re.compile(r"<tr\b([^>]*)>", re.IGNORECASE)
+_EXEC_ATTR_RE = re.compile(r'\b(width|colspan|rowspan|scope|align)="([^"]*)"', re.IGNORECASE)
+_EXEC_KEEP_DECL_RE = re.compile(r"(text-align|font-weight|background-color|color|white-space)\s*:\s*([^;]+)", re.IGNORECASE)
+
+
+def _exec_cell(match: re.Match[str]) -> str:
+    tag, attrs = match.group(1).lower(), match.group(2)
+    kept = {name.lower(): value for name, value in _EXEC_ATTR_RE.findall(attrs)}
+    style_match = re.search(r'style="([^"]*)"', attrs, re.IGNORECASE)
+    authored = dict((k.lower(), v.strip()) for k, v in _EXEC_KEEP_DECL_RE.findall(style_match.group(1))) if style_match else {}
+    if tag == "th" and ("colspan" in kept or kept.get("scope") == "rowgroup"):
+        style = _EXEC_GROUP_STYLE
+    elif tag == "th":
+        style = _EXEC_TH_STYLE
+    else:
+        style = _EXEC_TD_STYLE
+        for key in ("text-align", "font-weight", "background-color", "white-space"):
+            if key in authored:
+                style += f" {key}:{authored[key]};"
+        if authored.get("color", "").lower() in {"#111827", "#166534", "#92400e", "#991b1b"}:
+            style += f" color:{authored['color']};"
+    if "width" in kept:
+        style = f"width:{kept['width']}px; " + style
+    attr_text = "".join(f' {name}="{value}"' for name, value in kept.items())
+    return f'<{tag}{attr_text} style="{style}">'
+
+
+def _exec_table(match: re.Match[str]) -> str:
+    block = match.group(0)
+    open_tag = re.match(r"<table\b[^>]*>", block, re.IGNORECASE).group(0)  # type: ignore[union-attr]
+    width_match = re.search(r'width="(\d+)"', open_tag)
+    width = width_match.group(1) if width_match else "640"
+    new_open = f'<table width="{width}" cellpadding="0" cellspacing="0" border="0" style="{_EXEC_TABLE_STYLE.format(w=width)}">'
+    body = block[len(open_tag):]
+    body = re.sub(r"<thead>\s*<tr\b[^>]*>", "<thead><tr>", body, flags=re.IGNORECASE)
+    body = _EXEC_TR_RE.sub(lambda m: "<tr" + "".join(f' bgcolor="{v}"' for v in re.findall(r'bgcolor="(#EFF6FF|#eff6ff|#FFFBEB|#fffbeb)"', m.group(1))) + ">", body)
+    body = _EXEC_CELL_RE.sub(_exec_cell, body)
+    body = re.sub(r'(<td\b[^>]*style=")([^"]*)(">)(Done\b)', r'\1\2 color:#166534; font-weight:600;\3\4', body)
+    return new_open + body
+
+
+def executive_html(value: Markup | str | None) -> Markup:
+    """Normalise narrative HTML to the executive email design system."""
+    if value is None:
+        return Markup("")
+    html = str(value)
+    html = _EXEC_TABLE_RE.sub(_exec_table, html)
+    html = re.sub(r'<p style="margin:0 0 10px 0;">(Sources?:)', r'<p style="margin:12px 0 0 0; font-size:11px; line-height:16px; color:#6b7280;">\1', html)
+    html = html.replace('<p style="margin:0 0 10px 0;">', '<p style="margin:0 0 10px 0; font-size:14px; line-height:21px;">')
+    html = html.replace('<ul style="margin:0 0 10px 18px; padding:0;">', '<ul style="margin:0 0 12px 20px; padding:0; font-size:14px; line-height:21px;">')
+    html = html.replace('<li style="margin:0 0 6px 0;">', '<li style="margin:0 0 6px 0; padding-left:2px;">')
+    html = html.replace("color:#2563EB; text-decoration:underline;", "color:#1d4ed8; text-decoration:underline;")
+    return Markup(html)
 
 
 def kusto_tile_data(value: KpiTile | Mapping[str, Any] | None) -> dict[str, Any]:
@@ -560,6 +626,7 @@ JINJA_FILTERS: dict[str, Any] = {
     "pluralize": pluralize,
     "qg_summary": qg_summary,
     "rich_text_html": rich_text_html,
+    "executive_html": executive_html,
     "evidence_tooltip": evidence_tooltip,
     "risk_bg": risk_bg,
     "risk_fg": risk_fg,

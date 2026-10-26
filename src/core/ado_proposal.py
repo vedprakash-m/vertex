@@ -23,7 +23,7 @@ from src.core.snapshot_store import read_snapshot
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 from src.core.edition_resolver import get_program_output_dir, _output_subdir, _OUTPUT_SUBDIR_LEGACY, PROGRAMS_ROOT
-PROGRAMS_ROOT = REPO_ROOT / "programs"
+from src.core.workspace_paths import PROGRAMS_ROOT
 
 
 class ProposalManifestLockedError(RuntimeError):

@@ -33,6 +33,7 @@ from typing import Any
 from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.exceptions import ConfigError
 from src.core.models import Confidence  # noqa: F401 — re-exported for callers
+from src.core.policy_loader import load_freshness_policy
 from src.core.models_v2 import (
     Assumption as FactAssumption,
     DecisionEntry as FactDecisionEntry,
@@ -371,6 +372,8 @@ def load_program_context(
 
     resolved_editions_root = editions_root or (programs_root / program_id / "editions")
     program_dir = programs_root / program_id
+    review_policy = load_freshness_policy(override_path=program_dir / "freshness_policy.yaml").context_review
+    entry_thresholds = dict(review_policy.entries)
 
     # --- Load all files ---
     program_yaml = load_yaml_mapping(program_dir / "program.yaml")
@@ -797,157 +800,81 @@ def load_program_context(
     staleness_flags: list[StalenessFlag] = []
 
     # File-level staleness (from top-level last_reviewed_date field in each file)
-    _file_thresholds: list[tuple[str, int, int | None]] = [
-        ("program.yaml", 90, 180),
-        ("workstreams.yaml", 30, 90),
-        ("milestones.yaml", 14, 30),
-        ("scorecards.yaml", 60, 120),
-        ("kpis.yaml", 60, None),
-        ("editorial_rules.yaml", 60, None),
-        ("dependencies.yaml", 30, 60),
-        ("capability_status.yaml", 14, 30),
-        ("template_contract.yaml", 90, None),
-        ("slice_contracts.yaml", 60, 120),
-        ("chapter_contract.yaml", 90, None),
-        ("readiness.yaml", 30, 60),
-    ]
-    for fname, warn_days, block_days in _file_thresholds:
+    for fname, threshold in review_policy.files:
         fpath = program_dir / fname
         if not fpath.exists():
             continue
         data = load_yaml_mapping(fpath, required=False, default={})
-        lrd_raw = data.get("last_reviewed_date")
-        lrd = _parse_date(lrd_raw)
-        if lrd is None:
-            continue
-        days = (today - lrd).days
-        sev = "ok"
-        if block_days is not None and days >= block_days:
-            sev = "block"
-        elif days >= warn_days:
-            sev = "warn"
-        if sev != "ok":
-            staleness_flags.append(StalenessFlag(
-                file=fname,
-                entity_id=None,
-                field="last_reviewed_date",
-                last_reviewed_date=lrd,
-                days_stale=days,
-                warn_threshold=warn_days,
-                block_threshold=block_days,
-                severity=sev,
-            ))
+        flag = _review_staleness_flag(
+            fname, None, _parse_date(data.get("last_reviewed_date")), today,
+            threshold.warn_days, threshold.block_days,
+        )
+        if flag is not None:
+            staleness_flags.append(flag)
 
-    # Per-entry staleness: workstreams (14d warn / 30d block)
+    # Per-entry context review thresholds are independent of source recency.
+    threshold = entry_thresholds["workstreams.yaml"]
     for ws in workstreams:
-        lrd = ws.last_reviewed_date
-        if lrd:
-            days = (today - lrd).days
-            sev = "block" if days >= 30 else ("warn" if days >= 14 else "ok")
-            if sev != "ok":
-                staleness_flags.append(StalenessFlag(
-                    file="workstreams.yaml",
-                    entity_id=ws.id,
-                    field="last_reviewed_date",
-                    last_reviewed_date=lrd,
-                    days_stale=days,
-                    warn_threshold=14,
-                    block_threshold=30,
-                    severity=sev,
-                ))
+        flag = _review_staleness_flag(
+            "workstreams.yaml", ws.id, ws.last_reviewed_date, today, threshold.warn_days, threshold.block_days,
+        )
+        if flag is not None:
+            staleness_flags.append(flag)
 
-    # Per-entry staleness: workstream_registry (14d warn / 30d block)
+    threshold = entry_thresholds["workstream_registry.yaml"]
     for lane in registry_lanes:
-        lrd = lane.last_reviewed_date
-        if lrd:
-            days = (today - lrd).days
-            sev = "block" if days >= 30 else ("warn" if days >= 14 else "ok")
-            if sev != "ok":
-                staleness_flags.append(StalenessFlag(
-                    file="workstream_registry.yaml",
-                    entity_id=lane.id,
-                    field="last_reviewed_date",
-                    last_reviewed_date=lrd,
-                    days_stale=days,
-                    warn_threshold=14,
-                    block_threshold=30,
-                    severity=sev,
-                ))
+        flag = _review_staleness_flag(
+            "workstream_registry.yaml", lane.id, lane.last_reviewed_date, today,
+            threshold.warn_days, threshold.block_days,
+        )
+        if flag is not None:
+            staleness_flags.append(flag)
 
-    # Per-entry staleness: milestones (14d warn / 30d block)
+    threshold = entry_thresholds["milestones.yaml"]
     for m in milestones:
-        lrd = m.last_reviewed_date
-        if lrd:
-            days = (today - lrd).days
-            sev = "block" if days >= 30 else ("warn" if days >= 14 else "ok")
-            if sev != "ok":
-                staleness_flags.append(StalenessFlag(
-                    file="milestones.yaml",
-                    entity_id=m.id,
-                    field="last_reviewed_date",
-                    last_reviewed_date=lrd,
-                    days_stale=days,
-                    warn_threshold=14,
-                    block_threshold=30,
-                    severity=sev,
-                ))
+        flag = _review_staleness_flag(
+            "milestones.yaml", m.id, m.last_reviewed_date, today, threshold.warn_days, threshold.block_days,
+        )
+        if flag is not None:
+            staleness_flags.append(flag)
 
-    # Per-entry staleness: open risks (7d warn / 14d block)
+    threshold = entry_thresholds["risk_register.yaml"]
     for risk in risks:
         if risk.status not in ("open", "at_risk"):
             continue
-        lrd = risk.last_reviewed_date
-        if lrd:
-            days = (today - lrd).days
-            sev = "block" if days >= 14 else ("warn" if days >= 7 else "ok")
-            if sev != "ok":
-                staleness_flags.append(StalenessFlag(
-                    file="risk_register.yaml",
-                    entity_id=risk.id,
-                    field="last_reviewed_date",
-                    last_reviewed_date=lrd,
-                    days_stale=days,
-                    warn_threshold=7,
-                    block_threshold=14,
-                    severity=sev,
-                ))
+        flag = _review_staleness_flag(
+            "risk_register.yaml", risk.id, risk.last_reviewed_date, today, threshold.warn_days, threshold.block_days,
+        )
+        if flag is not None:
+            staleness_flags.append(flag)
 
-    # Per-entry staleness: decisions with past review_by (0d warn / 14d block)
+    threshold = entry_thresholds["decisions.yaml"]
     for dec in decisions:
         if dec.review_by and dec.status not in ("superseded", "closed"):
             days = (today - dec.review_by).days
-            if days >= 0:  # review_by is past
-                sev = "block" if days >= 14 else "warn"
+            if days >= threshold.warn_days:
+                sev = "block" if threshold.block_days is not None and days >= threshold.block_days else "warn"
                 staleness_flags.append(StalenessFlag(
                     file="decisions.yaml",
                     entity_id=dec.id,
                     field="review_by",
                     last_reviewed_date=dec.review_by,
                     days_stale=days,
-                    warn_threshold=0,
-                    block_threshold=14,
+                    warn_threshold=threshold.warn_days,
+                    block_threshold=threshold.block_days,
                     severity=sev,
                 ))
 
-    # Per-entry staleness: active assumptions (30d warn / 60d block)
+    threshold = entry_thresholds["assumptions.yaml"]
     for assum in assumptions:
         if assum.status != "active":
             continue
-        lrd = assum.last_reviewed_date
-        if lrd:
-            days = (today - lrd).days
-            sev = "block" if days >= 60 else ("warn" if days >= 30 else "ok")
-            if sev != "ok":
-                staleness_flags.append(StalenessFlag(
-                    file="assumptions.yaml",
-                    entity_id=assum.id,
-                    field="last_reviewed_date",
-                    last_reviewed_date=lrd,
-                    days_stale=days,
-                    warn_threshold=30,
-                    block_threshold=60,
-                    severity=sev,
-                ))
+        flag = _review_staleness_flag(
+            "assumptions.yaml", assum.id, assum.last_reviewed_date, today,
+            threshold.warn_days, threshold.block_days,
+        )
+        if flag is not None:
+            staleness_flags.append(flag)
 
     staleness_error_count = sum(1 for f in staleness_flags if f.severity == "block")
     staleness_warn_count = sum(1 for f in staleness_flags if f.severity == "warn")
@@ -956,6 +883,7 @@ def load_program_context(
     maturity_level, maturity_blockers = _compute_maturity_level(
         violations=violations,
         staleness_error_count=staleness_error_count,
+        unreviewed_count=sum(1 for f in staleness_flags if f.days_stale is None),
         registry_lanes=registry_lanes,
         milestones=milestones,
         risks=risks,
@@ -966,6 +894,7 @@ def load_program_context(
         programs_root=programs_root,
         program_id=program_id,
         edition_ids=edition_ids,
+        risk_review_warn_days=entry_thresholds["risk_register.yaml"].warn_days,
     )
 
     # --- Coverage metrics ---
@@ -987,6 +916,18 @@ def load_program_context(
 
     # --- Context gaps (informational only) ---
     context_gaps: list[ContextGapInfo] = []
+
+    for flag in staleness_flags:
+        if flag.days_stale is None:
+            entity = f" / {flag.entity_id}" if flag.entity_id else ""
+            context_gaps.append(ContextGapInfo(
+                feature="ProgramContext",
+                lane=flag.entity_id if flag.file in ("workstreams.yaml", "workstream_registry.yaml") else None,
+                field=flag.field,
+                severity="quality_degraded",
+                impact="medium",
+                message=f"{flag.file}{entity}: review date unknown or invalid; review required",
+            ))
 
     for lane in active_lanes:
         if not lane.deep_context.get("why"):
@@ -1067,10 +1008,40 @@ def load_program_context(
 # Section 5: Maturity level computation
 # ---------------------------------------------------------------------------
 
+def _review_staleness_flag(
+    file: str,
+    entity_id: str | None,
+    reviewed: date | None,
+    today: date,
+    warn_days: int,
+    block_days: int | None,
+) -> StalenessFlag | None:
+    days = (today - reviewed).days if reviewed is not None and reviewed <= today else None
+    if days is None:
+        severity = "warn"
+    elif block_days is not None and days >= block_days:
+        severity = "block"
+    elif days >= warn_days:
+        severity = "warn"
+    else:
+        return None
+    return StalenessFlag(
+        file=file,
+        entity_id=entity_id,
+        field="last_reviewed_date",
+        last_reviewed_date=reviewed,
+        days_stale=days,
+        warn_threshold=warn_days,
+        block_threshold=block_days,
+        severity=severity,
+    )
+
+
 def _compute_maturity_level(
     *,
     violations: list[InvariantViolation],
     staleness_error_count: int,
+    unreviewed_count: int,
     registry_lanes: tuple[RegistryLaneEntry, ...],
     milestones: tuple[MilestoneEntry, ...],
     risks: tuple[RiskEntry, ...],
@@ -1081,6 +1052,7 @@ def _compute_maturity_level(
     programs_root: Path,
     program_id: str,
     edition_ids: frozenset[str],
+    risk_review_warn_days: int = 7,
 ) -> tuple[MaturityLevel, list[str]]:
     """
     Compute §16 maturity level (L0–L4) and list blockers to the next level.
@@ -1088,9 +1060,9 @@ def _compute_maturity_level(
     Level rules:
       L0: program.yaml and workstreams.yaml exist with valid IDs and >= 1 workstream
       L1: no ERROR invariants; no stub WI IDs (DATE-01); all scorecard OData filters valid
-      L2: all active registry lanes have non-empty deep_context; risks reviewed within §8 windows;
+      L2: no blocking staleness; all active registry lanes have non-empty deep_context; risks reviewed within §8 windows;
           editorial_rules covers all editions; milestones have real WI IDs (no stubs)
-      L3: signal sources wired for >= 80% active lanes; workiq_latest fresh < 7d for all active lanes
+      L3: no unknown review dates; signal sources wired for >= 80% active lanes; workiq_latest fresh < 7d for all active lanes
       L4: all L3 criteria + plane1 changelog accumulating + context snapshots written
     """
     blockers: list[str] = []
@@ -1107,7 +1079,10 @@ def _compute_maturity_level(
     # Remaining L1 check: stub WI IDs and informal OData (already caught as DATE-01/FILTER-01 above)
     # If we're here, no ERROR violations exist → L1 achieved.
 
-    # L2: deep_context coverage
+    # L2: blocking staleness and deep_context coverage
+    if staleness_error_count:
+        blockers.append(f"{staleness_error_count} blocking context staleness flags")
+
     active_lanes = [lane for lane in registry_lanes if lane.lifecycle_state not in ("paused", "closed")]
     if active_lanes:
         missing_dc = [lane.id for lane in active_lanes if not lane.deep_context.get("why")]
@@ -1124,7 +1099,7 @@ def _compute_maturity_level(
         lrd = r.last_reviewed_date
         if not due or not lrd:
             continue
-        if (today - due).days > 7 and (today - lrd).days > 7:
+        if (today - due).days > 7 and (today - lrd).days > risk_review_warn_days:
             blockers.append(
                 f"risk {r.id} has past mitigation_due_date and stale last_reviewed_date"
             )
@@ -1137,10 +1112,15 @@ def _compute_maturity_level(
                 f"editorial_rules missing applies_to_editions for: {', '.join(missing_ed[:3])}"
             )
 
-    level = 2 if not blockers else 1
+    if blockers:
+        return MaturityLevel.L1, blockers
+    level = 2
 
     # L3 criteria
     l3_blockers: list[str] = []
+
+    if unreviewed_count:
+        l3_blockers.append(f"{unreviewed_count} context review dates unknown or invalid; review required")
 
     # Signal source coverage (>= 80% active lanes)
     if active_lanes:
@@ -1560,7 +1540,7 @@ def _parse_date(value: Any) -> date | None:
         return value.date()
     if isinstance(value, str):
         try:
-            return date.fromisoformat(value.strip()[:10])
+            return date.fromisoformat(value.strip())
         except (ValueError, IndexError):
             return None
     return None

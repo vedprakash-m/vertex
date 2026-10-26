@@ -15,10 +15,10 @@ from uuid import uuid4
 import yaml
 
 from src.core.feedback._advisory_yaml import load_advisory_yaml, write_advisory_yaml
+from src.core.workspace_paths import PROGRAMS_ROOT
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-PROGRAMS_ROOT = REPO_ROOT / "programs"
 SCHEMA_VERSION = "1.0"
 DEFAULT_MIN_WEIGHT = 0.2
 DEFAULT_EMA_ALPHA = 0.1

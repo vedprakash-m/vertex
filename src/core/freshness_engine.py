@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from html import unescape
@@ -10,6 +10,7 @@ from typing import Any, Mapping
 
 from src.core.ado_semantics import is_vertex_generated_comment
 from src.core.config_loader import NarrativeProgramContext, ProgramWorkstream
+from src.core.exceptions import ConfigError
 from src.core.models import DRISummary, FreshnessItem, FreshnessReport, NotifiedWorkItemState, PriorNotificationState, Snapshot, WorkItem
 from src.core.response_tracker import has_response_since
 from src.core.work_item_states import TERMINAL_WORK_ITEM_STATES
@@ -52,6 +53,74 @@ _ACTION_LABELS = {
     "FR-46": "Unowned",
     "FR-47": "Escalate",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class ContextReviewThreshold:
+    warn_days: int
+    block_days: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class ContextReviewPolicy:
+    files: tuple[tuple[str, ContextReviewThreshold], ...]
+    entries: tuple[tuple[str, ContextReviewThreshold], ...]
+
+
+def parse_context_review_policy(*sections: object) -> ContextReviewPolicy:
+    """Merge validated context_review sections over compatibility thresholds."""
+    rules = {
+        "files": {
+            "program.yaml": ContextReviewThreshold(90, 180),
+            "workstreams.yaml": ContextReviewThreshold(30, 90),
+            "milestones.yaml": ContextReviewThreshold(14, 30),
+            "scorecards.yaml": ContextReviewThreshold(60, 120),
+            "kpis.yaml": ContextReviewThreshold(60, None),
+            "editorial_rules.yaml": ContextReviewThreshold(60, None),
+            "dependencies.yaml": ContextReviewThreshold(30, 60),
+            "capability_status.yaml": ContextReviewThreshold(14, 30),
+            "template_contract.yaml": ContextReviewThreshold(90, None),
+            "slice_contracts.yaml": ContextReviewThreshold(60, 120),
+            "chapter_contract.yaml": ContextReviewThreshold(90, None),
+            "readiness.yaml": ContextReviewThreshold(30, 60),
+        },
+        "entries": {
+            "workstreams.yaml": ContextReviewThreshold(14, 30),
+            "workstream_registry.yaml": ContextReviewThreshold(14, 30),
+            "milestones.yaml": ContextReviewThreshold(14, 30),
+            "risk_register.yaml": ContextReviewThreshold(7, 14),
+            "decisions.yaml": ContextReviewThreshold(0, 14),
+            "assumptions.yaml": ContextReviewThreshold(30, 60),
+        },
+    }
+    for section in sections:
+        if not isinstance(section, dict):
+            raise ConfigError("context_review must be a mapping")
+        for group, targets in section.items():
+            if group not in rules:
+                raise ConfigError(f"context_review: unknown rule group {group!r}")
+            if not isinstance(targets, dict):
+                raise ConfigError(f"context_review.{group} must be a mapping")
+            for filename, raw in targets.items():
+                path = f"context_review.{group}.{filename}"
+                if filename not in rules[group]:
+                    raise ConfigError(f"{path}: unknown review target")
+                if not isinstance(raw, dict):
+                    raise ConfigError(f"{path} must be a mapping")
+                unknown = set(raw) - {"warn_days", "block_days"}
+                if unknown:
+                    raise ConfigError(f"{path}: unknown threshold fields {unknown!r}")
+                current = rules[group][filename]
+                warn = raw.get("warn_days", current.warn_days)
+                block = raw.get("block_days", current.block_days)
+                if isinstance(warn, bool) or not isinstance(warn, int) or warn < 0:
+                    raise ConfigError(f"{path}.warn_days must be a nonnegative integer")
+                if block is not None and (
+                    isinstance(block, bool) or not isinstance(block, int) or block < warn
+                ):
+                    raise ConfigError(f"{path}.block_days must be null or an integer >= warn_days")
+                rules[group][filename] = ContextReviewThreshold(warn, block)
+    return ContextReviewPolicy(tuple(rules["files"].items()), tuple(rules["entries"].items()))
 
 
 def build_freshness_report(

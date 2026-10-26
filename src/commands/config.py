@@ -4,6 +4,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 import json
 import os
+import stat
 from pathlib import Path
 from typing import Any, Callable
 
@@ -15,6 +16,11 @@ from src.core.claim_extraction_calibration_store import summarize_claim_extracti
 from src.core.exceptions import ConfigError
 from src.core.edition_resolver import resolve_edition_paths
 from src.core.journal import PROGRAMS_ROOT
+from src.core.kb_updates import supported_kb_paths, validate_program_kb
+from src.core.knowledge_store import get_shared_knowledge_root
+from src.core.metric_binding_validator import MetricBindingValidation, validate_metric_binding_documents
+from src.core.workspace_paths import is_bare_identifier
+from src.core.yaml_utils import load_yaml_document_strict, load_yaml_mapping_strict
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,9 +154,61 @@ def validate_command(
     resolved_targets = _resolve_schema_targets(edition=edition, program=program, programs_root=PROGRAMS_ROOT)
     assessments = tuple(_assess_config_schema(target) for target in resolved_targets)
     status = _summarize_schema_status(assessments)
+    program_dir = next(target.path.parent for target in resolved_targets if target.name == "program")
+    try:
+        validate_program_kb(str(program_dir.relative_to(PROGRAMS_ROOT)), programs_root=PROGRAMS_ROOT)
+    except ConfigError as error:
+        kb_status, kb_detail = "fail", str(error)
+    except (OSError, UnicodeDecodeError, yaml.YAMLError, ValueError) as error:
+        kb_status = "fail"
+        kb_detail = (
+            f"Cannot validate KB for {program_dir} ({type(error).__name__}). "
+            "Preserve existing files; check access, encoding and configured values before retrying."
+        )
+    else:
+        kb_status = "ok"
+        kb_detail = "Existing KB schema and owner/entity/query reference checks passed."
+    if kb_status == "fail":
+        status = "fail"
+    try:
+        metrics = _validate_config_metric_bindings(program_dir, programs_root=PROGRAMS_ROOT)
+    except ConfigError as error:
+        metric_status = "fail"
+        metric_payload: dict[str, Any] = {
+            "status": metric_status, "scope": "offline_metric_query_bindings",
+            "errors": [str(error)], "warnings": [], "live_validated": False,
+            "metric_count": None, "query_count": None, "binding_count": None,
+        }
+    else:
+        metric_status = (
+            "fail" if metrics.errors else
+            "not_configured" if not metrics.metric_count and not metrics.query_count else
+            "warn" if metrics.warnings else "ok"
+        )
+        metric_payload = {
+            "status": metric_status, "scope": metrics.scope,
+            "errors": list(metrics.errors), "warnings": list(metrics.warnings),
+            "metric_count": metrics.metric_count, "query_count": metrics.query_count,
+            "binding_count": metrics.binding_count, "live_validated": False,
+        }
+    if metric_status == "fail":
+        status = "fail"
+    elif metric_status == "warn" and status == "ok":
+        status = "warn"
 
     payload = {
         "status": status,
+        "validation_scope": "schema_versions_kb_and_metrics",
+        "content_validated": False,
+        "references_validated": False,
+        "kb_validation": {
+            "status": kb_status, "detail": kb_detail,
+            "scope": [
+                "program.yaml", *supported_kb_paths(), "workstream_registry.yaml",
+                "milestones.yaml", "dependencies.yaml",
+            ],
+        },
+        "metric_validation": metric_payload,
         "edition": edition.strip() if isinstance(edition, str) and edition.strip() else None,
         "program": next(
             (target.path.parent.name for target in resolved_targets if target.name == "program"),
@@ -172,16 +230,61 @@ def validate_command(
         typer.echo(json.dumps(payload, indent=2))
     else:
         typer.echo(f"Config schema validation: {status.upper()}")
+        typer.echo("Scope: schema versions, existing KB checks and offline metric bindings; remaining content and cross-file references have not been validated.")
         for assessment in assessments:
             typer.echo(
                 f"- {assessment.name}: {assessment.status.upper()} "
                 f"({assessment.path.relative_to(PROGRAMS_ROOT.parent).as_posix()})"
             )
             typer.echo(f"  {assessment.detail}")
+        typer.echo(f"- KB schema/references: {kb_status.upper()}")
+        typer.echo(f"  {kb_detail}")
+        typer.echo(f"- Offline metric bindings: {metric_status.upper()}")
+        for detail in (*metric_payload["errors"], *metric_payload["warnings"]):
+            typer.echo(f"  {detail}")
 
     if status == "fail":
         raise typer.Exit(code=1)
     raise typer.Exit(code=0)
+
+
+def _validate_config_metric_bindings(program_dir: Path, *, programs_root: Path) -> MetricBindingValidation:
+    shared_root = get_shared_knowledge_root(programs_root)
+    metrics_root = shared_root / "metrics"
+    try:
+        paths = sorted(metrics_root.iterdir())
+    except FileNotFoundError:
+        paths = []
+    except OSError as error:
+        raise ConfigError(
+            f"Cannot inspect metric catalog at {metrics_root} ({type(error).__name__}). Check access before retrying."
+        ) from error
+    metric_documents: dict[Path, object] = {}
+    for path in paths:
+        if path.suffix.lower() not in {".yaml", ".yml"}:
+            continue
+        try:
+            metric_documents[path] = load_yaml_document_strict(path)
+        except FileNotFoundError as error:
+            raise ConfigError(
+                f"Metric catalog at {path} disappeared during inspection. Retry against a stable authored revision."
+            ) from error
+    query_documents: dict[Path, object] = {}
+    kpis_path = program_dir / "kpis.yaml"
+    try:
+        query_documents[kpis_path] = load_yaml_document_strict(kpis_path)
+    except FileNotFoundError:
+        pass
+    for path in (shared_root / "golden_queries.yaml", program_dir / "knowledge" / "golden_queries.yaml"):
+        try:
+            document = load_yaml_document_strict(path)
+        except FileNotFoundError:
+            continue
+        query_documents[path] = document
+        break
+    return validate_metric_binding_documents(
+        program_id=program_dir.name, metric_documents=metric_documents, query_documents=query_documents,
+    )
 
 
 @app.command("migrate")
@@ -266,16 +369,20 @@ def _parse_value(spec: ConfigKeySpec, raw_value: str) -> Any:
 
 
 def _load_program_document(program_id: str, *, programs_root: Path) -> tuple[dict[str, Any], Path]:
-    path = programs_root / program_id / "program.yaml"
-    if not path.exists():
-        raise typer.BadParameter(f"Program '{program_id}' is missing program.yaml.")
+    path = _program_dir(program_id, programs_root=programs_root) / "program.yaml"
     try:
-        document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except yaml.YAMLError as error:
-        raise ConfigError(f"Invalid YAML in {path}: {error}") from error
-    if not isinstance(document, dict):
-        raise ConfigError(f"Expected mapping at top-level in {path}.")
+        document = _load_yaml_mapping(path)
+    except FileNotFoundError as error:
+        raise typer.BadParameter(f"Program '{program_id}' is missing program.yaml.") from error
+    except ConfigError as error:
+        raise typer.BadParameter(str(error)) from error
     return document, path
+
+
+def _program_dir(program_id: str, *, programs_root: Path) -> Path:
+    if not is_bare_identifier(program_id):
+        raise typer.BadParameter("Invalid program identifier: use a bare directory name without paths or wildcards.")
+    return programs_root / program_id
 
 
 def _get_nested_value(document: dict[str, Any], dotted_path: str) -> tuple[bool, Any]:
@@ -315,17 +422,23 @@ def _resolve_schema_targets(
     programs_root: Path,
 ) -> tuple[ConfigSchemaTarget, ...]:
     normalized_edition = edition.strip() if isinstance(edition, str) and edition.strip() else None
-    normalized_program = program.strip() if isinstance(program, str) and program.strip() else None
+    normalized_program = program if isinstance(program, str) and program.strip() else None
     if normalized_edition and normalized_program:
         raise typer.BadParameter("Specify either --edition or --program, not both.")
     if not normalized_edition and not normalized_program:
         raise typer.BadParameter("One of --edition or --program is required.")
 
     if normalized_edition:
-        resolved = resolve_edition_paths(
-            normalized_edition,
-            programs_root=programs_root,
-        )
+        try:
+            resolved = resolve_edition_paths(
+                normalized_edition,
+                programs_root=programs_root,
+            )
+        except (ConfigError, OSError, UnicodeDecodeError, yaml.YAMLError, ValueError) as error:
+            raise typer.BadParameter(
+                f"Cannot resolve configuration for edition {normalized_edition!r} ({type(error).__name__}). "
+                "Preserve existing files; check the identifier, uniqueness, access and YAML before retrying."
+            ) from error
         if resolved is None:
             raise typer.BadParameter(f"Unknown edition '{normalized_edition}'.")
         program_dir = resolved.program_dir
@@ -339,9 +452,18 @@ def _resolve_schema_targets(
         )
 
     assert normalized_program is not None
-    program_dir = programs_root / normalized_program
-    if not program_dir.exists():
-        raise typer.BadParameter(f"Unknown program '{normalized_program}'.")
+    program_dir = _program_dir(normalized_program, programs_root=programs_root)
+    try:
+        metadata = program_dir.stat()
+    except FileNotFoundError as error:
+        raise typer.BadParameter(f"Unknown program '{normalized_program}'.") from error
+    except OSError as error:
+        raise typer.BadParameter(
+            f"Cannot inspect program directory {program_dir} ({type(error).__name__}). "
+            "Preserve existing paths and check access before retrying."
+        ) from error
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise typer.BadParameter(f"Program '{normalized_program}' is not a directory.")
     return (
         _build_schema_target("program", program_dir / "program.yaml"),
         _build_schema_target("readiness", program_dir / "readiness.yaml", required=False),
@@ -364,13 +486,12 @@ def _build_schema_target(name: str, path: Path, *, required: bool | None = None)
 
 def _assess_config_schema(target: ConfigSchemaTarget) -> ConfigSchemaAssessment:
     expected_version = f"{target.expected_major}.{target.expected_minor}"
-    if not target.path.exists():
+    try:
+        document = _load_yaml_mapping(target.path)
+    except FileNotFoundError:
         status = "fail" if target.required else "warn"
         detail = f"{target.path} is missing."
         return ConfigSchemaAssessment(target.name, target.path, status, detail, None, expected_version)
-
-    try:
-        document = _load_yaml_mapping(target.path)
     except ConfigError as error:
         return ConfigSchemaAssessment(target.name, target.path, "fail", str(error), None, expected_version)
 
@@ -392,8 +513,8 @@ def _assess_config_schema(target: ConfigSchemaTarget) -> ConfigSchemaAssessment:
             target.name,
             target.path,
             "fail",
-            f"{target.path} has invalid schema_version {version!r}.",
-            version,
+            f"{target.path} has invalid schema_version; expected major.minor integers.",
+            None,
             expected_version,
         )
 
@@ -446,7 +567,7 @@ def _resolve_program_schema_migration_edition(
         return normalized_edition
 
     assert program is not None
-    editions_root = programs_root / program.strip() / "editions"
+    editions_root = _program_dir(program, programs_root=programs_root) / "editions"
     matching_editions = sorted(
         edition_path.stem
         for edition_path in editions_root.glob("*.yaml")
@@ -475,26 +596,24 @@ def _edition_program_id(path: Path) -> str | None:
 
 
 def _maybe_load_mapping(path: Path) -> dict[str, Any] | None:
-    if not path.exists():
+    try:
+        return _load_yaml_mapping(path)
+    except FileNotFoundError:
         return None
-    return _load_yaml_mapping(path)
 
 
 def _load_yaml_mapping(path: Path) -> dict[str, Any]:
-    try:
-        document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except yaml.YAMLError as error:
-        raise ConfigError(f"Invalid YAML in {path}: {error}") from error
-    if not isinstance(document, dict):
-        raise ConfigError(f"Expected mapping at top-level in {path}.")
-    return document
+    return load_yaml_mapping_strict(path)
 
 
 def _parse_schema_version(version: str) -> tuple[int, int] | None:
     parts = version.split(".", 1)
     if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
         return None
-    return int(parts[0]), int(parts[1])
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
 
 
 def _schema_major(version: str | None) -> int | None:

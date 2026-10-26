@@ -23,6 +23,7 @@ from src.core.models import Confidence, ReviewStatus
 from src.core.section_proposal_store import append_proposal, build_section_revision_proposal_id, get_proposals_path, supersede_pending_proposals
 from src.core.models_v2 import SectionRevisionProposal, SectionRevisionStatus
 from src.core.pipeline import run_pipeline
+from src.core.exceptions import StateError
 from src.core.signal_review import signal_is_approved_for_evidence
 from src.core.stages.compute_stage import ComputeStage
 from src.core.stages.fetch_stage import FetchStage
@@ -305,13 +306,17 @@ def propose_command(
     offline: bool = typer.Option(False, "--offline/--no-offline", help="Use cached snapshot instead of live ADO fetch."),
     steering: str = typer.Option(None, "--steering", help="PM strategic theme to apply as narrative emphasis (recorded as a ProgramEvent for provenance)."),
 ) -> None:
-    artifacts = generate_section_revision_proposals(
-        edition_name=edition,
-        ai=ai,
-        dry_run=dry_run,
-        offline=offline,
-        steering=steering or None,
-    )
+    try:
+        artifacts = generate_section_revision_proposals(
+            edition_name=edition,
+            ai=ai,
+            dry_run=dry_run,
+            offline=offline,
+            steering=steering or None,
+        )
+    except StateError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=2) from error
     if dry_run:
         for line in artifacts.preview_lines:
             typer.echo(line)

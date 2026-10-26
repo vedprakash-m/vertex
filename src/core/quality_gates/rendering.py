@@ -27,6 +27,8 @@ _HTML_TABLE_TAG_RE = re.compile(r"<table\b([^>]*)>", re.IGNORECASE)
 _HTML_HEX_COLOR_RE = re.compile(r"#[0-9a-fA-F]{6}\b")
 _HTML_CLASS_ATTR_RE = re.compile(r'\bclass\s*=\s*([\'"]).*?\1', re.DOTALL | re.IGNORECASE)
 _VISIBLE_TOOL_RE = re.compile(r"\b(vertex|manifest)\b", re.IGNORECASE)
+# visible_html_text() unescapes once, so double-escaped entities and escaped tags surface here.
+_LEAKED_MARKUP_RE = re.compile(r"&(#\d+|#x[0-9a-f]+|[a-z]+);|</?(a|p|span|strong|br|td|tr|table)\b[^>]*>", re.IGNORECASE)
 _VISIBLE_MANIFEST_ID_RE = re.compile(
     r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
     re.IGNORECASE,
@@ -199,6 +201,16 @@ def evaluate_outlook_compatibility_gate(html_content: str) -> GateEvaluation:
                 2,
                 forceable=True,
             )
+
+    leaked = _LEAKED_MARKUP_RE.search(visible_html_text(html_content))
+    if leaked is not None:
+        return GateEvaluation(
+            "QG-18",
+            False,
+            f"Email shows raw markup or HTML entity text to readers: {leaked.group(0)!r}.",
+            2,
+            forceable=True,
+        )
 
     return GateEvaluation("QG-18", True, "Outlook compatibility gate passed.", 2, forceable=True)
 

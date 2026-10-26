@@ -346,7 +346,15 @@ def _governance_decision_brief_to_record(proposal: GovernanceDecisionBriefPropos
         "decision_ask_id": proposal.decision_ask_id,
         "decision": proposal.decision,
         "context": proposal.context,
-        "options": [{"label": option.label, "tradeoffs": option.tradeoffs} for option in proposal.options],
+        "options": [
+            {
+                "label": option.label,
+                "tradeoffs": option.tradeoffs,
+                "evidence_refs": list(option.evidence_refs),
+                "unknowns": list(option.unknowns),
+            }
+            for option in proposal.options
+        ],
         "recommendation": proposal.recommendation,
         "consequences_of_delay": proposal.consequences_of_delay,
         "owner_alias": proposal.owner_alias,
@@ -355,6 +363,7 @@ def _governance_decision_brief_to_record(proposal: GovernanceDecisionBriefPropos
         "ai_run_id": proposal.ai_run_id,
         "status": proposal.status,
         "rejection_reason": proposal.rejection_reason,
+        "follow_up_action": proposal.follow_up_action,
         "proposed_at": _iso(proposal.proposed_at),
         "decided_at": _iso(proposal.decided_at),
     }
@@ -368,7 +377,12 @@ def _governance_decision_brief_from_record(record: dict[str, Any]) -> Governance
         decision=record["decision"],
         context=record["context"],
         options=tuple(
-            GovernanceDecisionOption(label=entry["label"], tradeoffs=entry["tradeoffs"])
+            GovernanceDecisionOption(
+                label=entry["label"],
+                tradeoffs=entry["tradeoffs"],
+                evidence_refs=tuple(entry.get("evidence_refs", ())),
+                unknowns=tuple(entry.get("unknowns", ())),
+            )
             for entry in record.get("options", ())
         ),
         recommendation=record["recommendation"],
@@ -379,6 +393,7 @@ def _governance_decision_brief_from_record(record: dict[str, Any]) -> Governance
         ai_run_id=record["ai_run_id"],
         status=record.get("status", "staged"),  # type: ignore[arg-type]
         rejection_reason=record.get("rejection_reason"),
+        follow_up_action=record.get("follow_up_action", ""),
         proposed_at=_parse_datetime(record["proposed_at"]) if record.get("proposed_at") else datetime.now(timezone.utc),
         decided_at=_parse_optional_datetime(record.get("decided_at")),
     )

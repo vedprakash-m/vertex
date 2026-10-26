@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping
 from typing import Any
 
+from src.core.exceptions import ConfigError
 from src.core.program_fact_store import ProgramFactStore
 from src.core.quality_gates.models import GateEvaluation, QualityGateReport
 
@@ -65,30 +66,72 @@ def evaluate_program_fact_drift_from_draft(
     draft_state: Mapping[str, Any],
     program_id: str | None,
     db_root: Any = None,
+    edition_name: str | None = None,
+    issue_number: int | None = None,
 ) -> QualityGateReport:
     """QG-SG-20 wrapper that resolves the pinned snapshot from ``draft_state``.
 
     Reads the ``program_fact_snapshot`` pin recorded at ``report`` time, then
     diffs it against the live store via :meth:`ProgramFactStore.detect_drift`.
-    Returns an empty (no-op) report when no snapshot was pinned so legacy drafts
-    and non-fact-backed programs are unaffected (INV-SG-12 / §7.4.9).
+    Returns an empty report only when no pin metadata is declared. Malformed
+    declarations block rather than disabling the gate (INV-SG-12 / §7.4.9).
     """
-    if program_id is None:
+    if "program_fact_snapshot" not in draft_state:
         return QualityGateReport(results=())
     raw_snapshot = draft_state.get("program_fact_snapshot")
-    if not isinstance(raw_snapshot, dict):
-        return QualityGateReport(results=())
-    snapshot_id = raw_snapshot.get("snapshot_id")
+    snapshot_id = raw_snapshot.get("snapshot_id") if isinstance(raw_snapshot, dict) else None
+    if (
+        not isinstance(raw_snapshot, dict)
+        or not isinstance(snapshot_id, str)
+        or not snapshot_id.strip()
+        or not isinstance(program_id, str)
+        or not program_id.strip()
+    ):
+        return QualityGateReport(
+            results=(
+                GateEvaluation(
+                    gate_id="QG-SG-20",
+                    passed=False,
+                    message=(
+                        "Declared program fact snapshot is invalid or its evaluation program is missing. "
+                        "Re-run `vertex report` and re-review before confirming."
+                    ),
+                    exit_code=3,
+                ),
+            )
+        )
     snapshot_program_id = raw_snapshot.get("program_id")
-    if not isinstance(snapshot_id, str) or not snapshot_id.strip():
-        return QualityGateReport(results=())
     if snapshot_program_id not in (None, program_id):
         return evaluate_program_fact_drift_gate(
             snapshot_id=snapshot_id,
             drifted_facts=(f"program_id_mismatch:{snapshot_program_id}",),
         )
     store = ProgramFactStore(program_id, db_root=db_root)
+    if edition_name is not None or issue_number is not None:
+        pin = store.load_snapshot_pin(snapshot_id)
+        if pin is not None and any(
+            expected is not None
+            and key in pin.metadata
+            and (type(pin.metadata[key]) is not type(expected) or pin.metadata[key] != expected)
+            for key, expected in (("edition_name", edition_name), ("issue_number", issue_number))
+        ):
+            return QualityGateReport(
+                results=(
+                    GateEvaluation(
+                        gate_id="QG-SG-20",
+                        passed=False,
+                        message="Program fact snapshot scope does not match this edition and issue. Re-run `vertex report` and re-review.",
+                        exit_code=3,
+                    ),
+                )
+            )
+    try:
+        drifted_facts = store.detect_drift(snapshot_id)
+    except KeyError as exc:
+        raise ConfigError(
+            "Declared program fact snapshot is unavailable. Re-run `vertex report` and re-review before confirming."
+        ) from exc
     return evaluate_program_fact_drift_gate(
         snapshot_id=snapshot_id,
-        drifted_facts=store.detect_drift(snapshot_id),
+        drifted_facts=drifted_facts,
     )

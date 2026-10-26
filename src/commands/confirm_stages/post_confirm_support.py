@@ -15,10 +15,11 @@ producing an incomplete snapshot.
 
 from __future__ import annotations
 
+from dataclasses import replace
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import typer
 
@@ -26,7 +27,8 @@ from src.commands.report_email import _distribution_to, _resolve_email_subject
 from src.core.archive_store import ArchiveEntry
 from src.core.context_snapshot_store import load_context_snapshot, write_context_snapshot
 from src.core.eml_writer import build_eml_bytes
-from src.core.models import ReportData
+from src.core.models import ReportData, RunManifest
+from src.core.view_models import KustoSectionData
 from src.core.plane1_changelog import load_plane1_changes
 from src.core.program_context import load_program_context as _load_program_context
 from src.core.edition_resolver import get_program_output_dir, PROGRAMS_ROOT
@@ -39,6 +41,81 @@ from src.core.program_fact_store import (
 
 
 log = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from src.commands.confirm import ConfirmResult
+
+
+def render_confirm_result(result: ConfirmResult, *, edition: str, dry_run: bool) -> None:
+    if result.failures:
+        typer.echo(f"Confirm blocked for issue {result.issue_number:03d}.")
+        for failure in result.failures:
+            typer.echo(f"- {failure}")
+        raise typer.Exit(code=result.exit_code)
+
+    if dry_run:
+        typer.echo(f"Confirm dry-run passed for issue {result.issue_number:03d}.")
+        typer.echo("Would write confirmed snapshot, archive HTML/Markdown/manifest, and reset active author state.")
+        if result.risk_delta_preview:
+            typer.echo(f"Risk-register delta preview ({len(result.risk_delta_preview)} approved risk signal(s)):")
+            for entry in result.risk_delta_preview:
+                typer.echo(f"- {entry.action}: {entry.risk_id} ({entry.title})")
+            typer.echo(f"Preview hash: {result.risk_delta_preview_hash}")
+        if result.warnings:
+            typer.echo(f"Warnings: {len(result.warnings)}")
+            for warning in result.warnings:
+                typer.echo(f"- {warning}")
+        raise typer.Exit(code=result.exit_code)
+
+    typer.echo(f"Confirmed issue {result.issue_number:03d} for {edition}.")
+    if result.archive_paths is not None:
+        typer.echo(f"Snapshot: {result.archive_paths.snapshot_path}")
+        if result.archive_paths.eml_path is not None:
+            typer.echo(f"EML: {result.archive_paths.eml_path}")
+        typer.echo(f"HTML: {result.archive_paths.html_path}")
+        typer.echo(f"Markdown: {result.archive_paths.md_path}")
+        typer.echo(f"Manifest: {result.archive_paths.manifest_path}")
+    if result.weekly_summary_card_path is not None:
+        typer.echo(f"Weekly Summary Card: {result.weekly_summary_card_path}")
+        if result.posted_weekly_summary_card:
+            typer.echo("Weekly summary card posted to Teams.")
+    typer.echo(f"Reset active state for issue {result.next_issue_number:03d}.")
+    if result.review_tracking_summary is not None:
+        typer.echo(result.review_tracking_summary)
+        if result.review_tracking_path is not None:
+            typer.echo(f"AI Review Tracking: {result.review_tracking_path}")
+    if result.learning_summary is not None:
+        typer.echo(result.learning_summary)
+        if result.learning_md_path is not None:
+            typer.echo(f"AI Learning Notes: {result.learning_md_path}")
+        if result.learning_json_path is not None:
+            typer.echo(f"AI Learning Data: {result.learning_json_path}")
+    if result.warnings:
+        typer.echo(f"Warnings: {len(result.warnings)}")
+        for warning in result.warnings:
+            typer.echo(f"- {warning}")
+    raise typer.Exit(code=result.exit_code)
+
+
+def add_chart_index(
+    manifest: RunManifest,
+    chart_cache_entries: dict[str, dict[str, Any]],
+    kusto_sections: tuple[KustoSectionData, ...],
+) -> RunManifest:
+    chart_index_entries = [
+        {
+            "query_id": query_id,
+            "chart_config_hash": entry["chart_config_hash"],
+            "captured_at": entry["captured_at"],
+            "row_count": entry["row_count"],
+            "png_size_bytes": next(
+                (ks.chart_png_size_bytes for ks in kusto_sections if ks.query_id == query_id and ks.render_mode == "chart_image"),
+                0,
+            ),
+        }
+        for query_id, entry in chart_cache_entries.items()
+    ]
+    return replace(manifest, metadata={**manifest.metadata, "chart_index": chart_index_entries})
 
 
 def write_context_snapshot_for_issue(

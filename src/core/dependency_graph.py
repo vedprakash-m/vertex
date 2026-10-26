@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable, Mapping
 import os
 from pathlib import Path
 
@@ -876,10 +877,32 @@ def _write_atomic_yaml(path: Path, payload: dict[str, Any]) -> None:
 _DEPENDENCY_RELATION_KINDS = frozenset({RelationKind.PREDECESSOR, RelationKind.SUCCESSOR})
 
 
+@dataclass(frozen=True, slots=True)
+class RelationItemContext:
+    """RELO-W2.7 (Section 8.10.2, RELO-G3 "preserve cross-team ownership"):
+    the owner/workstream context for one work item, used to populate a
+    relation-derived Dependency's ``owner_alias``/``from_workstream_id``/
+    ``to_workstream_id``. An item absent from the lookup (or with no
+    assignee/workstream) resolves to all-``None`` fields -- matching the
+    pre-W2.7 behavior of an honest unknown rather than a guess."""
+
+    owner_alias: str | None = None
+    workstream_id: str | None = None
+
+
+#: item_id -> its owner/workstream context. Built by the caller from already
+#: -hydrated WorkItem data (see channel_runtime.py); this module never fetches
+#: item data itself.
+RelationItemLookup = Mapping[int, RelationItemContext]
+
+_EMPTY_RELATION_ITEM_CONTEXT = RelationItemContext()
+
+
 def dependency_from_authoritative_relation(
     relation: WorkItemRelation,
     *,
     program_id: str,
+    item_lookup: RelationItemLookup | None = None,
 ) -> Dependency | None:
     """Converts one typed ADO relation into an AUTHORITATIVE_RELATION-tier
     ``Dependency``. Returns ``None`` for relation kinds that aren't
@@ -899,6 +922,13 @@ def dependency_from_authoritative_relation(
     always ``BLOCKS``, the one ``DependencyType`` member an ADO relation
     alone can support (``INFORMS``/``SHARES_RESOURCE`` need semantic
     judgment this function does not have).
+
+    RELO-W2.7: ``owner_alias`` is the blocker item's assignee -- the
+    accountable party for the work that must land before the blocked item
+    can proceed, i.e. who a TPM would actually escalate to. ``item_lookup``
+    is optional and keyed by item id; an item missing from it (unassigned,
+    or simply not passed by the caller) leaves ``owner_alias``/the
+    corresponding workstream id honestly ``None`` rather than guessed.
     """
     if relation.relation_kind not in _DEPENDENCY_RELATION_KINDS:
         return None
@@ -915,21 +945,25 @@ def dependency_from_authoritative_relation(
     else:  # SUCCESSOR: source is target's predecessor: source blocks target.
         blocker_item_id, blocked_item_id = relation.source_work_item_id, target_item_id
 
+    lookup = item_lookup or {}
+    blocker_context = lookup.get(blocker_item_id, _EMPTY_RELATION_ITEM_CONTEXT)
+    blocked_context = lookup.get(blocked_item_id, _EMPTY_RELATION_ITEM_CONTEXT)
+
     return Dependency(
         id=f"ado-relation-{blocker_item_id}-blocks-{blocked_item_id}",
         from_program_id=program_id,
-        from_workstream_id=None,
+        from_workstream_id=blocker_context.workstream_id,
         from_item_id=blocker_item_id,  # from = predecessor/blocker (finishes first)
         from_milestone_id=None,
         to_program_id=program_id,
-        to_workstream_id=None,
+        to_workstream_id=blocked_context.workstream_id,
         to_item_id=blocked_item_id,  # to = successor/blocked (depends on "from")
         to_milestone_id=None,
         dependency_type=DependencyType.BLOCKS,
         risk_if_broken="",  # unknown from a relation alone -- honest empty, never guessed
         mitigation=None,
         status=DependencyStatus.ACTIVE,
-        owner_alias=None,
+        owner_alias=blocker_context.owner_alias,
         evidence_tier=DependencyEvidenceTier.AUTHORITATIVE_RELATION,
         evidence_refs=(relation.rel_type_name,),
     )
@@ -939,16 +973,23 @@ def relations_to_dependencies(
     relations: Iterable[WorkItemRelation],
     *,
     program_id: str,
+    item_lookup: RelationItemLookup | None = None,
 ) -> tuple[Dependency, ...]:
     """Converts a batch of typed ADO relations into AUTHORITATIVE_RELATION
     dependency candidates, skipping non-dependency-shaped relations and
     deduplicating the same predecessor/successor edge (ADO commonly reports
     both directions -- the predecessor's own PREDECESSOR link and the
-    successor's mirrored SUCCESSOR link describe one edge, not two)."""
+    successor's mirrored SUCCESSOR link describe one edge, not two).
+
+    RELO-W2.7: ``item_lookup``, when provided, resolves owner/workstream
+    context onto each candidate (see ``dependency_from_authoritative_relation``).
+    """
     seen: set[str] = set()
     out: list[Dependency] = []
     for relation in relations:
-        candidate = dependency_from_authoritative_relation(relation, program_id=program_id)
+        candidate = dependency_from_authoritative_relation(
+            relation, program_id=program_id, item_lookup=item_lookup
+        )
         if candidate is None or candidate.id in seen:
             continue
         seen.add(candidate.id)
@@ -968,6 +1009,7 @@ def sync_authoritative_relation_dependencies(
     relations: Iterable[WorkItemRelation],
     *,
     scope_item_ids: frozenset[int] | None = None,
+    item_lookup: RelationItemLookup | None = None,
     programs_root: Path,
 ) -> tuple[Dependency, ...]:
     """ADF-W4.4 (Section 8.10.3): the gather-time producer of
@@ -1005,6 +1047,11 @@ def sync_authoritative_relation_dependencies(
     fetch (not yet wired) without any closure-logic change on the caller's
     part when it lands.
 
+    RELO-W2.7: ``item_lookup``, when provided, resolves owner/workstream
+    context onto each converted dependency (see
+    ``dependency_from_authoritative_relation``). Omitting it preserves the
+    exact pre-W2.7 behavior of an all-``None`` owner/workstream.
+
     Returns the converted dependencies (possibly empty) so a caller can log or
     surface the count; persistence is a side effect.
     """
@@ -1016,7 +1063,7 @@ def sync_authoritative_relation_dependencies(
         build_natural_key,
     )
 
-    dependencies = relations_to_dependencies(relations, program_id=program_id)
+    dependencies = relations_to_dependencies(relations, program_id=program_id, item_lookup=item_lookup)
     if not dependencies:
         # Still reconcile: a prior gather may have relation-derived facts that
         # have since all disappeared from ADO. An empty current set closes them.

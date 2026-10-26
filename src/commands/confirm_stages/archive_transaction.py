@@ -16,7 +16,7 @@ from src.core.archive_store import ConfirmedIssueArchivePaths
 from src.core.archive_store import find_latest_confirmed_entry, read_archive_index
 from src.core.checkpoint_store import create_checkpoint_snapshot
 from src.core.measurement_spine import IssueMetrics, write_issue_metrics
-from src.core.program_fact_store import load_program_facts, persist_program_fact_snapshot, resolve_fact_sor_mode
+from src.core.program_fact_store import _resolve_fact_db_root, load_program_facts, persist_program_fact_snapshot, resolve_fact_sor_mode
 from src.core.ledger.event_log import ConfidenceTier, TemporalConfidence, build_event_envelope, read_events, write_event
 from src.core.ledger.program_views import project_program_events
 from src.core.ledger.source_refs import NewsletterRef, OperatorAssertionRef
@@ -80,6 +80,7 @@ def execute_archive_transaction(
     legacy_regex_extractor: bool,
     extraction_result: Any,
     extraction_mode: str,
+    revalidate_evidence_fn: Callable[[], None],
     build_confirmed_eml_bytes_fn: ConfirmedEmlBuilder,
     write_confirmed_fn: SnapshotWriter,
     write_confirmed_issue_fn: ArchiveWriter,
@@ -104,9 +105,10 @@ def execute_archive_transaction(
 ) -> ArchiveTransactionResult:
     from src.core.models_v2 import SectionRevisionStatus
 
-    create_checkpoint_snapshot(program_id, issue_number, programs_root=programs_root) if program_id is not None else None
-
     with ArchiveLock(get_archive_root(edition_name, archive_root)):
+        revalidate_evidence_fn()
+        create_checkpoint_snapshot(program_id, issue_number, programs_root=programs_root) if program_id is not None else None
+
         staged_snapshot_path = write_confirmed_fn(
             edition=edition_name,
             issue_number=issue_number,
@@ -320,11 +322,14 @@ def execute_archive_transaction(
                         pass
             if program_id is not None:
                 try:
-                    fact_snapshot = load_program_facts(program_id, programs_root=programs_root)
+                    fact_snapshot = load_program_facts(
+                        program_id, programs_root=programs_root, archive_root=archive_root,
+                    )
                     persist_program_fact_snapshot(
                         fact_snapshot,
                         recorded_at=confirmed_at,
                         accepted_by="vertex.confirm",
+                        db_root=_resolve_fact_db_root(programs_root),
                     )
                 except Exception as exc:
                     warnings = warnings + (f"FactStore shadow write skipped: {exc}",)

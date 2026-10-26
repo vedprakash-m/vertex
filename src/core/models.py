@@ -17,7 +17,7 @@ class EnumParserMixin:
     def from_string(cls, value: str | None) -> Self:
         normalized = value.strip().lower() if value is not None else ""
         for member in cls:
-            if member.value.lower() == normalized:
+            if member.name != "_default_member_name" and member.value.lower() == normalized:
                 return cast(Self, member)
         if cls._default_member_name is not None:
             return cast(Self, getattr(cls, cls._default_member_name))

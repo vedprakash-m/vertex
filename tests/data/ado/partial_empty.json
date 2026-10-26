@@ -1,0 +1,25 @@
+{
+  "fixture_kind": "authored_synthetic",
+  "work_items": [
+    {
+      "WorkItemId": 920001,
+      "WorkItemType": "Feature",
+      "Title": "Deployment partial-scope example",
+      "State": "Active",
+      "AssignedTo": "Example Owner",
+      "AreaPath": "ExampleProject\\Acme\\Deployment",
+      "TargetDate": "2026-05-10",
+      "Tags": "Safety"
+    },
+    {
+      "WorkItemId": 920002,
+      "WorkItemType": "Risk",
+      "Title": "Networking partial-scope example",
+      "State": "At Risk",
+      "AssignedTo": "Example Owner",
+      "AreaPath": "ExampleProject\\Contoso\\Networking",
+      "TargetDate": "2026-05-12",
+      "Tags": ""
+    }
+  ]
+}

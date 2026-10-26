@@ -20,13 +20,23 @@ class CostRunState:
     run_id: str
     budget_usd: float
     spent_usd: float
+    reserved_usd: float
     ai_calls: int
     started_at: datetime
     updated_at: datetime
 
     @property
     def within_budget(self) -> bool:
-        return self.spent_usd <= self.budget_usd
+        return self.spent_usd + self.reserved_usd <= self.budget_usd
+
+
+@dataclass(frozen=True, slots=True)
+class CostReservation:
+    """One durable pre-dispatch reservation, settled at most once."""
+
+    reservation_id: int
+    estimated_cost_usd: float
+    state: CostRunState
 
 
 class CostGuard:
@@ -75,10 +85,146 @@ class CostGuard:
 
     def check(self, estimated_cost_usd: float = 0.0) -> None:
         state = self.current_state()
-        if state.spent_usd + estimated_cost_usd > state.budget_usd:
+        if state.spent_usd + state.reserved_usd + estimated_cost_usd > state.budget_usd:
             raise BudgetExceeded(
-                f"Spent ${state.spent_usd:.3f} of ${state.budget_usd:.2f}; next AI spend ${estimated_cost_usd:.3f} would exceed the run ceiling."
+                f"Spent/reserved ${state.spent_usd + state.reserved_usd:.3f} of ${state.budget_usd:.2f}; next AI spend ${estimated_cost_usd:.3f} would exceed the run ceiling."
             )
+
+    def reserve(self, estimated_cost_usd: float) -> CostRunState:
+        """Durably reserve worst-case spend before one remote dispatch.
+
+        A reservation is intentionally retained after an uncertain provider
+        outcome.  That is conservative: it may block later work, but can never
+        understate spend.  New provider paths use :meth:`reserve_call` for an
+        individually settled reservation; this compatibility method keeps its
+        state-only return shape for existing callers.
+        """
+        return self.reserve_call(estimated_cost_usd).state
+
+    def reserve_call(self, estimated_cost_usd: float) -> CostReservation:
+        """Atomically reserve one remote call before it can be dispatched.
+
+        SQLite serializes the budget decision and reservation insert under an
+        immediate transaction.  A second concurrent caller therefore sees the
+        first reservation before it can dispatch; a fallback attempt gets a
+        separate reservation and cannot borrow the failed attempt's budget.
+        """
+        if estimated_cost_usd < 0:
+            raise ValueError("estimated_cost_usd must not be negative")
+        fallback_state = self.current_state()
+        try:
+            with open_program_db(self.ledger_path, durability="strict") as connection:
+                _ensure_sqlite_schema(connection)
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT edition, run_id, budget_usd, reserved_usd, spent_usd, ai_calls, started_at, updated_at "
+                    "FROM ai_cost_runs WHERE edition = ? AND run_id = ?",
+                    (self._edition, self._run_id),
+                ).fetchone()
+                current = _state_from_sqlite_row(row, budget_usd=self._budget_usd) if row is not None else fallback_state
+                if current.spent_usd + current.reserved_usd + estimated_cost_usd > current.budget_usd:
+                    raise BudgetExceeded(
+                        f"Spent/reserved ${current.spent_usd + current.reserved_usd:.3f} of ${current.budget_usd:.2f}; "
+                        f"next AI spend ${estimated_cost_usd:.3f} would exceed the run ceiling."
+                    )
+                updated = _replace_state(current, reserved_usd=current.reserved_usd + estimated_cost_usd)
+                _upsert_sqlite_state(connection, updated)
+                cursor = connection.execute(
+                    "INSERT INTO ai_cost_reservations (edition, run_id, reserved_usd, status, created_at) VALUES (?, ?, ?, 'reserved', ?)",
+                    (self._edition, self._run_id, estimated_cost_usd, updated.updated_at.isoformat()),
+                )
+                reservation_id = cursor.lastrowid
+                assert reservation_id is not None
+        except sqlite3.DatabaseError as error:
+            raise StateError(f"Unable to reserve cost guard SQLite ledger at {self.ledger_path}") from error
+        self._persist_projection(updated)
+        return CostReservation(reservation_id=reservation_id, estimated_cost_usd=estimated_cost_usd, state=updated)
+
+    def settle_reservation(self, reserved_cost_usd: float, actual_cost_usd: float, *, ai_calls: int = 1) -> CostRunState:
+        """Convert a known reservation into actual spend after a response."""
+        if reserved_cost_usd < 0 or actual_cost_usd < 0:
+            raise ValueError("cost values must not be negative")
+        reservation = self._find_legacy_reservation(reserved_cost_usd)
+        if reservation is not None:
+            return self.settle_call(reservation, actual_cost_usd, ai_calls=ai_calls)
+        current = self.current_state()
+        if reserved_cost_usd > current.reserved_usd + 1e-12:
+            raise StateError("Cannot settle a cost reservation that is not present in the run state")
+        updated = _replace_state(
+            current,
+            spent_usd=current.spent_usd + actual_cost_usd,
+            reserved_usd=max(0.0, current.reserved_usd - reserved_cost_usd),
+            ai_calls=current.ai_calls + ai_calls,
+        )
+        return self._persist_state(updated)
+
+    def _find_legacy_reservation(self, reserved_cost_usd: float) -> CostReservation | None:
+        """Bridge state-only callers onto the new per-call ledger when possible."""
+        if not self.ledger_path.exists():
+            return None
+        try:
+            with open_program_db(self.ledger_path, read_only=True) as connection:
+                row = connection.execute(
+                    "SELECT reservation_id FROM ai_cost_reservations WHERE edition = ? AND run_id = ? "
+                    "AND status = 'reserved' AND ABS(reserved_usd - ?) < 0.000000000001 ORDER BY reservation_id LIMIT 1",
+                    (self._edition, self._run_id, reserved_cost_usd),
+                ).fetchone()
+        except sqlite3.OperationalError as error:
+            if "no such table" in str(error).lower():
+                return None
+            raise StateError(f"Invalid cost guard SQLite ledger in {self.ledger_path}") from error
+        except sqlite3.DatabaseError as error:
+            raise StateError(f"Invalid cost guard SQLite ledger in {self.ledger_path}") from error
+        if row is None:
+            return None
+        return CostReservation(
+            reservation_id=int(row["reservation_id"]),
+            estimated_cost_usd=reserved_cost_usd,
+            state=self.current_state(),
+        )
+
+    def settle_call(self, reservation: CostReservation, actual_cost_usd: float, *, ai_calls: int = 1) -> CostRunState:
+        """Settle exactly the call reservation that preceded a response."""
+        if actual_cost_usd < 0:
+            raise ValueError("actual_cost_usd must not be negative")
+        try:
+            with open_program_db(self.ledger_path, durability="strict") as connection:
+                _ensure_sqlite_schema(connection)
+                connection.execute("BEGIN IMMEDIATE")
+                reservation_row = connection.execute(
+                    "SELECT reserved_usd, status FROM ai_cost_reservations WHERE reservation_id = ? AND edition = ? AND run_id = ?",
+                    (reservation.reservation_id, self._edition, self._run_id),
+                ).fetchone()
+                if reservation_row is None:
+                    raise StateError("Unknown cost reservation")
+                if reservation_row["status"] != "reserved":
+                    raise StateError("Cost reservation has already been settled")
+                reserved_cost_usd = _coerce_state_float(reservation_row["reserved_usd"], field_name="reserved_usd")
+                state_row = connection.execute(
+                    "SELECT edition, run_id, budget_usd, reserved_usd, spent_usd, ai_calls, started_at, updated_at "
+                    "FROM ai_cost_runs WHERE edition = ? AND run_id = ?",
+                    (self._edition, self._run_id),
+                ).fetchone()
+                if state_row is None:
+                    raise StateError("Cost reservation has no run state")
+                current = _state_from_sqlite_row(state_row, budget_usd=self._budget_usd)
+                if reserved_cost_usd > current.reserved_usd + 1e-12:
+                    raise StateError("Cost reservation exceeds the run's reserved balance")
+                updated = _replace_state(
+                    current,
+                    spent_usd=current.spent_usd + actual_cost_usd,
+                    reserved_usd=max(0.0, current.reserved_usd - reserved_cost_usd),
+                    ai_calls=current.ai_calls + ai_calls,
+                )
+                _upsert_sqlite_state(connection, updated)
+                connection.execute(
+                    "UPDATE ai_cost_reservations SET status = 'settled', actual_usd = ?, settled_at = ? WHERE reservation_id = ?",
+                    (actual_cost_usd, updated.updated_at.isoformat(), reservation.reservation_id),
+                )
+        except sqlite3.DatabaseError as error:
+            raise StateError(f"Unable to settle cost guard SQLite ledger at {self.ledger_path}") from error
+        self._persist_projection(updated)
+        return updated
 
     def record(self, cost_usd: float, *, ai_calls: int = 1) -> CostRunState:
         self.check(cost_usd)
@@ -86,25 +232,23 @@ class CostGuard:
 
     def record_actual(self, cost_usd: float, *, ai_calls: int = 1) -> CostRunState:
         current = self.current_state()
-        updated_at = datetime.now(timezone.utc)
-        updated_state = CostRunState(
-            edition=current.edition,
-            run_id=current.run_id,
-            budget_usd=current.budget_usd,
-            spent_usd=current.spent_usd + cost_usd,
-            ai_calls=current.ai_calls + ai_calls,
-            started_at=current.started_at,
-            updated_at=updated_at,
-        )
-        _write_sqlite_state(self.ledger_path, updated_state)
+        updated_state = _replace_state(current, spent_usd=current.spent_usd + cost_usd, ai_calls=current.ai_calls + ai_calls)
+        return self._persist_state(updated_state)
+
+    def _persist_state(self, state: CostRunState) -> CostRunState:
+        _write_sqlite_state(self.ledger_path, state)
+
+        self._persist_projection(state)
+        return state
+
+    def _persist_projection(self, state: CostRunState) -> None:
 
         payload = _projection_payload_for_write(self.state_path, edition=self._edition)
         runs = payload.setdefault("runs", {})
         if not isinstance(runs, dict):
             raise StateError(f"Invalid cost guard format in {self.state_path}")
-        runs[self._run_id] = _state_to_payload(updated_state)
+        runs[self._run_id] = _state_to_payload(state)
         _write_atomic_json(self.state_path, payload)
-        return updated_state
 
 
 def load_run_states(
@@ -185,6 +329,7 @@ def _new_state(edition: str, run_id: str, budget_usd: float) -> CostRunState:
         run_id=run_id,
         budget_usd=budget_usd,
         spent_usd=0.0,
+        reserved_usd=0.0,
         ai_calls=0,
         started_at=now,
         updated_at=now,
@@ -212,6 +357,7 @@ def _state_from_payload(edition: str, run_id: str, budget_usd: float, payload: d
             _required_state_field(payload, field_name="spent_usd", message="Cost guard payload must include spent_usd."),
             field_name="spent_usd",
         ),
+        reserved_usd=_coerce_state_float(payload.get("reserved_usd", 0.0), field_name="reserved_usd"),
         ai_calls=_coerce_state_int(
             _required_state_field(payload, field_name="ai_calls", message="Cost guard payload must include ai_calls."),
             field_name="ai_calls",
@@ -253,6 +399,7 @@ def _state_to_payload(state: CostRunState) -> dict[str, Any]:
     return {
         "budget_usd": state.budget_usd,
         "spent_usd": state.spent_usd,
+        "reserved_usd": state.reserved_usd,
         "ai_calls": state.ai_calls,
         "started_at": state.started_at.isoformat(),
         "updated_at": state.updated_at.isoformat(),
@@ -270,10 +417,9 @@ def _load_sqlite_run_state(
         return None
     try:
         with open_program_db(path, read_only=True) as connection:
-            _ensure_sqlite_schema(connection)
             row = connection.execute(
                 """
-                SELECT edition, run_id, budget_usd, spent_usd, ai_calls, started_at, updated_at
+                SELECT edition, run_id, budget_usd, reserved_usd, spent_usd, ai_calls, started_at, updated_at
                 FROM ai_cost_runs
                 WHERE edition = ? AND run_id = ?
                 """,
@@ -291,10 +437,9 @@ def _load_sqlite_run_states(path: Path, *, edition: str) -> tuple[CostRunState, 
         return None
     try:
         with open_program_db(path, read_only=True) as connection:
-            _ensure_sqlite_schema(connection)
             rows = connection.execute(
                 """
-                SELECT edition, run_id, budget_usd, spent_usd, ai_calls, started_at, updated_at
+                SELECT edition, run_id, budget_usd, reserved_usd, spent_usd, ai_calls, started_at, updated_at
                 FROM ai_cost_runs
                 WHERE edition = ?
                 ORDER BY updated_at DESC, run_id DESC
@@ -312,35 +457,7 @@ def _write_sqlite_state(path: Path, state: CostRunState) -> None:
     try:
         with open_program_db(path, durability="strict") as connection:
             _ensure_sqlite_schema(connection)
-            connection.execute(
-                """
-                INSERT INTO ai_cost_runs (
-                    edition,
-                    run_id,
-                    budget_usd,
-                    reserved_usd,
-                    spent_usd,
-                    ai_calls,
-                    started_at,
-                    updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(edition, run_id) DO UPDATE SET
-                    budget_usd = excluded.budget_usd,
-                    spent_usd = excluded.spent_usd,
-                    ai_calls = excluded.ai_calls,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    state.edition,
-                    state.run_id,
-                    state.budget_usd,
-                    0.0,
-                    state.spent_usd,
-                    state.ai_calls,
-                    state.started_at.isoformat(),
-                    state.updated_at.isoformat(),
-                ),
-            )
+            _upsert_sqlite_state(connection, state)
     except sqlite3.DatabaseError as error:
         raise StateError(f"Unable to persist cost guard SQLite ledger at {path}") from error
 
@@ -361,6 +478,39 @@ def _ensure_sqlite_schema(connection: sqlite3.Connection) -> None:
         )
         """
     )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_cost_reservations (
+            reservation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            edition TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            reserved_usd REAL NOT NULL,
+            actual_usd REAL,
+            status TEXT NOT NULL CHECK (status IN ('reserved', 'settled')),
+            created_at TEXT NOT NULL,
+            settled_at TEXT
+        )
+        """
+    )
+
+
+def _upsert_sqlite_state(connection: sqlite3.Connection, state: CostRunState) -> None:
+    connection.execute(
+        """
+        INSERT INTO ai_cost_runs (edition, run_id, budget_usd, reserved_usd, spent_usd, ai_calls, started_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(edition, run_id) DO UPDATE SET
+            budget_usd = excluded.budget_usd,
+            reserved_usd = excluded.reserved_usd,
+            spent_usd = excluded.spent_usd,
+            ai_calls = excluded.ai_calls,
+            updated_at = excluded.updated_at
+        """,
+        (
+            state.edition, state.run_id, state.budget_usd, state.reserved_usd,
+            state.spent_usd, state.ai_calls, state.started_at.isoformat(), state.updated_at.isoformat(),
+        ),
+    )
 
 
 def _state_from_sqlite_row(row: sqlite3.Row, *, budget_usd: float) -> CostRunState:
@@ -370,9 +520,23 @@ def _state_from_sqlite_row(row: sqlite3.Row, *, budget_usd: float) -> CostRunSta
         run_id=str(row["run_id"]),
         budget_usd=stored_budget if stored_budget > 0 else budget_usd,
         spent_usd=_coerce_state_float(row["spent_usd"], field_name="spent_usd"),
+        reserved_usd=_coerce_state_float(row["reserved_usd"], field_name="reserved_usd"),
         ai_calls=_coerce_state_int(row["ai_calls"], field_name="ai_calls"),
         started_at=_parse_state_datetime(row["started_at"], field_name="started_at") or _raise_missing_state_datetime("started_at"),
         updated_at=_parse_state_datetime(row["updated_at"], field_name="updated_at") or _raise_missing_state_datetime("updated_at"),
+    )
+
+
+def _replace_state(state: CostRunState, **changes: Any) -> CostRunState:
+    return CostRunState(
+        edition=state.edition,
+        run_id=state.run_id,
+        budget_usd=state.budget_usd,
+        spent_usd=changes.get("spent_usd", state.spent_usd),
+        reserved_usd=changes.get("reserved_usd", state.reserved_usd),
+        ai_calls=changes.get("ai_calls", state.ai_calls),
+        started_at=state.started_at,
+        updated_at=datetime.now(timezone.utc),
     )
 
 

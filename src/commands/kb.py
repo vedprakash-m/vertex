@@ -24,6 +24,7 @@ from src.core.exceptions import ConfigError, StateError
 from src.core.kb_changelog import build_kb_changelog_report, render_kb_changelog_report
 from src.core.kb_updates import KbUpdatePlan, apply_kb_update, parse_deterministic_kb_correction
 from src.core.kb_updates import parse_kb_update_operations, prepare_kb_update, read_program_kb_documents
+from src.core.kb_updates import preflight_kb_update
 from src.core.kb_updates import supported_kb_paths
 from src.core.knowledge_store import get_shared_knowledge_root
 from src.core.operator_identity import capture_operator_identity
@@ -262,6 +263,11 @@ def kb_update_command(
         if not apply:
             typer.echo("\nPreview only. Re-run with --apply to write the change.")
             raise typer.Exit(code=0)
+        if generic_preview is not None:
+            try:
+                preflight_kb_update(generic_preview)
+            except StateError as error:
+                raise typer.BadParameter(str(error)) from error
         applied_shared = apply_shared_registry_patch(
             operations=patch_operations,
             programs_root=programs_root,
@@ -270,11 +276,14 @@ def kb_update_command(
             source="kb_update",
             apply=True,
         )
-        generic_result = (
-            apply_kb_update(generic_preview, programs_root=programs_root)
-            if generic_preview is not None
-            else None
-        )
+        try:
+            generic_result = (
+                apply_kb_update(generic_preview, programs_root=programs_root)
+                if generic_preview is not None
+                else None
+            )
+        except StateError as error:
+            raise typer.BadParameter(str(error)) from error
         generic_count = 0 if generic_result is None else len(generic_result.preview.changes)
         typer.echo(
             f"\nApplied shared registry generation {applied_shared.generation_id} "
@@ -293,7 +302,10 @@ def kb_update_command(
         typer.echo("\nPreview only. Re-run with --apply to write the change.")
         raise typer.Exit(code=0)
 
-    result = apply_kb_update(preview, programs_root=programs_root)
+    try:
+        result = apply_kb_update(preview, programs_root=programs_root)
+    except StateError as error:
+        raise typer.BadParameter(str(error)) from error
     typer.echo(f"\nApplied {len(result.preview.changes)} file(s). Audit log: {result.audit_path}")
     raise typer.Exit(code=0)
 

@@ -105,6 +105,7 @@ def _build_report_config_document(resolved: ResolvedEdition, knowledge: Knowledg
         "forecast_enabled": resolved.edition.forecast_enabled,
         "mobile_safe_scorecards": resolved.edition.mobile_safe_scorecards,
         "type_scale_v2": resolved.edition.type_scale_v2,
+        "executive_style": resolved.edition.executive_style,
         "calibration_pilot": resolved.edition.calibration_pilot,
     }
     return config_document

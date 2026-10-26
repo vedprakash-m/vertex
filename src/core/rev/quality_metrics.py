@@ -279,10 +279,14 @@ def compute_quality_report(
         if type_correct:
             pop_correct[population] += 1
 
-        per_type_n[expected] = per_type_n.get(expected, 0) + 1
-        per_type_predicted[proposed] = per_type_predicted.get(proposed, 0) + 1
-        if type_correct:
-            per_type_correct[expected] = per_type_correct.get(expected, 0) + 1
+        # Per-type precision is a property of the grounded extraction
+        # population. Imported and legacy/unknown rows remain visible in their
+        # population counters above, but must not inflate extraction quality.
+        if population == "extraction":
+            per_type_n[expected] = per_type_n.get(expected, 0) + 1
+            per_type_predicted[proposed] = per_type_predicted.get(proposed, 0) + 1
+            if type_correct:
+                per_type_correct[expected] = per_type_correct.get(expected, 0) + 1
 
         if label == "accept":
             pop_accept_n[population] += 1

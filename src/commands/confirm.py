@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -14,9 +15,7 @@ from src.commands.confirm_stages.deserialization import deserialize_kusto_sectio
 from src.commands.confirm_stages.deserialization import parse_datetime_required as _parse_datetime_required
 from src.commands.confirm_stages.draft_loaders import load_confirm_overrides as _load_confirm_overrides
 from src.commands.confirm_stages.draft_loaders import load_confirm_review_status as _load_confirm_review_status
-from src.commands.confirm_stages.draft_loaders import load_current_draft_manifest_id as _load_current_draft_manifest_id
-from src.commands.confirm_stages.draft_loaders import load_draft_ai_safety_metadata as _load_draft_ai_safety_metadata
-from src.commands.confirm_stages.draft_loaders import load_draft_readiness_metadata as _load_draft_readiness_metadata
+from src.commands.confirm_stages.draft_loaders import ConfirmDraftManifest, load_confirm_draft_manifest as _load_confirm_draft_manifest
 from src.commands.confirm_stages.draft_loaders import load_draft_state as _load_draft_state
 from src.commands.confirm_stages.draft_loaders import load_readiness_gate_settings as _load_readiness_gate_settings
 from src.commands.confirm_stages.validation import build_stale_proposed_decision_warnings as _build_stale_proposed_decision_warnings
@@ -39,6 +38,7 @@ from src.commands.confirm_stages.post_confirm_artifacts import record_ncfl_propo
 from src.commands.confirm_stages.post_confirm_artifacts import record_review_tracking as _record_review_tracking_impl
 from src.commands.confirm_stages.post_confirm_artifacts import record_workstream_associations as _record_workstream_associations_impl
 from src.commands.confirm_stages.post_confirm_support import build_confirmed_eml_bytes as _build_confirmed_eml_bytes_impl
+from src.commands.confirm_stages.post_confirm_support import add_chart_index, render_confirm_result
 from src.commands.confirm_stages.post_confirm_support import load_draft_continuation_contract_path as _load_draft_continuation_contract_path_impl
 from src.commands.confirm_stages.post_confirm_support import next_issue_narrative_templates as _next_issue_narrative_templates_impl
 from src.commands.confirm_stages.post_confirm_support import next_issue_number as _next_issue_number_impl
@@ -64,12 +64,13 @@ from src.core.continuation_contract import build_bridge_section_roster_ids, buil
 from src.core.delta_engine import build_deltas
 from src.core.edition_resolver import get_program_output_dir, resolve_edition, resolve_edition_paths as _resolve_edition_paths
 from src.core.evidence_engine import build_evidence
-from src.core.exceptions import ConfirmError, StateError as _AlertStateError
+from src.core.exceptions import ConfigError, ConfirmError, StateError as _AlertStateError
+from src.core.workspace_paths import validate_report_workspace
 from src.core.forecast_engine import build_forecast_assessment
 from src.core.freshness_engine import build_freshness_report
 from src.core.hygiene_engine import evaluate_hygiene
 from src.core.html_renderer import HTMLRenderer, RenderContext
-from src.core.manifest_writer import build_run_manifest
+from src.core.manifest_writer import build_run_manifest, hash_jsonable
 from src.core.narrative_store import build_workstream_narrative_history
 from src.core.notification_state_store import load_latest_notification_state
 from src.core.models import Confidence, EditionType, ProgramContext, ReportData, ReviewState
@@ -109,6 +110,7 @@ from src.commands.report import _build_scorecard_data, _build_scorecard_packets,
 from src.commands.report import _build_newsletter_narrative_covered_item_ids, _build_newsletter_scoped_items
 from src.commands.report import _build_v2_vitality_snapshot, _compute_healthy_streak
 from src.commands.report import _active_chapter_notes, _build_chapter_templates, _build_continuity_render_data
+from src.commands.report import _runtime_db_root_for_reports
 from src.commands.report import _build_workstream_data, _build_workstream_templates, _count_new_high_dimensions, _decision_strip_ack_required
 from src.commands.report import _build_continuity_exec_summary_template, _build_exec_summary_template, _format_edition_title, _format_prior_date_label, _group_scorecard_deltas, _resolve_forwarding_context, _subject_signal
 from src.commands.report import _has_usable_continuity_baseline, _load_previous_snapshot, _read_git_sha
@@ -174,6 +176,16 @@ def _confirm_additional_failures(
     )
 
 
+def _preflight_confirm_workspace() -> None:
+    try:
+        validate_report_workspace(
+            programs_root=_CONFIRM_PROGRAMS_ROOT, reports_root=REPORTS_ROOT, archive_root=ARCHIVE_ROOT,
+        )
+    except ConfigError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=2) from error
+
+
 def confirm_command(
     edition: str = typer.Option(..., "--edition", help="Edition name, e.g. myprogram_weekly."),
     issue: int | None = typer.Option(None, "--issue", help="Issue number to confirm. Defaults to next issue after archive index."),
@@ -199,6 +211,7 @@ def confirm_command(
         help="Skip best-effort NCFL proposal extraction after confirm.",
     ),
 ) -> None:
+    _preflight_confirm_workspace()
     if untrusted and (reason is None or not reason.strip()):
         raise typer.BadParameter("--reason is required when --untrusted is used.")
     if not untrusted and reason is not None:
@@ -228,6 +241,9 @@ def confirm_command(
                 post_weekly_summary_card=post_weekly_summary_card,
                 skip_ncfl=skip_ncfl,
             )
+        except ConfigError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=2) from exc
         except ConfirmError as exc:
             typer.echo(str(exc))
             raise typer.Exit(code=2) from exc
@@ -302,66 +318,11 @@ def confirm_command(
             ack_stale_approval_flag=True,
         )
 
-    if result.failures:
-        typer.echo(f"Confirm blocked for issue {result.issue_number:03d}.")
-        for failure in result.failures:
-            typer.echo(f"- {failure}")
-        raise typer.Exit(code=result.exit_code)
-
-    if dry_run:
-        typer.echo(f"Confirm dry-run passed for issue {result.issue_number:03d}.")
-        typer.echo("Would write confirmed snapshot, archive HTML/Markdown/manifest, and reset active author state.")
-        if result.risk_delta_preview:
-            typer.echo(f"Risk-register delta preview ({len(result.risk_delta_preview)} approved risk signal(s)):")
-            for entry in result.risk_delta_preview:
-                typer.echo(f"- {entry.action}: {entry.risk_id} ({entry.title})")
-            typer.echo(f"Preview hash: {result.risk_delta_preview_hash}")
-        if result.warnings:
-            typer.echo(f"Warnings: {len(result.warnings)}")
-            for warning in result.warnings:
-                typer.echo(f"- {warning}")
-        raise typer.Exit(code=result.exit_code)
-
-    typer.echo(f"Confirmed issue {result.issue_number:03d} for {edition}.")
-    if result.archive_paths is not None:
-        typer.echo(f"Snapshot: {result.archive_paths.snapshot_path}")
-        if result.archive_paths.eml_path is not None:
-            typer.echo(f"EML: {result.archive_paths.eml_path}")
-        typer.echo(f"HTML: {result.archive_paths.html_path}")
-        typer.echo(f"Markdown: {result.archive_paths.md_path}")
-        typer.echo(f"Manifest: {result.archive_paths.manifest_path}")
-    if result.weekly_summary_card_path is not None:
-        typer.echo(f"Weekly Summary Card: {result.weekly_summary_card_path}")
-        if result.posted_weekly_summary_card:
-            typer.echo("Weekly summary card posted to Teams.")
-    typer.echo(f"Reset active state for issue {result.next_issue_number:03d}.")
-    if result.review_tracking_summary is not None:
-        typer.echo(result.review_tracking_summary)
-        if result.review_tracking_path is not None:
-            typer.echo(f"AI Review Tracking: {result.review_tracking_path}")
-    if result.learning_summary is not None:
-        typer.echo(result.learning_summary)
-        if result.learning_md_path is not None:
-            typer.echo(f"AI Learning Notes: {result.learning_md_path}")
-        if result.learning_json_path is not None:
-            typer.echo(f"AI Learning Data: {result.learning_json_path}")
-    if result.warnings:
-        typer.echo(f"Warnings: {len(result.warnings)}")
-        for warning in result.warnings:
-            typer.echo(f"- {warning}")
-    raise typer.Exit(code=result.exit_code)
+    render_confirm_result(result, edition=edition, dry_run=dry_run)
 
 
 def _assert_state_authority_for_confirm(program_id: str, *, programs_root: Path) -> None:
-    """ADF-W1.9 / QG-37 (Section 12.1, 8.12.3): the mutation-blocking half,
-    activated 2026-07-13 after live operator reconciliation cleared the
-    real ambiguity it originally found (see specs/arch-data-fix.md
-    ADF-W1.9). Only called for a real (non-dry-run) confirm, since a
-    dry-run never mutates. A separate, tiny function so it is unit-testable
-    without needing ``confirm_issue``'s full pipeline (this repo's
-    acme-fixture test workspace is unrelated-ly broken in this environment
-    -- "program.yaml absent after copy" -- so most of `confirm_issue`'s own
-    tests are skipped here; this function's own test does not depend on it)."""
+    """Block mutating confirmation when fact-store authority is ambiguous."""
     try:
         assert_state_authority_or_raise(program_id, programs_root=programs_root)
     except StateAuthorityAmbiguousError as exc:
@@ -408,7 +369,10 @@ def confirm_issue(
 ) -> ConfirmResult:
     resolved_reports_root = reports_root or REPORTS_ROOT
     resolved_archive_root = archive_root or ARCHIVE_ROOT
-    programs_root = programs_root or resolved_reports_root.parent / "programs"
+    programs_root = programs_root if programs_root is not None else _CONFIRM_PROGRAMS_ROOT
+    validate_report_workspace(
+        programs_root=programs_root, reports_root=resolved_reports_root, archive_root=resolved_archive_root,
+    )
     editions_root = programs_root.parent / "editions"
 
     bundle = load_bundle(
@@ -419,6 +383,12 @@ def confirm_issue(
     if not dry_run:
         _assert_state_authority_for_confirm(bundle.program.id, programs_root=programs_root)
     draft_state = _load_draft_state(edition_name, issue_number, programs_root=programs_root)
+    draft_manifest = _load_confirm_draft_manifest(edition_name, issue_number, programs_root=programs_root)
+    if hash_jsonable(bundle.config) != draft_manifest.config_hash:
+        raise ConfigError(
+            "Confirmation configuration changed since the draft was generated. "
+            "Re-run `vertex report --dry-run` and review the updated draft before confirming."
+        )
     if post_weekly_summary_card:
         _validate_weekly_summary_card_request(bundle=bundle, draft_state=draft_state)
     overrides_document = _load_confirm_overrides(edition_name, issue_number, bundle, resolved_reports_root)
@@ -431,6 +401,7 @@ def confirm_issue(
         reports_root=resolved_reports_root,
         archive_root=resolved_archive_root,
         programs_root=programs_root,
+        draft_manifest=draft_manifest,
     )
 
     try:
@@ -484,7 +455,7 @@ def confirm_issue(
         if result.exit_code > 1 and force and result.forceable
     )
     manifest = artifacts[3]
-    current_draft_manifest_id = _load_current_draft_manifest_id(edition_name, issue_number, programs_root=programs_root)
+    current_draft_manifest_id = draft_manifest.manifest_id
     evidence_window_start = artifacts[6].ado_data_as_of - __import__("datetime", fromlist=["timedelta"]).timedelta(days=bundle.config.ado.date_window_days)
     evidence_by_item = {
         item.id: build_evidence(item, evidence_window_start, artifacts[6].ado_data_as_of)
@@ -724,26 +695,34 @@ def confirm_issue(
 
     # P4-3: enrich manifest with chart index entries per spec R3-054
     if chart_cache_entries:
-        chart_index_entries = [
-            {
-                "query_id": query_id,
-                "chart_config_hash": entry["chart_config_hash"],
-                "captured_at": entry["captured_at"],
-                "row_count": entry["row_count"],
-                "png_size_bytes": next(
-                    (ks.chart_png_size_bytes for ks in kusto_sections if ks.query_id == query_id and ks.render_mode == "chart_image"),
-                    0,
-                ),
-            }
-            for query_id, entry in chart_cache_entries.items()
-        ]
-        manifest = replace(
-            manifest,
-            metadata={
-                **manifest.metadata,
-                "chart_index": chart_index_entries,
-            },
+        manifest = add_chart_index(manifest, chart_cache_entries, kusto_sections)
+
+    def revalidate_evidence() -> None:
+        current_bundle = load_bundle(
+            edition_name, reports_root=resolved_reports_root, programs_root=programs_root,
         )
+        if hash_jsonable(current_bundle.config) != draft_manifest.config_hash:
+            raise ConfigError(
+                "Confirmation configuration changed before archive write. "
+                "Re-run `vertex report --dry-run` and review the updated draft before confirming."
+            )
+        fact_drift = evaluate_program_fact_drift_from_draft(
+            draft_state=draft_state,
+            program_id=program_id,
+            db_root=_runtime_db_root_for_reports(resolved_reports_root),
+            edition_name=edition_name,
+            issue_number=issue_number,
+        )
+        evidence_failures = tuple(result.message for result in fact_drift.failing_results)
+        if program_id is not None:
+            evidence_failures += _validate_pinned_gather_run(
+                program_id,
+                gather_run_id=draft_state.get("gather_run_id"),
+                gather_run_hash=draft_state.get("gather_run_hash"),
+                programs_root=programs_root,
+            )
+        if evidence_failures:
+            raise ConfigError("Confirmation evidence changed before archive write: " + "; ".join(evidence_failures))
 
     archive_transaction = _execute_archive_transaction_impl(
         edition_name=edition_name,
@@ -767,6 +746,7 @@ def confirm_issue(
         legacy_regex_extractor=legacy_regex_extractor,
         extraction_result=extraction_result,
         extraction_mode=extraction_mode,
+        revalidate_evidence_fn=revalidate_evidence,
         build_confirmed_eml_bytes_fn=_build_confirmed_eml_bytes,
         write_confirmed_fn=write_confirmed,
         write_confirmed_issue_fn=write_confirmed_issue,
@@ -917,6 +897,7 @@ def confirm_issue(
             edition_name=edition_name,
             issue_number=issue_number,
             report=artifacts[6],
+            programs_root=programs_root,
             archive_paths=archive_paths,
             webhook_url=str(bundle.config.m365.teams_incoming_webhook_url or ""),
         )
@@ -1033,9 +1014,23 @@ def _build_confirm_artifacts(
     reports_root: Path,
     archive_root: Path,
     programs_root: Path | None = None,
+    *,
+    draft_manifest: ConfirmDraftManifest | None = None,
 ) -> tuple[QualityGateReport, tuple[str, ...], Snapshot, RunManifest, str, str, ReportData, tuple[WorkstreamData, ...], Any]:
     started_at = datetime.now(timezone.utc)
-    programs_root = programs_root or reports_root.parent / "programs"
+    programs_root = programs_root if programs_root is not None else _CONFIRM_PROGRAMS_ROOT
+    validate_report_workspace(programs_root=programs_root, reports_root=reports_root, archive_root=archive_root)
+    if draft_manifest is None:
+        draft_manifest = _load_confirm_draft_manifest(edition_name, issue_number, programs_root=programs_root)
+    if (
+        draft_manifest.edition_name != edition_name
+        or draft_manifest.issue_number != issue_number
+        or draft_manifest.programs_root != programs_root.absolute()
+    ):
+        raise typer.BadParameter(
+            "Captured draft manifest scope does not match this confirmation. "
+            "Preserve the existing artifacts and capture evidence from the selected workspace, edition and issue."
+        )
     editions_root = programs_root.parent / "editions"
     resolved_v2 = resolve_edition(
         edition_name,
@@ -1192,6 +1187,7 @@ def _build_confirm_artifacts(
             workstream_names=tuple(workstream.name for workstream in bundle.program_context.workstreams) if bundle.program_context is not None else (),
             current_workstream_blurbs=workstream_blurbs,
             archive_root=archive_root,
+            reports_root=reports_root,
         )
     )
     freshness_report = build_freshness_report(
@@ -1291,7 +1287,7 @@ def _build_confirm_artifacts(
     exec_summary_citations = build_inline_citations(items, evidence_by_item, ado_base_url=_ado_item_base_url(bundle))
     title = _format_edition_title(bundle, issue_number, data_as_of)
     subject_signal = _subject_signal(dimension_risks, top_items, auto_suggestions, scorecard_deltas)
-    email_subject = _build_email_subject(title, health, subject_signal)
+    email_subject = title if bundle.config.executive_style else _build_email_subject(title, health, subject_signal)
     email_preheader = _build_email_preheader(health, health.bluf, top_items or auto_suggestions)
     confirmed_depth = sum(1 for entry in archive_index.issues if entry.kind == "confirmed")
     resolved_v2 = resolve_edition(edition_name, editions_root=editions_root, programs_root=programs_root)
@@ -1352,7 +1348,7 @@ def _build_confirm_artifacts(
         is_dry_run=False,
         workspace_root=str(Path(__file__).resolve().parents[2]),
         mobile_safe_scorecards=bundle.config.mobile_safe_scorecards,
-        type_scale_v2=bundle.config.type_scale_v2,
+        type_scale_v2=bundle.config.type_scale_v2, executive_style=bundle.config.executive_style,
         continuity=continuity_render,
         show_footer=not _is_continuity_layout(bundle),
     )
@@ -1444,11 +1440,7 @@ def _build_confirm_artifacts(
             "forecast_summary": (forecast.summary if forecast is not None else None),
             "forecast_confidence": (forecast.confidence.value if forecast is not None else None),
             "forecast_sources": (list(forecast.source_item_ids) if forecast is not None else []),
-            "ai_safety": _load_draft_ai_safety_metadata(
-                edition_name=edition_name,
-                issue_number=issue_number,
-                programs_root=programs_root,
-            ),
+            "ai_safety": deepcopy(draft_manifest.ai_safety),
         },
         # D-17: read back the gather-run lineage pinned in the draft at
         # generation time -- never re-resolved live, so confirm structurally
@@ -1524,6 +1516,7 @@ def _build_confirm_artifacts(
         channel_states=gather_state.channels if gather_state is not None else None,
         archive_root=archive_root,
         programs_root=programs_root,
+        reports_root=reports_root,
         stale_claim_ids=stale_claim_ids,
     )
     qg_phase_1c = evaluate_phase_1c_gates(
@@ -1534,7 +1527,15 @@ def _build_confirm_artifacts(
         html_content=html_body,
     )
     continuity_qg = (
-        evaluate_continuity_gates(html_content=html_body, issue_number=issue_number)
+        evaluate_continuity_gates(
+            html_content=html_body,
+            issue_number=issue_number,
+            scorecard_band_block_ids=(
+                tuple(f"scorecard-band-{band.band_id}" for band in continuity_render.scorecard_bands)
+                if continuity_render is not None
+                else ()
+            ),
+        )
         if _is_continuity_layout(bundle)
         else QualityGateReport(results=())
     )
@@ -1611,7 +1612,9 @@ def _build_confirm_artifacts(
     qg_program_fact_drift = evaluate_program_fact_drift_from_draft(
         draft_state=draft_state,
         program_id=program_id,
-        db_root=reports_root.parent / "vertex-db",
+        db_root=_runtime_db_root_for_reports(reports_root),
+        edition_name=edition_name,
+        issue_number=issue_number,
     )
     qg_report = combine_gate_reports(qg_report, qg_program_fact_drift)
     if program_id is not None:
@@ -1650,15 +1653,8 @@ def _build_confirm_artifacts(
             "forecast_summary": (forecast.summary if forecast is not None else None),
             "forecast_confidence": (forecast.confidence.value if forecast is not None else None),
             "forecast_sources": (list(forecast.source_item_ids) if forecast is not None else []),
-            "ai_safety": _load_draft_ai_safety_metadata(
-                edition_name=edition_name,
-                issue_number=issue_number,
-                programs_root=programs_root,
-            ),
-            "draft_readiness": _load_draft_readiness_metadata(
-                edition_name=edition_name,
-                issue_number=issue_number,
-            ),
+            "ai_safety": deepcopy(draft_manifest.ai_safety),
+            "draft_readiness": deepcopy(draft_manifest.draft_readiness),
         },
         gather_run_id=draft_state.get("gather_run_id"),
         gather_run_hash=draft_state.get("gather_run_hash"),

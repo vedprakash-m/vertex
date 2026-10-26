@@ -18,9 +18,9 @@ from src.core.ledger.event_log import DEFAULT_MAX_BYTES, ConfidenceTier, canonic
 from src.core.ledger.source_refs import OperatorAssertionRef, SourceRef, source_document_key, source_ref_from_dict, source_ref_priority, source_ref_to_dict, validate_typed_source_ref
 from src.core.ledger.ulid import new_ulid
 from src.core.yaml_utils import load_yaml_mapping
+from src.core.workspace_paths import PROGRAMS_ROOT
 
 
-PROGRAMS_ROOT = Path(__file__).resolve().parents[2] / "programs"
 
 _CONFIDENCE_RANK = {
     ConfidenceTier.INFERRED: 1,

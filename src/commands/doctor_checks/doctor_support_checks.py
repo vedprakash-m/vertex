@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from typing import Any, Callable, Mapping
 import yaml
+import typer
 
 from src.commands.doctor_checks.models import ADOProbeResult, DoctorCheck
 from src.core.ado_client import ADOClient, ADO_RESOURCE
@@ -15,6 +16,47 @@ from src.core.snapshot_store import read_snapshot
 from src.core.archive_store import find_latest_confirmed_entry
 from src.m365.agency_bridge import AgencyCapabilities
 from src.core.overrides_store import merge_overrides, save_overrides
+
+
+def resolve_doctor_roots(
+    *,
+    programs_root: Path | None,
+    reports_root: Path | None,
+    archive_root: Path | None,
+    editions_root: Path | None,
+    default_editions_root: Path,
+    default_archive_root: Path,
+    default_reports_root: Path,
+) -> tuple[Path, Path, Path, Path]:
+    workspace_root: Path | None = None
+    if programs_root is not None:
+        workspace_root = programs_root.parent
+    elif reports_root is not None:
+        workspace_root = reports_root.parent
+    elif archive_root is not None:
+        workspace_root = archive_root.parent
+    resolved_editions_root = editions_root or (
+        workspace_root / "editions" if workspace_root is not None else default_editions_root
+    )
+    resolved_archive_root = archive_root or (
+        workspace_root / "archive" if workspace_root is not None else default_archive_root
+    )
+    resolved_reports_root = reports_root or (
+        workspace_root / "reports" if workspace_root is not None else default_reports_root
+    )
+    resolved_programs_root = programs_root or (resolved_reports_root.parent / "programs")
+    return resolved_editions_root, resolved_archive_root, resolved_reports_root, resolved_programs_root
+
+
+def resolve_edition_name(
+    edition_name: str | None, reports_root: Path, *, discover_report_editions_fn: Callable[..., tuple[str, ...]],
+) -> str:
+    if edition_name is not None:
+        return edition_name
+    editions = discover_report_editions_fn(reports_root=reports_root)
+    if len(editions) == 1:
+        return editions[0]
+    raise typer.BadParameter("Provide --edition when multiple editions exist.")
 
 
 def load_milestone_owner_aliases(program_id: str, *, programs_root: Path) -> tuple[str, ...]:

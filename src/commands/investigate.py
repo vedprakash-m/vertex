@@ -8,10 +8,10 @@ import subprocess
 from typing import Protocol
 
 import typer
+from src.core.workspace_paths import PROGRAMS_ROOT
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PROGRAMS_ROOT = REPO_ROOT / "programs"
 
 
 class CompletedProcessLike(Protocol):

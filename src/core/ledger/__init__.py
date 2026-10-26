@@ -12,6 +12,12 @@ from src.core.ledger.event_log import (
     verify_event_log,
     write_event,
 )
+from src.core.ledger.chain_baseline import (
+    ChainBaseline,
+    get_chain_baseline_path,
+    load_chain_baseline,
+    write_chain_baseline,
+)
 from src.core.ledger.event_index import (
     get_event_index_path,
     load_entity_event_ids,
@@ -71,6 +77,10 @@ __all__ = [
     "build_event_envelope",
     "count_control_event_types",
     "compute_envelope_hash",
+    "ChainBaseline",
+    "get_chain_baseline_path",
+    "load_chain_baseline",
+    "write_chain_baseline",
     "EVENT_TYPE_REGISTRY",
     "get_event_schema",
     "get_event_index_path",

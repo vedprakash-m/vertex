@@ -12,10 +12,10 @@ import portalocker
 from src.core.edition_resolver import get_program_output_dir
 from src.core.jsonl_utils import append_jsonl_line, read_jsonl_records, validate_jsonl_row
 from src.core.models import Confidence
+from src.core.workspace_paths import PROGRAMS_ROOT
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PROGRAMS_ROOT = REPO_ROOT / "programs"
 _ALLOWED_TASK_TYPES = frozenset({"exec_summary", "workstream_blurb"})
 
 # High-risk append-only file — grows with every confirmed issue and every author override.

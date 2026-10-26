@@ -52,7 +52,7 @@ def run_flip_status_doctor(
     edition_name: str,
     program_id: str,
     programs_root: Path,
-    reality_db_root: Path,
+    reality_db_root: Path | None,
 ) -> DoctorReport:
     fact_store_db_path = get_program_reality_db_path(program_id, db_root=reality_db_root)
     accepted_revision_count, proposed_revision_count, snapshot_pin_count = _load_fact_store_counts(fact_store_db_path)
@@ -101,7 +101,7 @@ def run_flip_parity_doctor(
     program_id: str,
     issue_number: int,
     programs_root: Path,
-    reality_db_root: Path,
+    reality_db_root: Path | None,
     archive_root: Path,
     resolved_workstreams: tuple[Workstream, ...],
 ) -> DoctorReport:
@@ -237,7 +237,7 @@ def _compute_family_parity(
     program_id: str,
     issue_generated_at: datetime,
     programs_root: Path,
-    reality_db_root: Path,
+    reality_db_root: Path | None,
     archive_root: Path,
     resolved_workstreams: tuple[Workstream, ...],
 ) -> list[dict[str, Any]]:
@@ -252,6 +252,7 @@ def _compute_family_parity(
         entry
         for entry in load_skipped_issues_for_program(
             program_id,
+            programs_root=programs_root,
             archive_root=archive_root,
         )
         if entry.edition_id == edition_name and entry.generated_at <= issue_generated_at

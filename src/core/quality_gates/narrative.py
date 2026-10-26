@@ -34,6 +34,7 @@ def evaluate_material_change_narrative_gate(
     workstream_blurbs: Mapping[str, str] | None,
     program_context: NarrativeProgramContext | None,
     archive_root: Path,
+    reports_root: Path | None = None,
 ) -> GateEvaluation:
     if (
         deltas is None
@@ -51,7 +52,10 @@ def evaluate_material_change_narrative_gate(
     if previous_entry is None:
         return GateEvaluation("QG-10", True, "Material-change narrative gate passed.", 2, forceable=True)
 
-    archived_narratives = load_archived_narratives(edition_name, previous_entry.issue_number, archive_root=archive_root)
+    archived_narratives = load_archived_narratives(
+        edition_name, previous_entry.issue_number, archive_root=archive_root,
+        **({"reports_root": reports_root} if reports_root is not None else {}),
+    )
     if not archived_narratives:
         return GateEvaluation("QG-10", True, "Material-change narrative gate passed.", 2, forceable=True)
 

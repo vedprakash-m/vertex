@@ -25,7 +25,12 @@ from src.commands.gather_pipeline.support import enrich_resources, sanitize_disc
 
 
 def _sync_relation_dependencies_best_effort(
-    program_id: str, relations: Any, *, scope_item_ids: frozenset[int] | None, programs_root: Path
+    program_id: str,
+    relations: Any,
+    *,
+    scope_item_ids: frozenset[int] | None,
+    item_lookup: Any = None,
+    programs_root: Path,
 ) -> None:
     """ADF-W4.4 (Section 8.10.3): convert typed ADO relations into
     AUTHORITATIVE_RELATION dependencies (fact-store only). Lazy-imported to
@@ -38,17 +43,65 @@ def _sync_relation_dependencies_best_effort(
     this cycle (today, every registration -- hydration is still full-mode --
     but this makes the closure logic safe for a future incremental relation
     fetch with zero change needed here when that lands).
+
+    RELO-W2.7: ``item_lookup`` (a ``dependency_graph.RelationItemLookup``) is
+    resolved by the caller from already-hydrated ``WorkItem``s and threaded
+    through so the resulting dependency carries a real owner/workstream
+    instead of an all-``None`` placeholder.
     """
     try:
         from src.core.dependency_graph import sync_authoritative_relation_dependencies
 
         sync_authoritative_relation_dependencies(
-            program_id, relations, scope_item_ids=scope_item_ids, programs_root=programs_root,
+            program_id,
+            relations,
+            scope_item_ids=scope_item_ids,
+            item_lookup=item_lookup,
+            programs_root=programs_root,
         )
     except (OSError, ValueError):
         # A fact-store I/O or schema failure is logged via the integration-
         # error sink elsewhere; here we swallow to keep gather resilient.
         pass
+
+
+def _build_relation_item_lookup(work_items: Any) -> Any:
+    """RELO-W2.7: builds a ``dependency_graph.RelationItemLookup`` from
+    already-hydrated ``WorkItem``s so relation-derived dependencies carry a
+    real owner alias and workstream instead of an all-``None`` placeholder.
+
+    Each ``WorkItem`` may map to more than one workstream (``custom_fields
+    ["workstream_ids"]``, populated by ``enrich_resources``/``enrich_work_item``
+    before this point in the pipeline); the first is used as the single
+    representative workstream for a dependency edge, matching the existing
+    ``_workstream_suffixes`` convention (``ado_signal_extractor.py``) of
+    treating the first mapped workstream as primary. An item with no mapped
+    workstream resolves to ``None`` rather than guessing.
+    """
+    from src.core.dependency_graph import RelationItemContext
+
+    lookup: dict[int, RelationItemContext] = {}
+    for item in work_items:
+        raw_workstream_ids = item.custom_fields.get("workstream_ids")
+        workstream_id = (
+            str(raw_workstream_ids[0])
+            if isinstance(raw_workstream_ids, (tuple, list)) and raw_workstream_ids
+            else None
+        )
+        owner_alias = _normalize_owner_alias(item.assigned_to)
+        lookup[item.id] = RelationItemContext(owner_alias=owner_alias, workstream_id=workstream_id)
+    return lookup
+
+
+def _normalize_owner_alias(value: str | None) -> str | None:
+    """Mirrors ``dependency_scout._normalize_owner_alias`` -- same
+    strip/lowercase convention as every other owner_alias comparison/storage
+    site in this codebase, inlined here to avoid importing a private symbol
+    across modules."""
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    return normalized or None
 
 
 def _emit_channel_budget_alert_best_effort(
@@ -232,6 +285,8 @@ def run_channel(
                     source=error.source,
                     stage=error.stage,
                     error=error.message,
+                    retryable=error.retryable,
+                    operator_action=error.operator_action,
                 )
             if run_ctx.dry_run:
                 delta = compute_registry_delta(
@@ -379,6 +434,8 @@ def run_channel(
             source=hydration_error.source,
             stage=hydration_error.stage,
             error=hydration_error.message,
+            retryable=hydration_error.retryable,
+            operator_action=hydration_error.operator_action,
         )
     first_hydration_error = next(iter(hydration_result.errors), None)
     is_degraded = (
@@ -434,6 +491,8 @@ def run_channel_with_extraction(
             source=error.source,
             stage=error.stage,
             error=error.message,
+            retryable=error.retryable,
+            operator_action=error.operator_action,
         )
     # ADF-W4.4 (Section 8.10.3): convert typed ADO relations into
     # AUTHORITATIVE_RELATION dependencies. The relations live on the hydration
@@ -459,7 +518,15 @@ def run_channel_with_extraction(
             for ref_id, ref_kind in hydration_result.hydrated_ref_ids
             if ref_kind == "work_item" and ref_id.isdigit()
         )
+        # RELO-W2.7: work_items is only present on the ADO resources type
+        # (same shape rationale as `relations` above); getattr degrades to an
+        # empty lookup (all-None owner/workstream) for any other channel.
+        item_lookup = _build_relation_item_lookup(getattr(hydration_result.resources, "work_items", ()))
         _sync_relation_dependencies_best_effort(
-            program_id, relations, scope_item_ids=scope_item_ids, programs_root=programs_root,
+            program_id,
+            relations,
+            scope_item_ids=scope_item_ids,
+            item_lookup=item_lookup,
+            programs_root=programs_root,
         )
     return hydration_result, extraction_result, delta

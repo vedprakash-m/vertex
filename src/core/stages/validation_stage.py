@@ -234,6 +234,7 @@ class ValidationStage:
             scorecards=(ctx.resolved_v2.scorecards if ctx.resolved_v2 is not None else ()),
             archive_root=archive_root,
             programs_root=programs_root,
+            reports_root=ctx.reports_root,
             stale_claim_ids=(
                 load_stale_claim_ids(ctx.resolved_v2.program.id, ctx.resolved_issue_number, programs_root=programs_root)
                 if ctx.resolved_v2 is not None
@@ -261,6 +262,7 @@ class ValidationStage:
                 evaluate_continuity_gates(
                     html_content=render_state.html_body,
                     issue_number=ctx.resolved_issue_number,
+                    scorecard_band_block_ids=render_state.scorecard_band_block_ids,
                 )
             )
         trusted_baseline = load_trusted_baseline(

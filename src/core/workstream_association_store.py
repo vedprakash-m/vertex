@@ -9,10 +9,10 @@ from pathlib import Path
 from typing import Any
 
 import portalocker
+from src.core.workspace_paths import PROGRAMS_ROOT
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PROGRAMS_ROOT = REPO_ROOT / "programs"
 
 
 @dataclass(frozen=True, slots=True)

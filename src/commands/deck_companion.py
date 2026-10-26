@@ -197,6 +197,9 @@ def generate_deck_companion(
     _reality = ProgramReality.load(
         resolved_v2.program.id,
         programs_root=resolved_programs_root,
+        archive_root=resolved_archive_root,
+        edition_name=edition_name,
+        assessment_as_of=data_as_of,
     )
     issue_projections = build_issue_projection(
         items=items,

@@ -23,10 +23,9 @@ prefer canonical and fall back to the legacy root during the transition window.
 All ~22 production call sites already route through the correct getter or
 resolver from Phase 0.5, so no call-site changes are needed.
 
-``PROGRAMS_ROOT`` is imported from ``config_loader`` (the foundational default
-used by most stores). Edition-resolution paths continue to use
-``edition_resolver``'s env-aware root; runtime-path callers pass an explicit
-``programs_root`` in tests, so the default source does not diverge in practice.
+``PROGRAMS_ROOT`` comes from the lightweight ``workspace_paths`` authority,
+shared with configuration, edition resolution, stores and ledger paths.
+Explicit ``programs_root`` arguments still override that process default.
 """
 from __future__ import annotations
 
@@ -34,7 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
-from src.core.config_loader import PROGRAMS_ROOT
+from src.core.workspace_paths import PROGRAMS_ROOT
 
 # Subdirectory that collects platform-internal T-3 files (Phase 1-A).
 RUNTIME_SUBDIR = "runtime"

@@ -36,10 +36,10 @@ from src.core.program_fact_store import load_program_facts, project_action_items
 from src.core.teams_renderer import TeamsRenderer
 from src.m365.agency_bridge import AgencyBridge
 from src.m365.transcript_reader import TranscriptReader, TranscriptRecord
+from src.core.workspace_paths import PROGRAMS_ROOT
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PROGRAMS_ROOT = REPO_ROOT / "programs"
 _WI_REF_PATTERN = re.compile(r"\bWI:(\d+)\b", re.IGNORECASE)
 
 

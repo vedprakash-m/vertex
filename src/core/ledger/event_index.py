@@ -9,9 +9,9 @@ from typing import Any, Iterator
 from src.core._db import open_program_db
 from src.core.ledger.event_types import get_event_schema
 from src.core.ledger.source_refs import SourceRef, source_document_key
+from src.core.workspace_paths import PROGRAMS_ROOT
 
 
-PROGRAMS_ROOT = Path(__file__).resolve().parents[3] / "programs"
 SCHEMA_VERSION = "1"
 
 

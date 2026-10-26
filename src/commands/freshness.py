@@ -20,7 +20,7 @@ from src.core.archive_store import load_previous_confirmed_snapshot, read_archiv
 from src.core.circuit_breaker import CircuitBreaker, CircuitBreakerState
 from src.core.config_loader import ReportBundle, load_bundle
 from src.core.edition_resolver import get_program_output_dir, resolve_edition
-from src.core.exceptions import QueryError, StateError
+from src.core.exceptions import ConfigError, QueryError, StateError
 from src.core.freshness_engine import build_dri_summaries, build_freshness_report
 from src.core.models_v2 import ActionStatus
 from src.core.narrative_store import build_workstream_narrative_history, load_narratives
@@ -32,11 +32,11 @@ from src.core.review_status_store import load_review_status
 from src.core.ncfl_proposal_store import conflicting_pending_proposals, load_proposals, stale_pending_proposals
 from src.core.snapshot_store import ARCHIVE_ROOT as SNAPSHOT_ARCHIVE_ROOT, get_archive_root, read_snapshot
 from src.core.trusted_baseline_store import load_trusted_baseline_issue
+from src.core.workspace_paths import PROGRAMS_ROOT, validate_report_workspace
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REPORTS_ROOT = REPO_ROOT / "reports"
-PROGRAMS_ROOT = REPO_ROOT / "programs"
 ARCHIVE_ROOT = SNAPSHOT_ARCHIVE_ROOT
 DEFAULT_ADO_TOP = 1000
 _SINCE_PATTERN = re.compile(r"^(?P<value>\d+)d$", re.IGNORECASE)
@@ -78,6 +78,14 @@ class FreshnessArtifacts:
     notify_previews: tuple[NotifyPreview, ...]
 
 
+def _preflight_freshness_workspace() -> None:
+    try:
+        validate_report_workspace(programs_root=PROGRAMS_ROOT, reports_root=REPORTS_ROOT, archive_root=ARCHIVE_ROOT)
+    except ConfigError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=2) from error
+
+
 def freshness_command(
     edition: str = typer.Option("", "--edition", help="Edition used for the freshness run."),
     since: str | None = typer.Option(None, "--since", help="Relative lookback window, for example 14d."),
@@ -88,6 +96,7 @@ def freshness_command(
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview notification output without send confirmation."),
     format: str = typer.Option("human", "--format", help="Output format: human, json, or csv."),
 ) -> None:
+    _preflight_freshness_workspace()
     if format != "human" and teams_format:
         raise typer.BadParameter("--teams-format is only supported with --format human.")
     if format != "human" and notify and not dry_run:
@@ -336,13 +345,23 @@ def generate_freshness_report(
 
     started_at = datetime.now(timezone.utc)
     data_as_of = as_of or started_at
-    resolved_reports_root = reports_root or REPORTS_ROOT
-    resolved_archive_root = archive_root or ARCHIVE_ROOT
+    resolved_reports_root = reports_root if reports_root is not None else REPORTS_ROOT
+    resolved_archive_root = archive_root if archive_root is not None else ARCHIVE_ROOT
+    resolved_programs_root = (
+        programs_root if programs_root is not None
+        else reports_root.parent / "programs" if reports_root is not None
+        else PROGRAMS_ROOT
+    )
+    validate_report_workspace(
+        programs_root=resolved_programs_root,
+        reports_root=resolved_reports_root,
+        archive_root=resolved_archive_root,
+    )
 
     bundle = load_bundle(
         edition_name,
         reports_root=resolved_reports_root,
-        programs_root=resolved_reports_root.parent / "programs",
+        programs_root=resolved_programs_root,
     )
     archive_index = read_archive_index(edition_name, archive_root=resolved_archive_root)
     issue_number = _next_issue_number(archive_index)
@@ -353,7 +372,7 @@ def generate_freshness_report(
     trusted_baseline_issue_number = load_trusted_baseline_issue(
         edition_name,
         before_issue_number=issue_number,
-        programs_root=resolved_reports_root.parent / "programs",
+        programs_root=resolved_programs_root,
     )
     previous_snapshot, previous_issue_number = _load_previous_snapshot(
         edition_name,
@@ -370,8 +389,7 @@ def generate_freshness_report(
     }
 
     loader = work_item_loader or _load_live_freshness_items
-    _programs_root = programs_root or resolved_reports_root.parent / "programs"
-    breaker = CircuitBreaker(state_path=_breaker_state_path(_programs_root, edition_name))
+    breaker = CircuitBreaker(state_path=_breaker_state_path(resolved_programs_root, edition_name))
     items, _ado_calls, stale_banner = _load_items_with_fallback(
         bundle=bundle,
         as_of=data_as_of,
@@ -382,7 +400,7 @@ def generate_freshness_report(
     )
     previous_notification_state = None if stale_banner is not None else load_latest_notification_state(
         edition=edition_name,
-        programs_root=_programs_root,
+        programs_root=resolved_programs_root,
     )
     workstream_narrative_history = build_workstream_narrative_history(
         edition=edition_name,
@@ -390,6 +408,7 @@ def generate_freshness_report(
         workstream_names=tuple(workstream.name for workstream in bundle.program_context.workstreams) if bundle.program_context is not None else (),
         current_workstream_blurbs=workstream_blurbs,
         archive_root=resolved_archive_root,
+        reports_root=resolved_reports_root,
     )
 
     freshness_report = build_freshness_report(
@@ -417,17 +436,19 @@ def generate_freshness_report(
     review_summary, review_readiness = _summarize_review_status(review_status, issue_number=issue_number)
     resolved = resolve_edition(
         edition_name,
-        programs_root=resolved_reports_root.parent / "programs",
+        programs_root=resolved_programs_root,
     )
     action_summary_lines = _build_action_summary_lines(
         program_id=(resolved.paths.program_id if resolved is not None else None),
-        programs_root=resolved_reports_root.parent / "programs",
+        programs_root=resolved_programs_root,
+        archive_root=resolved_archive_root,
         as_of=data_as_of,
         program_facts=(
             load_program_facts(
                 resolved.paths.program_id,
-                db_root=(resolved_reports_root.parent / "programs").parent,
-                programs_root=resolved_reports_root.parent / "programs",
+                db_root=resolved_programs_root.parent,
+                programs_root=resolved_programs_root,
+                archive_root=resolved_archive_root,
             )
             if resolved is not None
             else None
@@ -435,13 +456,14 @@ def generate_freshness_report(
     )
     milestone_summary_lines = _build_milestone_summary_lines(
         program_id=(resolved.paths.program_id if resolved is not None else None),
-        programs_root=resolved_reports_root.parent / "programs",
+        programs_root=resolved_programs_root,
+        archive_root=resolved_archive_root,
         freshness_report=freshness_report,
     )
     summary_lines = (*action_summary_lines, *milestone_summary_lines)
     proposal_summary = _build_ncfl_summary_line(
         program_id=(resolved.paths.program_id if resolved is not None else None),
-        programs_root=resolved_reports_root.parent / "programs",
+        programs_root=resolved_programs_root,
     )
     if proposal_summary is not None:
         summary_lines = (*summary_lines, proposal_summary)
@@ -493,7 +515,7 @@ def generate_freshness_report(
         summary_lines=summary_lines,
     )
 
-    output_dir = get_program_output_dir(edition_name, programs_root=_programs_root)
+    output_dir = get_program_output_dir(edition_name, programs_root=resolved_programs_root)
     output_dir.mkdir(parents=True, exist_ok=True)
     md_path = _write_output_text(output_dir / f"issue_{issue_number:03d}" / f"issue_{issue_number:03d}.freshness.md", markdown_body)
     html_path = _write_output_text(output_dir / f"issue_{issue_number:03d}" / f"issue_{issue_number:03d}.freshness.html", html_body)
@@ -996,6 +1018,7 @@ def _build_action_summary_lines(
     *,
     program_id: str | None,
     programs_root: Path,
+    archive_root: Path,
     as_of: datetime,
     program_facts: ProgramFactSnapshot | None = None,
 ) -> tuple[str, ...]:
@@ -1005,6 +1028,7 @@ def _build_action_summary_lines(
         program_id,
         db_root=programs_root.parent,
         programs_root=programs_root,
+        archive_root=archive_root,
     )
     active_actions = tuple(
         action
@@ -1026,6 +1050,7 @@ def _build_milestone_summary_lines(
     *,
     program_id: str | None,
     programs_root: Path,
+    archive_root: Path,
     freshness_report: FreshnessReport,
 ) -> tuple[str, ...]:
     if program_id is None:
@@ -1044,6 +1069,7 @@ def _build_milestone_summary_lines(
         load_program_facts(
             program_id,
             programs_root=programs_root,
+            archive_root=archive_root,
             fact_types=("milestone.entry",),
         )
     ):

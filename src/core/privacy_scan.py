@@ -6,7 +6,7 @@ import re
 
 from src.core.exceptions import ConfigError
 from src.core.journal import PROGRAMS_ROOT, get_program_journal_archive_dir, get_program_journal_dir
-from src.core.knowledge_store import SHARED_KNOWLEDGE_ROOT
+from src.core.knowledge_store import get_shared_knowledge_root
 from src.core.profile_encryption import inspect_people_profiles_file
 
 
@@ -91,16 +91,17 @@ def find_plaintext_sensitive_profile_files(
     program_id: str,
     *,
     programs_root: Path = PROGRAMS_ROOT,
-    shared_knowledge_root: Path = SHARED_KNOWLEDGE_ROOT,
+    shared_knowledge_root: Path | None = None,
 ) -> SensitiveProfileStatus:
     workspace_root = programs_root.parent
+    resolved_shared_root = shared_knowledge_root if shared_knowledge_root is not None else get_shared_knowledge_root(programs_root)
     plaintext_paths: list[str] = []
     encrypted_paths: list[str] = []
     plaintext_profile_count = 0
     encrypted_profile_count = 0
 
     for file_path in (
-        shared_knowledge_root / "people_profiles.yaml",
+        resolved_shared_root / "people_profiles.yaml",
         programs_root / program_id / "knowledge" / "people_profiles.yaml",
     ):
         if not file_path.exists():

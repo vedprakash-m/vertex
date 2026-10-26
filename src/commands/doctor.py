@@ -13,7 +13,7 @@ from typing import Any, Callable
 import typer
 import yaml
 
-from src.commands.metric import _build_metric_rollout_status, _build_program_metric_binding_probe, validate_metric_bindings_command
+from src.commands.metric import _build_metric_rollout_status, _build_program_metric_binding_probe, _resolve_runtime_db_root, validate_metric_bindings_command
 from src.commands import watch as watch_command
 from src.commands.doctor_checks.output import build_doctor_payload, doctor_tip, render_doctor_output
 from src.commands.doctor_checks.chart_checks import run_charts_doctor as _run_charts_doctor
@@ -36,8 +36,8 @@ from src.commands.doctor_checks.channel_surface_checks import ado_pr_coverage_ch
 from src.commands.doctor_checks.channel_surface_checks import channel_detail_check as _channel_detail_check_impl
 from src.commands.doctor_checks.channel_surface_checks import extract_kusto_failed_target as _extract_kusto_failed_target_impl
 from src.commands.doctor_checks.channel_surface_checks import channel_last_error as _channel_last_error_impl
-from src.commands.doctor_checks.channel_surface_checks import uil_registry_check as _uil_registry_check_impl
-from src.commands.doctor_checks.channel_surface_checks import uil_registry_checks as _uil_registry_checks_impl
+from src.commands.doctor_checks.channel_surface_checks import uil_registry_check as _uil_registry_check
+from src.commands.doctor_checks.channel_surface_checks import uil_registry_checks as _uil_registry_checks
 from src.commands.doctor_checks.channel_delta_checks import channel_delta_check as _channel_delta_check_impl
 from src.commands.doctor_checks.channel_delta_checks import channel_health_snapshot as _channel_health_snapshot_impl
 from src.commands.doctor_checks.circuit_breaker_checks import default_breaker_snapshot
@@ -47,6 +47,7 @@ from src.commands.doctor_checks.circuit_breaker_checks import run_circuit_breake
 from src.commands.doctor_checks.consistency_checks import consistency_check as _consistency_check_impl
 from src.commands.doctor_checks.context_checks import run_context_doctor as _run_context_doctor_impl
 from src.commands.doctor_checks.context_checks import run_ranked_gaps as _run_ranked_gaps_impl
+from src.commands.doctor_checks.context_checks import run_rev_health as _run_rev_health_impl
 from src.commands.doctor_checks.default_report_composition import run_default_doctor_report as _run_default_doctor_report
 from src.commands.doctor_checks.default_report_support_checks import audit_hygiene_check as _audit_hygiene_check
 from src.commands.doctor_checks.default_report_support_checks import candidate_queue_backlog_check as _candidate_queue_backlog_check
@@ -61,6 +62,8 @@ from src.commands.doctor_checks.default_report_support_checks import slice_telem
 from src.commands.doctor_checks.default_report_support_checks import override_streak_check as _override_streak_check
 from src.commands.doctor_checks.doctor_support_checks import agency_cli_check as _agency_cli_check_impl
 from src.commands.doctor_checks.doctor_support_checks import load_milestone_owner_aliases
+from src.commands.doctor_checks.doctor_support_checks import resolve_doctor_roots as _resolve_doctor_roots
+from src.commands.doctor_checks.doctor_support_checks import resolve_edition_name as _resolve_edition_name_impl
 from src.commands.doctor_checks.doctor_support_checks import latest_snapshot_check as _latest_snapshot_check_impl
 from src.commands.doctor_checks.doctor_support_checks import mail_preview_check as _mail_preview_check_impl
 from src.commands.doctor_checks.doctor_support_checks import probe_ado_access as _probe_ado_access_impl
@@ -271,16 +274,25 @@ def doctor_command(
 ) -> None:
     default_reports_root = REPO_ROOT / "reports"
     default_programs_root = REPO_ROOT / "programs"
-    effective_programs_root: Path | None = PROGRAMS_ROOT
+    effective_programs_root = PROGRAMS_ROOT
     if REPORTS_ROOT != default_reports_root and PROGRAMS_ROOT == default_programs_root:
-        effective_programs_root = None
+        effective_programs_root = REPORTS_ROOT.parent / "programs"
+    effective_reports_root = (
+        REPORTS_ROOT if REPORTS_ROOT != default_reports_root else effective_programs_root.parent / "reports"
+    )
+    effective_archive_root = (
+        ARCHIVE_ROOT if ARCHIVE_ROOT != REPO_ROOT / "archive" else effective_programs_root.parent / "archive"
+    )
+    effective_editions_root = (
+        EDITIONS_ROOT if EDITIONS_ROOT != REPO_ROOT / "editions" else effective_programs_root.parent / "editions"
+    )
 
     if rev_health:
         _run_rev_health(
             edition=edition,
             rev_program=rev_program,
-            programs_root=PROGRAMS_ROOT,
-            editions_root=EDITIONS_ROOT,
+            programs_root=effective_programs_root,
+            editions_root=effective_editions_root,
             format=format,
         )
         return
@@ -302,8 +314,8 @@ def doctor_command(
             raise typer.BadParameter("--ranked requires --context.")
         _run_ranked_gaps(
             edition_name=edition,
-            programs_root=PROGRAMS_ROOT,
-            editions_root=EDITIONS_ROOT,
+            programs_root=effective_programs_root,
+            editions_root=effective_editions_root,
         )
         return
 
@@ -313,13 +325,19 @@ def doctor_command(
         raise typer.BadParameter("--issue requires --flip-parity.")
 
     try:
-        _ed_paths = _resolve_edition_paths(edition or "", editions_root=EDITIONS_ROOT, programs_root=PROGRAMS_ROOT)
-        if _ed_paths is None and edition is None:
-            _discovered = discover_report_editions(reports_root=REPORTS_ROOT)
+        _ed_paths = _resolve_edition_paths(
+            edition, editions_root=effective_editions_root, programs_root=effective_programs_root,
+        ) if edition is not None else None
+        if _ed_paths is None and edition is None and not platform_readiness:
+            _discovered = discover_report_editions(
+                reports_root=effective_reports_root, programs_root=effective_programs_root,
+            )
             if len(_discovered) == 1:
-                _ed_paths = _resolve_edition_paths(_discovered[0], editions_root=EDITIONS_ROOT, programs_root=PROGRAMS_ROOT)
+                _ed_paths = _resolve_edition_paths(
+                    _discovered[0], editions_root=effective_editions_root, programs_root=effective_programs_root,
+                )
         if _ed_paths is not None:
-            _doctor_banner = _surface_alert_banner(_ed_paths.program_id, programs_root=PROGRAMS_ROOT)
+            _doctor_banner = _surface_alert_banner(_ed_paths.program_id, programs_root=effective_programs_root)
             if _doctor_banner is not None:
                 typer.echo(_doctor_banner, err=True)
     except (OSError, _StateError, ValueError):
@@ -373,9 +391,9 @@ def doctor_command(
         sharepoint=sharepoint,
         strict_lt_alignment=strict_lt_alignment,
         schedule_health=schedule_health,
-        reports_root=REPORTS_ROOT,
-        archive_root=ARCHIVE_ROOT,
-        editions_root=EDITIONS_ROOT,
+        reports_root=effective_reports_root,
+        archive_root=effective_archive_root,
+        editions_root=effective_editions_root,
         programs_root=effective_programs_root,
     )
 
@@ -509,11 +527,16 @@ def run_doctor(
     reality_db_root: Path | None = None,
     now: datetime | None = None,
 ) -> DoctorReport:
-    resolved_editions_root = editions_root or EDITIONS_ROOT
-    resolved_archive_root = archive_root or ARCHIVE_ROOT
-    resolved_reports_root = reports_root or REPORTS_ROOT
-    resolved_programs_root = programs_root or (resolved_reports_root.parent / "programs")
-    resolved_reality_db_root = reality_db_root or (resolved_programs_root.parent / "vertex-db")
+    resolved_editions_root, resolved_archive_root, resolved_reports_root, resolved_programs_root = _resolve_doctor_roots(
+        programs_root=programs_root,
+        reports_root=reports_root,
+        archive_root=archive_root,
+        editions_root=editions_root,
+        default_editions_root=EDITIONS_ROOT,
+        default_archive_root=ARCHIVE_ROOT,
+        default_reports_root=REPORTS_ROOT,
+    )
+    resolved_reality_db_root = _resolve_runtime_db_root(reality_db_root, programs_root=resolved_programs_root)
     if sum(1 for option in (check_auth, operator_gates, platform_readiness, kb, context, ids, cadence, channels, privacy, kusto, milestones, dependencies, actions, risks, escalations, decisions, assumptions, readiness, semantic_index, personas, metric_bindings, consistency, checkpoints, storage, flip_status, flip_parity, fact_parity, fact_bridge, fact_deserialization, confirm_readiness, adapter_cert, charts, source_waivers, watch_sources, catchup_log, nudge, circuit_breakers, sharepoint, schedule_health) if option) > 1:
         raise typer.BadParameter(
             "Choose only one of --check-auth, --operator-gates, --platform-readiness, --kb, --context, --ids, --cadence, --channels, --privacy, --kusto, --milestones, --dependencies, --actions, --risks, --escalations, --decisions, --assumptions, --readiness, --semantic-index, --personas, --metric-bindings, --consistency, --checkpoints, --storage, --flip-status, --flip-parity, --fact-parity, --fact-bridge, --fact-deserialization, --confirm-readiness, --adapter-cert, --charts, --source-waivers, --watch-sources, --catchup-log, --nudge, --circuit-breakers, --sharepoint, or --schedule-health."
@@ -1009,14 +1032,6 @@ def _run_channel_doctor(*, edition_name: str, reports_root: Path, editions_root:
     )
 
 
-def _uil_registry_checks(channel_entries: dict[str, dict[str, Any]]) -> list[DoctorCheck]:
-    return _uil_registry_checks_impl(channel_entries)
-
-
-def _uil_registry_check(channel_name: str, channel_entry: Any) -> DoctorCheck | None:
-    return _uil_registry_check_impl(channel_name, channel_entry)
-
-
 def _ado_pr_coverage_check(workstreams: tuple[Any, ...]) -> DoctorCheck:
     return _ado_pr_coverage_check_impl(workstreams)
 
@@ -1179,12 +1194,9 @@ def _run_auth_doctor(
 
 
 def _resolve_edition_name(edition_name: str | None, reports_root: Path) -> str:
-    if edition_name is not None:
-        return edition_name
-    editions = discover_report_editions(reports_root=reports_root)
-    if len(editions) == 1:
-        return editions[0]
-    raise typer.BadParameter("Provide --edition when multiple editions exist.")
+    return _resolve_edition_name_impl(
+        edition_name, reports_root, discover_report_editions_fn=discover_report_editions,
+    )
 
 
 def _run_cadence_doctor(*, edition_name: str, editions_root: Path, programs_root: Path, archive_root: Path) -> DoctorReport:
@@ -1298,30 +1310,14 @@ def _run_rev_health(
     editions_root: Path,
     format: str,
 ) -> None:
-    """``doctor --rev-health`` — print the REV subsystem health summary.
-
-    Resolves the target program from ``--rev-program`` or the resolved edition,
-    then aggregates run-state + verification + evidence-vault health (read-only).
-    """
-    import json as _json
-
-    from src.core.rev.health import build_rev_health_report, render_rev_health_human
-
-    program_id = rev_program
-    if program_id is None:
-        ed_paths = _resolve_edition_paths(edition or "", editions_root=editions_root, programs_root=programs_root)
-        if ed_paths is None:
-            typer.echo("rev-health: pass --rev-program <id> or --edition <name> to resolve a program.")
-            raise typer.Exit(code=2)
-        program_id = ed_paths.program_id
-    report = build_rev_health_report(program_id, programs_root=programs_root)
-    if format == "json":
-        typer.echo(_json.dumps(report.to_dict(), indent=2, sort_keys=True))
-    else:
-        typer.echo(render_rev_health_human(report), nl=False)
-    # Non-zero when shield degrade is active (Azure Prompt Shields not wired) so
-    # the operator sees the visible-degrade state in CI/exit code.
-    raise typer.Exit(code=1 if report.shield_degrade else 0)
+    return _run_rev_health_impl(
+        edition=edition,
+        rev_program=rev_program,
+        programs_root=programs_root,
+        editions_root=editions_root,
+        format=format,
+        resolve_edition_paths_fn=_resolve_edition_paths,
+    )
 
 
 def _run_context_doctor(

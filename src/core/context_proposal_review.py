@@ -76,7 +76,13 @@ def load_pending_context_proposal_rows(
                 target=target,
                 proposed_value=proposal.source_value,
                 current_value_hash=proposal.current_value_hash,
-                evidence=f"{proposal.source_artifact}:{proposal.source_field}",
+                evidence=(
+                    f"{proposal.source_artifact}:{proposal.source_field}"
+                    + (
+                        f" | {proposal.extraction_method_rationale}"
+                        if proposal.source_type == "context_gap_reply" else ""
+                    )
+                ),
                 conflict_state=conflict_state,
                 next_command=next_command,
             )

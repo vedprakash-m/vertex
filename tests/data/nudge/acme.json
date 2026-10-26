@@ -1,0 +1,89 @@
+{
+  "metadata": {"program": "acme", "note": "Authored synthetic nudge fixture; no operational source data."},
+  "work_items_by_tag": {
+    "RELEASE": [101, 102, 104],
+    "RELEASE-ALT": [102, 103],
+    "FOLLOWUP": [104, 105, 106]
+  },
+  "work_items": [
+    {"id": 101, "fields": {
+      "System.Id": 101, "System.WorkItemType": "Feature",
+      "System.Title": "Acme release validation", "System.State": "Active",
+      "System.AssignedTo": {"displayName": "Release Owner", "uniqueName": "release@nudge-synth.local"},
+      "System.AreaPath": "ExampleProject\\Acme", "System.IterationPath": "Example Sprint",
+      "System.ChangedDate": "2026-06-18T18:00:00+00:00",
+      "Microsoft.VSTS.Scheduling.TargetDate": "2026-07-01",
+      "System.Tags": "RELEASE", "Custom.RiskAssessment": "On Track",
+      "Custom.RiskAssessmentComment": "", "Custom.CommitmentStatus": "Committed",
+      "System.Description": "Validate the synthetic release package."
+    }},
+    {"id": 102, "fields": {
+      "System.Id": 102, "System.WorkItemType": "Feature",
+      "System.Title": "Acme release checklist", "System.State": "Active",
+      "System.AssignedTo": {"displayName": "Checklist Owner", "uniqueName": "checklist@nudge-synth.local"},
+      "System.AreaPath": "ExampleProject\\Acme", "System.IterationPath": "Example Sprint",
+      "System.ChangedDate": "2026-06-10T18:00:00+00:00",
+      "Microsoft.VSTS.Scheduling.TargetDate": "2026-07-02",
+      "System.Tags": "RELEASE; RELEASE-ALT", "Custom.RiskAssessment": "On Track",
+      "Custom.RiskAssessmentComment": "", "System.Description": "Review the synthetic checklist."
+    }},
+    {"id": 103, "fields": {
+      "System.Id": 103, "System.WorkItemType": "Feature",
+      "System.Title": "Acme release schedule", "System.State": "Active",
+      "System.AssignedTo": {"displayName": "Schedule Owner", "uniqueName": "schedule@nudge-synth.local"},
+      "System.AreaPath": "ExampleProject\\Acme", "System.IterationPath": "Example Sprint",
+      "System.ChangedDate": "2026-06-09T18:00:00+00:00",
+      "System.Tags": "RELEASE-ALT", "Custom.RiskAssessment": "On Track",
+      "Custom.RiskAssessmentComment": "", "System.Description": "Set a target date for the synthetic release."
+    }},
+    {"id": 104, "fields": {
+      "System.Id": 104, "System.WorkItemType": "Feature",
+      "System.Title": "Acme release dependency", "System.State": "Active",
+      "System.AssignedTo": {"displayName": "Dependency Owner", "uniqueName": "dependency@nudge-synth.local"},
+      "System.AreaPath": "ExampleProject\\Acme", "System.IterationPath": "Example Sprint",
+      "System.ChangedDate": "2026-06-19T18:00:00+00:00",
+      "Microsoft.VSTS.Scheduling.TargetDate": "2026-07-03",
+      "System.Tags": "RELEASE; FOLLOWUP", "Custom.RiskAssessment": "At Risk",
+      "Custom.RiskAssessmentComment": "Blocked on a synthetic dependency; ETA next milestone.",
+      "System.Description": "Resolve the synthetic dependency."
+    }},
+    {"id": 105, "fields": {
+      "System.Id": 105, "System.WorkItemType": "Feature",
+      "System.Title": "Acme follow-up testing", "System.State": "Active",
+      "System.AssignedTo": {"displayName": "Testing Owner", "uniqueName": "testing@nudge-synth.local"},
+      "System.AreaPath": "ExampleProject\\Acme", "System.IterationPath": "Example Sprint",
+      "System.ChangedDate": "2026-06-08T18:00:00+00:00",
+      "Microsoft.VSTS.Scheduling.TargetDate": "2026-07-10",
+      "System.Tags": "FOLLOWUP", "Custom.RiskAssessment": "On Track",
+      "Custom.RiskAssessmentComment": "", "System.Description": "Run synthetic follow-up checks."
+    }},
+    {"id": 106, "fields": {
+      "System.Id": 106, "System.WorkItemType": "Feature",
+      "System.Title": "Acme follow-up documentation", "System.State": "Active",
+      "System.AssignedTo": {"displayName": "Documentation Owner", "uniqueName": "documentation@nudge-synth.local"},
+      "System.AreaPath": "ExampleProject\\Acme", "System.IterationPath": "Example Sprint",
+      "System.ChangedDate": "2026-06-18T18:00:00+00:00",
+      "Microsoft.VSTS.Scheduling.TargetDate": "2026-07-11",
+      "System.Tags": "FOLLOWUP", "Custom.RiskAssessment": "On Track",
+      "Custom.RiskAssessmentComment": "", "Custom.CommitmentStatus": "Committed",
+      "System.Description": "Document the synthetic release."
+    }},
+    {"id": 110, "fields": {
+      "System.Id": 110, "System.WorkItemType": "Feature",
+      "System.Title": "Acme priority review", "System.State": "Active",
+      "System.AssignedTo": {"displayName": "Review Owner", "uniqueName": "review@nudge-synth.local"},
+      "System.AreaPath": "ExampleProject\\Acme", "System.IterationPath": "Example Sprint",
+      "System.ChangedDate": "2026-06-17T18:00:00+00:00",
+      "Microsoft.VSTS.Scheduling.TargetDate": "2026-07-01",
+      "System.Tags": "PRIORITY", "Custom.RiskAssessment": "On Track",
+      "Custom.RiskAssessmentComment": "", "Custom.CommitmentStatus": "Committed",
+      "System.Description": "Review the synthetic priority item."
+    }}
+  ],
+  "comments_by_id": {
+    "101": [{"createdDate": "2026-06-18T18:00:00+00:00", "text": "Status: on track, no blockers."}],
+    "104": [{"createdDate": "2026-06-19T18:00:00+00:00", "text": "Blocked on a synthetic dependency."}],
+    "106": [{"createdDate": "2026-06-18T18:00:00+00:00", "text": "Complete, on track."}],
+    "110": [{"createdDate": "2026-06-17T18:00:00+00:00", "text": "Status: on track for review."}]
+  }
+}

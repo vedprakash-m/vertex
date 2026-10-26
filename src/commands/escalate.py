@@ -1328,17 +1328,17 @@ def _scorecard_evidence_lines(packet: ScorecardEvidencePacket | None) -> tuple[s
 
 def _history_risk_trend(history: tuple[RiskLevel, ...]) -> tuple[str | None, str | None]:
     visible_history = history[-4:]
-    if not visible_history:
+    if len(visible_history) < 2 or RiskLevel.UNKNOWN in visible_history:
         return None, None
     sparkline = "".join(report_helpers._spark_char(level) for level in visible_history)
+    observation_label = f"across {len(visible_history)} observations"
     if all(level == RiskLevel.HIGH for level in visible_history):
-        return sparkline, "chronic high"
-    if len(visible_history) >= 2:
-        if report_helpers._risk_rank(visible_history[-1]) > report_helpers._risk_rank(visible_history[0]):
-            return sparkline, "rising 4w"
-        if report_helpers._risk_rank(visible_history[-1]) < report_helpers._risk_rank(visible_history[0]):
-            return sparkline, "falling 4w"
-    return sparkline, "stable"
+        return sparkline, f"high {observation_label}"
+    if report_helpers._risk_rank(visible_history[-1]) > report_helpers._risk_rank(visible_history[0]):
+        return sparkline, f"net rise {observation_label}"
+    if report_helpers._risk_rank(visible_history[-1]) < report_helpers._risk_rank(visible_history[0]):
+        return sparkline, f"net fall {observation_label}"
+    return sparkline, f"no net change {observation_label}"
 
 
 def _finalize_escalation_preview(*, edition_name: str, preview: EscalationPreview) -> EscalationPreview:

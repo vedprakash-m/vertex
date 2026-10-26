@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any, Callable
@@ -10,16 +11,24 @@ import typer
 from src.commands.gather_pipeline.ado_pipeline_stage import _parse_datetime, _roll_query_value_history
 from src.commands.gather_workiq_helpers import _truncate_signal_text
 from src.core.ado_client import ADO_WIQL_DEFAULT_TOP, ADOClient
+from src.core.ado_discovery import LinkedItemExpansionResult
 from src.core.ado_discovery import expand_with_linked_items as _expand_with_linked_items
 from src.core.exceptions import AuthError, QueryError
+from src.core.gather_channel_support import append_integration_error_once
 from src.core.m365_payload_support import optional_string as _optional_string
 from src.core.models import Confidence
-from src.core.models_v2 import KustoQuery, Program, Signal, Workstream
+from src.core.models_v2 import IntegrationError, KustoQuery, Program, Signal, Workstream
 from src.core.signal_ref_utils import merge_entity_refs
 
 
 TeamNameNormalizer = Callable[[str | None], str | None]
-GraphExpander = Callable[[ADOClient, frozenset[int]], frozenset[int] | set[int]]
+GraphExpander = Callable[[ADOClient, frozenset[int]], LinkedItemExpansionResult]
+
+#: RELO-W2.2 (Sec 8.3.2): entity_refs/metadata below cap linked-item lists
+#: to this many entries; "truncation explicit" means every signal that caps
+#: a list also carries an explicit boolean saying so, not just a raw count
+#: a caller must remember to compare against the cap themselves.
+_LINKED_ITEM_DISPLAY_CAP = 25
 
 
 def load_wiql_golden_query_signals(
@@ -30,6 +39,7 @@ def load_wiql_golden_query_signals(
     queries: tuple[KustoQuery, ...],
     query_state_sink: dict[str, dict[str, Any]] | None = None,
     previous_query_states: dict[str, dict[str, Any]] | None = None,
+    integration_error_sink: list[IntegrationError] | None = None,
     ado_client_factory: Callable[..., ADOClient],
     normalize_ado_team_name_fn: TeamNameNormalizer,
     expand_with_linked_items_fn: GraphExpander = _expand_with_linked_items,
@@ -124,15 +134,26 @@ def load_wiql_golden_query_signals(
                     "query_id": query.id,
                     "engine": "wiql",
                     "work_item_count": len(work_item_ids),
-                    "work_item_ids": tuple(str(item_id) for item_id in work_item_ids[:25]),
+                    "work_item_ids": tuple(str(item_id) for item_id in work_item_ids[:_LINKED_ITEM_DISPLAY_CAP]),
+                    "work_item_ids_truncated": len(work_item_ids) > _LINKED_ITEM_DISPLAY_CAP,
                     "date": capture_date,
                 },
             )
         )
     if all_seed_ids:
-        linked_ids = expand_with_linked_items_fn(client, frozenset(all_seed_ids))
-        if linked_ids:
-            linked_refs = tuple(f"WI:{lid}" for lid in sorted(linked_ids)[:25])
+        expansion = expand_with_linked_items_fn(client, frozenset(all_seed_ids))
+        linked_ids = expansion.linked_ids
+        for error in expansion.errors:
+            append_integration_error_once(
+                integration_error_sink, source=error.source, stage=error.stage,
+                error=error.message, retryable=error.retryable,
+                operator_action=error.operator_action,
+            )
+        # RELO-W2.2: emit even when zero work items were discovered but an
+        # external/artifact target or quarantined relation was -- that must stay visible, not
+        # silently vanish because the linked_ids set alone is empty.
+        if linked_ids or expansion.external_target_count or expansion.errors:
+            linked_refs = tuple(f"WI:{lid}" for lid in sorted(linked_ids)[:_LINKED_ITEM_DISPLAY_CAP])
             signals.append(
                 Signal(
                     id=str(uuid5(NAMESPACE_URL, f"{program.id}|ado_graph_expansion|{capture_date}|{','.join(str(i) for i in sorted(linked_ids))}")),
@@ -143,6 +164,7 @@ def load_wiql_golden_query_signals(
                     entity_refs=linked_refs,
                     text=_truncate_signal_text(
                         f"Graph expansion: {len(linked_ids)} linked item(s) discovered from {len(all_seed_ids)} seed item(s)"
+                        + (f"; {len(expansion.errors)} relation(s) quarantined" if expansion.errors else "")
                     ),
                     raw_ref=f"ado_graph:{capture_date}",
                     confidence=Confidence.MEDIUM,
@@ -150,7 +172,13 @@ def load_wiql_golden_query_signals(
                         "engine": "graph",
                         "seed_count": len(all_seed_ids),
                         "linked_count": len(linked_ids),
-                        "linked_work_item_ids": tuple(str(i) for i in sorted(linked_ids)[:25]),
+                        "linked_work_item_ids": tuple(str(i) for i in sorted(linked_ids)[:_LINKED_ITEM_DISPLAY_CAP]),
+                        "linked_work_item_ids_truncated": len(linked_ids) > _LINKED_ITEM_DISPLAY_CAP,
+                        "external_target_count": expansion.external_target_count,
+                        "is_degraded": bool(expansion.errors),
+                        "quarantined_relation_count": len(expansion.errors),
+                        "relation_errors": tuple(asdict(error) for error in expansion.errors[:_LINKED_ITEM_DISPLAY_CAP]),
+                        "relation_errors_truncated": len(expansion.errors) > _LINKED_ITEM_DISPLAY_CAP,
                         "date": capture_date,
                     },
                 )
