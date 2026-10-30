@@ -1022,7 +1022,7 @@ def test_append_bridged_milestone_event_creates_fact_revision(tmp_path) -> None:
     assert snapshot.facts[0].payload["id"] == "milestone:m2"
 
 
-def test_build_bridge_dependency_fact_input_from_declared_event() -> None:
+def test_build_bridge_dependency_fact_input_from_declared_event(tmp_path) -> None:
     event = EventEnvelope(
         event_id="evt-dependency-declared",
         program_id="acme",
@@ -1045,6 +1045,20 @@ def test_build_bridge_dependency_fact_input_from_declared_event() -> None:
     )
 
     fact = build_bridge_dependency_fact_input(event)
+
+    assert fact.payload["planned_resolution_date"] == "2026-07-01"
+    store_payload = dict(fact.payload)
+    assert store_payload.get("provider_forecast_ready_date") is None
+    assert store_payload.get("consumer_required_by_date") is None
+    from src.core.program_fact_store import project_dependencies
+    from src.core.milestone_engine import assess_dependency_date_margin
+
+    store = ProgramFactStore("acme", db_root=tmp_path)
+    store.append_fact(fact)
+    dependency, = project_dependencies(store.snapshot())
+    assert dependency.provider_forecast_ready_date is None
+    assert dependency.consumer_required_by_date is None
+    assert assess_dependency_date_margin(dependency).status == "unknown"
 
     assert fact.fact_type == "dependency.link"
     assert fact.entity_refs == ("DEPENDENCY:dependency:d1",)

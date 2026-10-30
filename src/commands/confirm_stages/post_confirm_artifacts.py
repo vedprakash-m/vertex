@@ -23,6 +23,7 @@ from src.core.edition_resolver import resolve_edition, get_program_output_dir
 from src.core.models import ReportData
 from src.core.ncfl_extractor import extract_proposals
 from src.core.ncfl_proposal_store import get_proposals_path, stage_extracted_proposals
+from src.core.overrides_store import _resolve_artifact_edition
 from src.core.view_models import WorkstreamData
 from src.core.workstream_association_store import append_workstream_association_records, record_from_dict
 
@@ -182,9 +183,12 @@ def record_edit_patterns_for_v2(
     report: ReportData,
     confirmed_at: datetime,
     reports_root: Path,
+    programs_root: Path | None = None,
 ) -> str | None:
-    repo_root = reports_root.parent
-    programs_root = repo_root / "programs"
+    if programs_root is None:
+        programs_root = reports_root.parent / "programs"
+    else:
+        _resolve_artifact_edition(edition_name, reports_root, programs_root)
     resolved_v2 = resolve_edition(
         edition_name,
         programs_root=programs_root,

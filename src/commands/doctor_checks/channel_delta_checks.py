@@ -20,7 +20,11 @@ def channel_delta_check(
 ) -> DoctorCheck:
     current_active_channels, current_channels_at_expected_min, current_completeness_pct = channel_health_snapshot(current_channels)
     _, _, previous_completeness_pct = channel_health_snapshot(previous_channels)
-    completeness_delta_pct = current_completeness_pct - previous_completeness_pct
+    completeness_delta_pct = (
+        current_completeness_pct - previous_completeness_pct
+        if current_completeness_pct is not None and previous_completeness_pct is not None
+        else None
+    )
 
     regressed_channels: list[str] = []
     improved_channels: list[str] = []
@@ -63,10 +67,18 @@ def channel_delta_check(
     m365_signals_without_workstream_delta = int(current_m365_discovery.get("signals_without_workstream") or 0) - int(previous_m365_discovery.get("signals_without_workstream") or 0)
     m365_untracked_threads_delta = int(current_m365_discovery.get("untracked_observed_thread_ids") or 0) - int(previous_m365_discovery.get("untracked_observed_thread_ids") or 0)
 
-    detail = (
-        f"Previous run completeness {previous_completeness_pct}% -> current {current_completeness_pct}% "
-        f"({completeness_delta_pct:+d} points) from {previous_gathered_at.isoformat()}."
-    )
+    if completeness_delta_pct is None:
+        previous_label = "unavailable" if previous_completeness_pct is None else f"{previous_completeness_pct}%"
+        current_label = "unavailable" if current_completeness_pct is None else f"{current_completeness_pct}%"
+        detail = (
+            f"Previous run completeness {previous_label} -> current {current_label} "
+            f"(change unavailable) from {previous_gathered_at.isoformat()}."
+        )
+    else:
+        detail = (
+            f"Previous run completeness {previous_completeness_pct}% -> current {current_completeness_pct}% "
+            f"({completeness_delta_pct:+d} points) from {previous_gathered_at.isoformat()}."
+        )
     if regressed_channels:
         detail = f"{detail} Regressed channels: {', '.join(regressed_channels)}."
     if improved_channels:
@@ -83,7 +95,8 @@ def channel_delta_check(
         detail = f"{detail} M365 unattributed signals increased by {m365_signals_without_workstream_delta}."
 
     has_regression = bool(
-        completeness_delta_pct < 0
+        completeness_delta_pct is None
+        or completeness_delta_pct < 0
         or regressed_channels
         or newly_failed_queries
         or newly_stale_queries
@@ -114,8 +127,8 @@ def channel_delta_check(
     )
 
 
-def channel_health_snapshot(channel_entries: dict[str, dict[str, Any]]) -> tuple[list[str], list[str], int]:
+def channel_health_snapshot(channel_entries: dict[str, dict[str, Any]]) -> tuple[list[str], list[str], int | None]:
     active_channels = [name for name, entry in channel_entries.items() if bool(entry.get("active"))]
     channels_at_expected_min = [name for name in active_channels if bool(channel_entries[name].get("meets_expected_min"))]
-    completeness_pct = int(round((len(channels_at_expected_min) / len(active_channels)) * 100)) if active_channels else 100
+    completeness_pct = int(round((len(channels_at_expected_min) / len(active_channels)) * 100)) if active_channels else None
     return active_channels, channels_at_expected_min, completeness_pct

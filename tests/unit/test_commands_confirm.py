@@ -32,7 +32,12 @@ from src.ai.edit_learner import read_edit_patterns
 import src.core.archive_store as archive_store
 from src.core.config_loader import load_report_bundle
 from src.core.decision_register import save_decisions
+from src.core.exceptions import ConfigError
 from src.core.journal import append_review_decision, append_signal, read_signals
+from src.core.file_stores import FileTrajectoryStore
+from src.core.models_v2 import TrajectoryPoint
+from src.core.pipeline import capture_milestone_trajectory_snapshot
+from src.core.quality_gates import fact_drift as fact_drift_module
 from src.ai.learning_distiller import EditorialRuleProposal, LearningDistillation
 from src.core.narrative_store import get_narratives_dir, load_narratives
 from src.core.overrides_store import get_overrides_path, load_overrides
@@ -44,7 +49,8 @@ from src.core.semantic_index import get_semantic_index_path, load_semantic_index
 from tests.support.slice_contract_fixtures import build_test_source_health_slice_contract
 from src.core.section_proposal_store import append_proposal
 from src.core.slice_contract_loader import SliceAdoSourceContract, SliceContract, SliceDegradation, SliceFilterDefinition, SliceFreshness, SliceOwners, SlicePredicateDefinition, SliceSourceContract, SliceTelemetryContract
-from src.core.sqlite_stores import SQLiteSignalStore
+from src.core.sqlite_stores import SQLiteSignalStore, SQLiteTrajectoryStore
+from src.core.store_factory import build_trajectory_store_for_program_id
 from src.core.snapshot_store import get_archive_root
 from src.core import quality_gates
 from src.core.quality_gates import GateEvaluation, QualityGateReport
@@ -116,6 +122,241 @@ def test_program_fact_drift_gate_blocks_confirm_when_live_store_changes(tmp_path
     assert gate.passed is False
     assert gate.results[0].gate_id == "QG-SG-20"
     assert "State Drift Warning" in gate.results[0].message
+
+
+@pytest.mark.parametrize("backend", ["file", "sqlite"])
+@pytest.mark.parametrize("omit_linked_item", [False, True])
+def test_milestone_trajectory_gate_binds_exact_assessment_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    omit_linked_item: bool,
+) -> None:
+    store = (
+        FileTrajectoryStore(programs_root=tmp_path)
+        if backend == "file"
+        else SQLiteTrajectoryStore(programs_root=tmp_path)
+    )
+    points = {
+        item_id: TrajectoryPoint(
+            date=date(2026, 5, item_id - 900000),
+            state="Active",
+            assigned_to=None,
+            target_date=None,
+            risk_level=None,
+            area_path="",
+        )
+        for item_id in (900001, 900002)
+    }
+    for item_id, point in points.items():
+        assert store.append("fixture", item_id, point)
+    monkeypatch.setattr(
+        fact_drift_module,
+        "build_trajectory_store_for_program_id",
+        lambda program_id, *, programs_root: store,
+    )
+    captured_ids = (900001,) if omit_linked_item else (900001, 900002)
+    captured = capture_milestone_trajectory_snapshot(
+        "fixture",
+        store,
+        {item_id: store.read("fixture", item_id) for item_id in captured_ids},
+    )
+    gate = quality_gates.evaluate_program_fact_drift_from_draft(
+        draft_state={"edition_type": "detailed"},
+        program_id="fixture",
+        milestone_assessments=[
+            {"milestone_id": "m1", "linked_work_item_ids": [900001, 900002]},
+            {"milestone_id": "m2", "linked_work_item_ids": []},
+        ],
+        milestone_trajectory_snapshot=captured,
+        programs_root=tmp_path,
+    )
+    if omit_linked_item:
+        assert not gate.passed
+        assert gate.results[0].gate_id == "QG-SG-20"
+        assert "scope does not match" in gate.results[0].message
+    else:
+        assert gate.passed
+
+
+def test_milestone_trajectory_gate_rejects_unbound_historical_assessments(
+    tmp_path: Path,
+) -> None:
+    gate = quality_gates.evaluate_program_fact_drift_from_draft(
+        draft_state={"edition_type": "detailed"},
+        program_id="fixture",
+        milestone_assessments=[{"milestone_id": "m1"}],
+        milestone_trajectory_snapshot=None,
+        programs_root=tmp_path,
+    )
+    assert not gate.passed
+    assert gate.results[0].gate_id == "QG-SG-20"
+    assert "item scope" in gate.results[0].message
+
+
+@pytest.mark.parametrize(
+    ("draft_state", "assessments"),
+    [
+        ({"edition_type": "detailed"}, []),
+        ({"edition_type": "lookback"}, None),
+    ],
+)
+def test_milestone_trajectory_gate_bypasses_unassessed_drafts_without_reading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    draft_state: dict[str, str],
+    assessments: object,
+) -> None:
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Unassessed drafts must not read trajectory history.")
+
+    monkeypatch.setattr(fact_drift_module, "build_trajectory_store_for_program_id", forbidden)
+    gate = quality_gates.evaluate_program_fact_drift_from_draft(
+        draft_state=draft_state,
+        program_id="fixture",
+        milestone_assessments=assessments,
+        milestone_trajectory_snapshot={"malformed": True},
+        programs_root=tmp_path,
+    )
+    assert gate.passed
+
+
+@pytest.mark.parametrize(
+    ("location", "value", "message"),
+    [
+        ("assessments", None, "metadata"),
+        ("program_id", None, "program"),
+        ("row", False, "metadata"),
+        ("milestone_id", "", "scope"),
+        ("duplicate_row", None, "scope"),
+        ("linked_ids", [True], "item scope"),
+        ("linked_ids", [0], "item scope"),
+        ("linked_ids", [2, 1], "item scope"),
+        ("linked_ids", [1, 1], "item scope"),
+        ("capture", None, "capture"),
+        ("extra_key", None, "shape"),
+        ("schema_version", "2", "version or program"),
+        ("program", "other", "version or program"),
+        ("backend", "other", "backend"),
+        ("items", None, "item list"),
+        ("item", None, "item is invalid"),
+        ("item", {}, "item is invalid"),
+        ("work_item_id", True, "item ID"),
+        ("work_item_id", 0, "item ID"),
+        ("points", None, "points"),
+        ("point", None, "point"),
+        ("point", {}, "point"),
+        ("date", None, "point"),
+        ("date", "not-a-date", "point"),
+        ("date", "20260505", "point"),
+        ("state", None, "point"),
+        ("target_date", "not-a-date", "point"),
+        ("sha256", "incorrect", "digest"),
+    ],
+)
+def test_milestone_trajectory_gate_rejects_malformed_capture_before_store_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    location: str,
+    value: object,
+    message: str,
+) -> None:
+    from src.core.manifest_writer import hash_jsonable
+
+    program_id = "fixture"
+    assessments = [{"milestone_id": "m1", "linked_work_item_ids": [1]}]
+    captured = {
+        "schema_version": "1",
+        "program_id": program_id,
+        "backend": "file",
+        "items": [{
+            "work_item_id": 1,
+            "points": [{"date": "2026-05-05", "state": "Active", "target_date": None}],
+        }],
+    }
+    captured["sha256"] = hash_jsonable(captured)
+    if location == "assessments":
+        assessments = value
+    elif location == "program_id":
+        program_id = value
+    elif location == "row":
+        assessments[0] = value
+    elif location == "milestone_id":
+        assessments[0]["milestone_id"] = value
+    elif location == "duplicate_row":
+        assessments.append(dict(assessments[0]))
+    elif location == "linked_ids":
+        assessments[0]["linked_work_item_ids"] = value
+    elif location == "capture":
+        captured = value
+    elif location == "extra_key":
+        captured["extra"] = value
+    elif location == "program":
+        captured["program_id"] = value
+    elif location in {"schema_version", "backend", "items", "sha256"}:
+        captured[location] = value
+    elif location == "item":
+        captured["items"][0] = value
+    elif location in {"work_item_id", "points"}:
+        captured["items"][0][location] = value
+    elif location == "point":
+        captured["items"][0]["points"][0] = value
+    else:
+        captured["items"][0]["points"][0][location] = value
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Invalid captured evidence must fail before reading current trajectories.")
+
+    monkeypatch.setattr(fact_drift_module, "build_trajectory_store_for_program_id", forbidden)
+    gate = quality_gates.evaluate_program_fact_drift_from_draft(
+        draft_state={"edition_type": "detailed"},
+        program_id=program_id,
+        milestone_assessments=assessments,
+        milestone_trajectory_snapshot=captured,
+        programs_root=tmp_path,
+    )
+    assert not gate.passed
+    assert gate.results[0].gate_id == "QG-SG-20"
+    assert message in gate.results[0].message
+
+
+@pytest.mark.parametrize("change", ["unavailable", "backend", "points", "unchanged"])
+def test_milestone_trajectory_gate_checks_selected_current_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str,
+) -> None:
+    store = FileTrajectoryStore(programs_root=tmp_path)
+    captured = capture_milestone_trajectory_snapshot("fixture", store, {1: ()})
+    if change == "backend":
+        current_store = SQLiteTrajectoryStore(programs_root=tmp_path)
+    else:
+        current_store = store
+    if change == "points":
+        store.append(
+            "fixture", 1,
+            TrajectoryPoint(
+                date=date(2026, 5, 5), state="Active", assigned_to=None,
+                target_date=None, risk_level=None, area_path="",
+            ),
+        )
+    factory = Mock(return_value=current_store)
+    if change == "unavailable":
+        factory.side_effect = OSError("Synthetic unavailable history")
+    monkeypatch.setattr(fact_drift_module, "build_trajectory_store_for_program_id", factory)
+    gate = quality_gates.evaluate_program_fact_drift_from_draft(
+        draft_state={"edition_type": "detailed"},
+        program_id="fixture",
+        milestone_assessments=[{"milestone_id": "m1", "linked_work_item_ids": [1]}],
+        milestone_trajectory_snapshot=captured,
+    )
+    factory.assert_called_once_with("fixture")
+    assert gate.passed is (change == "unchanged")
+    if change != "unchanged":
+        assert gate.results[0].gate_id == "QG-SG-20"
+        assert {
+            "unavailable": "unavailable",
+            "backend": "backend changed",
+            "points": "trajectories changed",
+        }[change] in gate.results[0].message
 
 
 # ---------------------------------------------------------------------------
@@ -449,14 +690,31 @@ def _seed_high_risk_signal_coverage_sqlite(
     )
 
 
-def test_confirm_issue_archives_outputs_and_resets_active_state(repo_root: Path, tmp_path: Path) -> None:
+def test_confirm_issue_archives_outputs_and_resets_active_state(
+    repo_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     reports_root = stage_v2_report_workspace(repo_root, tmp_path)
     archive_root = tmp_path / "archive"
     programs_root = reports_root.parent / "programs"
+    selected_roots: dict[str, Path | None] = {}
+    for name in (
+        "get_review_status_path",
+        "get_narratives_dir",
+        "reset_overrides_for_next_issue",
+        "reset_narratives_for_next_issue",
+        "reset_review_status",
+    ):
+        original = getattr(confirm_module, name)
+
+        def capture_root(*args, _name=name, _original=original, **kwargs):
+            selected_roots[_name] = kwargs.get("programs_root")
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(confirm_module, name, capture_root)
     disable_kusto_in_report_copy(reports_root)
 
     as_of = __import__("datetime", fromlist=["datetime", "timezone"]).datetime(2026, 5, 5, 18, 0, tzinfo=__import__("datetime", fromlist=["timezone"]).timezone.utc)
-    generate_report_draft(
+    draft_artifacts = generate_report_draft(
         edition_name=EDITION_NAME,
         reports_root=reports_root,
         archive_root=archive_root,
@@ -506,6 +764,11 @@ def test_confirm_issue_archives_outputs_and_resets_active_state(repo_root: Path,
     )
 
     assert result.exit_code == 0, result.failures
+    assert result.manifest.metadata["milestone_assessments"] == draft_artifacts.manifest.metadata["milestone_assessments"]
+    assert (
+        result.manifest.metadata["milestone_trajectory_snapshot"]
+        == draft_artifacts.manifest.metadata["milestone_trajectory_snapshot"]
+    )
     assert result.archive_paths is not None
     assert result.archive_paths.snapshot_path.exists()
     assert result.archive_paths.eml_path is not None and result.archive_paths.eml_path.exists()
@@ -594,6 +857,13 @@ def test_confirm_issue_archives_outputs_and_resets_active_state(repo_root: Path,
     assert active_narratives["exec_summary.md"] == "Confirmed executive summary.\n"
     assert active_review_status is not None and active_review_status.issue_number == 2
     assert all(section.state.value == "pending" for section in active_review_status.sections)
+    assert selected_roots == {
+        "get_review_status_path": programs_root,
+        "get_narratives_dir": programs_root,
+        "reset_overrides_for_next_issue": programs_root,
+        "reset_narratives_for_next_issue": programs_root,
+        "reset_review_status": programs_root,
+    }
     assert trusted_baseline is not None
     assert trusted_baseline.trusted_issue_number == 1
     assert trusted_baseline.history[-1].action == "established"
@@ -703,8 +973,8 @@ def test_confirm_issue_updates_semantic_index_when_enabled(repo_root: Path, tmp_
     )
 
     assert result.exit_code == 0
-    assert get_semantic_index_path(EDITION_NAME, archive_root=archive_root).exists()
-    state = load_semantic_index_state(EDITION_NAME, archive_root=archive_root)
+    assert get_semantic_index_path(EDITION_NAME, archive_root=archive_root, programs_root=programs_root).exists()
+    state = load_semantic_index_state(EDITION_NAME, archive_root=archive_root, programs_root=programs_root)
     assert state is not None
     assert state.semantic_index_dirty is False
     assert state.latest_confirmed_issue == 1
@@ -731,7 +1001,7 @@ def test_confirm_issue_marks_semantic_index_dirty_when_update_fails(monkeypatch,
 
     assert result.exit_code == 0
     assert any("Semantic index update skipped" in warning for warning in result.warnings)
-    state = load_semantic_index_state(EDITION_NAME, archive_root=archive_root)
+    state = load_semantic_index_state(EDITION_NAME, archive_root=archive_root, programs_root=programs_root)
     assert state is not None
     assert state.semantic_index_dirty is True
     assert "fts refresh failed" in (state.dirty_reason or "")
@@ -850,6 +1120,7 @@ dimensions:
 def test_confirm_issue_blocks_on_source_health_gate(monkeypatch, repo_root: Path, tmp_path: Path) -> None:
     reports_root, archive_root, output_root = _prepare_confirmable_weekly_issue(repo_root, tmp_path)
     programs_root = reports_root.parent / "programs"
+    recorded_gate_roots: list[Path | None] = []
     failing_report = QualityGateReport(
         results=(
             GateEvaluation(
@@ -862,6 +1133,11 @@ def test_confirm_issue_blocks_on_source_health_gate(monkeypatch, repo_root: Path
         )
     )
     monkeypatch.setattr("src.commands.confirm.evaluate_source_health_gates", lambda **kwargs: failing_report)
+    monkeypatch.setattr(
+        confirm_module,
+        "record_gate_failures_from_report",
+        lambda *args, **kwargs: recorded_gate_roots.append(kwargs.get("programs_root")),
+    )
 
     result = confirm_issue(
         edition_name=EDITION_NAME,
@@ -875,6 +1151,7 @@ def test_confirm_issue_blocks_on_source_health_gate(monkeypatch, repo_root: Path
     assert result.archive_paths is None
     assert result.manifest.qg_results["QG-SG-01"] is False
     assert failing_report.results[0].message in result.failures
+    assert recorded_gate_roots == [programs_root]
 
 
 def test_confirm_issue_force_surfaces_source_health_gate_as_warning(monkeypatch, repo_root: Path, tmp_path: Path) -> None:
@@ -1253,10 +1530,20 @@ def test_confirm_cli_blocks_when_risks_are_missing(monkeypatch, repo_root: Path,
     assert not (get_archive_root(EDITION_NAME, archive_root) / "snapshots" / "issue_001.snapshot.json").exists()
 
 
-def test_confirm_issue_blocks_when_exec_summary_scaffold_placeholders_remain(repo_root: Path, tmp_path: Path) -> None:
+def test_confirm_issue_blocks_when_exec_summary_scaffold_placeholders_remain(
+    repo_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     reports_root = stage_v2_report_workspace(repo_root, tmp_path)
     archive_root = tmp_path / "archive"
     programs_root = reports_root.parent / "programs"
+    original_find_placeholders = confirm_module.find_unresolved_scaffold_placeholders
+    placeholder_roots: list[Path | None] = []
+
+    def find_placeholders(*args, **kwargs):
+        placeholder_roots.append(kwargs.get("programs_root"))
+        return original_find_placeholders(*args, **kwargs)
+
+    monkeypatch.setattr(confirm_module, "find_unresolved_scaffold_placeholders", find_placeholders)
     disable_kusto_in_report_copy(reports_root)
 
     generate_report_draft(
@@ -1287,6 +1574,7 @@ def test_confirm_issue_blocks_when_exec_summary_scaffold_placeholders_remain(rep
     )
 
     assert any("unresolved scaffold placeholders" in failure for failure in blocked.failures)
+    assert placeholder_roots == [programs_root]
 
 
 def test_confirm_issue_v2_records_claims_and_decision_asks(repo_root: Path, tmp_path: Path) -> None:
@@ -1674,23 +1962,31 @@ def test_confirm_issue_warns_on_stale_proposed_decisions(repo_root: Path, tmp_pa
     assert any("decision-1 (EXGATE timeline approval)" in warning for warning in result.warnings)
 
 
+@pytest.mark.parametrize("selected", [False, True])
 def test_build_stale_proposed_decision_warnings_reads_decisions_from_program_facts(
     monkeypatch,
     tmp_path: Path,
+    selected: bool,
 ) -> None:
     reports_root = tmp_path / "reports"
-    programs_root = tmp_path / "programs"
+    selected_root = tmp_path / "selected" / "programs"
+    if selected:
+        selected_edition = selected_root / "acme" / "editions" / "acme_weekly.yaml"
+        selected_edition.parent.mkdir(parents=True)
+        selected_edition.write_text("program_id: acme\n", encoding="utf-8")
+    programs_root = selected_root if selected else reports_root.parent / "programs"
     captured: dict[str, object] = {}
 
     # _build_stale_proposed_decision_warnings now lives in
     # src/commands/confirm_stages/validation.py (D-25 decomposition); patch the
     # dependency names in that module's namespace where it resolves them.
-    monkeypatch.setattr(
-        "src.commands.confirm_stages.validation.resolve_edition",
-        lambda edition_name, editions_root, programs_root: SimpleNamespace(
-            program=SimpleNamespace(id="acme")
-        ),
-    )
+    def resolve_edition(edition_name, *, editions_root, programs_root):
+        captured["edition"] = edition_name
+        captured["editions_root"] = editions_root
+        captured["resolved_programs_root"] = programs_root
+        return SimpleNamespace(program=SimpleNamespace(id="acme"))
+
+    monkeypatch.setattr("src.commands.confirm_stages.validation.resolve_edition", resolve_edition)
 
     def _load_current_decision_entries(program_id: str, *, programs_root: Path):
         captured["program_id"] = program_id
@@ -1722,14 +2018,62 @@ def test_build_stale_proposed_decision_warnings_reads_decisions_from_program_fac
         edition_name="acme_weekly",
         as_of=date(2026, 5, 5),
         reports_root=reports_root,
+        **({"programs_root": selected_root} if selected else {}),
     )
 
-    assert captured == {
-        "program_id": "acme",
-        "programs_root": programs_root,
-    }
+    assert captured["edition"] == "acme_weekly"
+    assert captured["editions_root"] == programs_root.parent / "editions"
+    assert captured["resolved_programs_root"] == programs_root
+    assert captured["program_id"] == "acme"
+    assert captured["programs_root"] == programs_root
     assert len(warnings) == 1
     assert "decision-1" in warnings[0]
+
+
+@pytest.mark.parametrize("root_case", ["missing", "relative", "legacy_decoy"])
+def test_stale_decision_warnings_reject_invalid_explicit_root_before_reads(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    root_case: str,
+) -> None:
+    from src.commands.confirm_stages import validation
+
+    reports_root = tmp_path / "reports"
+    reports_root.mkdir()
+    if root_case == "missing":
+        selected_root = tmp_path / "selected" / "missing-programs"
+    elif root_case == "relative":
+        selected_root = Path("selected-relative-programs")
+    else:
+        selected_root = tmp_path / "selected" / "programs"
+        selected_root.mkdir(parents=True)
+        decoy_editions = selected_root.parent / "editions"
+        decoy_editions.mkdir()
+        (decoy_editions / "acme_weekly.yaml").write_text("program_id: acme\n", encoding="utf-8")
+
+    resolver_calls = []
+    provider_calls = []
+    monkeypatch.setattr(
+        validation,
+        "resolve_edition",
+        lambda *args, **kwargs: resolver_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        validation,
+        "load_current_decision_entries",
+        lambda *args, **kwargs: provider_calls.append((args, kwargs)) or (),
+    )
+
+    with pytest.raises(ConfigError):
+        validation.build_stale_proposed_decision_warnings(
+            edition_name="acme_weekly",
+            as_of=date(2026, 5, 5),
+            reports_root=reports_root,
+            programs_root=selected_root,
+        )
+
+    assert resolver_calls == []
+    assert provider_calls == []
 
 
 def test_confirm_issue_force_does_not_override_qg11_at_l2(repo_root: Path, tmp_path: Path) -> None:

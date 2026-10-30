@@ -72,14 +72,89 @@ def test_item1_crash_after_enqueue_before_lease_is_idempotent(tmp_path: Path) ->
 
     # Re-enqueue with the same key (idempotent-enqueue) must not create a
     # second row or re-drive dispatch.
+    completed = load_entry(outbox_db_path(_PROGRAM_ID, programs_root=programs_root), key)
+    assert completed is not None
     enqueue_create_task_intent(
         program_id=_PROGRAM_ID, idempotency_key=key, operation_intent_id="intent-1", proposal_id="prop-1",
-        payload_json="{}", programs_root=programs_root,
+        payload_json=completed.payload_json, programs_root=programs_root,
     )
     entry = load_entry(outbox_db_path(_PROGRAM_ID, programs_root=programs_root), key)
     assert entry is not None
     assert entry.status == "completed"
     assert calls == [key]  # dispatch_fn was not called again
+
+
+def test_abrupt_exit_after_dispatched_is_classified_without_callback(tmp_path: Path) -> None:
+    import json
+    import os
+    import subprocess
+    import sys
+
+    programs_root = tmp_path / "programs"
+    key = _enqueue(programs_root)
+    callback_marker = tmp_path / "callback-reached"
+    script = r'''
+import os
+import sys
+from pathlib import Path
+import src.core.actuation_outbox as service
+original = service.mark_dispatched
+def crash(*args, **kwargs):
+    original(*args, **kwargs)
+    if os.environ.get("RVX_GUARD_SUMMARY"):
+        import sitecustomize
+        sitecustomize._finish()
+    os._exit(86)
+def forbidden(entry):
+    Path(sys.argv[3]).write_text("callback reached", encoding="utf-8")
+    raise AssertionError("provider callback reached")
+service.mark_dispatched = crash
+service.dispatch_leased_create_task(
+    program_id="fixture_prog", idempotency_key=sys.argv[2], owner="dead-worker",
+    dispatch_fn=forbidden, programs_root=Path(sys.argv[1]),
+    workspace_lease_ttl_seconds=0, outbox_lease_ttl_seconds=0,
+)
+'''
+    process = subprocess.run(
+        [sys.executable, "-B", "-c", script, str(programs_root), key, str(callback_marker)],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert process.returncode == 86, process.stderr
+    db = outbox_db_path(_PROGRAM_ID, programs_root=programs_root)
+    before = load_entry(db, key)
+    assert before is not None and before.status == "dispatched"
+    backlog = _enqueue(programs_root, operation_intent_id="backlog")
+    retry_script = r'''
+import json
+import sys
+from pathlib import Path
+from src.core.actuation_outbox import dispatch_leased_create_task
+def forbidden(entry):
+    Path(sys.argv[3]).write_text("callback reached", encoding="utf-8")
+    raise AssertionError("provider callback reached")
+result = dispatch_leased_create_task(
+    program_id="fixture_prog", idempotency_key=sys.argv[2], owner="replacement",
+    dispatch_fn=forbidden, programs_root=Path(sys.argv[1]),
+)
+print(json.dumps({"status":result.status,"remote_id":result.remote_id}))
+'''
+    retry = subprocess.run(
+        [sys.executable, "-B", "-c", retry_script, str(programs_root), key, str(callback_marker)],
+        capture_output=True, text=True, timeout=30, check=False, env=os.environ.copy(),
+    )
+    assert retry.returncode == 0, retry.stderr
+    assert json.loads(retry.stdout) == {"status": "uncertain_remote_state", "remote_id": None}
+    after = load_entry(db, key)
+    assert after is not None and after.status == "uncertain_remote_state"
+    assert after.attempt_count == before.attempt_count
+    assert after.lease_expires_at == before.lease_expires_at
+    assert after.payload_json == before.payload_json
+    assert after.remote_request_hash == before.remote_request_hash
+    assert after.remote_response_hash == before.remote_response_hash
+    assert after.lease_fencing_token == before.lease_fencing_token + 1
+    assert not callback_marker.exists()
+    untouched = load_entry(db, backlog)
+    assert untouched is not None and untouched.status == "pending"
 
 
 def test_item2_crash_after_lease_before_dispatch_is_reclaimed(tmp_path: Path) -> None:

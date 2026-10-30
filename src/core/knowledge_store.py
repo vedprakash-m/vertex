@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
+import math
 from pathlib import Path
 import re
 from typing import Any, Literal, cast
@@ -34,6 +35,20 @@ class PeopleDirectoryDrift:
 
 
 _QUERY_CLASSIFICATIONS = {"validation", "analytics_history", "evidence", "hygiene", "retired"}
+
+
+def _optional_slo_target(value: Any, path: Path) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ConfigError(f"slo_target must be a finite number in {path}")
+    try:
+        target = float(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ConfigError(f"slo_target must be a finite number in {path}") from error
+    if not math.isfinite(target):
+        raise ConfigError(f"slo_target must be a finite number in {path}")
+    return target
 
 
 def _query_classification(value: Any, path: Path) -> Literal["validation", "analytics_history", "evidence", "hygiene", "retired"]:
@@ -192,7 +207,7 @@ def parse_knowledge_documents(
             result_column=_optional_str(entry.get("result_column")),
             metric_id=_optional_str(entry.get("metric_id")),
             unit=_optional_str(entry.get("unit")),
-            slo_target=float(entry["slo_target"]) if entry.get("slo_target") is not None else None,
+            slo_target=_optional_slo_target(entry.get("slo_target"), knowledge_root / "golden_queries.yaml"),
             comparison=_optional_str(entry.get("comparison")),
             assertion_ids=_string_tuple(entry.get("assertion_ids", [])),
             engine=_optional_str(entry.get("engine")) or ("wiql" if _optional_str(entry.get("wiql")) else "kusto"),

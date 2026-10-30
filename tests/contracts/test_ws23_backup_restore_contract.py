@@ -13,6 +13,7 @@ These tests assert:
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import shutil
 import subprocess
 import sys
@@ -28,6 +29,146 @@ from src.core.exceptions import StateError
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.mark.parametrize("version", ["1.1", "1.0", "unversioned"])
+@pytest.mark.parametrize("skip_preflight", [False, True])
+@pytest.mark.parametrize("declarations", [
+    '"files": [], "files": []',
+    '"metadata": {"PRIVATE-DUPLICATE": 0, "PRIVATE-DUPLICATE": 1}',
+    '"metadata": {"PRIVATE-DUPLICATE": 1, "PRIVATE-DUPLICATE": 1}',
+    r'"metadata": {"PRIVATE-DUPLICATE": 0, "\u0050RIVATE-DUPLICATE": 1}',
+    '"schema_version": "1.0", "schema_version": "1.0"',
+    '"schema_version": "1.1", "schema_version": "1.0"',
+])
+def test_restore_refuses_duplicate_json_properties_before_mutation(
+    version: str, skip_preflight: bool, declarations: str, tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    (source / "knowledge").mkdir(parents=True)
+    (source / "knowledge" / "note.md").write_text("original", encoding="utf-8")
+    backup = tmp_path / "backup"
+    create_repository_backup(backup, source_root=source)
+    manifest = backup / "backup_manifest.json"
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    if version != "1.1":
+        payload.pop("declared_scope")
+        payload.pop("schema_version")
+        if version == "1.0":
+            payload["schema_version"] = version
+    unique = json.dumps(payload)
+    manifest.write_text(unique, encoding="utf-8")
+    control = tmp_path / "control"
+    restore_repository_backup(backup, control, skip_preflight=skip_preflight)
+    assert (control / "knowledge" / "note.md").read_text(encoding="utf-8") == "original"
+    manifest.write_text(unique[:-1] + ", " + declarations + "}", encoding="utf-8")
+    destination = tmp_path / "restored"
+    with pytest.raises(StateError, match="duplicate") as caught:
+        restore_repository_backup(backup, destination, skip_preflight=skip_preflight)
+    assert "PRIVATE-DUPLICATE" not in str(caught.value)
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("version", ["1.1", "1.0", "unversioned"])
+@pytest.mark.parametrize("fault", ["manifest", "manifest_source", "source", "copy", "copy_io", "hash_io", "unexpected"])
+def test_restore_binds_success_to_verified_bytes(
+    version: str, fault: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.core.backup as backup
+
+    source = tmp_path / "source"
+    (source / "knowledge").mkdir(parents=True)
+    (source / "knowledge" / "first.yaml").write_text("first: original\n", encoding="utf-8")
+    (source / "knowledge" / "second.yaml").write_text("second: original\n", encoding="utf-8")
+    captured = tmp_path / "backup"
+    destination = tmp_path / "restored"
+    create_repository_backup(captured, source_root=source)
+    manifest_path = captured / backup.BACKUP_MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if version != "1.1":
+        manifest.pop("declared_scope")
+        if version == "unversioned":
+            manifest.pop("schema_version")
+        else:
+            manifest["schema_version"] = version
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    original_verify = backup._verify_manifest
+    original_copy = backup.shutil.copy2
+    original_hash = backup._hash_file
+    original_load = backup._load_manifest
+    loads = []
+
+    def load(path):
+        loads.append(path)
+        return original_load(path)
+
+    def verify(root, payload):
+        result = original_verify(root, payload)
+        if fault in {"manifest", "manifest_source"}:
+            replacement = dict(payload)
+            replacement["files"] = payload["files"][:1]
+            manifest_path.write_text(json.dumps(replacement), encoding="utf-8")
+        if fault in {"source", "manifest_source"}:
+            (captured / "knowledge" / "second.yaml").write_text("second: changed\n", encoding="utf-8")
+        return result
+
+    def copy(src, dst):
+        if dst.name == "second.yaml":
+            if fault == "copy_io":
+                raise OSError("synthetic copy failure")
+            if fault == "unexpected":
+                raise TypeError("synthetic implementation failure")
+            if fault == "copy":
+                dst.write_text("second: damaged\n", encoding="utf-8")
+                return dst
+        return original_copy(src, dst)
+
+    def hash_file(path):
+        if fault == "hash_io" and path == destination / "knowledge" / "second.yaml":
+            raise OSError("synthetic hash failure")
+        return original_hash(path)
+
+    monkeypatch.setattr(backup, "_load_manifest", load)
+    monkeypatch.setattr(backup, "_verify_manifest", verify)
+    monkeypatch.setattr(backup.shutil, "copy2", copy)
+    monkeypatch.setattr(backup, "_hash_file", hash_file)
+    if fault == "manifest":
+        result = restore_repository_backup(captured, destination)
+        assert result.file_count == 2
+        assert result.preflight_verified
+        assert len(loads) == 1
+        assert (destination / "knowledge" / "second.yaml").read_bytes() == (source / "knowledge" / "second.yaml").read_bytes()
+    else:
+        expected = TypeError if fault == "unexpected" else StateError
+        message = "synthetic implementation failure" if fault == "unexpected" else "knowledge/second.yaml"
+        with pytest.raises(expected, match=message):
+            restore_repository_backup(captured, destination)
+        assert len(loads) == 1
+        assert (destination / "knowledge" / "first.yaml").read_bytes() == (source / "knowledge" / "first.yaml").read_bytes()
+
+
+def test_restore_skip_preflight_retains_unchecked_copy_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.core.backup as backup
+
+    source = tmp_path / "source"
+    (source / "knowledge").mkdir(parents=True)
+    (source / "knowledge" / "record.yaml").write_text("original\n", encoding="utf-8")
+    captured = tmp_path / "backup"
+    create_repository_backup(captured, source_root=source)
+    (captured / "knowledge" / "record.yaml").write_text("unchecked\n", encoding="utf-8")
+
+    def forbidden(*args):
+        pytest.fail("skip-preflight must not verify integrity")
+
+    monkeypatch.setattr(backup, "_verify_manifest", forbidden)
+    monkeypatch.setattr(backup, "_hash_file", forbidden)
+    destination = tmp_path / "restored"
+    result = restore_repository_backup(captured, destination, skip_preflight=True)
+    assert not result.preflight_verified
+    assert result.declared_scope_check == "not_checked"
+    assert (destination / "knowledge" / "record.yaml").read_text(encoding="utf-8") == "unchecked\n"
 
 
 def _make_minimal_program_tree(root: Path, program_id: str) -> None:

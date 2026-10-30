@@ -12,6 +12,29 @@ from src.commands import prep
 from src.core.exceptions import ConfigError
 
 
+@pytest.mark.parametrize("selection", ("external", "legacy", "checkout", "installation"))
+def test_prep_preflight_admits_only_safe_external_or_unset_legacy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selection: str,
+) -> None:
+    from src.core.workspace_paths import REPO_ROOT
+
+    root = tmp_path / "programs"
+    if selection == "checkout":
+        (tmp_path / ".git").write_text("gitdir: synthetic", encoding="utf-8")
+    elif selection in ("legacy", "installation"):
+        root = REPO_ROOT / "programs"
+    for name in ("reports", "archive"):
+        monkeypatch.setattr(prep, name.upper() + "_ROOT", REPO_ROOT / name)
+    monkeypatch.setattr(prep, "PROGRAMS_ROOT", root)
+    monkeypatch.setattr("src.core.workspace_paths._PROGRAMS_ROOT_CONFIGURED", selection == "installation")
+    if selection in ("checkout", "installation"):
+        with pytest.raises(typer.Exit) as error:
+            prep._preflight_prep_workspace()
+        assert error.value.exit_code == 2
+    else:
+        prep._preflight_prep_workspace()
+
+
 def _forbidden(*args, **kwargs):
     raise AssertionError("Invalid workspace reached metadata, a reader, provider, or writer.")
 
@@ -51,7 +74,7 @@ def test_invalid_prep_workspace_fails_before_access(
             "load_program_facts", "_build_anticipation_client", "_write_output_text",
         ):
             guard.setattr(prep, target, _forbidden)
-        for target in ("stat", "exists", "is_file", "is_dir", "open", "mkdir"):
+        for target in ("open", "mkdir"):
             guard.setattr(Path, target, _forbidden)
         with pytest.raises(ConfigError, match="workspace roots"):
             prep.generate_prep_brief(edition_name="demo_lt", **kwargs)
@@ -118,7 +141,7 @@ def test_prep_preflight_guards_generation(
 
 
 def test_prep_preflight_preserves_unexpected_errors(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(prep, "validate_report_workspace", Mock(side_effect=RuntimeError("unexpected")), raising=False)
+    monkeypatch.setattr(prep, "resolve_report_workspace_roots", Mock(side_effect=RuntimeError("unexpected")))
     with pytest.raises(RuntimeError, match="unexpected"):
         prep._preflight_prep_workspace()
 

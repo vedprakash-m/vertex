@@ -82,7 +82,7 @@ def infer_ado_risk_level(
             return mapped
     if normalized_state in {"off track", "at risk"}:
         return RiskLevel.HIGH if normalized_state == "off track" else RiskLevel.MEDIUM
-    return RiskLevel.LOW
+    return RiskLevel.UNKNOWN if normalized_risk is None else RiskLevel.LOW
 
 
 def extract_child_ids_by_parent(rows: list[dict[str, Any]]) -> dict[int, tuple[int, ...]]:

@@ -175,7 +175,7 @@ def _render_vitality_report(artifacts: VitalityArtifacts, *, format: str = "huma
         f"ADO Vitality: {artifacts.program_id}",
         f"Scored items: {len(artifacts.scored_items)}",
         f"Items updated this week: {summary.updated_this_week}/{summary.total_items} ({summary.updated_this_week_percentage}%)",
-        f"Average freshness age: {summary.freshness_average_days:.1f} days",
+        f"Average freshness age: {summary.freshness_average_days:.1f} days (known for {summary.freshness_known_items}/{summary.total_items} items)" if summary.freshness_average_days is not None else f"Average freshness age: unknown (known for {summary.freshness_known_items}/{summary.total_items} items)",
         f"Owners with stale items: {', '.join(summary.stale_owner_aliases) if summary.stale_owner_aliases else 'none'}",
         "",
         "OWNER AGGREGATES:",
@@ -193,8 +193,9 @@ def _render_vitality_report(artifacts: VitalityArtifacts, *, format: str = "huma
             missing = ", ".join(score.richness_missing) if score.richness_missing else "none"
             workstream_label = score.workstream_id or "-"
             owner_label = score.owner_alias or "-"
+            freshness_label = f"{score.freshness_days}d" if score.freshness_days is not None else "unknown"
             lines.append(
-                f"- WI:{score.work_item_id} | owner={owner_label} | ws={workstream_label} | freshness={score.freshness_grade} ({score.freshness_days}d) | richness={score.richness_score} | composite={score.composite_score} | missing={missing}"
+                f"- WI:{score.work_item_id} | owner={owner_label} | ws={workstream_label} | freshness={score.freshness_grade} ({freshness_label}) | richness={score.richness_score} | composite={score.composite_score} | missing={missing}"
             )
     else:
         lines.append("- none")
@@ -224,6 +225,7 @@ def render_vitality_csv(payload: dict[str, object]) -> str:
         "updated_this_week",
         "updated_this_week_percentage",
         "freshness_average_days",
+        "freshness_known_items",
         "stale_owner_aliases",
         "fresh_items",
         "avg_richness",
@@ -256,6 +258,7 @@ def render_vitality_csv(payload: dict[str, object]) -> str:
             summary.get("updated_this_week", ""),
             summary.get("updated_this_week_percentage", ""),
             summary.get("freshness_average_days", ""),
+            summary.get("freshness_known_items", ""),
             ";".join(summary.get("stale_owner_aliases", [])),
             "",
             "",
@@ -286,6 +289,7 @@ def render_vitality_csv(payload: dict[str, object]) -> str:
                 aggregate.get("composite_score", ""),
                 "",
                 aggregate.get("total_items", ""),
+                "",
                 "",
                 "",
                 "",
@@ -323,6 +327,7 @@ def render_vitality_csv(payload: dict[str, object]) -> str:
                 "",
                 "",
                 "",
+                "",
                 aggregate.get("fresh_items", ""),
                 aggregate.get("avg_richness", ""),
                 aggregate.get("total_leakage", ""),
@@ -351,6 +356,7 @@ def render_vitality_csv(payload: dict[str, object]) -> str:
                 score.get("workiq_signal_count", ""),
                 score.get("composite_score", ""),
                 score.get("suggested_update", ""),
+                "",
                 "",
                 "",
                 "",

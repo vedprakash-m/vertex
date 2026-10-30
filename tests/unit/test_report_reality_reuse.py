@@ -243,6 +243,9 @@ def test_fresh_contexts_never_share_retained_reality(report_context) -> None:
 def test_nonempty_milestone_health_and_lineage_survive_reuse(
     report_context, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from src.core.file_stores import FileTrajectoryStore
+    from src.core.models_v2 import TrajectoryPoint
+
     ctx, loader, reality, _ = report_context
     milestone = Milestone(
         id="milestone-1", program_id="synthetic", name="Synthetic milestone",
@@ -260,7 +263,16 @@ def test_nonempty_milestone_health_and_lineage_survive_reuse(
         blocked_criteria=(), slip_probability=0.5, critical_path=False,
         confidence=Confidence.HIGH, reasoning="synthetic assessment",
     )
-    trajectory_store = Mock()
+    trajectory_store = FileTrajectoryStore(programs_root=ctx.programs_root)
+    trajectory_store.append(
+        "synthetic", 1,
+        TrajectoryPoint(
+            date=ctx.data_as_of.date(), state="Active", assigned_to=None,
+            target_date=milestone.target_date, risk_level=None, area_path="",
+        ),
+    )
+    history = trajectory_store.read("synthetic", 1)
+    monkeypatch.setattr(trajectory_store, "read", Mock(return_value=history))
     monkeypatch.setattr(milestone_stage, "build_trajectory_store_for_program_id", Mock(return_value=trajectory_store))
     assessor = Mock(return_value=health)
     monkeypatch.setattr(milestone_stage, "assess_milestone_health", assessor)

@@ -267,7 +267,8 @@ class AdoVitalitySectionData:
     items_updated: int
     items_total: int
     updated_percentage: int
-    freshness_average_days: float
+    freshness_average_days: float | None
+    freshness_known_items: int
     leakage_events: int
     best_documented_label: str | None
     best_documented_detail: str | None

@@ -20,7 +20,7 @@ from src.commands import gather as gather_helpers
 from src.commands import report as report_helpers
 from src.core.analytics_store import AutonomyAuditRecord, append_autonomy_audit_record, compute_prior_acceptance_rate
 from src.core.ado_semantics import item_owner_alias
-from src.core.archive_store import get_dimension_history
+from src.core.archive_store import find_latest_confirmed_entry, get_dimension_history, read_archive_index, read_scorecard_history
 from src.core.claim_tracker import load_decision_asks, load_latest_claim_statuses, resolve_entry_status, touch_decision_ask
 from src.core.config_loader import REPORTS_ROOT, load_bundle_with_mode
 from src.core.edition_resolver import get_program_output_dir, load_program, resolve_edition, PROGRAMS_ROOT
@@ -42,6 +42,7 @@ from src.core.milestone_engine import (
     summarize_milestone_target_date_history,
 )
 from src.core.models import Confidence, RiskLevel, ScorecardEvidencePacket, WorkItem
+from src.core.scorecard_trends import compare_dated_risk_pair
 from src.core.models_v2 import DependencyStatus, IncidentEntry, LeadershipReader, Scorecard, Signal, SignalReviewDecision, Workstream
 from src.core.overrides_store import load_overrides, merge_overrides
 from src.core.program_fact_store import load_program_facts, project_dependencies, project_milestones
@@ -50,7 +51,7 @@ from src.core.sqlite_stores import get_program_sqlite_store_path
 from src.core.signal_classification import classify_signal as _classify_signal
 from src.core.store_factory import build_signal_store_for_program_id, build_trajectory_store_for_program_id, resolve_storage_backend
 from src.core.vitality_reporting import effective_vitality_exempt_aliases, vitality_settings_from_program
-from src.core.vitality_scorer import aggregate_vitality, score_vitality
+from src.core.vitality_scorer import aggregate_vitality, freshness_days_for_policy, score_vitality
 from src.m365.graph_send_client import GraphMailMessage, GraphSendClient
 
 
@@ -81,6 +82,7 @@ class EscalationPreview:
     recommended_action: str | None = None
     vitality_composite: int | None = None
     stale_days: int | None = None
+    stale_age_unknown: bool = False
     milestone_id: str | None = None
     milestone_status: str | None = None
     milestone_days_to_target: int | None = None
@@ -308,7 +310,7 @@ def generate_escalations(
         for dimension_name, linked_workstream_ids in dimension_workstream_ids.items()
     }
     accountable_by_workstream = _accountable_aliases_by_workstream(resolved.workstreams)
-    vitality_composite_by_workstream, stale_days_by_workstream = _build_workstream_vitality_context(
+    vitality_composite_by_workstream, stale_days_by_workstream, stale_age_by_workstream = _build_workstream_vitality_context(
         program_id=resolved.program.id,
         items=items,
         workstreams=resolved.workstreams,
@@ -376,19 +378,34 @@ def generate_escalations(
     suppressed: list[str] = []
     unresolved: list[str] = []
     if decision_ask_id is None:
+        archive_root = programs_root.parent / "archive"
+        latest_confirmed_entry = find_latest_confirmed_entry(
+            read_archive_index(edition_name, archive_root=archive_root, programs_root=programs_root)
+        )
+        try:
+            scorecard_history = read_scorecard_history(edition_name, archive_root=archive_root)
+        except json.JSONDecodeError:
+            scorecard_history = ()
+            suppressed.append("Scorecard trend unavailable: malformed scorecard history")
         for dimension in dimension_risks:
             linked_workstream_ids = dimension_workstream_ids.get(dimension.name, ())
             scorecard_packet = _scorecard_evidence_packet(scorecard_packets, dimension.name)
             dimension_history = (*_dimension_history_levels(edition_name, dimension.name, archive_dir=resolved.paths.archive_dir), dimension.risk)
-            risk_sparkline = dimension.risk_sparkline
-            trend_label = dimension.trend_label
-            if trend_label is None and scorecard_packet is not None:
-                risk_sparkline, trend_label = report_helpers._derive_risk_sparkline(
-                    dimension.risk,
-                    scorecard_packet.prior_confirmed_risk,
+            prior_risk = (
+                _latest_confirmed_dimension_risk(
+                    scorecard_history,
+                    issue_number=latest_confirmed_entry.issue_number,
+                    dimension_name=dimension.name,
                 )
-            if trend_label is None:
-                risk_sparkline, trend_label = _history_risk_trend(dimension_history)
+                if latest_confirmed_entry is not None
+                else None
+            )
+            risk_sparkline, trend_label = _history_risk_trend(
+                prior_risk,
+                dimension.risk,
+                prior_at=(latest_confirmed_entry.generated_at if latest_confirmed_entry is not None else None),
+                current_at=current_time,
+            )
             vitality_composite = _linked_workstream_vitality_composite(
                 linked_workstream_ids,
                 vitality_composite_by_workstream,
@@ -396,6 +413,11 @@ def generate_escalations(
             stale_days = _linked_workstream_stale_days(
                 linked_workstream_ids,
                 stale_days_by_workstream,
+            )
+            has_linked_vitality, source_age_days = _linked_workstream_stale_age(
+                linked_workstream_ids,
+                stale_days_by_workstream,
+                stale_age_by_workstream,
             )
             context: dict[str, object] = {
                 "consecutive_high": _consecutive_high_count(dimension_history),
@@ -450,7 +472,8 @@ def generate_escalations(
                             dependency_context_by_dimension.get(dimension.name)
                         ),
                         vitality_composite=vitality_composite,
-                        stale_days=stale_days,
+                        stale_days=source_age_days,
+                        stale_age_unknown=has_linked_vitality and source_age_days is None,
                         dependency_context=dependency_context_by_dimension.get(dimension.name),
                     )
                 )
@@ -465,6 +488,11 @@ def generate_escalations(
             stale_days = _linked_workstream_stale_days(
                 milestone.linked_workstream_ids,
                 stale_days_by_workstream,
+            )
+            has_linked_vitality, source_age_days = _linked_workstream_stale_age(
+                milestone.linked_workstream_ids,
+                stale_days_by_workstream,
+                stale_age_by_workstream,
             )
             context = {
                 "milestone_status": assessment.computed_health.value,
@@ -525,7 +553,8 @@ def generate_escalations(
                         recipients=recipients,
                         cooldown_key=cooldown_key,
                     vitality_composite=vitality_composite,
-                    stale_days=stale_days,
+                    stale_days=source_age_days,
+                    stale_age_unknown=has_linked_vitality and source_age_days is None,
                     milestone_days_to_target=context["milestone_days_to_target"],  # type: ignore[arg-type]
                     milestone_schedule_summary=milestone_schedule_summary,
                     milestone_target_date_history_summary=milestone_target_date_history_summary,
@@ -555,6 +584,11 @@ def generate_escalations(
         stale_days = _linked_workstream_stale_days(
             linked_workstream_ids,
             stale_days_by_workstream,
+        )
+        has_linked_vitality, source_age_days = _linked_workstream_stale_age(
+            linked_workstream_ids,
+            stale_days_by_workstream,
+            stale_age_by_workstream,
         )
         context = {
             "decision_ask_age_days": max(0, (current_time.date() - ask.ask_date).days),
@@ -604,7 +638,8 @@ def generate_escalations(
                     recipients=recipients,
                     cooldown_key=cooldown_key,
                     vitality_composite=vitality_composite,
-                    stale_days=stale_days,
+                    stale_days=source_age_days,
+                    stale_age_unknown=has_linked_vitality and source_age_days is None,
                     rule_name=rule.name,
                     incident_refs=incident_refs,
                     incident_summary=(
@@ -846,7 +881,7 @@ def _build_workstream_vitality_context(
     knowledge,
     as_of: datetime,
     programs_root: Path,
-) -> tuple[dict[str, int], dict[str, int]]:
+) -> tuple[dict[str, int], dict[str, int], dict[str, int | None]]:
     settings = vitality_settings_from_program(raw_program)
     exempt_aliases = effective_vitality_exempt_aliases(settings, knowledge.people_directory)
     eligible_items = tuple(
@@ -855,7 +890,7 @@ def _build_workstream_vitality_context(
         if item_owner_alias(item) not in exempt_aliases
     )
     if not eligible_items:
-        return {}, {}
+        return {}, {}, {}
 
     trajectory_store = build_trajectory_store_for_program_id(
         program_id,
@@ -890,13 +925,16 @@ def _build_workstream_vitality_context(
         for aggregate in workstream_aggregates
     }
     stale_days_by_workstream: dict[str, int] = {}
+    stale_age_by_workstream: dict[str, int | None] = {}
     for score in scores:
         if score.workstream_id is None:
             continue
+        policy_days = freshness_days_for_policy(score.freshness_days)
         previous = stale_days_by_workstream.get(score.workstream_id)
-        if previous is None or score.freshness_days > previous:
-            stale_days_by_workstream[score.workstream_id] = score.freshness_days
-    return composite_by_workstream, stale_days_by_workstream
+        if previous is None or policy_days > previous:
+            stale_days_by_workstream[score.workstream_id] = policy_days
+            stale_age_by_workstream[score.workstream_id] = score.freshness_days
+    return composite_by_workstream, stale_days_by_workstream, stale_age_by_workstream
 
 
 def _linked_workstream_vitality_composite(
@@ -927,6 +965,21 @@ def _linked_workstream_stale_days(
     return max(values)
 
 
+def _linked_workstream_stale_age(
+    linked_workstream_ids: tuple[str, ...],
+    stale_days_by_workstream: dict[str, int],
+    stale_age_by_workstream: dict[str, int | None],
+) -> tuple[bool, int | None]:
+    values = [
+        (stale_days_by_workstream[workstream_id], stale_age_by_workstream[workstream_id])
+        for workstream_id in linked_workstream_ids
+        if workstream_id in stale_days_by_workstream
+    ]
+    if not values:
+        return False, None
+    return True, max(values, key=lambda value: (value[0], value[1] is not None))[1]
+
+
 def _build_escalation_preview(
     *,
     edition_name: str,
@@ -944,6 +997,7 @@ def _build_escalation_preview(
     recommended_action: str,
     vitality_composite: int | None = None,
     stale_days: int | None = None,
+    stale_age_unknown: bool = False,
     dependency_context: EscalationDependencyContext | None = None,
 ) -> EscalationPreview:
     workstream_label = ", ".join(linked_workstream_names or linked_workstream_ids) or "unmapped"
@@ -961,7 +1015,9 @@ def _build_escalation_preview(
         body_lines.append(f"Consecutive High issues: {consecutive_high}")
     if vitality_composite is not None:
         body_lines.append(f"Lowest linked vitality composite: {vitality_composite}")
-    if stale_days is not None:
+    if stale_age_unknown:
+        body_lines.append("Oldest linked stale item: source age unknown")
+    elif stale_days is not None:
         day_label = "day" if stale_days == 1 else "days"
         body_lines.append(f"Oldest linked stale item: {stale_days} {day_label}")
     body_lines.extend(
@@ -979,7 +1035,9 @@ def _build_escalation_preview(
         metric_fragments.append(f"{consecutive_high} consecutive High issues")
     if vitality_composite is not None:
         metric_fragments.append(f"vitality {vitality_composite}")
-    if stale_days is not None:
+    if stale_age_unknown:
+        metric_fragments.append("stale age unknown")
+    elif stale_days is not None:
         metric_fragments.append(f"stale {stale_days}d")
     if metric_fragments:
         signal_text = f"Escalation drafted for {dimension_name} ({rule_name}; {', '.join(metric_fragments)})."
@@ -1007,6 +1065,7 @@ def _build_escalation_preview(
             cooldown_key=_build_cooldown_key(rule_name, dimension_name, linked_workstream_ids),
             vitality_composite=vitality_composite,
             stale_days=stale_days,
+            stale_age_unknown=stale_age_unknown,
             escalation_path_label=(dependency_context.escalation_path_label if dependency_context is not None else None),
             escalation_guidance=(dependency_context.guidance if dependency_context is not None else None),
         ),
@@ -1112,6 +1171,7 @@ def _build_milestone_escalation_preview(
     cooldown_key: str,
     vitality_composite: int | None,
     stale_days: int | None,
+    stale_age_unknown: bool,
     milestone_days_to_target: int,
     milestone_schedule_summary: str | None,
     milestone_target_date_history_summary: str | None,
@@ -1136,7 +1196,9 @@ def _build_milestone_escalation_preview(
         body_lines.append(milestone_completion_date_history_summary)
     if vitality_composite is not None:
         body_lines.append(f"Lowest linked vitality composite: {vitality_composite}")
-    if stale_days is not None:
+    if stale_age_unknown:
+        body_lines.append("Oldest linked stale item: source age unknown")
+    elif stale_days is not None:
         day_label = "day" if stale_days == 1 else "days"
         body_lines.append(f"Oldest linked stale item: {stale_days} {day_label}")
     if assessment.blocked_criteria:
@@ -1155,7 +1217,9 @@ def _build_milestone_escalation_preview(
     ]
     if vitality_composite is not None:
         metric_fragments.append(f"vitality {vitality_composite}")
-    if stale_days is not None:
+    if stale_age_unknown:
+        metric_fragments.append("stale age unknown")
+    elif stale_days is not None:
         metric_fragments.append(f"stale {stale_days}d")
     signal_text = f"Escalation drafted for milestone {milestone.name} ({rule_name}; {', '.join(metric_fragments)})."
     return _finalize_escalation_preview(
@@ -1180,6 +1244,7 @@ def _build_milestone_escalation_preview(
             cooldown_key=cooldown_key,
             vitality_composite=vitality_composite,
             stale_days=stale_days,
+            stale_age_unknown=stale_age_unknown,
             milestone_id=milestone.id,
             milestone_status=assessment.computed_health.value,
             milestone_days_to_target=milestone_days_to_target,
@@ -1203,6 +1268,7 @@ def _build_decision_ask_escalation_preview(
     cooldown_key: str,
     vitality_composite: int | None,
     stale_days: int | None,
+    stale_age_unknown: bool,
     rule_name: str,
     incident_refs: tuple[str, ...],
     incident_summary: str | None,
@@ -1223,7 +1289,9 @@ def _build_decision_ask_escalation_preview(
         body_lines.append(f"Incident-linked: {incident_summary}")
     if vitality_composite is not None:
         body_lines.append(f"Lowest linked vitality composite: {vitality_composite}")
-    if stale_days is not None:
+    if stale_age_unknown:
+        body_lines.append("Oldest linked stale item: source age unknown")
+    elif stale_days is not None:
         day_label = "day" if stale_days == 1 else "days"
         body_lines.append(f"Oldest linked stale item: {stale_days} {day_label}")
     body_lines.extend(
@@ -1239,7 +1307,9 @@ def _build_decision_ask_escalation_preview(
     ]
     if vitality_composite is not None:
         metric_fragments.append(f"vitality {vitality_composite}")
-    if stale_days is not None:
+    if stale_age_unknown:
+        metric_fragments.append("stale age unknown")
+    elif stale_days is not None:
         metric_fragments.append(f"stale {stale_days}d")
     signal_text = f"Escalation drafted for decision ask {ask.id} ({rule_name}; {', '.join(metric_fragments)})."
     return _finalize_escalation_preview(
@@ -1264,6 +1334,7 @@ def _build_decision_ask_escalation_preview(
             cooldown_key=cooldown_key,
             vitality_composite=vitality_composite,
             stale_days=stale_days,
+            stale_age_unknown=stale_age_unknown,
             decision_ask_id=ask.id,
             decision_ask_status=effective_status,
             decision_ask_age_days=ask_age_days,
@@ -1326,19 +1397,54 @@ def _scorecard_evidence_lines(packet: ScorecardEvidencePacket | None) -> tuple[s
     return tuple(evidence_lines)
 
 
-def _history_risk_trend(history: tuple[RiskLevel, ...]) -> tuple[str | None, str | None]:
-    visible_history = history[-4:]
-    if len(visible_history) < 2 or RiskLevel.UNKNOWN in visible_history:
-        return None, None
-    sparkline = "".join(report_helpers._spark_char(level) for level in visible_history)
-    observation_label = f"across {len(visible_history)} observations"
-    if all(level == RiskLevel.HIGH for level in visible_history):
-        return sparkline, f"high {observation_label}"
-    if report_helpers._risk_rank(visible_history[-1]) > report_helpers._risk_rank(visible_history[0]):
-        return sparkline, f"net rise {observation_label}"
-    if report_helpers._risk_rank(visible_history[-1]) < report_helpers._risk_rank(visible_history[0]):
-        return sparkline, f"net fall {observation_label}"
-    return sparkline, f"no net change {observation_label}"
+def _history_risk_trend(
+    prior_risk: RiskLevel | None,
+    current_risk: RiskLevel,
+    *,
+    prior_at: datetime | None,
+    current_at: datetime | None,
+) -> tuple[str | None, str | None]:
+    sparkline, direction = compare_dated_risk_pair(
+        current_risk,
+        prior_risk,
+        current_at=current_at,
+        prior_at=prior_at,
+    )
+    if direction == "high":
+        return sparkline, "high across 2 observations"
+    if direction == "rise":
+        return sparkline, "net rise across 2 observations"
+    if direction == "fall":
+        return sparkline, "net fall across 2 observations"
+    if direction == "steady":
+        return sparkline, "no net change across 2 observations"
+    return None, None
+
+
+def _latest_confirmed_dimension_risk(
+    history: tuple[dict[str, Any], ...],
+    *,
+    issue_number: int,
+    dimension_name: str,
+) -> RiskLevel | None:
+    for entry in reversed(history):
+        raw_issue_number = entry.get("issue_number")
+        if isinstance(raw_issue_number, int) and not isinstance(raw_issue_number, bool):
+            entry_issue_number = raw_issue_number
+        elif isinstance(raw_issue_number, str) and raw_issue_number.strip().isdigit():
+            entry_issue_number = int(raw_issue_number.strip())
+        else:
+            continue
+        if (
+            entry_issue_number != issue_number
+            or str(entry.get("dimension", "")).strip().lower() != dimension_name.strip().lower()
+        ):
+            continue
+        raw_risk = entry.get("risk")
+        if not isinstance(raw_risk, str):
+            return None
+        return RiskLevel.from_string(raw_risk)
+    return None
 
 
 def _finalize_escalation_preview(*, edition_name: str, preview: EscalationPreview) -> EscalationPreview:
@@ -1762,7 +1868,9 @@ def render_escalation_preview_plaintext(artifacts: EscalationArtifacts) -> str:
             lines.append(f"   Consecutive High: {preview.consecutive_high}")
         if preview.vitality_composite is not None:
             lines.append(f"   Vitality Composite: {preview.vitality_composite}")
-        if preview.stale_days is not None:
+        if preview.stale_age_unknown:
+            lines.append("   Stale Age: unknown")
+        elif preview.stale_days is not None:
             lines.append(f"   Stale Days: {preview.stale_days}")
         lines.append(f"   Subject: {preview.subject}")
     for message in artifacts.suppressed:
@@ -1814,6 +1922,7 @@ def render_escalation_output(
                 "consecutive_high",
                 "vitality_composite",
                 "stale_days",
+                "stale_age_unknown",
                 "milestone_id",
                 "milestone_status",
                 "milestone_days_to_target",
@@ -1841,6 +1950,7 @@ def render_escalation_output(
                     preview["consecutive_high"] if preview["consecutive_high"] is not None else "",
                     preview["vitality_composite"] if preview["vitality_composite"] is not None else "",
                     preview["stale_days"] if preview["stale_days"] is not None else "",
+                    str(preview["stale_age_unknown"]).lower(),
                     preview["milestone_id"] or "",
                     preview["milestone_status"] or "",
                     preview["milestone_days_to_target"] if preview["milestone_days_to_target"] is not None else "",
@@ -1874,6 +1984,7 @@ def _serialize_escalation_preview(preview: EscalationPreview) -> dict[str, objec
         "consecutive_high": preview.consecutive_high,
         "vitality_composite": preview.vitality_composite,
         "stale_days": preview.stale_days,
+        "stale_age_unknown": preview.stale_age_unknown,
         "milestone_id": preview.milestone_id,
         "milestone_status": preview.milestone_status,
         "milestone_days_to_target": preview.milestone_days_to_target,

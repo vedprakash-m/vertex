@@ -10,17 +10,20 @@ from pathlib import Path
 from uuid import UUID
 
 from typer.testing import CliRunner
+import pytest
 import yaml
 
 from src.commands.gather import gather_program
 from cli import app
 from src.commands.report import generate_report_draft
 from src.commands.status import build_status_report
+from src.core.exceptions import ConfigError, StateError
 from src.core.gather_state_store import write_gather_state
 from src.core.journal import append_review_decision, append_signal
 from src.core.models import Confidence
 from src.core.models_v2 import IntegrationError, RiskCategory, RiskEntry, RiskImpact, RiskProbability, RiskStatus
 from src.core.models_v2 import Signal, SignalReviewDecision
+from src.core.program_fact_store import ProgramFactSnapshot
 from src.core.risk_register_engine import save_risk_register
 from src.core.sqlite_stores import SQLiteSignalStore
 from src.core.snapshot_store import get_archive_root
@@ -32,6 +35,154 @@ runner = CliRunner()
 EDITION_NAME = "acme_weekly"
 FROZEN_NOW = datetime(2026, 5, 5, 18, 0, tzinfo=timezone.utc)
 FROZEN_MANIFEST_ID = UUID("11111111-1111-1111-1111-111111111111")
+
+
+@pytest.mark.parametrize("value", ["false", "true", 1, 0, None, [], {}, ["private-detail"]])
+def test_status_manifest_rejects_non_boolean_gate_members(tmp_path: Path, value) -> None:
+    from src.commands.status import _load_latest_manifest
+
+    issue = tmp_path / "issue_001"
+    issue.mkdir()
+    manifest = issue / "issue_001.manifest.json"
+    manifest.write_text(json.dumps({"qg_results": {"QG-1": True, "QG-8": value}}), encoding="utf-8")
+    original = manifest.read_bytes()
+    with pytest.raises(StateError, match="boolean") as error:
+        _load_latest_manifest(tmp_path)
+    assert "private-detail" not in str(error.value)
+    assert str(tmp_path) not in str(error.value)
+    assert manifest.read_bytes() == original
+
+
+@pytest.mark.parametrize("value", ["false", False, 0, [], [True]])
+def test_status_manifest_rejects_non_mapping_gate_results(tmp_path: Path, value) -> None:
+    from src.commands.status import _load_latest_manifest
+
+    issue = tmp_path / "issue_001"
+    issue.mkdir()
+    (issue / "issue_001.manifest.json").write_text(json.dumps({"qg_results": value}), encoding="utf-8")
+    with pytest.raises(StateError, match="boolean"):
+        _load_latest_manifest(tmp_path)
+
+
+@pytest.mark.parametrize("payload, expected", [
+    ({}, {}),
+    ({"qg_results": None}, {}),
+    ({"qg_results": {}}, {}),
+    ({"qg_results": {"QG-1": True}}, {"QG-1": True}),
+    ({"qg_results": {"QG-1": False}}, {"QG-1": False}),
+    ({"qg_results": {"QG-1": True, "QG-8": False}}, {"QG-1": True, "QG-8": False}),
+])
+def test_status_manifest_preserves_valid_and_absent_gate_results(tmp_path: Path, payload, expected) -> None:
+    from src.commands.status import _load_latest_manifest
+
+    issue = tmp_path / "issue_001"
+    issue.mkdir()
+    path = issue / "issue_001.manifest.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    result = _load_latest_manifest(tmp_path)
+    assert result is not None
+    assert result[:3] == (path, 1, expected)
+
+
+@pytest.mark.parametrize("with_snapshot", [False, True])
+@pytest.mark.parametrize("output_format", ["human", "json", "csv"])
+def test_status_cli_refuses_malformed_gate_readiness(
+    monkeypatch, repo_root: Path, tmp_path: Path, with_snapshot: bool, output_format: str,
+) -> None:
+    _seed_status_workspace(monkeypatch, repo_root, tmp_path)
+    issue = tmp_path / "programs" / "acme" / "publications" / EDITION_NAME / "issue_001"
+    manifest = issue / "issue_001.manifest.json"
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["qg_results"] = {"QG-1": True, "QG-8": "false-private-detail"}
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    original = manifest.read_bytes()
+    if not with_snapshot:
+        (issue / "issue_001.snapshot.json").unlink()
+    monkeypatch.setattr("src.commands.status.PROGRAMS_ROOT", tmp_path / "programs")
+    monkeypatch.setattr("src.commands.status.ARCHIVE_ROOT", tmp_path / "archive")
+
+    result = runner.invoke(app, ["status", "--edition", EDITION_NAME, "--format", output_format])
+    assert result.exit_code == 2, result.output
+    assert result.stdout == ""
+    assert "boolean" in result.stderr
+    assert "Preserve" in result.stderr
+    assert "retrying status" in result.stderr
+    assert "private-detail" not in result.stderr
+    assert str(tmp_path) not in result.stderr
+    assert manifest.read_bytes() == original
+
+
+def test_status_cli_unexpected_report_failure_propagates(monkeypatch) -> None:
+    def fail_report(*args, **kwargs):
+        raise RuntimeError("implementation failure")
+
+    monkeypatch.setattr("src.commands.status.build_status_report", fail_report)
+    result = runner.invoke(app, ["status", "--edition", EDITION_NAME])
+    assert isinstance(result.exception, RuntimeError)
+    assert str(result.exception) == "implementation failure"
+
+
+def test_status_risk_configuration_failure_is_unavailable_in_all_formats(
+    monkeypatch, repo_root: Path, tmp_path: Path,
+) -> None:
+    _seed_status_workspace(monkeypatch, repo_root, tmp_path)
+    publications = tmp_path / "programs" / "acme" / "publications" / EDITION_NAME
+    (publications / "issue_001" / "issue_001.snapshot.json").unlink()
+    monkeypatch.setattr("src.commands.status.PROGRAMS_ROOT", tmp_path / "programs")
+    monkeypatch.setattr("src.commands.status.ARCHIVE_ROOT", tmp_path / "archive")
+
+    def fail_risk_load(*args, **kwargs):
+        raise ConfigError("private-path-and-detail")
+
+    monkeypatch.setattr("src.commands.status.load_program_facts", fail_risk_load)
+    expected = (
+        "unavailable: risk facts could not be loaded (configuration error; "
+        "correct the program fact configuration before retrying status)"
+    )
+    report = build_status_report(
+        EDITION_NAME,
+        as_of=FROZEN_NOW,
+        programs_root=tmp_path / "programs",
+        archive_root=tmp_path / "archive",
+    )
+    assert report.risk_register_summary == expected
+    assert report.readiness_percent == 90
+    assert report.milestone_summary == "1 at risk, 2 on track"
+
+    human = runner.invoke(app, ["status", "--edition", EDITION_NAME])
+    structured = runner.invoke(app, ["status", "--edition", EDITION_NAME, "--format", "json"])
+    tabular = runner.invoke(app, ["status", "--edition", EDITION_NAME, "--format", "csv"])
+    for result in (human, structured, tabular):
+        assert result.exit_code == 0, result.stdout
+        assert "private-path-and-detail" not in result.stdout
+    assert f"Risks:        {expected}" in human.stdout
+    assert json.loads(structured.stdout)["risk_register_summary"] == expected
+    assert list(csv.DictReader(tabular.stdout.splitlines()))[0]["risk_register_summary"] == expected
+
+
+def test_status_empty_risk_facts_are_not_unavailable(monkeypatch, tmp_path: Path) -> None:
+    from src.commands.status import _build_status_risk_register_summary
+
+    monkeypatch.setattr(
+        "src.commands.status.load_program_facts",
+        lambda *args, **kwargs: ProgramFactSnapshot("demo", FROZEN_NOW, ()),
+    )
+    assert _build_status_risk_register_summary(
+        "demo", programs_root=tmp_path, as_of=FROZEN_NOW,
+    ) is None
+
+
+def test_status_unexpected_risk_failure_propagates(monkeypatch, tmp_path: Path) -> None:
+    from src.commands.status import _build_status_risk_register_summary
+
+    def fail_risk_load(*args, **kwargs):
+        raise RuntimeError("implementation failure")
+
+    monkeypatch.setattr("src.commands.status.load_program_facts", fail_risk_load)
+    with pytest.raises(RuntimeError, match="implementation failure"):
+        _build_status_risk_register_summary(
+            "demo", programs_root=tmp_path, as_of=FROZEN_NOW,
+        )
 
 
 def test_build_status_report_uses_latest_draft_artifacts(monkeypatch, repo_root: Path, tmp_path: Path) -> None:

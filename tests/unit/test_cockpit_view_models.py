@@ -4,13 +4,30 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 
 import src.core.cockpit_builder as cockpit_builder
+
+
+def test_exception_selector_and_headline_preserve_existing_precedence() -> None:
+    from src.core.cockpit_models import CockpitFinding, select_cockpit_exceptions
+
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    findings = tuple(
+        CockpitFinding(str(index), "program", status, str(index), "", None, command, (), now)
+        for index, (status, command) in enumerate((
+            ("info", "info"), ("warn", "warn"), ("blocked", None),
+            ("blocked", "block"), ("blocked", "block"), ("warn", "warn-two"), ("ok", None),
+        ))
+    )
+    assert [finding.finding_id for finding in select_cockpit_exceptions(findings)] == ["2", "3", "4", "1", "5"]
+    assert cockpit_builder._pick_next_action(list(findings)) == "block"
+    assert cockpit_builder._pick_next_action([]) is None
+    assert select_cockpit_exceptions(()) == ()
 from src.core.cockpit_builder import build_cockpit_snapshot
 from src.core.cockpit_models import (
     CockpitFinding,
@@ -28,7 +45,11 @@ from src.core.cockpit_models import (
     finalize_cockpit_snapshot,
 )
 from src.core.exceptions import ConfigError
+from src.core.fact_sor_state import get_fact_sor_state_path, save_fact_sor_state
 from src.core.models_v2 import RiskCategory, RiskEntry, RiskImpact, RiskProbability, RiskStatus
+from src.core.program_fact_store import FactPrecedence, ProgramFactInput, ProgramFactStore, build_natural_key
+from src.core.program_reality import ProgramReality
+from src.core.risk_register_engine import _risk_fact_payload, get_risk_register_path, save_risk_register
 
 _NOW = datetime(2026, 7, 12, 3, 4, 5, tzinfo=timezone.utc)
 
@@ -316,6 +337,367 @@ def test_successful_risk_summary_preserves_existing_behavior(
     assert not any(f.finding_id.endswith("_failed") for f in snapshot.findings)
 
 
+def _seed_primary_risk_divergence(
+    programs_root: Path,
+) -> tuple[datetime, tuple[RiskEntry, ...]]:
+    program_id = "fixture_prog"
+    mirror_risks = (
+        replace(
+            _risk_entry("risk-diverged"),
+            probability=RiskProbability.VERY_LIKELY,
+            impact=RiskImpact.CRITICAL,
+        ),
+        replace(
+            _risk_entry("risk-threshold"),
+            probability=RiskProbability.UNLIKELY,
+            impact=RiskImpact.LOW,
+        ),
+    )
+    primary_risks = (
+        replace(
+            mirror_risks[0],
+            probability=RiskProbability.POSSIBLE,
+            impact=RiskImpact.HIGH,
+        ),
+        replace(
+            mirror_risks[1],
+            probability=RiskProbability.LIKELY,
+            impact=RiskImpact.HIGH,
+        ),
+    )
+    save_risk_register(program_id, mirror_risks, programs_root=programs_root)
+
+    recorded_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    store = ProgramFactStore(
+        program_id,
+        db_root=programs_root.parent,
+    )
+    for risk in primary_risks:
+        entity_refs = (f"RISK:{risk.id}",)
+        store.append_fact(
+            ProgramFactInput(
+                fact_type="risk.entry",
+                scope="program",
+                entity_refs=entity_refs,
+                payload=_risk_fact_payload(risk),
+                precedence=FactPrecedence.ACTIVE_PM_JUDGMENT,
+                natural_key=build_natural_key(
+                    "risk.entry",
+                    entity_refs=entity_refs,
+                    scope="program",
+                ),
+                created_by="synthetic-cockpit-test",
+            ),
+            recorded_at=recorded_at,
+        )
+    save_fact_sor_state(
+        program_id,
+        mode="legacy",
+        family_modes={"judgment": "primary"},
+        recorded_at=recorded_at,
+        recorded_by="synthetic-cockpit-test",
+        programs_root=programs_root,
+    )
+    return recorded_at + timedelta(seconds=1), primary_risks
+
+
+def test_primary_cockpit_risk_summary_uses_real_program_reality_not_mirror(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    programs_root = tmp_path / "programs"
+    observed_at, primary_risks = _seed_primary_risk_divergence(programs_root)
+
+    reality = ProgramReality.load(
+        "fixture_prog",
+        programs_root=programs_root,
+        archive_root=None,
+        assessment_as_of=observed_at,
+    )
+    assert reality.family_sor_mode("judgment") == "primary"
+    reality_risks = {assessment.record.id: assessment.record for assessment in reality.risks()}
+    assert {
+        risk_id: (risk.probability, risk.impact)
+        for risk_id, risk in reality_risks.items()
+    } == {
+        risk.id: (risk.probability, risk.impact)
+        for risk in primary_risks
+    }
+    mirror_risks = {
+        risk.id: risk
+        for risk in cockpit_builder.load_risk_register(
+            "fixture_prog",
+            programs_root=programs_root,
+        )
+    }
+    assert reality_risks["risk-diverged"].probability != mirror_risks["risk-diverged"].probability
+    assert cockpit_builder.compute_risk_score(reality_risks["risk-diverged"]) == 6
+    assert cockpit_builder.compute_risk_score(reality_risks["risk-threshold"]) == 9
+    assert cockpit_builder._HIGH_RISK_SCORE_THRESHOLD == 9
+
+    actual_loader = ProgramReality.load
+    loader_calls: list[tuple[str, dict[str, object]]] = []
+
+    def load_reality(program_id: str, **kwargs: object) -> ProgramReality:
+        loader_calls.append((program_id, kwargs))
+        return actual_loader(program_id, **kwargs)
+
+    monkeypatch.setattr(ProgramReality, "load", staticmethod(load_reality))
+    mirror_loader = Mock(side_effect=AssertionError("Primary mode must not read the mirror."))
+    monkeypatch.setattr(cockpit_builder, "load_risk_register", mirror_loader)
+    snapshot = build_cockpit_snapshot(
+        "fixture_prog",
+        programs_root=programs_root,
+        now=observed_at,
+    )
+
+    assert snapshot.program_summary.overall_risk == "red"
+    assert snapshot.program_summary.blocker_count == 1
+    finding = next(
+        finding
+        for finding in snapshot.findings
+        if finding.finding_id == "program.risk.high_active_count"
+    )
+    assert finding.evidence_refs == ("risk-threshold",)
+    assert finding.observed_at == observed_at
+    assert loader_calls == [
+        (
+            "fixture_prog",
+            {
+                "programs_root": programs_root,
+                "archive_root": None,
+                "assessment_as_of": observed_at,
+            },
+        )
+    ]
+    mirror_loader.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("mode", "family_modes"),
+    [
+        ("legacy", None),
+        ("legacy", {"judgment": "shadow"}),
+        ("primary", {"judgment": "legacy"}),
+        ("primary", {"judgment": "shadow"}),
+    ],
+)
+def test_nonprimary_cockpit_risk_summary_preserves_mirror_behavior(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    family_modes: dict[str, str] | None,
+) -> None:
+    programs_root = tmp_path / "programs"
+    risks = (_risk_entry("mirror-risk"),)
+    save_risk_register("fixture_prog", risks, programs_root=programs_root)
+    save_fact_sor_state(
+        "fixture_prog",
+        mode=mode,
+        family_modes=family_modes,
+        recorded_at=_NOW,
+        recorded_by="synthetic-cockpit-test",
+        programs_root=programs_root,
+    )
+    loader = Mock(side_effect=AssertionError("Non-primary mode must not load ProgramReality."))
+    monkeypatch.setattr(ProgramReality, "load", loader)
+
+    snapshot = build_cockpit_snapshot(
+        "fixture_prog",
+        programs_root=programs_root,
+        now=_NOW,
+    )
+
+    assert snapshot.program_summary.overall_risk == "red"
+    assert snapshot.program_summary.blocker_count == 1
+    loader.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [OSError("private diagnostic"), ConfigError("private diagnostic"), UnicodeError("private diagnostic")],
+)
+def test_primary_cockpit_reality_failure_never_falls_back_to_mirror(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+) -> None:
+    programs_root = tmp_path / "programs"
+    save_fact_sor_state(
+        "fixture_prog",
+        mode="legacy",
+        family_modes={"judgment": "primary"},
+        recorded_at=_NOW,
+        recorded_by="synthetic-cockpit-test",
+        programs_root=programs_root,
+    )
+    reality_loader = Mock(side_effect=error)
+    mirror_loader = Mock(return_value=(_risk_entry("mirror-risk"),))
+    monkeypatch.setattr(ProgramReality, "load", reality_loader)
+    monkeypatch.setattr(cockpit_builder, "load_risk_register", mirror_loader)
+
+    snapshot = build_cockpit_snapshot(
+        "fixture_prog",
+        programs_root=programs_root,
+        now=_NOW,
+    )
+
+    assert snapshot.program_summary.overall_risk == "unknown"
+    assert snapshot.program_summary.blocker_count is None
+    finding = next(f for f in snapshot.findings if f.finding_id == "program.risk.read_failed")
+    assert finding.status == "blocked"
+    assert "private diagnostic" not in str(cockpit_snapshot_to_json_dict(snapshot))
+    mirror_loader.assert_not_called()
+
+
+def test_primary_cockpit_empty_reality_does_not_fall_back_to_mirror(
+    tmp_path: Path,
+) -> None:
+    programs_root = tmp_path / "programs"
+    save_risk_register(
+        "fixture_prog",
+        (_risk_entry("mirror-only-risk"),),
+        programs_root=programs_root,
+    )
+    mirror_path = get_risk_register_path("fixture_prog", programs_root)
+    mirror_text = mirror_path.read_text(encoding="utf-8")
+    save_risk_register("fixture_prog", (), programs_root=programs_root)
+    mirror_path.write_text(mirror_text, encoding="utf-8")
+    assert [risk.id for risk in cockpit_builder.load_risk_register("fixture_prog", programs_root=programs_root)] == [
+        "mirror-only-risk"
+    ]
+    save_fact_sor_state(
+        "fixture_prog",
+        mode="legacy",
+        family_modes={"judgment": "primary"},
+        recorded_at=_NOW,
+        recorded_by="synthetic-cockpit-test",
+        programs_root=programs_root,
+    )
+
+    snapshot = build_cockpit_snapshot(
+        "fixture_prog",
+        programs_root=programs_root,
+        now=_NOW,
+    )
+
+    assert snapshot.program_summary.overall_risk == "green"
+    assert snapshot.program_summary.blocker_count == 0
+    assert not any(
+        finding.finding_id == "program.risk.high_active_count"
+        for finding in snapshot.findings
+    )
+
+
+def test_primary_cockpit_risk_authority_change_during_read_is_unknown_not_mirror(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    programs_root = tmp_path / "programs"
+    observed_at, _ = _seed_primary_risk_divergence(programs_root)
+    actual_loader = ProgramReality.load
+
+    def flip_then_load(program_id: str, **kwargs: object) -> ProgramReality:
+        save_fact_sor_state(
+            program_id,
+            mode="legacy",
+            family_modes={"judgment": "legacy"},
+            recorded_at=observed_at,
+            recorded_by="synthetic-cockpit-test",
+            programs_root=programs_root,
+        )
+        return actual_loader(program_id, **kwargs)
+
+    mirror_loader = Mock(side_effect=AssertionError("Authority change must not read the mirror."))
+    monkeypatch.setattr(ProgramReality, "load", staticmethod(flip_then_load))
+    monkeypatch.setattr(cockpit_builder, "load_risk_register", mirror_loader)
+
+    snapshot = build_cockpit_snapshot(
+        "fixture_prog",
+        programs_root=programs_root,
+        now=observed_at,
+    )
+
+    assert snapshot.program_summary.overall_risk == "unknown"
+    assert snapshot.program_summary.blocker_count is None
+    finding = next(f for f in snapshot.findings if f.finding_id == "program.risk.read_failed")
+    assert finding.status == "blocked"
+    assert "ConfigError" in finding.detail
+    mirror_loader.assert_not_called()
+
+
+def test_malformed_risk_authority_state_is_unknown_not_mirror(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    programs_root = tmp_path / "programs"
+    save_risk_register("fixture_prog", (_risk_entry("mirror-risk"),), programs_root=programs_root)
+    save_fact_sor_state(
+        "fixture_prog",
+        mode="legacy",
+        family_modes={"judgment": "primary"},
+        recorded_at=_NOW,
+        recorded_by="synthetic-cockpit-test",
+        programs_root=programs_root,
+    )
+    get_fact_sor_state_path("fixture_prog", programs_root=programs_root).write_text("mode: [not-a-mode\n", encoding="utf-8")
+    mirror_loader = Mock(side_effect=AssertionError("Unknown authority must not read the mirror."))
+    reality_loader = Mock(side_effect=AssertionError("Unknown authority must not load reality."))
+    monkeypatch.setattr(cockpit_builder, "load_risk_register", mirror_loader)
+    monkeypatch.setattr(ProgramReality, "load", reality_loader)
+
+    snapshot = build_cockpit_snapshot(
+        "fixture_prog",
+        programs_root=programs_root,
+        now=_NOW,
+    )
+
+    assert snapshot.program_summary.overall_risk == "unknown"
+    assert snapshot.program_summary.blocker_count is None
+    finding = next(f for f in snapshot.findings if f.finding_id == "program.risk.read_failed")
+    assert finding.status == "blocked"
+    mirror_loader.assert_not_called()
+    reality_loader.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        KeyError("unexpected implementation failure"),
+        TypeError("unexpected implementation failure"),
+        ValueError("unexpected implementation failure"),
+        RuntimeError("unexpected implementation failure"),
+    ],
+)
+def test_unexpected_primary_cockpit_reality_failure_propagates_without_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+) -> None:
+    programs_root = tmp_path / "programs"
+    save_fact_sor_state(
+        "fixture_prog",
+        mode="legacy",
+        family_modes={"judgment": "primary"},
+        recorded_at=_NOW,
+        recorded_by="synthetic-cockpit-test",
+        programs_root=programs_root,
+    )
+    reality_loader = Mock(side_effect=error)
+    mirror_loader = Mock(return_value=(_risk_entry("mirror-risk"),))
+    monkeypatch.setattr(ProgramReality, "load", reality_loader)
+    monkeypatch.setattr(cockpit_builder, "load_risk_register", mirror_loader)
+
+    with pytest.raises(type(error), match="unexpected implementation failure"):
+        build_cockpit_snapshot(
+            "fixture_prog",
+            programs_root=programs_root,
+            now=_NOW,
+        )
+
+    mirror_loader.assert_not_called()
+
+
 def test_unknown_risk_count_survives_json_history_and_all_renderers(tmp_path: Path) -> None:
     from src.commands.cockpit import (
         find_nearest_history_snapshot, persist_cockpit_snapshot,
@@ -455,6 +837,56 @@ def test_lineage_read_failure_is_blocked_not_empty_and_preserves_known_evidence(
     assert finding.summary in html
     assert finding.detail in html
     assert "private diagnostic" not in str(payload) + terminal + html
+
+
+@pytest.mark.parametrize("lineage_fails", [False, True])
+def test_failed_retained_synthesis_preserves_high_risk_lineage_and_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lineage_fails: bool,
+) -> None:
+    from src.commands.cockpit import find_nearest_history_snapshot, persist_cockpit_snapshot, render_cockpit_terminal
+    from src.core.cockpit_html import render_cockpit_html
+    from src.core.program_synthesis import persist_program_synthesis
+    from src.core.quality_gates.ai_release_audit import ReleaseTerminal, record_ai_release_decision
+    from tests.unit.test_program_synthesis import _synthesis
+
+    root = tmp_path / "programs"
+    save_fact_sor_state("fixture_prog", mode="legacy", recorded_at=_NOW, programs_root=root)
+    save_risk_register("fixture_prog", (_risk_entry("known-high"),), programs_root=root)
+    synthesis = _synthesis(program_id="fixture_prog")
+    path = persist_program_synthesis(synthesis, programs_root=root)
+    assert path is not None
+    record_ai_release_decision(
+        program_id="fixture_prog", ai_run_id=synthesis.ai_run_id, terminal=ReleaseTerminal.RELEASED,
+        reason="synthetic control", validator_finding_count=0, programs_root=root,
+    )
+    baseline = build_cockpit_snapshot("fixture_prog", programs_root=root, now=_NOW)
+    path.write_text("{private assessment", encoding="utf-8")
+    if lineage_fails:
+        monkeypatch.setattr(cockpit_builder, "compute_lineage_coverage", Mock(side_effect=ConfigError("private lineage")))
+    snapshot = build_cockpit_snapshot("fixture_prog", programs_root=root, now=_NOW)
+    assert snapshot.program_summary.overall_risk == "red" and snapshot.program_summary.blocker_count == 1
+    assert any(f.finding_id == "intelligence.synthesis.read_failed" for f in snapshot.findings)
+    if lineage_fails:
+        assert snapshot.intelligence_summary.lineage_coverage is None
+        assert any(f.finding_id == "intelligence.lineage.read_failed" for f in snapshot.findings)
+    else:
+        assert snapshot.intelligence_summary.lineage_coverage == baseline.intelligence_summary.lineage_coverage
+        assert tuple(f for f in snapshot.findings if f.finding_id.startswith("intelligence.lineage.")) == tuple(
+            f for f in baseline.findings if f.finding_id.startswith("intelligence.lineage.")
+        )
+    payload = cockpit_snapshot_to_json_dict(snapshot)
+    assert payload["intelligence_summary"]["program_synthesis_through_line"] is None
+    assert cockpit_snapshot_from_json_dict(payload) == snapshot
+    persist_cockpit_snapshot(snapshot, programs_root=root)
+    retained = find_nearest_history_snapshot("fixture_prog", _NOW, programs_root=root)
+    assert retained == snapshot
+    terminal = render_cockpit_terminal(snapshot)
+    html = render_cockpit_html(snapshot)
+    assert "synthesis unavailable (read failed)" in terminal
+    assert "Program health:        RED (1 high-risk item(s))" in terminal
+    assert "Program synthesis unavailable" in html and "finding-blocked" in html
+    assert "private" not in html + terminal + str(payload)
+    assert str(tmp_path) not in html + terminal + str(payload)
 
 
 def test_malformed_lineage_waiver_is_not_reported_as_no_program_facts(tmp_path: Path) -> None:

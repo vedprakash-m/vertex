@@ -27,6 +27,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from src.core._db import open_program_db_with_retry as open_program_db
+from src.core.unit_of_work import open_unit_of_work
+from src.core.workspace_lease import LeaseHandle, get_workspace_lease_db_path
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS outbox (
@@ -218,6 +220,49 @@ def lease_next(
             (owner, next_token, _wire(expires_at), _wire(now), outbox_id),
         )
     return load_entry(db_path, str(outbox_id))
+
+
+def classify_expired_dispatched(
+    db_path: Path,
+    observed: OutboxEntry,
+    *,
+    workspace_lease: LeaseHandle,
+    programs_root: Path,
+) -> OutboxEntry:
+    with open_unit_of_work({
+        "outbox": db_path,
+        "fence": get_workspace_lease_db_path(workspace_lease.program_id, programs_root=programs_root),
+    }) as transaction:
+        now = _wire(_now())
+        row = transaction.connection.execute(
+            """
+            UPDATE outbox SET status = 'uncertain_remote_state', lease_owner = ?,
+                lease_fencing_token = lease_fencing_token + 1,
+                failure_reason = ?, updated_at = ?
+            WHERE outbox_id = ? AND domain = ? AND correlation_id = ? AND payload_json = ?
+                AND status = 'dispatched' AND lease_owner = ? AND lease_owner <> ?
+                AND lease_fencing_token = ? AND lease_expires_at = ? AND lease_expires_at <= ?
+                AND EXISTS (
+                    SELECT 1 FROM fence.workspace_lease WHERE mutation_domain = ?
+                        AND owner = ? AND fencing_token = ? AND expires_at > ?
+                )
+            RETURNING outbox_id, domain, correlation_id, payload_json, status, lease_owner,
+                lease_fencing_token, lease_expires_at, attempt_count, next_attempt_at,
+                remote_request_hash, remote_response_hash, failure_reason, created_at, updated_at
+            """,
+            (
+                workspace_lease.owner,
+                "Expired dispatched attempt; remote outcome unknown; manual reconciliation required.",
+                now, observed.outbox_id, workspace_lease.mutation_domain, observed.outbox_id,
+                observed.payload_json, observed.lease_owner, workspace_lease.owner,
+                observed.lease_fencing_token, _wire(observed.lease_expires_at), now, workspace_lease.mutation_domain,
+                workspace_lease.owner, workspace_lease.fencing_token, now,
+            ),
+        ).fetchone()
+        if row is None:
+            raise LeaseNoLongerCurrent(observed.outbox_id)
+        result = _entry_from_row(tuple(row))
+    return result
 
 
 def _transition(

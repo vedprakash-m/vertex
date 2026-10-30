@@ -92,6 +92,40 @@ def lint_specification(path: Path) -> CheckResult:
     duplicates = _duplicates(defined_ids)
     if duplicates:
         findings.append(f"duplicate defined RELO ID(s): {', '.join(duplicates)}")
+    traceability = re.search(
+        r"^### 19\.2\s[^\n]*\n(.*?)(?=^#{1,3}\s|\Z)", content,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    if traceability is not None:
+        definitions = set(re.findall(
+            r"^\|\s*(?:\*\*)?(RELO-(?:FR-\d+|NFR-\d+|W\d+\.\d+[a-z]?|QG-\d+))(?=\s|\*\*|\|)",
+            content[:traceability.start()] + content[traceability.end():],
+            flags=re.MULTILINE,
+        ))
+        declared_requirements: set[str] = set()
+        for line in traceability.group(1).splitlines():
+            if not re.match(r"^\|\s*RELO-(?:FR|NFR)-\d+\s*\|", line):
+                continue
+            declared_requirements.add(line.split("|")[1].strip())
+            columns = [cell.strip() for cell in line.strip().split("|")[1:-1]]
+            if not line.rstrip().endswith("|") or len(columns) != 5 or not all(columns):
+                identifier = line.split("|")[1].strip()
+                findings.append(f"{identifier}: declared traceability row requires five nonempty columns")
+                continue
+            references = {columns[0]}
+            try:
+                references.update(_traceability_references(" ".join(columns[1:3]), definitions))
+            except ValueError as error:
+                findings.append(f"{columns[0]}: {error}")
+            unresolved_references = sorted(references - definitions)
+            if unresolved_references:
+                findings.append(f"{columns[0]}: unresolved traceability reference(s): {', '.join(unresolved_references)}")
+        missing_requirements = sorted(
+            identifier for identifier in definitions
+            if identifier.startswith(("RELO-FR-", "RELO-NFR-")) and identifier not in declared_requirements
+        )
+        if missing_requirements:
+            findings.append(f"missing requirement traceability row(s): {', '.join(missing_requirements)}")
     return CheckResult(
         "RELO-SPEC-LINT",
         not findings,
@@ -99,6 +133,26 @@ def lint_specification(path: Path) -> CheckResult:
         if not findings
         else "; ".join(findings),
     )
+
+
+def _traceability_references(value: str, definitions: set[str]) -> set[str]:
+    references: set[str] = set()
+    pattern = r"(?<![\w-])(?:RELO-)?(W\d+\.\d+[a-z]?|QG-\d+)(?:\s*[-–]\s*(?:RELO-)?(W\d+\.\d+[a-z]?|QG-\d+))?"
+    for match in re.finditer(pattern, value):
+        start, end = match.groups()
+        if end is None:
+            references.add(f"RELO-{start}")
+            continue
+        first = re.fullmatch(r"(W\d+\.|QG-)(\d+)", start)
+        last = re.fullmatch(r"(W\d+\.|QG-)(\d+)", end)
+        if first is None or last is None or first[1] != last[1] or int(first[2]) > int(last[2]):
+            raise ValueError(f"invalid traceability range: {match.group(0)}")
+        for number in range(int(first[2]), int(last[2]) + 1):
+            reference = f"RELO-{first[1]}{number:02d}" if first[1] == "QG-" else f"RELO-{first[1]}{number}"
+            if reference not in definitions:
+                raise ValueError(f"unresolved traceability reference: {reference}")
+            references.add(reference)
+    return references
 
 
 def lint_work_packages(repo_root: Path, *, spec_path: Path) -> CheckResult:

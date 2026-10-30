@@ -7,9 +7,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
+
 from src.commands.confirm_stages import post_confirm_artifacts as artifacts_module
 from src.core.config_loader import EditorialRules
 from src.core.edition_resolver import get_program_output_dir
+from src.core.exceptions import ConfigError
 from src.core.models import ReportData
 from src.core.ncfl_models import ContextUpdateProposal
 
@@ -171,16 +174,23 @@ def test_record_learning_distillation_writes_outputs(monkeypatch, tmp_path: Path
     assert warning is None
 
 
-def test_record_edit_patterns_for_v2_appends_patterns(monkeypatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("selected", [False, True])
+def test_record_edit_patterns_for_v2_appends_patterns(monkeypatch, tmp_path: Path, selected: bool) -> None:
     captured: dict[str, object] = {}
     reports_root = tmp_path / "reports"
     reports_root.mkdir()
+    selected_root = tmp_path / "selected" / "programs"
+    if selected:
+        selected_edition = selected_root / "acme" / "editions" / f"{EDITION}.yaml"
+        selected_edition.parent.mkdir(parents=True)
+        selected_edition.write_text("program_id: acme\n", encoding="utf-8")
+    expected_root = selected_root if selected else reports_root.parent / "programs"
 
-    monkeypatch.setattr(
-        artifacts_module,
-        "resolve_edition",
-        lambda *args, **kwargs: SimpleNamespace(program=SimpleNamespace(id=PROGRAM_ID)),
-    )
+    def resolve_edition(*args, **kwargs):
+        captured["resolved_programs_root"] = kwargs["programs_root"]
+        return SimpleNamespace(program=SimpleNamespace(id=PROGRAM_ID))
+
+    monkeypatch.setattr(artifacts_module, "resolve_edition", resolve_edition)
     monkeypatch.setattr(
         artifacts_module,
         "build_edit_patterns",
@@ -205,11 +215,66 @@ def test_record_edit_patterns_for_v2_appends_patterns(monkeypatch, tmp_path: Pat
         report=cast(ReportData, report),
         confirmed_at=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc),
         reports_root=reports_root,
+        **({"programs_root": selected_root} if selected else {}),
     )
 
     assert warning is None
     assert captured["program_id"] == PROGRAM_ID
     assert captured["patterns"] == ("pattern-1",)
+    assert captured["resolved_programs_root"] == expected_root
+    assert captured["programs_root"] == expected_root
+
+
+@pytest.mark.parametrize("root_case", ["missing", "relative", "legacy_decoy"])
+def test_record_edit_patterns_rejects_invalid_explicit_root_before_reads_or_writes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    root_case: str,
+) -> None:
+    reports_root = tmp_path / "reports"
+    reports_root.mkdir()
+    if root_case == "missing":
+        selected_root = tmp_path / "selected" / "missing-programs"
+    elif root_case == "relative":
+        selected_root = Path("selected-relative-programs")
+    else:
+        selected_root = tmp_path / "selected" / "programs"
+        selected_root.mkdir(parents=True)
+        decoy_editions = selected_root.parent / "editions"
+        decoy_editions.mkdir()
+        (decoy_editions / f"{EDITION}.yaml").write_text("program_id: acme\n", encoding="utf-8")
+
+    resolver_calls = []
+    artifact_calls = []
+    monkeypatch.setattr(
+        artifacts_module,
+        "resolve_edition",
+        lambda *args, **kwargs: resolver_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        artifacts_module,
+        "build_edit_patterns",
+        lambda **kwargs: artifact_calls.append(("build", kwargs)) or ("pattern-1",),
+    )
+    monkeypatch.setattr(
+        artifacts_module,
+        "append_edit_patterns",
+        lambda *args, **kwargs: artifact_calls.append(("append", args, kwargs)),
+    )
+
+    with pytest.raises(ConfigError):
+        artifacts_module.record_edit_patterns_for_v2(
+            edition_name=EDITION,
+            issue_number=1,
+            draft_state={},
+            report=cast(ReportData, SimpleNamespace(exec_summary_text="confirmed", workstream_blurbs={})),
+            confirmed_at=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc),
+            reports_root=reports_root,
+            programs_root=selected_root,
+        )
+
+    assert resolver_calls == []
+    assert artifact_calls == []
 
 
 def test_record_workstream_associations_warns_on_non_object_entries(monkeypatch, tmp_path: Path) -> None:

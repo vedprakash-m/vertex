@@ -273,6 +273,73 @@ def test_readers_do_not_initialize_or_rewrite_queue_files(tmp_path: Path, popula
     assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
 
 
+@pytest.mark.parametrize("latest_status", ["pending", "accepted", "dismissed", "superseded"])
+@pytest.mark.parametrize("lag, expected_stale", [(2, False), (3, True)])
+def test_staleness_retains_terminal_issue_horizon_without_returning_terminal_proposals(
+    tmp_path: Path, latest_status: str, lag: int, expected_stale: bool,
+) -> None:
+    old = _pending()
+    latest = replace(_pending("latest"), issue_number=1 + lag, status=latest_status)
+    terminal = replace(_pending("terminal"), status="dismissed")
+    store.save_proposals("acme", 1, (old, terminal), programs_root=tmp_path)
+    store.save_proposals("acme", 1 + lag, (latest,), programs_root=tmp_path)
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+
+    assert store.stale_pending_proposals("acme", programs_root=tmp_path) == (
+        (old,) if expected_stale else ()
+    )
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+
+@pytest.mark.parametrize("queue_state", ["missing", "empty", "all_terminal"])
+def test_staleness_empty_or_terminal_queues_preserve_selected_program_and_root(
+    tmp_path: Path, queue_state: str,
+) -> None:
+    selected, other_root = tmp_path / "selected", tmp_path / "other"
+    if queue_state != "missing":
+        terminal = replace(_pending(), status="accepted")
+        store.save_proposals(
+            "acme", 1, (terminal,) if queue_state == "all_terminal" else (),
+            programs_root=selected,
+        )
+        if queue_state == "all_terminal":
+            store.save_proposals(
+                "acme", 4, (replace(terminal, proposal_id="latest", issue_number=4),),
+                programs_root=selected,
+            )
+    for root, program in ((selected, "other"), (other_root, "acme")):
+        store.save_proposals(
+            program, 100,
+            (replace(_pending("decoy"), program_id=program, issue_number=100),),
+            programs_root=root,
+        )
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+
+    assert store.stale_pending_proposals("acme", programs_root=selected) == ()
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+
+def test_staleness_uses_custom_lag_and_ignores_other_programs_and_roots(tmp_path: Path) -> None:
+    selected, other_root = tmp_path / "selected", tmp_path / "other"
+    old = _pending()
+    store.save_proposals("acme", 1, (old,), programs_root=selected)
+    store.save_proposals(
+        "acme", 5, (replace(_pending("latest"), issue_number=5, status="dismissed"),),
+        programs_root=selected,
+    )
+    for root, program in ((selected, "other"), (other_root, "acme")):
+        store.save_proposals(
+            program, 100,
+            (replace(_pending("decoy"), program_id=program, issue_number=100),),
+            programs_root=root,
+        )
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+
+    assert store.stale_pending_proposals("acme", max_issue_lag=4, programs_root=selected) == ()
+    assert store.stale_pending_proposals("acme", max_issue_lag=3, programs_root=selected) == (old,)
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+
 _LOCK_PROBE = """
 import os
 import sys

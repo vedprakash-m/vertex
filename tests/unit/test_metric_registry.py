@@ -3,8 +3,38 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from src.core.edition_resolver import load_program
-from src.core.metric_registry import load_metric_definition_map
+from src.core.exceptions import ConfigError
+from src.core.metric_registry import _parse_metric_definition, load_metric_definition_map
+
+
+@pytest.mark.parametrize("target", [float("nan"), float("inf"), float("-inf"), pytest.param(10**1000, id="overflow")])
+def test_registry_rejects_nonfinite_slo_target(target: float) -> None:
+    with pytest.raises(ConfigError, match="slo_target.*finite"):
+        _parse_metric_definition(
+            {"id": "synthetic.count", "title": "Count", "unit": "count", "aggregation": "last", "slo_target": target},
+            Path("synthetic-catalog.yaml"),
+        )
+
+
+@pytest.mark.parametrize("target", [None, 0, -2, 95.5])
+def test_registry_keeps_absent_and_finite_slo_target(target: float | None) -> None:
+    definition = _parse_metric_definition(
+        {"id": "synthetic.count", "title": "Count", "unit": "count", "aggregation": "last", "slo_target": target},
+        Path("synthetic-catalog.yaml"),
+    )
+    assert definition.slo_target == target
+
+
+@pytest.mark.parametrize("target", [True, "95.5"])
+def test_registry_keeps_numeric_type_requirement_for_slo_target(target: bool | str) -> None:
+    with pytest.raises(ConfigError, match="slo_target.*numeric"):
+        _parse_metric_definition(
+            {"id": "synthetic.count", "title": "Count", "unit": "count", "aggregation": "last", "slo_target": target},
+            Path("synthetic-catalog.yaml"),
+        )
 
 
 def test_load_metric_definition_map_reads_active_definition(tmp_path: Path) -> None:

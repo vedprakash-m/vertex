@@ -163,8 +163,12 @@ class RenderStage:
                 )
             ),
             reports_root=ctx.reports_root,
+            programs_root=ctx.programs_root if ctx.resolved_v2 is not None else None,
         )
-        review_status_path = get_review_status_path(ctx.edition_name, reports_root=ctx.reports_root)
+        review_status_path = get_review_status_path(
+            ctx.edition_name, reports_root=ctx.reports_root,
+            programs_root=ctx.programs_root if ctx.resolved_v2 is not None else None,
+        )
 
         report = ReportData(
             issue_number=ctx.resolved_issue_number,
@@ -306,6 +310,7 @@ class RenderStage:
             ctx.resolved_issue_number,
             ctx.dimension_risks,
             ctx.archive_root,
+            **({"programs_root": ctx.programs_root} if ctx.resolved_v2 is not None else {}),
         )
         health = _build_health_summary_with_risk_fallback(
             ctx,
@@ -357,7 +362,11 @@ class RenderStage:
                 ado_vitality = build_vitality_section(
                     vitality_snapshot,
                     current_issue_number=ctx.resolved_issue_number,
-                    history_entries=read_vitality_history(ctx.edition_name, archive_root=ctx.archive_root),
+                    history_entries=read_vitality_history(
+                        ctx.edition_name,
+                        archive_root=ctx.archive_root,
+                        **({"programs_root": ctx.programs_root} if ctx.resolved_v2 is not None else {}),
+                    ),
                     items=ctx.items,
                     workstreams=ctx.resolved_v2.workstreams,
                     include_individual_praise=vitality_settings.newsletter_individual_praise,

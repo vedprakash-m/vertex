@@ -11,6 +11,7 @@ import pytest
 from src.commands import confirm
 import src.commands.confirm_stages.archive_transaction as archive_transaction
 from src.core.exceptions import ConfigError
+from src.core.manifest_writer import hash_jsonable
 from src.core.gather_run_manifest import (
     GatherRunStatus,
     compute_manifest_hash,
@@ -63,6 +64,15 @@ def test_confirm_gather_pin_identity_gates_archive(
     )
     draft = json.loads(draft_path.read_text(encoding="utf-8"))
     draft.update(gather_run_id=committed.run_id, gather_run_hash=invalid.manifest_hash)
+    report_manifest_path = draft_path.with_name("issue_001.manifest.json")
+    report_manifest = json.loads(report_manifest_path.read_text(encoding="utf-8"))
+    capture = report_manifest["metadata"]["run_evidence_snapshot"]
+    for payload in (report_manifest, capture):
+        payload.update(gather_run_id=draft["gather_run_id"], gather_run_hash=draft["gather_run_hash"])
+    capture.pop("sha256")
+    capture["sha256"] = hash_jsonable(capture)
+    draft["run_evidence_snapshot_sha256"] = capture["sha256"]
+    report_manifest_path.write_text(json.dumps(report_manifest), encoding="utf-8")
     draft_path.write_text(json.dumps(draft), encoding="utf-8")
     archive_before = {path: path.read_bytes() for path in archive_root.rglob("*") if path.is_file()}
     writers = [Mock(wraps=getattr(confirm, name)) for name in ("write_confirmed", "write_confirmed_issue")]
@@ -111,6 +121,15 @@ def test_forced_confirm_rechecks_gather_pin_after_archive_lock(
     draft_path = programs_root / "acme" / "publications" / EDITION_NAME / "issue_001" / "issue_001.draft.json"
     draft = json.loads(draft_path.read_text(encoding="utf-8"))
     draft.update(gather_run_id=committed.run_id, gather_run_hash=committed.manifest_hash)
+    report_manifest_path = draft_path.with_name("issue_001.manifest.json")
+    report_manifest = json.loads(report_manifest_path.read_text(encoding="utf-8"))
+    capture = report_manifest["metadata"]["run_evidence_snapshot"]
+    for payload in (report_manifest, capture):
+        payload.update(gather_run_id=draft["gather_run_id"], gather_run_hash=draft["gather_run_hash"])
+    capture.pop("sha256")
+    capture["sha256"] = hash_jsonable(capture)
+    draft["run_evidence_snapshot_sha256"] = capture["sha256"]
+    report_manifest_path.write_text(json.dumps(report_manifest), encoding="utf-8")
     draft_path.write_text(json.dumps(draft), encoding="utf-8")
     archive_before = {path: path.read_bytes() for path in archive_root.rglob("*") if path.is_file()}
     lock = archive_transaction.ArchiveLock

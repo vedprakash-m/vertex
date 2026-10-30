@@ -50,9 +50,17 @@ def test_scalar_gather_helpers_enforce_cardinality(count: int) -> None:
     query = _query()
     rows = _rows(count)
     state: dict[str, dict[str, Any]] = {}
+    previous: dict[str, Any] | None = None
+    for value in (7, 8):
+        sink: dict[str, dict[str, Any]] = {}
+        kusto_query_helpers.record_kusto_query_state(
+            sink, query, rows=_rows(1, value), as_of=datetime(2025, 12, 31, tzinfo=timezone.utc),
+            duration_ms=1, previous_state=previous,
+        )
+        previous = sink[query.id]
     signals = kusto_query_helpers.build_kusto_signals(
         queries=(query,), program_id="synthetic", as_of=NOW, executor=lambda _: rows,
-        query_state_sink=state, previous_query_states={query.id: PREVIOUS},
+        query_state_sink=state, previous_query_states={query.id: previous},
     )
     assert len(signals) == (1 if count == 1 else 0)
     assert kusto_query_helpers.extract_kusto_query_numeric_value(query, rows) == (3.0 if count == 1 else None)
@@ -127,6 +135,14 @@ def test_invalid_scalar_without_previous_state_is_not_successful_zero() -> None:
 def test_actual_kpi_stage_enforces_scalar_and_records_failure(count: int) -> None:
     query = _query()
     state: dict[str, dict[str, Any]] = {}
+    previous: dict[str, Any] | None = None
+    for value in (7, 8):
+        sink: dict[str, dict[str, Any]] = {}
+        kusto_query_helpers.record_kusto_query_state(
+            sink, query, rows=_rows(1, value), as_of=datetime(2025, 12, 31, tzinfo=timezone.utc),
+            duration_ms=1, previous_state=previous,
+        )
+        previous = sink[query.id]
     signals = ado_kpi_stage.build_kusto_kpi_signals(
         queries=(query,), program=Program(schema_version="2.0", id="synthetic", name="Synthetic"),
         program_id="synthetic", as_of=NOW, workstreams=(), executor=lambda _: _rows(count),
@@ -137,7 +153,7 @@ def test_actual_kpi_stage_enforces_scalar_and_records_failure(count: int) -> Non
         summarize_pull_requests_fn=lambda *args, **kwargs: None,
         pull_request_provider_ref_fn=lambda *args: None,
         pull_request_entity_refs_fn=lambda *args: (),
-        query_state_sink=state, previous_query_states={query.id: PREVIOUS},
+        query_state_sink=state, previous_query_states={query.id: previous},
     )
     assert len(signals) == (1 if count == 1 else 0)
     assert state[query.id]["last_error"] == (None if count == 1 else _error(count))

@@ -1104,8 +1104,13 @@ class RealityStore:
             raise KeyError(observation_id)
         return observation_id
 
-    def list_metric_observations(self, metric_id: str) -> tuple[MetricObservation, ...]:
-        with _connect_reality_db(self._db_path) as connection:
+    def list_metric_observations(
+        self,
+        metric_id: str,
+        *,
+        read_only: bool = False,
+    ) -> tuple[MetricObservation, ...]:
+        with _connect_reality_db(self._db_path, read_only=read_only) as connection:
             rows = connection.execute(
                 """
                 SELECT * FROM reality_metric_observations
@@ -1540,14 +1545,15 @@ def resolve_binding_owner(
 
 
 @contextmanager
-def _connect_reality_db(db_path: Path) -> Iterator[sqlite3.Connection]:
+def _connect_reality_db(db_path: Path, *, read_only: bool = False) -> Iterator[sqlite3.Connection]:
     """INV-AF-13 (WO-2 item 12): routed through open_program_db()
     (durability="strict" preserves this store's prior always-FULL
     synchronous default, never explicitly set before). Same reference
     pattern as src/core/ledger/event_index.py.
     """
-    with open_program_db(db_path, durability="strict") as connection:
-        _ensure_schema(connection)
+    with open_program_db(db_path, read_only=read_only, durability="strict") as connection:
+        if not read_only:
+            _ensure_schema(connection)
         yield connection
 
 

@@ -13,9 +13,11 @@ def _ensure_review_status(
     workstream_section_ids: tuple[str, ...],
     skipped_section_ids: set[str],
     reports_root: Path,
+    *,
+    programs_root: Path | None = None,
 ) -> ReviewStatus:
     expected_section_ids = ("exec_summary",) + tuple(f"ws:{section_id}" for section_id in workstream_section_ids)
-    existing = load_review_status(edition_name, reports_root=reports_root)
+    existing = load_review_status(edition_name, reports_root=reports_root, programs_root=programs_root)
     if existing is not None and existing.issue_number == issue_number:
         existing_sections = {section.section_id: section for section in existing.sections}
         merged_sections = tuple(
@@ -23,7 +25,7 @@ def _ensure_review_status(
             for section_id in expected_section_ids
         )
         status = ReviewStatus(issue_number=issue_number, sections=merged_sections)
-        save_review_status(edition_name, status, reports_root=reports_root)
+        save_review_status(edition_name, status, reports_root=reports_root, programs_root=programs_root)
         return status
 
     status = ReviewStatus(
@@ -33,7 +35,7 @@ def _ensure_review_status(
             for section_id in expected_section_ids
         ),
     )
-    save_review_status(edition_name, status, reports_root=reports_root)
+    save_review_status(edition_name, status, reports_root=reports_root, programs_root=programs_root)
     return status
 
 

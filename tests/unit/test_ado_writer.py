@@ -9,10 +9,80 @@ import portalocker
 import pytest
 import yaml
 
+from src.commands.ado import apply_ado_proposal
 from src.core.ado_proposal import ADOUpdateEntry, ADOUpdateProposal, ProposalManifestLockedError, proposal_from_document, read_proposal_manifest, write_proposal_manifest
+from src.core.exceptions import AuthError, CredentialExpired, QueryError, QueryTimeoutError
+from src.core.integration_types import PaginationOutcome
 from src.core.journal import load_latest_review_decisions, read_signals
+from src.core.models_v2 import ADOConfig, Program
 from src.core.sqlite_stores import SQLiteSignalStore
-from src.m365.ado_writer import ADOWriter
+from src.m365.ado_writer import ADOApplyArtifacts, ADOWriter
+
+
+def _apply_ado_proposal_with_fake_client(
+    proposal_reference: str,
+    *,
+    applied_at: datetime,
+    programs_root: Path,
+    program: Program,
+    client: _FakeADOClient,
+) -> ADOApplyArtifacts:
+    def program_loader(program_id: str, root: Path) -> tuple[Program, tuple[Any, ...]]:
+        assert program_id == program.id
+        assert root == programs_root
+        return program, ()
+
+    def client_factory(loaded_program: Program) -> _FakeADOClient:
+        assert loaded_program is program
+        return client
+
+    return apply_ado_proposal(
+        proposal_reference,
+        applied_at=applied_at,
+        programs_root=programs_root,
+        program_loader=program_loader,
+        client_factory=client_factory,
+    )
+
+
+def _comment_program() -> Program:
+    return Program(
+        schema_version="2.0",
+        id="demo",
+        name="Demo",
+        ado=ADOConfig(
+            organization="your-org",
+            project="One",
+            area_paths=("One\\Demo",),
+            work_item_types=("Task",),
+            excluded_states=(),
+            date_window_days=30,
+        ),
+    )
+
+
+def _comment_proposal(proposal_id: str, at: datetime, *, entry_status: str = "pending") -> ADOUpdateProposal:
+    return ADOUpdateProposal(
+        id=proposal_id,
+        program_id="demo",
+        edition_id="demo_weekly",
+        issue_number=7,
+        update_type="comment",
+        created_at=at - timedelta(hours=2),
+        expires_at=at + timedelta(hours=70),
+        entries=(
+            ADOUpdateEntry(
+                work_item_id=1001,
+                action="add_comment",
+                field_or_tag="comment",
+                current_value=None,
+                proposed_value="Vertex demo_weekly issue #007\nRisk: high.",
+                reason="Cited in confirmed issue #007.",
+                revision_id=7,
+                entry_status=entry_status,
+            ),
+        ),
+    )
 
 
 def test_apply_manifest_updates_entries_and_logs_audit_signals(tmp_path: Path) -> None:
@@ -113,6 +183,7 @@ def test_apply_manifest_updates_entries_and_logs_audit_signals(tmp_path: Path) -
     assert len(signals) == 3
     assert all(signal.source == "vertex/ado_update" for signal in signals)
     assert set(reviews) == {signal.id for signal in signals}
+    assert client.comment_lookup_count == 2
     assert client.session.calls[0]["method"] == "POST"
     assert client.session.calls[1]["method"] == "PATCH"
     assert client.session.calls[2]["method"] == "PATCH"
@@ -261,6 +332,131 @@ def test_rollback_manifest_reverts_applied_entries_idempotently(tmp_path: Path) 
     assert len(client.session.calls) == 2
 
 
+@pytest.mark.parametrize(
+    ("pagination_mode", "lookup_error", "expected_status"),
+    [
+        *[(mode, None, "conflict") for mode in (
+            "truncated",
+            "missing",
+            "invalid",
+            "multiple",
+            "invalid_total",
+            "mismatched_total",
+            "invalid_page_count",
+            "zero_pages",
+            "invalid_truncation",
+        )],
+        ("complete", AuthError("unauthorized"), "failed"),
+        ("complete", CredentialExpired("credential expired"), "failed"),
+        ("complete", QueryError("query failed"), "failed"),
+        ("complete", QueryTimeoutError("query timed out"), "failed"),
+    ],
+)
+def test_apply_ado_proposal_persists_comment_lookup_disposition(
+    tmp_path: Path, pagination_mode: str, lookup_error: Exception | None, expected_status: str
+) -> None:
+    programs_root = tmp_path / "programs"
+    applied_at = datetime(2026, 5, 13, 18, 0, tzinfo=timezone.utc)
+    proposal = _comment_proposal(f"prop-apply-{pagination_mode}-{expected_status}", applied_at)
+    manifest_path = write_proposal_manifest(proposal, programs_root=programs_root)
+    client = _FakeADOClient(
+        rows_by_id={1001: {"rev": 7, "fields": {"System.Id": 1001, "System.Rev": 7}}},
+        comment_pagination_mode=pagination_mode,
+        comment_lookup_error=lookup_error,
+    )
+    artifacts = _apply_ado_proposal_with_fake_client(
+        str(manifest_path),
+        applied_at=applied_at,
+        programs_root=programs_root,
+        program=_comment_program(),
+        client=client,
+    )
+
+    persisted_proposal, persisted_status = read_proposal_manifest(manifest_path)
+    assert artifacts.conflict_count == int(expected_status == "conflict")
+    assert artifacts.failed_count == int(expected_status == "failed")
+    assert persisted_status == "partially_applied"
+    assert persisted_proposal.entries[0].entry_status == expected_status
+    reason = persisted_proposal.entries[0].status_reason or ""
+    assert ("comment history" if expected_status == "conflict" else "lookup failed") in reason
+    assert client.session.calls == []
+    assert read_signals("demo", programs_root=programs_root) == ()
+
+
+@pytest.mark.parametrize(
+    ("pagination_mode", "lookup_error", "expected_status"),
+    [
+        ("truncated", None, "conflict"),
+        ("missing", None, "conflict"),
+        ("invalid", None, "conflict"),
+        ("complete", AuthError("unauthorized"), "failed"),
+        ("complete", CredentialExpired("credential expired"), "failed"),
+        ("complete", QueryError("query failed"), "failed"),
+        ("complete", QueryTimeoutError("query timed out"), "failed"),
+    ],
+)
+def test_rollback_comment_lookup_blocks_post_and_maps_disposition(
+    tmp_path: Path,
+    pagination_mode: str,
+    lookup_error: Exception | None,
+    expected_status: str,
+) -> None:
+    rolled_back_at = datetime(2026, 5, 14, 9, 30, tzinfo=timezone.utc)
+    proposal = _comment_proposal("prop-rollback-comment-lookup", rolled_back_at, entry_status="applied")
+    manifest_path = write_proposal_manifest(proposal, programs_root=tmp_path / "programs")
+    client = _FakeADOClient(
+        rows_by_id={},
+        comment_pagination_mode=pagination_mode,
+        comment_lookup_error=lookup_error,
+    )
+
+    artifacts = ADOWriter(client).rollback_manifest(
+        manifest_path, action_id="action-123", rolled_back_at=rolled_back_at
+    )
+
+    assert artifacts.rolled_back_count == 0
+    assert artifacts.conflict_count == int(expected_status == "conflict")
+    assert artifacts.failed_count == int(expected_status == "failed")
+    assert artifacts.results[0].status == expected_status
+    assert client.session.calls == []
+
+
+@pytest.mark.parametrize("operation", ["apply", "rollback"])
+def test_unexpected_comment_lookup_error_propagates_without_post(tmp_path: Path, operation: str) -> None:
+    at = datetime(2026, 5, 13, 18, 0, tzinfo=timezone.utc)
+    entry_status = "applied" if operation == "rollback" else "pending"
+    proposal = _comment_proposal(f"prop-unexpected-{operation}", at, entry_status=entry_status)
+    manifest_path = write_proposal_manifest(proposal, programs_root=tmp_path / "programs")
+    rows_by_id = {1001: {"rev": 7, "fields": {"System.Id": 1001, "System.Rev": 7}}} if operation == "apply" else {}
+    client = _FakeADOClient(rows_by_id=rows_by_id, comment_lookup_error=RuntimeError("unexpected failure"))
+    writer = ADOWriter(client, programs_root=tmp_path / "programs")
+
+    with pytest.raises(RuntimeError, match="unexpected failure"):
+        if operation == "apply":
+            writer.apply_manifest(manifest_path, applied_at=at)
+        else:
+            writer.rollback_manifest(manifest_path, action_id="action-123", rolled_back_at=at)
+
+    assert client.session.calls == []
+
+
+def test_empty_comment_signature_keeps_existing_no_lookup_behavior() -> None:
+    client = _FakeADOClient(rows_by_id={})
+    writer = ADOWriter(client)
+    entry = ADOUpdateEntry(
+        work_item_id=1001,
+        action="add_comment",
+        field_or_tag="comment",
+        current_value=None,
+        proposed_value=" \n\t",
+        reason="test empty signature",
+        revision_id=1,
+    )
+
+    assert writer._has_duplicate_comment(entry) is False
+    assert client.comment_lookup_count == 0
+
+
 def test_apply_manifest_rejects_expired_pending_entries(tmp_path: Path) -> None:
     manifest_path = write_proposal_manifest(
         ADOUpdateProposal(
@@ -332,9 +528,20 @@ def test_apply_manifest_rejects_locked_manifest(tmp_path: Path) -> None:
 
 
 class _FakeADOClient:
-    def __init__(self, *, rows_by_id: dict[int, dict[str, Any]], comments_by_id: dict[int, list[dict[str, Any]]] | None = None, fail_patch_for: set[int] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        rows_by_id: dict[int, dict[str, Any]],
+        comments_by_id: dict[int, list[dict[str, Any]]] | None = None,
+        fail_patch_for: set[int] | None = None,
+        comment_pagination_mode: str = "complete",
+        comment_lookup_error: Exception | None = None,
+    ) -> None:
         self.rows_by_id = rows_by_id
         self.comments_by_id = comments_by_id or {}
+        self.comment_pagination_mode = comment_pagination_mode
+        self.comment_lookup_error = comment_lookup_error
+        self.comment_lookup_count = 0
         self.timeout = 30
         self._rest_base_url = "https://dev.azure.com/your-org/One/_apis/wit/"
         self._session = _FakeSession(self, fail_patch_for=fail_patch_for or set())
@@ -366,7 +573,35 @@ class _FakeADOClient:
             )
         return rows
 
-    def list_work_item_comments(self, work_item_id: int) -> list[dict[str, Any]]:
+    def list_work_item_comments(
+        self,
+        work_item_id: int,
+        *,
+        on_pagination: Any | None = None,
+    ) -> list[dict[str, Any]]:
+        self.comment_lookup_count += 1
+        if self.comment_lookup_error is not None:
+            raise self.comment_lookup_error
+        if on_pagination is not None and self.comment_pagination_mode != "missing":
+            total = len(self.comments_by_id.get(work_item_id, ()))
+            outcomes = {
+                "invalid": (object(),),
+                "multiple": (
+                    PaginationOutcome(total_fetched=0, page_count=1, is_truncated=False),
+                    PaginationOutcome(total_fetched=0, page_count=1, is_truncated=False),
+                ),
+                "invalid_total": (PaginationOutcome(total_fetched=True, page_count=1, is_truncated=False),),  # type: ignore[arg-type]
+                "mismatched_total": (PaginationOutcome(total_fetched=total + 1, page_count=1, is_truncated=False),),
+                "invalid_page_count": (PaginationOutcome(total_fetched=total, page_count=True, is_truncated=False),),  # type: ignore[arg-type]
+                "zero_pages": (PaginationOutcome(total_fetched=total, page_count=0, is_truncated=False),),
+                "invalid_truncation": (PaginationOutcome(total_fetched=total, page_count=1, is_truncated=1),),  # type: ignore[arg-type]
+                "truncated": (PaginationOutcome(total_fetched=total, page_count=10, is_truncated=True),),
+            }.get(
+                self.comment_pagination_mode,
+                (PaginationOutcome(total_fetched=total, page_count=1, is_truncated=False),),
+            )
+            for outcome in outcomes:
+                on_pagination(outcome)  # type: ignore[arg-type]
         return list(self.comments_by_id.get(work_item_id, ()))
 
 
@@ -578,4 +813,3 @@ def test_new_fields_round_trip_through_manifest(tmp_path: Path) -> None:
 
     assert restored.entries[0].remote_rev == 11
     assert restored.entries[0].status_reason is None
-

@@ -13,6 +13,7 @@ from src.commands import gather as gather_helpers
 from src.core.exceptions import ConfigError
 from src.core.journal import PROGRAMS_ROOT
 from src.core.milestone_engine import (
+    assess_dependency_date_margin,
     assess_milestone_health,
     build_critical_path,
     describe_milestone_schedule_variance,
@@ -23,13 +24,30 @@ from src.core.milestone_engine import (
     summarize_milestone_target_date_history,
 )
 from src.core.models import WorkItem
-from src.core.models_v2 import Milestone, MilestoneAssessment, MilestoneStatus, Program, Workstream
+from src.core.dependency_graph import DependencyDateMarginFields, _serialize_date_margin_fields
+from src.core.models_v2 import Dependency, Milestone, MilestoneAssessment, MilestoneStatus, Program, Workstream
 from src.core.program_fact_store import load_program_facts, project_dependencies, project_milestones
 from src.core.store_factory import build_trajectory_store_for_program_id
 
 
 ProgramLoader = Callable[[str, Path], tuple[Program, tuple[Workstream, ...]]]
 ItemLoader = Callable[[Program, tuple[Workstream, ...], datetime], tuple[tuple[WorkItem, ...], int]]
+
+
+class DependencyDateMarginRow(DependencyDateMarginFields):
+    dependency_id: str
+    margin_days: int | None
+    status: str
+    reasons: tuple[str, ...]
+    from_program_id: str
+    from_workstream_id: str | None
+    from_item_id: int | None
+    from_milestone_id: str | None
+    to_program_id: str
+    to_workstream_id: str | None
+    to_item_id: int | None
+    to_milestone_id: str | None
+    dependency_type: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,10 +77,18 @@ class MilestoneAssessmentReport:
     ado_calls: int
     critical_path_ids: tuple[str, ...]
     rows: tuple[MilestoneAssessmentRow, ...]
+    dependency_date_margins: tuple[DependencyDateMarginRow, ...] = ()
+
+    @property
+    def longest_dependency_chain_ids(self) -> tuple[str, ...]:
+        return self.critical_path_ids
 
     def to_payload(self) -> dict[str, object]:
         payload = asdict(self)
         payload["generated_at"] = self.generated_at.isoformat()
+        payload["longest_dependency_chain_ids"] = self.longest_dependency_chain_ids
+        for row in payload["rows"]:
+            row["longest_dependency_chain"] = row["critical_path"]
         return payload
 
 
@@ -165,6 +191,26 @@ def update_milestone_command(
     raise typer.Exit(code=0)
 
 
+def _build_dependency_date_margin_row(dependency: Dependency) -> DependencyDateMarginRow:
+    assessment = assess_dependency_date_margin(dependency)
+    return {
+        "dependency_id": assessment.dependency_id,
+        "margin_days": assessment.margin_days,
+        "status": assessment.status,
+        "reasons": assessment.reasons,
+        "from_program_id": dependency.from_program_id,
+        "from_workstream_id": dependency.from_workstream_id,
+        "from_item_id": dependency.from_item_id,
+        "from_milestone_id": dependency.from_milestone_id,
+        "to_program_id": dependency.to_program_id,
+        "to_workstream_id": dependency.to_workstream_id,
+        "to_item_id": dependency.to_item_id,
+        "to_milestone_id": dependency.to_milestone_id,
+        "dependency_type": dependency.dependency_type.value,
+        **_serialize_date_margin_fields(dependency),
+    }
+
+
 def build_milestone_assessment_report(
     program_id: str,
     *,
@@ -181,6 +227,8 @@ def build_milestone_assessment_report(
         fact_types=("milestone.entry", "dependency.link"),
     )
     milestones = _sort_milestones(project_milestones(fact_snapshot))
+    dependencies = project_dependencies(fact_snapshot)
+    dependency_date_margins = tuple(_build_dependency_date_margin_row(dependency) for dependency in dependencies)
     if not milestones:
         return MilestoneAssessmentReport(
             program_id=program_id,
@@ -188,11 +236,11 @@ def build_milestone_assessment_report(
             ado_calls=0,
             critical_path_ids=(),
             rows=(),
+            dependency_date_margins=dependency_date_margins,
         )
 
     program, workstreams = (program_loader or _load_program_context)(program_id, resolved_programs_root)
     items, ado_calls = (item_loader or _load_live_items)(program, workstreams, current_time)
-    dependencies = project_dependencies(fact_snapshot)
     critical_path_ids = tuple(
         milestone.id for milestone in build_critical_path(milestones, dependencies)
     )
@@ -236,21 +284,22 @@ def build_milestone_assessment_report(
         ado_calls=ado_calls,
         critical_path_ids=critical_path_ids,
         rows=rows,
+        dependency_date_margins=dependency_date_margins,
     )
 
 
 def render_milestone_assessment_report(report: MilestoneAssessmentReport) -> str:
-    if not report.rows:
+    if not report.rows and not report.dependency_date_margins:
         return f"No milestones found for {report.program_id}."
 
     critical_path_label = ", ".join(report.critical_path_ids) if report.critical_path_ids else "none"
     lines = [
         f"MILESTONE HEALTH — {report.program_id} ({len(report.rows)})",
         f"ADO calls: {report.ado_calls}",
-        f"Critical path: {critical_path_label}",
+        f"Longest dependency chain: {critical_path_label}",
     ]
     for row in report.rows:
-        path_label = "critical path" if row.critical_path else "non-critical"
+        path_label = "on longest dependency chain" if row.critical_path else "not on longest dependency chain"
         lines.append(
             f"- {row.id} | declared {row.declared_status} | computed {row.computed_health} | target {row.target_date} | {path_label} | slip {row.slip_probability:.2f} | confidence {row.confidence}"
         )
@@ -271,6 +320,13 @@ def render_milestone_assessment_report(report: MilestoneAssessmentReport) -> str
             if len(row.blocked_criteria) > 1:
                 blocked_detail = f"{blocked_detail}; +{len(row.blocked_criteria) - 1} more"
             lines.append(f"  Blockers: {blocked_detail}")
+    for margin in report.dependency_date_margins:
+        detail = (
+            f"{margin['margin_days']} days ({margin['status']}; calendar_days/1/UTC/days; lag 0)"
+            if margin["margin_days"] is not None
+            else f"unknown ({', '.join(margin['reasons'])})"
+        )
+        lines.append(f"Dependency date margin {margin['dependency_id']}: {detail}")
     return "\n".join(lines)
 
 
@@ -298,6 +354,9 @@ def render_milestone_assessment_csv(report: MilestoneAssessmentReport) -> str:
             "target_date_history",
             "blocked_criteria",
             "reasoning",
+            "record_type",
+            "longest_dependency_chain",
+            "dependency_date_margin",
         )
     )
     for row in report.rows:
@@ -322,8 +381,17 @@ def render_milestone_assessment_csv(report: MilestoneAssessmentReport) -> str:
                 "|".join(row.target_date_history),
                 "|".join(row.blocked_criteria),
                 row.reasoning,
+                "milestone",
+                "true" if row.critical_path else "false",
+                "",
             )
         )
+    for margin in report.dependency_date_margins:
+        writer.writerow((
+            report.program_id, report.generated_at.isoformat(), report.ado_calls,
+            *("" for _ in range(16)), "dependency_date_margin", "",
+            json.dumps(margin, sort_keys=True),
+        ))
     return buffer.getvalue()
 
 

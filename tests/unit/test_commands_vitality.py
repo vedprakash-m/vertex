@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import csv
 import json
 from types import SimpleNamespace
 
@@ -16,6 +17,37 @@ from src.core.sqlite_stores import SQLiteTrajectoryStore
 
 
 runner = CliRunner()
+
+
+def test_vitality_cli_renders_unknown_age_without_policy_sentinel() -> None:
+    score = VitalityScore(
+        work_item_id=500,
+        owner_alias="operator",
+        workstream_id="ws_demo",
+        freshness_days=None,
+        freshness_grade="red",
+        richness_score=40,
+        richness_missing=(),
+        leakage_events=0,
+        workiq_signal_count=0,
+        composite_score=28,
+        suggested_update=None,
+    )
+    artifacts = vitality.VitalityArtifacts("acme", (), (score,), (), (), 0)
+
+    human = vitality._render_vitality_report(artifacts)
+    payload = json.loads(vitality._render_vitality_report(artifacts, format="json"))
+    csv_rows = list(csv.reader(vitality._render_vitality_report(artifacts, format="csv").splitlines()))
+
+    assert "Average freshness age: unknown (known for 0/1 items)" in human
+    assert "freshness=red (unknown)" in human
+    assert "9999" not in human
+    assert payload["summary"]["freshness_average_days"] is None
+    assert payload["summary"]["freshness_known_items"] == 0
+    assert payload["item_scores"][0]["freshness_days"] is None
+    assert csv_rows[1][csv_rows[0].index("freshness_average_days")] == ""
+    assert csv_rows[1][csv_rows[0].index("freshness_known_items")] == "0"
+    assert all(len(row) == len(csv_rows[0]) for row in csv_rows)
 
 
 def test_generate_vitality_report_groups_owner_scores(monkeypatch, tmp_path) -> None:

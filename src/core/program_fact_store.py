@@ -22,7 +22,7 @@ from src.core.assumption_tracker import load_assumptions
 from src.core.claim_tracker import load_claim_status_updates, load_open_claims, load_open_decision_asks
 from src.core.decision_register import load_decisions
 from src.core.fact_sor_state import FactSorState, load_fact_sor_state
-from src.core.dependency_graph import load_dependencies
+from src.core.dependency_graph import load_dependencies, _parse_date_margin_fields, _serialize_date_margin_fields
 from src.core.milestone_engine import load_milestones
 from src.core.models_v2 import (
     ActionItem,
@@ -2584,6 +2584,7 @@ def _build_dependency_facts(
                     dependency.schedule_status.value if dependency.schedule_status is not None else None
                 ),
                 "linked_risk_ids": list(dependency.linked_risk_ids),
+                **_serialize_date_margin_fields(dependency),
             },
             recorded_at=recorded_at,
         )
@@ -2977,6 +2978,7 @@ def _dependency_from_fact(fact: ProgramFactRevision) -> Dependency:
         linked_risk_ids=tuple(str(value) for value in payload.get("linked_risk_ids") or ()),
         evidence_tier=_dependency_evidence_tier_from_payload(payload),
         evidence_refs=tuple(str(value) for value in payload.get("evidence_refs") or ()),
+        **_parse_date_margin_fields(payload),
     )
 
 

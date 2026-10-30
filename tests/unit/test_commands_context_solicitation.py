@@ -43,6 +43,78 @@ def _files(root: Path) -> dict[Path, bytes]:
     return {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
 
 
+def test_detector_packet_reply_and_structural_reopening(tmp_path: Path, monkeypatch) -> None:
+    from datetime import date
+    from email.message import EmailMessage
+    from cli import app
+    from src.commands.doctor_checks.context_checks import emit_context_gaps
+    from src.core.context_gap_store import load_context_gaps, rank_context_gaps
+
+    programs, _ = _workspace(tmp_path)
+    program = programs / "sample"
+    observations = program / "_feedback" / "context_gaps.jsonl"
+    observations.unlink()
+    emit_context_gaps(
+        program_id="sample", registry_entries=[{"id": "deployment", "deep_context": {}}],
+        kpis_list=[], today=date(2026, 10, 26), programs_root=programs,
+    )
+    fingerprint = "sample:doctor --context:deployment:deep_context.why"
+    retained = observations.read_bytes()
+    result = CliRunner().invoke(app, _args(programs, fingerprint))
+    assert result.exit_code == 0, result.output + repr(result.exception)
+    log = program / "_feedback" / "context_gap_solicitations.jsonl"
+    record = json.loads(log.read_text())
+    assert record["gap_fingerprint"] == fingerprint
+    source = program / "reply.eml"
+    reply = EmailMessage()
+    reply["From"] = "unverified@example.com"
+    reply.set_content(f"Proposed purpose.\n\n> Reference: {record['solicitation_id']}\n")
+    source.write_bytes(reply.as_bytes())
+    args = [
+        "context", "import-reply", "--edition", "sample_weekly", "--issue", "1",
+        "--source", str(source), "--gap-fingerprint", fingerprint,
+        "--solicitation-id", record["solicitation_id"], "--programs-root", str(programs),
+    ]
+    before = _files(tmp_path)
+    preview = CliRunner().invoke(app, args + ["--dry-run"])
+    assert preview.exit_code == 0, preview.output + repr(preview.exception)
+    assert _files(tmp_path) == before
+    intake = CliRunner().invoke(app, args)
+    assert intake.exit_code == 0, intake.output + repr(intake.exception)
+    assert "pending" in intake.output and "unverified" in intake.output
+    proposal = json.loads((program / "context_proposals" / "issue_001.proposals.json").read_text())
+    assert proposal[0]["current_value_hash"] == record["current_value_hash"]
+    registry = program / "workstream_registry.yaml"
+    for value, active in [("Purpose", False), ('""', True)]:
+        registry.write_text(f"workstreams:\n- id: deployment\n  deep_context:\n    why: {value}\n", encoding="utf-8")
+        ranked = rank_context_gaps(load_context_gaps("sample", programs_root=programs), programs_root=programs)
+        assert any(g.field == "deep_context.why" for g in ranked) is active
+        before = _files(tmp_path)
+        request = CliRunner().invoke(app, _args(programs, fingerprint) + ["--dry-run"])
+        assert request.exit_code == 2
+        assert ("cooldown" if active else "active") in request.output.lower()
+        assert _files(tmp_path) == before
+        assert observations.read_bytes() == retained
+    from datetime import timedelta
+    from src.core import context_gap_solicitation
+
+    original_cooldown = context_gap_solicitation.is_in_cooldown
+    monkeypatch.setattr(
+        context_gap_solicitation, "is_in_cooldown",
+        lambda gap, **kwargs: original_cooldown(
+            gap, now=datetime.now(timezone.utc) + timedelta(days=15), **kwargs,
+        ),
+    )
+    reopened = CliRunner().invoke(app, _args(programs, fingerprint))
+    assert reopened.exit_code == 0, reopened.output + repr(reopened.exception)
+    rows = [json.loads(line) for line in log.read_text().splitlines()]
+    assert len(rows) == 2
+    assert rows[0] == record
+    assert rows[1]["gap_fingerprint"] == fingerprint
+    assert rows[1]["solicitation_id"] != record["solicitation_id"]
+    assert observations.read_bytes() == retained
+
+
 @pytest.mark.parametrize("change", ["foreign", "unsupported", "recipient", "corrupt"])
 def test_invalid_solicitation_inputs_are_nonmutating(tmp_path: Path, change: str) -> None:
     from cli import app

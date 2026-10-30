@@ -6,9 +6,11 @@ from dataclasses import replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+import json
 
 import pytest
 
+from src.core.exceptions import ConfigError
 from src.core.models import Confidence, RiskLevel
 from src.core.models_v2 import (
     AIProposal,
@@ -120,6 +122,127 @@ def test_load_latest_released_returns_the_most_recent_release(tmp_path: Path) ->
 
 def test_load_latest_released_returns_none_when_no_directory(tmp_path: Path) -> None:
     assert load_latest_released_program_synthesis("samplealpha", programs_root=tmp_path / "programs") is None
+
+
+def test_retained_synthesis_empty_directory_ignores_non_json_files(tmp_path: Path) -> None:
+    directory = program_synthesis_path("samplealpha", "unused", programs_root=tmp_path).parent
+    directory.mkdir(parents=True)
+    assert load_latest_released_program_synthesis("samplealpha", programs_root=tmp_path) is None
+    (directory / "notes.txt").write_text("Not a synthesis", encoding="utf-8")
+    assert load_latest_released_program_synthesis("samplealpha", programs_root=tmp_path) is None
+
+
+def test_retained_synthesis_uppercase_json_extension_remains_readable(tmp_path: Path) -> None:
+    path = persist_program_synthesis(_synthesis(), programs_root=tmp_path)
+    assert path is not None
+    path.rename(path.with_suffix(".JSON"))
+    record_ai_release_decision(
+        program_id="samplealpha", ai_run_id="run-1", terminal=ReleaseTerminal.RELEASED,
+        reason="synthetic control", validator_finding_count=0, programs_root=tmp_path,
+    )
+    assert load_latest_released_program_synthesis("samplealpha", programs_root=tmp_path) == _synthesis()
+
+
+@pytest.mark.parametrize("damage,error_class", [
+    ("json", "JSONDecodeError"), ("null", "TypeError"), ("list", "TypeError"),
+    ("missing", "KeyError"), ("date", "ValueError"), ("recommendation", "TypeError"),
+    ("unicode", "UnicodeDecodeError"), ("read", "PermissionError"), ("disappeared", "FileNotFoundError"),
+])
+def test_retained_synthesis_candidate_failure_never_falls_back_to_older_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str, error_class: str,
+) -> None:
+    older = replace(_synthesis(ai_run_id="run-old"), generated_at=datetime(2026, 6, 1, tzinfo=timezone.utc))
+    for synthesis in (older, _synthesis()):
+        persist_program_synthesis(synthesis, programs_root=tmp_path)
+        record_ai_release_decision(
+            program_id="samplealpha", ai_run_id=synthesis.ai_run_id, terminal=ReleaseTerminal.RELEASED,
+            reason="synthetic control", validator_finding_count=0, programs_root=tmp_path,
+        )
+    path = program_synthesis_path("samplealpha", "run-1", programs_root=tmp_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if damage in {"json", "null", "list"}:
+        path.write_text({"json": "{private-payload", "null": "null", "list": "[]"}[damage], encoding="utf-8")
+    elif damage == "unicode":
+        path.write_bytes(b"\xff")
+    elif damage == "missing":
+        del payload["ai_run_id"]
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    elif damage == "date":
+        payload["generated_at"] = "private-invalid-date"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    elif damage == "recommendation":
+        payload["recommendations"] = [None]
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    else:
+        read_text = Path.read_text
+
+        def fail_candidate_read(candidate, *args, **kwargs):
+            if candidate == path:
+                if damage == "disappeared":
+                    raise FileNotFoundError("private-path-and-data")
+                raise PermissionError("private-path-and-data")
+            return read_text(candidate, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", fail_candidate_read)
+
+    with pytest.raises(ConfigError) as raised:
+        load_latest_released_program_synthesis("samplealpha", programs_root=tmp_path)
+
+    assert error_class in str(raised.value)
+    assert "retained" in str(raised.value).lower()
+    assert "private" not in str(raised.value)
+    assert str(tmp_path) not in str(raised.value)
+
+
+@pytest.mark.parametrize("failure", [PermissionError, NotADirectoryError])
+def test_retained_synthesis_enumeration_failure_is_not_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: type[OSError],
+) -> None:
+    directory = program_synthesis_path("samplealpha", "unused", programs_root=tmp_path).parent
+    directory.mkdir(parents=True)
+    iterdir = Path.iterdir
+
+    def fail_enumeration(path):
+        if path == directory:
+            yield directory / "unused.txt"
+            raise failure("private directory")
+        yield from iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", fail_enumeration)
+    with pytest.raises(ConfigError) as raised:
+        load_latest_released_program_synthesis("samplealpha", programs_root=tmp_path)
+    assert failure.__name__ in str(raised.value)
+    assert "private" not in str(raised.value)
+
+
+@pytest.mark.parametrize("error", [
+    RuntimeError("implementation error"), TypeError("release programming error"), ConfigError("release state error"),
+])
+def test_retained_synthesis_release_errors_propagate_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception,
+) -> None:
+    persist_program_synthesis(_synthesis(), programs_root=tmp_path)
+
+    def fail_release(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr("src.core.program_synthesis.is_ai_output_released", fail_release)
+    with pytest.raises(type(error)) as raised:
+        load_latest_released_program_synthesis("samplealpha", programs_root=tmp_path)
+    assert raised.value is error
+
+
+def test_retained_synthesis_parser_implementation_failure_propagates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    persist_program_synthesis(_synthesis(), programs_root=tmp_path)
+    error = RuntimeError("implementation error")
+
+    def fail_parse(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr("src.core.program_synthesis._synthesis_from_dict", fail_parse)
+    with pytest.raises(RuntimeError) as raised:
+        load_latest_released_program_synthesis("samplealpha", programs_root=tmp_path)
+    assert raised.value is error
 
 
 def test_persist_survives_disk_write_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

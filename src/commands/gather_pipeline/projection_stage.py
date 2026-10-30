@@ -22,6 +22,7 @@ from src.core.models_v2 import AIProposalStatus, Program, TrajectoryPoint, Vital
 from src.core.program_fact_store import load_program_facts, project_dependencies
 from src.core.trajectory_analyzer import count_eta_slips
 from src.core.vitality_reporting import parse_vitality_archive_entry, vitality_settings_from_program
+from src.core.vitality_scorer import freshness_days_for_policy
 from src.core.yaml_utils import load_yaml_mapping
 from src.core.store_factory import build_trajectory_store
 
@@ -384,7 +385,7 @@ def has_sustained_low_vitality(
     current_scores = tuple(score for score in scores if score.workstream_id == workstream_id)
     if not current_scores:
         return False
-    return all(score.freshness_days > stale_days for score in current_scores)
+    return all(freshness_days_for_policy(score.freshness_days) > stale_days for score in current_scores)
 
 
 def run_background_synthesis(

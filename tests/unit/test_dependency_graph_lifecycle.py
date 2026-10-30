@@ -12,6 +12,127 @@ from src.core.models_v2 import Dependency, DependencyScheduleStatus, DependencyS
 from src.core.program_fact_store import load_program_facts, project_dependencies
 
 
+def test_date_margin_inputs_round_trip_all_ingress(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    fields = {
+        "provider_forecast_ready_date": "2026-10-23",
+        "consumer_required_by_date": "2026-10-26",
+        "date_margin_calendar": "calendar_days",
+        "date_margin_calendar_version": "1",
+        "date_margin_timezone": "UTC",
+        "date_margin_unit": "days",
+        "date_margin_lag": 0,
+    }
+    programs_root = _write_deps(tmp_path, [{
+        "id": "margin", "from_milestone_id": "provider", "to_milestone_id": "consumer",
+        "dependency_type": "blocks", "risk_if_broken": "Blocked", "status": "active",
+        "planned_resolution_date": "2026-12-01", **fields,
+    }])
+    dependency, = load_dependencies("acme", programs_root=programs_root)
+    assert dependency.provider_forecast_ready_date == date(2026, 10, 23)
+    shim = load_program_facts("acme", programs_root=programs_root, fact_types=("dependency.link",))
+    assert project_dependencies(shim) == (dependency,)
+    save_dependencies("acme", (dependency,), programs_root=programs_root)
+    raw = yaml.safe_load((programs_root / "acme" / "dependencies.yaml").read_text())
+    assert raw["schema_version"] == "1.0"
+    assert all(raw["dependencies"][0][key] == value for key, value in fields.items())
+    persisted = load_program_facts("acme", as_of=datetime.now(timezone.utc), db_root=programs_root.parent)
+    assert project_dependencies(persisted) == (dependency,)
+    assert persisted.facts[0].payload["provider_forecast_ready_date"] == "2026-10-23"
+    raw["dependencies"][0]["consumer_required_by_date"] = "2026-10-22"
+    (programs_root / "acme" / "dependencies.yaml").write_text(yaml.safe_dump(raw), encoding="utf-8")
+    assert project_dependencies(load_program_facts(
+        "acme", programs_root=programs_root, fact_types=("dependency.link",),
+    )) == (dependency,)
+    cleared = replace(dependency, **dict.fromkeys(fields))
+    save_dependencies("acme", (cleared,), programs_root=programs_root)
+    raw = yaml.safe_load((programs_root / "acme" / "dependencies.yaml").read_text())
+    assert all(raw["dependencies"][0][key] is None for key in fields)
+    assert project_dependencies(load_program_facts(
+        "acme", as_of=datetime.now(timezone.utc), db_root=programs_root.parent,
+    )) == (cleared,)
+    assert cleared.planned_resolution_date == date(2026, 12, 1)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("date_margin_calendar", "working_days"), ("date_margin_calendar_version", "2"),
+    ("date_margin_timezone", "Europe/London"), ("date_margin_unit", "hours"),
+    ("date_margin_lag", 1),
+])
+def test_unsupported_declared_semantics_round_trip_unknown(tmp_path: Path, field: str, value: object) -> None:
+    from dataclasses import replace
+    from src.core.milestone_engine import assess_dependency_date_margin
+    from tests.unit.test_milestone_engine import _date_margin_dependency
+
+    dependency = replace(_date_margin_dependency(), from_program_id="acme", **{field: value})
+    programs_root = tmp_path / "programs"
+    save_dependencies("acme", (dependency,), programs_root=programs_root)
+    loaded, = load_dependencies("acme", programs_root=programs_root)
+    projected, = project_dependencies(load_program_facts("acme", programs_root=programs_root))
+    assert loaded == projected == dependency
+    assert assess_dependency_date_margin(projected).reasons == (f"unsupported_{field}",)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("provider_forecast_ready_date", "not-a-date"),
+    ("consumer_required_by_date", "2026-10-26T12:00:00Z"),
+    ("date_margin_lag", True),
+    ("date_margin_lag", "0"),
+    ("date_margin_calendar_version", 1),
+    ("provider_forecast_ready_date", "2026-W43-1"),
+])
+def test_malformed_date_margin_inputs_fail_admission(tmp_path: Path, field: str, value: object) -> None:
+    from src.core.exceptions import ConfigError
+
+    programs_root = _write_deps(tmp_path, [{
+        "id": "margin", "from_milestone_id": "provider", "to_milestone_id": "consumer",
+        "dependency_type": "blocks", "risk_if_broken": "Blocked", "status": "active",
+        "provider_forecast_ready_date": "2026-10-23",
+        "consumer_required_by_date": "2026-10-26",
+        "date_margin_calendar": "calendar_days", "date_margin_calendar_version": "1",
+        "date_margin_timezone": "UTC", "date_margin_unit": "days", "date_margin_lag": 0,
+        field: value,
+    }])
+    with pytest.raises(ConfigError, match=field):
+        load_dependencies("acme", programs_root=programs_root)
+
+
+def test_shared_dependency_date_margin_retains_scoped_endpoints(tmp_path: Path) -> None:
+    from src.core.milestone_engine import assess_dependency_date_margin
+
+    programs_root = _write_deps(tmp_path, [])
+    (programs_root / "acme" / "dependencies.yaml").unlink()
+    (programs_root / "dependencies.yaml").write_text(yaml.safe_dump({
+        "schema_version": "1.1", "dependencies": [{
+            "id": "shared", "from_milestone_id": "acme:provider",
+            "to_milestone_id": "partner:consumer", "dependency_type": "blocks",
+            "risk_if_broken": "Blocked", "status": "active",
+            "provider_forecast_ready_date": date(2026, 10, 23),
+            "consumer_required_by_date": date(2026, 10, 26),
+            "date_margin_calendar": "calendar_days", "date_margin_calendar_version": "1",
+            "date_margin_timezone": "UTC", "date_margin_unit": "days", "date_margin_lag": 0,
+        }],
+    }), encoding="utf-8")
+    dependency, = load_dependencies("acme", programs_root=programs_root)
+    assert (dependency.from_program_id, dependency.from_milestone_id) == ("acme", "provider")
+    assert (dependency.to_program_id, dependency.to_milestone_id) == ("partner", "consumer")
+    assert assess_dependency_date_margin(dependency).margin_days == 3
+    snapshot = load_program_facts("acme", programs_root=programs_root, fact_types=("dependency.link",))
+    assert project_dependencies(snapshot) == (dependency,)
+
+
+def test_invalid_relationship_still_fails_configuration(tmp_path: Path) -> None:
+    from src.core.exceptions import ConfigError
+
+    programs_root = _write_deps(tmp_path, [{
+        "id": "invalid", "from_milestone_id": "provider", "to_milestone_id": "consumer",
+        "dependency_type": "finish_to_finish", "risk_if_broken": "Blocked", "status": "active",
+    }])
+    with pytest.raises(ConfigError, match="dependency"):
+        load_dependencies("acme", programs_root=programs_root)
+
+
 def _write_deps(tmp_path: Path, deps: list) -> Path:
     programs_root = tmp_path / "programs"
     dep_path = programs_root / "acme" / "dependencies.yaml"

@@ -18,6 +18,7 @@ from src.core.coverage_gap import CoverageGap
 from src.core.models import Snapshot, SnapshotItem
 from src.core.models import WorkItem
 from src.core.models_v2 import VitalityScore
+from src.core.vitality_scorer import freshness_days_for_policy
 from src.core.snapshot_store import read_snapshot
 
 
@@ -281,7 +282,7 @@ def build_vitality_nudge_proposal(
             current_value=None,
             proposed_value=_build_vitality_nudge_body(item, score),
             reason=(
-                f"Vitality composite {score.composite_score}% with {score.workiq_signal_count} non-ADO signals and {score.freshness_days} stale days."
+                f"Vitality composite {score.composite_score}% with {score.workiq_signal_count} non-ADO signals and {f'{score.freshness_days} stale days' if score.freshness_days is not None else 'unknown source age'}."
             ),
             revision_id=revision_ids.get(item.id),
         )
@@ -291,7 +292,7 @@ def build_vitality_nudge_proposal(
         if score.work_item_id not in blocked_item_ids
         if score.composite_score < composite_threshold
         if score.workiq_signal_count > 0
-        if score.freshness_days > stale_days
+        if freshness_days_for_policy(score.freshness_days) > stale_days
     )
     return ADOUpdateProposal(
         id=proposal_id or f"prop-{uuid.uuid4().hex[:8]}",
@@ -345,7 +346,7 @@ def build_vitality_tag_proposal(
                 )
             )
             continue
-        if item.id not in coverage_gap_ids or has_tag or score.freshness_days < stale_gap_days:
+        if item.id not in coverage_gap_ids or has_tag or freshness_days_for_policy(score.freshness_days) < stale_gap_days:
             continue
         entries.append(
             ADOUpdateEntry(
@@ -355,7 +356,7 @@ def build_vitality_tag_proposal(
                 current_value="; ".join(item.tags) if item.tags else None,
                 proposed_value=tag_name,
                 reason=(
-                    f"Coverage gap persisted across roughly {consecutive_gap_threshold} stale windows ({score.freshness_days} days since the last update)."
+                    f"Coverage gap persisted across roughly {consecutive_gap_threshold} stale windows ({score.freshness_days} days since the last update)." if score.freshness_days is not None else "Coverage gap remains present; latest meaningful ADO update time is unknown."
                 ),
                 revision_id=revision_ids.get(item.id),
             )
@@ -693,7 +694,7 @@ def _build_vitality_nudge_body(item: WorkItem, score: VitalityScore) -> str:
     lines = [
         f"Vertex Vitality Check - WI:{item.id}",
         "",
-        f"This item has not been updated in ADO for {score.freshness_days} days.",
+        (f"This item has not been updated in ADO for {score.freshness_days} days." if score.freshness_days is not None else "The latest meaningful ADO update time is unknown."),
         "Recent non-ADO activity was detected for this item.",
         "",
         "A quick status update here would help keep the weekly review accurate.",

@@ -3,11 +3,66 @@ from __future__ import annotations
 from dataclasses import replace
 from unittest.mock import Mock
 
+import pytest
+
 from src.ai.structured_feature_runner import (
     ContextBuildResult, DeterministicCacheIdentity, DeterministicResultCache, ReleasedResultCache, StructuredFeatureRunner,
 )
 from src.ai.tiered_router import Tier, TierResult
 from tests.unit.test_structured_feature_runner import _compiled, _context, _identity, _runner, _spec
+
+
+def test_model_cache_identity_changes_with_execution_classification(tmp_path) -> None:
+    compiled = ContextBuildResult(compiled=_compiled())
+    spec = _spec(
+        tmp_path, request_hash=lambda request: request,
+        deployment_fingerprint="test", validator_version="v1",
+        serialize_response=str, deserialize_response=str,
+    )
+    identities = []
+    for classification in ("internal", "restricted"):
+        runner = StructuredFeatureRunner(
+            context=_context(tmp_path, classification=classification), frontier_eligible=True,
+            released_cache=Mock(), ceiling_ledger=Mock(), deterministic_cache=Mock(),
+        )
+        identity = runner._cache_identity(spec, "same", compiled)
+        assert identity is not None
+        identities.append(identity)
+    assert identities[0].cache_key() != identities[1].cache_key()
+    assert [identity.classification for identity in identities] == ["internal", "internal"]
+    assert [identity.execution_classification for identity in identities] == ["internal", "restricted"]
+
+
+@pytest.mark.parametrize(
+    ("first_classification", "second_classification"),
+    [("internal", "restricted"), ("restricted", "internal")],
+)
+def test_model_cache_cannot_reuse_across_execution_classifications(
+    tmp_path, first_classification, second_classification,
+) -> None:
+    cache = ReleasedResultCache(tmp_path / "shared-model.sqlite3")
+    provider = Mock(side_effect=["first-profile", "second-profile"])
+    spec = _spec(
+        tmp_path, build_context=lambda _: ContextBuildResult(compiled=_compiled()),
+        call_provider=provider, request_hash=lambda request: request,
+        deployment_fingerprint="test", validator_version="v1",
+        serialize_response=str, deserialize_response=str,
+    )
+    outcomes = []
+    for classification in (first_classification, second_classification):
+        runner = StructuredFeatureRunner(
+            context=_context(tmp_path, classification=classification), frontier_eligible=True,
+            released_cache=cache, ceiling_ledger=Mock(), deterministic_cache=Mock(),
+        )
+        first = runner.run(spec, "same")
+        repeated = runner.run(spec, "same")
+        assert first.released and repeated.released
+        assert repeated.tier == Tier.CACHE
+        assert repeated.value == first.value
+        outcomes.append(first)
+    assert [outcome.tier for outcome in outcomes] == [Tier.FRONTIER, Tier.FRONTIER]
+    assert [outcome.value for outcome in outcomes] == ["first-profile", "second-profile"]
+    assert provider.call_count == 2
 
 
 def test_model_cache_changes_with_compiler_policy_independently_of_routing_policy(tmp_path) -> None:

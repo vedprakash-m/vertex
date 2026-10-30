@@ -8,7 +8,7 @@ from src.core.issue_projection import IssueProjection
 from src.core.models import Confidence, RiskLevel, WorkItem
 from src.core.models_v2 import Signal
 from src.core.quality_gates import GateEvaluation, QualityGateReport
-from src.core.triage import ReadinessAssessment, TriageReport, build_readiness_assessment, finalize_triage_report, render_triage_report
+from src.core.triage import ReadinessAssessment, TriageReport, _render_vitality_lines, build_readiness_assessment, finalize_triage_report, render_triage_report
 from src.core.vitality_scorer import VitalitySummary
 
 
@@ -100,6 +100,7 @@ def test_finalize_triage_report_surfaces_forecasts_and_gate_failures() -> None:
             updated_this_week=1,
             updated_this_week_percentage=50,
             freshness_average_days=9.0,
+            freshness_known_items=1,
             stale_owner_aliases=("owner",),
         ),
     )
@@ -113,6 +114,15 @@ def test_finalize_triage_report_surfaces_forecasts_and_gate_failures() -> None:
     assert triage.vitality_enabled is True
     assert triage.vitality_summary is not None
     assert triage.vitality_summary.updated_this_week_percentage == 50
+
+
+def test_render_vitality_lines_marks_unknown_source_age() -> None:
+    summary = VitalitySummary(2, 0, 0, None, 0, ())
+
+    lines = _render_vitality_lines(summary)
+
+    assert "unknown (known for 0/2 items)" in lines[1]
+    assert "9999" not in " ".join(lines)
 
 
 def test_render_triage_report_includes_coverage_gap_confidence() -> None:

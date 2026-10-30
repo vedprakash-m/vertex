@@ -24,7 +24,7 @@ from src.core.milestone_engine import (
 from src.core.models import DeltaKind, DeltaSet, DimensionRisk, ItemDelta, RiskLevel, ScorecardDelta, WorkItem
 from src.core.models_v2 import Assumption, AssumptionStatus, DecisionEntry, DecisionStatus, Milestone, MilestoneAssessment, MilestoneStatus, RiskEntry, RiskStatus
 from src.core.program_reality import FactAssessment, ProgramReality
-from src.core.risk_register_engine import assess_risk_staleness, compute_risk_score
+from src.core.risk_register_engine import assess_risk_staleness, compute_risk_score, risk_summary_sort_key
 from src.core.signal_review import signal_is_approved_for_evidence
 from src.core.store_factory import build_signal_store_for_program_id, build_trajectory_store_for_program_id
 from src.core.telemetry_summary import build_program_telemetry_summary
@@ -247,11 +247,7 @@ def _build_deck_risk_rows(
     )
     ordered_risk_assessments = sorted(
         risk_assessments,
-        key=lambda assessment: (
-            0 if assessment.record.status == RiskStatus.ESCALATED else 1,
-            -compute_risk_score(assessment.record),
-            assessment.record.title.lower(),
-        ),
+        key=lambda assessment: risk_summary_sort_key(assessment.record),
     )
     return tuple(
         DeckRiskRow(
@@ -590,7 +586,7 @@ def _format_deck_milestone_detail(
 def _format_milestone_status_label(status: MilestoneStatus, *, critical_path: bool) -> str:
     label = status.value.replace("_", " ")
     if critical_path:
-        return f"{label} (critical path)"
+        return f"{label} (longest dependency chain)"
     return label
 
 

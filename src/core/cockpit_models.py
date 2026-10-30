@@ -15,6 +15,7 @@ import types
 from dataclasses import dataclass, fields, is_dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
+from collections.abc import Iterable
 from typing import Any, Union, get_args, get_origin, get_type_hints
 
 #: Section 9.1 / Appendix A.6.
@@ -87,6 +88,12 @@ class CockpitFinding:
             raise ValueError(f"CockpitFinding.area={self.area!r} not in {sorted(FINDING_AREAS)}")
         if self.status not in FINDING_STATUSES:
             raise ValueError(f"CockpitFinding.status={self.status!r} not in {sorted(FINDING_STATUSES)}")
+
+
+def select_cockpit_exceptions(findings: Iterable[CockpitFinding]) -> tuple[CockpitFinding, ...]:
+    """Blocked before warn, preserving original order within each status."""
+    retained = tuple(findings)
+    return tuple(finding for status in ("blocked", "warn") for finding in retained if finding.status == status)
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,6 +310,7 @@ __all__ = [
     "ValueMetric",
     "TimeSavingsCertification",
     "CockpitFinding",
+    "select_cockpit_exceptions",
     "ProgramCockpitSummary",
     "SourceCockpitSummary",
     "IntelligenceCockpitSummary",

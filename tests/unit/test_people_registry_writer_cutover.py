@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from cli import app
@@ -33,6 +34,8 @@ from src.core.people_registry_writer import (
     register_onboarding_facts,
     shared_registry_is_active,
 )
+from src.core.program_fact_store import load_program_facts, project_workstreams
+from src.core.workstream_documents import save_workstreams_document
 
 
 _NOW = datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc)
@@ -163,6 +166,8 @@ def test_onboarding_registration_uses_canonical_writer_and_classifies_workstream
 
 
 def test_kb_update_cli_routes_active_shared_person_change_through_registry_writer(monkeypatch, tmp_path: Path) -> None:
+    import src.core.kb_updates as kb_updates
+
     programs_root = tmp_path / "programs"
     knowledge_root = _seed_active_registry(programs_root)
     program_dir = programs_root / "demo"
@@ -171,6 +176,10 @@ def test_kb_update_cli_routes_active_shared_person_change_through_registry_write
     monkeypatch.setattr("src.commands.kb.PROGRAMS_ROOT", programs_root)
     monkeypatch.setenv("VERTEX_OPERATOR_PRINCIPAL", "test-principal")
 
+    def reject_workstream_save(*args, **kwargs):
+        raise AssertionError("Shared-only corrections must not save workstreams.")
+
+    monkeypatch.setattr(kb_updates, "save_workstreams_document", reject_workstream_save, raising=False)
     result = _RUNNER.invoke(app, ["kb", "update", "Set alice title to Director", "--program", "demo", "--apply", "--no-ai"])
 
     assert result.exit_code == 0, result.output
@@ -187,21 +196,37 @@ def test_kb_update_cli_routes_active_shared_person_change_through_registry_write
     )
 
 
-def test_kb_update_keeps_unrelated_workstream_path_compatible_with_active_shared_registry(monkeypatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("mixed", [False, True])
+def test_kb_update_keeps_unrelated_workstream_path_compatible_with_active_shared_registry(
+    monkeypatch, tmp_path: Path, mixed: bool,
+) -> None:
+    from src.core.kb_updates import KbUpdateOperation, KbUpdatePlan
+
     programs_root = tmp_path / "programs"
-    _seed_active_registry(programs_root)
+    knowledge_root = _seed_active_registry(programs_root)
+    shared_before = read_journal_records(knowledge_root, STREAM_PEOPLE_CHANGES)
     program_dir = programs_root / "demo"
     (program_dir / "knowledge").mkdir(parents=True)
     (program_dir / "program.yaml").write_text("schema_version: '2.0'\nid: demo\nname: Demo\n", encoding="utf-8")
-    (program_dir / "workstreams.yaml").write_text(
-        "schema_version: '2.0'\nworkstreams:\n  - id: delivery\n    name: Delivery\n    pm_owner: alice\n",
-        encoding="utf-8",
+    save_workstreams_document(
+        "demo", {
+            "schema_version": "2.0",
+            "workstreams": [{"id": "delivery", "name": "Delivery", "pm_owner": "alice"}],
+        }, programs_root=programs_root,
     )
     (program_dir / "scorecards.yaml").write_text(
         "schema_version: '2.0'\nscorecards:\n  - name: Delivery\n    dimensions:\n      - name: Health\n        workstream_id: delivery\n",
         encoding="utf-8",
     )
     monkeypatch.setattr("src.commands.kb.PROGRAMS_ROOT", programs_root)
+    if mixed:
+        monkeypatch.setenv("VERTEX_OPERATOR_PRINCIPAL", "test-principal")
+        monkeypatch.setattr("src.commands.kb.parse_deterministic_kb_correction", lambda *args, **kwargs: KbUpdatePlan(
+            "demo", "synthetic mixed correction", "deterministic", (
+                KbUpdateOperation("workstreams.yaml", "set_fields", "delivery", fields=(("pm_owner", None),)),
+                KbUpdateOperation("knowledge/people_directory.yaml", "set_fields", "alice", fields=(("title", "Director"),)),
+            ),
+        ))
 
     result = _RUNNER.invoke(
         app,
@@ -209,8 +234,21 @@ def test_kb_update_keeps_unrelated_workstream_path_compatible_with_active_shared
     )
 
     assert result.exit_code == 0, result.output
-    assert "Applied 1 file(s)." in result.stdout
+    assert ("Applied shared registry generation" if mixed else "Applied 1 file(s).") in result.stdout
     assert "pm_owner: null" in (program_dir / "workstreams.yaml").read_text(encoding="utf-8")
+    persisted = project_workstreams(load_program_facts(
+        "demo", programs_root=programs_root, as_of=datetime.now(timezone.utc),
+    ))
+    assert persisted[0].pm_owner is None
+    shared_after = read_journal_records(knowledge_root, STREAM_PEOPLE_CHANGES)
+    if mixed:
+        assert any(
+            change["source"] == "kb_update" and change["field"] == "person.title"
+            and change["authenticated_principal"] == "test-principal"
+            for change in shared_after[len(shared_before):]
+        )
+    else:
+        assert shared_after == shared_before
 
 
 def test_ncfl_people_directory_apply_routes_through_shared_registry_writer(tmp_path: Path) -> None:

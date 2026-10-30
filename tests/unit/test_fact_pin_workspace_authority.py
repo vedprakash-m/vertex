@@ -93,7 +93,7 @@ def test_actual_confirm_drift_uses_configured_fact_database(
 
     monkeypatch.setattr(fact_drift, "ProgramFactStore", open_store)
 
-    _exercise_actual_confirm(repo_root, tmp_path)
+    _exercise_actual_confirm(repo_root, tmp_path, monkeypatch)
 
     assert observed_paths == [tmp_path / ".vertex" / "acme" / "vertex.sqlite3"] * 2
 

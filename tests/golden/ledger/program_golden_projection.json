@@ -112,7 +112,7 @@
       "coverage_latest": "2025-03-20T00:00:00+00:00",
       "event_watermark": "01KEJK7S00PD2FTBGTMJ6NYCY3",
       "knowledge_as_of": null,
-      "projector_version": "2",
+      "projector_version": "3",
       "schema_version": "1"
     }
   ]

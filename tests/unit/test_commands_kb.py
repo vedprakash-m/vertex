@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 import json
+import os
 from pathlib import Path
 import subprocess
 
+import pytest
+import yaml
 from typer.testing import CliRunner
 
 from cli import app
@@ -14,6 +17,8 @@ from src.commands import kb as kb_module
 from src.ai.llm_trace import AITraceContext
 from src.core.kb_changelog import build_kb_changelog_report, render_kb_changelog_report
 from src.core.profile_encryption import encrypt_people_profiles_file
+from src.core.program_fact_store import load_current_workstreams, load_program_facts, project_workstreams
+from tests.unit.test_kb_updates import _seed_workstream_repair
 
 
 runner = CliRunner()
@@ -218,6 +223,113 @@ def test_kb_update_blocks_invalid_referential_change(monkeypatch, tmp_path: Path
     assert result.exit_code != 0
     assert "Unknown team_id 'missing' referenced by person 'demo'." in result.output
     assert "missing" not in people_directory_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("field", ["pm_owner", "eng_owner", "alternate_owner"])
+@pytest.mark.parametrize("clear", [False, True])
+def test_kb_workstream_cli_repairs_retained_facts_and_edition_bundle(
+    monkeypatch, tmp_path: Path, field: str, clear: bool,
+) -> None:
+    from src.core.edition_resolver import resolve_edition
+    from src.core.kb_updates import parse_deterministic_kb_correction, prepare_kb_update
+
+    root = _seed_workstream_repair(tmp_path)
+    decoy_root = _seed_workstream_repair(tmp_path / "decoy")
+    decoy_before = {path: path.read_bytes() for path in decoy_root.parent.rglob("*") if path.is_file()}
+    monkeypatch.chdir(decoy_root.parent)
+    monkeypatch.setattr(kb_module, "PROGRAMS_ROOT", root)
+    other_before = {path: path.read_bytes() for path in (root / "fabrikam").rglob("*") if path.is_file()}
+    other_facts = load_program_facts("fabrikam", programs_root=root, as_of=datetime.now(timezone.utc))
+    before_time = datetime.now(timezone.utc)
+    correction = f"Clear delivery {field.replace('_', ' ')}" if clear else f"Set delivery {field.replace('_', ' ')} to bob"
+    plan = parse_deterministic_kb_correction(correction, program_id="acme")
+    assert plan is not None
+    preview = prepare_kb_update(plan, programs_root=root)
+    result = runner.invoke(app, ["kb", "update", correction, "--program", "acme", "--apply", "--no-ai"])
+    expected = None if clear else "bob"
+    assert result.exit_code == 0, result.output
+    assert "Applied 1 file(s)." in result.output
+    path = root / "acme" / "workstreams.yaml"
+    assert path.read_bytes() == preview.changes[0].after_text.replace("\n", os.linesep).encode("utf-8")
+    assert yaml.safe_load(path.read_text(encoding="utf-8"))["workstreams"][0][field] == expected
+    persisted = project_workstreams(load_program_facts("acme", programs_root=root, as_of=datetime.now(timezone.utc)))
+    assert getattr(next(entry for entry in persisted if entry.id == "delivery"), field) == expected
+    current = load_current_workstreams("acme", programs_root=root)
+    assert getattr(next(entry for entry in current if entry.id == "delivery"), field) == expected
+    bundle = resolve_edition("acme_weekly", programs_root=root)
+    assert bundle is not None
+    assert getattr(next(entry for entry in bundle.workstreams if entry.id == "delivery"), field) == expected
+    old = project_workstreams(load_program_facts("acme", programs_root=root, as_of=before_time))
+    assert getattr(next(entry for entry in old if entry.id == "delivery"), field) == "alice"
+    assert {path: path.read_bytes() for path in other_before} == other_before
+    assert {path: path.read_bytes() for path in decoy_root.parent.rglob("*") if path.is_file()} == decoy_before
+    assert load_program_facts("fabrikam", programs_root=root, as_of=datetime.now(timezone.utc)).facts == other_facts.facts
+    audit = json.loads((root / "acme" / "journal" / "kb_edits.jsonl").read_text(encoding="utf-8"))
+    assert audit["files"][0]["before"]["workstreams"][0][field] == "alice"
+    assert audit["files"][0]["after"]["workstreams"][0][field] == expected
+
+
+@pytest.mark.parametrize("mode", ["preview", "unknown-owner"])
+def test_kb_workstream_cli_refuses_mutation_without_valid_apply(
+    monkeypatch, tmp_path: Path, mode: str,
+) -> None:
+    root = _seed_workstream_repair(tmp_path)
+    monkeypatch.setattr(kb_module, "PROGRAMS_ROOT", root)
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    correction = "Set delivery pm owner to " + ("ghost" if mode == "unknown-owner" else "bob")
+    args = ["kb", "update", correction, "--program", "acme", "--no-ai"]
+    if mode == "unknown-owner":
+        args.append("--apply")
+    result = runner.invoke(app, args)
+    assert result.exit_code == (2 if mode == "unknown-owner" else 0), result.output
+    assert ("Unknown pm_owner" if mode == "unknown-owner" else "Preview only.") in result.output
+    assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+
+
+def test_kb_workstream_cli_preview_does_not_create_fact_database(monkeypatch, tmp_path: Path) -> None:
+    root = _seed_kb_update_layout(tmp_path)
+    monkeypatch.setattr(kb_module, "PROGRAMS_ROOT", root)
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    result = runner.invoke(app, [
+        "kb", "update", "Clear ws_demo pm owner", "--program", "demo", "--no-ai",
+    ])
+    assert result.exit_code == 0, result.output
+    assert "Preview only." in result.output
+    assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+
+
+@pytest.mark.parametrize("failure", ["save", "sync"])
+def test_kb_workstream_cli_failure_has_no_success_audit(
+    monkeypatch, tmp_path: Path, failure: str,
+) -> None:
+    import src.core.kb_updates as kb_updates
+    import src.core.workstream_documents as workstream_documents
+
+    root = _seed_workstream_repair(tmp_path)
+    monkeypatch.setattr(kb_module, "PROGRAMS_ROOT", root)
+    path = root / "acme" / "workstreams.yaml"
+    before = path.read_bytes()
+
+    def fail(*args, **kwargs):
+        raise OSError("synthetic writer failure")
+
+    if failure == "save":
+        monkeypatch.setattr(kb_updates, "save_workstreams_document", fail, raising=False)
+    else:
+        monkeypatch.setattr(workstream_documents, "_sync_workstream_facts", fail)
+    result = runner.invoke(app, [
+        "kb", "update", "Set delivery pm owner to bob", "--program", "acme", "--apply", "--no-ai",
+    ])
+    assert result.exit_code != 0
+    assert "Applied " not in result.output
+    assert not (root / "acme" / "journal" / "kb_edits.jsonl").exists()
+    if failure == "save":
+        assert path.read_bytes() == before
+    else:
+        assert yaml.safe_load(path.read_text(encoding="utf-8"))["workstreams"][0]["pm_owner"] == "bob"
+        assert path.with_suffix(".yaml.bak").read_bytes() == before
+    persisted = project_workstreams(load_program_facts("acme", programs_root=root, as_of=datetime.now(timezone.utc)))
+    assert next(entry for entry in persisted if entry.id == "delivery").pm_owner == "alice"
 
 
 def test_kb_update_surfaces_vertex_first_ai_guidance_for_unsupported_correction(monkeypatch, tmp_path: Path) -> None:

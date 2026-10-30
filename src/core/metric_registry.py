@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Collection
 from datetime import date, datetime, time, timezone
+import math
 from pathlib import Path
 from typing import Any, Literal, TypeVar, cast
 
@@ -191,7 +192,13 @@ def _optional_float(value: Any, path: Path, field_name: str) -> float | None:
         return None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ConfigError(f"Metric registry field '{field_name}' must be numeric in {path}")
-    return float(value)
+    try:
+        number = float(value)
+    except OverflowError as error:
+        raise ConfigError(f"Metric registry field '{field_name}' must be finite in {path}") from error
+    if not math.isfinite(number):
+        raise ConfigError(f"Metric registry field '{field_name}' must be finite in {path}")
+    return number
 
 
 def _optional_literal(

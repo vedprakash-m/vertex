@@ -16,6 +16,7 @@ import argparse
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -38,7 +39,7 @@ def _count_collected_tests(tests_root: Path) -> int:
     """Best-effort: return the number of tests pytest would collect, or -1."""
     try:
         result = subprocess.run(
-            ["python", "-m", "pytest", str(tests_root), "-q", "--tb=no", "--co"],
+            [sys.executable, "-m", "pytest", str(tests_root), "-q", "--tb=no", "--co"],
             cwd=str(REPO_ROOT),
             capture_output=True,
             text=True,

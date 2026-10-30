@@ -46,7 +46,7 @@ from src.core.signal_ranking import signal_source_family
 from src.core.store_factory import build_signal_store_for_program_id
 from src.core.telemetry_summary import build_approved_telemetry_summary
 from src.core.trusted_baseline_store import load_trusted_baseline_issue
-from src.core.workspace_paths import PROGRAMS_ROOT, validate_report_workspace
+from src.core.workspace_paths import PROGRAMS_ROOT, REPO_ROOT, resolve_report_workspace_roots
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +57,16 @@ class PrepBriefArtifacts:
 
 def _preflight_prep_workspace() -> None:
     try:
-        validate_report_workspace(programs_root=PROGRAMS_ROOT, reports_root=REPORTS_ROOT, archive_root=ARCHIVE_ROOT)
+        programs_root: Path | None = PROGRAMS_ROOT
+        reports_root: Path | None = REPORTS_ROOT
+        archive_root: Path | None = ARCHIVE_ROOT
+        if programs_root == REPO_ROOT / "programs":
+            programs_root = None
+        if reports_root == REPO_ROOT / "reports":
+            reports_root = None
+        if archive_root == REPO_ROOT / "archive":
+            archive_root = None
+        resolve_report_workspace_roots(programs_root, reports_root, archive_root)
     except ConfigError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(code=2) from error
@@ -106,13 +115,20 @@ def generate_prep_brief(
     programs_root: Path | None = None,
     as_of: datetime | None = None,
 ) -> PrepBriefArtifacts:
-    resolved_reports_root = reports_root or REPORTS_ROOT
-    resolved_archive_root = archive_root or ARCHIVE_ROOT
-    programs_root = programs_root or (resolved_reports_root.parent / "programs" if reports_root is not None else PROGRAMS_ROOT)
-    validate_report_workspace(
-        programs_root=programs_root,
-        reports_root=resolved_reports_root,
-        archive_root=resolved_archive_root,
+    selected_programs_root = programs_root
+    if selected_programs_root is None:
+        if reports_root is not None:
+            selected_programs_root = reports_root.parent / "programs"
+        elif PROGRAMS_ROOT != REPO_ROOT / "programs":
+            selected_programs_root = PROGRAMS_ROOT
+    selected_reports_root = reports_root
+    if selected_reports_root is None and REPORTS_ROOT != REPO_ROOT / "reports":
+        selected_reports_root = REPORTS_ROOT
+    selected_archive_root = archive_root
+    if selected_archive_root is None and ARCHIVE_ROOT != REPO_ROOT / "archive":
+        selected_archive_root = ARCHIVE_ROOT
+    programs_root, resolved_reports_root, resolved_archive_root = resolve_report_workspace_roots(
+        selected_programs_root, selected_reports_root, selected_archive_root,
     )
     generated_at = as_of or datetime.now(timezone.utc)
 
@@ -674,7 +690,7 @@ def _build_prep_milestone_lines(
         status = str(assessment.get("computed_health") or "unknown").replace("_", " ")
         details = [status]
         if assessment.get("critical_path"):
-            details.append("critical path")
+            details.append("longest dependency chain")
         target_date = assessment.get("target_date")
         if target_date is not None:
             details.append(f"target {target_date}")

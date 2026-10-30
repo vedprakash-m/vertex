@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from src.core.leakage_detector import LeakageReport
 from src.core.models import Comment, Revision, RiskLevel, WorkItem
-from src.core.vitality_scorer import aggregate_vitality, score_vitality, summarize_vitality
+from src.core.vitality_scorer import aggregate_vitality, freshness_days_for_policy, score_vitality, summarize_vitality
 
 
 def test_score_vitality_excludes_terminal_and_new_items() -> None:
@@ -72,6 +72,8 @@ def test_score_vitality_computes_richness_and_aggregates() -> None:
     assert owner_aggregates[0].leakage_ratio == 0.5
     assert summary.updated_this_week == 1
     assert summary.stale_owner_aliases == ("operator",)
+    assert summary.freshness_average_days == 9.5
+    assert summary.freshness_known_items == 2
 
 
 def test_score_vitality_uses_pre_workiq_formula_when_signals_are_sparse() -> None:
@@ -224,6 +226,42 @@ def test_score_vitality_ignores_vertex_comments_and_changed_date_without_meaning
     assert scores[0].freshness_grade == "red"
     assert scores[0].freshness_days == 18
     assert "recent_comment" in scores[0].richness_missing
+
+
+def test_unknown_source_age_stays_red_without_reporting_a_fabricated_age() -> None:
+    as_of = datetime(2026, 10, 28, 12, 0, tzinfo=timezone.utc)
+    item = _item(500, changed_at=as_of)
+    item.custom_fields = {}
+    item.revisions = []
+    item.comments = []
+    item.fetched_at = as_of
+
+    scores = score_vitality((item,), as_of=as_of)
+    summary = summarize_vitality(scores)
+
+    assert scores[0].freshness_days is None
+    assert scores[0].freshness_grade == "red"
+    assert scores[0].composite_score == 28
+    assert summary.freshness_average_days is None
+    assert summary.freshness_known_items == 0
+
+    mixed_summary = summarize_vitality(
+        (*scores, *score_vitality((_item(501, changed_at=as_of - timedelta(days=5)),), as_of=as_of))
+    )
+    assert mixed_summary.freshness_average_days == 5.0
+    assert mixed_summary.freshness_known_items == 1
+    assert mixed_summary.total_items == 2
+    assert summarize_vitality(()).freshness_average_days is None
+    assert summarize_vitality(()).freshness_known_items == 0
+
+
+def test_unknown_freshness_policy_keeps_legacy_threshold_comparisons() -> None:
+    assert freshness_days_for_policy(None) == 9999
+    assert freshness_days_for_policy(None) > 9998
+    assert not freshness_days_for_policy(None) > 9999
+    assert not freshness_days_for_policy(None) < 9999
+    assert freshness_days_for_policy(None) < 10000
+    assert freshness_days_for_policy(10000) == 10000
 
 
 def _item(

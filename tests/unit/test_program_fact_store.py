@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -72,6 +72,52 @@ from src.core.fact_sor_state import save_fact_sor_state
 from src.core.risk_register_engine import load_risk_register, save_risk_register
 from src.core.trusted_baseline_store import advance_trusted_baseline, load_trusted_baseline_for_program, record_untrusted_issue
 from src.core.workstream_documents import save_workstreams_document
+
+
+def test_date_margin_fact_precedence_and_history(tmp_path: Path) -> None:
+    from tests.unit.test_milestone_engine import _date_margin_dependency
+    from src.core.dependency_graph import _dependency_fact_payload
+    from src.core.milestone_engine import assess_dependency_date_margin
+
+    programs_root = tmp_path / "programs"
+    dependency = replace(_date_margin_dependency(), from_program_id="acme", to_program_id="acme")
+    save_dependencies("acme", (dependency,), programs_root=programs_root)
+    store = ProgramFactStore("acme", db_root=programs_root.parent)
+    first = store.snapshot()
+    later = first.as_of + timedelta(seconds=1)
+    accepted = ProgramFactInput(
+        fact_type="dependency.link", scope="program", entity_refs=("DEPENDENCY:margin",),
+        payload=_dependency_fact_payload(replace(dependency, consumer_required_by_date=date(2026, 10, 22))),
+        precedence=FactPrecedence.ACTIVE_PM_JUDGMENT, created_by="test",
+    )
+    store.append_fact(accepted, recorded_at=later)
+    assert assess_dependency_date_margin(project_dependencies(store.snapshot(as_of=later))[0]).margin_days == -1
+    assert assess_dependency_date_margin(project_dependencies(store.snapshot(as_of=first.as_of))[0]).margin_days == 3
+    proposed = replace(accepted, payload=_dependency_fact_payload(dependency), precedence=FactPrecedence.RAW_TELEMETRY)
+    result = store.append_fact(proposed, recorded_at=later + timedelta(seconds=1))
+    assert result.action == "proposed_revision"
+    assert assess_dependency_date_margin(project_dependencies(store.snapshot(as_of=later + timedelta(seconds=2)))[0]).margin_days == -1
+
+
+@pytest.mark.parametrize("field,value", [
+    ("provider_forecast_ready_date", "bad-date"),
+    ("consumer_required_by_date", 123),
+    ("date_margin_calendar", []),
+    ("date_margin_lag", False),
+])
+def test_malformed_date_margin_fact_payload_fails_admission(tmp_path: Path, field: str, value: object) -> None:
+    from tests.unit.test_milestone_engine import _date_margin_dependency
+    from src.core.dependency_graph import _dependency_fact_payload
+
+    payload = _dependency_fact_payload(_date_margin_dependency())
+    payload[field] = value
+    store = ProgramFactStore("demo", db_root=tmp_path)
+    store.append_fact(ProgramFactInput(
+        fact_type="dependency.link", scope="program", entity_refs=("DEPENDENCY:margin",),
+        payload=payload, precedence=FactPrecedence.ACTIVE_PM_JUDGMENT, created_by="test",
+    ))
+    with pytest.raises(ConfigError, match=field):
+        project_dependencies(store.snapshot())
 
 
 def _programs_root(tmp_path: Path) -> Path:

@@ -313,6 +313,27 @@ def test_list_work_item_comments_follows_continuation_token_across_pages() -> No
     assert outcomes[0].is_truncated is False
 
 
+def test_list_work_item_comments_reports_truncation_at_page_cap() -> None:
+    class _CappedCommentsClient(ADOClient):
+        def __init__(self) -> None:
+            self._rest_base_url = "https://dev.azure.com/your-org/One/_apis/wit/"
+
+        def _request_response(self, method: str, url: str, **kwargs: object) -> _FakeJsonResponse:
+            del method, url, kwargs
+            return _FakeJsonResponse({"comments": [{"id": 1}]}, headers={"x-ms-continuationtoken": "page-2"})
+
+    client = _CappedCommentsClient()
+    outcomes: list[object] = []
+
+    rows = client.list_work_item_comments(101, max_pages=1, on_pagination=outcomes.append)
+
+    assert rows == [{"id": 1}]
+    assert len(outcomes) == 1
+    assert outcomes[0].total_fetched == 1
+    assert outcomes[0].page_count == 1
+    assert outcomes[0].is_truncated is True
+
+
 def test_get_work_item_relations_expands_relations() -> None:
     client = RecordingRestADOClient(payload={"value": [{"id": 101, "relations": []}]})
 

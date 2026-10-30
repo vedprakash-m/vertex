@@ -17,6 +17,25 @@ from src.core.backup import (
 from src.core.exceptions import StateError
 
 
+_SCOPE_COLUMNS = ("capture_scope", "declared_scope_check", "absent_unassessed_store_count", "recovery_qualification")
+
+
+def _scope_output(result) -> dict:
+    return {
+        "capture_scope": result.capture_scope,
+        "declared_scope_check": result.declared_scope_check,
+        "absent_unassessed_store_count": result.absent_unassessed_store_count,
+        "recovery_qualification": "not_assessed",
+    }
+
+
+def _scope_description(result) -> str:
+    return (
+        f"Scope: {result.capture_scope}; declared scope check: {result.declared_scope_check.replace('_', ' ')}; "
+        f"absent/unassessed stores: {result.absent_unassessed_store_count}; recovery not assessed."
+    )
+
+
 def backup_command(
     to: Path | None = typer.Option(None, "--to", help="Destination directory for a backup snapshot."),
     verify: Path | None = typer.Option(None, "--verify", help="Existing backup directory to verify."),
@@ -60,19 +79,28 @@ def backup_command(
             raise typer.Exit(code=2) from error
         if format == "human":
             typer.echo(
-                f"Restore complete: {result.file_count} files restored to {result.destination_root}"
+                f"Restore copied {result.file_count} files to {result.destination_root}"
             )
             typer.echo(f"Manifest: {result.manifest_path}")
             typer.echo(f"Preflight verified: {result.preflight_verified}")
+            typer.echo(_scope_description(result))
         else:
             typer.echo(render_backup_restore_output(result, format=format), nl=False)
         raise typer.Exit(code=0)
 
     if to is not None:
-        backup_result = create_repository_backup(to, source_root=REPO_ROOT)
+        try:
+            backup_result = create_repository_backup(to, source_root=REPO_ROOT)
+        except StateError as error:
+            if format == "human":
+                typer.echo(f"Backup failed: {error}")
+            else:
+                typer.echo(render_backup_create_error_output(to, str(error), format=format), nl=False)
+            raise typer.Exit(code=2) from error
         if format == "human":
-            typer.echo(f"Backup complete: {backup_result.file_count} files copied to {backup_result.destination_root}")
+            typer.echo(f"Repository subset captured: {backup_result.file_count} files copied to {backup_result.destination_root}")
             typer.echo(f"Manifest: {backup_result.manifest_path}")
+            typer.echo(_scope_description(backup_result))
         else:
             typer.echo(render_backup_create_output(backup_result, format=format), nl=False)
         raise typer.Exit(code=0)
@@ -92,8 +120,9 @@ def backup_command(
 
     if verify_result.is_valid:
         if format == "human":
-            typer.echo(f"Backup verified: {verify_result.checked_file_count} files checked")
+            typer.echo(f"Listed-file integrity verified: {verify_result.checked_file_count} files checked")
             typer.echo(f"Manifest: {verify.resolve() / BACKUP_MANIFEST_NAME}")
+            typer.echo(_scope_description(verify_result))
         else:
             typer.echo(render_backup_verify_output(verify, verify_result, format=format), nl=False)
         raise typer.Exit(code=0)
@@ -107,6 +136,7 @@ def backup_command(
             typer.echo(f"  Missing: {relative_path}")
         for relative_path in verify_result.mismatched_paths:
             typer.echo(f"  Checksum mismatch: {relative_path}")
+        typer.echo(_scope_description(verify_result))
     else:
         typer.echo(render_backup_verify_output(verify, verify_result, format=format), nl=False)
     raise typer.Exit(code=2)
@@ -118,14 +148,28 @@ def render_backup_create_output(result, *, format: str) -> str:
         "file_count": result.file_count,
         "destination_root": str(result.destination_root),
         "manifest_path": str(result.manifest_path),
+        **_scope_output(result),
     }
     if format == "json":
         return json.dumps(payload, indent=2, sort_keys=True) + "\n"
     if format == "csv":
         buffer = StringIO()
         writer = csv.writer(buffer)
-        writer.writerow(("mode", "file_count", "destination_root", "manifest_path"))
-        writer.writerow((payload["mode"], payload["file_count"], payload["destination_root"], payload["manifest_path"]))
+        writer.writerow(("mode", "file_count", "destination_root", "manifest_path") + _SCOPE_COLUMNS)
+        writer.writerow((payload["mode"], payload["file_count"], payload["destination_root"], payload["manifest_path"]) + tuple(payload[key] for key in _SCOPE_COLUMNS))
+        return buffer.getvalue()
+    raise typer.BadParameter("--format must be 'human', 'json', or 'csv'.")
+
+
+def render_backup_create_error_output(destination_root: Path, error_message: str, *, format: str) -> str:
+    payload = {"mode": "create", "destination_root": str(destination_root.resolve()), "error": error_message}
+    if format == "json":
+        return json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    if format == "csv":
+        buffer = StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(("mode", "destination_root", "error"))
+        writer.writerow((payload["mode"], payload["destination_root"], payload["error"]))
         return buffer.getvalue()
     raise typer.BadParameter("--format must be 'human', 'json', or 'csv'.")
 
@@ -157,13 +201,14 @@ def render_backup_verify_output(backup_root: Path, result, *, format: str) -> st
         "missing_paths": list(result.missing_paths),
         "mismatched_paths": list(result.mismatched_paths),
         "manifest_path": str(backup_root.resolve() / BACKUP_MANIFEST_NAME),
+        **_scope_output(result),
     }
     if format == "json":
         return json.dumps(payload, indent=2, sort_keys=True) + "\n"
     if format == "csv":
         buffer = StringIO()
         writer = csv.writer(buffer)
-        writer.writerow(("mode", "backup_root", "is_valid", "checked_file_count", "missing_paths", "mismatched_paths", "manifest_path", "error"))
+        writer.writerow(("mode", "backup_root", "is_valid", "checked_file_count", "missing_paths", "mismatched_paths", "manifest_path", "error") + _SCOPE_COLUMNS)
         writer.writerow(
             (
                 payload["mode"],
@@ -174,7 +219,7 @@ def render_backup_verify_output(backup_root: Path, result, *, format: str) -> st
                 ";".join(payload["mismatched_paths"]),
                 payload["manifest_path"],
                 "",
-            )
+            ) + tuple(payload[key] for key in _SCOPE_COLUMNS)
         )
         return buffer.getvalue()
     raise typer.BadParameter("--format must be 'human', 'json', or 'csv'.")
@@ -188,13 +233,14 @@ def render_backup_restore_output(result, *, format: str) -> str:
         "file_count": result.file_count,
         "preflight_verified": result.preflight_verified,
         "manifest_path": str(result.manifest_path),
+        **_scope_output(result),
     }
     if format == "json":
         return json.dumps(payload, indent=2, sort_keys=True) + "\n"
     if format == "csv":
         buffer = StringIO()
         writer = csv.writer(buffer)
-        writer.writerow(("mode", "from", "destination_root", "file_count", "preflight_verified", "manifest_path"))
+        writer.writerow(("mode", "from", "destination_root", "file_count", "preflight_verified", "manifest_path") + _SCOPE_COLUMNS)
         writer.writerow(
             (
                 payload["mode"],
@@ -203,7 +249,7 @@ def render_backup_restore_output(result, *, format: str) -> str:
                 payload["file_count"],
                 payload["preflight_verified"],
                 payload["manifest_path"],
-            )
+            ) + tuple(payload[key] for key in _SCOPE_COLUMNS)
         )
         return buffer.getvalue()
     raise typer.BadParameter("--format must be 'human', 'json', or 'csv'.")

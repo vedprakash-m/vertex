@@ -20,6 +20,7 @@ from src.ai.claim_extractor import (
     ClaimExtractorSafetyError,
 )
 from src.core.claim_tracker import ClaimExtractionResult
+from src.core.exceptions import ConfigError
 from src.commands.confirm_stages import claim_resolution
 from src.commands.confirm_stages.claim_resolution import (
     claim_extractor_mode,
@@ -244,6 +245,46 @@ def test_prepare_claim_extraction_regex_mode_skips_calibration_record(monkeypatc
     assert result is None and mode == "regex" and record is None
 
 
+def test_prepare_claim_extraction_uses_explicit_programs_root(monkeypatch, tmp_path: Path) -> None:
+    reports_root = tmp_path / "legacy" / "reports"
+    selected_root = tmp_path / "selected" / "programs"
+    selected_edition = selected_root / "acme" / "editions" / "acme_weekly.yaml"
+    selected_edition.parent.mkdir(parents=True)
+    selected_edition.write_text("program_id: acme\n", encoding="utf-8")
+    resolved = SimpleNamespace(program=SimpleNamespace(id="acme"), workstreams=())
+    resolution_calls = []
+    narrative_calls = []
+    extraction_calls = []
+
+    def resolve(edition_name, *, editions_root, programs_root):
+        resolution_calls.append((edition_name, editions_root, programs_root))
+        return resolved
+
+    monkeypatch.setattr(claim_resolution, "resolve_edition", resolve)
+    monkeypatch.setattr(
+        claim_resolution, "load_narratives",
+        lambda *args, **kwargs: narrative_calls.append((args, kwargs)) or {},
+    )
+    monkeypatch.setattr(
+        claim_resolution, "resolve_confirm_claim_extraction",
+        lambda **kwargs: extraction_calls.append(kwargs) or (None, "regex", ()),
+    )
+
+    result = prepare_confirm_claim_extraction_for_v2(
+        edition_name="acme_weekly",
+        issue_number=2,
+        confirmed_at=datetime(2026, 6, 5, 12, 0, 0),
+        reports_root=reports_root,
+        items=(),
+        programs_root=selected_root,
+    )
+
+    assert result == (None, "regex", (), None)
+    assert resolution_calls == [("acme_weekly", selected_root.parent / "editions", selected_root)]
+    assert narrative_calls[0][1]["programs_root"] == selected_root
+    assert extraction_calls[0]["programs_root"] == selected_root
+
+
 def test_record_confirmed_claims_for_v2_returns_empty_when_edition_is_missing(tmp_path: Path) -> None:
     reports_root = tmp_path / "repo" / "reports"
     reports_root.mkdir(parents=True)
@@ -257,6 +298,26 @@ def test_record_confirmed_claims_for_v2_returns_empty_when_edition_is_missing(tm
         )
         == ()
     )
+
+
+def test_record_confirmed_claims_for_v2_keeps_legacy_file_not_found_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reports_root = tmp_path / "repo" / "reports"
+
+    def fail_resolution(*args, **kwargs):
+        raise FileNotFoundError("legacy edition is missing")
+
+    monkeypatch.setattr(claim_resolution, "resolve_edition", fail_resolution)
+
+    assert record_confirmed_claims_for_v2(
+        edition_name="missing_edition",
+        issue_number=1,
+        confirmed_at=datetime(2026, 6, 5, 12, 0, 0),
+        reports_root=reports_root,
+        items=(),
+    ) == ()
 
 
 def test_record_confirmed_claims_for_v2_skips_resolution_when_result_is_precomputed(
@@ -315,6 +376,175 @@ def test_record_confirmed_claims_for_v2_skips_resolution_when_result_is_precompu
         "persisted warning",
         "Claim tracker recorded 1 claim(s) and 0 decision ask(s).",
     )
+
+
+def test_record_confirmed_claims_for_v2_uses_explicit_programs_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reports_root = tmp_path / "legacy" / "reports"
+    selected_root = tmp_path / "selected" / "programs"
+    selected_edition = selected_root / "acme" / "editions" / "acme_weekly.yaml"
+    selected_edition.parent.mkdir(parents=True)
+    selected_edition.write_text("program_id: acme\n", encoding="utf-8")
+    resolved = SimpleNamespace(
+        program=SimpleNamespace(id="acme"),
+        workstreams=(SimpleNamespace(id="ws-a", area_paths=("Area\\A",)),),
+    )
+    resolution_calls = []
+    narrative_calls = []
+    record_calls = []
+
+    def resolve(edition_name, *, editions_root, programs_root):
+        resolution_calls.append((edition_name, editions_root, programs_root))
+        return resolved
+
+    monkeypatch.setattr(claim_resolution, "resolve_edition", resolve)
+    monkeypatch.setattr(
+        claim_resolution, "load_narratives",
+        lambda *args, **kwargs: narrative_calls.append((args, kwargs)) or {"exec_summary": "selected"},
+    )
+    monkeypatch.setattr(
+        claim_resolution, "record_confirmed_claims",
+        lambda **kwargs: record_calls.append(kwargs) or SimpleNamespace(
+            warnings=(), written_claims=(), written_decision_asks=(),
+        ),
+    )
+
+    warnings = record_confirmed_claims_for_v2(
+        edition_name="acme_weekly",
+        issue_number=2,
+        confirmed_at=datetime(2026, 6, 5, 12, 0, 0),
+        reports_root=reports_root,
+        items=(),
+        extraction_result=ClaimExtractionResult(claims=(), decision_asks=(), warnings=()),
+        resolve_extraction_if_missing=False,
+        programs_root=selected_root,
+    )
+
+    assert warnings == ()
+    assert resolution_calls == [("acme_weekly", selected_root.parent / "editions", selected_root)]
+    assert narrative_calls[0][1]["programs_root"] == selected_root
+    assert record_calls[0]["programs_root"] == selected_root
+
+
+def test_record_confirmed_claims_for_v2_does_not_swallow_missing_explicit_program_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reports_root = tmp_path / "legacy" / "reports"
+    selected_root = tmp_path / "selected" / "programs"
+    selected_edition = selected_root / "acme" / "editions" / "acme_weekly.yaml"
+    selected_edition.parent.mkdir(parents=True)
+    selected_edition.write_text("program_id: acme\n", encoding="utf-8")
+    resolution_calls = []
+    provider_calls = []
+
+    def fail_resolution(*args, **kwargs):
+        resolution_calls.append((args, kwargs))
+        raise FileNotFoundError("selected program configuration is missing")
+
+    monkeypatch.setattr(claim_resolution, "resolve_edition", fail_resolution)
+    monkeypatch.setattr(
+        claim_resolution,
+        "load_narratives",
+        lambda *args, **kwargs: provider_calls.append(("narratives", args, kwargs)) or {},
+    )
+    monkeypatch.setattr(
+        claim_resolution,
+        "record_confirmed_claims",
+        lambda **kwargs: provider_calls.append(("record", kwargs)),
+    )
+
+    with pytest.raises(FileNotFoundError, match="selected program configuration is missing"):
+        record_confirmed_claims_for_v2(
+            edition_name="acme_weekly",
+            issue_number=2,
+            confirmed_at=datetime(2026, 6, 5, 12, 0, 0),
+            reports_root=reports_root,
+            items=(),
+            extraction_result=ClaimExtractionResult(claims=(), decision_asks=(), warnings=()),
+            resolve_extraction_if_missing=False,
+            programs_root=selected_root,
+        )
+
+    assert len(resolution_calls) == 1
+    assert provider_calls == []
+
+
+@pytest.mark.parametrize("helper", ["prepare", "record"])
+@pytest.mark.parametrize("root_case", ["missing", "relative", "legacy_decoy"])
+def test_explicit_claim_root_rejects_invalid_selection_before_resolution_or_io(
+    helper: str,
+    root_case: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reports_root = tmp_path / "legacy" / "reports"
+    reports_root.mkdir(parents=True)
+    if root_case == "missing":
+        selected_root = tmp_path / "selected" / "missing-programs"
+    elif root_case == "relative":
+        selected_root = Path("selected-relative-programs")
+    else:
+        selected_root = tmp_path / "selected" / "programs"
+        selected_root.mkdir(parents=True)
+        decoy_editions = selected_root.parent / "editions"
+        decoy_editions.mkdir()
+        (decoy_editions / "acme_weekly.yaml").write_text("program_id: acme\n", encoding="utf-8")
+
+    resolved = SimpleNamespace(
+        program=SimpleNamespace(id="acme"),
+        workstreams=(),
+    )
+    resolution_calls = []
+    provider_calls = []
+    monkeypatch.setattr(
+        claim_resolution,
+        "resolve_edition",
+        lambda *args, **kwargs: resolution_calls.append((args, kwargs)) or resolved,
+    )
+    monkeypatch.setattr(
+        claim_resolution,
+        "load_narratives",
+        lambda *args, **kwargs: provider_calls.append(("narratives", args, kwargs)) or {},
+    )
+    monkeypatch.setattr(
+        claim_resolution,
+        "resolve_confirm_claim_extraction",
+        lambda **kwargs: provider_calls.append(("extract", kwargs)) or (None, "regex", ()),
+    )
+    monkeypatch.setattr(
+        claim_resolution,
+        "record_confirmed_claims",
+        lambda **kwargs: provider_calls.append(("record", kwargs))
+        or SimpleNamespace(warnings=(), written_claims=(), written_decision_asks=()),
+    )
+
+    with pytest.raises(ConfigError):
+        if helper == "prepare":
+            prepare_confirm_claim_extraction_for_v2(
+                edition_name="acme_weekly",
+                issue_number=2,
+                confirmed_at=datetime(2026, 6, 5, 12, 0, 0),
+                reports_root=reports_root,
+                items=(),
+                programs_root=selected_root,
+            )
+        else:
+            record_confirmed_claims_for_v2(
+                edition_name="acme_weekly",
+                issue_number=2,
+                confirmed_at=datetime(2026, 6, 5, 12, 0, 0),
+                reports_root=reports_root,
+                items=(),
+                extraction_result=ClaimExtractionResult(claims=(), decision_asks=(), warnings=()),
+                resolve_extraction_if_missing=False,
+                programs_root=selected_root,
+            )
+
+    assert resolution_calls == []
+    assert provider_calls == []
 
 
 def test_record_confirmed_claims_for_v2_resolves_missing_extraction_and_merges_warnings(

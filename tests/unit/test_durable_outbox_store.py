@@ -25,6 +25,199 @@ from src.core.ledger.durable_outbox_store import (
 from src.core._db import open_program_db_with_retry
 
 
+def _expired_dispatch_fixture(tmp_path: Path):
+    from src.core.workspace_lease import ACTUATION_DISPATCH_DOMAIN, acquire_lease
+
+    root = tmp_path / "programs"
+    db = root / "fixture" / "runtime" / "outbox.db"
+    enqueue(db, "key", domain=ACTUATION_DISPATCH_DOMAIN, correlation_id="key", payload_json="{}")
+    leased = lease_next(db, ACTUATION_DISPATCH_DOMAIN, owner="old", ttl_seconds=0)
+    assert leased is not None
+    observed = mark_dispatched(db, "key", owner="old", fencing_token=leased.lease_fencing_token, remote_request_hash="request")
+    handle = acquire_lease("fixture", "new", mutation_domain=ACTUATION_DISPATCH_DOMAIN, programs_root=root)
+    return root, db, observed, handle
+
+
+def test_classification_preserves_data_and_fences_old_worker(tmp_path: Path) -> None:
+    from dataclasses import replace
+    from src.core.ledger import durable_outbox_store as store
+
+    root, db, observed, handle = _expired_dispatch_fixture(tmp_path)
+    result = store.classify_expired_dispatched(db, observed, workspace_lease=handle, programs_root=root)
+    assert result.status == "uncertain_remote_state"
+    assert result.lease_owner == "new"
+    assert result.lease_fencing_token == observed.lease_fencing_token + 1
+    assert result.failure_reason == "Expired dispatched attempt; remote outcome unknown; manual reconciliation required."
+    assert result.updated_at >= observed.updated_at
+    assert replace(
+        result, status=observed.status, lease_owner=observed.lease_owner,
+        lease_fencing_token=observed.lease_fencing_token, failure_reason=observed.failure_reason,
+        updated_at=observed.updated_at,
+    ) == observed
+    with pytest.raises(LeaseNoLongerCurrent):
+        mark_succeeded(db, "key", owner="old", fencing_token=observed.lease_fencing_token)
+    assert lease_next(db, observed.domain, owner="third") is None
+    resolved = mark_manually_resolved(db, "key", resolved_by="operator", reason="explicit offline reconciliation")
+    assert resolved.status == "manually_resolved"
+
+
+@pytest.mark.parametrize("change", [
+    "row_token", "row_owner", "payload", "domain", "correlation", "status",
+    "missing_expiry", "changed_expiry", "active", "workspace_token", "workspace_owner", "workspace_expiry", "same_owner",
+])
+def test_classification_refuses_changed_or_active_fences(tmp_path: Path, change: str) -> None:
+    from dataclasses import replace
+    from src.core.ledger import durable_outbox_store as store
+    from src.core.workspace_lease import get_workspace_lease_db_path
+
+    root, db, observed, handle = _expired_dispatch_fixture(tmp_path)
+    alterations = {
+        "row_token": ("lease_fencing_token", observed.lease_fencing_token + 1),
+        "row_owner": ("lease_owner", "third"),
+        "payload": ("payload_json", '{"changed":true}'),
+        "domain": ("domain", "other"),
+        "correlation": ("correlation_id", "other"),
+        "status": ("status", "completed"),
+        "missing_expiry": ("lease_expires_at", None),
+        "changed_expiry": ("lease_expires_at", "2000-01-01T00:00:00Z"),
+        "active": ("lease_expires_at", (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat().replace("+00:00", "Z")),
+    }
+    if change in alterations:
+        column, value = alterations[change]
+        with open_program_db_with_retry(db, durability="strict") as connection:
+            connection.execute(f"UPDATE outbox SET {column} = ?", (value,))
+    elif change == "same_owner":
+        handle = replace(handle, owner="old")
+        with open_program_db_with_retry(get_workspace_lease_db_path("fixture", programs_root=root), durability="strict") as connection:
+            connection.execute("UPDATE workspace_lease SET owner = 'old'")
+    else:
+        column, value = {
+            "workspace_token": ("fencing_token", handle.fencing_token + 1),
+            "workspace_owner": ("owner", "third"),
+            "workspace_expiry": ("expires_at", "2000-01-01T00:00:00Z"),
+        }[change]
+        with open_program_db_with_retry(get_workspace_lease_db_path("fixture", programs_root=root), durability="strict") as connection:
+            connection.execute(f"UPDATE workspace_lease SET {column} = ?", (value,))
+    before = load_entry(db, "key")
+    with pytest.raises(LeaseNoLongerCurrent):
+        store.classify_expired_dispatched(db, observed, workspace_lease=handle, programs_root=root)
+    assert load_entry(db, "key") == before
+
+
+def test_classification_clock_is_sampled_after_transaction_locks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from contextlib import contextmanager
+    from src.core.ledger import durable_outbox_store as store
+    from src.core.unit_of_work import open_unit_of_work
+
+    root, db, observed, handle = _expired_dispatch_fixture(tmp_path)
+    locked = False
+
+    @contextmanager
+    def locking(databases):
+        nonlocal locked
+        with open_unit_of_work(databases) as transaction:
+            locked = True
+            yield transaction
+
+    def clock():
+        assert locked
+        return handle.expires_at + timedelta(seconds=1)
+
+    monkeypatch.setattr(store, "open_unit_of_work", locking, raising=False)
+    monkeypatch.setattr(store, "_now", clock)
+    before = load_entry(db, "key")
+    with pytest.raises(LeaseNoLongerCurrent):
+        store.classify_expired_dispatched(db, observed, workspace_lease=handle, programs_root=root)
+    assert load_entry(db, "key") == before
+
+
+def test_workspace_takeover_waits_until_classification_commits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from src.core.ledger import durable_outbox_store as store
+    from src.core.workspace_lease import acquire_lease
+
+    root, db, observed, handle = _expired_dispatch_fixture(tmp_path)
+    started, finished = Event(), Event()
+    original_clock = store._now
+
+    def takeover():
+        started.set()
+        try:
+            acquire_lease("fixture", "third", mutation_domain=handle.mutation_domain, programs_root=root)
+        finally:
+            finished.set()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = None
+
+        def clock():
+            nonlocal future
+            future = pool.submit(takeover)
+            assert started.wait(2)
+            assert not finished.wait(0.1)
+            return original_clock()
+
+        monkeypatch.setattr(store, "_now", clock)
+        result = store.classify_expired_dispatched(db, observed, workspace_lease=handle, programs_root=root)
+        assert result.status == "uncertain_remote_state"
+        assert future is not None
+        from src.core.workspace_lease import LeaseHeldByAnotherOwner
+        with pytest.raises(LeaseHeldByAnotherOwner):
+            future.result(timeout=10)
+
+
+def test_workspace_takeover_before_classification_rejects_old_handle(tmp_path: Path) -> None:
+    from src.core.ledger import durable_outbox_store as store
+    from src.core.workspace_lease import acquire_lease, release_lease, read_lease_state
+
+    root, db, observed, old_handle = _expired_dispatch_fixture(tmp_path)
+    release_lease(old_handle, programs_root=root)
+    current = acquire_lease(
+        "fixture", "third", mutation_domain=old_handle.mutation_domain, programs_root=root,
+    )
+    before = load_entry(db, "key")
+    with pytest.raises(LeaseNoLongerCurrent):
+        store.classify_expired_dispatched(db, observed, workspace_lease=old_handle, programs_root=root)
+    assert load_entry(db, "key") == before
+    assert read_lease_state("fixture", mutation_domain=current.mutation_domain, programs_root=root) == current
+
+
+def test_old_worker_completion_waits_then_is_fenced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from src.core.ledger import durable_outbox_store as store
+
+    root, db, observed, handle = _expired_dispatch_fixture(tmp_path)
+    started, finished = Event(), Event()
+    original_clock = store._now
+
+    def complete():
+        started.set()
+        try:
+            return mark_succeeded(db, "key", owner="old", fencing_token=observed.lease_fencing_token)
+        finally:
+            finished.set()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = None
+
+        def clock():
+            nonlocal future
+            if not started.is_set():
+                future = pool.submit(complete)
+                assert started.wait(2)
+                assert not finished.wait(0.1)
+            return original_clock()
+
+        monkeypatch.setattr(store, "_now", clock)
+        result = store.classify_expired_dispatched(db, observed, workspace_lease=handle, programs_root=root)
+        assert result.status == "uncertain_remote_state"
+        assert future is not None
+        with pytest.raises(LeaseNoLongerCurrent):
+            future.result(timeout=10)
+
+
 def _db(tmp_path: Path) -> Path:
     return tmp_path / "outbox.sqlite3"
 

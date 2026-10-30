@@ -215,12 +215,18 @@ def record_workiq_provenance(
             source = (signal.metadata or {}).get("source_type", "workiq")
             source_counts[source] = source_counts.get(source, 0) + 1
         latest = max(signals, key=lambda signal: signal.timestamp)
+        metadata = latest.metadata or {}
+        native_message_id = metadata.get("native_message_id")
         try:
             record_provenance(
                 make_provenance_record(
                     lane_id=lane_id,
                     source_type=max(source_counts, key=source_counts.__getitem__),
-                    source_id=(latest.metadata or {}).get("message_id", latest.raw_ref or ""),
+                    source_id=(
+                        native_message_id
+                        if isinstance(native_message_id, str) and native_message_id
+                        else metadata.get("message_id", latest.raw_ref or "")
+                    ),
                     source_date=latest.timestamp.date().isoformat(),
                     confidence=0.5,
                     fields_populated=("source_type", "confidence"),

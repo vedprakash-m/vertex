@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 import json
 import os
@@ -14,10 +15,48 @@ from src.core.archive_store import read_archive_index
 from src.core.exceptions import ConfigError
 from src.core.journal import PROGRAMS_ROOT
 from src.core.models import Confidence, WorkItem
-from src.core.models_v2 import Dependency, LegacyDependency, Milestone, MilestoneAssessment, MilestoneStatus, TrajectoryPoint
+from src.core.models_v2 import Dependency, DependencyType, LegacyDependency, Milestone, MilestoneAssessment, MilestoneStatus, TrajectoryPoint
 from src.core.work_item_states import TERMINAL_WORK_ITEM_STATES
 
 _CLOSED_STATES = TERMINAL_WORK_ITEM_STATES - {"removed", "cut"}
+
+
+@dataclass(frozen=True, slots=True)
+class DependencyDateMarginAssessment:
+    dependency_id: str
+    margin_days: int | None
+    status: str
+    reasons: tuple[str, ...]
+
+
+def assess_dependency_date_margin(dependency: Dependency) -> DependencyDateMarginAssessment:
+    reasons: list[str] = []
+    for name in ("provider_forecast_ready_date", "consumer_required_by_date"):
+        value = getattr(dependency, name)
+        if type(value) is not date:
+            reasons.append(f"missing_or_invalid_{name}")
+    for name, expected in (
+        ("date_margin_calendar", "calendar_days"), ("date_margin_calendar_version", "1"),
+        ("date_margin_timezone", "UTC"), ("date_margin_unit", "days"),
+    ):
+        value = getattr(dependency, name)
+        if value is None:
+            reasons.append(f"missing_{name}")
+        elif value != expected:
+            reasons.append(f"unsupported_{name}")
+    if dependency.date_margin_lag is None:
+        reasons.append("missing_date_margin_lag")
+    elif type(dependency.date_margin_lag) is not int or dependency.date_margin_lag != 0:
+        reasons.append("unsupported_date_margin_lag")
+    if dependency.dependency_type is not DependencyType.BLOCKS:
+        reasons.append("unsupported_dependency_type")
+    if reasons:
+        return DependencyDateMarginAssessment(dependency.id, None, "unknown", tuple(reasons))
+    assert dependency.consumer_required_by_date is not None
+    assert dependency.provider_forecast_ready_date is not None
+    margin = (dependency.consumer_required_by_date - dependency.provider_forecast_ready_date).days
+    status = "buffer" if margin > 0 else "no_buffer" if margin == 0 else "breach"
+    return DependencyDateMarginAssessment(dependency.id, margin, status, ())
 
 
 def get_milestones_path(program_id: str, programs_root: Path = PROGRAMS_ROOT) -> Path:
@@ -43,7 +82,7 @@ def load_milestones(program_id: str, programs_root: Path = PROGRAMS_ROOT) -> tup
     if not isinstance(schema_version, str) or schema_version.split(".", 1)[0] != "1":
         raise ConfigError(f"Unsupported milestones schema_version {schema_version!r} in {path}.")
 
-    raw_milestones = document.get("milestones") or ()
+    raw_milestones = document.get("milestones", ())
     if not isinstance(raw_milestones, list):
         raise ConfigError(f"Expected 'milestones' list in {path}.")
 

@@ -13,6 +13,7 @@ from src.core.work_item_states import TERMINAL_WORK_ITEM_STATES
 
 
 _INITIAL_STATES = {"new", "proposed"}
+_UNKNOWN_FRESHNESS_POLICY_DAYS = 9999
 _ACTION_VERB_RE = re.compile(r"\b(update|ship|resolve|mitigate|review|complete|confirm|prepare|follow up|sync|investigate)\b", re.IGNORECASE)
 _DATE_TOKEN_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b|\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b", re.IGNORECASE)
 _OWNER_TOKEN_RE = re.compile(r"\b(owner|dri|team|@)\b", re.IGNORECASE)
@@ -24,7 +25,8 @@ class VitalitySummary:
     total_items: int
     updated_this_week: int
     updated_this_week_percentage: int
-    freshness_average_days: float
+    freshness_average_days: float | None
+    freshness_known_items: int
     stale_owner_aliases: tuple[str, ...]
 
 
@@ -49,7 +51,7 @@ def score_vitality(
         owner_alias = item_owner_alias(item)
         workstream_id = workstream_resolver(item) if workstream_resolver is not None else None
         freshness_days = _freshness_days(item, as_of=as_of)
-        freshness_grade = _freshness_grade(freshness_days)
+        freshness_grade = _freshness_grade(freshness_days_for_policy(freshness_days))
         richness_score, richness_missing = _richness_score(item, as_of=as_of, owner_alias=owner_alias)
         freshness_pct = _freshness_percentage(freshness_grade)
         leakage_events = leakage_counts_by_item.get(item.id, 0)
@@ -132,16 +134,19 @@ def summarize_vitality(scores: tuple[VitalityScore, ...]) -> VitalitySummary:
             total_items=0,
             updated_this_week=0,
             updated_this_week_percentage=0,
-            freshness_average_days=0.0,
+            freshness_average_days=None,
+            freshness_known_items=0,
             stale_owner_aliases=(),
         )
     updated_this_week = sum(1 for score in scores if score.freshness_grade == "green")
     stale_owner_aliases = tuple(sorted({score.owner_alias for score in scores if score.freshness_grade == "red" and score.owner_alias}))
+    known_ages = tuple(score.freshness_days for score in scores if score.freshness_days is not None)
     return VitalitySummary(
         total_items=len(scores),
         updated_this_week=updated_this_week,
         updated_this_week_percentage=round((updated_this_week / len(scores)) * 100),
-        freshness_average_days=round(sum(score.freshness_days for score in scores) / len(scores), 1),
+        freshness_average_days=round(sum(known_ages) / len(known_ages), 1) if known_ages else None,
+        freshness_known_items=len(known_ages),
         stale_owner_aliases=stale_owner_aliases,
     )
 
@@ -167,11 +172,15 @@ def _item_age_days(item: WorkItem, *, as_of: datetime) -> int:
     return max(0, (as_of.astimezone(timezone.utc) - min(normalized).astimezone(timezone.utc)).days)
 
 
-def _freshness_days(item: WorkItem, *, as_of: datetime) -> int:
+def _freshness_days(item: WorkItem, *, as_of: datetime) -> int | None:
     latest = latest_meaningful_ado_update(item)
     if latest is None:
-        return 9999
+        return None
     return max(0, (as_of.astimezone(timezone.utc) - latest.astimezone(timezone.utc)).days)
+
+
+def freshness_days_for_policy(days: int | None) -> int:
+    return _UNKNOWN_FRESHNESS_POLICY_DAYS if days is None else days
 
 
 def _freshness_grade(days: int) -> Literal["green", "amber", "red"]:

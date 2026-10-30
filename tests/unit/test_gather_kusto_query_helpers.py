@@ -26,8 +26,20 @@ def _kusto_query(query_id: str = "query-a") -> KustoQuery:
     )
 
 
-def test_build_kusto_signals_emits_signal_and_query_state() -> None:
+@pytest.mark.parametrize("legacy", [False, True])
+def test_build_kusto_signals_emits_signal_and_query_state(legacy: bool) -> None:
     query_state_sink: dict[str, dict[str, object]] = {}
+    previous: dict = {"query-a": {"value_last_4": [4.2, 4.2, 4.2]}}
+    if not legacy:
+        previous = {}
+        for _ in range(3):
+            sink: dict = {}
+            kusto_query_helpers.record_kusto_query_state(
+                sink, _kusto_query(), rows=[{"P50": 4.2}],
+                as_of=datetime(2026, 5, 9, tzinfo=timezone.utc), duration_ms=1,
+                previous_state=previous.get("query-a"),
+            )
+            previous = sink
 
     signals = kusto_query_helpers.build_kusto_signals(
         queries=(_kusto_query(),),
@@ -35,7 +47,7 @@ def test_build_kusto_signals_emits_signal_and_query_state() -> None:
         as_of=datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc),
         executor=lambda query: [{"P50": 4.2, "Timestamp": "2026-05-10T07:00:00Z"}],
         query_state_sink=query_state_sink,
-        previous_query_states={"query-a": {"value_last_4": [4.2, 4.2, 4.2]}},
+        previous_query_states=previous,
     )
 
     assert len(signals) == 1
@@ -44,8 +56,10 @@ def test_build_kusto_signals_emits_signal_and_query_state() -> None:
     state = query_state_sink["query-a"]
     assert state["last_cycle_succeeded"] is True
     assert state["data_freshness_ok"] is True
-    assert state["value_last_4"] == [4.2, 4.2, 4.2, 4.2]
-    assert state["value_frozen_warning"] is True
+    assert state["value_last_4"] == ([4.2] if legacy else [4.2, 4.2, 4.2, 4.2])
+    assert state["value_frozen_warning"] is (not legacy)
+    assert state["history_contract_identity"]
+    assert state["history_break_reason"] == "legacy_unverified"
 
 
 def test_build_kusto_signal_shares_across_all_configured_workstreams() -> None:

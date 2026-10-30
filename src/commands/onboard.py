@@ -21,7 +21,7 @@ from src.core.assumption_tracker import save_assumptions
 from src.core.config_loader import REPORTS_ROOT, load_bundle
 from src.core.decision_register import save_decisions
 from src.core.edition_resolver import find_edition_yaml, resolve_edition_paths
-from src.core.exceptions import VertexError
+from src.core.exceptions import ConfigError, VertexError
 from src.core.models_v2 import Assumption, AssumptionStatus, Dependency
 from src.core.operator_identity import capture_operator_identity
 from src.core.people_registry_writer import (
@@ -39,6 +39,7 @@ from src.core.program_fact_store import (
 )
 from src.core.risk_register_engine import save_risk_register
 from src.core.workstream_documents import save_workstreams_document
+from src.core.workspace_paths import PROGRAMS_ROOT, is_bare_identifier, validate_new_programs_root, validate_report_workspace
 
 
 _EDITION_NAME_PATTERN = re.compile(r"^[a-z0-9_]+$")
@@ -258,6 +259,11 @@ def onboard_command(
         raise typer.BadParameter("Specify exactly one of --edition or --update.")
     if run_migration and update is None:
         raise typer.BadParameter("--migrate-v3/--migrate-deps requires --update <edition>.")
+    if update is None:
+        try:
+            _resolve_new_onboard_reports_root()
+        except ConfigError as error:
+            raise typer.BadParameter(str(error)) from error
 
     result = (
         run_onboard_migrate_v3(edition_name=update)
@@ -298,7 +304,7 @@ def run_onboard_create(
     assistant: OnboardAssistant | None = None,
     register_shared: bool = False,
 ) -> OnboardResult:
-    resolved_reports_root = reports_root or REPORTS_ROOT
+    resolved_reports_root = _resolve_new_onboard_reports_root(reports_root)
     _validate_edition_name(edition_name)
     repo_root = resolved_reports_root.parent
     programs_root = repo_root / "programs"
@@ -359,7 +365,17 @@ def run_onboard_update(
     assistant: OnboardAssistant | None = None,
     register_shared: bool = False,
 ) -> OnboardResult:
-    resolved_reports_root = reports_root or REPORTS_ROOT
+    from src.core.workspace_paths import REPO_ROOT, resolve_report_workspace_roots
+
+    selected_programs_root = PROGRAMS_ROOT if PROGRAMS_ROOT != REPO_ROOT / "programs" else None
+    selected_reports_root = reports_root
+    if selected_programs_root is None:
+        selected_reports_root = reports_root if reports_root is not None else REPORTS_ROOT
+        if selected_reports_root != REPO_ROOT / "reports":
+            selected_programs_root = selected_reports_root.parent / "programs"
+    _, resolved_reports_root, _ = resolve_report_workspace_roots(
+        selected_programs_root, selected_reports_root,
+    )
     _validate_edition_name(edition_name)
     paths = _resolve_existing_onboard_paths(edition_name=edition_name, reports_root=resolved_reports_root)
 
@@ -2076,9 +2092,14 @@ def _default_altitude_for_edition_type(edition_type: str) -> str:
 
 
 def _resolve_onboard_paths(*, edition_name: str, program_id: str, reports_root: Path) -> OnboardPaths:
+    reports_root = _resolve_new_onboard_reports_root(reports_root)
     repo_root = reports_root.parent
-    programs_root = repo_root / "programs"
+    programs_root = validate_new_programs_root(PROGRAMS_ROOT)
+    if not is_bare_identifier(program_id) or not is_bare_identifier(edition_name):
+        raise ConfigError("New program workspace requires bare program and edition identifiers.")
     program_dir = programs_root / program_id
+    if not program_dir.resolve().is_relative_to(programs_root):
+        raise ConfigError("New program workspace program path escapes the declared root.")
     editions_root = program_dir / "editions"
     return OnboardPaths(
         repo_root=repo_root,
@@ -2089,6 +2110,18 @@ def _resolve_onboard_paths(*, edition_name: str, program_id: str, reports_root: 
         program_dir=program_dir,
         knowledge_dir=program_dir / "knowledge",
     )
+
+
+def _resolve_new_onboard_reports_root(reports_root: Path | None = None) -> Path:
+    programs_root = validate_new_programs_root(PROGRAMS_ROOT)
+    expected = programs_root.parent / "reports"
+    archive_root = programs_root.parent / "archive"
+    validate_report_workspace(programs_root=programs_root, reports_root=expected, archive_root=archive_root)
+    if validate_new_programs_root(expected) != expected or validate_new_programs_root(archive_root) != archive_root:
+        raise ConfigError("Conflicting new program workspace roots: report/archive storage escapes its declared workspace.")
+    if reports_root is not None and (not reports_root.is_absolute() or reports_root.resolve() != expected):
+        raise ConfigError("Conflicting new program workspace roots: reports must belong to the canonical workspace.")
+    return expected
 
 
 def _resolve_existing_onboard_paths(*, edition_name: str, reports_root: Path) -> OnboardPaths:
@@ -2520,7 +2553,9 @@ def _finalize_onboarding(
         )
         shared_registry_transaction_id = shared_result.transaction_id
     _ensure_program_store_scaffolds(program_id, paths)
-    validation = _run_onboard_validation(edition_name=edition_name, reports_root=paths.reports_root)
+    validation = _run_onboard_validation(
+        edition_name=edition_name, reports_root=paths.reports_root, programs_root=paths.programs_root,
+    )
     readme_path = _write_readme(paths.program_dir, edition_name=edition_name, draft=draft, validation=validation)
     return _build_onboard_result(
         edition_name=edition_name,
@@ -2660,13 +2695,18 @@ def _build_readme_markdown(
     return "\n".join(lines)
 
 
-def _run_onboard_validation(edition_name: str, reports_root: Path) -> OnboardValidationResult:
+def _run_onboard_validation(
+    edition_name: str, reports_root: Path, *, programs_root: Path | None = None,
+) -> OnboardValidationResult:
     from src.commands.report import generate_report_draft
 
     try:
         artifacts = generate_report_draft(
             edition_name=edition_name,
+            dry_run=True,
             reports_root=reports_root,
+            archive_root=reports_root.parent / "archive",
+            programs_root=programs_root if programs_root is not None else reports_root.parent / "programs",
             open_browser=True,
         )
     except (VertexError, OSError) as error:

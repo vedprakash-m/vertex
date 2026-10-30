@@ -12,7 +12,7 @@ from typing import cast
 
 from src.core._db import open_program_db
 from src.core.archive_store import find_latest_confirmed_entry, read_archive_index
-from src.core.edition_resolver import resolve_edition_paths
+from src.core.edition_resolver import resolve_artifact_edition, resolve_edition_paths
 from src.core.incident_journal_store import get_incident_journal_path, read_incident_entries
 from src.core.models import RiskLevel
 from src.core.snapshot_store import ARCHIVE_ROOT, get_archive_root, read_snapshot
@@ -135,9 +135,11 @@ def rebuild_archive_semantic_index(
     edition_name: str,
     *,
     archive_root: Path = ARCHIVE_ROOT,
+    programs_root: Path | None = None,
 ) -> Path:
-    documents = _collect_semantic_documents(edition_name, archive_root=archive_root)
-    index_path = get_semantic_index_path(edition_name, archive_root=archive_root)
+    selected_root_kwargs = {"programs_root": programs_root} if programs_root is not None else {}
+    documents = _collect_semantic_documents(edition_name, archive_root=archive_root, **selected_root_kwargs)
+    index_path = get_semantic_index_path(edition_name, archive_root=archive_root, **selected_root_kwargs)
     index_path.parent.mkdir(parents=True, exist_ok=True)
     built_at = datetime.now(timezone.utc)
 
@@ -177,13 +179,14 @@ def rebuild_archive_semantic_index(
         edition_name,
         archive_root=archive_root,
         last_built_at=built_at,
-        latest_confirmed_issue=_latest_confirmed_issue_number(edition_name, archive_root=archive_root),
-        latest_confirmed_at=_latest_confirmed_generated_at(edition_name, archive_root=archive_root),
+        latest_confirmed_issue=_latest_confirmed_issue_number(edition_name, archive_root=archive_root, **selected_root_kwargs),
+        latest_confirmed_at=_latest_confirmed_generated_at(edition_name, archive_root=archive_root, **selected_root_kwargs),
         indexed_document_count=len(documents),
         semantic_index_dirty=False,
         dirty_reason=None,
         last_optimized_at=built_at,
         last_optimized_document_count=len(documents),
+        **selected_root_kwargs,
     )
     return index_path
 
@@ -193,12 +196,14 @@ def update_archive_semantic_index_for_issue(
     issue_number: int,
     *,
     archive_root: Path = ARCHIVE_ROOT,
+    programs_root: Path | None = None,
 ) -> Path:
-    index_path = get_semantic_index_path(edition_name, archive_root=archive_root)
+    selected_root_kwargs = {"programs_root": programs_root} if programs_root is not None else {}
+    index_path = get_semantic_index_path(edition_name, archive_root=archive_root, **selected_root_kwargs)
     if not index_path.exists():
-        return rebuild_archive_semantic_index(edition_name, archive_root=archive_root)
+        return rebuild_archive_semantic_index(edition_name, archive_root=archive_root, **selected_root_kwargs)
 
-    archive_index = read_archive_index(edition_name, archive_root=archive_root)
+    archive_index = read_archive_index(edition_name, archive_root=archive_root, **selected_root_kwargs)
     entry = next(
         (
             candidate
@@ -208,10 +213,10 @@ def update_archive_semantic_index_for_issue(
         None,
     )
     if entry is None:
-        return rebuild_archive_semantic_index(edition_name, archive_root=archive_root)
+        return rebuild_archive_semantic_index(edition_name, archive_root=archive_root, **selected_root_kwargs)
 
     documents = _documents_for_archive_entry(entry)
-    prior_state = load_semantic_index_state(edition_name, archive_root=archive_root)
+    prior_state = load_semantic_index_state(edition_name, archive_root=archive_root, **selected_root_kwargs)
     with _connect_index(index_path) as connection:
         _ensure_schema(connection)
         _delete_issue_documents(connection, issue_number)
@@ -256,6 +261,7 @@ def update_archive_semantic_index_for_issue(
         dirty_reason=None,
         last_optimized_at=(prior_state.last_optimized_at if prior_state is not None else None),
         last_optimized_document_count=(prior_state.last_optimized_document_count if prior_state is not None else document_count),
+        **selected_root_kwargs,
     )
     return index_path
 
@@ -349,8 +355,10 @@ def load_semantic_index_state(
     edition_name: str,
     *,
     archive_root: Path = ARCHIVE_ROOT,
+    programs_root: Path | None = None,
 ) -> SemanticIndexState | None:
-    state_path = get_semantic_index_state_path(edition_name, archive_root=archive_root)
+    selected_root_kwargs = {"programs_root": programs_root} if programs_root is not None else {}
+    state_path = get_semantic_index_state_path(edition_name, archive_root=archive_root, **selected_root_kwargs)
     if not state_path.exists():
         return None
     try:
@@ -365,7 +373,7 @@ def load_semantic_index_state(
         return None
     return SemanticIndexState(
         edition_name=edition_name,
-        index_path=get_semantic_index_path(edition_name, archive_root=archive_root),
+        index_path=get_semantic_index_path(edition_name, archive_root=archive_root, **selected_root_kwargs),
         last_built_at=_parse_optional_datetime(raw_state.get("last_built_at")),
         latest_confirmed_issue=_parse_optional_int(raw_state.get("latest_confirmed_issue")),
         latest_confirmed_at=_parse_optional_datetime(raw_state.get("latest_confirmed_at")),
@@ -382,47 +390,55 @@ def mark_semantic_index_dirty(
     reason: str,
     *,
     archive_root: Path = ARCHIVE_ROOT,
+    programs_root: Path | None = None,
 ) -> None:
-    prior_state = load_semantic_index_state(edition_name, archive_root=archive_root)
+    selected_root_kwargs = {"programs_root": programs_root} if programs_root is not None else {}
+    prior_state = load_semantic_index_state(edition_name, archive_root=archive_root, **selected_root_kwargs)
     _write_semantic_index_state(
         edition_name,
         archive_root=archive_root,
         last_built_at=(prior_state.last_built_at if prior_state is not None else None),
-        latest_confirmed_issue=(prior_state.latest_confirmed_issue if prior_state is not None else _latest_confirmed_issue_number(edition_name, archive_root=archive_root)),
-        latest_confirmed_at=(prior_state.latest_confirmed_at if prior_state is not None else _latest_confirmed_generated_at(edition_name, archive_root=archive_root)),
+        latest_confirmed_issue=(prior_state.latest_confirmed_issue if prior_state is not None else _latest_confirmed_issue_number(edition_name, archive_root=archive_root, **selected_root_kwargs)),
+        latest_confirmed_at=(prior_state.latest_confirmed_at if prior_state is not None else _latest_confirmed_generated_at(edition_name, archive_root=archive_root, **selected_root_kwargs)),
         indexed_document_count=(prior_state.indexed_document_count if prior_state is not None else 0),
         semantic_index_dirty=True,
         dirty_reason=reason.strip(),
         last_optimized_at=(prior_state.last_optimized_at if prior_state is not None else None),
         last_optimized_document_count=(prior_state.last_optimized_document_count if prior_state is not None else 0),
+        **selected_root_kwargs,
     )
 
 
-def get_semantic_index_path(edition_name: str, *, archive_root: Path = ARCHIVE_ROOT) -> Path:
-    return get_semantic_index_root(edition_name, archive_root=archive_root) / f"{edition_name}.sqlite3"
+def get_semantic_index_path(edition_name: str, *, archive_root: Path = ARCHIVE_ROOT, programs_root: Path | None = None) -> Path:
+    selected_root_kwargs = {"programs_root": programs_root} if programs_root is not None else {}
+    return get_semantic_index_root(edition_name, archive_root=archive_root, **selected_root_kwargs) / f"{edition_name}.sqlite3"
 
 
-def get_semantic_index_root(edition_name: str, *, archive_root: Path = ARCHIVE_ROOT) -> Path:
-    edition_root = get_archive_root(edition_name, archive_root)
+def get_semantic_index_root(edition_name: str, *, archive_root: Path = ARCHIVE_ROOT, programs_root: Path | None = None) -> Path:
+    selected_root_kwargs = {"programs_root": programs_root} if programs_root is not None else {}
+    edition_root = get_archive_root(edition_name, archive_root, **selected_root_kwargs)
     return edition_root.parent.parent / "semantic_index"
 
 
-def get_semantic_index_state_path(edition_name: str, *, archive_root: Path = ARCHIVE_ROOT) -> Path:
-    edition_root = get_archive_root(edition_name, archive_root)
+def get_semantic_index_state_path(edition_name: str, *, archive_root: Path = ARCHIVE_ROOT, programs_root: Path | None = None) -> Path:
+    selected_root_kwargs = {"programs_root": programs_root} if programs_root is not None else {}
+    edition_root = get_archive_root(edition_name, archive_root, **selected_root_kwargs)
     return edition_root.parent.parent / "semantic_index_state.json"
 
 
-def _collect_archive_documents(edition_name: str, *, archive_root: Path) -> tuple[_SemanticDocument, ...]:
-    archive_index = read_archive_index(edition_name, archive_root=archive_root)
+def _collect_archive_documents(edition_name: str, *, archive_root: Path, programs_root: Path | None = None) -> tuple[_SemanticDocument, ...]:
+    selected_root_kwargs = {"programs_root": programs_root} if programs_root is not None else {}
+    archive_index = read_archive_index(edition_name, archive_root=archive_root, **selected_root_kwargs)
     documents: list[_SemanticDocument] = []
     for entry in sorted(archive_index.issues, key=lambda issue: issue.issue_number):
         documents.extend(_documents_for_archive_entry(entry))
     return tuple(documents)
 
 
-def _collect_semantic_documents(edition_name: str, *, archive_root: Path) -> tuple[_SemanticDocument, ...]:
-    documents = list(_collect_archive_documents(edition_name, archive_root=archive_root))
-    documents.extend(_collect_incident_documents(edition_name, archive_root=archive_root))
+def _collect_semantic_documents(edition_name: str, *, archive_root: Path, programs_root: Path | None = None) -> tuple[_SemanticDocument, ...]:
+    selected_root_kwargs = {"programs_root": programs_root} if programs_root is not None else {}
+    documents = list(_collect_archive_documents(edition_name, archive_root=archive_root, **selected_root_kwargs))
+    documents.extend(_collect_incident_documents(edition_name, archive_root=archive_root, **selected_root_kwargs))
     return tuple(documents)
 
 
@@ -448,16 +464,17 @@ def _documents_for_archive_entry(entry: object) -> tuple[_SemanticDocument, ...]
     )
 
 
-def _collect_incident_documents(edition_name: str, *, archive_root: Path) -> tuple[_SemanticDocument, ...]:
-    resolved_paths = resolve_edition_paths(
-        edition_name,
-        programs_root=archive_root.parent / "programs",
+def _collect_incident_documents(edition_name: str, *, archive_root: Path, programs_root: Path | None = None) -> tuple[_SemanticDocument, ...]:
+    resolved_paths = (
+        resolve_artifact_edition(edition_name, archive_root, programs_root)
+        if programs_root is not None
+        else resolve_edition_paths(edition_name, programs_root=archive_root.parent / "programs")
     )
     if resolved_paths is None:
         return ()
     entries = read_incident_entries(
         resolved_paths.program_id,
-        programs_root=archive_root.parent / "programs",
+        programs_root=programs_root if programs_root is not None else archive_root.parent / "programs",
     )
     documents: list[_SemanticDocument] = []
     for entry in entries:
@@ -769,8 +786,10 @@ def _write_semantic_index_state(
     dirty_reason: str | None,
     last_optimized_at: datetime | None,
     last_optimized_document_count: int,
+    programs_root: Path | None = None,
 ) -> None:
-    state_path = get_semantic_index_state_path(edition_name, archive_root=archive_root)
+    selected_root_kwargs = {"programs_root": programs_root} if programs_root is not None else {}
+    state_path = get_semantic_index_state_path(edition_name, archive_root=archive_root, **selected_root_kwargs)
     state_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"schema_version": "1.0", "editions": {}}
     if state_path.exists():
@@ -799,13 +818,15 @@ def _write_semantic_index_state(
     state_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _latest_confirmed_issue_number(edition_name: str, *, archive_root: Path) -> int | None:
-    latest_confirmed = find_latest_confirmed_entry(read_archive_index(edition_name, archive_root=archive_root))
+def _latest_confirmed_issue_number(edition_name: str, *, archive_root: Path, programs_root: Path | None = None) -> int | None:
+    selected_root_kwargs = {"programs_root": programs_root} if programs_root is not None else {}
+    latest_confirmed = find_latest_confirmed_entry(read_archive_index(edition_name, archive_root=archive_root, **selected_root_kwargs))
     return None if latest_confirmed is None else latest_confirmed.issue_number
 
 
-def _latest_confirmed_generated_at(edition_name: str, *, archive_root: Path) -> datetime | None:
-    latest_confirmed = find_latest_confirmed_entry(read_archive_index(edition_name, archive_root=archive_root))
+def _latest_confirmed_generated_at(edition_name: str, *, archive_root: Path, programs_root: Path | None = None) -> datetime | None:
+    selected_root_kwargs = {"programs_root": programs_root} if programs_root is not None else {}
+    latest_confirmed = find_latest_confirmed_entry(read_archive_index(edition_name, archive_root=archive_root, **selected_root_kwargs))
     return None if latest_confirmed is None else latest_confirmed.generated_at
 
 

@@ -27,6 +27,7 @@ from src.core.gather_run_manifest import (
     GatherRunManifest,
     GatherRunStatus,
     RequiredScopeStatus,
+    QueryResultEntry,
     canonical_json,
     commit_staging_run,
     compute_manifest_hash,
@@ -42,7 +43,9 @@ from src.core.models import Snapshot, EditionType
 from src.core.pipeline import StageContext
 
 
-def _commit_gather_run(programs_root: Path, *, program_id: str = "acme") -> GatherRunManifest:
+def _commit_gather_run(
+    programs_root: Path, *, program_id: str = "acme", query_results: tuple[QueryResultEntry, ...] = (),
+) -> GatherRunManifest:
     started_at = datetime(2026, 5, 4, 8, 0, tzinfo=timezone.utc)
     staging_manifest = GatherRunManifest(
         run_id=f"gather-{new_ulid(started_at)}",
@@ -54,6 +57,7 @@ def _commit_gather_run(programs_root: Path, *, program_id: str = "acme") -> Gath
         started_at=started_at,
         scope_as_of=started_at,
         required_scope_status=RequiredScopeStatus.FULL,
+        query_results=query_results,
     )
     create_staging_manifest(staging_manifest, programs_root=programs_root)
     return commit_staging_run(
@@ -76,6 +80,7 @@ def test_pin_gather_run_lineage_stamps_ctx_from_latest_committed_run(tmp_path: P
 
     assert pinned.gather_run_id == committed.run_id
     assert pinned.gather_run_hash == committed.manifest_hash
+    assert pinned.gather_run_manifest == committed
 
 
 def test_pin_gather_run_lineage_noop_when_resolved_v2_missing(tmp_path: Path) -> None:

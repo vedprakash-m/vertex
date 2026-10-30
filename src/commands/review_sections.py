@@ -15,13 +15,16 @@ from src.commands.review_full import prepare_review_full_context
 from src.core.ado_semantics import item_owner_alias
 from src.core.archive_store import find_latest_confirmed_entry, read_archive_index
 from src.core.config_loader import REPORTS_ROOT, ReviewSettings, load_bundle
-from src.core.edition_resolver import get_program_output_dir, PROGRAMS_ROOT
+from src.core.edition_resolver import get_program_output_dir, PROGRAMS_ROOT, resolve_edition
+from src.core.exceptions import ConfigError
 from src.core.models import ReviewSection, ReviewState, ReviewStatus
 from src.core.models_v2 import ActionItem, ActionStatus
+from src.core.overrides_store import _resolve_artifact_edition
 from src.core.program_fact_store import load_program_facts, project_action_items
 from src.core.reviewer_renderer import ReviewerRenderer, ReviewerTrackedEntryRow, ReviewerVitalityRow
-from src.core.review_status_store import load_review_status, save_review_status
+from src.core.review_status_store import get_review_status_path, load_review_status, save_review_status
 from src.core.snapshot_store import ARCHIVE_ROOT
+from src.core.workspace_paths import REPO_ROOT, resolve_report_workspace_roots
 
 
 app = typer.Typer(help="Manage per-section review status for the active issue.")
@@ -33,19 +36,41 @@ class ReviewSectionExportArtifacts:
     html_path: Path
 
 
+def _preflight_review_sections_workspace() -> None:
+    try:
+        programs_root: Path | None = PROGRAMS_ROOT
+        reports_root: Path | None = REPORTS_ROOT
+        archive_root: Path | None = ARCHIVE_ROOT
+        if programs_root == REPO_ROOT / "programs":
+            programs_root = None
+        if reports_root == REPO_ROOT / "reports":
+            reports_root = None
+        if archive_root == REPO_ROOT / "archive":
+            archive_root = None
+        resolve_report_workspace_roots(
+            programs_root,
+            reports_root,
+            archive_root,
+        )
+    except ConfigError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=2) from error
+
+
 @app.command("show")
 def show_review_sections_command(
     edition: str = typer.Option(..., "--edition", help="Edition name, e.g. myprogram_weekly."),
     issue: int | None = typer.Option(None, "--issue", help="Issue number to inspect. Defaults to the active issue."),
     format: str = typer.Option("human", "--format", help="Output format: human, json, or csv."),
 ) -> None:
-    resolved_issue, review_status, review_settings, resolved_reports_root = _load_review_context(edition, issue)
+    resolved_issue, review_status, review_settings, resolved_reports_root, programs_root = _load_review_context(edition, issue)
     assigned_reviewers = _assigned_reviewers_by_section(review_settings)
-    current_manifest_id = _try_load_active_manifest_id(edition, resolved_issue)
+    current_manifest_id = _try_load_active_manifest_id(edition, resolved_issue, programs_root=programs_root)
+    source_path = get_review_status_path(edition, resolved_reports_root, programs_root=programs_root)
 
     if format == "human":
         typer.echo(f"REVIEW STATUS — {edition} Issue {resolved_issue:03d}")
-        typer.echo(f"Source: {resolved_reports_root / edition / 'review_status.yaml'}")
+        typer.echo(f"Source: {source_path}")
         for section in review_status.sections:
             assigned = assigned_reviewers.get(section.section_id)
             actual_reviewer = section.reviewer or assigned or "unassigned"
@@ -64,7 +89,7 @@ def show_review_sections_command(
                 review_status=review_status,
                 assigned_reviewers=assigned_reviewers,
                 current_manifest_id=current_manifest_id,
-                source_path=resolved_reports_root / edition / "review_status.yaml",
+                source_path=source_path,
                 format=format,
             ),
             nl=False,
@@ -131,8 +156,8 @@ def set_review_section_command(
     reviewer: str | None = typer.Option(None, "--reviewer", help="Optional reviewer name override."),
 ) -> None:
     try:
-        resolved_issue, review_status, review_settings, resolved_reports_root = _load_review_context(edition, issue)
-        manifest_id = None if ReviewState.from_string(state) == ReviewState.PENDING else _load_active_manifest_id(edition, resolved_issue)
+        resolved_issue, review_status, review_settings, resolved_reports_root, programs_root = _load_review_context(edition, issue)
+        manifest_id = None if ReviewState.from_string(state) == ReviewState.PENDING else _load_active_manifest_id(edition, resolved_issue, programs_root=programs_root)
         resolved_state = ReviewState.from_string(state)
         updated_status = _update_review_status(
             review_status=review_status,
@@ -143,7 +168,7 @@ def set_review_section_command(
             reviewer=reviewer,
             manifest_id=manifest_id,
         )
-        save_review_status(edition, updated_status, reports_root=resolved_reports_root)
+        save_review_status(edition, updated_status, reports_root=resolved_reports_root, programs_root=programs_root)
     except typer.BadParameter as error:
         typer.echo(str(error))
         raise typer.Exit(code=2)
@@ -156,7 +181,7 @@ def clear_review_section_command(
     issue: int | None = typer.Option(None, "--issue", help="Issue number to update. Defaults to the active issue."),
     section: str = typer.Option(..., "--section", help="Section id to reset to pending."),
 ) -> None:
-    resolved_issue, review_status, review_settings, resolved_reports_root = _load_review_context(edition, issue)
+    resolved_issue, review_status, review_settings, resolved_reports_root, programs_root = _load_review_context(edition, issue)
     updated_status = _update_review_status(
         review_status=review_status,
         review_settings=review_settings,
@@ -167,7 +192,7 @@ def clear_review_section_command(
         manifest_id=None,
         clear=True,
     )
-    save_review_status(edition, updated_status, reports_root=resolved_reports_root)
+    save_review_status(edition, updated_status, reports_root=resolved_reports_root, programs_root=programs_root)
     typer.echo(f"Cleared {section} review state for Issue {resolved_issue:03d}.")
 
 
@@ -199,11 +224,32 @@ def export_review_section(
     issue_number: int | None = None,
     reports_root: Path | None = None,
     archive_root: Path | None = None,
+    programs_root: Path | None = None,
     output_root: Path | None = None,
     open_browser: bool = False,
 ) -> ReviewSectionExportArtifacts:
-    resolved_reports_root = reports_root or REPORTS_ROOT
-    resolved_archive_root = archive_root or ARCHIVE_ROOT
+    legacy_roots = (
+        programs_root is None
+        and reports_root is None
+        and archive_root is None
+        and PROGRAMS_ROOT == REPO_ROOT / "programs"
+        and REPORTS_ROOT == REPO_ROOT / "reports"
+        and ARCHIVE_ROOT == REPO_ROOT / "archive"
+    )
+    if programs_root is None:
+        if reports_root is not None:
+            programs_root = reports_root.parent / "programs"
+        elif PROGRAMS_ROOT != REPO_ROOT / "programs":
+            programs_root = PROGRAMS_ROOT
+    if reports_root is None and REPORTS_ROOT != REPO_ROOT / "reports":
+        reports_root = REPORTS_ROOT
+    if archive_root is None and ARCHIVE_ROOT != REPO_ROOT / "archive":
+        archive_root = ARCHIVE_ROOT
+    programs_root, resolved_reports_root, resolved_archive_root = resolve_report_workspace_roots(
+        programs_root,
+        reports_root,
+        archive_root,
+    )
     normalized_section_id = section_id.strip()
     if not normalized_section_id.startswith("ws:"):
         raise typer.BadParameter("review-sections export only supports workstream section ids, for example ws:deployment_readiness.")
@@ -211,8 +257,9 @@ def export_review_section(
     review_data = prepare_review_full_context(
         edition_name=edition_name,
         issue_number=issue_number,
-        reports_root=resolved_reports_root,
-        archive_root=resolved_archive_root,
+        reports_root=None if legacy_roots else resolved_reports_root,
+        archive_root=None if legacy_roots else resolved_archive_root,
+        programs_root=None if legacy_roots else programs_root,
     )
     selected_section = next(
         (section for section in review_data.reviewer_context.sections if section.section_id == normalized_section_id),
@@ -230,10 +277,10 @@ def export_review_section(
     remediation_rows = _build_remediation_rows(
         program_id=review_data.program_id,
         section=selected_section,
-        programs_root=resolved_reports_root.parent / "programs",
+        programs_root=programs_root,
         ado_item_base_url=_ado_item_base_url(review_data.bundle),
     )
-    reviewer_html_path = get_program_output_dir(edition_name, programs_root=resolved_reports_root.parent / "programs") / "review" / f"issue_{review_data.issue_number:03d}.html"
+    reviewer_html_path = get_program_output_dir(edition_name, programs_root=programs_root) / "review" / f"issue_{review_data.issue_number:03d}.html"
     reviewer_html_uri = _artifact_uri(
         review_data.bundle.config.m365.artifact_base_url,
         reviewer_html_path,
@@ -256,7 +303,7 @@ def export_review_section(
         changes_requested_command=f"{render_command} --state changes_requested --reviewer <name> --note \"<feedback>\"",
     ).strip() + "\n"
     target_path = _write_section_export_html(
-        get_program_output_dir(edition_name, programs_root=resolved_reports_root.parent / "programs") / "review" / "sections" / f"issue_{review_data.issue_number:03d}.{_sanitize_section_filename_component(selected_section.section_id)}.html",
+        get_program_output_dir(edition_name, programs_root=programs_root) / "review" / "sections" / f"issue_{review_data.issue_number:03d}.{_sanitize_section_filename_component(selected_section.section_id)}.html",
         html,
     )
     if open_browser:
@@ -270,22 +317,35 @@ def _load_review_context(
     *,
     reports_root: Path | None = None,
     archive_root: Path | None = None,
-) -> tuple[int, ReviewStatus, ReviewSettings, Path]:
-    resolved_reports_root = reports_root or REPORTS_ROOT
-    resolved_archive_root = archive_root or ARCHIVE_ROOT
+    programs_root: Path | None = None,
+) -> tuple[int, ReviewStatus, ReviewSettings, Path, Path | None]:
+    if programs_root is None:
+        if reports_root is not None:
+            programs_root = reports_root.parent / "programs"
+        elif PROGRAMS_ROOT != REPO_ROOT / "programs":
+            programs_root = PROGRAMS_ROOT
+    if reports_root is None and REPORTS_ROOT != REPO_ROOT / "reports":
+        reports_root = REPORTS_ROOT
+    if archive_root is None and ARCHIVE_ROOT != REPO_ROOT / "archive":
+        archive_root = ARCHIVE_ROOT
+    programs_root, resolved_reports_root, resolved_archive_root = resolve_report_workspace_roots(
+        programs_root, reports_root, archive_root,
+    )
     bundle = load_bundle(
         edition_name,
         reports_root=resolved_reports_root,
-        programs_root=resolved_reports_root.parent / "programs",
+        programs_root=programs_root,
     )
+    resolved_v2 = resolve_edition(edition_name, programs_root=programs_root)
+    artifact_root = programs_root if resolved_v2 is not None else None
     archive_index = read_archive_index(edition_name, archive_root=resolved_archive_root)
     resolved_issue_number = issue_number if issue_number is not None else _next_issue_number(archive_index)
-    review_status = load_review_status(edition_name, reports_root=resolved_reports_root)
+    review_status = load_review_status(edition_name, reports_root=resolved_reports_root, programs_root=artifact_root)
     if review_status is None or review_status.issue_number != resolved_issue_number:
         raise typer.BadParameter(
             f"review_status.yaml is not initialized for Issue {resolved_issue_number:03d}. Run `vertex report --dry-run --edition {edition_name}` first."
         )
-    return resolved_issue_number, review_status, bundle.review, resolved_reports_root
+    return resolved_issue_number, review_status, bundle.review, resolved_reports_root, artifact_root
 
 
 def _update_review_status(
@@ -339,8 +399,14 @@ def _next_issue_number(archive_index) -> int:
     return latest.issue_number + 1
 
 
-def _load_active_manifest_id(edition_name: str, issue_number: int) -> str:
-    path = get_program_output_dir(edition_name, programs_root=PROGRAMS_ROOT) / f"issue_{issue_number:03d}" / f"issue_{issue_number:03d}.manifest.json"
+def _load_active_manifest_id(
+    edition_name: str, issue_number: int, *, programs_root: Path | None = None,
+) -> str:
+    if programs_root is not None:
+        _resolve_artifact_edition(edition_name, REPORTS_ROOT, programs_root)
+    path = get_program_output_dir(
+        edition_name, programs_root=programs_root if programs_root is not None else PROGRAMS_ROOT,
+    ) / f"issue_{issue_number:03d}" / f"issue_{issue_number:03d}.manifest.json"
     if not path.exists():
         raise typer.BadParameter(
             f"Manifest not found at {path}. Run `vertex report --dry-run --edition {edition_name} --issue {issue_number}` first."
@@ -355,9 +421,11 @@ def _load_active_manifest_id(edition_name: str, issue_number: int) -> str:
     return str(manifest_id)
 
 
-def _try_load_active_manifest_id(edition_name: str, issue_number: int) -> str | None:
+def _try_load_active_manifest_id(
+    edition_name: str, issue_number: int, *, programs_root: Path | None = None,
+) -> str | None:
     try:
-        return _load_active_manifest_id(edition_name, issue_number)
+        return _load_active_manifest_id(edition_name, issue_number, programs_root=programs_root)
     except typer.BadParameter:
         return None
 

@@ -353,7 +353,7 @@ def _print_risks(program_id: str, *, status_filter: RiskStatus | None, format: s
                         asdict(entry)
                         | {
                             "risk_score": compute_risk_score(entry),
-                            "staleness": ("stale" if assess_risk_staleness(entry, today) else "current"),
+                            "staleness": _risk_review_label(entry, today),
                             # Track E follow-up: preserve FactAssessment metadata so the
                             # risk board carries the same truth signal as ask/triage/newsletter.
                             "truth_level": assessment.truth_level.value,
@@ -386,7 +386,7 @@ def _print_risks(program_id: str, *, status_filter: RiskStatus | None, format: s
     typer.echo(f"RISK REGISTER — {program_id} ({len(sorted_assessments)})")
     for assessment in sorted_assessments:
         entry = assessment.record
-        stale_label = "stale" if assess_risk_staleness(entry, today) else "current"
+        stale_label = _risk_review_label(entry, today)
         due_label = entry.mitigation_due_date.isoformat() if entry.mitigation_due_date is not None else "-"
         truth_label = _format_risk_truth_label(assessment)
         typer.echo(
@@ -399,6 +399,14 @@ def _print_risks(program_id: str, *, status_filter: RiskStatus | None, format: s
             if chain is not None:
                 for warning in chain.warnings:
                     typer.echo(f"  RAID warning: {warning}")
+
+
+def _risk_review_label(entry: RiskEntry, as_of: date) -> str:
+    if entry.status in {RiskStatus.OPEN, RiskStatus.ESCALATED} and (
+        entry.last_reviewed_date is None or entry.last_reviewed_date > as_of
+    ):
+        return "unreviewed"
+    return "stale" if assess_risk_staleness(entry, as_of) else "current"
 
 
 def _sort_risks(entries: tuple[RiskEntry, ...]) -> tuple[RiskEntry, ...]:
@@ -544,7 +552,7 @@ def render_risks_csv(
                 entry.program_id,
                 entry.title,
                 entry.status.value,
-                "stale" if assess_risk_staleness(entry, as_of) else "current",
+                _risk_review_label(entry, as_of),
                 compute_risk_score(entry),
                 entry.probability.value,
                 entry.impact.value,

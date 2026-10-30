@@ -119,6 +119,10 @@ def test_build_vitality_section_formats_trend_and_best_documented_copy() -> None
     )
 
     assert snapshot.aggregate_score == 87
+    assert snapshot.freshness_average_days == 3.5
+    assert snapshot.freshness_known_items == 2
+    assert section.freshness_average_days == 3.5
+    assert section.freshness_known_items == 2
     assert section.items_updated == 2
     assert section.items_total == 2
     assert section.best_documented_label == "WI:900001"
@@ -179,6 +183,43 @@ def test_build_vitality_section_skips_unmapped_accountability_rows() -> None:
     )
 
     assert section.accountability_rows == ()
+
+
+def test_build_vitality_section_reports_unknown_age_as_unknown() -> None:
+    as_of = datetime(2026, 5, 10, 18, 0, tzinfo=timezone.utc)
+    score = VitalityScore(900011, "alex", "ws_demo", None, "red", 40, (), 0, 0, 32, None)
+    snapshot = build_vitality_snapshot((score,), ())
+    item = WorkItem(
+        id=900011,
+        type="Feature",
+        title="Undated source update",
+        state="Active",
+        assigned_to="Alex Doe",
+        assigned_to_email="alex@example.com",
+        area_path="One\\Adventure\\Acme",
+        iteration_path="Sprint 1",
+        target_date=None,
+        risk_level=RiskLevel.HIGH,
+        tags=(),
+        custom_fields={},
+        revisions=(),
+        comments=(),
+        fetched_at=as_of,
+    )
+
+    section = build_vitality_section(
+        snapshot,
+        current_issue_number=77,
+        history_entries=(),
+        items=(item,),
+        workstreams=(Workstream(id="ws_demo", name="Demo"),),
+        include_individual_praise=False,
+    )
+
+    assert section.freshness_average_days is None
+    assert section.freshness_known_items == 0
+    assert section.accountability_rows[0].fields_to_update == ("Meaningful ADO update (time unknown)",)
+    assert "9999" not in " ".join(section.accountability_rows[0].fields_to_update)
 
 
 def test_build_vitality_archive_entry_tracks_aggregate_and_per_workstream() -> None:

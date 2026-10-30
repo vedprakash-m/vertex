@@ -3,12 +3,18 @@ from tests.support.synthetic_report_source import synthetic_report_root as repo_
 
 from datetime import date
 from datetime import datetime, timezone
+import csv
+from io import StringIO
 import json
 from pathlib import Path
+import shutil
 
+import pytest
+import typer
 from typer.testing import CliRunner
 
 from cli import app
+from src.commands import review_sections
 from src.commands.review_full import prepare_review_full_context
 from src.commands.review_sections import _sanitize_section_filename_component
 from src.core.action_tracker import append_action, build_action_id
@@ -17,7 +23,10 @@ from src.core.models_v2 import ActionItem, ActionSourceType, ActionStatus
 from src.core.models_v2 import Confidence, Signal, SignalReviewDecision
 import src.core.archive_store as archive_store
 from src.commands.report import generate_report_draft
-from src.core.review_status_store import load_review_status
+from src.core.edition_resolver import get_program_output_dir
+from src.core.models import ReviewSection, ReviewState, ReviewStatus
+from src.core.review_status_store import get_review_status_path, load_review_status, save_review_status
+from src.core.workspace_paths import REPO_ROOT
 from tests.unit.test_commands_report import _lookback_snapshot, _manifest, _sample_items, _seed_v2_report_layout, _snapshot_item_from_work_item, _stable_low_risk_items
 
 
@@ -479,7 +488,7 @@ def test_review_sections_show_supports_json_and_csv(monkeypatch, repo_root: Path
     payload = json.loads(json_result.stdout)
     assert payload["edition_name"] == EDITION_NAME
     assert payload["issue_number"] == 1
-    assert Path(payload["source_path"]) == reports_root / EDITION_NAME / "review_status.yaml"
+    assert Path(payload["source_path"]) == get_review_status_path(EDITION_NAME, reports_root, programs_root=programs_root)
     assert any(section["section_id"] == "exec_summary" for section in payload["sections"])
 
     csv_result = runner.invoke(app, ["review-sections", "show", "--edition", EDITION_NAME, "--format", "csv"])
@@ -488,3 +497,198 @@ def test_review_sections_show_supports_json_and_csv(monkeypatch, repo_root: Path
     lines = csv_result.stdout.strip().splitlines()
     assert lines[0] == "edition_name,issue_number,source_path,section_id,state,display_state,reviewer,updated_at,note"
     assert any(",exec_summary," in line for line in lines[1:])
+
+
+@pytest.mark.parametrize("program_backed", (False, True))
+def test_review_sections_commands_keep_one_artifact_context(
+    monkeypatch: pytest.MonkeyPatch, repo_root: Path, tmp_path: Path, program_backed: bool,
+) -> None:
+    reports_root, archive_root = _seed_v2_report_layout(repo_root, tmp_path)
+    programs_root = tmp_path / "programs"
+    draft = generate_report_draft(
+        edition_name=EDITION_NAME, reports_root=reports_root, archive_root=archive_root,
+        programs_root=programs_root, as_of=datetime(2026, 5, 5, 18, tzinfo=timezone.utc),
+        work_item_loader=lambda bundle, timestamp: (_sample_items(timestamp), 0), open_browser=False,
+    )
+    for name, value in (("REPORTS_ROOT", reports_root), ("ARCHIVE_ROOT", archive_root), ("PROGRAMS_ROOT", programs_root)):
+        monkeypatch.setattr(review_sections, name, value)
+    if not program_backed:
+        monkeypatch.setattr(review_sections, "resolve_edition", lambda *args, **kwargs: None, raising=False)
+    expected_root = programs_root if program_backed else None
+    calls = []
+    for name in ("load_review_status", "save_review_status", "get_review_status_path", "_load_active_manifest_id"):
+        original = getattr(review_sections, name, None)
+        if original is None:
+            original = get_review_status_path
+
+        def capture(*args, _name=name, _original=original, **kwargs):
+            assert kwargs["programs_root"] == expected_root
+            calls.append(_name)
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(review_sections, name, capture, raising=False)
+    status_path = get_review_status_path(EDITION_NAME, reports_root, programs_root=expected_root)
+    commands = [
+        ["set", "--section", "exec_summary", "--state", "approved", "--note", "selected note"],
+        ["show", "--format", "human"], ["show", "--format", "json"], ["show", "--format", "csv"],
+        ["set", "--section", "exec_summary", "--state", "pending"],
+        ["clear", "--section", "exec_summary"],
+    ]
+    for arguments in commands:
+        result = runner.invoke(app, ["review-sections", *arguments, "--edition", EDITION_NAME])
+        assert result.exit_code == 0, repr(result.exception)
+        if arguments == ["show", "--format", "human"]:
+            assert f"Source: {status_path}" in result.stdout
+            assert "selected note" in result.stdout
+        elif arguments == ["show", "--format", "json"]:
+            payload = json.loads(result.stdout)
+            assert Path(payload["source_path"]) == status_path
+            assert next(row for row in payload["sections"] if row["section_id"] == "exec_summary")["display_state"] == "approved"
+        elif arguments == ["show", "--format", "csv"]:
+            rows = list(csv.DictReader(StringIO(result.stdout)))
+            assert {Path(row["source_path"]) for row in rows} == {status_path}
+        elif arguments[0] == "set" and "pending" in arguments:
+            status = load_review_status(EDITION_NAME, reports_root, programs_root=expected_root)
+            assert next(row for row in status.sections if row.section_id == "exec_summary").manifest_id is None
+    assert set(calls) == {"load_review_status", "save_review_status", "get_review_status_path", "_load_active_manifest_id"}
+    status = load_review_status(EDITION_NAME, reports_root, programs_root=expected_root)
+    section = next(row for row in status.sections if row.section_id == "exec_summary")
+    assert section.state == ReviewState.PENDING and section.note is None and section.reviewer is None
+    draft.manifest_path.unlink()
+    result = runner.invoke(app, ["review-sections", "set", "--edition", EDITION_NAME, "--section", "exec_summary", "--state", "pending"])
+    assert result.exit_code == 0
+
+
+@pytest.mark.parametrize("selection", ("omitted", "none", "explicit"))
+def test_review_sections_manifest_helper_uses_selected_root_without_decoy(
+    monkeypatch: pytest.MonkeyPatch, repo_root: Path, tmp_path: Path, selection: str,
+) -> None:
+    _seed_v2_report_layout(repo_root, tmp_path / "selected")
+    _seed_v2_report_layout(repo_root, tmp_path / "decoy")
+    selected_root = tmp_path / "named-home"
+    (tmp_path / "selected" / "programs").rename(selected_root)
+    decoy_root = tmp_path / "decoy" / "programs"
+    monkeypatch.setattr(review_sections, "PROGRAMS_ROOT", decoy_root)
+    for root, manifest in ((selected_root, "selected-manifest"), (decoy_root, "decoy-manifest")):
+        path = get_program_output_dir(EDITION_NAME, programs_root=root) / "issue_001" / "issue_001.manifest.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"manifest_id": manifest}), encoding="utf-8")
+    kwargs = {} if selection == "omitted" else {"programs_root": selected_root if selection == "explicit" else None}
+    expected = "selected-manifest" if selection == "explicit" else "decoy-manifest"
+    assert review_sections._load_active_manifest_id(EDITION_NAME, 1, **kwargs) == expected
+    assert review_sections._try_load_active_manifest_id(EDITION_NAME, 1, **kwargs) == expected
+    status = ReviewSection(
+        section_id="exec_summary", state=ReviewState.APPROVED, reviewer=None,
+        note=None, updated_at=None, manifest_id="selected-manifest",
+    )
+    assert ("STALE" in review_sections._display_state_label(status, expected)) == (selection != "explicit")
+    assert review_sections._try_load_active_manifest_id(EDITION_NAME, 2, **kwargs) is None
+
+
+@pytest.mark.parametrize("selection", ("defaults", "none", "explicit", "legacy-reports"))
+def test_review_sections_context_preserves_root_selection(
+    monkeypatch: pytest.MonkeyPatch, repo_root: Path, tmp_path: Path, selection: str,
+) -> None:
+    reports_root, archive_root = _seed_v2_report_layout(repo_root, tmp_path)
+    programs_root = tmp_path / "programs"
+    for name, root in (("PROGRAMS_ROOT", programs_root), ("REPORTS_ROOT", reports_root), ("ARCHIVE_ROOT", archive_root)):
+        monkeypatch.setattr(review_sections, name, root)
+    save_review_status(EDITION_NAME, ReviewStatus(issue_number=1, sections=()), reports_root, programs_root=programs_root)
+    kwargs = {}
+    if selection == "none":
+        kwargs = dict.fromkeys(("programs_root", "reports_root", "archive_root"))
+    elif selection == "explicit":
+        kwargs = {"programs_root": programs_root, "reports_root": reports_root, "archive_root": archive_root}
+    elif selection == "legacy-reports":
+        monkeypatch.setattr(review_sections, "PROGRAMS_ROOT", tmp_path / "unselected")
+        kwargs = {"reports_root": reports_root, "archive_root": archive_root}
+    result = review_sections._load_review_context(EDITION_NAME, None, **kwargs)
+    assert result[0] == 1 and result[-1] == programs_root
+    with pytest.raises(typer.BadParameter, match="Issue 002"):
+        review_sections._load_review_context(EDITION_NAME, 2, **kwargs)
+
+
+@pytest.mark.parametrize("selection", ("omitted", "none"))
+def test_review_sections_context_preserves_flat_status(
+    monkeypatch: pytest.MonkeyPatch, repo_root: Path, tmp_path: Path, selection: str,
+) -> None:
+    reports_root, archive_root = _seed_v2_report_layout(repo_root, tmp_path)
+    for name, root in (("PROGRAMS_ROOT", tmp_path / "programs"), ("REPORTS_ROOT", reports_root), ("ARCHIVE_ROOT", archive_root)):
+        monkeypatch.setattr(review_sections, name, root)
+    monkeypatch.setattr(review_sections, "resolve_edition", lambda *args, **kwargs: None, raising=False)
+    bundle = review_sections.load_bundle(EDITION_NAME, reports_root, programs_root=tmp_path / "programs")
+    shutil.rmtree(tmp_path / "programs")
+    monkeypatch.setattr(review_sections, "load_bundle", lambda *args, **kwargs: bundle)
+    status_path = save_review_status(EDITION_NAME, ReviewStatus(issue_number=1, sections=()), reports_root)
+    assert status_path == reports_root / EDITION_NAME / "review_status.yaml"
+    kwargs = {} if selection == "omitted" else {"programs_root": None}
+    result = review_sections._load_review_context(EDITION_NAME, None, **kwargs)
+    assert result[0] == 1 and result[-1] is None
+    result = runner.invoke(app, ["review-sections", "show", "--edition", EDITION_NAME, "--format", "json"])
+    assert result.exit_code == 0
+    assert Path(json.loads(result.stdout)["source_path"]) == status_path
+
+
+@pytest.mark.parametrize("selection", ("defaults", "none", "explicit", "legacy-reports"))
+def test_review_sections_export_forwards_root_to_real_consumers(
+    monkeypatch: pytest.MonkeyPatch, repo_root: Path, tmp_path: Path, selection: str,
+) -> None:
+    reports_root, archive_root = _seed_v2_report_layout(repo_root, tmp_path)
+    programs_root = tmp_path / "programs"
+    for name, root in (("PROGRAMS_ROOT", programs_root), ("REPORTS_ROOT", reports_root), ("ARCHIVE_ROOT", archive_root)):
+        monkeypatch.setattr(review_sections, name, root)
+    generate_report_draft(
+        edition_name=EDITION_NAME, reports_root=reports_root, archive_root=archive_root,
+        programs_root=programs_root, as_of=datetime(2026, 5, 5, 18, tzinfo=timezone.utc),
+        work_item_loader=lambda bundle, timestamp: (_sample_items(timestamp), 0), open_browser=False,
+    )
+    calls = []
+    for name in ("prepare_review_full_context", "_build_remediation_rows", "get_program_output_dir"):
+        original = getattr(review_sections, name)
+
+        def capture(*args, _name=name, _original=original, **kwargs):
+            assert kwargs["programs_root"] == programs_root
+            calls.append(_name)
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(review_sections, name, capture)
+    opened = []
+    monkeypatch.setattr(review_sections.webbrowser, "open", opened.append)
+    kwargs = {"output_root": tmp_path / "ignored-output", "open_browser": True}
+    if selection == "none":
+        kwargs.update(programs_root=None, reports_root=None, archive_root=None)
+    elif selection == "explicit":
+        kwargs.update(programs_root=programs_root, reports_root=reports_root, archive_root=archive_root)
+    elif selection == "legacy-reports":
+        monkeypatch.setattr(review_sections, "PROGRAMS_ROOT", tmp_path / "unselected")
+        kwargs.update(reports_root=reports_root, archive_root=archive_root)
+    artifact = review_sections.export_review_section(
+        edition_name=EDITION_NAME, section_id="ws:deployment_readiness", **kwargs,
+    )
+    assert artifact.html_path.is_relative_to(programs_root)
+    assert "DRI Self-Service" in artifact.html_path.read_text(encoding="utf-8")
+    assert opened == [artifact.html_path.resolve().as_uri()]
+    assert set(calls) == {"prepare_review_full_context", "_build_remediation_rows", "get_program_output_dir"}
+    assert not (tmp_path / "ignored-output").exists()
+
+
+def test_review_sections_export_uses_external_program_root_for_runtime_siblings(
+    monkeypatch: pytest.MonkeyPatch, repo_root: Path, tmp_path: Path,
+) -> None:
+    reports_root, archive_root = _seed_v2_report_layout(repo_root, tmp_path)
+    programs_root = tmp_path / "programs"
+    generate_report_draft(
+        edition_name=EDITION_NAME, reports_root=reports_root, archive_root=archive_root,
+        programs_root=programs_root, as_of=datetime(2026, 5, 5, 18, tzinfo=timezone.utc),
+        work_item_loader=lambda bundle, timestamp: (_sample_items(timestamp), 0), open_browser=False,
+    )
+    monkeypatch.setattr(review_sections, "PROGRAMS_ROOT", programs_root)
+    monkeypatch.setattr(review_sections, "REPORTS_ROOT", REPO_ROOT / "reports")
+    monkeypatch.setattr(review_sections, "ARCHIVE_ROOT", REPO_ROOT / "archive")
+
+    artifact = review_sections.export_review_section(
+        edition_name=EDITION_NAME, section_id="ws:deployment_readiness",
+    )
+
+    assert artifact.html_path.is_relative_to(programs_root)
+    assert "DRI Self-Service" in artifact.html_path.read_text(encoding="utf-8")

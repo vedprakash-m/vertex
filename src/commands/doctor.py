@@ -1131,7 +1131,7 @@ def _channel_delta_check(
     )
 
 
-def _channel_health_snapshot(channel_entries: dict[str, dict[str, Any]]) -> tuple[list[str], list[str], int]:
+def _channel_health_snapshot(channel_entries: dict[str, dict[str, Any]]) -> tuple[list[str], list[str], int | None]:
     return _channel_health_snapshot_impl(channel_entries)
 
 

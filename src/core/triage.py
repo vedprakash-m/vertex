@@ -633,9 +633,14 @@ def _render_vitality_lines(summary: VitalitySummary | None) -> tuple[str, ...]:
     if summary is None or summary.total_items == 0:
         return ("  - None",)
     stale_owners = ", ".join(summary.stale_owner_aliases) if summary.stale_owner_aliases else "none"
+    freshness_line = (
+        f"  - Freshness average: {summary.freshness_average_days:.1f} days (known for {summary.freshness_known_items}/{summary.total_items} items)"
+        if summary.freshness_average_days is not None
+        else f"  - Freshness age: unknown (known for {summary.freshness_known_items}/{summary.total_items} items)"
+    )
     return (
         f"  - {summary.updated_this_week}/{summary.total_items} items updated this week ({summary.updated_this_week_percentage}%)",
-        f"  - Freshness average: {summary.freshness_average_days:.1f} days since last meaningful update",
+        freshness_line,
         f"  - Owners with stale items: {stale_owners}",
     )
 

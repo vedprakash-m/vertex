@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from pathlib import Path
+import sqlite3
+
+import pytest
 
 from src.core.archive_store import write_confirmed_issue
 from src.core.incident_journal_store import append_incident_entry
@@ -21,6 +24,151 @@ from src.core.semantic_index import (
 
 
 EDITION_NAME = "acme_weekly"
+
+
+def test_selected_semantic_refresh_and_dirty_state_ignore_decoys(tmp_path: Path) -> None:
+    from src.core import archive_store
+    from tests.unit.test_archive_store import _build_manifest, _build_snapshot
+    from tests.unit.test_archive_workspace_context import _bytes, _seed, _workspace
+
+    archive = tmp_path / "legacy" / "archive"
+    _write_confirmed_issue(archive, issue_number=76, markdown_body="flat decoy narrative")
+    update_archive_semantic_index_for_issue(EDITION_NAME, 76, archive_root=archive)
+    selected, archive, decoy = _workspace(tmp_path)
+    _seed(selected)
+    _seed(decoy, 77)
+    for root, identity in ((selected, "selected incident"), (decoy, "decoy incident")):
+        append_incident_entry(
+            IncidentEntry(
+                program_id="acme", incident_id=identity, signal_id=identity,
+                observed_at=datetime(2026, 5, 6, tzinfo=timezone.utc),
+                recorded_at=datetime(2026, 5, 6, tzinfo=timezone.utc),
+                belief_change_summary=identity, confidence=Confidence.HIGH, workstream_id=None,
+            ),
+            programs_root=root,
+        )
+    update_archive_semantic_index_for_issue(EDITION_NAME, 77, archive_root=archive)
+    before = _bytes(archive.parent)
+    kwargs = {"archive_root": archive, "programs_root": selected}
+    path = update_archive_semantic_index_for_issue(EDITION_NAME, 78, **kwargs)
+    assert path == selected / "acme" / "semantic_index" / f"{EDITION_NAME}.sqlite3"
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT source_ref FROM archive_documents ORDER BY source_ref").fetchall() == [
+            ("IcM selected incident",), ("Issue 078",),
+        ]
+    initial = load_semantic_index_state(EDITION_NAME, **kwargs)
+    assert initial is not None and initial.latest_confirmed_issue == 78
+    mark_semantic_index_dirty(EDITION_NAME, " refresh failed ", **kwargs)
+    dirty = load_semantic_index_state(EDITION_NAME, **kwargs)
+    assert dirty is not None and dirty.semantic_index_dirty and dirty.dirty_reason == "refresh failed"
+    assert dirty.last_built_at == initial.last_built_at
+    assert dirty.indexed_document_count == initial.indexed_document_count == 2
+    archive_store.write_confirmed_issue(
+        EDITION_NAME, 79, _build_snapshot(79), "selected html", "selected new narrative",
+        _build_manifest(79), **kwargs,
+    )
+    update_archive_semantic_index_for_issue(EDITION_NAME, 79, **kwargs)
+    refreshed = load_semantic_index_state(EDITION_NAME, **kwargs)
+    assert refreshed is not None and refreshed.latest_confirmed_issue == 79
+    assert not refreshed.semantic_index_dirty and refreshed.indexed_document_count == 3
+    assert refreshed.last_optimized_at == initial.last_optimized_at
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT DISTINCT issue_number FROM archive_documents ORDER BY issue_number").fetchall() == [
+            (None,), (78,), (79,),
+        ]
+    update_archive_semantic_index_for_issue(EDITION_NAME, 999, **kwargs)
+    assert load_semantic_index_state(EDITION_NAME, **kwargs).indexed_document_count == 3
+    assert _bytes(archive.parent) == before
+
+
+def test_selected_semantic_empty_and_missing_state_paths(tmp_path: Path) -> None:
+    from src.core import semantic_index
+    from tests.unit.test_archive_workspace_context import _seed, _workspace
+
+    selected, archive, _ = _workspace(tmp_path)
+    kwargs = {"archive_root": archive, "programs_root": selected}
+    mark_semantic_index_dirty(EDITION_NAME, "initial failure", **kwargs)
+    state = load_semantic_index_state(EDITION_NAME, **kwargs)
+    assert state is not None and state.latest_confirmed_issue is None
+    assert state.latest_confirmed_at is None and state.indexed_document_count == 0
+    semantic_index.rebuild_archive_semantic_index(EDITION_NAME, **kwargs)
+    _seed(selected)
+    get_semantic_index_state_path(EDITION_NAME, **kwargs).unlink()
+    update_archive_semantic_index_for_issue(EDITION_NAME, 78, **kwargs)
+    state = load_semantic_index_state(EDITION_NAME, **kwargs)
+    assert state is not None and state.latest_confirmed_issue == 78
+    assert state.last_optimized_document_count == 1
+
+
+@pytest.mark.parametrize("operation", ["update", "rebuild", "dirty", "path", "state"])
+@pytest.mark.parametrize("kind", ["missing", "relative", "unresolved", "ambiguous", "malformed", "escaping"])
+def test_invalid_semantic_selection_has_no_effects(tmp_path: Path, monkeypatch, operation: str, kind: str) -> None:
+    from src.core import semantic_index
+    from src.core.exceptions import ConfigError
+    from tests.unit.test_archive_workspace_context import _bytes, _workspace
+
+    selected, archive, decoy = _workspace(tmp_path)
+    edition = selected / "acme" / "editions" / f"{EDITION_NAME}.yaml"
+    if kind == "missing":
+        selected = selected / "absent"
+    elif kind == "relative":
+        selected = Path("relative-home")
+    elif kind == "unresolved":
+        edition.unlink()
+    elif kind == "ambiguous":
+        other = selected / "other" / "editions"
+        other.mkdir(parents=True)
+        (other / edition.name).write_text("program_id: other\n", encoding="utf-8")
+    elif kind == "malformed":
+        edition.write_text("program_id: ../escape\n", encoding="utf-8")
+    else:
+        resolve = Path.resolve
+        monkeypatch.setattr(Path, "resolve", lambda path, *args, **kwargs: tmp_path / "outside.yaml" if path == edition else resolve(path, *args, **kwargs))
+    before = _bytes(tmp_path)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid selection reached semantic effects")
+
+    monkeypatch.setattr(semantic_index, "_connect_index", forbidden)
+    monkeypatch.setattr(semantic_index, "read_incident_entries", forbidden)
+    monkeypatch.setattr(Path, "mkdir", forbidden)
+    kwargs = {"archive_root": archive, "programs_root": selected}
+    with pytest.raises(ConfigError):
+        if operation == "update":
+            update_archive_semantic_index_for_issue(EDITION_NAME, 1, **kwargs)
+        elif operation == "rebuild":
+            semantic_index.rebuild_archive_semantic_index(EDITION_NAME, **kwargs)
+        elif operation == "dirty":
+            mark_semantic_index_dirty(EDITION_NAME, "failure", **kwargs)
+        elif operation == "path":
+            get_semantic_index_path(EDITION_NAME, **kwargs)
+        else:
+            load_semantic_index_state(EDITION_NAME, **kwargs)
+    assert _bytes(tmp_path) == before
+
+
+@pytest.mark.parametrize("selection", ["omitted", "none"])
+@pytest.mark.parametrize("sibling", [False, True])
+def test_semantic_legacy_selection_compatibility(tmp_path: Path, monkeypatch, selection: str, sibling: bool) -> None:
+    from src.core import semantic_index
+    from tests.unit.test_archive_workspace_context import _seed
+
+    get_archive_root = semantic_index.get_archive_root
+    monkeypatch.setattr(semantic_index, "get_archive_root", lambda edition, archive: get_archive_root(edition, archive))
+    archive = tmp_path / "archive"
+    if sibling:
+        editions = tmp_path / "programs" / "acme" / "editions"
+        editions.mkdir(parents=True)
+        (editions / f"{EDITION_NAME}.yaml").write_text("program_id: acme\n", encoding="utf-8")
+        _seed(tmp_path / "programs")
+    else:
+        _write_confirmed_issue(archive, issue_number=78, markdown_body="legacy narrative")
+    kwargs = {"programs_root": None} if selection == "none" else {}
+    path = update_archive_semantic_index_for_issue(EDITION_NAME, 78, archive_root=archive, **kwargs)
+    expected = tmp_path / "programs" / "acme" if sibling else tmp_path
+    assert path == expected / "semantic_index" / f"{EDITION_NAME}.sqlite3"
+    mark_semantic_index_dirty(EDITION_NAME, "legacy failure", archive_root=archive, **kwargs)
+    assert load_semantic_index_state(EDITION_NAME, archive_root=archive, **kwargs).semantic_index_dirty
 
 
 def test_search_archive_semantic_index_builds_local_index_and_returns_ranked_matches(tmp_path: Path) -> None:

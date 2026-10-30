@@ -2453,8 +2453,9 @@ Program/platform/economics/value cockpit (read-only projection).
 |---|---|---|---|---|
 | --program TEXT | text | Yes |  | Program id, e.g. acme. |
 | --edition TEXT | text | No |  | Optional edition id to scope this snapshot to. |
-| --format TEXT | text | No | human | Output format: human or json. |
-| --no-persist | boolean | No | False | Build and print the snapshot without writing latest.json/history (read-only preview). |
+| --format TEXT | text | No | human | Fresh output: human or json; retained html requires --as-of. |
+| --no-persist | boolean | No | False | Suppress latest.json/history writes; fresh readers are not fully read-only. |
+| --as-of TEXT | text | No |  | Read retained history at or before this ISO timestamp. |
 
 #### `vertex cockpit build`
 
@@ -2488,6 +2489,7 @@ rule, and what-Vertex-did-not-do) rather than fabricating content.
 | --program TEXT | text | Yes |  | Program id, e.g. acme. |
 | --edition TEXT | text | No |  | Optional edition id to scope this snapshot to. |
 | --finding TEXT | text | Yes |  | finding_id to explain. |
+| --as-of TEXT | text | No |  | Explain a retained finding without rebuilding. |
 
 #### `vertex cockpit tui`
 

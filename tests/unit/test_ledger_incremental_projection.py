@@ -8,8 +8,13 @@ always falls through to full rebuild.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
+from unittest.mock import Mock
 
-from src.core.ledger.event_log import ConfidenceTier, TemporalConfidence, build_event_envelope, write_event
+import pytest
+
+from src.core.ledger import program_views
+from src.core.ledger.event_log import ConfidenceTier, EventEnvelope, TemporalConfidence, build_event_envelope, write_event
 from src.core.ledger.event_index import rebuild_event_index
 from src.core.ledger.program_views import canonical_projection_dump, project_events_incremental_to_sqlite, project_events_to_sqlite
 from src.core.ledger.source_refs import LTDeckRef
@@ -267,3 +272,124 @@ def test_no_delta_returns_cached_result(tmp_path) -> None:
 
     assert r1.event_watermark == r2.event_watermark
     assert r2.event_count == 1
+
+
+def _dependency_event(event_type: str, day: int, payload: dict[str, str]) -> EventEnvelope:
+    timestamp = datetime(2026, 1, day, tzinfo=timezone.utc)
+    return build_event_envelope(
+        program_id="acme",
+        event_type=event_type,
+        occurred_at=timestamp,
+        recorded_at=timestamp,
+        temporal_confidence=TemporalConfidence.EXACT,
+        confidence=ConfidenceTier.SOURCE_AUTHORITATIVE,
+        actor="import",
+        payload=payload,
+        source_ref=_deck_ref(),
+    )
+
+
+@pytest.mark.parametrize("change", ["source", "target", "status"])
+@pytest.mark.parametrize("shared_endpoints", [False, True])
+def test_dependency_incremental_full_canonical_parity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str, shared_endpoints: bool,
+) -> None:
+    programs_root = tmp_path / "programs"
+    initial = _dependency_event(
+        "dependency.declared.v1", 1,
+        {"dependency_id": "dependency:d1", "from_entity": "milestone:a", "to_entity": "milestone:b"},
+    )
+    untouched = _dependency_event(
+        "dependency.declared.v1", 1,
+        {
+            "dependency_id": "dependency:d2",
+            "from_entity": "milestone:a" if shared_endpoints else "milestone:x",
+            "to_entity": "milestone:b",
+        },
+    )
+    base = (initial, untouched)
+    incremental_path = tmp_path / "incremental.sqlite3"
+    full_path = tmp_path / "full.sqlite3"
+    project_events_incremental_to_sqlite(
+        "acme", base, projection_path=incremental_path, programs_root=programs_root,
+    )
+    before = canonical_projection_dump(incremental_path)
+
+    def reject_full_rebuild(*args: object, **kwargs: object) -> None:
+        pytest.fail("Second call must exercise the affected-entity incremental fold")
+
+    monkeypatch.setattr(program_views, "project_events_to_sqlite", reject_full_rebuild)
+    events = base
+    for day in (2, 3):
+        delta = (
+            _dependency_event(
+                "dependency.status_changed.v1", day,
+                {"dependency_id": "dependency:d1", "new_status": "blocked" if day == 2 else "resolved"},
+            )
+            if change == "status"
+            else _dependency_event(
+                "dependency.declared.v1", day,
+                {
+                    "dependency_id": "dependency:d1",
+                    "from_entity": f"milestone:a{day}" if change == "source" else "milestone:a",
+                    "to_entity": f"milestone:b{day}" if change == "target" else "milestone:b",
+                },
+            )
+        )
+        events = (*events, delta)
+        project_events_to_sqlite("acme", events, projection_path=full_path, programs_root=programs_root)
+        result = project_events_incremental_to_sqlite(
+            "acme", events, projection_path=incremental_path, programs_root=programs_root,
+        )
+        actual = canonical_projection_dump(incremental_path)
+        expected = canonical_projection_dump(full_path)
+        assert result.event_watermark == delta.event_id
+        assert result.event_count == len(events)
+        assert actual["proj_dependency"] == expected["proj_dependency"]
+        assert [row for row in actual["proj_dependency"] if row["dependency_id"] == "dependency:d2"] == [
+            row for row in before["proj_dependency"] if row["dependency_id"] == "dependency:d2"
+        ]
+        assert [row for row in actual["entity_links"] if row["event_id"] == untouched.event_id] == [
+            row for row in before["entity_links"] if row["event_id"] == untouched.event_id
+        ]
+        assert actual == expected
+        replay = project_events_incremental_to_sqlite(
+            "acme", events, projection_path=incremental_path, programs_root=programs_root,
+        )
+        assert replay.event_watermark == result.event_watermark
+        assert canonical_projection_dump(incremental_path) == expected
+
+
+def test_old_projector_rebuilds_stale_dependency_links_without_new_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    programs_root = tmp_path / "programs"
+    initial = _dependency_event(
+        "dependency.declared.v1", 1,
+        {"dependency_id": "dependency:d1", "from_entity": "milestone:a", "to_entity": "milestone:b"},
+    )
+    replacement = _dependency_event(
+        "dependency.declared.v1", 2,
+        {"dependency_id": "dependency:d1", "from_entity": "milestone:a", "to_entity": "milestone:c"},
+    )
+    events = (initial, replacement)
+    incremental_path = tmp_path / "incremental.sqlite3"
+    full_path = tmp_path / "full.sqlite3"
+    for path in (incremental_path, full_path):
+        project_events_to_sqlite("acme", events, projection_path=path, programs_root=programs_root)
+    with program_views.connect_projection_db(incremental_path) as connection:
+        connection.execute("UPDATE projection_meta SET projector_version = '2'")
+        connection.execute(
+            "INSERT INTO entity_links (from_entity, link_kind, to_entity, event_id) VALUES (?, ?, ?, ?)",
+            ("milestone:a", "depends_on", "milestone:b", initial.event_id),
+        )
+    assert canonical_projection_dump(incremental_path)["entity_links"] != canonical_projection_dump(full_path)["entity_links"]
+    rebuild = Mock(wraps=project_events_to_sqlite)
+    monkeypatch.setattr(program_views, "project_events_to_sqlite", rebuild)
+    result = project_events_incremental_to_sqlite(
+        "acme", events, projection_path=incremental_path, programs_root=programs_root,
+    )
+    rebuild.assert_called_once()
+    assert result.event_watermark == replacement.event_id
+    assert canonical_projection_dump(incremental_path) == canonical_projection_dump(full_path)
+    assert canonical_projection_dump(incremental_path)["projection_meta"][0]["projector_version"] == "3"

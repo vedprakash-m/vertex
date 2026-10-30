@@ -1,6 +1,7 @@
 """ME-01: Provenance recording wired into gather WorkIQ stage."""
 from __future__ import annotations
 import json
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -107,3 +108,54 @@ def test_dominant_source_type_selected(tmp_path: Path) -> None:
     prov_file = tmp_path / "acme" / "journal" / "evidence_provenance.jsonl"
     records = [json.loads(line) for line in prov_file.read_text(encoding="utf-8").splitlines()]
     assert records[0]["source_type"] == "email"
+
+
+@pytest.mark.parametrize(
+    ("native_message_id", "raw_ref", "expected_source_id"),
+    [
+        ("native-parent", "workiq:email:segment-1", "native-parent"),
+        (None, "workiq:email:segment-1", "segment-1"),
+        ("", "workiq:email:segment-1", "segment-1"),
+        (None, None, "segment-1"),
+    ],
+)
+def test_provenance_prefers_nonempty_native_message_id_and_preserves_legacy_fallback(
+    tmp_path: Path,
+    native_message_id: str | None,
+    raw_ref: str | None,
+    expected_source_id: str,
+) -> None:
+    from src.commands.gather import _record_workiq_provenance
+
+    signal = _make_signal("acme.networking", message_id="segment-1")
+    signal = replace(
+        signal,
+        raw_ref=raw_ref,
+        metadata={**(signal.metadata or {}), "native_message_id": native_message_id},
+    )
+    _record_workiq_provenance(
+        workiq_signals=(signal,),
+        program_id="acme",
+        programs_root=tmp_path,
+        run_at=datetime(2026, 6, 17, 18, 0, 0, tzinfo=timezone.utc),
+    )
+
+    provenance_path = tmp_path / "acme" / "journal" / "evidence_provenance.jsonl"
+    records = [json.loads(line) for line in provenance_path.read_text(encoding="utf-8").splitlines()]
+    assert records[0]["source_id"] == expected_source_id
+
+
+def test_provenance_uses_raw_reference_when_legacy_metadata_is_missing(tmp_path: Path) -> None:
+    from src.commands.gather import _record_workiq_provenance
+
+    signal = replace(_make_signal("acme.networking"), metadata=None)
+    _record_workiq_provenance(
+        workiq_signals=(signal,),
+        program_id="acme",
+        programs_root=tmp_path,
+        run_at=datetime(2026, 6, 17, 18, 0, 0, tzinfo=timezone.utc),
+    )
+
+    provenance_path = tmp_path / "acme" / "journal" / "evidence_provenance.jsonl"
+    records = [json.loads(line) for line in provenance_path.read_text(encoding="utf-8").splitlines()]
+    assert records[0]["source_id"] == signal.raw_ref

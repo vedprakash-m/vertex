@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,7 +27,7 @@ from src.core.stages import risk_stage as risk_stage_module
 from src.core.stages.milestone_stage import MilestoneStage
 from src.core.stages.risk_stage import RiskStage
 from src.core.truth_levels import TruthLevel
-from src.core.view_models import EditionMeta, HealthSummary
+from src.core.view_models import ContinuityRenderData, EditionMeta, HealthSummary
 
 
 def _snapshot(program_id: str, when: datetime) -> ProgramFactSnapshot:
@@ -270,6 +271,42 @@ def test_risk_stage_non_legacy_surfaces_fact_assessment_metadata_into_render() -
 
     assert "◆ CORROBORATED" in rendered
     assert "[DISPUTED ⚠]" in rendered
+
+
+@pytest.mark.parametrize("layout_mode", ["dashboard", "continuity"])
+@pytest.mark.parametrize("selected_disputed", [False, True])
+def test_rendered_risk_summary_attributes_only_the_named_risk(
+    layout_mode: str, selected_disputed: bool,
+) -> None:
+    risk = _risk_entry("alpha", title="Alpha current")
+    other = _risk_entry("zulu", title="Zulu stale review")
+    selected = _assessment(
+        risk, truth_level=TruthLevel.CORROBORATED,
+        disputed=selected_disputed, stale=selected_disputed,
+    )
+    health = report_health_module._build_health_summary(
+        (), None, risks=(other, risk),
+        risk_assessments=(
+            _assessment(other, truth_level=TruthLevel.RAW_OBSERVED, disputed=not selected_disputed),
+            selected,
+        ),
+        stale_risk_ids=("zulu",),
+    )
+
+    rendered = HTMLRenderer("acme_weekly").render(
+        replace(
+            _render_context(health=health), layout_mode=layout_mode,
+            continuity=ContinuityRenderData(
+                brand_name=None, brand_header_url=None, edition_intro=None,
+                cadence_note="", scorecard_bands=(), jump_links=(), chapters=(),
+            ) if layout_mode == "continuity" else None,
+        ),
+    )
+
+    assert "Highest active: Alpha current" in rendered
+    assert "◆ CORROBORATED" in rendered
+    assert ("[DISPUTED ⚠]" in rendered) is selected_disputed
+    assert health.risk_register_stale_evidence is selected_disputed
 
 
 def test_risk_stage_empty_set_cross_check_warns_when_legacy_has_data(monkeypatch, tmp_path: Path) -> None:

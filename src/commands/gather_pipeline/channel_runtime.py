@@ -18,7 +18,7 @@ from src.core.channel_registry_store import (
 from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.gather_channel_support import append_integration_error_once, binding_provider_instance_id
 from src.core.exceptions import QueryError
-from src.core.integration_types import HydrationMode, HydrationResult, RunContext
+from src.core.integration_types import DiscoveryCompleteness, HydrationMode, HydrationResult, RunContext, ScopeStatusKind
 from src.core.models_v2 import IntegrationError
 from src.core.gather_run_manifest import ChannelOutcomeEntry
 from src.commands.gather_pipeline.support import enrich_resources, sanitize_discovery_result
@@ -274,6 +274,23 @@ def run_channel(
                 discovery_result,
                 expected_provider_instance_id=provider_instance_id,
             )
+            incomplete_scope = next(
+                (
+                    status for status in discovery_result.scope_statuses.values()
+                    if status.status is not ScopeStatusKind.SUCCESS
+                    or status.completeness is DiscoveryCompleteness.PARTIAL
+                ),
+                None,
+            )
+            if discovery_result.errors:
+                discovery_degrade_reason = discovery_result.errors[0].message
+            elif incomplete_scope is not None:
+                discovery_degrade_reason = (
+                    incomplete_scope.error_message
+                    or f"{channel} discovery incomplete for scope {incomplete_scope.scope_id}."
+                )
+            elif discovery_result.completeness is DiscoveryCompleteness.PARTIAL:
+                discovery_degrade_reason = f"{channel} discovery is partial."
             if discovery_result_sink is not None:
                 # Preserve provider-native per-query membership captures for
                 # the gather-run manifest; consumers must never reconstruct

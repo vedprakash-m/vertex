@@ -15,11 +15,13 @@ from src.commands.report import _build_chapter_templates, _build_exec_summary_te
 from src.commands.report import generate_report_draft
 from src.core.archive_store import is_issue_confirmed
 from src.core.config_loader import REPORTS_ROOT, load_bundle
-from src.core.edition_resolver import PROGRAMS_ROOT
+from src.core.edition_resolver import PROGRAMS_ROOT, resolve_edition_paths
+from src.core.exceptions import ConfigError
 from src.core.models import EditionType
 from src.core.jinja_filters import build_anchor
 from src.core.narrative_store import get_narratives_dir
 from src.core.snapshot_store import ARCHIVE_ROOT
+from src.core.workspace_paths import validate_report_workspace
 
 
 EditorRunner = Callable[[Path, bool], bool]
@@ -38,11 +40,20 @@ class EditResult:
     reran_dry_run: bool
 
 
+def _preflight_edit_workspace() -> None:
+    try:
+        validate_report_workspace(programs_root=PROGRAMS_ROOT, reports_root=REPORTS_ROOT, archive_root=ARCHIVE_ROOT)
+    except ConfigError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=2) from error
+
+
 def edit_command(
     edition: str = typer.Option("", "--edition", help="Edition name."),
     section: str = typer.Option(..., "--section", help="Section id, dimension name, or exec_summary."),
     issue: int | None = typer.Option(None, "--issue", help="Issue number. Defaults to the latest draft issue."),
 ) -> None:
+    _preflight_edit_workspace()
     result = run_edit(
         edition_name=edition,
         section=section,
@@ -74,6 +85,7 @@ def run_edit(
     prompt_runner: PromptRunner | None = None,
     rerun_runner: RerunRunner | None = None,
 ) -> EditResult:
+    validate_report_workspace(programs_root=programs_root, reports_root=reports_root, archive_root=archive_root)
     latest_issue_number = _latest_draft_issue_number(edition_name, programs_root=programs_root)
     resolved_issue_number = issue_number or latest_issue_number
     # A confirmed (published) issue is a permanent record — its narrative source
@@ -91,7 +103,11 @@ def run_edit(
         issue_number=resolved_issue_number,
         reports_root=reports_root,
         read_only=read_only,
-        programs_root=programs_root,
+        programs_root=(
+            programs_root
+            if resolve_edition_paths(edition_name, programs_root=programs_root) is not None
+            else None
+        ),
     )
 
     opened_in_editor = False
@@ -100,7 +116,12 @@ def run_edit(
 
     reran_dry_run = False
     if not read_only and (prompt_runner or _default_prompt_runner)("Re-run --dry-run now?"):
-        (rerun_runner or _default_rerun_runner)(edition_name, resolved_issue_number, reports_root, archive_root)
+        if rerun_runner is not None:
+            rerun_runner(edition_name, resolved_issue_number, reports_root, archive_root)
+        else:
+            _default_rerun_runner(
+                edition_name, resolved_issue_number, reports_root, archive_root, programs_root=programs_root,
+            )
         reran_dry_run = True
 
     return EditResult(
@@ -121,16 +142,18 @@ def _prepare_edit_target(
     issue_number: int,
     reports_root: Path,
     read_only: bool = False,
-    programs_root: Path = PROGRAMS_ROOT,
+    programs_root: Path | None = None,
 ) -> tuple[Path, str, bool]:
-    narratives_dir = get_narratives_dir(edition_name, issue_number, reports_root=reports_root)
+    narratives_dir = get_narratives_dir(
+        edition_name, issue_number, reports_root=reports_root, programs_root=programs_root,
+    )
     narratives_dir.mkdir(parents=True, exist_ok=True)
     section_id, filename, section_title = _resolve_edit_section_target(
         edition_name=edition_name,
         section=section,
         reports_root=reports_root,
         issue_number=issue_number,
-        programs_root=programs_root,
+        programs_root=programs_root if programs_root is not None else PROGRAMS_ROOT,
     )
     target_path = narratives_dir / filename
     created = False
@@ -142,7 +165,7 @@ def _prepare_edit_target(
                 section_title=section_title,
                 edition_name=edition_name,
                 reports_root=reports_root,
-                programs_root=programs_root,
+                programs_root=programs_root if programs_root is not None else PROGRAMS_ROOT,
             ),
             encoding="utf-8",
         )
@@ -267,11 +290,14 @@ def _default_rerun_runner(
     issue_number: int,
     reports_root: Path,
     archive_root: Path,
+    *,
+    programs_root: Path | None = None,
 ) -> None:
     generate_report_draft(
         edition_name=edition_name,
         issue_number=issue_number,
         reports_root=reports_root,
         archive_root=archive_root,
+        programs_root=programs_root,
         open_browser=False,
     )

@@ -4,6 +4,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from src.commands import report_ai
 from src.core.evidence_models import SourceRef, WorkstreamEvidence
 from src.core.exceptions import ConfigError
@@ -214,7 +216,7 @@ def test_program_synthesis_exec_summary_context_lines_covers_three_categories(mo
 
     assert any("Vendor delay risk." in line and "[high]" in line for line in lines)
     assert any("Milestone date disagreement." in line for line in lines)
-    assert any("M1 code complete" in line for line in lines)
+    assert "Active milestone: M1 code complete | status=at_risk" in lines
     # kusto_slo_breach is deliberately not surfaced in this pass.
     assert not any("Latency SLO breached." in line for line in lines)
 
@@ -253,7 +255,8 @@ def test_program_synthesis_exec_summary_context_lines_degrades_on_failure(monkey
     assert lines == ()
 
 
-def test_program_synthesis_blurb_context_lines_scopes_by_workstream(monkeypatch) -> None:
+@pytest.mark.parametrize("milestone_status", ("at_risk", "completed"))
+def test_program_synthesis_blurb_context_lines_scopes_by_workstream(monkeypatch, milestone_status) -> None:
     # ADF-W2.9: workstream-scoped analog of the exec-summary enrichment --
     # a risk/milestone linked to a DIFFERENT workstream must not leak into
     # this section's blurb context.
@@ -274,7 +277,7 @@ def test_program_synthesis_blurb_context_lines_scopes_by_workstream(monkeypatch)
     unmatched_risk = SimpleNamespace(record=_risk("risk-out-of-scope", workstream_ids=("ws-other",)), fact_id="fact-risk-2")
 
     matched_milestone = SimpleNamespace(
-        record=SimpleNamespace(name="M1", status="at_risk", target_date=None, linked_workstream_ids=("ws-deployment",)),
+        record=SimpleNamespace(name="M1", status=milestone_status, target_date=None, linked_workstream_ids=("ws-deployment",)),
         fact_id="fact-1",
     )
     unmatched_milestone = SimpleNamespace(
@@ -300,7 +303,7 @@ def test_program_synthesis_blurb_context_lines_scopes_by_workstream(monkeypatch)
 
     assert any("risk-in-scope" in line or "Risk risk-in-scope" in line for line in lines)
     assert not any("risk-out-of-scope" in line for line in lines)
-    assert any("M1" in line for line in lines)
+    assert f"Milestone: M1 | status={milestone_status}" in lines
     assert not any("M2" in line for line in lines)
     assert any("In-scope disagreement." in line for line in lines)
     assert not any("Out-of-scope disagreement." in line for line in lines)

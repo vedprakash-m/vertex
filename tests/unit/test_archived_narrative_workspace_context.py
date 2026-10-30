@@ -20,9 +20,11 @@ def test_archived_placeholders_use_selected_reports_context(
 
     def inject(
         edition: str, issue_number: int, narratives: dict[str, str], reports_root: Path,
+        *, programs_root: Path | None,
     ) -> dict[str, str]:
         assert edition == "synthetic_weekly"
         assert issue_number == 1
+        assert programs_root is None
         observed.append(reports_root)
         return narratives
 

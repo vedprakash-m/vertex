@@ -57,7 +57,7 @@
           "coverage_latest": "2021-06-01T00:00:00+00:00",
           "event_watermark": "01KEJK7S00PD2FTBGTMJ6NYCY3",
           "knowledge_as_of": "2026-12-31T00:00:00+00:00",
-          "projector_version": "2",
+          "projector_version": "3",
           "schema_version": "1"
         }
       ]
@@ -121,7 +121,7 @@
           "coverage_latest": "2021-06-01T00:00:00+00:00",
           "event_watermark": "01JKS4WE00ME4ER37QHZAF5TYY",
           "knowledge_as_of": "2025-12-31T00:00:00+00:00",
-          "projector_version": "2",
+          "projector_version": "3",
           "schema_version": "1"
         }
       ]
@@ -244,7 +244,7 @@
           "coverage_latest": "2025-03-20T00:00:00+00:00",
           "event_watermark": "01KEJK7S00PD2FTBGTMJ6NYCY5",
           "knowledge_as_of": "2025-03-31T00:00:00+00:00",
-          "projector_version": "2",
+          "projector_version": "3",
           "schema_version": "1"
         }
       ]

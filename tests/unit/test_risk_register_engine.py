@@ -17,6 +17,59 @@ def test_load_risk_register_returns_empty_tuple_when_file_absent(tmp_path: Path)
     assert load_risk_register("acme", programs_root=tmp_path / "programs") == ()
 
 
+def test_load_risk_register_round_trips_actual_empty_writer(tmp_path: Path) -> None:
+    import yaml
+
+    programs_root = tmp_path / "programs"
+    save_risk_register("synthetic", (), programs_root=programs_root)
+    path = programs_root / "synthetic" / "risk_register.yaml"
+    before = path.read_bytes()
+    assert yaml.safe_load(before) == {"schema_version": "1.0", "risks": []}
+    assert load_risk_register("synthetic", programs_root=programs_root) == ()
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("collection", ["", "risks: null", "risks: {}", "risks: {id: risk-1}",
+                                      "risks: false", "risks: 0", "risks: ''", "risks: invalid"])
+def test_load_risk_register_rejects_missing_or_malformed_collection(tmp_path: Path, collection: str) -> None:
+    programs_root = tmp_path / "programs"
+    path = programs_root / "synthetic" / "risk_register.yaml"
+    path.parent.mkdir(parents=True)
+    path.write_text(f"schema_version: '1.0'\n{collection}\n", encoding="utf-8")
+    before = path.read_bytes()
+    with pytest.raises(ConfigError, match="Expected 'risks' list"):
+        load_risk_register("synthetic", programs_root=programs_root)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("document", "message"),
+    [
+        ("schema_version: '1.0'\nrisks: [null]\n", "must be a mapping"),
+        ("schema_version: '1.0'\nrisks: [{}]\n", "Invalid risk entry"),
+        ("schema_version: '1.0'\nrisks: [\n", "Invalid YAML"),
+        ("{}\n", "Unsupported risk register schema_version"),
+        ("schema_version: 1\nrisks: []\n", "Unsupported risk register schema_version"),
+        ("- invalid\n", "Expected mapping"),
+    ],
+)
+def test_load_risk_register_preserves_invalid_document_refusal(tmp_path: Path, document: str, message: str) -> None:
+    programs_root = tmp_path / "programs"
+    path = programs_root / "synthetic" / "risk_register.yaml"
+    path.parent.mkdir(parents=True)
+    path.write_text(document, encoding="utf-8")
+    with pytest.raises(ConfigError, match=message):
+        load_risk_register("synthetic", programs_root=programs_root)
+
+
+def test_load_risk_register_preserves_duplicate_refusal(tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    entry = _risk_entry()
+    save_risk_register("acme", (entry, entry), programs_root=programs_root)
+    with pytest.raises(ConfigError, match="Duplicate risk id"):
+        load_risk_register("acme", programs_root=programs_root)
+
+
 def test_load_risk_register_reads_yaml(tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     register_path = programs_root / "acme" / "risk_register.yaml"
@@ -170,6 +223,24 @@ def test_compute_risk_score_multiplies_probability_and_impact() -> None:
     entry = _risk_entry(probability=RiskProbability.LIKELY, impact=RiskImpact.HIGH)
 
     assert compute_risk_score(entry) == 9
+
+
+def test_risk_summary_priority_preserves_existing_order_and_stable_ties() -> None:
+    from src.core.risk_register_engine import risk_summary_sort_key
+
+    base = _risk_entry()
+    risks = (
+        replace(base, id="tie-first", title="Alpha"),
+        replace(base, id="tie-second", title="ALPHA"),
+        replace(base, id="zulu", title="Zulu"),
+        replace(base, id="score", probability=RiskProbability.VERY_LIKELY, impact=RiskImpact.CRITICAL),
+        replace(base, id="escalated", status=RiskStatus.ESCALATED, probability=RiskProbability.UNLIKELY, impact=RiskImpact.LOW),
+        replace(base, id="unassessed", probability=RiskProbability.UNASSESSED, impact=RiskImpact.UNASSESSED),
+    )
+
+    assert [risk.id for risk in sorted(risks, key=risk_summary_sort_key)] == [
+        "escalated", "score", "tie-first", "tie-second", "zulu", "unassessed",
+    ]
 
 
 def test_save_risk_register_round_trips_and_creates_backup(tmp_path: Path) -> None:

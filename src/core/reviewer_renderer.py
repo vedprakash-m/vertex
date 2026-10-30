@@ -192,7 +192,7 @@ class ReviewerMilestoneTimelineRow:
     def status_summary(self) -> str:
         labels = [f"computed {self.computed_status}", f"declared {self.declared_status}"]
         if self.critical_path:
-            labels.append("critical path")
+            labels.append("longest dependency chain")
         if self.schedule_summary:
             labels.append(self.schedule_summary)
         if self.target_history_summary:

@@ -20,6 +20,112 @@ from src.core.nudge_models import ResolvedRecipient
 _NOW = datetime(2026, 7, 1, tzinfo=timezone.utc)
 
 
+@pytest.mark.parametrize("field", ["why", "what"])
+def test_actual_detector_gap_repair_refusal_and_reopening(tmp_path: Path, field: str) -> None:
+    from datetime import date
+    from src.commands.doctor_checks.context_checks import emit_context_gaps
+    from src.core.context_gap_solicitation import produce_context_gap_solicitation
+
+    programs = tmp_path / "programs"
+    program = programs / "sample"
+    program.mkdir(parents=True)
+    registry = program / "workstream_registry.yaml"
+    registry.write_text("workstreams:\n- id: lane\n  deep_context: {}\n")
+    emit_context_gaps(
+        program_id="sample", registry_entries=[{"id": "lane", "deep_context": {}}],
+        kpis_list=[], today=date(2026, 10, 26), programs_root=programs,
+    )
+    observations = program / "_feedback" / "context_gaps.jsonl"
+    retained = observations.read_bytes()
+    fingerprint = f"sample:doctor --context:lane:deep_context.{field}"
+    args = dict(program_id="sample", gap_fingerprint=fingerprint, recipient_email="owner@example.com",
+                programs_root=programs, dry_run=True)
+    first = produce_context_gap_solicitation(**args)
+    registry.write_text(f"workstreams:\n- id: lane\n  deep_context:\n    {field}: Repaired\n")
+    with pytest.raises(ContextGapSolicitationError, match="active"):
+        produce_context_gap_solicitation(**args)
+    registry.write_text("workstreams:\n- id: lane\n  deep_context: {}\n")
+    reopened = produce_context_gap_solicitation(**args)
+    assert first.gap_fingerprint == reopened.gap_fingerprint == fingerprint
+    assert first.current_value_hash == reopened.current_value_hash
+    assert observations.read_bytes() == retained
+
+
+def test_second_packet_preserves_legacy_unterminated_cooldown_record(tmp_path: Path) -> None:
+    import json
+
+    first = _staged_solicitation()
+    record_solicitation_drafted(first, programs_root=tmp_path, now=_NOW)
+    log = tmp_path / "acme" / "_feedback" / "context_gap_solicitations.jsonl"
+    legacy = log.read_bytes().rstrip(b"\r\n")
+    log.write_bytes(legacy)
+    record_solicitation_drafted(first, programs_root=tmp_path, now=_NOW + timedelta(days=15))
+    rows = [json.loads(line) for line in log.read_text().splitlines()]
+    assert len(rows) == 2
+    assert log.read_bytes().startswith(legacy)
+    assert is_in_cooldown(_gap(), programs_root=tmp_path, now=_NOW + timedelta(days=16))
+
+
+@pytest.mark.parametrize("existing", [None, b"", b"{}\n", b"{}"])
+def test_cooldown_writer_uses_bounded_tail_read(tmp_path: Path, monkeypatch, existing: bytes | None) -> None:
+    import json
+
+    log = tmp_path / "acme" / "_feedback" / "context_gap_solicitations.jsonl"
+    if existing is not None:
+        log.parent.mkdir(parents=True)
+        log.write_bytes(existing)
+    read_bytes = Path.read_bytes
+
+    def reject_full_read(path: Path):
+        if path == log:
+            raise AssertionError("Cooldown writer must not read the entire log")
+        return read_bytes(path)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(Path, "read_bytes", reject_full_read)
+        record_solicitation_drafted(_staged_solicitation(), programs_root=tmp_path, now=_NOW)
+    rows = [json.loads(line) for line in log.read_text().splitlines()]
+    assert len(rows) == (2 if existing else 1)
+    assert log.read_bytes().startswith(existing or b"")
+
+
+def test_structural_repair_during_packet_preparation_is_nonmutating(tmp_path: Path, monkeypatch) -> None:
+    from datetime import date
+    from src.commands.doctor_checks.context_checks import emit_context_gaps
+    from src.core import context_gap_solicitation
+    from src.core.context_gap_store import rank_context_gaps
+
+    programs = tmp_path / "programs"
+    program = programs / "sample"
+    program.mkdir(parents=True)
+    registry = program / "workstream_registry.yaml"
+    registry.write_text("workstreams:\n- id: lane\n  deep_context: {}\n")
+    emit_context_gaps(
+        program_id="sample", registry_entries=[{"id": "lane", "deep_context": {}}],
+        kpis_list=[], today=date(2026, 10, 26), programs_root=programs,
+    )
+    retained = (program / "_feedback" / "context_gaps.jsonl").read_bytes()
+    calls = 0
+
+    def rank_then_repair(*args, **kwargs):
+        nonlocal calls
+        result = rank_context_gaps(*args, **kwargs)
+        calls += 1
+        if calls == 1:
+            registry.write_text("workstreams:\n- id: lane\n  deep_context:\n    why: Repaired\n")
+        return result
+
+    monkeypatch.setattr(context_gap_solicitation, "rank_context_gaps", rank_then_repair)
+    with pytest.raises(ContextGapSolicitationError, match="active"):
+        context_gap_solicitation.produce_context_gap_solicitation(
+            program_id="sample", gap_fingerprint="sample:doctor --context:lane:deep_context.why",
+            recipient_email="owner@example.com", programs_root=programs,
+        )
+    assert not list((program / "nudge" / "drafts").glob("*.eml"))
+    assert not (program / "_feedback" / "context_gap_solicitations.jsonl").exists()
+    assert (program / "_feedback" / "context_gaps.jsonl").read_bytes() == retained
+
+
 @pytest.mark.parametrize("key,value", [
     ("packet_version", True), ("packet_version", 1.0), ("packet_version", "1"),
     ("target_key", None), ("target_key", []), ("target_key", ""),

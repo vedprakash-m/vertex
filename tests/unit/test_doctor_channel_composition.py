@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from src.commands.doctor_checks.channel_composition import run_channel_doctor
 from src.commands.doctor_checks.models import DoctorCheck
@@ -72,3 +75,53 @@ def test_run_channel_doctor_summarizes_channel_completeness_and_injected_checks(
     assert "Zero-row queries: q2." in summary.detail
     assert "Stale queries: q3." in summary.detail
     assert "Frozen metric queries: q4." in summary.detail
+
+
+@pytest.mark.parametrize(
+    "channels, expected, status, queries",
+    [
+        ({"ado": {"active": False, "meets_expected_min": False}}, None, "warn", {}),
+        ({"ado": {"active": True, "meets_expected_min": True}}, 100, "ok", {}),
+        ({"ado": {"active": True, "meets_expected_min": False}}, 0, "warn", {}),
+        ({"ado": {"active": True, "meets_expected_min": True}, "kusto": {"active": False, "meets_expected_min": False}}, 100, "ok", {}),
+        ({}, None, "warn", {}),
+        ({"ado": {"active": True, "meets_expected_min": True}}, 100, "warn", {"q": {"last_cycle_succeeded": False}}),
+        ({"ado": {"active": True, "meets_expected_min": True}}, 100, "warn", {"q": {"last_cycle_succeeded": True, "row_count": 1, "data_freshness_ok": False}}),
+        ({"ado": {"active": True, "meets_expected_min": True}}, 100, "warn", {"q": {"last_cycle_succeeded": True, "row_count": 1, "value_frozen_warning": True}}),
+    ],
+)
+def test_run_channel_doctor_nullable_summary(
+    tmp_path: Path, channels: dict[str, dict[str, bool]], expected: int | None, status: str,
+    queries: dict[str, dict[str, bool | int]],
+) -> None:
+    from src.commands.doctor import run_doctor
+    from tests.support.fact_store_doctor_setup import stage_fact_store_doctor_workspace
+
+    reports = stage_fact_store_doctor_workspace(tmp_path)
+    program = tmp_path / "programs" / "acme"
+    (program / "slice_contracts.yaml").write_text('schema_version: "1.0"\nslices: []\n', encoding="utf-8")
+    (program / "runtime").mkdir()
+    (program / "runtime" / "gather_state.json").write_text(
+        json.dumps({"program_id": "acme", "gathered_at": "2026-10-28T12:00:00+00:00", "channels": channels, "queries": queries}),
+        encoding="utf-8",
+    )
+    report = run_doctor(edition_name="acme_weekly", channels=True, reports_root=reports, programs_root=tmp_path / "programs")
+    summary = report.checks[0]
+    assert summary.status == status
+    if channels:
+        assert summary.metadata is not None
+        assert summary.metadata["completeness_pct"] == expected
+        if expected is None:
+            assert summary.detail == "Channel completeness unavailable (no active channels on the latest gather)."
+    else:
+        assert summary.detail == "Latest gather state does not include channel telemetry. Re-run gather with the updated client."
+
+
+def test_run_channel_doctor_without_state_remains_warning(tmp_path: Path) -> None:
+    from src.commands.doctor import run_doctor
+    from tests.support.fact_store_doctor_setup import stage_fact_store_doctor_workspace
+
+    reports = stage_fact_store_doctor_workspace(tmp_path)
+    report = run_doctor(edition_name="acme_weekly", channels=True, reports_root=reports, programs_root=tmp_path / "programs")
+    assert report.checks[0].status == "warn"
+    assert report.checks[0].detail == "No gather state recorded yet."

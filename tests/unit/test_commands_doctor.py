@@ -63,6 +63,45 @@ from tests.support.report_test_setup import reset_overrides_to_seed_state, stage
 runner = CliRunner()
 EDITION_NAME = "acme_weekly"
 
+
+@pytest.mark.parametrize("current_active, previous_active", [(False, True), (True, False), (False, False), (True, True)])
+def test_run_doctor_channels_nullable_actual_serialization(tmp_path: Path, current_active: bool, previous_active: bool) -> None:
+    from tests.support.fact_store_doctor_setup import stage_fact_store_doctor_workspace
+
+    reports = stage_fact_store_doctor_workspace(tmp_path)
+    program = tmp_path / "programs" / "acme"
+    (program / "slice_contracts.yaml").write_text('schema_version: "1.0"\nslices: []\n', encoding="utf-8")
+    (program / "runtime").mkdir()
+    def channel(active: bool) -> dict[str, dict[str, bool | int]]:
+        return {"ado": {"active": active, "signal_count": int(active), "expected_min": 1, "meets_expected_min": active}}
+    (program / "runtime" / "gather_state.json").write_text(json.dumps({
+        "program_id": "acme",
+        "gathered_at": "2026-10-28T12:00:00+00:00",
+        "channels": channel(current_active),
+        "previous_gathered_at": "2026-10-27T12:00:00+00:00",
+        "previous_channels": channel(previous_active),
+    }), encoding="utf-8")
+    report = run_doctor(edition_name=EDITION_NAME, channels=True, reports_root=reports, programs_root=tmp_path / "programs")
+    payload = _build_doctor_payload(report=report, tip=None)
+    rendered = json.loads(render_doctor_output(payload, format="json"))
+    assert rendered["edition"] == EDITION_NAME
+    assert rendered["failures"] == 0
+    checks = {check["label"]: check for check in rendered["checks"]}
+    summary, delta = checks["Channels"], checks["Channels Delta"]
+    assert summary["status"] == ("ok" if current_active else "warn")
+    assert summary["metadata"]["gathered_at"] == "2026-10-28T12:00:00+00:00"
+    assert summary["metadata"]["completeness_pct"] == (100 if current_active else None)
+    assert delta["metadata"]["previous_completeness_pct"] == (100 if previous_active else None)
+    assert delta["metadata"]["current_completeness_pct"] == (100 if current_active else None)
+    assert delta["metadata"]["completeness_delta_pct"] == (0 if current_active and previous_active else None)
+    assert delta["status"] == ("ok" if current_active and previous_active else "warn")
+    if not (current_active and previous_active):
+        assert "unavailable" in delta["detail"]
+        assert "points" not in delta["detail"]
+    rows = {row["label"]: row for row in csv.DictReader(render_doctor_output(payload, format="csv").splitlines())}
+    for label in ("Channels", "Channels Delta"):
+        assert json.loads(rows[label]["metadata_json"]) == checks[label]["metadata"]
+
 class _FakeKeyring:
         def __init__(self) -> None:
                 self._values: dict[tuple[str, str], str] = {}
@@ -8713,7 +8752,10 @@ def test_run_doctor_kusto_warns_on_unvalidated_queries_and_includes_kpis(tmp_pat
         assert checks["Kusto Probe"].metadata["cluster_targets"] == ["https://example.kusto.windows.net/ExampleDb"]
 
 
-def test_run_doctor_kusto_warns_when_wired_query_freshness_is_stale(tmp_path: Path) -> None:
+@pytest.mark.parametrize("identity", ["matching", "missing", "mismatched"])
+def test_run_doctor_kusto_warns_when_wired_query_freshness_is_stale(tmp_path: Path, identity: str) -> None:
+        from src.core.kusto_query_loader import load_kpi_queries, query_history_contract_identity
+
         editions_root, programs_root = _seed_kb_layout(tmp_path, query_ids=())
         program_path = programs_root / "demo" / "program.yaml"
         program_doc = yaml.safe_load(program_path.read_text(encoding="utf-8"))
@@ -8726,12 +8768,19 @@ def test_run_doctor_kusto_warns_when_wired_query_freshness_is_stale(tmp_path: Pa
         queries_doc["queries"][0]["validated"] = True
         queries_path.write_text(yaml.safe_dump(queries_doc, sort_keys=False, allow_unicode=False), encoding="utf-8")
 
+        query = load_kpi_queries("demo", programs_root=programs_root)[0]
+        identity_state = {}
+        if identity != "missing":
+                identity_state["history_contract_identity"] = (
+                        query_history_contract_identity(query) if identity == "matching" else "other-contract"
+                )
         (programs_root / "demo" / "gather_state.json").write_text(
                 json.dumps(
                         {
                                 "schema_version": "2.0",
                                 "queries": {
                                         "velocity-p50": {
+                                                **identity_state,
                                                 "last_succeeded_at": "2026-05-01T08:00:00Z",
                                                 "last_cycle_succeeded": True,
                                                 "row_count": 1,
@@ -8752,10 +8801,16 @@ def test_run_doctor_kusto_warns_when_wired_query_freshness_is_stale(tmp_path: Pa
 
         checks = {check.label: check for check in report.checks}
         assert checks["Kusto Freshness"].status == "warn"
-        assert "stale >7d" in checks["Kusto Freshness"].detail
         assert "velocity-p50" in checks["Kusto Freshness"].detail
         assert checks["Kusto Freshness"].metadata is not None
-        assert checks["Kusto Freshness"].metadata["stale_query_ids"] == ["velocity-p50"]
+        if identity == "matching":
+                assert "stale >7d" in checks["Kusto Freshness"].detail
+                assert checks["Kusto Freshness"].metadata["stale_query_ids"] == ["velocity-p50"]
+                assert checks["Kusto Freshness"].metadata["missing_query_ids"] == []
+        else:
+                assert "no successful gather recorded for velocity-p50" in checks["Kusto Freshness"].detail
+                assert checks["Kusto Freshness"].metadata["missing_query_ids"] == ["velocity-p50"]
+                assert checks["Kusto Freshness"].metadata["stale_query_ids"] == []
 
 
 def test_run_doctor_kusto_surfaces_icm_query_readiness(tmp_path: Path) -> None:

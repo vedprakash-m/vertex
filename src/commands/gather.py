@@ -3091,6 +3091,7 @@ def _build_kusto_kpi_signal(
     if not rows or kusto_metric_result_error(
         query.id, query.expected_cardinality, rows,
         metric_id=query.metric_id, result_column=query.result_column,
+        slo_target=query.slo_target, comparison=query.comparison,
     ):
         return None
 
@@ -3155,6 +3156,7 @@ def _project_kpi_signals_to_observations(
         include_unvalidated=include_unvalidated,
         load_refresh_kpi_queries_fn=_load_refresh_kpi_queries,
         dedupe_queries_fn=_dedupe_queries_by_id,
+        metrics_root=programs_root.parent / "knowledge" / "metrics",
     )
 
 

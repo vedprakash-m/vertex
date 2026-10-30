@@ -22,6 +22,8 @@ import difflib
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from src.core.cockpit_html import render_cockpit_html
 from src.core.cockpit_models import (
     CockpitFinding,
@@ -37,7 +39,7 @@ from src.core.cockpit_models import (
     finalize_cockpit_snapshot,
 )
 
-GOLDEN_DIR = Path(__file__).resolve().parent / "snapshots"
+GOLDEN_DIR = Path(__file__).resolve().parent / "public_snapshots"
 _NOW = datetime(2026, 7, 12, 8, 0, 0, tzinfo=timezone.utc)
 
 
@@ -131,15 +133,12 @@ def _fixture_snapshot() -> CockpitSnapshot:
 
 def _compare_with_golden(name: str, actual: str, update: bool) -> None:
     golden_path = GOLDEN_DIR / f"{name}.golden"
-    if update or not golden_path.exists():
+    if update:
         GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
         golden_path.write_text(actual, encoding="utf-8")
-        if not update:
-            import pytest
-
-            pytest.skip(f"Created new golden file: {name}.golden")
         return
 
+    assert golden_path.exists(), f"Missing public golden baseline: {name}.golden; regenerate explicitly with --update-golden."
     golden = golden_path.read_text(encoding="utf-8")
     if actual != golden:
         diff = "".join(
@@ -164,3 +163,32 @@ def test_cockpit_html_contract_no_external_resources() -> None:
 def test_cockpit_html_golden(update_golden: bool) -> None:
     rendered = render_cockpit_html(_fixture_snapshot())
     _compare_with_golden("cockpit_html", rendered, update_golden)
+
+
+def test_missing_baseline_fails_without_writing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    directory = tmp_path / "missing"
+    monkeypatch.setitem(globals(), "GOLDEN_DIR", directory)
+    try:
+        with pytest.raises(AssertionError, match="Missing public golden baseline"):
+            _compare_with_golden("cockpit_html", "synthetic output", False)
+    except pytest.skip.Exception:
+        pytest.fail("A missing baseline must fail, not create output and skip.")
+    assert not directory.exists()
+
+
+def test_explicit_update_creates_and_replaces_baseline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    directory = tmp_path / "baselines"
+    monkeypatch.setitem(globals(), "GOLDEN_DIR", directory)
+    _compare_with_golden("cockpit_html", "first", True)
+    assert (directory / "cockpit_html.golden").read_text(encoding="utf-8") == "first"
+    _compare_with_golden("cockpit_html", "second", True)
+    assert (directory / "cockpit_html.golden").read_text(encoding="utf-8") == "second"
+
+
+def test_mismatched_baseline_fails_without_replacing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(globals(), "GOLDEN_DIR", tmp_path)
+    baseline = tmp_path / "cockpit_html.golden"
+    baseline.write_text("reviewed output", encoding="utf-8")
+    with pytest.raises(AssertionError, match="does not match golden file"):
+        _compare_with_golden("cockpit_html", "different output", False)
+    assert baseline.read_text(encoding="utf-8") == "reviewed output"

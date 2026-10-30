@@ -32,7 +32,7 @@ from src.core.review_status_store import load_review_status
 from src.core.ncfl_proposal_store import conflicting_pending_proposals, load_proposals, stale_pending_proposals
 from src.core.snapshot_store import ARCHIVE_ROOT as SNAPSHOT_ARCHIVE_ROOT, get_archive_root, read_snapshot
 from src.core.trusted_baseline_store import load_trusted_baseline_issue
-from src.core.workspace_paths import PROGRAMS_ROOT, validate_report_workspace
+from src.core.workspace_paths import PROGRAMS_ROOT, resolve_report_workspace_roots
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -80,7 +80,16 @@ class FreshnessArtifacts:
 
 def _preflight_freshness_workspace() -> None:
     try:
-        validate_report_workspace(programs_root=PROGRAMS_ROOT, reports_root=REPORTS_ROOT, archive_root=ARCHIVE_ROOT)
+        programs_root: Path | None = PROGRAMS_ROOT
+        reports_root: Path | None = REPORTS_ROOT
+        archive_root: Path | None = ARCHIVE_ROOT
+        if programs_root == REPO_ROOT / "programs":
+            programs_root = None
+        if reports_root == REPO_ROOT / "reports":
+            reports_root = None
+        if archive_root == REPO_ROOT / "archive":
+            archive_root = None
+        resolve_report_workspace_roots(programs_root, reports_root, archive_root)
     except ConfigError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(code=2) from error
@@ -345,17 +354,20 @@ def generate_freshness_report(
 
     started_at = datetime.now(timezone.utc)
     data_as_of = as_of or started_at
-    resolved_reports_root = reports_root if reports_root is not None else REPORTS_ROOT
-    resolved_archive_root = archive_root if archive_root is not None else ARCHIVE_ROOT
-    resolved_programs_root = (
-        programs_root if programs_root is not None
-        else reports_root.parent / "programs" if reports_root is not None
-        else PROGRAMS_ROOT
-    )
-    validate_report_workspace(
-        programs_root=resolved_programs_root,
-        reports_root=resolved_reports_root,
-        archive_root=resolved_archive_root,
+    selected_programs_root = programs_root
+    if selected_programs_root is None:
+        if reports_root is not None:
+            selected_programs_root = reports_root.parent / "programs"
+        elif PROGRAMS_ROOT != REPO_ROOT / "programs":
+            selected_programs_root = PROGRAMS_ROOT
+    selected_reports_root = reports_root
+    if selected_reports_root is None and REPORTS_ROOT != REPO_ROOT / "reports":
+        selected_reports_root = REPORTS_ROOT
+    selected_archive_root = archive_root
+    if selected_archive_root is None and ARCHIVE_ROOT != REPO_ROOT / "archive":
+        selected_archive_root = ARCHIVE_ROOT
+    resolved_programs_root, resolved_reports_root, resolved_archive_root = resolve_report_workspace_roots(
+        selected_programs_root, selected_reports_root, selected_archive_root,
     )
 
     bundle = load_bundle(

@@ -1,5 +1,18 @@
 from __future__ import annotations
 
+
+def test_explicit_review_root_reset_load_save(tmp_path):
+    from tests.unit.test_narrative_store import _selected_artifact_root
+    from src.core import review_status_store as store
+
+    root = _selected_artifact_root(tmp_path)
+    reports = tmp_path / "reports"
+    document = store.reset_review_status("fixture_weekly", 7, ("exec_summary",), reports, programs_root=root)
+    assert store.load_review_status("fixture_weekly", reports, programs_root=root) == document
+    assert store.get_review_status_path("fixture_weekly", reports, programs_root=root).is_relative_to(root)
+    assert not reports.exists()
+
+
 from datetime import datetime, timezone
 from pathlib import Path
 

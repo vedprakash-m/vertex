@@ -5,8 +5,32 @@ from pathlib import Path
 import pytest
 
 from src.core.config_loader_v2 import load_edition_bundle
-from src.core.knowledge_store import load_program_knowledge
+from src.core.exceptions import ConfigError
+from src.core.knowledge_store import load_program_knowledge, parse_knowledge_documents
 from src.core.profile_encryption import encrypt_people_profiles_file
+
+
+@pytest.mark.parametrize("target", [
+    float("nan"), float("inf"), float("-inf"), "NaN", "inf", "-inf", "1e999", "unavailable", {},
+    pytest.param(10**1000, id="overflow"),
+])
+def test_golden_query_rejects_nonfinite_slo_target(target: object) -> None:
+    with pytest.raises(ConfigError, match="slo_target.*finite"):
+        parse_knowledge_documents(
+            {"golden_queries.yaml": {"queries": [{"id": "count", "kql": "print Count=0", "slo_target": target}]}},
+            knowledge_root=Path("synthetic-knowledge"),
+        )
+
+
+@pytest.mark.parametrize("target,expected", [(None, None), (0, 0), (-2, -2), ("95.5", 95.5), ("0", 0)])
+def test_golden_query_keeps_absent_and_finite_slo_target(
+    target: float | str | None, expected: float | None,
+) -> None:
+    knowledge = parse_knowledge_documents(
+        {"golden_queries.yaml": {"queries": [{"id": "count", "kql": "print Count=0", "slo_target": target}]}},
+        knowledge_root=Path("synthetic-knowledge"),
+    )
+    assert knowledge.golden_queries[0].slo_target == expected
 
 
 class _FakeKeyring:

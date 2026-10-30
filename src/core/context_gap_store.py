@@ -25,6 +25,7 @@ from typing import Any
 import portalocker
 
 from src.core.edition_resolver import PROGRAMS_ROOT
+from src.core.manual_registry_diff import _read_registry_value
 
 
 # ---------------------------------------------------------------------------
@@ -211,11 +212,15 @@ class RankedGap:
 
 def rank_context_gaps(
     gaps: list[ContextGapRecord],
+    *,
+    programs_root: Path | None = None,
 ) -> list[RankedGap]:
     """
     Rank gaps by impact_estimate descending, then by count descending.
 
     Groups by (feature, lane, field) to aggregate frequency.
+    With an explicit root, project the doctor's missing why/what conditions
+    against current registry values without changing historical observations.
     """
     # Group by key
     from collections import defaultdict
@@ -226,9 +231,22 @@ def rank_context_gaps(
         groups[key].append(g)
 
     ranked: list[RankedGap] = []
+    registry_documents: dict[str, Any] = {}
     for (feature, lane, field), group in groups.items():
         group.sort(key=lambda r: r.ts)
         first = group[0]
+        # Only the doctor's missing-field detector establishes this condition.
+        # Legacy observations may request a change to an already populated value.
+        if (
+            programs_root is not None and feature == "doctor --context" and lane
+            and field in {"deep_context.why", "deep_context.what"}
+        ):
+            current, state = _read_registry_value(
+                first.program, lane, field, programs_root=programs_root,
+                registry_documents=registry_documents,
+            )
+            if state == "str" and current:
+                continue
         last = group[-1]
         impact = first.impact_estimate
         severity = first.severity

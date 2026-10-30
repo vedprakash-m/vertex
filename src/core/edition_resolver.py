@@ -264,6 +264,26 @@ def resolve_edition_paths(
     )
 
 
+def resolve_artifact_edition(
+    edition: str, reports_root: Path, programs_root: Path | None,
+) -> ResolvedEditionPaths | None:
+    if programs_root is None:
+        return resolve_edition_paths(edition, programs_root=reports_root.parent / "programs")
+    try:
+        if not programs_root.is_absolute() or not programs_root.is_dir():
+            raise ConfigError("Selected artifact programs root must be an accessible absolute directory.")
+        root = programs_root.resolve()
+        edition_path = find_edition_yaml(edition, programs_root=root)
+        if not edition_path.is_file() or not edition_path.resolve().is_relative_to(root):
+            raise ConfigError("Edition is unavailable in the selected artifact programs root; no legacy fallback is permitted.")
+        resolved = resolve_edition_paths(edition, programs_root=root)
+        if resolved is None or not resolved.program_dir.resolve().is_relative_to(root):
+            raise ConfigError("Selected artifact program escapes its declared root.")
+    except OSError as exc:
+        raise ConfigError("Selected artifact programs root cannot be accessed.") from exc
+    return resolved
+
+
 def resolve_edition(
     edition_id: str,
     *,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError, replace
+
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -47,6 +49,34 @@ def test_load_milestones_reads_yaml(tmp_path: Path) -> None:
 
 def test_load_milestones_returns_empty_tuple_when_file_absent(tmp_path: Path) -> None:
     assert load_milestones("acme", programs_root=tmp_path / "programs") == ()
+
+
+def test_load_milestones_accepts_authored_empty_list(tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    path = programs_root / "acme" / "milestones.yaml"
+    path.parent.mkdir(parents=True)
+    path.write_text('schema_version: "1.0"\nmilestones: []\n', encoding="utf-8")
+
+    assert load_milestones("acme", programs_root=programs_root) == ()
+
+
+def test_save_empty_milestones_round_trips(tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+
+    save_milestones("acme", (), programs_root=programs_root)
+
+    assert load_milestones("acme", programs_root=programs_root) == ()
+
+
+@pytest.mark.parametrize("field", ["", "milestones: null", "milestones: false", "milestones: 0", "milestones: ''", "milestones: {}", "milestones: example"])
+def test_load_milestones_rejects_non_list_collection(tmp_path: Path, field: str) -> None:
+    programs_root = tmp_path / "programs"
+    path = programs_root / "acme" / "milestones.yaml"
+    path.parent.mkdir(parents=True)
+    path.write_text(f'schema_version: "1.0"\n{field}\n', encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="Expected 'milestones' list"):
+        load_milestones("acme", programs_root=programs_root)
 
 
 def test_load_milestones_rejects_non_string_status(tmp_path: Path) -> None:
@@ -423,3 +453,65 @@ def _work_item(*, item_id: int, state: str, risk_level: RiskLevel, target_date: 
         comments=[],
         fetched_at=datetime(2026, 5, 10, 18, 0, tzinfo=timezone.utc),
     )
+def _date_margin_dependency():
+    from src.core.models_v2 import Dependency, DependencyType, DependencyStatus
+
+    return Dependency(
+        id="margin", from_program_id="demo", from_workstream_id=None, from_item_id=None,
+        from_milestone_id="provider", to_program_id="demo", to_workstream_id=None,
+        to_item_id=None, to_milestone_id="consumer", dependency_type=DependencyType.BLOCKS,
+        risk_if_broken="Blocked", mitigation=None, status=DependencyStatus.ACTIVE, owner_alias=None,
+        provider_forecast_ready_date=date(2026, 10, 23),
+        consumer_required_by_date=date(2026, 10, 26),
+        date_margin_calendar="calendar_days", date_margin_calendar_version="1",
+        date_margin_timezone="UTC", date_margin_unit="days", date_margin_lag=0,
+    )
+
+
+@pytest.mark.parametrize("required,margin,status", [
+    (date(2026, 10, 26), 3, "buffer"),
+    (date(2026, 10, 23), 0, "no_buffer"),
+    (date(2026, 10, 22), -1, "breach"),
+])
+def test_dependency_date_margin(required: date, margin: int, status: str) -> None:
+    from src.core.milestone_engine import assess_dependency_date_margin
+
+    result = assess_dependency_date_margin(replace(
+        _date_margin_dependency(), consumer_required_by_date=required,
+    ))
+    assert (result.margin_days, result.status, result.reasons) == (margin, status, ())
+    assert not hasattr(result, "__dict__")
+    with pytest.raises(FrozenInstanceError):
+        result.status = "unknown"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("provider_forecast_ready_date", None), ("consumer_required_by_date", None),
+    ("provider_forecast_ready_date", "invalid"),
+    ("consumer_required_by_date", datetime(2026, 10, 26, tzinfo=timezone.utc)),
+    ("date_margin_calendar", None), ("date_margin_calendar", "working_days"),
+    ("date_margin_calendar_version", None), ("date_margin_calendar_version", "2"),
+    ("date_margin_timezone", None), ("date_margin_timezone", "Europe/London"),
+    ("date_margin_unit", None), ("date_margin_unit", "hours"),
+    ("date_margin_lag", None), ("date_margin_lag", 1), ("date_margin_lag", True),
+    ("date_margin_lag", "0"), ("date_margin_lag", 0.0),
+    ("dependency_type", DependencyType.INFORMS),
+    ("dependency_type", DependencyType.SHARES_RESOURCE),
+    ("dependency_type", "blocks"),
+    ("date_margin_calendar", 1), ("date_margin_unit", []),
+])
+def test_dependency_date_margin_unknown(field: str, value: object) -> None:
+    from src.core.milestone_engine import assess_dependency_date_margin
+
+    result = assess_dependency_date_margin(replace(_date_margin_dependency(), **{field: value}))
+    assert result.status == "unknown"
+    assert result.margin_days is None
+    assert any(field in reason for reason in result.reasons)
+
+
+def test_dependency_date_margin_never_uses_legacy_target_date() -> None:
+    from src.core.milestone_engine import assess_dependency_date_margin
+
+    dependency = replace(_date_margin_dependency(), provider_forecast_ready_date=None,
+                         consumer_required_by_date=None, planned_resolution_date=date(2026, 10, 23))
+    assert assess_dependency_date_margin(dependency).margin_days is None

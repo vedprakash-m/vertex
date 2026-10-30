@@ -40,6 +40,7 @@ class ComputeStage:
             items=ctx.items,
             as_of=ctx.data_as_of,
             reports_root=ctx.reports_root,
+            programs_root=ctx.programs_root if ctx.resolved_v2 is not None else None,
         )
         evidence_window_start = ctx.data_as_of - timedelta(days=ctx.bundle.config.ado.date_window_days)
         evidence_by_item = {
@@ -62,11 +63,17 @@ class ComputeStage:
         overrides_document, _ = merge_overrides(
             issue_number=ctx.resolved_issue_number,
             expected_scorecards=expected_scorecards,
-            existing=load_overrides(ctx.edition_name, reports_root=ctx.reports_root, issue_number=ctx.resolved_issue_number),
+            existing=load_overrides(
+                ctx.edition_name, reports_root=ctx.reports_root, issue_number=ctx.resolved_issue_number,
+                programs_root=ctx.programs_root if ctx.resolved_v2 is not None else None,
+            ),
         )
         override_snapshot = support.build_override_snapshot(overrides_document)
         top_3_now = tuple(entry.text.strip() for entry in overrides_document.top_3_now if entry.text.strip())
-        overrides_path = save_overrides(ctx.edition_name, overrides_document, reports_root=ctx.reports_root)
+        overrides_path = save_overrides(
+            ctx.edition_name, overrides_document, reports_root=ctx.reports_root,
+            programs_root=ctx.programs_root if ctx.resolved_v2 is not None else None,
+        )
         scorecard_packets = support.build_scorecard_packets(
             ctx.bundle,
             ctx.items,
@@ -86,6 +93,9 @@ class ComputeStage:
             archive_root=ctx.archive_root,
             trusted_issue_number=ctx.trusted_baseline_issue_number,
             reports_root=ctx.reports_root,
+            current_at=ctx.data_as_of,
+            programs_root=ctx.programs_root if ctx.resolved_v2 is not None else None,
+            prior_at=(continuity_snapshot.generated_at if continuity_snapshot is not None else None),
         )
         signal_context = support.load_report_signal_context(
             edition_name=ctx.edition_name,

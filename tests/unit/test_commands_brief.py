@@ -2,8 +2,13 @@ from __future__ import annotations
 from tests.support.synthetic_report_source import synthetic_report_root as repo_root
 
 from datetime import date, datetime, timezone
+import hashlib
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
+import sys
 from types import SimpleNamespace
 
 from typer.testing import CliRunner
@@ -123,8 +128,157 @@ def test_build_brief_surfaces_program_narrative_when_synthesis_released(tmp_path
     assert "Program Narrative" in rendered
     assert "- Deployment workstream is the program's critical path this cycle." in rendered
     assert "- Long pole: Vendor delivery risk remains open." in rendered
+    assert not any("editorial rules" in line for line in report.now_lines)
     # The section must render after (not instead of) the existing sections.
     assert rendered.index("Program Narrative") > rendered.index("Staged")
+
+
+@pytest.mark.parametrize(
+    ("through_line", "long_poles", "custom_phrase"),
+    [
+        ("Furthermore, delivery remains on schedule.", ("Vendor follow-up remains open.",), None),
+        ("Delivery remains on schedule.", ("Private custom phrase: vendor follow-up remains open.",), "private custom phrase"),
+    ],
+)
+def test_brief_omits_released_synthesis_with_editorial_violation(
+    tmp_path: Path,
+    through_line: str,
+    long_poles: tuple[str, ...],
+    custom_phrase: str | None,
+) -> None:
+    from src.core.program_synthesis import ProgramSynthesis, load_latest_released_program_synthesis, persist_program_synthesis
+    from src.core.quality_gates.ai_release_audit import ReleaseTerminal, record_ai_release_decision
+
+    programs_root = tmp_path / "selected-programs"
+    _seed_brief_workspace(programs_root, "acme")
+    synthesis = ProgramSynthesis(
+        program_id="acme",
+        ai_run_id="editorial-run",
+        through_line=through_line,
+        long_poles=long_poles,
+        facts=(),
+        inferences=(),
+        recommendations=(),
+        generated_at=datetime(2026, 5, 20, tzinfo=timezone.utc),
+        prompt_version="program_synthesis.v1",
+        source_item_count=3,
+    )
+    persist_program_synthesis(synthesis, programs_root=programs_root)
+    record_ai_release_decision(
+        program_id="acme",
+        ai_run_id=synthesis.ai_run_id,
+        terminal=ReleaseTerminal.RELEASED,
+        reason="synthetic control",
+        validator_finding_count=0,
+        programs_root=programs_root,
+    )
+    if custom_phrase is not None:
+        rules_path = programs_root / "acme" / "editorial_rules.yaml"
+        rules_path.write_text(
+            "schema_version: '1.0'\nstale_warn_days: 14\nstale_block_days: 30\n"
+            f"banned_phrases:\n  - {custom_phrase}\nbanned_openings: []\nverbosity: {{}}\n",
+            encoding="utf-8",
+        )
+
+    report = build_brief(
+        "acme",
+        programs_root=programs_root,
+        as_of=datetime(2026, 5, 21, 9, tzinfo=timezone.utc),
+    )
+    rendered = render_brief(report)
+    diagnostic = next(line for line in report.now_lines if "editorial" in line)
+
+    assert report.program_narrative_lines == ()
+    assert "Program Narrative" not in rendered
+    assert through_line not in rendered
+    assert all(pole not in rendered for pole in long_poles)
+    assert custom_phrase is None or custom_phrase not in diagnostic
+    assert "Claim c-1" in rendered and "Contradiction WI:123" in rendered
+    assert str(tmp_path) not in diagnostic
+    retained = load_latest_released_program_synthesis("acme", programs_root=programs_root)
+    assert retained is not None and retained.ai_run_id == synthesis.ai_run_id
+
+
+@pytest.mark.parametrize("failure", ["invalid_schema", "malformed_shape", "unreadable", "unreadable_path"])
+def test_brief_withholds_released_synthesis_when_editorial_rules_cannot_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    from src.core.program_synthesis import ProgramSynthesis, load_latest_released_program_synthesis, persist_program_synthesis
+    from src.core.quality_gates.ai_release_audit import ReleaseTerminal, record_ai_release_decision
+
+    programs_root = tmp_path / "selected-programs"
+    _seed_brief_workspace(programs_root, "acme")
+    synthesis = ProgramSynthesis(
+        program_id="acme",
+        ai_run_id="editorial-config-run",
+        through_line="Delivery remains on schedule.",
+        long_poles=("Vendor follow-up remains open.",),
+        facts=(),
+        inferences=(),
+        recommendations=(),
+        generated_at=datetime(2026, 5, 20, tzinfo=timezone.utc),
+        prompt_version="program_synthesis.v1",
+        source_item_count=3,
+    )
+    persist_program_synthesis(synthesis, programs_root=programs_root)
+    record_ai_release_decision(
+        program_id="acme",
+        ai_run_id=synthesis.ai_run_id,
+        terminal=ReleaseTerminal.RELEASED,
+        reason="synthetic control",
+        validator_finding_count=0,
+        programs_root=programs_root,
+    )
+    rules_path = programs_root / "acme" / "editorial_rules.yaml"
+    private_config_content = "private editorial config content"
+    if failure == "invalid_schema":
+        rules_path.write_text(
+            f"schema_version: invalid\nprivate_value: {private_config_content}\n",
+            encoding="utf-8",
+        )
+    elif failure == "malformed_shape":
+        rules_path.write_text(
+            f"schema_version: '1.0'\nprivate_value: {private_config_content}\n",
+            encoding="utf-8",
+        )
+    elif failure == "unreadable":
+        rules_path.write_text("schema_version: '1.0'\n", encoding="utf-8")
+        original_read_text = Path.read_text
+
+        def fail_editorial_rules_read(path: Path, *args, **kwargs):
+            if path == rules_path:
+                raise PermissionError(private_config_content)
+            return original_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", fail_editorial_rules_read)
+    else:
+        original_stat = Path.lstat
+
+        def fail_editorial_rules_stat(path: Path, *args, **kwargs):
+            if path == rules_path:
+                raise PermissionError(private_config_content)
+            return original_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "lstat", fail_editorial_rules_stat)
+
+    report = build_brief(
+        "acme",
+        programs_root=programs_root,
+        as_of=datetime(2026, 5, 21, 9, tzinfo=timezone.utc),
+    )
+    rendered = render_brief(report)
+    diagnostic = next(line for line in report.now_lines if "editorial" in line)
+
+    assert report.program_narrative_lines == ()
+    assert "Program Narrative" not in rendered
+    assert synthesis.through_line not in rendered
+    assert "Claim c-1" in rendered and "Contradiction WI:123" in rendered
+    assert "synthesis unavailable" not in diagnostic and "retained assessment read failed" not in diagnostic
+    assert private_config_content not in rendered and str(tmp_path) not in rendered
+    retained = load_latest_released_program_synthesis("acme", programs_root=programs_root)
+    assert retained is not None and retained.ai_run_id == synthesis.ai_run_id
 
 
 def test_build_brief_omits_program_narrative_section_when_no_synthesis_released(tmp_path: Path) -> None:
@@ -141,15 +295,67 @@ def test_build_brief_omits_program_narrative_section_when_no_synthesis_released(
     assert "Program Narrative" not in render_brief(report)
 
 
-def test_build_program_narrative_lines_degrades_on_failure(monkeypatch, tmp_path: Path) -> None:
+def test_build_program_narrative_lines_propagates_implementation_failure(monkeypatch, tmp_path: Path) -> None:
     def _raise(program_id, **kwargs):
         raise RuntimeError("fact store unavailable")
 
     monkeypatch.setattr("src.core.program_synthesis.load_latest_released_program_synthesis", _raise)
 
-    lines = _build_program_narrative_lines("acme", programs_root=tmp_path / "programs")
+    with pytest.raises(RuntimeError, match="fact store unavailable"):
+        _build_program_narrative_lines("acme", programs_root=tmp_path / "programs")
 
-    assert lines == ()
+
+@pytest.mark.parametrize("failure", ["invalid", "unavailable"])
+def test_brief_retained_synthesis_failure_is_visible_without_losing_other_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    from src.core.program_synthesis import persist_program_synthesis
+    from src.core.quality_gates.ai_release_audit import ReleaseTerminal, record_ai_release_decision
+    from tests.unit.test_program_synthesis import _synthesis
+
+    programs_root = tmp_path / "programs"
+    _seed_brief_workspace(programs_root, "acme")
+    synthesis = _synthesis(program_id="acme")
+    path = persist_program_synthesis(synthesis, programs_root=programs_root)
+    assert path is not None
+    record_ai_release_decision(
+        program_id="acme", ai_run_id=synthesis.ai_run_id, terminal=ReleaseTerminal.RELEASED,
+        reason="synthetic control", validator_finding_count=0, programs_root=programs_root,
+    )
+    if failure == "invalid":
+        path.write_text("{private retained content", encoding="utf-8")
+    else:
+        read_text = Path.read_text
+
+        def fail_read(candidate, *args, **kwargs):
+            if candidate == path:
+                raise PermissionError("private retained path")
+            return read_text(candidate, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", fail_read)
+
+    report = build_brief("acme", programs_root=programs_root, as_of=datetime(2026, 5, 21, 9, tzinfo=timezone.utc))
+    rendered = render_brief(report)
+    diagnostic = next(line for line in report.now_lines if "synthesis unavailable" in line)
+    assert "acme" in diagnostic and "ConfigError" in diagnostic
+    assert "Inspect" in diagnostic and "retry" in diagnostic
+    assert "retained" in diagnostic and "vertex brief --program acme" in diagnostic
+    assert "Program Narrative" not in rendered and report.program_narrative_lines == ()
+    assert "Claim c-1" in rendered and "Contradiction WI:123" in rendered
+    assert synthesis.through_line not in rendered and "private retained" not in rendered
+    assert str(tmp_path) not in rendered
+
+
+def test_brief_unreleased_retained_synthesis_keeps_empty_compatibility(tmp_path: Path) -> None:
+    from src.core.program_synthesis import persist_program_synthesis
+    from tests.unit.test_program_synthesis import _synthesis
+
+    programs_root = tmp_path / "programs"
+    _seed_brief_workspace(programs_root, "acme")
+    as_of = datetime(2026, 5, 21, 9, tzinfo=timezone.utc)
+    before = render_brief(build_brief("acme", programs_root=programs_root, as_of=as_of))
+    persist_program_synthesis(_synthesis(program_id="acme"), programs_root=programs_root)
+    assert render_brief(build_brief("acme", programs_root=programs_root, as_of=as_of)) == before
 
 
 def test_build_brief_incident_learning_lines_include_higher_order_class_patterns() -> None:
@@ -627,6 +833,198 @@ def test_brief_command_approve_decision_ask_escalation_applies_and_renders_updat
         if line.strip()
     ]
     assert audit_payloads[-1]["action_type"] == "decision_ask_escalation"
+
+
+@pytest.mark.parametrize(
+    "route",
+    ("direct", "cli", "explicit", "explicit_program", "late_environment", "apply", "legacy_preview", "legacy_apply"),
+)
+def test_brief_escalation_actual_workspace_handoffs(tmp_path: Path, route: str) -> None:
+    from tests.support.synthetic_report_source import build_synthetic_report_source
+
+    checkout = Path(__file__).resolve().parents[2]
+    selected = build_synthetic_report_source(tmp_path / "selected")
+    decoy = build_synthetic_report_source(tmp_path / "misleading-cwd")
+    for home in (selected, decoy):
+        _seed_brief_escalation_context(home)
+        _seed_brief_escalation_rule(home / "programs")
+        append_decision_ask(
+            DecisionAsk(
+                id="d-3", program_id="acme", edition_id="acme_weekly", issue_number=77,
+                text="Selected-only rollout sequencing" if home == selected else "DECOY rollout sequencing",
+                entity_refs=("WI:1201",), ask_date=date(2026, 4, 20), owner_alias="priya",
+            ),
+            programs_root=home / "programs",
+        )
+    legacy = route.startswith("legacy")
+    if legacy:
+        installation = tmp_path / "installation"
+        shutil.copytree(checkout / "src", installation / "src", ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copyfile(checkout / "cli.py", installation / "cli.py")
+        shutil.copytree(selected / "programs", installation / "programs")
+        shutil.copytree(selected / "knowledge", installation / "knowledge")
+        shutil.copytree(checkout / "templates", installation / "templates")
+        shutil.copytree(checkout / "vertex", installation / "vertex", ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copytree(checkout / "reports" / "schemas", installation / "reports" / "schemas")
+        selected = installation
+    else:
+        installation = checkout
+    protected_roots = (
+        tuple(selected / name for name in ("programs", "knowledge", "reports", "archive"))
+        if legacy else (selected,)
+    )
+    before_selected = {
+        str(path.relative_to(selected)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for root in protected_roots for path in root.rglob("*") if path.is_file()
+    }
+    before_decoy = {
+        str(path.relative_to(decoy)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in decoy.rglob("*") if path.is_file()
+    }
+    env = dict(os.environ)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    if legacy:
+        env.pop("VERTEX_PROGRAMS_ROOT", None)
+    else:
+        env["VERTEX_PROGRAMS_ROOT"] = str((decoy if route == "explicit_program" else selected) / "programs")
+    env["PYTHONPATH"] = os.pathsep.join((str(installation), str(checkout), env.get("PYTHONPATH", "")))
+    code = """
+from datetime import datetime, timezone
+import os
+from pathlib import Path
+from src.commands import brief, escalate
+from src.core.workspace_paths import PROGRAMS_ROOT, resolve_report_workspace_roots
+from tests.unit.test_commands_brief import _sample_brief_escalation_items
+brief._utc_now = lambda: datetime(2026, 5, 21, 9, tzinfo=timezone.utc)
+escalate.report_helpers._load_live_work_items = lambda bundle, timestamp: (_sample_brief_escalation_items(timestamp), 0)
+route = ROUTE
+selected = Path(SELECTED)
+if route == "late_environment":
+    os.environ["VERTEX_PROGRAMS_ROOT"] = str(Path.cwd() / "programs")
+programs_root = selected / "programs" if route == "explicit_program" else PROGRAMS_ROOT
+if route != "explicit_program":
+    assert resolve_report_workspace_roots()[0] == programs_root
+assert resolve_report_workspace_roots(
+    None if route.startswith("legacy") else programs_root,
+    selected / "reports", selected / "archive",
+) == (programs_root, selected / "reports", selected / "archive")
+assert escalate.REPORTS_ROOT == Path(escalate.__file__).resolve().parents[2] / "reports"
+report = brief.build_brief("acme", programs_root=programs_root)
+proposal = next(p for p in report.staged_interventions if p.proposal_id == "decision-ask-d-3-escalate")
+assert "Selected-only" in proposal.evidence_summary
+assert "DECOY" not in repr(proposal)
+if route == "explicit":
+    plan = escalate.plan_decision_ask_escalation(
+        edition_name="acme_weekly", decision_ask_id="d-3", reports_root=selected / "reports",
+    )
+    assert "Selected-only" in repr(plan.artifacts.previews)
+    assert plan.artifacts.previews[0].recipients == ("priya@example.com",)
+elif route == "cli":
+    from cli import app
+    app()
+elif route.startswith("legacy"):
+    import typer
+    try:
+        brief.brief_command(
+            program="acme", today=False, approve="decision-ask-d-3-escalate",
+            dismiss=None, dry_run=(route == "legacy_preview"),
+        )
+    except typer.Exit as error:
+        raise SystemExit(error.exit_code)
+else:
+    output = brief._apply_supported_intervention(
+        proposal, programs_root=programs_root, dry_run=(route != "apply"),
+    )
+    print("\\n".join(output))
+    if route != "apply":
+        assert "Decision Ask: d-3" in "\\n".join(output)
+        assert "priya@example.com" in "\\n".join(output)
+""".replace("ROUTE", repr(route)).replace("SELECTED", repr(str(selected)))
+    result = subprocess.run(
+        [sys.executable, "-c", code, "--no-catchup", "brief", "--program", "acme",
+         "--approve", "decision-ask-d-3-escalate", "--dry-run"],
+        cwd=decoy, env=env, text=True, capture_output=True, timeout=120,
+    )
+    after_selected = {
+        str(path.relative_to(selected)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for root in protected_roots for path in root.rglob("*") if path.is_file()
+    }
+    assert {
+        str(path.relative_to(decoy)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in decoy.rglob("*") if path.is_file()
+    } == before_decoy
+    if route not in {"apply", "legacy_apply"}:
+        assert {
+            path: digest for path, digest in after_selected.items()
+            if not (path.endswith((".sqlite3", ".sqlite3-wal", ".sqlite3-shm")) or "vertex-db" in path)
+        } == {
+            path: digest for path, digest in before_selected.items()
+            if not (path.endswith((".sqlite3", ".sqlite3-wal", ".sqlite3-shm")) or "vertex-db" in path)
+        }, result.stderr + result.stdout
+    assert result.returncode == 0, result.stderr + result.stdout
+    if route in {"apply", "legacy_apply"}:
+        assert len(list((selected / "programs" / "acme" / "publications" / "acme_weekly" / "escalations").glob("*.eml"))) == 1
+        assert next(
+            ask for ask in load_open_decision_asks("acme", programs_root=selected / "programs")
+            if ask.id == "d-3"
+        ).last_touched_at is not None
+    if route == "legacy_apply":
+        assert load_brief_intervention_resolutions(
+            "acme", programs_root=selected / "programs",
+        )["decision-ask-d-3-escalate"].status is BriefInterventionStatus.APPROVED
+    if route in {"cli", "legacy_preview"}:
+        assert "Decision Ask: d-3" in result.stdout
+        assert "Recorded approved" not in result.stdout
+
+
+@pytest.mark.parametrize("selection", ("relative", "installation", "checkout", "linked_checkout", "mismatch"))
+def test_brief_escalation_rejects_unsafe_workspace_before_provider(
+    tmp_path: Path, selection: str, monkeypatch,
+) -> None:
+    from src.commands.brief import _apply_supported_intervention
+    from src.core.exceptions import ConfigError
+    from src.core.intervention_ranker import InterventionProposal
+    from src.core.workspace_paths import REPO_ROOT, resolve_report_workspace_roots
+
+    root = tmp_path / "workspace" / "programs"
+    root.mkdir(parents=True)
+    if selection == "relative":
+        root = Path("relative") / "programs"
+    elif selection == "installation":
+        root = REPO_ROOT / "programs" / "nested"
+    elif selection in {"checkout", "linked_checkout"}:
+        checkout = tmp_path / "checkout"
+        checkout.mkdir()
+        (checkout / ".git").write_text("gitdir: synthetic", encoding="utf-8")
+        root = checkout / "programs"
+        root.mkdir()
+        if selection == "linked_checkout":
+            link = tmp_path / "linked"
+            if os.name == "nt":
+                import _winapi
+
+                _winapi.CreateJunction(str(checkout), str(link))
+            else:
+                link.symlink_to(checkout, target_is_directory=True)
+            root = link / "programs"
+    provider_calls = []
+    monkeypatch.setattr(
+        "src.commands.escalate.report_helpers._load_live_work_items",
+        lambda *args: provider_calls.append(args),
+    )
+    before = sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*"))
+    proposal = InterventionProposal(
+        proposal_id="decision-ask-d-3-escalate", title="Selected escalation", evidence_summary="WI:1201",
+        proposed_action="Preview", command="vertex escalate --edition acme_weekly --decision-ask d-3 --dry-run",
+        rollback="Do not send", source_hash="synthetic", priority=1,
+    )
+    with pytest.raises(ConfigError):
+        if selection == "mismatch":
+            resolve_report_workspace_roots(root, tmp_path / "elsewhere" / "reports")
+        else:
+            _apply_supported_intervention(proposal, programs_root=root, dry_run=True)
+    assert provider_calls == []
+    assert sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*")) == before
 
 
 def test_brief_command_approve_incident_readiness_review_fetches_snapshot_and_renders_updated_brief(

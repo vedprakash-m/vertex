@@ -107,6 +107,7 @@ def editor_report_command(
             resolved.edition_id,
             reports_root=reports_root,
             issue_number=issue_number,
+            programs_root=programs_root,
         )
         if issue_number is not None
         else None

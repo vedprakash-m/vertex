@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import typer
@@ -27,6 +28,7 @@ from src.commands.confirm_stages.draft_loaders import (
     load_readiness_gate_settings,
 )
 from src.core.models import ReviewState
+from src.core.overrides_store import OverridesDocument
 
 
 def _write_manifest(output_root: Path, edition: str, issue: int, metadata: dict) -> None:
@@ -147,3 +149,37 @@ def test_load_confirm_overrides_missing_raises(tmp_path: Path) -> None:
     # never dereferenced before the BadParameter is raised.
     with pytest.raises(typer.BadParameter):
         load_confirm_overrides("acme_weekly", 1, bundle=None, reports_root=tmp_path)
+
+
+def test_confirm_artifact_loaders_forward_explicit_programs_root(monkeypatch, tmp_path: Path) -> None:
+    from src.commands.confirm_stages import draft_loaders
+
+    selected_root = tmp_path / "selected" / "programs"
+    reports_root = tmp_path / "reports"
+    overrides_calls = []
+    review_calls = []
+    document = OverridesDocument(issue_number=5, top_3_now=(), scorecards=())
+
+    def load_overrides(*args, **kwargs):
+        overrides_calls.append((args, kwargs))
+        return document
+
+    def load_review_status(*args, **kwargs):
+        review_calls.append((args, kwargs))
+        return None
+
+    monkeypatch.setattr(draft_loaders, "load_overrides", load_overrides)
+    monkeypatch.setattr(draft_loaders, "load_review_status", load_review_status)
+
+    bundle = SimpleNamespace(config=SimpleNamespace(scorecards=()))
+    assert load_confirm_overrides(
+        "acme_weekly", 5, bundle, reports_root, programs_root=selected_root,
+    ) == document
+    status = load_confirm_review_status(
+        "acme_weekly", 5, ("ws-a",), reports_root, programs_root=selected_root,
+    )
+
+    assert overrides_calls[0][1]["programs_root"] == selected_root
+    assert review_calls[0][1]["programs_root"] == selected_root
+    assert status.issue_number == 5
+    assert tuple(section.section_id for section in status.sections) == ("exec_summary", "ws:ws-a")

@@ -11,7 +11,7 @@ import yaml
 
 from src.core.baseline_lock import assert_issue_unlocked
 from src.core.config_loader import load_bundle
-from src.core.edition_resolver import resolve_edition_paths
+from src.core.edition_resolver import resolve_artifact_edition as _resolve_artifact_edition
 from src.core.exceptions import ConfigError
 from src.core.models import ConfirmedDimension, RiskLevel
 from src.core.persona_models import PersonaOverride
@@ -138,11 +138,9 @@ def get_overrides_path(
     reports_root: Path = REPORTS_ROOT,
     *,
     issue_number: int | None = None,
+    programs_root: Path | None = None,
 ) -> Path:
-    resolved_paths = resolve_edition_paths(
-        edition,
-        programs_root=reports_root.parent / "programs",
-    )
+    resolved_paths = _resolve_artifact_edition(edition, reports_root, programs_root)
     if resolved_paths is not None:
         resolved_issue_number = issue_number or _detect_latest_v2_issue_number(resolved_paths.program_dir)
         if resolved_issue_number is None:
@@ -156,8 +154,9 @@ def load_overrides(
     reports_root: Path = REPORTS_ROOT,
     *,
     issue_number: int | None = None,
+    programs_root: Path | None = None,
 ) -> OverridesDocument | None:
-    path = get_overrides_path(edition, reports_root, issue_number=issue_number)
+    path = get_overrides_path(edition, reports_root, issue_number=issue_number, programs_root=programs_root)
     return _load_overrides_from_path(path)
 
 
@@ -189,20 +188,22 @@ def seed_overrides_from_prior(
     reports_root: Path = REPORTS_ROOT,
     archive_root: Path = ARCHIVE_ROOT,
     program_id: str | None = None,
-    programs_root: Path = PROGRAMS_ROOT,
+    programs_root: Path | None = None,
 ) -> OverridesSeedingState:
-    current_path = get_overrides_path(edition, reports_root, issue_number=target_issue_number)
+    current_path = get_overrides_path(edition, reports_root, issue_number=target_issue_number, programs_root=programs_root)
     current_document = _load_overrides_from_path(current_path)
     if current_document is not None and not _is_seed_like_document(current_document):
         return OverridesSeedingState(seeded=False, source_issue=source_issue_number)
 
-    source_document = load_overrides(edition, reports_root=reports_root, issue_number=source_issue_number)
+    source_document = load_overrides(edition, reports_root=reports_root, issue_number=source_issue_number, programs_root=programs_root)
     if source_document is None:
         source_document = load_archived_overrides(edition, source_issue_number, archive_root=archive_root)
     if source_document is None:
         return OverridesSeedingState(seeded=False, source_issue=source_issue_number)
 
-    seeded_scorecards = _overlay_judgment_facts(source_document.scorecards, program_id, programs_root)
+    seeded_scorecards = _overlay_judgment_facts(
+        source_document.scorecards, program_id, programs_root if programs_root is not None else PROGRAMS_ROOT,
+    )
     seeded_document = OverridesDocument(
         issue_number=target_issue_number,
         top_3_now=(),
@@ -222,7 +223,7 @@ def seed_overrides_from_prior(
         governance=source_document.governance,
         decisions=source_document.decisions,
     )
-    save_overrides(edition, seeded_document, reports_root=reports_root)
+    save_overrides(edition, seeded_document, reports_root=reports_root, programs_root=programs_root)
     return OverridesSeedingState(
         seeded=True,
         source_issue=source_issue_number,
@@ -425,8 +426,10 @@ def save_overrides(
     edition: str,
     document: OverridesDocument,
     reports_root: Path = REPORTS_ROOT,
+    *,
+    programs_root: Path | None = None,
 ) -> Path:
-    path = get_overrides_path(edition, reports_root, issue_number=document.issue_number)
+    path = get_overrides_path(edition, reports_root, issue_number=document.issue_number, programs_root=programs_root)
     # Hardlock: never silently overwrite the overrides of a trusted/locked baseline issue.
     assert_issue_unlocked(document.issue_number, target_path=path, artifact="overrides")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -438,11 +441,18 @@ def apply_pending_overrides(
     edition_name: str,
     report_dir: Path,
     reports_root: Path = REPORTS_ROOT,
+    *,
+    programs_root: Path | None = None,
 ) -> Path | None:
+    if programs_root is not None:
+        _resolve_artifact_edition(edition_name, reports_root, programs_root)
     issue_number = _resolve_pending_override_issue_number(report_dir)
     if issue_number is None:
         return None
-    bundle = load_bundle(edition_name, reports_root=reports_root)
+    bundle = load_bundle(
+        edition_name, reports_root=reports_root,
+        **({"programs_root": programs_root} if programs_root is not None else {}),
+    )
     expected_scorecards = {
         scorecard.name: tuple(dimension.name for dimension in scorecard.dimensions)
         for scorecard in bundle.config.scorecards
@@ -450,17 +460,19 @@ def apply_pending_overrides(
     overrides_document, _ = merge_overrides(
         issue_number=issue_number,
         expected_scorecards=expected_scorecards,
-        existing=load_overrides(edition_name, reports_root=reports_root, issue_number=issue_number),
+        existing=load_overrides(edition_name, reports_root=reports_root, issue_number=issue_number, programs_root=programs_root),
     )
-    return save_overrides(edition_name, overrides_document, reports_root=reports_root)
+    return save_overrides(edition_name, overrides_document, reports_root=reports_root, programs_root=programs_root)
 
 
 def delete_seedable_overrides(
     edition: str,
     issue_number: int,
     reports_root: Path = REPORTS_ROOT,
+    *,
+    programs_root: Path | None = None,
 ) -> bool:
-    path = get_overrides_path(edition, reports_root, issue_number=issue_number)
+    path = get_overrides_path(edition, reports_root, issue_number=issue_number, programs_root=programs_root)
     document = _load_overrides_from_path(path)
     if document is None or not _is_seed_like_document(document):
         return False
@@ -485,6 +497,8 @@ def reset_overrides_for_next_issue(
     next_issue_number: int,
     confirmed_dimensions: tuple[ConfirmedDimension, ...],
     reports_root: Path = REPORTS_ROOT,
+    *,
+    programs_root: Path | None = None,
 ) -> OverridesDocument:
     grouped_dimensions: dict[str, list[DimensionOverride]] = {}
     for dimension in confirmed_dimensions:
@@ -514,7 +528,7 @@ def reset_overrides_for_next_issue(
         removed_sections=(),
         persona_overrides=(),
     )
-    save_overrides(edition, document, reports_root)
+    save_overrides(edition, document, reports_root, programs_root=programs_root)
     return document
 
 

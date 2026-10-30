@@ -12,6 +12,207 @@ from src.core.kusto_query_loader import kpi_queries_for_workstream, load_kpi_que
 from src.core.models_v2 import KustoQuery
 
 
+@pytest.mark.parametrize("identity", ["matching", "different", "missing"])
+@pytest.mark.parametrize("explicit", [False, True])
+def test_overlay_requires_success_identity_for_validation_time(
+    identity: str, explicit: bool,
+) -> None:
+    from src.core.kusto_query_loader import _apply_gather_query_state, query_history_contract_identity
+
+    query = KustoQuery(
+        id="rate", cluster="synthetic", database="synthetic", kql="print Rate=1",
+        section="Rate", render_as="metric_highlight", confidence="high", validated=True,
+    )
+    state = {
+        "last_succeeded_at": "2026-10-24T00:00:00+00:00",
+        "last_cycle_succeeded": False,
+    }
+    if explicit:
+        state["validated_at"] = "2026-10-25T00:00:00+00:00"
+    if identity != "missing":
+        state["history_contract_identity"] = (
+            query_history_contract_identity(query) if identity == "matching" else "different"
+        )
+    loaded = _apply_gather_query_state(query, state)
+    assert loaded.validated is True
+    assert loaded.last_cycle_succeeded is False
+    expected = datetime(2026, 10, 25 if explicit else 24, tzinfo=timezone.utc)
+    assert loaded.validated_at == (expected if identity == "matching" else None)
+
+
+@pytest.mark.parametrize("source", ["kpi", "golden"])
+@pytest.mark.parametrize("program_ids", [[], ["synthetic"], ["other", "synthetic"], ["other"]])
+def test_program_scope_admission_precedes_state_overlay(
+    source: str, program_ids: list[str], monkeypatch, tmp_path: Path,
+) -> None:
+    program_dir = tmp_path / "synthetic"
+    knowledge_dir = program_dir / "knowledge"
+    knowledge_dir.mkdir(parents=True)
+    path = program_dir / "kpis.yaml" if source == "kpi" else knowledge_dir / "golden_queries.yaml"
+    collection = "kpis" if source == "kpi" else "queries"
+    path.write_text(json.dumps({collection: [{
+        "id": "rate", "program_ids": program_ids, "kql": "print Rate=0",
+        "metric_id": "synthetic.rate", "result_column": "Rate", "unit": "%",
+        "slo_target": 0, "comparison": ">=",
+    }]}), encoding="utf-8")
+    (program_dir / "gather_state.json").write_text(json.dumps({
+        "schema_version": "2.0", "queries": {"rate": {
+            "last_cycle_succeeded": False, "last_succeeded_at": "2026-10-24T00:00:00+00:00",
+        }},
+    }), encoding="utf-8")
+    from src.core import kusto_query_loader
+
+    overlaid: list[str] = []
+    apply_state = kusto_query_loader._apply_gather_query_state
+
+    def track_overlay(query, state):
+        overlaid.append(query.id)
+        return apply_state(query, state)
+
+    monkeypatch.setattr(kusto_query_loader, "_apply_gather_query_state", track_overlay)
+    queries = load_kpi_queries("synthetic", programs_root=tmp_path)
+    applicable = not program_ids or "synthetic" in program_ids
+    assert [query.id for query in queries] == (["rate"] if applicable else [])
+    assert overlaid == (["rate"] if applicable else [])
+    if applicable:
+        query = queries[0]
+        assert (query.unit, query.slo_target, query.comparison) == ("%", 0, ">=")
+        assert query.last_cycle_succeeded is False
+        assert query.validated_at is None
+
+
+@pytest.mark.parametrize("sources", [("kpi", "kpi"), ("golden", "kpi"), ("kpi", "golden")])
+@pytest.mark.parametrize("excluded_first", [False, True])
+@pytest.mark.parametrize("excluded", [False, True])
+def test_program_scope_collision_admission(
+    sources: tuple[str, str], excluded_first: bool, excluded: bool, tmp_path: Path,
+) -> None:
+    program_dir = tmp_path / "synthetic"
+    knowledge_dir = program_dir / "knowledge"
+    knowledge_dir.mkdir(parents=True)
+    entries = [
+        {"id": "rate", "program_ids": ["synthetic"], "kql": "print Rate=1"},
+        {"id": "rate", "program_ids": ["other"] if excluded else ["synthetic"], "kql": "print Rate=2"},
+    ]
+    pairs = list(zip(sources, entries))
+    if excluded_first:
+        pairs.reverse()
+    for source, filename, collection in [
+        ("kpi", program_dir / "kpis.yaml", "kpis"),
+        ("golden", knowledge_dir / "golden_queries.yaml", "queries"),
+    ]:
+        filename.write_text(json.dumps({
+            collection: [entry for kind, entry in pairs if kind == source],
+        }), encoding="utf-8")
+    if excluded:
+        queries = load_kpi_queries("synthetic", programs_root=tmp_path)
+        assert [query.kql for query in queries] == ["print Rate=1"]
+    else:
+        with pytest.raises(ConfigError, match="Duplicate Kusto query id 'rate'"):
+            load_kpi_queries("synthetic", programs_root=tmp_path)
+
+
+@pytest.mark.parametrize("source", ["kpi", "golden"])
+@pytest.mark.parametrize("invalid", [{"slo_target": True}, {"slo_target": "NaN"}, {"id": ""}])
+def test_excluded_program_queries_still_validate_authored_fields(
+    source: str, invalid: dict, tmp_path: Path,
+) -> None:
+    program_dir = tmp_path / "synthetic"
+    knowledge_dir = program_dir / "knowledge"
+    knowledge_dir.mkdir(parents=True)
+    path = program_dir / "kpis.yaml" if source == "kpi" else knowledge_dir / "golden_queries.yaml"
+    collection = "kpis" if source == "kpi" else "queries"
+    path.write_text(json.dumps({collection: [{
+        "id": "rate", "program_ids": ["other"], "kql": "print Rate=0", **invalid,
+    }]}), encoding="utf-8")
+    with pytest.raises(ConfigError, match="slo_target.*finite|id"):
+        load_kpi_queries("synthetic", programs_root=tmp_path)
+
+
+@pytest.mark.parametrize("source", ["kpi", "golden"])
+@pytest.mark.parametrize("target", [0, 95.5, None])
+@pytest.mark.parametrize("state", [None, {}, {"last_cycle_succeeded": True}, {"last_cycle_succeeded": False}])
+def test_state_overlay_preserves_authored_metric_semantics(
+    source: str, target: float | None, state: dict | None, monkeypatch, tmp_path: Path,
+) -> None:
+    program_dir = tmp_path / "synthetic"
+    program_dir.mkdir()
+    query = KustoQuery(
+        id="rate", cluster="synthetic", database="synthetic", kql="print Rate=0",
+        section="Rate", render_as="metric_highlight", confidence="high",
+        metric_id="synthetic.rate", result_column="Rate", unit="%",
+        slo_target=target, comparison=">=",
+    )
+    if source == "kpi":
+        (program_dir / "kpis.yaml").write_text(
+            "kpis:\n  - id: rate\n    kql: print Rate=0\n    metric_id: synthetic.rate\n"
+            "    result_column: Rate\n    unit: '%'\n    comparison: '>='\n"
+            f"    slo_target: {target if target is not None else 'null'}\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(
+        "src.core.kusto_query_loader.load_program_knowledge",
+        lambda *args, **kwargs: KnowledgeStore((), (), (), (), (query,) if source == "golden" else ()),
+    )
+    monkeypatch.setattr(
+        "src.core.kusto_query_loader._load_gather_query_state",
+        lambda *args, **kwargs: {"unmatched": {}} if state is None else {"rate": state},
+    )
+
+    loaded = load_kpi_queries("synthetic", programs_root=tmp_path)[0]
+
+    assert loaded.unit == "%"
+    assert loaded.slo_target == target
+    assert loaded.comparison == ">="
+    assert loaded.last_cycle_succeeded == (state or {}).get("last_cycle_succeeded")
+    assert loaded.validated_at is None
+
+
+@pytest.mark.parametrize("target", [".nan", ".inf", "-.inf", "'NaN'", "'inf'", "'-inf'", "'1e999'", "'unavailable'", "{}"])
+def test_kpi_loader_rejects_nonfinite_slo_target(target: str, monkeypatch, tmp_path: Path) -> None:
+    program_dir = tmp_path / "synthetic"
+    program_dir.mkdir()
+    (program_dir / "kpis.yaml").write_text(
+        f"kpis:\n  - id: count\n    kql: print Count=0\n    slo_target: {target}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "src.core.kusto_query_loader.load_program_knowledge",
+        lambda *args, **kwargs: KnowledgeStore((), (), (), (), ()),
+    )
+    with pytest.raises(ConfigError, match="slo_target.*finite"):
+        load_kpi_queries("synthetic", programs_root=tmp_path)
+
+
+@pytest.mark.parametrize("target,expected", [("null", None), ("0", 0), ("-2", -2), ("'95.5'", 95.5), ("'0'", 0)])
+def test_kpi_loader_keeps_absent_and_finite_slo_target(
+    target: str, expected: float | None, monkeypatch, tmp_path: Path,
+) -> None:
+    program_dir = tmp_path / "synthetic"
+    program_dir.mkdir()
+    (program_dir / "kpis.yaml").write_text(
+        f"kpis:\n  - id: count\n    kql: print Count=0\n    slo_target: {target}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "src.core.kusto_query_loader.load_program_knowledge",
+        lambda *args, **kwargs: KnowledgeStore((), (), (), (), ()),
+    )
+    assert load_kpi_queries("synthetic", programs_root=tmp_path)[0].slo_target == expected
+
+
+def test_kpi_loader_keeps_golden_slo_target_without_program_kpis(monkeypatch, tmp_path: Path) -> None:
+    query = KustoQuery(
+        id="count", cluster="synthetic", database="synthetic", kql="print Count=0",
+        section="Count", render_as="metric_highlight", confidence="high", slo_target=0,
+    )
+    monkeypatch.setattr(
+        "src.core.kusto_query_loader.load_program_knowledge",
+        lambda *args, **kwargs: KnowledgeStore((), (), (), (), (query,)),
+    )
+    assert load_kpi_queries("synthetic", programs_root=tmp_path)[0].slo_target == 0
+
+
 def test_load_kpi_queries_merges_program_kpis_with_golden_queries(monkeypatch, tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     program_dir = programs_root / "acme"
@@ -285,7 +486,7 @@ kpis:
     assert queries[0].expected_cardinality == "scalar_required"
     assert queries[0].kusto_no_safety is True
     assert queries[0].last_cycle_succeeded is True
-    assert queries[0].validated_at == datetime(2026, 5, 17, 14, 2, 14, tzinfo=timezone.utc)
+    assert queries[0].validated_at is None
     assert queries[0].metric_id == "acme.readiness_scorecard"
     assert queries[0].assertion_ids == ("assertion-001", "assertion-002")
     assert queries[0].chapter == "readiness_scorecards"
@@ -340,6 +541,14 @@ kpis:
         ),
     )
 
+    from src.core.kusto_query_loader import query_history_contract_identity
+
+    state_path = program_dir / "gather_state.json"
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    query = load_kpi_queries("acme", programs_root=programs_root)[0]
+    assert query.validated_at is None
+    payload["queries"][query.id]["history_contract_identity"] = query_history_contract_identity(query)
+    state_path.write_text(json.dumps(payload), encoding="utf-8")
     queries = load_kpi_queries("acme", programs_root=programs_root)
 
     assert len(queries) == 1

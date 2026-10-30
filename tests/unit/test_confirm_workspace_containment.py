@@ -78,6 +78,21 @@ def test_coherent_confirm_context_preserves_shared_or_explicit_root(
     assert not list(tmp_path.iterdir())
 
 
+def test_direct_confirm_api_uses_selected_external_workspace_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "external" / "programs"
+    monkeypatch.setattr(confirm, "_CONFIRM_PROGRAMS_ROOT", root)
+    dependency = Mock(side_effect=RuntimeError("stop after selected configuration"))
+    monkeypatch.setattr(confirm, "load_bundle", dependency)
+
+    with pytest.raises(RuntimeError, match="stop after selected configuration"):
+        confirm.confirm_issue("fixture", 7, dry_run=True)
+
+    assert dependency.call_args.kwargs["programs_root"] == root.resolve()
+    assert dependency.call_args.kwargs["reports_root"] == root.parent / "reports"
+
+
 @pytest.mark.parametrize("installed", [False, True])
 @pytest.mark.parametrize("conflict", ["reports", "archive"])
 @pytest.mark.parametrize("mode", ["--dry-run", "--force"])

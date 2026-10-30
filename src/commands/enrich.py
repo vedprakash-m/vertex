@@ -428,6 +428,11 @@ def _extract_per_thread_evidence(
         cache_path=cache_path,
         one_hop=retrieval_config.per_thread_one_hop,
     )
+    if retrieval.rejected_identity_count:
+        typer.echo(
+            f" [WorkIQ: rejected {retrieval.rejected_identity_count} record(s) without stable source identity]",
+            err=True,
+        )
     evidences: list[WorkstreamEvidence] = []
     for enrichment in retrieval.enrichments:
         # The retriever already requested structured extraction. Reuse the parser

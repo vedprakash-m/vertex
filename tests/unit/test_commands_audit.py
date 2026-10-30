@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Callable
 
 from typer.testing import CliRunner
 
@@ -13,6 +14,7 @@ from src.commands.audit import build_audit_timeline
 from src.core.ado_proposal import ADOUpdateEntry, ADOUpdateProposal, write_proposal_manifest
 from src.core.analytics_store import AutonomyAuditRecord, append_autonomy_audit_record, get_program_autonomy_audit_archive_path, get_program_autonomy_audit_path
 from src.core.feedback.signal_approval_learner import load_promoted_signal_approval_rules
+from src.core.integration_types import PaginationOutcome
 from src.core.journal import append_review_decision, append_signal, append_usage_marker
 from src.core.models import Confidence
 from src.core.models_v2 import Signal, SignalReviewDecision, SignalUsageMarker
@@ -1624,8 +1626,16 @@ class _AuditRollbackFakeADOClient:
             )
         return rows
 
-    def list_work_item_comments(self, work_item_id: int) -> list[dict[str, object]]:
-        return list(self.comments_by_id.get(work_item_id, ()))
+    def list_work_item_comments(
+        self,
+        work_item_id: int,
+        *,
+        on_pagination: Callable[[PaginationOutcome], None] | None = None,
+    ) -> list[dict[str, object]]:
+        rows = list(self.comments_by_id.get(work_item_id, ()))
+        if on_pagination is not None:
+            on_pagination(PaginationOutcome(total_fetched=len(rows), page_count=1, is_truncated=False))
+        return rows
 
 
 class _AuditRollbackFakeSession:

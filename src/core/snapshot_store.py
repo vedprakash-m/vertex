@@ -11,7 +11,7 @@ import shutil
 from typing import Any
 
 from src.core.baseline_lock import assert_issue_unlocked
-from src.core.edition_resolver import resolve_edition_paths
+from src.core.edition_resolver import resolve_artifact_edition
 from src.core.exceptions import StateError
 from src.core.models import ConfirmedDimension, EditionType, RiskLevel, Snapshot, SnapshotItem
 
@@ -55,17 +55,16 @@ class ArchiveLock:
 def get_archive_root(
     edition: str, archive_root: Path = ARCHIVE_ROOT, *, programs_root: Path | None = None,
 ) -> Path:
-    resolved_paths = resolve_edition_paths(
-        edition,
-        programs_root=programs_root if programs_root is not None else archive_root.parent / "programs",
-    )
+    resolved_paths = resolve_artifact_edition(edition, archive_root, programs_root)
     if resolved_paths is not None:
         return resolved_paths.archive_dir
     return archive_root / edition
 
 
-def find_orphaned_staging(edition: str, archive_root: Path = ARCHIVE_ROOT) -> Path | None:
-    staging_root = get_archive_root(edition, archive_root) / "staging"
+def find_orphaned_staging(
+    edition: str, archive_root: Path = ARCHIVE_ROOT, *, programs_root: Path | None = None,
+) -> Path | None:
+    staging_root = get_archive_root(edition, archive_root, programs_root=programs_root) / "staging"
     if not staging_root.exists():
         return None
     if any(staging_root.rglob("*")):
@@ -80,8 +79,10 @@ def write_confirmed(
     archive_root: Path = ARCHIVE_ROOT,
     promote: bool = True,
     acquire_lock: bool = True,
+    *,
+    programs_root: Path | None = None,
 ) -> Path:
-    edition_root = get_archive_root(edition, archive_root)
+    edition_root = get_archive_root(edition, archive_root, programs_root=programs_root)
     staging_root = edition_root / "staging"
     final_snapshot_path = edition_root / "snapshots" / _snapshot_filename(issue_number)
     staged_snapshot_path = staging_root / "snapshots" / _snapshot_filename(issue_number)
@@ -90,7 +91,7 @@ def write_confirmed(
 
     lock_context = ArchiveLock(edition_root) if acquire_lock else nullcontext()
     with lock_context:
-        orphaned_staging = find_orphaned_staging(edition, archive_root)
+        orphaned_staging = find_orphaned_staging(edition, archive_root, programs_root=programs_root)
         if orphaned_staging is not None:
             raise StateError(
                 f"Incomplete confirm detected at {orphaned_staging}. Resolve staging before writing a new snapshot."

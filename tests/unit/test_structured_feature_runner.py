@@ -478,6 +478,7 @@ def _identity(**overrides) -> CacheIdentity:
         response_schema_version="1",
         validator_version="v1",
         classification="internal",
+        execution_classification="internal",
         principal="operator",
         snapshot_id="snap-1",
     )
@@ -490,7 +491,7 @@ def test_cache_identity_differs_by_every_field() -> None:
     fields = [
         "program_id", "feature", "request_hash", "context_hash", "prompt_version", "policy_version", "compiler_policy_version",
         "deployment_fingerprint", "tokenizer_id", "response_schema_version", "validator_version",
-        "classification", "principal", "snapshot_id",
+        "classification", "execution_classification", "principal", "snapshot_id",
     ]
     keys = {base.cache_key()}
     for field_name in fields:

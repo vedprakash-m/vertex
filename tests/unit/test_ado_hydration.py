@@ -3,11 +3,23 @@ from __future__ import annotations
 import threading
 import time
 from datetime import datetime, timezone
+from typing import Any
 
 import pytest
 
-from src.core.ado_hydration import ADOHydrationConfig, ADOHydrationProvider, _normalize_ado_comment_html
+from src.commands.report_fetch import _work_item_from_sources
+from src.core.ado_enrichment import ADO_RISK_ASSESSMENT_FIELD, infer_ado_risk_level
+from src.core.ado_reconcile import build_ado_reconcile_report
+from src.core.ado_hydration import (
+    ADOHydrationConfig,
+    ADOHydrationProvider,
+    _normalize_ado_comment_html,
+    _work_item_from_batch_row,
+)
+from src.core.config_loader import ScorecardDimensionSettings, ScorecardSettings
 from src.core.integration_types import ChannelRegistration, HydrationMode, RegistrationStatus
+from src.core.models import RiskLevel, WorkItem
+from src.core.overrides_store import DimensionOverride, OverridesDocument, ScorecardOverrides
 
 
 def _registration(ref_id: str, *, last_verified_at: datetime | None = None) -> ChannelRegistration:
@@ -86,6 +98,134 @@ class _FakeADOClient:
                 "text": "Ready for review",
             }
         ]
+
+
+def _risk_row(
+    *,
+    risk_assessment: str | None,
+    state: str = "Active",
+    tags: str = "",
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "System.Id": 990001,
+        "System.WorkItemType": "Feature",
+        "System.Title": "Synthetic risk assessment",
+        "System.State": state,
+        "System.Tags": tags,
+    }
+    if risk_assessment is not None:
+        fields[ADO_RISK_ASSESSMENT_FIELD] = risk_assessment
+    return {"id": 990001, "fields": fields}
+
+
+def _hydrated_item(
+    *,
+    risk_assessment: str | None,
+    state: str = "Active",
+    tags: str = "",
+) -> WorkItem:
+    return _work_item_from_batch_row(
+        _risk_row(risk_assessment=risk_assessment, state=state, tags=tags),
+        revision_rows=[],
+        comment_rows=[],
+        fetched_at=datetime(2026, 10, 29, tzinfo=timezone.utc),
+    )
+
+
+@pytest.mark.parametrize(
+    ("risk_assessment", "expected"),
+    [
+        ("On Track", RiskLevel.LOW),
+        ("At Risk", RiskLevel.MEDIUM),
+        ("Off Track", RiskLevel.HIGH),
+    ],
+)
+def test_hydration_maps_recognized_explicit_ado_risk_assessment(
+    risk_assessment: str,
+    expected: RiskLevel,
+) -> None:
+    row = _risk_row(risk_assessment=risk_assessment)
+    item = _work_item_from_batch_row(
+        row,
+        revision_rows=[],
+        comment_rows=[],
+        fetched_at=datetime(2026, 10, 29, tzinfo=timezone.utc),
+    )
+    report_item = _work_item_from_sources(
+        {"id": 990001},
+        row,
+        datetime(2026, 10, 29, tzinfo=timezone.utc),
+    )
+
+    assert item.risk_level is expected
+    assert item.risk_assessment == risk_assessment
+    assert report_item.risk_level is expected
+    assert item.risk_level is infer_ado_risk_level(
+        item.state,
+        item.tags,
+        item.risk_assessment,
+    )
+    reconciliation = build_ado_reconcile_report(
+        program_id="synthetic",
+        items=(report_item,),
+        workstreams=(),
+        scorecards=(
+            ScorecardSettings(
+                name="Synthetic",
+                dimensions=(
+                    ScorecardDimensionSettings(
+                        name="Release",
+                        description=None,
+                        ado_filter="",
+                    ),
+                ),
+            ),
+        ),
+        overrides_document=OverridesDocument(
+            issue_number=990001,
+            top_3_now=(),
+            scorecards=(
+                ScorecardOverrides(
+                    name="Synthetic",
+                    dimensions=(DimensionOverride(name="Release", risk=expected),),
+                ),
+            ),
+        ),
+        open_claims=(),
+    )
+    assert reconciliation.discrepancies == ()
+
+
+@pytest.mark.parametrize("risk_assessment", [None, "", "Pending"])
+def test_hydration_keeps_missing_blank_and_unsupported_assessment_unknown(
+    risk_assessment: str | None,
+) -> None:
+    item = _hydrated_item(risk_assessment=risk_assessment)
+
+    assert item.risk_level is RiskLevel.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    ("state", "tags", "risk_assessment", "expected"),
+    [
+        ("Closed", "", "Off Track", RiskLevel.LOW),
+        ("Blocked", "", "On Track", RiskLevel.HIGH),
+        ("Active", "Blocked", "On Track", RiskLevel.HIGH),
+        ("Active", "Blocker", "On Track", RiskLevel.HIGH),
+        ("Active", "High Risk", "On Track", RiskLevel.HIGH),
+        ("Active", "Risk", "Off Track", RiskLevel.MEDIUM),
+        ("Active", "At Risk", "Off Track", RiskLevel.MEDIUM),
+    ],
+)
+def test_hydration_state_and_tag_precedence_over_explicit_assessment(
+    state: str,
+    tags: str,
+    risk_assessment: str,
+    expected: RiskLevel,
+) -> None:
+    item = _hydrated_item(state=state, tags=tags, risk_assessment=risk_assessment)
+
+    assert item.risk_level is expected
 
 
 @pytest.mark.parametrize("with_known", [False, True])

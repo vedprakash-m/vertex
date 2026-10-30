@@ -140,3 +140,29 @@ def test_render_doctor_output_human_and_bad_format_raise() -> None:
         render_doctor_output(payload, format="human")
     with pytest.raises(typer.BadParameter):
         render_doctor_output(payload, format="xml")
+
+
+@pytest.mark.parametrize("current_active, previous_active", [(False, True), (True, False), (False, False), (True, True)])
+def test_render_doctor_output_nullable_channel_delta(current_active: bool, previous_active: bool) -> None:
+    from datetime import datetime, timezone
+    from src.commands.doctor_checks.channel_delta_checks import channel_delta_check
+
+    check = channel_delta_check(
+        previous_gathered_at=datetime(2026, 10, 27, tzinfo=timezone.utc),
+        current_channels={"ado": {"active": current_active, "meets_expected_min": True}},
+        previous_channels={"ado": {"active": previous_active, "meets_expected_min": True}},
+        current_failed_queries=[], previous_query_states={}, current_stale_queries=[],
+        current_frozen_queries=[], current_m365_discovery={}, previous_m365_discovery={},
+    )
+    payload = build_doctor_payload(report=DoctorReport(edition="acme_weekly", checks=(check,)), tip=None)
+    item = json.loads(render_doctor_output(payload, format="json"))["checks"][0]
+    expected_delta = 0 if current_active and previous_active else None
+    assert item["metadata"]["completeness_delta_pct"] == expected_delta
+    assert item["metadata"]["current_completeness_pct"] == (100 if current_active else None)
+    assert item["metadata"]["previous_completeness_pct"] == (100 if previous_active else None)
+    row = next(csv.DictReader(render_doctor_output(payload, format="csv").splitlines()))
+    assert json.loads(row["metadata_json"]) == item["metadata"]
+    assert row["detail"] == item["detail"]
+    if expected_delta is None:
+        assert "unavailable" in row["detail"]
+        assert row["status"] == "warn"

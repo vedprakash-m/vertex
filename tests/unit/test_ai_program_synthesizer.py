@@ -10,8 +10,17 @@ from typing import Any, Callable
 
 import pytest
 
-from src.ai.program_synthesizer import generate_program_synthesis, generate_program_synthesis_via_context_gateway
-from src.core.program_synthesis import ProgramSynthesisRequest, SynthesisInputItem, load_latest_released_program_synthesis
+from src.ai.program_synthesizer import (
+    ProgramSynthesisOutcome,
+    generate_program_synthesis,
+    generate_program_synthesis_via_context_gateway,
+)
+from src.core.program_synthesis import (
+    ProgramSynthesisRequest,
+    SynthesisInputItem,
+    load_latest_released_program_synthesis,
+    program_synthesis_path,
+)
 from src.core.quality_gates.ai_release_audit import ReleaseTerminal, released_terminal_for_run
 
 _AS_OF = datetime(2026, 7, 1, tzinfo=timezone.utc)
@@ -185,6 +194,165 @@ def test_different_request_items_does_not_hit_the_cache(tmp_path: Path) -> None:
     generate_program_synthesis(_request(), client=client, programs_root=programs_root)
     generate_program_synthesis(_request(items=other_items), client=client, programs_root=programs_root)
 
+    assert client.calls == 2
+
+
+@pytest.mark.parametrize("generate", [generate_program_synthesis, generate_program_synthesis_via_context_gateway])
+@pytest.mark.parametrize(
+    "evidence_refs",
+    [
+        pytest.param({"risk-1": "foreign-private-reference"}, id="mapping"),
+        pytest.param("risk-1", id="scalar-string"),
+        pytest.param(None, id="null-container"),
+        pytest.param(1, id="numeric-container"),
+        pytest.param(True, id="boolean-container"),
+        pytest.param(["risk-1", {"item_id": "foreign-private-reference"}], id="mixed-object"),
+        pytest.param(["risk-1", None], id="mixed-null"),
+        pytest.param(["risk-1", 1], id="mixed-numeric"),
+        pytest.param(["risk-1", True], id="mixed-boolean"),
+        pytest.param([1], id="numeric-entry"),
+        pytest.param([True], id="boolean-entry"),
+    ],
+)
+def test_malformed_recommendation_evidence_is_rejected_including_cached_response(
+    tmp_path: Path, generate: Callable[..., ProgramSynthesisOutcome], evidence_refs: object
+) -> None:
+    programs_root = tmp_path / "programs"
+    request = _request(
+        items=tuple(
+            SynthesisInputItem(category="strategic_risk", item_id=item_id, summary="Vendor delay.")
+            for item_id in ("risk-1", "1", "True")
+        )
+    )
+    response = _valid_response()
+    response["recommendations"][0]["evidence_refs"] = evidence_refs
+    client = _FakeClient(response=response)
+    run_ids: set[str] = set()
+
+    for _ in range(2):
+        outcome = generate(request, client=client, programs_root=programs_root)
+
+        assert outcome.released is False
+        assert outcome.synthesis is None
+        assert any("invalid recommendation evidence_refs" in finding for finding in outcome.findings)
+        assert all("foreign-private-reference" not in finding for finding in outcome.findings)
+        assert released_terminal_for_run(
+            outcome.ai_run_id, program_id=request.program_id, programs_root=programs_root
+        ) is ReleaseTerminal.REJECTED
+        assert not program_synthesis_path(
+            request.program_id, outcome.ai_run_id, programs_root=programs_root
+        ).exists()
+        assert load_latest_released_program_synthesis(request.program_id, programs_root=programs_root) is None
+        run_ids.add(outcome.ai_run_id)
+
+    assert len(run_ids) == 2
+    assert client.calls == 1
+
+
+@pytest.mark.parametrize("generate", [generate_program_synthesis, generate_program_synthesis_via_context_gateway])
+@pytest.mark.parametrize("case", ["absent", "empty", "foreign", "mixed-foreign"])
+def test_recommendation_evidence_semantic_refusal_controls(
+    tmp_path: Path, generate: Callable[..., ProgramSynthesisOutcome], case: str
+) -> None:
+    programs_root = tmp_path / "programs"
+    request = _request()
+    response = _valid_response()
+    if case == "absent":
+        del response["recommendations"][0]["evidence_refs"]
+    else:
+        response["recommendations"][0]["evidence_refs"] = {
+            "empty": [], "foreign": ["not-a-real-item"], "mixed-foreign": ["risk-1", "not-a-real-item"]
+        }[case]
+    client = _FakeClient(response=response)
+
+    outcome = generate(request, client=client, programs_root=programs_root)
+
+    assert outcome.released is False
+    assert outcome.synthesis is None
+    assert any(
+        ("no evidence_refs" if case in {"absent", "empty"} else "unsupported causal claim") in finding
+        for finding in outcome.findings
+    )
+    assert released_terminal_for_run(
+        outcome.ai_run_id, program_id=request.program_id, programs_root=programs_root
+    ) is ReleaseTerminal.REJECTED
+    assert not program_synthesis_path(request.program_id, outcome.ai_run_id, programs_root=programs_root).exists()
+    assert load_latest_released_program_synthesis(request.program_id, programs_root=programs_root) is None
+    assert client.calls == 1
+
+
+@pytest.mark.parametrize("generate", [generate_program_synthesis, generate_program_synthesis_via_context_gateway])
+@pytest.mark.parametrize("evidence_refs", [["risk-1"], ["risk-2", "risk-1"], ["1", "True", "risk-1"]])
+def test_valid_recommendation_evidence_round_trips_including_cache(
+    tmp_path: Path, generate: Callable[..., ProgramSynthesisOutcome], evidence_refs: list[str]
+) -> None:
+    programs_root = tmp_path / "programs"
+    request = _request(
+        items=tuple(
+            SynthesisInputItem(category="strategic_risk", item_id=item_id, summary="Vendor delay.")
+            for item_id in ("risk-1", "risk-2", "1", "True")
+        )
+    )
+    response = _valid_response()
+    response["recommendations"][0]["evidence_refs"] = evidence_refs
+    client = _FakeClient(response=response)
+    run_ids: set[str] = set()
+
+    for _ in range(2):
+        outcome = generate(request, client=client, programs_root=programs_root)
+
+        assert outcome.released is True
+        assert outcome.findings == ()
+        assert outcome.synthesis is not None
+        assert outcome.synthesis.recommendations[0].evidence_refs == tuple(evidence_refs)
+        assert released_terminal_for_run(
+            outcome.ai_run_id, program_id=request.program_id, programs_root=programs_root
+        ) is ReleaseTerminal.RELEASED
+        assert program_synthesis_path(request.program_id, outcome.ai_run_id, programs_root=programs_root).exists()
+        reloaded = load_latest_released_program_synthesis(request.program_id, programs_root=programs_root)
+        assert reloaded is not None
+        assert reloaded.ai_run_id == outcome.ai_run_id
+        assert reloaded.recommendations == outcome.synthesis.recommendations
+        run_ids.add(outcome.ai_run_id)
+
+    assert len(run_ids) == 2
+    assert client.calls == 1
+
+
+@pytest.mark.parametrize("generate", [generate_program_synthesis, generate_program_synthesis_via_context_gateway])
+@pytest.mark.parametrize("evidence_refs", [{"risk-1": "not-a-real-item"}, ["risk-1", None]])
+def test_malformed_recommendation_preserves_previously_released_history(
+    tmp_path: Path, generate: Callable[..., ProgramSynthesisOutcome], evidence_refs: object
+) -> None:
+    programs_root = tmp_path / "programs"
+    request = _request()
+    client = _FakeClient(response=_valid_response())
+    valid = generate(request, client=client, programs_root=programs_root)
+    assert valid.released is True
+    retained_path = program_synthesis_path(request.program_id, valid.ai_run_id, programs_root=programs_root)
+    retained_bytes = retained_path.read_bytes()
+
+    response = _valid_response()
+    response["recommendations"][0]["evidence_refs"] = evidence_refs
+    client.response = response
+    changed_request = _request(
+        items=(SynthesisInputItem(category="strategic_risk", item_id="risk-1", summary="Vendor delay increased."),)
+    )
+    bad = generate(changed_request, client=client, programs_root=programs_root)
+
+    assert bad.released is False
+    assert bad.synthesis is None
+    assert released_terminal_for_run(
+        bad.ai_run_id, program_id=request.program_id, programs_root=programs_root
+    ) is ReleaseTerminal.REJECTED
+    assert not program_synthesis_path(request.program_id, bad.ai_run_id, programs_root=programs_root).exists()
+    reloaded = load_latest_released_program_synthesis(request.program_id, programs_root=programs_root)
+    assert reloaded is not None
+    assert reloaded.ai_run_id == valid.ai_run_id
+    assert released_terminal_for_run(
+        valid.ai_run_id, program_id=request.program_id, programs_root=programs_root
+    ) is ReleaseTerminal.RELEASED
+    assert retained_path.read_bytes() == retained_bytes
     assert client.calls == 2
 
 

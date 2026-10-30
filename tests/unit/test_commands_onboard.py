@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 import yaml
 
@@ -14,11 +15,120 @@ from src.commands.onboard import _draft_from_existing_edition, _prompt_supported
 from src.commands.onboard import _run_onboard_validation, run_onboard_create, run_onboard_migrate_v3, run_onboard_update
 from src.core.assumption_tracker import load_assumptions
 from src.core.config_loader import load_bundle_with_mode
-from src.core.exceptions import AuthError
+from src.core.exceptions import AuthError, ConfigError
 from src.core.models_v2 import Workstream
 
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _declared_creation_workspace(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(onboard_module, "PROGRAMS_ROOT", tmp_path / "programs", raising=False)
+    monkeypatch.setattr("cli._maybe_register_tier_decision_sink", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("cli._maybe_run_scheduled_db_maintenance", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("cli._maybe_run_session_catchup", lambda *_args, **_kwargs: None)
+
+
+def test_new_onboard_paths_use_canonical_workspace_not_installation(monkeypatch, tmp_path: Path) -> None:
+    canonical = tmp_path / "private" / "programs"
+    monkeypatch.setattr(onboard_module, "PROGRAMS_ROOT", canonical)
+    paths = onboard_module._resolve_onboard_paths(
+        edition_name="synthetic_weekly", program_id="synthetic", reports_root=canonical.parent / "reports",
+    )
+    assert paths.programs_root == canonical
+    with pytest.raises(ConfigError, match="workspace"):
+        onboard_module._resolve_onboard_paths(
+            edition_name="synthetic_weekly", program_id="synthetic", reports_root=tmp_path / "other" / "reports",
+        )
+    assert not canonical.exists()
+
+
+@pytest.mark.parametrize("program_id", ["..", "../escape", r"..\escape", "C:\\escape"])
+def test_new_onboard_path_escape_refused(monkeypatch, tmp_path: Path, program_id: str) -> None:
+    with pytest.raises(ConfigError, match="identifier|workspace"):
+        onboard_module._resolve_onboard_paths(
+            edition_name="synthetic_weekly", program_id=program_id, reports_root=tmp_path / "reports",
+        )
+    assert not list(tmp_path.iterdir())
+
+
+def test_new_onboard_create_rejects_missing_context_before_evidence(monkeypatch, tmp_path: Path) -> None:
+    from src.core.workspace_paths import REPO_ROOT
+
+    monkeypatch.setattr(onboard_module, "PROGRAMS_ROOT", REPO_ROOT / "programs")
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("Creation admission must precede evidence or providers.")
+    for name in ("find_edition_yaml", "_collect_onboard_draft", "_resolve_onboard_assistant", "shared_registry_is_active"):
+        monkeypatch.setattr(onboard_module, name, forbidden)
+    with pytest.raises(ConfigError, match="workspace"):
+        run_onboard_create("synthetic_weekly")
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("exit_code", [0, 2, 3])
+def test_new_onboard_validation_forwards_one_workspace(monkeypatch, tmp_path: Path, exit_code: int) -> None:
+    import inspect
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from src.commands.report import generate_report_draft
+
+    signature = inspect.signature(generate_report_draft)
+    html = tmp_path / "synthetic.html"
+    markdown = tmp_path / "synthetic.md"
+    manifest = tmp_path / "synthetic.manifest.json"
+    generate = Mock(return_value=SimpleNamespace(
+        issue_number=1, exit_code=exit_code, html_path=html, md_path=markdown, manifest_path=manifest,
+    ))
+    monkeypatch.setattr("src.commands.report.generate_report_draft", generate)
+    validation = _run_onboard_validation("synthetic_weekly", reports_root=tmp_path / "reports")
+    arguments = signature.bind(**generate.call_args.kwargs)
+    arguments.apply_defaults()
+    assert arguments.arguments["dry_run"] is True
+    assert arguments.arguments["offline"] is False
+    assert arguments.arguments["open_browser"] is True
+    assert arguments.arguments["reports_root"] == tmp_path / "reports"
+    assert arguments.arguments["programs_root"] == tmp_path / "programs"
+    assert arguments.arguments["archive_root"] == tmp_path / "archive"
+    assert validation == OnboardValidationResult(
+        issue_number=1, exit_code=exit_code, html_path=html, md_path=markdown, manifest_path=manifest,
+    )
+
+
+def test_new_onboard_unsupported_report_mapping_stops_before_evidence(monkeypatch, tmp_path: Path) -> None:
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(onboard_module, "PROGRAMS_ROOT", tmp_path / "private" / "custom-programs")
+    finder = Mock(side_effect=AssertionError("Unsupported layout must not read program state."))
+    monkeypatch.setattr(onboard_module, "find_edition_yaml", finder)
+    with pytest.raises(ConfigError, match="Conflicting report workspace roots"):
+        run_onboard_create("synthetic_weekly")
+    finder.assert_not_called()
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("linked", ["program", "reports", "archive"])
+def test_new_onboard_rejects_escaping_linked_storage(monkeypatch, tmp_path: Path, linked: str) -> None:
+    import subprocess
+    import sys
+
+    programs = tmp_path / "private" / "programs"
+    programs.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = programs / "synthetic" if linked == "program" else programs.parent / linked
+    if sys.platform == "win32":
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(outside)], check=True, capture_output=True)
+    else:
+        link.symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(onboard_module, "PROGRAMS_ROOT", programs)
+    before = list(tmp_path.rglob("*"))
+    with pytest.raises(ConfigError, match="escapes"):
+        onboard_module._resolve_onboard_paths(
+            edition_name="synthetic_weekly", program_id="synthetic", reports_root=programs.parent / "reports",
+        )
+    assert list(tmp_path.rglob("*")) == before
 
 
 class _FakeOnboardAssistant:
@@ -97,7 +207,7 @@ def _stub_onboard_validation(
     issue_number: int = 1,
     exit_code: int = 0,
 ) -> None:
-    def _fake_validation(edition_name: str, reports_root: Path) -> OnboardValidationResult:
+    def _fake_validation(edition_name: str, reports_root: Path, *, programs_root: Path | None = None) -> OnboardValidationResult:
         del reports_root
         output_dir = tmp_path / "output" / edition_name
         return OnboardValidationResult(
@@ -1081,6 +1191,9 @@ def test_draft_from_existing_edition_loads_workstreams_from_program_facts(monkey
 
 
 def test_onboard_update_preserves_unmodeled_v2_fields(monkeypatch, tmp_path: Path) -> None:
+    from src.core.workspace_paths import REPO_ROOT
+
+    monkeypatch.setattr(onboard_module, "PROGRAMS_ROOT", REPO_ROOT / "programs")
     reports_root, editions_root, programs_root = _seed_existing_v2_edition(
         tmp_path,
         edition_name="existing_newsletter",
@@ -1308,6 +1421,9 @@ def test_write_yaml_creates_backup_when_overwriting_existing_file(tmp_path: Path
 
 
 def test_run_onboard_migrate_v3_scaffolds_files_and_seeds_charter_assumptions(monkeypatch, tmp_path: Path) -> None:
+    from src.core.workspace_paths import REPO_ROOT
+
+    monkeypatch.setattr(onboard_module, "PROGRAMS_ROOT", REPO_ROOT / "programs")
     reports_root, _editions_root, programs_root = _seed_existing_v2_edition(
         tmp_path,
         edition_name="existing_newsletter",
@@ -1400,3 +1516,202 @@ def test_run_onboard_validation_returns_message_for_expected_report_failures(mon
     validation = _run_onboard_validation("demo_newsletter", reports_root=tmp_path)
 
     assert validation.message == "Automatic validation dry-run could not complete: ADO auth failed"
+
+
+@pytest.mark.parametrize(("installed", "explicit_reports"), [(False, False), (False, True), (True, False)])
+def test_onboard_update_retains_selected_workspace(
+    monkeypatch, tmp_path: Path, installed: bool, explicit_reports: bool,
+) -> None:
+    from dataclasses import replace
+
+    edition = "synthetic_weekly"
+    selected = tmp_path / "selected"
+    decoy = tmp_path / "installation"
+    reports, _, programs = _seed_existing_v2_edition(
+        selected, edition_name=edition, program_id="selected", edition_type="detailed",
+    )
+    decoy_reports, _, _ = _seed_existing_v2_edition(
+        decoy, edition_name=edition, program_id="decoy", edition_type="detailed",
+    )
+    before = {path.relative_to(decoy): path.read_bytes() for path in decoy.rglob("*") if path.is_file()}
+    monkeypatch.setattr(onboard_module, "PROGRAMS_ROOT", programs)
+    monkeypatch.setattr(onboard_module, "REPORTS_ROOT", decoy_reports)
+    observed = []
+
+    def collect(_edition, draft, assistant=None):
+        assert draft.identity is not None
+        assert draft.identity.program_id == "selected"
+        observed.append(draft.identity.objective)
+        return replace(draft, identity=replace(draft.identity, objective="Updated synthetic objective."))
+
+    monkeypatch.setattr(onboard_module, "_collect_onboard_draft", collect)
+    monkeypatch.setattr(onboard_module.typer, "confirm", lambda *_args, **_kwargs: True)
+    _stub_onboard_validation(monkeypatch, selected)
+    if installed:
+        result = runner.invoke(app, ["onboard", "--update", edition])
+        assert result.exit_code == 0, result.output + repr(result.exception)
+        assert str(programs / "selected") in result.output
+    else:
+        result = run_onboard_update(edition, reports_root=reports if explicit_reports else None)
+        assert result.program_dir == programs / "selected"
+    assert observed == ["Old objective."]
+    assert _read_yaml(programs / "selected" / "program.yaml")["objective"] == "Updated synthetic objective."
+    assert {path.relative_to(decoy): path.read_bytes() for path in decoy.rglob("*") if path.is_file()} == before
+
+
+@pytest.mark.parametrize(
+    ("case", "installed"),
+    [(case, installed) for case in ("conflict", "relative", "checkout", "unsupported")
+     for installed in (False, True) if not (case == "conflict" and installed)],
+)
+def test_onboard_update_rejects_context_before_reads(monkeypatch, tmp_path: Path, case: str, installed: bool) -> None:
+    from unittest.mock import Mock
+
+    selected = tmp_path / "selected" / "programs"
+    reports = None
+    if case == "conflict":
+        reports = tmp_path / "other" / "reports"
+    elif case == "relative":
+        selected = Path("relative") / "programs"
+    elif case == "checkout":
+        selected.parent.mkdir()
+        (selected.parent / ".git").mkdir()
+    else:
+        selected = selected.with_name("custom-programs")
+    monkeypatch.setattr(onboard_module, "PROGRAMS_ROOT", selected)
+    forbidden = Mock(side_effect=AssertionError("Update context must be admitted before state access."))
+    for name in ("_validate_edition_name", "_resolve_existing_onboard_paths", "_draft_from_existing_edition",
+                 "_collect_onboard_draft", "shared_registry_is_active", "_finalize_onboarding"):
+        monkeypatch.setattr(onboard_module, name, forbidden)
+    before = sorted(str(path) for path in tmp_path.rglob("*"))
+    if installed:
+        result = runner.invoke(app, ["onboard", "--update", "synthetic_weekly"])
+        assert result.exit_code != 0
+        assert isinstance(result.exception, ConfigError), repr(result.exception)
+    else:
+        with pytest.raises(ConfigError):
+            run_onboard_update("synthetic_weekly", reports_root=reports)
+    forbidden.assert_not_called()
+    assert sorted(str(path) for path in tmp_path.rglob("*")) == before
+
+
+@pytest.mark.parametrize("explicit_reports", [False, True])
+def test_onboard_update_unset_selection_preserves_legacy_context(monkeypatch, tmp_path: Path, explicit_reports: bool) -> None:
+    from src.core import workspace_paths
+
+    reports, _, programs = _seed_existing_v2_edition(
+        tmp_path, edition_name="legacy_weekly", program_id="legacy", edition_type="detailed",
+    )
+    monkeypatch.setattr(onboard_module, "PROGRAMS_ROOT", workspace_paths.REPO_ROOT / "programs")
+    monkeypatch.setattr(onboard_module, "REPORTS_ROOT", reports)
+    monkeypatch.setattr(workspace_paths, "_PROGRAMS_ROOT_CONFIGURED", False)
+    if not explicit_reports:
+        monkeypatch.setattr(workspace_paths, "REPO_ROOT", tmp_path)
+        monkeypatch.setattr(workspace_paths, "PROGRAMS_ROOT", programs)
+        monkeypatch.setattr(onboard_module, "PROGRAMS_ROOT", programs)
+    monkeypatch.setattr(onboard_module, "_collect_onboard_draft", lambda _edition, draft, assistant=None: draft)
+    monkeypatch.setattr(onboard_module.typer, "confirm", lambda *_args, **_kwargs: True)
+    _stub_onboard_validation(monkeypatch, tmp_path)
+    result = run_onboard_update("legacy_weekly", reports_root=reports if explicit_reports else None)
+    assert result.program_dir == programs / "legacy"
+
+
+def test_onboard_update_continues_real_created_draft_without_rewriting_history(monkeypatch, tmp_path: Path) -> None:
+    from dataclasses import replace
+    import json
+
+    from src.commands import report as report_module
+    from src.core.config_loader import load_bundle
+    from src.core.models import RiskLevel, WorkItem
+
+    programs = tmp_path / "selected" / "programs"
+    monkeypatch.setattr(onboard_module, "PROGRAMS_ROOT", programs)
+    monkeypatch.setattr(onboard_module, "REPORTS_ROOT", tmp_path / "installation" / "reports")
+    acquisitions = []
+
+    def acquire(bundle, timestamp):
+        assert bundle.program_context is not None
+        assert bundle.program_context.program_name == "Storage Demo"
+        acquisitions.append(bundle.program_context.objective)
+        return (WorkItem(
+            id=900001, type="Feature", title="Synthetic delivery check", state="Active",
+            assigned_to="Synthetic Owner", assigned_to_email="owner@example.com",
+            area_path=r"One\Storage\Demo", iteration_path=r"One\Synthetic", target_date=None,
+            risk_level=RiskLevel.UNKNOWN, tags=["Safety"], custom_fields={}, fetched_at=timestamp,
+        ),), 0
+
+    monkeypatch.setattr(report_module, "_load_live_work_items", acquire)
+    browser_calls = []
+    monkeypatch.setattr(report_module.webbrowser, "open", lambda uri: browser_calls.append(uri))
+    pipeline_contexts = []
+    execute_pipeline = report_module._execute_report_pipeline
+
+    def observe_pipeline(ctx, **kwargs):
+        pipeline_contexts.append(ctx)
+        return execute_pipeline(ctx, **kwargs)
+
+    monkeypatch.setattr(report_module, "_execute_report_pipeline", observe_pipeline)
+    monkeypatch.setattr("src.ai.ai_mode._CURRENT_MODE", AIMode.DISABLED)
+    created = runner.invoke(app, ["onboard", "--edition", "synthetic_weekly"], input="\n".join(_rich_cli_inputs()))
+    assert created.exit_code == 0, created.output + repr(created.exception)
+    program = programs / "storage_demo"
+    initial_html = tuple((program / "publications" / "synthetic_weekly" / "issue_001").glob("*.html"))
+    assert initial_html, created.output
+    assert initial_html[0].read_text(encoding="utf-8")
+    assert pipeline_contexts[0].dry_run is True
+    assert pipeline_contexts[0].offline is False
+    assert pipeline_contexts[0].open_browser is True
+    assert pipeline_contexts[0].programs_root == programs
+    assert pipeline_contexts[0].reports_root == programs.parent / "reports"
+    assert pipeline_contexts[0].archive_root == programs.parent / "archive"
+    assert browser_calls
+    first_draft = report_module.generate_report_draft(
+        "synthetic_weekly", issue_number=2, dry_run=True, programs_root=programs,
+        reports_root=programs.parent / "reports", archive_root=programs.parent / "archive",
+    )
+    assert first_draft.html_path is not None and first_draft.md_path is not None
+    assert first_draft.manifest_path is not None
+    first_html = first_draft.html_path
+    first_manifest = first_draft.manifest_path
+    first = {path.relative_to(program): path.read_bytes()
+             for path in first_html.parent.rglob("*") if path.is_file()}
+    assert first_html.read_text(encoding="utf-8")
+    assert first_draft.md_path.read_text(encoding="utf-8")
+    gate_results = json.loads(first_manifest.read_text(encoding="utf-8"))["qg_results"]
+    assert gate_results and all(isinstance(value, bool) for value in gate_results.values())
+    assert any(value is False for value in gate_results.values())
+    assert first_draft.exit_code != 0
+    archive_before = {path.relative_to(program): path.read_bytes()
+                      for path in (program / "archive").rglob("*") if path.is_file()}
+
+    def repair(_edition, draft, assistant=None):
+        assert draft.identity is not None
+        return replace(draft, identity=replace(draft.identity, objective="Updated synthetic context."))
+
+    monkeypatch.setattr(onboard_module, "_collect_onboard_draft", repair)
+    monkeypatch.setattr(onboard_module.typer, "confirm", lambda *_args, **_kwargs: True)
+    updated = run_onboard_update("synthetic_weekly")
+    assert updated.program_dir == program
+    assert pipeline_contexts[-1].dry_run is True
+    assert pipeline_contexts[-1].offline is False
+    assert pipeline_contexts[-1].open_browser is True
+    bundle = load_bundle("synthetic_weekly", programs_root=programs, reports_root=programs.parent / "reports")
+    assert bundle.program_context is not None
+    assert bundle.program_context.objective == "Updated synthetic context."
+    regenerated = report_module.generate_report_draft(
+        "synthetic_weekly", issue_number=3, dry_run=True, programs_root=programs,
+        reports_root=programs.parent / "reports", archive_root=programs.parent / "archive",
+    )
+    assert regenerated.html_path is not None and regenerated.html_path.is_file()
+    assert regenerated.md_path is not None and regenerated.md_path.is_file()
+    assert regenerated.manifest_path is not None and regenerated.manifest_path.is_file()
+    assert regenerated.exit_code != 0
+    assert any(value is False for value in json.loads(
+        regenerated.manifest_path.read_text(encoding="utf-8"),
+    )["qg_results"].values())
+    assert acquisitions[0] == "Provide a concise weekly readiness view."
+    assert acquisitions[-1] == "Updated synthetic context."
+    assert {path.relative_to(program): path.read_bytes()
+            for path in (program / "archive").rglob("*") if path.is_file()} == archive_before
+    assert {path.relative_to(program): path.read_bytes()
+            for path in first_html.parent.rglob("*") if path.is_file()} == first

@@ -5,8 +5,8 @@ from pathlib import Path
 
 import typer
 
-from src.core.config_loader import REPORTS_ROOT
 from src.core.edition_resolver import PROGRAMS_ROOT, resolve_edition_paths
+from src.core.exceptions import ConfigError
 from src.core.ncfl_extractor import extract_proposals
 from src.core.ncfl_proposal_store import (
     conflicting_pending_proposals,
@@ -16,6 +16,7 @@ from src.core.ncfl_proposal_store import (
 )
 from src.core.operator_identity import capture_operator_identity
 from src.core.ncfl_models import ContextUpdateProposal
+from src.core.workspace_paths import resolve_report_workspace_roots
 
 
 app = typer.Typer(help="NCFL context proposal extraction and review.")
@@ -101,10 +102,16 @@ def extract_command(
     edition: str = typer.Option(..., "--edition", help="Edition name, e.g. acme_weekly."),
     issue: int = typer.Option(..., "--issue", min=1, help="Confirmed issue number to extract from."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview extracted proposals without writing."),
-    reports_root: Path = typer.Option(REPORTS_ROOT, hidden=True),
-    programs_root: Path = typer.Option(PROGRAMS_ROOT, hidden=True),
+    reports_root: Path | None = typer.Option(None, hidden=True),
+    programs_root: Path | None = typer.Option(None, hidden=True),
 ) -> None:
-    program_id = _resolve_program_id(edition, programs_root=programs_root)
+    try:
+        programs_root, reports_root, _ = resolve_report_workspace_roots(
+            programs_root=programs_root, reports_root=reports_root,
+        )
+        program_id = _resolve_program_id(edition, programs_root=programs_root)
+    except ConfigError as error:
+        raise typer.BadParameter(str(error)) from error
     proposals = extract_proposals(
         program_id,
         edition,

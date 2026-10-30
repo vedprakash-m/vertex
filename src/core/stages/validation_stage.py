@@ -459,7 +459,7 @@ def _load_published_baseline_map(ctx: StageContext) -> dict[str, str] | None:
 
 
 def _build_manifest_metadata(ctx: StageContext, render_state: Any) -> dict[str, Any]:
-    return {
+    metadata = {
         "suggested_subject": render_state.email_subject,
         "suggested_preheader": render_state.email_preheader,
         "subject_signal": render_state.subject_signal,
@@ -470,6 +470,9 @@ def _build_manifest_metadata(ctx: StageContext, render_state: Any) -> dict[str, 
         "ai_safety": _build_ai_safety_metadata(ctx),
         "family_read_paths": _build_family_read_paths_metadata(ctx),
     }
+    if ctx.milestone_trajectory_snapshot is not None:
+        metadata["milestone_trajectory_snapshot"] = ctx.milestone_trajectory_snapshot
+    return metadata
 
 
 def _build_family_read_paths_metadata(ctx: StageContext) -> dict[str, str]:
@@ -546,6 +549,9 @@ def _serialize_milestone_assessments(ctx: StageContext) -> list[dict[str, Any]]:
     return [
         {
             "milestone_id": assessment.milestone_id,
+            "linked_work_item_ids": sorted(set(milestones[assessment.milestone_id].linked_work_item_ids))
+            if assessment.milestone_id in milestones
+            else [],
             "milestone_name": (milestones[assessment.milestone_id].name if assessment.milestone_id in milestones else None),
             "declared_status": (milestones[assessment.milestone_id].status.value if assessment.milestone_id in milestones else None),
             "target_date": (

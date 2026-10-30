@@ -21,7 +21,7 @@ from src.core.workspace_paths import PROGRAMS_ROOT
 PROJECTION_SCHEMA_VERSION = "1"
 # Bumped when projection logic changes (independent of schema_version).
 # Incremental logic forces a full rebuild when the stored projector_version differs.
-_PROJECTOR_VERSION = "2"
+_PROJECTOR_VERSION = "3"
 # Maximum events in a delta before we skip the incremental short-circuit and
 # do a full rebuild.  Keeps the incremental path bounded and predictable.
 _MAX_INCREMENTAL_DELTA = 50
@@ -302,6 +302,9 @@ def _incremental_fold(
     with connect_projection_db(projection_path) as connection:
         # Wipe stale rows for affected entities so re-fold starts clean
         _delete_affected_rows(connection, affected_entity_ids)
+        for event in visible_events:
+            if event.event_type == "dependency.declared.v1" and event.payload["dependency_id"] in seen_ids:
+                connection.execute("DELETE FROM entity_links WHERE event_id = ?", (event.event_id,))
 
         # Re-fold each affected entity using its complete (globally-superseded) history
         for entity_id, evts in entity_events.items():

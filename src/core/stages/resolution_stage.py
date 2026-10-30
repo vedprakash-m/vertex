@@ -53,7 +53,10 @@ class ResolutionStage:
             ctx.edition_name,
             programs_root=programs_root,
         ) if find_edition_yaml(ctx.edition_name, programs_root=programs_root) is not None else None
-        archive_index = read_archive_index(ctx.edition_name, archive_root=resolved_archive_root)
+        artifact_root_kwargs = {"programs_root": programs_root} if resolved_v2 is not None else {}
+        archive_index = read_archive_index(
+            ctx.edition_name, archive_root=resolved_archive_root, **artifact_root_kwargs,
+        )
         latest_confirmed_entry = find_latest_confirmed_entry(archive_index)
         resolved_issue_number = ctx.issue_number if ctx.issue_number is not None else _next_issue_number(archive_index)
         previous_dry_run_state = _load_previous_dry_run_state(
@@ -81,11 +84,13 @@ class ResolutionStage:
                 ctx.edition_name,
                 resolved_issue_number,
                 reports_root=resolved_reports_root,
+                programs_root=programs_root if resolved_v2 is not None else None,
             )
             delete_seedable_overrides(
                 ctx.edition_name,
                 resolved_issue_number,
                 reports_root=resolved_reports_root,
+                programs_root=programs_root if resolved_v2 is not None else None,
             )
         previous_snapshot, previous_issue_number = _resolve_previous_snapshot(
             edition_name=ctx.edition_name,
@@ -93,7 +98,7 @@ class ResolutionStage:
             archive_index=archive_index,
             archive_root=resolved_archive_root,
             editions_root=editions_root,
-            programs_root=programs_root,
+            **artifact_root_kwargs,
             trusted_issue_number=trusted_baseline_issue_number,
         )
         resolved_edition_type = EditionType.from_string(ctx.edition_type_override or bundle.config.edition.type)
@@ -104,6 +109,7 @@ class ResolutionStage:
                 source_issue_number=trusted_baseline_issue_number,
                 reports_root=resolved_reports_root,
                 archive_root=resolved_archive_root,
+                programs_root=programs_root if resolved_v2 is not None else None,
             )
             if trusted_baseline_issue_number is not None
             else None
@@ -168,7 +174,7 @@ def _resolve_previous_snapshot(
     archive_index: ArchiveIndex,
     archive_root: Path,
     editions_root: Path,
-    programs_root: Path,
+    programs_root: Path | None = None,
     trusted_issue_number: int | None = None,
 ) -> tuple[Any, int | None]:
     if trusted_issue_number is not None:
@@ -179,6 +185,7 @@ def _resolve_previous_snapshot(
         edition_name,
         issue_number,
         archive_root=archive_root,
+        **({"programs_root": programs_root} if programs_root is not None else {}),
     )
 
 

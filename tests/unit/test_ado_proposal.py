@@ -173,7 +173,7 @@ def test_build_vitality_nudge_proposal_filters_recent_nudges_and_uses_neutral_co
             _work_item(1002, created_at),
         ),
         scores=(
-            VitalityScore(1001, "owner", "ws_demo", 18, "red", 35, ("recent_comment",), 1, 2, 31, "Add an owner comment"),
+            VitalityScore(1001, "owner", "ws_demo", None, "red", 35, ("recent_comment",), 1, 2, 31, "Add an owner comment"),
             VitalityScore(1002, "owner", "ws_demo", 18, "red", 35, ("recent_comment",), 1, 2, 31, "Add an owner comment"),
         ),
         current_work_item_rows=[
@@ -191,6 +191,9 @@ def test_build_vitality_nudge_proposal_filters_recent_nudges_and_uses_neutral_co
     assert "Recent non-ADO activity was detected for this item." in proposal.entries[0].proposed_value
     assert "Owner comment / next step" in proposal.entries[0].proposed_value
     assert "email" not in proposal.entries[0].proposed_value.lower()
+    assert "latest meaningful ADO update time is unknown" in proposal.entries[0].proposed_value
+    assert "unknown source age" in proposal.entries[0].reason
+    assert "9999" not in proposal.entries[0].proposed_value + proposal.entries[0].reason
 
 
 def test_build_vitality_tag_proposal_adds_and_removes_tags() -> None:
@@ -204,7 +207,7 @@ def test_build_vitality_tag_proposal_adds_and_removes_tags() -> None:
             _work_item(1002, created_at, tags=("Needs-PM-Review",)),
         ),
         scores=(
-            VitalityScore(1001, "owner", "ws_demo", 32, "red", 35, (), 0, 0, 28, "Refresh ADO status"),
+            VitalityScore(1001, "owner", "ws_demo", None, "red", 35, (), 0, 0, 28, "Refresh ADO status"),
             VitalityScore(1002, "owner", "ws_demo", 3, "green", 80, (), 0, 0, 92, None),
         ),
         current_work_item_rows=[
@@ -219,6 +222,30 @@ def test_build_vitality_tag_proposal_adds_and_removes_tags() -> None:
     assert proposal.update_type == "vitality_tag"
     assert [(entry.work_item_id, entry.action) for entry in proposal.entries] == [(1001, "add_tag"), (1002, "remove_tag")]
     assert all(entry.proposed_value == "Needs-PM-Review" for entry in proposal.entries)
+    assert "latest meaningful ADO update time is unknown" in proposal.entries[0].reason
+    assert "9999" not in proposal.entries[0].reason
+
+
+def test_unknown_vitality_age_keeps_nudge_and_tag_threshold_comparisons() -> None:
+    created_at = datetime(2026, 5, 15, 18, 0, tzinfo=timezone.utc)
+    item = _work_item(1003, created_at)
+    score = VitalityScore(1003, "owner", "ws_demo", None, "red", 35, (), 0, 2, 31, None)
+    common = dict(
+        program_id="demo",
+        edition_id="demo_weekly",
+        issue_number=7,
+        items=(item,),
+        scores=(score,),
+        current_work_item_rows=(),
+        proposal_id="prop-unknown-age",
+        created_at=created_at,
+    )
+
+    assert len(build_vitality_nudge_proposal(**common, stale_days=9998).entries) == 1
+    assert build_vitality_nudge_proposal(**common, stale_days=9999).entries == ()
+    coverage_gap = (CoverageGap(work_item_id=1003, title="Tracked item", state="Active", assigned_to="owner@example.com"),)
+    assert len(build_vitality_tag_proposal(**common, coverage_gaps=coverage_gap, consecutive_gap_threshold=9999, gap_window_days=1).entries) == 1
+    assert build_vitality_tag_proposal(**common, coverage_gaps=coverage_gap, consecutive_gap_threshold=10000, gap_window_days=1).entries == ()
 
 
 def test_build_field_proposal_loads_mapping_config_and_skips_noops(tmp_path: Path) -> None:

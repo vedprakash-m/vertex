@@ -25,6 +25,100 @@ from src.core.context_gap_store import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+@pytest.mark.parametrize("value,active", [
+    ("{}", True), ("{why: null}", True), ('{why: ""}', True),
+    ("{why: Purpose}", False), ('{why: "<missing>"}', False),
+    ('{why: "<null>"}', False), ("{why: false}", True),
+])
+def test_rank_projects_only_recognized_structural_gaps(tmp_path: Path, value: str, active: bool) -> None:
+    program = tmp_path / "sample"
+    program.mkdir()
+    (program / "workstream_registry.yaml").write_text(
+        f"workstreams:\n- id: lane\n  deep_context: {value}\n", encoding="utf-8",
+    )
+    records = [
+        ContextGapRecord(
+            ts=datetime(2026, 10, 26, tzinfo=timezone.utc), feature=feature,
+            program="sample", lane=lane, field=field, severity="quality_degraded",
+            message="Synthetic observation", impact_estimate="medium",
+        )
+        for feature, lane, field in [
+            ("doctor --context", "lane", "deep_context.why"),
+            ("doctor --context", "lane", "deep_context.how"),
+            ("other", "lane", "deep_context.why"),
+            ("workstream_registry", "lane", "deep_context.why"),
+            ("doctor --context", None, "deep_context.why"),
+        ]
+    ]
+    ranked = rank_context_gaps(records, programs_root=tmp_path)
+    assert len(ranked) == (5 if active else 4)
+    assert len(rank_context_gaps(records)) == 5
+    assert len(records) == 5
+
+
+def test_rank_reads_registry_once_per_program_per_invocation(tmp_path: Path, monkeypatch) -> None:
+    program = tmp_path / "sample"
+    program.mkdir()
+    registry = program / "workstream_registry.yaml"
+    registry.write_text("workstreams:\n" + "".join(
+        f"- id: lane-{lane}\n  deep_context: {{}}\n" for lane in range(3)
+    ), encoding="utf-8")
+    records = [
+        ContextGapRecord(
+            ts=datetime(2026, 10, 26, tzinfo=timezone.utc), feature="doctor --context",
+            program="sample", lane=f"lane-{lane}", field=f"deep_context.{field}",
+            severity="quality_degraded", message="Missing", impact_estimate="medium",
+        )
+        for lane in range(3) for field in ("why", "what")
+    ]
+    read_text = Path.read_text
+    reads: list[Path] = []
+
+    def observe_read(path: Path, *args, **kwargs):
+        if path == registry:
+            reads.append(path)
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", observe_read)
+    assert len(rank_context_gaps(records, programs_root=tmp_path)) == 6
+    assert len(reads) == 1
+    registry.write_text("workstreams:\n" + "".join(
+        f"- id: lane-{lane}\n  deep_context: {{why: Purpose, what: Scope}}\n" for lane in range(3)
+    ), encoding="utf-8")
+    assert rank_context_gaps(records, programs_root=tmp_path) == []
+    assert len(reads) == 2
+
+
+@pytest.mark.parametrize("failure", ["unreadable", "corrupt", "wrong-shape", "duplicate", "invalid-value"])
+def test_rank_registry_errors_never_hide_structural_gap(tmp_path: Path, monkeypatch, failure: str) -> None:
+    import yaml
+    from src.core.manual_registry_diff import ManualRegistryDiffError
+
+    program = tmp_path / "sample"
+    program.mkdir()
+    registry = program / "workstream_registry.yaml"
+    registry.write_text({
+        "unreadable": "workstreams: []\n", "corrupt": "workstreams: [\n",
+        "wrong-shape": "[]\n", "duplicate": "workstreams:\n- id: lane\n- id: lane\n",
+        "invalid-value": "workstreams:\n- id: lane\n  deep_context: {why: [invalid]}\n",
+    }[failure])
+    if failure == "unreadable":
+        read_text = Path.read_text
+
+        def deny_read(path: Path, *args, **kwargs):
+            if path == registry:
+                raise PermissionError("Synthetic unreadable registry")
+            return read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", deny_read)
+    record = ContextGapRecord(
+        ts=datetime(2026, 10, 26, tzinfo=timezone.utc), feature="doctor --context",
+        program="sample", lane="lane", field="deep_context.why", severity="quality_degraded",
+        message="Missing", impact_estimate="medium",
+    )
+    with pytest.raises((PermissionError, yaml.YAMLError, ManualRegistryDiffError)):
+        rank_context_gaps([record], programs_root=tmp_path)
+
 def _programs_root(tmp_path: Path) -> Path:
     root = tmp_path / "programs"
     root.mkdir(parents=True, exist_ok=True)

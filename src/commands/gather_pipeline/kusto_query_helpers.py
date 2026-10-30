@@ -16,6 +16,7 @@ from src.commands.gather_pipeline.support import (
 )
 from src.commands.gather_workiq_helpers import _truncate_signal_text
 from src.core.kusto_ref_utils import extract_kusto_entity_refs as _extract_kusto_entity_refs
+from src.core.kusto_query_loader import query_history_contract_identity
 from src.core.metric_binding_validator import coerce_metric_value, kusto_metric_result_error
 from src.core.models_v2 import KustoQuery, Signal
 from src.core.signal_ref_utils import merge_entity_refs
@@ -67,14 +68,25 @@ def record_kusto_query_state(
     error = error or kusto_metric_result_error(
         query.id, query.expected_cardinality, rows,
         metric_id=query.metric_id, result_column=query.result_column,
+        slo_target=query.slo_target, comparison=query.comparison,
     )
     timestamp = as_of.astimezone(timezone.utc)
     max_data_timestamp = extract_kusto_max_data_timestamp(rows)
     numeric_value = extract_kusto_query_numeric_value(query, rows) if error is None else None
-    value_last_4 = roll_query_value_history(previous_state, numeric_value)
+    previous = previous_state or {}
+    identity = previous.get("history_contract_identity")
+    break_reason = previous.get("history_break_reason")
+    history_state = previous_state
+    if numeric_value is not None:
+        current_identity = query_history_contract_identity(query)
+        if identity != current_identity:
+            history_state = None
+            break_reason = "contract_changed" if identity is not None else "legacy_unverified"
+        identity = current_identity
+    value_last_4 = roll_query_value_history(history_state, numeric_value)
     state: dict[str, Any] = {
         "last_attempted_at": timestamp,
-        "last_succeeded_at": timestamp if error is None else coerce_datetime_or_none((previous_state or {}).get("last_succeeded_at")),
+        "last_succeeded_at": timestamp if error is None and rows else coerce_datetime_or_none(previous.get("last_succeeded_at")),
         "row_count": len(rows),
         "duration_ms": duration_ms,
         "last_cycle_succeeded": error is None,
@@ -87,6 +99,10 @@ def record_kusto_query_state(
         # `row_count=0` (which is misleadingly normal-looking).
         "is_degraded": error is not None,
     }
+    if identity is not None:
+        state["history_contract_identity"] = identity
+    if break_reason is not None:
+        state["history_break_reason"] = break_reason
     if max_data_timestamp is not None:
         data_age_hours = round((timestamp - max_data_timestamp).total_seconds() / 3600.0, 2)
         state["max_data_timestamp"] = max_data_timestamp
@@ -125,6 +141,7 @@ def extract_kusto_query_numeric_value(query: KustoQuery, rows: list[dict[str, An
     if not rows or kusto_metric_result_error(
         query.id, query.expected_cardinality, rows,
         metric_id=query.metric_id, result_column=query.result_column,
+        slo_target=query.slo_target, comparison=query.comparison,
     ):
         return None
     value = kusto_kpi_value(query, rows[0])
@@ -148,6 +165,7 @@ def build_kusto_signal(
     if not rows or kusto_metric_result_error(
         query.id, query.expected_cardinality, rows,
         metric_id=query.metric_id, result_column=query.result_column,
+        slo_target=query.slo_target, comparison=query.comparison,
     ):
         return None
 

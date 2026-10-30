@@ -131,7 +131,8 @@ def test_triage_cli_supports_json_and_csv(monkeypatch) -> None:
                     total_items=4,
                     updated_this_week=2,
                     updated_this_week_percentage=50,
-                    freshness_average_days=6.5,
+                    freshness_average_days=None,
+                    freshness_known_items=0,
                     stale_owner_aliases=("maintainer",),
                 ),
                 stale_narratives=(
@@ -192,6 +193,8 @@ def test_triage_cli_supports_json_and_csv(monkeypatch) -> None:
     assert payload["counts"]["decision_debt"] == 1
     assert payload["counts"]["stale_claims"] == 1
     assert payload["counts"]["stale_narratives"] == 1
+    assert payload["vitality_summary"]["freshness_average_days"] is None
+    assert payload["vitality_summary"]["freshness_known_items"] == 0
     assert payload["counts"]["telemetry"] == 1
     assert payload["counts"]["scorecard_composition"] == 1
     assert payload["counts"]["section_roster"] == 1

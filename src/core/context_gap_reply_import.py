@@ -115,7 +115,11 @@ def import_context_gap_reply(
             if not validate_solicitation_draft(program_id, draft, programs_root=programs_root):
                 raise ContextGapReplyImportError("Missing solicitation packet binding.")
             if (
-                gap.feature != "workstream_registry" or record.get("program_id") != program_id
+                not (
+                    gap.feature == "workstream_registry"
+                    or gap.feature == "doctor --context" and gap.field in {"deep_context.why", "deep_context.what"}
+                )
+                or record.get("program_id") != program_id
                 or record.get("target_store") != "workstream_registry"
                 or record.get("target_key") != gap.lane or record.get("target_field") != target_field
             ):

@@ -362,6 +362,9 @@ def test_lookback_assumption_render_fallback_injects_visible_warning_banner(monk
 def test_lookback_assumption_synthetic_bridged_fact_renders_trust_badge(tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     _seed_program(programs_root, "nova")
+    edition_path = programs_root / "nova" / "editions" / "nova_weekly.yaml"
+    edition_path.parent.mkdir()
+    edition_path.write_text("program_id: nova\n", encoding="utf-8")
     save_fact_sor_state(
         "nova",
         mode="legacy",

@@ -37,6 +37,7 @@ from src.core.journal import PROGRAMS_ROOT
 from src.core.ledger.durable_outbox_store import (
     OutboxEntry,
     OutboxError,
+    classify_expired_dispatched,
     enqueue,
     lease_next,
     load_entry,
@@ -111,6 +112,12 @@ def enqueue_create_task_intent(
     db_path = outbox_db_path(program_id, programs_root=programs_root)
     existing = load_entry(db_path, idempotency_key)
     if existing is not None:
+        if (
+            existing.domain != ACTUATION_DISPATCH_DOMAIN
+            or existing.correlation_id != idempotency_key
+            or existing.payload_json != payload_json
+        ):
+            raise OutboxError("Existing outbox key has different domain, correlation or payload")
         return existing
     entry = enqueue(
         db_path,
@@ -149,6 +156,20 @@ def dispatch_leased_create_task(
     caller rather than silently retried).
     """
     db_path = outbox_db_path(program_id, programs_root=programs_root)
+    observed = load_entry(db_path, idempotency_key)
+    if observed is not None:
+        if observed.domain != ACTUATION_DISPATCH_DOMAIN or observed.correlation_id != idempotency_key:
+            raise OutboxError("Existing outbox key has different domain or correlation")
+        if observed.status == "uncertain_remote_state":
+            return ActuationDispatchOutcome(entry=observed, remote_id=None, status="uncertain_remote_state")
+        if observed.status == "completed":
+            raise OutboxError("Completed outbox row cannot be dispatched again")
+        if observed.status == "dispatched" and (
+            observed.lease_expires_at is None
+            or observed.lease_expires_at > datetime.now(timezone.utc)
+            or observed.lease_owner == owner
+        ):
+            raise OutboxError("Dispatched outbox row requires an expired recorded lease and a different owner")
     lease_handle = acquire_lease(
         program_id,
         owner,
@@ -157,6 +178,11 @@ def dispatch_leased_create_task(
         programs_root=programs_root,
     )
     try:
+        if observed is not None and observed.status == "dispatched":
+            classified = classify_expired_dispatched(
+                db_path, observed, workspace_lease=lease_handle, programs_root=programs_root,
+            )
+            return ActuationDispatchOutcome(entry=classified, remote_id=None, status="uncertain_remote_state")
         outcome: ActuationDispatchOutcome | None = None
         for _ in range(max_drain_iterations):
             leased = lease_next(db_path, ACTUATION_DISPATCH_DOMAIN, owner=owner, ttl_seconds=outbox_lease_ttl_seconds)

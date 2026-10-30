@@ -9,6 +9,103 @@ from src.commands.gather_pipeline import channel_runtime
 from src.core.models import RiskLevel, WorkItem
 
 
+@pytest.mark.parametrize(
+    "discovery_state",
+    [
+        "partial", "scope_partial", "scope_partial_no_reason", "scope_error", "returned_error",
+        "exception", "empty", "incremental", "full_scope",
+    ],
+)
+@pytest.mark.parametrize("hydration_error", [False, True])
+def test_run_channel_preserves_discovery_degradation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, discovery_state: str, hydration_error: bool,
+) -> None:
+    from types import SimpleNamespace
+
+    from src.core.channel_registry_store import ChannelRegistryStore
+    from src.core.exceptions import QueryError
+    from src.core.integration_types import (
+        ADOHydrationOutput, ChannelConfig, DiscoveryCompleteness, DiscoveryResult,
+        HydrationResult, IntegrationError, RunContext, ScopeStatus, ScopeStatusKind,
+    )
+
+    now = datetime(2026, 10, 28, tzinfo=timezone.utc)
+    errors = []
+    outcomes = []
+    captures = []
+    discovery_error = IntegrationError(
+        source="ado", stage="discovery", message="Discovery unavailable", retryable=True,
+        operator_action="Retry discovery",
+    )
+    scope_statuses = {}
+    if discovery_state in {"scope_partial", "scope_partial_no_reason", "scope_error", "full_scope"}:
+        scope_statuses["scope"] = ScopeStatus(
+            scope_id="scope",
+            status=ScopeStatusKind.ERROR if discovery_state == "scope_error" else ScopeStatusKind.SUCCESS,
+            completeness=DiscoveryCompleteness.PARTIAL if discovery_state.startswith("scope_partial") else DiscoveryCompleteness.FULL,
+            item_count=0,
+            error_message=None if discovery_state == "scope_partial_no_reason" else "Scope discovery incomplete",
+        )
+    result = DiscoveryResult(
+        channel="ado", program_id="demo", discovered_refs=(),
+        completeness=(
+            DiscoveryCompleteness.PARTIAL if discovery_state == "partial"
+            else DiscoveryCompleteness.INCREMENTAL if discovery_state == "incremental"
+            else DiscoveryCompleteness.FULL
+        ),
+        scope_statuses=scope_statuses, scope_state_updates={},
+        errors=(discovery_error,) if discovery_state == "returned_error" else (),
+        computed_at=now,
+    )
+
+    def discover(*args, **kwargs):
+        if discovery_state == "exception":
+            raise QueryError("Discovery unavailable")
+        return result
+
+    hydration = HydrationResult(
+        channel="ado", resources=ADOHydrationOutput(work_items=(), freshness_items=()),
+        api_call_count=2, hydrated_ref_ids=(), failed_ref_ids=(),
+        errors=(
+            IntegrationError(source="ado", stage="hydration", message="Hydration warning", retryable=False),
+        ) if hydration_error else (),
+    )
+    binding = SimpleNamespace(
+        config=ChannelConfig(channel="ado", enabled=True, discovery_threshold_hours=24, ttl_days=30),
+        discovery_provider=SimpleNamespace(discover=discover),
+        hydration_provider=SimpleNamespace(hydrate=lambda *args, **kwargs: hydration),
+        discovery_config=object(), hydration_config=object(),
+    )
+    monkeypatch.setattr(channel_runtime, "load_arch_data_fix", lambda *args, **kwargs: None)
+    hydrated, _ = channel_runtime.run_channel(
+        binding, ChannelRegistryStore(tmp_path / "registry.sqlite3", "demo"),
+        program_id="demo", since=now, verified_at=now, run_ctx=RunContext(force_discovery=True),
+        integration_error_sink=errors, discovery_result_sink=captures, channel_outcome_sink=outcomes,
+        programs_root=tmp_path,
+    )
+
+    assert hydrated == hydration
+    assert len(outcomes) == 1
+    degraded = hydration_error or discovery_state not in {"empty", "incremental", "full_scope"}
+    assert outcomes[0].degraded is degraded
+    assert outcomes[0].ado_call_count == 2
+    if hydration_error:
+        assert outcomes[0].degrade_reason == "Hydration warning"
+    elif degraded:
+        assert outcomes[0].degrade_reason
+        if discovery_state in {"exception", "returned_error"}:
+            assert outcomes[0].degrade_reason == "Discovery unavailable"
+    else:
+        assert outcomes[0].degrade_reason is None
+    assert captures == ([] if discovery_state == "exception" else [result])
+    if discovery_state == "returned_error":
+        assert any(
+            error.message == discovery_error.message and error.retryable
+            and error.operator_action == "Retry discovery"
+            for error in errors
+        )
+
+
 def test_run_channel_with_extraction_surfaces_extractor_errors(tmp_path: Path) -> None:
     from src.core.alerts import append_or_suppress_alert, read_alerts
     from src.core.channel_registry_store import ChannelRegistryStore

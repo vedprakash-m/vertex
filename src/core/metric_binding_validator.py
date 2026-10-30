@@ -38,18 +38,27 @@ def kusto_scalar_cardinality_error(
 def kusto_metric_result_error(
     query_id: str, expected_cardinality: str, rows: Sequence[Mapping[str, Any]],
     *, metric_id: str | None = None, result_column: str | None = None,
+    slo_target: float | None = None, comparison: str | None = None,
 ) -> str | None:
     error = kusto_scalar_cardinality_error(
         query_id, expected_cardinality, len(rows), metric_id=metric_id,
     )
-    if error is not None or metric_id is None or not rows:
+    if error is not None:
         return error
-    value = rows[0].get(result_column) if result_column else None
-    if coerce_metric_value(value) is None:
-        return (
-            f"Kusto query {query_id} requires a finite numeric value in its declared "
-            f"result column for metric {metric_id}."
-        )
+    if metric_id is not None and rows:
+        value = rows[0].get(result_column) if result_column else None
+        if coerce_metric_value(value) is None:
+            return (
+                f"Kusto query {query_id} requires a finite numeric value in its declared "
+                f"result column for metric {metric_id}."
+            )
+    if slo_target is not None and (isinstance(slo_target, bool) or not math.isfinite(slo_target)):
+        return f"Kusto query {query_id} requires a finite numeric slo_target."
+    if (
+        rows and metric_id is not None and slo_target is not None and comparison is not None
+        and comparison not in {">=", "<=", "==", ">", "<"}
+    ):
+        return f"Kusto query {query_id} has an unsupported SLO comparison."
     return None
 
 

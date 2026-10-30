@@ -14,11 +14,12 @@ from src.commands import report_deck as report_deck_module
 from src.commands.report import generate_report_draft
 from src.core.action_tracker import append_action
 from src.core.exceptions import ConfigError, QueryTimeoutError
+from src.core.file_stores import FileTrajectoryStore
 from src.core.models import Confidence, EditionType, RiskLevel
 from src.core.models_v2 import ActionItem, ActionSourceType, ActionStatus, Dependency, DependencyScheduleStatus, DependencyStatus
 from src.core.fact_sor_state import save_fact_sor_state
 from src.core.models_v2 import DependencyType, Milestone, MilestoneAssessment, MilestoneStatus, SectionEvidenceBrief, SectionRevisionProposal, SectionRevisionStatus, Signal, SignalReviewDecision, TrajectoryPoint
-from src.core.pipeline import StageContext
+from src.core.pipeline import StageContext, capture_milestone_trajectory_snapshot
 from src.core.section_proposal_store import append_proposal
 from src.core.sqlite_stores import SQLiteSignalStore, SQLiteTrajectoryStore
 from src.core.stages import action_stage as action_stage_module
@@ -125,6 +126,253 @@ def _stage_pipeline_workspace(workspace_root: Path) -> Path:
 def _exampletag1_items(as_of: datetime) -> tuple:
     from dataclasses import replace
     return tuple(replace(item, tags=[*item.tags, "EXAMPLETAG1"]) for item in _sample_items(as_of))
+
+
+@pytest.mark.parametrize("program_backed", [False, True])
+def test_lookback_stage_forwards_selected_program_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program_backed: bool,
+) -> None:
+    from unittest.mock import Mock
+
+    root = tmp_path / "named-home"
+    generator = Mock(return_value=SimpleNamespace())
+    monkeypatch.setattr(report_module, "_generate_lookback_draft", generator)
+    ctx = StageContext(
+        edition_name=EDITION_NAME, bundle=SimpleNamespace(), archive_index=SimpleNamespace(),
+        resolved_issue_number=7, resolved_edition_type=EditionType.LOOKBACK,
+        started_at=datetime(2026, 5, 5, tzinfo=timezone.utc), data_as_of=datetime(2026, 5, 5, tzinfo=timezone.utc),
+        reports_root=tmp_path / "reports", archive_root=tmp_path / "archive", programs_root=root,
+        resolved_v2=SimpleNamespace() if program_backed else None,
+    )
+    result = report_module._LookbackStage().execute(ctx)
+    assert result.artifacts is generator.return_value
+    assert generator.call_args.kwargs.get("programs_root") == (root if program_backed else None)
+
+
+@pytest.mark.parametrize("program_backed", [False, True])
+def test_output_stage_fact_pin_uses_selected_program_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program_backed: bool,
+) -> None:
+    from unittest.mock import Mock
+
+    root = tmp_path / "named-home"
+    pin = Mock(side_effect=RuntimeError("Selected output pin boundary"))
+    monkeypatch.setattr(report_module, "_pin_program_fact_snapshot", pin)
+    monkeypatch.setattr(report_module, "_runtime_db_root_for_reports", Mock(wraps=report_module._runtime_db_root_for_reports))
+    ctx = StageContext(
+        edition_name=EDITION_NAME, reports_root=tmp_path / "elsewhere" / "reports",
+        archive_root=tmp_path / "archive", editions_root=tmp_path / "editions", programs_root=root,
+        resolved_v2=SimpleNamespace(program=SimpleNamespace(id="fixture")) if program_backed else None,
+        fact_snapshot_pin=SimpleNamespace() if program_backed else None, resolved_issue_number=7,
+        resolved_edition_type=EditionType.DETAILED, started_at=datetime(2026, 5, 5, tzinfo=timezone.utc),
+        data_as_of=datetime(2026, 5, 5, tzinfo=timezone.utc), overrides_path=tmp_path / "overrides.yaml",
+        narratives_dir=tmp_path / "narratives", override_snapshot={}, render_exec_summary_text="",
+        render_workstream_blurbs={}, render_state=SimpleNamespace(), validation_state=SimpleNamespace(),
+    )
+    with pytest.raises(RuntimeError, match="Selected output pin boundary"):
+        report_module._OutputStage().execute(ctx)
+    reader = report_module._runtime_db_root_for_reports
+    assert reader.call_args.kwargs.get("programs_root") == (root if program_backed else None)
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("program_backed", [False, True])
+@pytest.mark.parametrize("missing", [False, True])
+def test_dormant_assembly_artifacts_respect_context_without_reactivation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program_backed: bool, missing: bool,
+) -> None:
+    from dataclasses import replace
+    from unittest.mock import Mock
+    from src.commands.report_pipeline import assemble_stage as assembly
+    from src.core.narrative_store import write_narrative_section
+    from src.core.overrides_store import OverridesDocument, save_overrides
+
+    reports = _stage_pipeline_workspace(tmp_path)
+    request = report_module._build_stage_request_context(
+        edition_name=EDITION_NAME, issue_number=7, reseed=False, no_seed=True, dry_run=True,
+        offline=False, diff_mode=False, as_of=datetime(2026, 5, 5, tzinfo=timezone.utc),
+        edition_type_override=None, lookback_range=None, section_filter_ids=(),
+        reports_root=reports, archive_root=tmp_path / "archive", programs_root=tmp_path / "programs",
+        work_item_loader=lambda bundle, timestamp: (_sample_items(timestamp), 0),
+        kusto_query_executor=None, open_browser=False,
+    )
+    ctx = ResolutionStage().execute(request)
+    for stage in (FetchStage(), ComputeStage(), NarrativeStage(), AIStage(), RenderStage(), ValidationStage()):
+        ctx = stage.execute(ctx)
+    root = (tmp_path / "programs").rename(tmp_path / "named-home")
+    selected = root if program_backed else None
+    reports = tmp_path / "elsewhere" / "reports"
+    if not program_backed:
+        import shutil
+        shutil.copytree(root, reports.parent / "programs")
+    save_overrides(
+        EDITION_NAME, OverridesDocument(issue_number=7, top_3_now=(), scorecards=(), edition_intro="selected"),
+        reports, programs_root=selected,
+    )
+    write_narrative_section(EDITION_NAME, 7, "exec_summary", "selected summary", reports, programs_root=selected)
+    if program_backed:
+        write_narrative_section(EDITION_NAME, 7, "exec_summary", "decoy", reports)
+        decoy = reports / EDITION_NAME / "narratives" / "issue_007" / "exec_summary.md"
+        decoy_bytes = decoy.read_bytes()
+    ctx = replace(
+        ctx, programs_root=root, reports_root=reports, resolved_v2=ctx.resolved_v2 if program_backed else None,
+        default_exec_summary=None if missing else ctx.default_exec_summary,
+        evidence_by_item=None if missing else ctx.evidence_by_item,
+        narratives_dir=None if missing else ctx.narratives_dir,
+    )
+    readers = {}
+    for name in ("load_overrides", "get_overrides_path", "load_narratives", "merge_narratives", "build_workstream_narrative_history"):
+        readers[name] = Mock(wraps=getattr(assembly, name))
+        monkeypatch.setattr(assembly, name, readers[name])
+    monkeypatch.setattr(assembly, "_load_report_signal_context", Mock(return_value=ctx.signal_context))
+    forecast = Mock(wraps=assembly._load_eta_forecasts)
+    monkeypatch.setattr(assembly, "_load_eta_forecasts", forecast)
+    pin = Mock(side_effect=RuntimeError("Dormant assembly output boundary"))
+    monkeypatch.setattr(assembly, "_pin_program_fact_snapshot", pin)
+    runtime = Mock(wraps=assembly._runtime_db_root_for_reports)
+    monkeypatch.setattr(assembly, "_runtime_db_root_for_reports", runtime)
+    with pytest.raises(RuntimeError, match="Dormant assembly output boundary"):
+        assembly._generate_report_draft_from_context(ctx)
+    assert runtime.call_args.kwargs.get("programs_root") == selected
+    if missing:
+        assert forecast.called
+        assert forecast.call_args.kwargs.get("programs_root") == selected
+    else:
+        forecast.assert_not_called()
+    for reader in readers.values():
+        if missing:
+            assert reader.called
+            assert all(call.kwargs.get("programs_root") == selected for call in reader.call_args_list)
+        else:
+            reader.assert_not_called()
+    if program_backed:
+        assert decoy.read_bytes() == decoy_bytes
+    assert [stage.name() for stage in report_module._report_pipeline_stages(EditionType.DETAILED)][-1] == "output"
+
+
+@pytest.mark.parametrize("program_backed", [False, True])
+@pytest.mark.parametrize("seed_mode", ["seed", "no_seed", "sentinel"])
+def test_narrative_stage_selected_artifacts_and_legacy_omission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program_backed: bool, seed_mode: str,
+) -> None:
+    from unittest.mock import Mock
+    from src.core import narrative_store
+    from src.core.stages import narrative_stage
+    from src.core.overrides_store import OverridesDocument
+    from tests.unit.test_narrative_store import _selected_artifact_root
+
+    root = _selected_artifact_root(tmp_path)
+    reports, archive = tmp_path / "elsewhere" / "reports", tmp_path / "archive"
+    selected = root if program_backed else None
+    for issue in (1, 2):
+        narrative_store.write_narrative_section("fixture_weekly", issue, "delivery", f"prior {issue}", reports, programs_root=selected)
+        narrative_store.archive_narratives("fixture_weekly", issue, archive, reports, programs_root=selected)
+    if program_backed:
+        narrative_store.write_narrative_section("fixture_weekly", 3, "exec_summary", "decoy", reports)
+        decoy = reports / "fixture_weekly" / "narratives" / "issue_003" / "exec_summary.md"
+        decoy_bytes = decoy.read_bytes()
+    if seed_mode == "sentinel":
+        target = narrative_store.get_narratives_dir("fixture_weekly", 3, reports, programs_root=selected)
+        target.mkdir(parents=True)
+        (target / narrative_store.NO_SEED_SENTINEL_FILENAME).touch()
+    monkeypatch.setattr(
+        narrative_store, "read_archive_index",
+        lambda *_args, **_kwargs: SimpleNamespace(issues=tuple(
+            SimpleNamespace(kind="confirmed", issue_number=i) for i in (1, 2)
+        )),
+    )
+    sync = Mock(wraps=narrative_stage.sync_published_baseline_to_target)
+    monkeypatch.setattr(narrative_stage, "sync_published_baseline_to_target", sync)
+    support = Mock()
+    support.build_top_items.return_value = ()
+    support.build_auto_suggested_top_items.return_value = ()
+    support.is_continuity_layout.return_value = False
+    support.visible_continuity_chapters.return_value = ()
+    support.build_workstream_templates.return_value = {"ws_delivery.md": "fresh"}
+    support.build_exec_summary_template.return_value = "fresh summary"
+    support.visible_detail_section_ids.return_value = {"delivery"}
+    support.active_workstream_blurbs.side_effect = lambda narratives, _ids: {"delivery": narratives["ws_delivery.md"].strip()}
+    ctx = StageContext(
+        edition_name="fixture_weekly", reports_root=reports, archive_root=archive, programs_root=root,
+        resolved_v2=SimpleNamespace() if program_backed else None,
+        bundle=SimpleNamespace(
+            chapter_contract=None, slice_contracts=None, config=SimpleNamespace(layout_mode="default"),
+            program_context=SimpleNamespace(workstreams=(SimpleNamespace(name="Delivery"),)),
+        ), resolved_issue_number=3, trusted_baseline_issue_number=2, no_seed=seed_mode == "no_seed",
+        resolved_edition_type=EditionType.DETAILED,
+        overrides_document=OverridesDocument(issue_number=3, top_3_now=(), scorecards=()),
+        scorecards=(), scorecard_packets={}, scorecard_deltas=(), deltas=SimpleNamespace(),
+        default_exec_summary="default", stage_support=support,
+    )
+    result = NarrativeStage().execute(ctx)
+    target = narrative_store.get_narratives_dir("fixture_weekly", 3, reports, programs_root=selected)
+    assert result.narratives_dir == target
+    assert result.workstream_narrative_history["Delivery"][1:] == ("prior 2", "prior 1")
+    if seed_mode == "seed":
+        assert result.narrative_seeding is not None
+        assert "prior 2" in result.loaded_narratives["ws_delivery.md"]
+        assert sync.call_args.kwargs.get("programs_root") == selected
+    else:
+        assert result.narrative_seeding is None
+        assert result.loaded_narratives["ws_delivery.md"] == "fresh\n"
+        sync.assert_not_called()
+    if program_backed:
+        assert decoy.read_bytes() == decoy_bytes
+
+
+@pytest.mark.parametrize("program_backed", [False, True])
+def test_resolution_stage_reseed_forwards_artifact_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program_backed: bool,
+) -> None:
+    from unittest.mock import Mock
+    from src.core.stages import resolution_stage
+    from src.core.overrides_store import OverridesDocument, save_overrides, get_overrides_path
+    from src.core.narrative_store import write_narrative_section, get_narratives_dir
+
+    reports = _stage_pipeline_workspace(tmp_path)
+    root, archive = tmp_path / "programs", tmp_path / "archive"
+    selected = root if program_backed else None
+    write_narrative_section(EDITION_NAME, 2, "exec_summary", "discard", reports, programs_root=selected)
+    save_overrides(EDITION_NAME, OverridesDocument(issue_number=1, top_3_now=(), scorecards=(), edition_intro="prior"), reports)
+    save_overrides(EDITION_NAME, OverridesDocument(issue_number=2, top_3_now=(), scorecards=()), reports)
+    narrative_delete = Mock(wraps=resolution_stage.delete_narratives_dir)
+    override_delete = Mock(wraps=resolution_stage.delete_seedable_overrides)
+    seed = Mock(wraps=resolution_stage.seed_overrides_from_prior)
+    monkeypatch.setattr(resolution_stage, "delete_narratives_dir", narrative_delete)
+    monkeypatch.setattr(resolution_stage, "delete_seedable_overrides", override_delete)
+    monkeypatch.setattr(resolution_stage, "seed_overrides_from_prior", seed)
+    monkeypatch.setattr(resolution_stage, "load_trusted_baseline_issue", lambda *_args, **_kwargs: 1)
+    if not program_backed:
+        monkeypatch.setattr(resolution_stage, "resolve_edition", lambda *_args, **_kwargs: None)
+    result = ResolutionStage().execute(StageContext(
+        edition_name=EDITION_NAME, issue_number=2, reseed=True, reports_root=reports, archive_root=archive,
+        programs_root=root, as_of=datetime(2026, 5, 5, tzinfo=timezone.utc),
+    ))
+    for call in (narrative_delete, override_delete, seed):
+        assert call.call_args.kwargs.get("programs_root") == selected
+    assert not get_narratives_dir(EDITION_NAME, 2, reports, programs_root=selected).exists()
+    assert get_overrides_path(EDITION_NAME, reports, issue_number=2, programs_root=selected).exists()
+    assert result.overrides_seeding.seeded
+
+
+def test_resolution_stage_keeps_custom_root_admission_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import Mock
+    from src.core.stages import resolution_stage
+    from tests.unit.test_narrative_store import _selected_artifact_root
+
+    root = _selected_artifact_root(tmp_path)
+    reader = Mock(side_effect=AssertionError("Admission must precede bundle loading"))
+    monkeypatch.setattr(resolution_stage, "load_bundle", reader)
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    with pytest.raises(ConfigError, match="Conflicting report workspace roots"):
+        ResolutionStage().execute(StageContext(
+            edition_name="fixture_weekly", issue_number=7, reseed=True, programs_root=root,
+            reports_root=tmp_path / "reports", archive_root=tmp_path / "archive",
+        ))
+    reader.assert_not_called()
+    assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+    assert not (tmp_path / "reports").exists()
+    assert not (tmp_path / "archive").exists()
 
 
 def test_resolution_stage_populates_report_context(repo_root: Path, tmp_path: Path) -> None:
@@ -299,6 +547,12 @@ def test_narrative_stage_populates_editorial_state(repo_root: Path, tmp_path: Pa
 
     assert milestone_ctx.milestones is not None
     assert milestone_ctx.milestone_assessments is not None
+    if milestone_ctx.milestone_assessments:
+        assert milestone_ctx.milestone_trajectory_snapshot is not None
+        assert milestone_ctx.milestone_trajectory_snapshot["backend"] in {"file", "sqlite"}
+        assert milestone_ctx.milestone_trajectory_snapshot["sha256"].startswith("sha256:")
+    else:
+        assert milestone_ctx.milestone_trajectory_snapshot is None
     assert risk_ctx.risks is not None
     assert risk_ctx.risks == ()
     assert risk_ctx.stale_risk_ids == ()
@@ -1307,3 +1561,74 @@ def _set_v2_program_storage_backend(programs_root: Path, *, program_id: str, sto
     assert isinstance(program_document, dict)
     program_document["storage_backend"] = storage_backend
     program_path.write_text(yaml.safe_dump(program_document, sort_keys=False), encoding="utf-8")
+
+
+def test_milestone_trajectory_snapshot_preserves_ordered_assessment_projection(tmp_path: Path) -> None:
+    store = FileTrajectoryStore(programs_root=tmp_path)
+    points = (
+        TrajectoryPoint(
+            date=date(2026, 5, 5), state="Active", assigned_to="first",
+            target_date=date(2026, 6, 1), risk_level=RiskLevel.LOW, area_path="first-path",
+        ),
+        TrajectoryPoint(
+            date=date(2026, 5, 5), state="Closed", assigned_to="second",
+            target_date=None, risk_level=RiskLevel.HIGH, area_path="second-path",
+        ),
+    )
+    snapshot = capture_milestone_trajectory_snapshot(
+        "acme", store, {900002: (), 900001: points},
+    )
+    assert snapshot["backend"] == "file"
+    assert [item["work_item_id"] for item in snapshot["items"]] == [900001, 900002]
+    assert snapshot["items"][0]["points"] == [
+        {"date": "2026-05-05", "state": "Active", "target_date": "2026-06-01"},
+        {"date": "2026-05-05", "state": "Closed", "target_date": None},
+    ]
+    assert snapshot["items"][1]["points"] == []
+
+
+@pytest.mark.parametrize("work_item_id", [0, -1, True])
+def test_milestone_trajectory_snapshot_rejects_nonpositive_or_bool_ids(
+    tmp_path: Path,
+    work_item_id: int,
+) -> None:
+    with pytest.raises(ValueError, match="positive integers"):
+        capture_milestone_trajectory_snapshot(
+            "acme", FileTrajectoryStore(programs_root=tmp_path), {work_item_id: ()},
+        )
+
+
+def test_milestone_trajectory_snapshot_rejects_unknown_store_type() -> None:
+    with pytest.raises(ValueError, match="Unsupported"):
+        capture_milestone_trajectory_snapshot("acme", object(), {})
+
+
+def test_milestone_stage_empty_and_lookback_paths_do_not_read_trajectories(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("No milestone assessment may read trajectory history.")
+
+    monkeypatch.setattr(milestone_stage_module, "build_trajectory_store_for_program_id", forbidden)
+    monkeypatch.setattr(milestone_stage_module, "retained_report_fact_snapshot", lambda *_args: None)
+    monkeypatch.setattr(milestone_stage_module, "resolve_family_sor_mode", lambda *_args, **_kwargs: "legacy")
+    monkeypatch.setattr(milestone_stage_module, "_load_current_milestones", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(milestone_stage_module, "_load_current_dependencies", lambda *_args, **_kwargs: ())
+    empty = MilestoneStage().execute(
+        StageContext(
+            resolved_v2=SimpleNamespace(paths=SimpleNamespace(program_id="acme")),
+            programs_root=tmp_path,
+            data_as_of=datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc),
+        )
+    )
+    lookback = MilestoneStage().execute(
+        StageContext(resolved_edition_type=EditionType.LOOKBACK),
+    )
+    unresolved = MilestoneStage().execute(StageContext())
+    assert empty.milestone_assessments == ()
+    assert empty.milestone_trajectory_snapshot is None
+    assert lookback.milestone_assessments == ()
+    assert lookback.milestone_trajectory_snapshot is None
+    assert unresolved.milestone_assessments == ()
+    assert unresolved.milestone_trajectory_snapshot is None

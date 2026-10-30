@@ -14,6 +14,7 @@ from src.commands import freshness as freshness_module
 from src.commands.freshness import _record_confirmed_notify_run, generate_freshness_report
 from src.core.action_tracker import append_action
 from src.core.exceptions import QueryError
+from src.core.freshness_engine import build_freshness_report
 from src.core.milestone_engine import save_milestones
 from src.core.models import ReviewSection, ReviewState, ReviewStatus
 from src.core.notification_state_store import load_latest_notification_state
@@ -29,6 +30,31 @@ from tests.unit.test_config_loader import _write_demo_v2_layout
 runner = CliRunner()
 EDITION_NAME = "acme_weekly"
 AS_OF = datetime(2026, 5, 5, 18, 0, tzinfo=timezone.utc)
+
+
+def test_missing_live_risk_produces_existing_fr23_warning() -> None:
+    item = freshness_module._work_item_from_sources(
+        {"WorkItemId": 901},
+        {"fields": {"System.State": "Active", "System.Title": "Synthetic"}},
+        [], [], AS_OF,
+    )
+    snapshot = Snapshot(
+        issue_number=1, generated_at=AS_OF, ado_data_as_of=AS_OF,
+        edition_type=EditionType.DETAILED,
+        items=(SnapshotItem(
+            id=901, type=item.type, title=item.title, state=item.state,
+            assigned_to=None, area_path="", target_date=None,
+            risk_level=RiskLevel.LOW, tags=[],
+        ),),
+        scorecards=(), schema_version="1.0",
+    )
+    report = build_freshness_report(
+        (item,), 2, AS_OF, 14, 30, previous_snapshot=snapshot,
+    )
+    finding, = (finding for finding in report.items if finding.rule_id == "FR-23")
+    assert item.risk_level is RiskLevel.UNKNOWN
+    assert finding.severity == "warn"
+    assert finding.message == "Risk changed from low to unknown since the last confirmed issue."
 
 
 @pytest.fixture(autouse=True)
@@ -114,6 +140,29 @@ def test_generate_freshness_report_writes_outputs(repo_root: Path, tmp_path: Pat
     assert "VERTEX FRESHNESS REPORT" in artifacts.plaintext_body
     assert "SLICE INPUT FINDINGS" in artifacts.plaintext_body
     assert "## Slice Input Findings" in artifacts.markdown_body
+
+
+def test_external_default_notification_dry_run_does_not_record_or_confirm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reports_root, archive_root, _ = _stage_freshness_workspace(tmp_path, tmp_path)
+    monkeypatch.setattr(freshness_module, "REPORTS_ROOT", freshness_module.REPO_ROOT / "reports")
+    monkeypatch.setattr(freshness_module, "ARCHIVE_ROOT", freshness_module.REPO_ROOT / "archive")
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Dry-run must not record a notification or confirm a snapshot")
+
+    monkeypatch.setattr(freshness_module, "append_confirmed_notify_run", forbidden)
+    monkeypatch.setattr("src.core.snapshot_store.write_confirmed", forbidden)
+    result = generate_freshness_report(
+        edition_name=EDITION_NAME, notify=True, dry_run=True, as_of=AS_OF,
+        work_item_loader=lambda bundle, timestamp, since: (_sample_items(timestamp), 0),
+    )
+    assert result.notify_previews
+    assert result.md_path.is_relative_to(tmp_path / "programs")
+    assert result.html_path.exists()
+    assert result.exit_code == 3
+    assert not archive_root.exists()
 
 
 def test_generate_freshness_report_uses_trusted_baseline_for_previous_snapshot(

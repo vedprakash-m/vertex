@@ -192,10 +192,16 @@ def _signals_as_enrichments(signals: list[Signal]) -> list:
     for sig in signals:
         if not sig.text:
             continue
+        metadata = sig.metadata or {}
+        native_message_id = metadata.get("native_message_id")
         enrichments.append(Enrichment(
             source="transcript",
-            source_id=sig.raw_ref or sig.id,                           # required; was source_ref= (wrong)
-            author=(sig.metadata or {}).get("sender_alias", "unknown"), # required; was absent
+            source_id=(
+                f"workiq:transcript:{native_message_id}"
+                if isinstance(native_message_id, str) and native_message_id
+                else sig.raw_ref or sig.id
+            ),
+            author=metadata.get("sender_alias", "unknown"), # required; was absent
             timestamp=sig.timestamp,
             excerpt=sig.text[:120],
             permalink=None,

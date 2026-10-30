@@ -27,7 +27,7 @@ from src.core.profile_encryption import dump_people_profiles_document, load_peop
 from src.core.people_directory_schema import ContactKind, load_people_directory, load_teams
 from src.core.people_membership_schema import MembershipStatus, load_memberships
 from src.core.milestone_engine import load_milestones
-from src.core.workstream_documents import _parse_workstreams
+from src.core.workstream_documents import _parse_workstreams, save_workstreams_document
 from src.core.workspace_paths import PROGRAMS_ROOT
 from src.core.yaml_utils import load_yaml_mapping_strict
 
@@ -471,8 +471,11 @@ def apply_kb_update(
 ) -> KbUpdateApplyResult:
     preflight_kb_update(preview)
     for change in preview.changes:
-        change.absolute_path.parent.mkdir(parents=True, exist_ok=True)
-        change.absolute_path.write_text(change.after_text, encoding="utf-8")
+        if change.relative_path == "workstreams.yaml":
+            save_workstreams_document(preview.program_id, change.after_document, programs_root=programs_root)
+        else:
+            change.absolute_path.parent.mkdir(parents=True, exist_ok=True)
+            change.absolute_path.write_text(change.after_text, encoding="utf-8")
 
     audit_path = programs_root / preview.program_id / "journal" / "kb_edits.jsonl"
     _append_jsonl(

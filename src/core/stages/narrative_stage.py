@@ -103,6 +103,7 @@ class NarrativeStage:
             ctx.edition_name,
             ctx.resolved_issue_number,
             reports_root=ctx.reports_root,
+            programs_root=ctx.programs_root if ctx.resolved_v2 is not None else None,
         )
         valid_seed_filenames = _build_valid_seed_filenames(ctx, continuity_chapters, narrative_templates)
         removed_section_ids = set(ctx.overrides_document.removed_sections)
@@ -119,6 +120,7 @@ class NarrativeStage:
                 removed_section_ids=removed_section_ids,
                 reports_root=ctx.reports_root,
                 archive_root=ctx.archive_root,
+                programs_root=ctx.programs_root if ctx.resolved_v2 is not None else None,
             )
             if ctx.resolved_issue_number == ctx.trusted_baseline_issue_number + 1:
                 sync_published_baseline_to_target(
@@ -129,11 +131,13 @@ class NarrativeStage:
                     archive_root=ctx.archive_root,
                     valid_filenames=valid_seed_filenames,
                     removed_section_ids=removed_section_ids,
+                    programs_root=ctx.programs_root if ctx.resolved_v2 is not None else None,
                 )
         existing_narratives = load_narratives(
             ctx.edition_name,
             ctx.resolved_issue_number,
             reports_root=ctx.reports_root,
+            programs_root=ctx.programs_root if ctx.resolved_v2 is not None else None,
         )
         if active_chapters:
             narrative_templates.update(
@@ -160,11 +164,13 @@ class NarrativeStage:
             ctx.resolved_issue_number,
             templates=narrative_templates,
             reports_root=ctx.reports_root,
+            programs_root=ctx.programs_root if ctx.resolved_v2 is not None else None,
         )
         loaded_narratives = load_narratives(
             ctx.edition_name,
             ctx.resolved_issue_number,
             reports_root=ctx.reports_root,
+            programs_root=ctx.programs_root if ctx.resolved_v2 is not None else None,
         )
         loaded_exec_summary_text = loaded_narratives.get("exec_summary.md", "").strip()
         exec_summary_text = loaded_exec_summary_text or ctx.default_exec_summary
@@ -289,6 +295,7 @@ class NarrativeStage:
                 current_workstream_blurbs=workstream_blurbs,
                 archive_root=ctx.archive_root,
                 reports_root=ctx.reports_root,
+                programs_root=ctx.programs_root if ctx.resolved_v2 is not None else None,
             )
             section_roster_current_ids = tuple(sorted(("exec_summary", *diagnostic_section_ids)))
 
@@ -302,6 +309,7 @@ class NarrativeStage:
                 ctx.edition_name,
                 ctx.resolved_issue_number,
                 reports_root=ctx.reports_root,
+                programs_root=ctx.programs_root if ctx.resolved_v2 is not None else None,
             ),
             loaded_narratives=loaded_narratives,
             visible_section_ids=visible_section_ids,

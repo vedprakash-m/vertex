@@ -105,7 +105,8 @@ def execute_archive_transaction(
 ) -> ArchiveTransactionResult:
     from src.core.models_v2 import SectionRevisionStatus
 
-    with ArchiveLock(get_archive_root(edition_name, archive_root)):
+    selected_root_kwargs = {"programs_root": programs_root} if resolved_v2 is not None else {}
+    with ArchiveLock(get_archive_root(edition_name, archive_root, **selected_root_kwargs)):
         revalidate_evidence_fn()
         create_checkpoint_snapshot(program_id, issue_number, programs_root=programs_root) if program_id is not None else None
 
@@ -116,6 +117,7 @@ def execute_archive_transaction(
             archive_root=archive_root,
             promote=False,
             acquire_lock=False,
+            **selected_root_kwargs,
         )
         archive_paths = write_confirmed_issue_fn(
             edition=edition_name,
@@ -133,7 +135,12 @@ def execute_archive_transaction(
             html_body=artifacts[4],
             markdown_body=artifacts[5],
             manifest=manifest,
-            overrides_source=get_overrides_path_fn(edition_name, reports_root, issue_number=issue_number),
+            overrides_source=get_overrides_path_fn(
+                edition_name,
+                reports_root,
+                issue_number=issue_number,
+                **({"programs_root": programs_root} if resolved_v2 is not None else {}),
+            ),
             review_status_source=(review_status_path if review_status_path.exists() else None),
             narratives_source_dir=(narrative_dir if narrative_dir.exists() else None),
             continuation_contract_source=load_draft_continuation_contract_path_fn(
@@ -147,6 +154,7 @@ def execute_archive_transaction(
             snapshot_source=staged_snapshot_path,
             snapshot_is_staged=True,
             acquire_lock=False,
+            **selected_root_kwargs,
         )
 
         if resolved_v2 is not None:
@@ -158,7 +166,7 @@ def execute_archive_transaction(
                 archive_root=archive_root,
                 programs_root=programs_root,
                 prior_issue_entry=find_latest_confirmed_entry(
-                    read_archive_index(edition_name, archive_root),
+                    read_archive_index(edition_name, archive_root, **selected_root_kwargs),
                     before_issue_number=issue_number,
                 ),
             )
@@ -178,12 +186,14 @@ def execute_archive_transaction(
                     edition_name,
                     issue_number,
                     archive_root=archive_root,
+                    **selected_root_kwargs,
                 )
             except Exception as exc:
                 mark_semantic_index_dirty_fn(
                     edition_name,
                     f"confirm issue {issue_number:03d}: {exc}",
                     archive_root=archive_root,
+                    **selected_root_kwargs,
                 )
                 warnings = warnings + (f"Semantic index update skipped: {exc}",)
 
@@ -229,6 +239,7 @@ def execute_archive_transaction(
             extraction_result=extraction_result,
             extraction_mode=extraction_mode,
             resolve_extraction_if_missing=False,
+            **({"programs_root": programs_root} if resolved_v2 is not None else {}),
         )
     except Exception as exc:
         warnings = warnings + (f"Claim tracker skipped: {exc}",)

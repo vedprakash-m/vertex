@@ -28,7 +28,7 @@
   <tr>
     <td style="padding:16px 20px; background-color:#BFBFBF; color:#000000; border-bottom:1px solid #E5E7EB;">
       <p style="margin:0 0 6px 0; font-size:12px; line-height:1.4; font-weight:700; letter-spacing:0.05em; text-transform:uppercase;">Program Health: NEEDS INPUT, STABLE</p>
-<p style="margin:0 0 6px 0; font-size:13px; line-height:1.5; color:#000000;">Milestones: 1 at risk, 2 on track. Critical path: Design, M3 - Code Complete.</p>      <p style="margin:0 0 6px 0; font-size:14px; line-height:1.5; font-weight:700; color:#000000;">Leadership ask: Author confirmation required before publish.</p>
+<p style="margin:0 0 6px 0; font-size:13px; line-height:1.5; color:#000000;">Milestones: 1 at risk, 2 on track. Longest dependency chain: Design, M3 - Code Complete.</p>      <p style="margin:0 0 6px 0; font-size:14px; line-height:1.5; font-weight:700; color:#000000;">Leadership ask: Author confirmation required before publish.</p>
       <p style="margin:0; font-size:12px; line-height:1.5; color:#000000;">~1 min read · Narrative Edition</p>
     </td>
   </tr>

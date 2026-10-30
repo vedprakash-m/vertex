@@ -158,6 +158,7 @@ def build_kusto_kpi_signals(
             cardinality_error = kusto_metric_result_error(
                 query.id, query.expected_cardinality, rows,
                 metric_id=query.metric_id, result_column=query.result_column,
+                slo_target=query.slo_target, comparison=query.comparison,
             )
             record_kusto_query_state_fn(
                 query_state_sink,

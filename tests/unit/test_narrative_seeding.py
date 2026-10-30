@@ -13,6 +13,45 @@ from tests.unit.test_commands_report import _sample_items
 EDITION_NAME = "acme_weekly"
 
 
+def test_explicit_narrative_seeding_uses_selected_local_source(tmp_path) -> None:
+    from tests.unit.test_narrative_store import _selected_artifact_root
+    from src.core import narrative_store as store
+
+    root = _selected_artifact_root(tmp_path)
+    reports, archive = tmp_path / "reports", tmp_path / "archive"
+    store.write_narrative_section("fixture_weekly", 1, "exec_summary", "selected source", reports, programs_root=root)
+    state = store.seed_narratives_from_prior(
+        "fixture_weekly", target_issue_number=2, source_issue_number=1, valid_filenames={"exec_summary.md"},
+        removed_section_ids=set(), reports_root=reports, archive_root=archive, programs_root=root,
+    )
+    assert state is not None and state.source_path == "program_local"
+    assert store.load_narrative_seeding_state("fixture_weekly", 2, reports, programs_root=root) == state
+    assert not store.narrative_seeding_disabled("fixture_weekly", 2, reports, programs_root=root)
+    assert "selected source" in store.load_narratives("fixture_weekly", 2, reports, programs_root=root)["exec_summary.md"]
+    assert not reports.exists()
+
+
+def test_explicit_published_sync_preserves_selected_local_fallback(tmp_path) -> None:
+    from tests.unit.test_narrative_store import _selected_artifact_root
+    from src.core import narrative_store as store
+
+    root = _selected_artifact_root(tmp_path)
+    reports = tmp_path / "reports"
+    store.write_narrative_section("fixture_weekly", 1, "exec_summary", "local", reports, programs_root=root)
+    result = store.sync_published_baseline_to_target(
+        "fixture_weekly", target_issue_number=2, source_issue_number=1, reports_root=reports,
+        archive_root=tmp_path / "archive", programs_root=root,
+        published_narratives={"ws_delivery.md": "published"}, valid_filenames={"exec_summary.md"},
+    )
+    assert result is not None
+    target = root / "fixture" / "narratives" / "issue_002"
+    assert "local" in (target / "exec_summary.md").read_text(encoding="utf-8")
+    assert "published" in (target / "ws_delivery.md").read_text(encoding="utf-8")
+    assert (target / store.SEEDING_MANIFEST_FILENAME).exists()
+    assert store.find_unresolved_scaffold_placeholders("fixture_weekly", 2, reports, programs_root=root) == {}
+    assert not reports.exists()
+
+
 def test_generate_report_draft_seeds_narratives_from_trusted_prior_issue(repo_root, tmp_path) -> None:
     reports_root = stage_v2_report_workspace(repo_root, tmp_path)
     archive_root = tmp_path / "archive"

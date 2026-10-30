@@ -328,6 +328,7 @@ class CacheIdentity:
     response_schema_version: str
     validator_version: str
     classification: str
+    execution_classification: str
     principal: str
     snapshot_id: str
 
@@ -346,6 +347,7 @@ class CacheIdentity:
                 self.response_schema_version,
                 self.validator_version,
                 self.classification,
+                self.execution_classification,
                 self.principal,
                 self.snapshot_id,
             ),
@@ -668,6 +670,7 @@ class StructuredFeatureRunner:
             response_schema_version=spec.schema_version,
             validator_version=spec.validator_version,
             classification=manifest.classification,
+            execution_classification=self._context.classification,
             principal=self._context.principal,
             snapshot_id=self._context.snapshot_id,
         )

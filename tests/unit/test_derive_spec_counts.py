@@ -30,6 +30,14 @@ class TestCollectedTests:
     wording change. pytest < 8 emits "collected N items"; pytest 9.x emits
     "N tests collected in X.XXs". Both must resolve, not silently -> -1."""
 
+    def test_collection_uses_active_interpreter(self, module, monkeypatch, tmp_path):
+        def run(command, **kwargs):
+            assert command == [sys.executable, "-m", "pytest", str(tmp_path), "-q", "--tb=no", "--co"]
+            return SimpleNamespace(stdout="1 test collected in 0.01s\n", returncode=0)
+
+        monkeypatch.setattr(module.subprocess, "run", run)
+        assert module._count_collected_tests(tmp_path) == 1
+
     def test_old_pytest_wording(self, module, monkeypatch, tmp_path):
         monkeypatch.setattr(
             module.subprocess,

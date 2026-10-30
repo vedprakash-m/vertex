@@ -35,7 +35,7 @@ from __future__ import annotations
 from html import escape
 from urllib.parse import urlparse
 
-from src.core.cockpit_models import CockpitFinding, CockpitSnapshot
+from src.core.cockpit_models import CockpitFinding, CockpitSnapshot, select_cockpit_exceptions
 
 #: Section 10.3's "URLs and schemes are allowlisted."
 _ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
@@ -65,7 +65,7 @@ def _safe_evidence_link(ref: str) -> str:
     return escape(ref)
 
 
-def _render_finding(finding: CockpitFinding) -> str:
+def _render_finding(finding: CockpitFinding, *, retained: bool = False) -> str:
     status_label = _STATUS_LABEL.get(finding.status, finding.status)
     owner = escape(finding.owner) if finding.owner else "unassigned"
     next_command = f"<code>{escape(finding.next_command)}</code>" if finding.next_command else "none"
@@ -74,29 +74,44 @@ def _render_finding(finding: CockpitFinding) -> str:
         if finding.evidence_refs
         else "<li>none</li>"
     )
+    limitation = (
+        "<p>Confidence, current authority, expiry/escalation, diff and expected effect: "
+        "not available in this retained finding.</p>" if retained else ""
+    )
     return f"""
     <li class="finding finding-{escape(finding.status)}">
       <span class="finding-status" aria-label="Status: {escape(status_label)}">[{escape(status_label)}]</span>
       <strong>{escape(finding.summary)}</strong>
       <p>{escape(finding.detail)}</p>
       <dl>
+        <dt>Finding ID</dt><dd>{escape(finding.finding_id)}</dd>
         <dt>Area</dt><dd>{escape(finding.area)}</dd>
         <dt>Owner</dt><dd>{owner}</dd>
         <dt>Next command</dt><dd>{next_command}</dd>
         <dt>Evidence</dt><dd><ul>{evidence}</ul></dd>
         <dt>Observed</dt><dd>{escape(finding.observed_at.isoformat())}</dd>
-      </dl>
+      </dl>{limitation}
     </li>"""
 
 
-def render_cockpit_html(snapshot: CockpitSnapshot) -> str:
+def render_cockpit_html(snapshot: CockpitSnapshot, *, retained: bool = False) -> str:
     """Renders one self-contained HTML document -- no external CSS/JS,
     no network requests, safe to open with ``file://``."""
     program = snapshot.program_summary
     source = snapshot.source_summary
     value = snapshot.value_summary
     risk_color = _RISK_COLOR.get(program.overall_risk, "#57606a")
-    findings_html = "".join(_render_finding(f) for f in snapshot.findings) or "<li>No findings.</li>"
+    exceptions = select_cockpit_exceptions(snapshot.findings)
+    exceptions_html = "".join(_render_finding(f, retained=retained) for f in exceptions)
+    exceptions_html = exceptions_html or "<li>No blocked/warn findings in this retained snapshot</li>"
+    findings_html = "".join(
+        _render_finding(f, retained=retained) for f in snapshot.findings if f.status not in {"blocked", "warn"}
+    ) or "<li>No findings.</li>"
+    retained_notice = (
+        "<p>Retained cockpit snapshot — Current source and action state not evaluated. "
+        "Recorded commands are historical guidance; current CLI revalidation is required.</p>"
+        if retained else ""
+    )
     edition_label = escape(snapshot.edition_id) if snapshot.edition_id else "(all editions)"
     readiness = f"{program.readiness_percent}%" if program.readiness_percent is not None else "not measured yet"
     blocker_count = str(program.blocker_count) if program.blocker_count is not None else "unknown"
@@ -128,10 +143,7 @@ def render_cockpit_html(snapshot: CockpitSnapshot) -> str:
   h2 {{ border-bottom: 1px solid #d0d7de; padding-bottom: 0.3rem; }}
   ul.findings {{ list-style: none; padding: 0; }}
   li.finding {{ border: 1px solid #d0d7de; border-radius: 0.4rem; padding: 0.75rem; margin-bottom: 0.75rem; }}
-  li.finding-blocked {{ border-left: 4px solid #cf222e; }}
-  li.finding-warn {{ border-left: 4px solid #9a6700; }}
-  li.finding-ok {{ border-left: 4px solid #1a7f37; }}
-  li.finding-info {{ border-left: 4px solid #57606a; }}
+  li.finding {{ border-left: 4px solid #57606a; overflow-wrap: anywhere; }}
   dl {{ display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 1rem; font-size: 0.9em; }}
   dt {{ font-weight: bold; }}
   code {{ background: #f6f8fa; color: #1f2328; padding: 0.1em 0.3em; border-radius: 0.2em; }}
@@ -143,7 +155,7 @@ def render_cockpit_html(snapshot: CockpitSnapshot) -> str:
 <a class="skip-link" href="#main">Skip to main content</a>
 <header>
   <h1>Vertex Cockpit — {escape(snapshot.program_id)} <small>({edition_label})</small></h1>
-  <p>Generated {escape(snapshot.generated_at.isoformat())} · as of {escape(snapshot.as_of.isoformat())}</p>
+  <p>Generated {escape(snapshot.generated_at.isoformat())} · as of {escape(snapshot.as_of.isoformat())}</p>{retained_notice}
 </header>
 <main id="main">
   <section aria-labelledby="program-health">
@@ -161,8 +173,12 @@ def render_cockpit_html(snapshot: CockpitSnapshot) -> str:
     <h2 id="value">Value</h2>
     <ul>{value_metrics}</ul>
   </section>
+  <section aria-labelledby="exceptions">
+    <h2 id="exceptions">Exceptions</h2>
+    <ul class="findings">{exceptions_html}</ul>
+  </section>
   <section aria-labelledby="findings">
-    <h2 id="findings">Findings</h2>
+    <h2 id="findings">Other findings</h2>
     <ul class="findings">{findings_html}</ul>
   </section>
 </main>

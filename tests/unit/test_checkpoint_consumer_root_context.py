@@ -37,12 +37,20 @@ def test_consumers_forward_selected_root_names(function, callee: str, keywords: 
         arguments = {keyword.arg: keyword.value for keyword in call.keywords}
         for keyword in keywords:
             argument = arguments.get(keyword)
-            assert isinstance(argument, ast.Name), f"{function.__name__}: {callee} must forward {keyword}"
-            assert argument.id == (
+            expected = (
                 keyword.upper()
                 if function in (publish_gate.publish_gate_command, facts.facts_parity_check)
                 else keyword
             )
+            if keyword == "programs_root" and function is edit.run_edit and callee == "_prepare_edit_target":
+                expected = (
+                    "programs_root if resolve_edition_paths(edition_name, programs_root=programs_root) "
+                    "is not None else None"
+                )
+            elif keyword == "programs_root" and function is edit._prepare_edit_target:
+                expected = "programs_root if programs_root is not None else PROGRAMS_ROOT"
+            assert argument is not None, f"{function.__name__}: {callee} must forward {keyword}"
+            assert ast.dump(argument) == ast.dump(ast.parse(expected, mode="eval").body)
 
 
 @pytest.mark.parametrize("section", ["exec_summary", "deployment_readiness"])
@@ -57,7 +65,9 @@ def test_edit_scaffolds_from_selected_programs_without_sibling_assumption(
     )
     assert created
     assert section_id == section
-    assert path.is_relative_to(reports_root)
+    filename = "exec_summary.md" if section == "exec_summary" else f"chapter_{section}.md"
+    assert path == source / "programs" / "acme" / "narratives" / "issue_001" / filename
+    assert not reports_root.exists()
     assert "vertex:scaffold" in path.read_text(encoding="utf-8")
 
 

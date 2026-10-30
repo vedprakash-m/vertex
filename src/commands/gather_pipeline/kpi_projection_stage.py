@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, time, timezone
 import json
@@ -15,9 +16,11 @@ from src.commands.gather_pipeline.support import (
     hash_ingestion_query_text,
     parse_date,
 )
+from src.core.exceptions import QueryError
 from src.core.m365_payload_support import optional_string as _optional_string
 from src.core.metric_binding_validator import coerce_metric_value
-from src.core.metric_models import MetricObservation, MetricQualityState, MetricSourceBinding
+from src.core.metric_models import MetricDefinition, MetricObservation, MetricQualityState, MetricSourceBinding
+from src.core.metric_registry import load_metric_definition_map
 from src.core.models_v2 import KustoQuery, Signal
 from src.core.reality_store import RealityStore
 from src.core.source_models import IngestionRun, SourceKind
@@ -37,6 +40,8 @@ def project_refresh_kpi_signals_to_observations(
     store: RealityStore,
     load_refresh_kpi_queries_fn: RefreshKpiQueryLoader,
     dedupe_queries_fn: KpiQueryDeduper,
+    metric_definitions: Mapping[str, MetricDefinition] | None = None,
+    metrics_root: Path | None = None,
 ) -> tuple[MetricObservation, ...]:
     queries = dedupe_queries_fn(
         load_refresh_kpi_queries_fn(
@@ -47,6 +52,8 @@ def project_refresh_kpi_signals_to_observations(
     )
     if not queries:
         return ()
+    if metric_definitions is None and metrics_root is not None:
+        metric_definitions = load_metric_definition_map(metrics_root=metrics_root, as_of=as_of)
     return project_kpi_signals_to_observations(
         program_id,
         queries=queries,
@@ -54,6 +61,7 @@ def project_refresh_kpi_signals_to_observations(
         kpi_signals=kpi_signals,
         query_states=query_states,
         store=store,
+        metric_definitions=metric_definitions,
     )
 
 
@@ -65,6 +73,7 @@ def project_kpi_signals_to_observations(
     kpi_signals: tuple[Signal, ...],
     query_states: dict[str, dict[str, Any]],
     store: RealityStore,
+    metric_definitions: Mapping[str, MetricDefinition] | None = None,
 ) -> tuple[MetricObservation, ...]:
     store.initialize()
     signals_by_query_id = {
@@ -106,16 +115,20 @@ def project_kpi_signals_to_observations(
         if query_failed:
             observation_error = f"KPI query {query.id} failed; skipping MetricObservation projection."
         elif signal is not None and binding is not None:
-            observation = build_metric_observation_from_kpi_signal(
-                program_id=program_id,
-                query=query,
-                signal=signal,
-                binding=binding,
-                observed_at=as_of,
-                ingestion_run_id=run_id,
-            )
+            try:
+                observation = build_metric_observation_from_kpi_signal(
+                    program_id=program_id,
+                    query=query,
+                    signal=signal,
+                    binding=binding,
+                    observed_at=as_of,
+                    ingestion_run_id=run_id,
+                    metric_definition=(metric_definitions or {}).get(binding.metric_id),
+                )
+            except QueryError as error:
+                observation_error = str(error)
             if observation is None:
-                observation_error = (
+                observation_error = observation_error or (
                     f"KPI query {query.id} returned a non-numeric result; skipping MetricObservation projection."
                 )
             else:
@@ -202,6 +215,7 @@ def build_metric_observation_from_kpi_signal(
     binding: MetricSourceBinding,
     observed_at: datetime,
     ingestion_run_id: str,
+    metric_definition: MetricDefinition | None = None,
 ) -> MetricObservation | None:
     if signal.metadata is None:
         return None
@@ -214,12 +228,33 @@ def build_metric_observation_from_kpi_signal(
 
     measurement_period_end = resolve_kpi_measurement_period_end(row, fallback=signal.timestamp)
     measurement_period_start = resolve_kpi_measurement_period_start(row, fallback=measurement_period_end)
-    dimensions_json = json.dumps(dict(binding.dimension_defaults), sort_keys=True, separators=(",", ":"))
+    if measurement_period_start > measurement_period_end:
+        raise QueryError(
+            f"KPI query {query.id} measurement period start is after its end; "
+            "skipping MetricObservation projection."
+        )
+    dimensions = dict(binding.dimension_defaults)
+    if metric_definition is not None:
+        for column in metric_definition.dimension_columns:
+            value = row.get(column)
+            if not isinstance(value, str) or (column in dimensions and dimensions[column] != value):
+                raise QueryError(
+                    f"KPI query {query.id} has a missing, unsupported or conflicting declared "
+                    f"dimension {column}; skipping MetricObservation projection."
+                )
+            dimensions[column] = value
+    if metric_definition is not None and query.unit is not None and query.unit != metric_definition.unit:
+        raise QueryError(
+            f"KPI query {query.id} unit does not match its metric definition; "
+            "skipping MetricObservation projection."
+        )
+    dimensions_json = json.dumps(dimensions, sort_keys=True, separators=(",", ":"))
+    identity = f"{program_id}|{query.id}|{binding.binding_id}|{measurement_period_end.isoformat()}"
+    if dimensions:
+        identity = f"{identity}|{dimensions_json}"
     sample_count = coerce_sample_count(row)
     return MetricObservation(
-        observation_id=str(
-            uuid5(NAMESPACE_URL, f"{program_id}|{query.id}|{binding.binding_id}|{measurement_period_end.isoformat()}")
-        ),
+        observation_id=str(uuid5(NAMESPACE_URL, identity)),
         program_id=program_id,
         metric_id=binding.metric_id,
         dimensions_json=dimensions_json,

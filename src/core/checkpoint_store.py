@@ -9,6 +9,8 @@ from pathlib import Path
 
 from src.core.config_loader import PROGRAMS_ROOT
 
+SQLITE_BACKUP_SUFFIXES = frozenset({".sqlite3", ".sqlite", ".db"})
+
 # Files that are captured in each checkpoint snapshot.
 # Phase 1-B (declutter.md §6 1-B / R-9): T-3b runtime artifacts are now under
 # ``runtime/`` — channel_registry, vertex_analytics, and m365_registry are the
@@ -150,7 +152,7 @@ def checkpoint_missing_relpaths(
 
 
 def _copy_checkpoint_file(src: Path, dst: Path) -> None:
-    if src.suffix == ".sqlite3":
+    if src.suffix.lower() in SQLITE_BACKUP_SUFFIXES:
         _copy_sqlite(src, dst)
         return
     shutil.copy2(src, dst)
@@ -167,10 +169,12 @@ def _copy_sqlite(src: Path, dst: Path) -> None:
     tests/contracts/test_architecture_fitness.py's INV-AF-13 guard, same
     rationale class as unit_of_work.py's cross-database ATTACH primitive.
     """
-    src_conn = sqlite3.connect(src)
-    dst_conn = sqlite3.connect(dst)
+    src_conn = sqlite3.connect(f"{src.resolve().as_uri()}?mode=ro", uri=True)
     try:
-        src_conn.backup(dst_conn)
+        dst_conn = sqlite3.connect(dst)
+        try:
+            src_conn.backup(dst_conn)
+        finally:
+            dst_conn.close()
     finally:
-        dst_conn.close()
         src_conn.close()

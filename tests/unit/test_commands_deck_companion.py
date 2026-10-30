@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -63,6 +64,65 @@ def test_generate_deck_companion_forwards_supplied_reality_context(
             edition_name=EDITION_NAME, issue_number=1,
             reports_root=reports_root, archive_root=archive_root,
         )
+
+
+def test_deck_companion_risk_consumer_preserves_summary_priority_and_metadata(
+    repo_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import MagicMock
+
+    from src.commands import report_health
+    from tests.unit.test_report_deck_reality_consolidation import _risk_assessment
+
+    reports_root = stage_v2_report_workspace(repo_root, tmp_path)
+    archive_root = tmp_path / "archive"
+    disable_kusto_in_report_copy(reports_root)
+    as_of = datetime(2026, 5, 5, 18, 0, tzinfo=timezone.utc)
+    generate_report_draft(
+        edition_name=EDITION_NAME, issue_number=1, reports_root=reports_root,
+        archive_root=archive_root, programs_root=tmp_path / "programs", as_of=as_of,
+        work_item_loader=lambda _bundle, timestamp: (_sample_items(timestamp), 0),
+        open_browser=False,
+    )
+    selected = replace(
+        _risk_assessment(),
+        record=replace(_risk_assessment().record, id="alpha", title="Alpha current"),
+    )
+    other = replace(
+        selected, record=replace(selected.record, id="zulu", title="Zulu stale review"),
+        disputed=False, stale=False,
+    )
+    reality = MagicMock()
+    reality.risks.return_value = (other, selected)
+    reality.actions.return_value = ()
+    reality.decisions.return_value = ()
+    reality.assumptions.return_value = ()
+    loader = MagicMock(return_value=reality)
+    monkeypatch.setattr(deck_companion.ProgramReality, "load", loader)
+    observed_context = []
+    render = deck_companion.DeckRenderer.render
+
+    def capture_context(renderer, context):
+        observed_context.append(context)
+        return render(renderer, context)
+
+    monkeypatch.setattr(deck_companion.DeckRenderer, "render", capture_context)
+    artifacts = generate_deck_companion(
+        edition_name=EDITION_NAME, issue_number=1,
+        reports_root=reports_root, archive_root=archive_root,
+    )
+    markdown = artifacts.markdown_path.read_text(encoding="utf-8")
+    summary = report_health._build_risk_register_summary(
+        (other.record, selected.record), stale_risk_ids=("zulu",),
+    )
+    assert markdown.index("Alpha current") < markdown.index("Zulu stale review")
+    assert "Highest active: Alpha current" in summary
+    assert len(observed_context) == 1
+    row = observed_context[0].open_risk_rows[0]
+    assert row.evidence_truth_level == selected.truth_level.value
+    assert row.evidence_disputed is True
+    assert row.evidence_stale is True
+    loader.assert_called_once()
 
 
 def test_generate_deck_companion_renders_markdown(repo_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

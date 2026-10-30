@@ -19,7 +19,9 @@ from typing import Annotated, Callable
 import typer
 
 from src.ai.ai_mode import AIMode, get_ai_mode
-from src.commands.onboard import ADOStage, IdentityStage
+from src.commands.onboard import ADOStage, IdentityStage, _resolve_new_onboard_reports_root
+from src.core.exceptions import ConfigError
+from src.core.workspace_paths import validate_new_programs_root
 from src.core.setup_state import (
     ConversationStateMachine,
     SetupDraft,
@@ -321,6 +323,7 @@ def _collect_workstreams(
     *,
     from_description: str | None = None,
     auto: bool = False,
+    ai_enabled: bool = True,
 ) -> list[tuple[str, str]]:
     """Collect workstreams. Returns list of (name, description)."""
     _step("workstreams")
@@ -334,7 +337,7 @@ def _collect_workstreams(
         draft.identity.objective if isinstance(draft.identity, IdentityStage) else ""
     )
 
-    if description:
+    if description and ai_enabled:
         _info("Asking AI to suggest workstreams from your program description...")
         ai_suggestions = _ai_suggest_workstreams(description)
 
@@ -803,8 +806,19 @@ def setup_command(
         raise typer.Exit(code=0)
 
     # --- Resume mode
-    workspace = Path(output_dir).resolve()
+    workspace: Path | None = None
+    reports_root: Path | None = None
+    if not dry_run:
+        try:
+            reports_root = _resolve_new_onboard_reports_root()
+            workspace = reports_root.parent
+            if output_dir != Path("."):
+                workspace = validate_new_programs_root(output_dir)
+        except ConfigError as error:
+            raise typer.BadParameter(str(error)) from error
     if resume:
+        if workspace is None:
+            raise typer.BadParameter("--resume requires a private workspace; it cannot be combined with --dry-run.")
         result = load_session(workspace)
         if result is None:
             typer.echo("No saved session found.")
@@ -837,11 +851,12 @@ def setup_command(
             draft,
             from_description=from_description,
             auto=auto,
+            ai_enabled=not dry_run,
         )
         sm.transition("ado_probe")
 
         # Step 3 — ADO (with optional live discovery)
-        ws_area_paths = _collect_ado(draft, workstreams, manual=manual)
+        ws_area_paths = _collect_ado(draft, workstreams, manual=manual or dry_run)
         # Transition through ado_discovery state when live ADO was used,
         # otherwise take the direct ado_probe → structure_propose path.
         if draft.ado_discovery_used:
@@ -857,6 +872,7 @@ def setup_command(
             confirmed = _show_review(draft, workstreams)
             if not confirmed:
                 _warn("Setup cancelled. Run `vertex setup` to start over.")
+                assert workspace is not None
                 save_session(draft, sm, workspace)
                 _info("Session saved. Run `vertex setup --resume` to continue.")
                 raise typer.Exit(code=1)
@@ -891,7 +907,8 @@ def setup_command(
         )
         edition_slug = generate_edition_slug(identity.program_name)
 
-        if preview:
+        if preview and not dry_run:
+            assert workspace is not None
             _run_preview(draft, workstreams, output_dir=workspace, no_open=no_open)
             sm.transition("done")
             raise typer.Exit(code=0)
@@ -902,12 +919,14 @@ def setup_command(
             sm.transition("done")
             raise typer.Exit(code=0)
 
-        reports_root = workspace / "reports"
+        assert reports_root is not None
         paths = _resolve_onboard_paths(
             edition_name=edition_slug,
             program_id=identity.program_id,
             reports_root=reports_root,
         )
+        if paths.program_dir.exists():
+            raise typer.BadParameter("New program workspace already contains this program; use explicit onboarding update.")
         documents = _build_documents(edition_slug, onboard_draft)
         _finalize_onboarding(
             edition_name=edition_slug,

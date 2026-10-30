@@ -58,7 +58,7 @@ class DecisionAdvice:
 def _program_synthesis_context_lines(
     program_id: str, programs_root: Path, *, limit: int = 3,
 ) -> tuple[str, ...]:
-    """ADF-W2.9: program-level risk/contradiction/critical-path-milestone
+    """ADF-W2.9: program-level risk/contradiction/active-milestone
     context, mirroring ``report_ai._program_synthesis_exec_summary_context_
     lines`` (same three ``assemble_program_synthesis_request`` categories,
     same formatting). Unlike that helper's workstream-scoped blurb sibling,
@@ -82,7 +82,7 @@ def _program_synthesis_context_lines(
     for item in [item for item in request.items if item.category == "contradiction"][:limit]:
         lines.append(f"Unresolved contradiction: {item.summary}")
     for item in [item for item in request.items if item.category == "critical_path_milestone"][:limit]:
-        lines.append(f"Critical-path milestone: {item.summary}")
+        lines.append(f"Active milestone: {item.summary}")
     return tuple(lines)
 
 

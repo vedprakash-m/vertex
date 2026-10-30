@@ -19,7 +19,7 @@ from src.core.communication_plan import CommunicationPlanEntry, describe_communi
 from src.core.config_loader import load_report_bundle
 from src.core.circuit_breaker import CircuitBreaker, CircuitBreakerState
 from src.core.edition_resolver import EDITIONS_ROOT, PROGRAMS_ROOT, resolve_edition
-from src.core.exceptions import ConfigError
+from src.core.exceptions import ConfigError, StateError
 from src.core.freshness_engine import build_freshness_report
 from src.core.gather_state_store import build_gather_integration_summary, load_gather_state
 from src.core.issue_projection import build_issue_projection
@@ -84,7 +84,11 @@ def status_command(
     edition: str = typer.Option(..., "--edition", help="Edition id, e.g. myprogram_weekly."),
     format: str = typer.Option("human", "--format", help="Output format: human, json, or csv."),
 ) -> None:
-    report = build_status_report(edition)
+    try:
+        report = build_status_report(edition)
+    except StateError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=2) from error
 
     if format == "json":
         typer.echo(json.dumps(report.to_payload(), indent=2, sort_keys=True))
@@ -435,7 +439,10 @@ def _build_status_risk_register_summary(
     try:
         risks = project_risk_entries(load_program_facts(program_id, db_root=programs_root.parent, programs_root=programs_root))
     except ConfigError:
-        return None
+        return (
+            "unavailable: risk facts could not be loaded (configuration error; "
+            "correct the program fact configuration before retrying status)"
+        )
 
     active_risks = tuple(
         risk
@@ -603,7 +610,16 @@ def _load_latest_manifest(output_dir: Path) -> tuple[Path, int, dict[str, bool],
     except (OSError, json.JSONDecodeError):
         return path, issue_number, {}, None
     raw_qg = payload.get("qg_results") if isinstance(payload, dict) else {}
-    qg_results = {str(key): bool(value) for key, value in raw_qg.items()} if isinstance(raw_qg, dict) else {}
+    if raw_qg is not None and (
+        not isinstance(raw_qg, dict)
+        or any(not isinstance(value, bool) for value in raw_qg.values())
+    ):
+        raise StateError(
+            f"Invalid quality-gate results for draft issue {issue_number:03d}: "
+            "expected a mapping of boolean results. Preserve the existing manifest "
+            "and regenerate a valid report before retrying status."
+        )
+    qg_results = dict(raw_qg) if isinstance(raw_qg, dict) else {}
     ended_at = _parse_datetime(payload.get("ended_at")) if isinstance(payload, dict) else None
     return path, issue_number, qg_results, ended_at
 

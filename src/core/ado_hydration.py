@@ -10,7 +10,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.core.ado_client import ADOClient
-from src.core.ado_enrichment import ADO_RISK_ASSESSMENT_COMMENT_FIELD, ADO_RISK_ASSESSMENT_FIELD, normalize_risk_assessment
+from src.core.ado_enrichment import (
+    ADO_RISK_ASSESSMENT_COMMENT_FIELD,
+    ADO_RISK_ASSESSMENT_FIELD,
+    infer_ado_risk_level,
+    normalize_risk_assessment,
+)
 from src.core.ado_relations import parse_relations_payload, traverse_relations
 from src.core.ado_schema_drift import assert_row_shape
 from src.core.config_loader import PROGRAMS_ROOT
@@ -608,7 +613,6 @@ def _field_value(value: Any) -> str | None:
 
 
 def _infer_risk_level(state: str, tags: list[str], risk_assessment: str | None) -> RiskLevel:
-    del risk_assessment
     normalized_state = state.strip().lower()
     normalized_tags = {tag.strip().lower() for tag in tags}
     if normalized_state in {"closed", "done", "resolved", "removed"}:
@@ -617,4 +621,6 @@ def _infer_risk_level(state: str, tags: list[str], risk_assessment: str | None) 
         return RiskLevel.HIGH
     if {"risk", "at risk"} & normalized_tags:
         return RiskLevel.MEDIUM
+    if risk_assessment in {"On Track", "At Risk", "Off Track"}:
+        return infer_ado_risk_level(state, tags, risk_assessment)
     return RiskLevel.UNKNOWN

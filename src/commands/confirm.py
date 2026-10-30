@@ -42,14 +42,14 @@ from src.commands.confirm_stages.post_confirm_support import add_chart_index, re
 from src.commands.confirm_stages.post_confirm_support import load_draft_continuation_contract_path as _load_draft_continuation_contract_path_impl
 from src.commands.confirm_stages.post_confirm_support import next_issue_narrative_templates as _next_issue_narrative_templates_impl
 from src.commands.confirm_stages.post_confirm_support import next_issue_number as _next_issue_number_impl
-from src.commands.confirm_stages.post_confirm_support import write_context_snapshot_for_issue as _write_context_snapshot_for_issue_impl
+from src.commands.confirm_stages.post_confirm_support import write_context_snapshot_for_issue as _write_context_snapshot_for_issue
 from src.commands.confirm_stages.weekly_summary_card import post_confirm_weekly_summary_card as _post_confirm_weekly_summary_card
 from src.commands.confirm_stages.weekly_summary_card import validate_weekly_summary_card_request as _validate_weekly_summary_card_request
 from src.commands.doctor_checks.semantic_index_checks import semantic_index_enabled as _semantic_index_enabled
 from src.commands.report_email import _build_email_preheader, _build_email_subject
 from src.commands.report_narratives import _active_workstream_blurbs, _workstream_narrative_warnings
 from src.core.analytics_store import load_contradiction_state
-from src.core.archive_store import archive_integrity_waived, ArchiveEntry, ConfirmedIssueArchivePaths, find_archive_index_inconsistencies, find_latest_confirmed_entry, read_archive_index, read_vitality_history
+from src.core.archive_store import archive_integrity_waived, ConfirmedIssueArchivePaths, find_archive_index_inconsistencies, find_latest_confirmed_entry, read_archive_index, read_vitality_history
 from src.core.archive_store import verify_archive_integrity
 from src.core.archive_store import write_confirmed_issue
 from src.core.chart_cache_store import load_chart_cache
@@ -65,7 +65,7 @@ from src.core.delta_engine import build_deltas
 from src.core.edition_resolver import get_program_output_dir, resolve_edition, resolve_edition_paths as _resolve_edition_paths
 from src.core.evidence_engine import build_evidence
 from src.core.exceptions import ConfigError, ConfirmError, StateError as _AlertStateError
-from src.core.workspace_paths import validate_report_workspace
+from src.core.workspace_paths import REPO_ROOT, resolve_report_workspace_roots, validate_report_workspace
 from src.core.forecast_engine import build_forecast_assessment
 from src.core.freshness_engine import build_freshness_report
 from src.core.hygiene_engine import evaluate_hygiene
@@ -176,10 +176,12 @@ def _confirm_additional_failures(
     )
 
 
-def _preflight_confirm_workspace() -> None:
+def _preflight_confirm_workspace() -> tuple[Path, Path, Path]:
     try:
-        validate_report_workspace(
-            programs_root=_CONFIRM_PROGRAMS_ROOT, reports_root=REPORTS_ROOT, archive_root=ARCHIVE_ROOT,
+        return resolve_report_workspace_roots(
+            _CONFIRM_PROGRAMS_ROOT if _CONFIRM_PROGRAMS_ROOT != REPO_ROOT / "programs" else None,
+            REPORTS_ROOT if REPORTS_ROOT != REPO_ROOT / "reports" else None,
+            ARCHIVE_ROOT if ARCHIVE_ROOT != REPO_ROOT / "archive" else None,
         )
     except ConfigError as error:
         typer.echo(str(error), err=True)
@@ -211,7 +213,7 @@ def confirm_command(
         help="Skip best-effort NCFL proposal extraction after confirm.",
     ),
 ) -> None:
-    _preflight_confirm_workspace()
+    _, reports_root, archive_root = _preflight_confirm_workspace()
     if untrusted and (reason is None or not reason.strip()):
         raise typer.BadParameter("--reason is required when --untrusted is used.")
     if not untrusted and reason is not None:
@@ -248,10 +250,10 @@ def confirm_command(
             typer.echo(str(exc))
             raise typer.Exit(code=2) from exc
 
-    archive_index = read_archive_index(edition, archive_root=ARCHIVE_ROOT)
+    archive_index = read_archive_index(edition, archive_root=archive_root)
     # WS-1 §9a P1: archive integrity pre-flight — blocks dangling refs before writing a new confirmed entry.
     if not archive_integrity_waived():
-        _ai_result = verify_archive_integrity(edition, archive_root=ARCHIVE_ROOT)
+        _ai_result = verify_archive_integrity(edition, archive_root=archive_root)
         if not _ai_result.ok:
             typer.echo(
                 f"[ARCHIVE INTEGRITY FAILURE] {len(_ai_result.inconsistencies)} inconsistency/ies found "
@@ -367,11 +369,8 @@ def confirm_issue(
     output_root: Path | None = None,
     programs_root: Path | None = None,
 ) -> ConfirmResult:
-    resolved_reports_root = reports_root or REPORTS_ROOT
-    resolved_archive_root = archive_root or ARCHIVE_ROOT
-    programs_root = programs_root if programs_root is not None else _CONFIRM_PROGRAMS_ROOT
-    validate_report_workspace(
-        programs_root=programs_root, reports_root=resolved_reports_root, archive_root=resolved_archive_root,
+    programs_root, resolved_reports_root, resolved_archive_root = resolve_report_workspace_roots(
+        programs_root or (_CONFIRM_PROGRAMS_ROOT if _CONFIRM_PROGRAMS_ROOT != REPO_ROOT / "programs" else None), reports_root, archive_root,
     )
     editions_root = programs_root.parent / "editions"
 
@@ -380,10 +379,11 @@ def confirm_issue(
         reports_root=resolved_reports_root,
         programs_root=programs_root,
     )
+    artifact_root_kwargs = {"programs_root": programs_root} if getattr(bundle, "program_id", None) is not None else {}
     if not dry_run:
         _assert_state_authority_for_confirm(bundle.program.id, programs_root=programs_root)
     draft_state = _load_draft_state(edition_name, issue_number, programs_root=programs_root)
-    draft_manifest = _load_confirm_draft_manifest(edition_name, issue_number, programs_root=programs_root)
+    draft_manifest = _load_confirm_draft_manifest(edition_name, issue_number, draft_state=draft_state, programs_root=programs_root)
     if hash_jsonable(bundle.config) != draft_manifest.config_hash:
         raise ConfigError(
             "Confirmation configuration changed since the draft was generated. "
@@ -391,7 +391,9 @@ def confirm_issue(
         )
     if post_weekly_summary_card:
         _validate_weekly_summary_card_request(bundle=bundle, draft_state=draft_state)
-    overrides_document = _load_confirm_overrides(edition_name, issue_number, bundle, resolved_reports_root)
+    overrides_document = _load_confirm_overrides(
+        edition_name, issue_number, bundle, resolved_reports_root, **artifact_root_kwargs,
+    )
     artifacts = _build_confirm_artifacts(
         edition_name=edition_name,
         issue_number=issue_number,
@@ -414,6 +416,7 @@ def confirm_issue(
             reports_root=resolved_reports_root,
             items=artifacts[6].items,
             legacy_regex_extractor=legacy_regex_extractor,
+            **artifact_root_kwargs,
         )
     except Exception as exc:
         extraction_result = None
@@ -429,14 +432,15 @@ def confirm_issue(
     if not dry_run and qg_report.failing_results:
         _gate_resolved_v2 = resolve_edition(
             edition_name,
-            programs_root=resolved_reports_root.parent / "programs",
+            editions_root=programs_root.parent / "editions",
+            programs_root=programs_root,
         )
         if _gate_resolved_v2 is not None:
             record_gate_failures_from_report(
                 _gate_resolved_v2.program.id,
                 gate_report=qg_report,
                 edition_id=edition_name,
-                programs_root=resolved_reports_root.parent / "programs",
+                programs_root=programs_root,
             )
 
     advisory_results = tuple(
@@ -488,12 +492,14 @@ def confirm_issue(
             edition_name,
             issue_number,
             reports_root=resolved_reports_root,
+            **artifact_root_kwargs,
         ),
     )
     decision_warnings = _build_stale_proposed_decision_warnings(
         edition_name=edition_name,
         as_of=artifacts[6].ado_data_as_of.date(),
         reports_root=resolved_reports_root,
+        **artifact_root_kwargs,
     )
     # D-17/ARM-GATHER-11 (AG-6.2): reject a pinned gather run that is invalid,
     # stale, or PARTIAL scope -- before either a dry-run preview or a real
@@ -579,8 +585,12 @@ def confirm_issue(
             risk_delta_preview_hash=risk_delta_preview_hash,
         )
 
-    review_status_path = get_review_status_path(edition_name, reports_root=resolved_reports_root)
-    narrative_dir = get_narratives_dir(edition_name, issue_number, reports_root=resolved_reports_root)
+    review_status_path = get_review_status_path(
+        edition_name, reports_root=resolved_reports_root, **artifact_root_kwargs,
+    )
+    narrative_dir = get_narratives_dir(
+        edition_name, issue_number, reports_root=resolved_reports_root, **artifact_root_kwargs,
+    )
 
     # Reuse the resolution already performed above for gather-run-lineage
     # validation instead of resolving the edition a second time.
@@ -640,6 +650,7 @@ def confirm_issue(
         overrides_document=overrides_document,
         edition_name=edition_name,
         reports_root=resolved_reports_root,
+        programs_root=programs_root if getattr(bundle, "program_id", None) is not None else None,
     )
     resolved_edition_type = EditionType.from_string(str(draft_state.get("edition_type", bundle.config.edition.type)))
     default_exec_summary = _build_exec_summary_text(
@@ -712,6 +723,9 @@ def confirm_issue(
             db_root=_runtime_db_root_for_reports(resolved_reports_root),
             edition_name=edition_name,
             issue_number=issue_number,
+            milestone_assessments=draft_manifest.milestone_assessments,
+            milestone_trajectory_snapshot=draft_manifest.milestone_trajectory_snapshot,
+            programs_root=programs_root,
         )
         evidence_failures = tuple(result.message for result in fact_drift.failing_results)
         if program_id is not None:
@@ -789,6 +803,7 @@ def confirm_issue(
         next_issue_number=next_issue_number,
         confirmed_dimensions=artifacts[2].scorecards,
         reports_root=resolved_reports_root,
+        **artifact_root_kwargs,
     )
     reset_narratives_for_next_issue(
         edition=edition_name,
@@ -799,12 +814,14 @@ def confirm_issue(
             is_continuity_layout_fn=_is_continuity_layout,
         ),
         reports_root=resolved_reports_root,
+        **artifact_root_kwargs,
     )
     reset_review_status(
         edition=edition_name,
         issue_number=next_issue_number,
         section_ids=tuple(section.section_id for section in artifacts[6].review_status.sections),
         reports_root=resolved_reports_root,
+        **artifact_root_kwargs,
     )
 
     review_tracking_path, review_tracking_summary, review_tracking_warning = _record_review_tracking_impl(
@@ -823,6 +840,7 @@ def confirm_issue(
         report=artifacts[6],
         confirmed_at=confirmed_at,
         reports_root=resolved_reports_root,
+        **artifact_root_kwargs,
     )
     if edit_pattern_warning is not None:
         warnings = warnings + (edit_pattern_warning,)
@@ -924,27 +942,6 @@ def confirm_issue(
     )
 
 
-def _write_context_snapshot_for_issue(
-    *,
-    program_id: str,
-    edition_id: str,
-    issue_number: int,
-    confirmed_at: datetime,
-    archive_root: Path,
-    programs_root: Path,
-    prior_issue_entry: ArchiveEntry | None,
-) -> None:
-    _write_context_snapshot_for_issue_impl(
-        program_id=program_id,
-        edition_id=edition_id,
-        issue_number=issue_number,
-        confirmed_at=confirmed_at,
-        archive_root=archive_root,
-        programs_root=programs_root,
-        prior_issue_entry=prior_issue_entry,
-    )
-
-
 def _build_confirmed_eml_bytes(
     bundle,
     *,
@@ -991,6 +988,7 @@ def _record_confirmed_claims_for_v2(
     extraction_result: ClaimExtractionResult | None = None,
     extraction_mode: str = "regex",
     resolve_extraction_if_missing: bool = True,
+    programs_root: Path | None = None,
 ) -> tuple[str, ...]:
     return _record_confirmed_claims_for_v2_impl(
         edition_name=edition_name,
@@ -1002,6 +1000,7 @@ def _record_confirmed_claims_for_v2(
         extraction_result=extraction_result,
         extraction_mode=extraction_mode,
         resolve_extraction_if_missing=resolve_extraction_if_missing,
+        **({"programs_root": programs_root} if programs_root is not None else {}),
     )
 
 
@@ -1021,7 +1020,7 @@ def _build_confirm_artifacts(
     programs_root = programs_root if programs_root is not None else _CONFIRM_PROGRAMS_ROOT
     validate_report_workspace(programs_root=programs_root, reports_root=reports_root, archive_root=archive_root)
     if draft_manifest is None:
-        draft_manifest = _load_confirm_draft_manifest(edition_name, issue_number, programs_root=programs_root)
+        draft_manifest = _load_confirm_draft_manifest(edition_name, issue_number, draft_state=draft_state, programs_root=programs_root)
     if (
         draft_manifest.edition_name != edition_name
         or draft_manifest.issue_number != issue_number
@@ -1037,6 +1036,7 @@ def _build_confirm_artifacts(
         programs_root=programs_root,
     )
     program_id = resolved_v2.program.id if resolved_v2 is not None else None
+    artifact_root_kwargs = {"programs_root": programs_root} if program_id is not None else {}
     resolved_workstreams = resolved_v2.workstreams if resolved_v2 is not None else ()
     resolved_scorecards = resolved_v2.scorecards if resolved_v2 is not None else ()
     items = _deserialize_items(tuple(draft_state.get("items", [])))
@@ -1090,6 +1090,7 @@ def _build_confirm_artifacts(
         overrides_document=overrides_document,
         edition_name=edition_name,
         reports_root=reports_root,
+        programs_root=programs_root if program_id is not None else None,
     )
     resolved_edition_type = EditionType.from_string(str(draft_state.get("edition_type", bundle.config.edition.type)))
     default_exec_summary = _build_exec_summary_text(
@@ -1133,7 +1134,9 @@ def _build_confirm_artifacts(
             )
         ),
     }
-    loaded_narratives = load_narratives(edition_name, issue_number, reports_root=reports_root)
+    loaded_narratives = load_narratives(
+        edition_name, issue_number, reports_root=reports_root, **artifact_root_kwargs,
+    )
     exec_summary_text = loaded_narratives.get("exec_summary.md", "").strip() or default_exec_summary
     top_items = _build_top_items(overrides_document, scorecards)
     if _is_continuity_layout(bundle):
@@ -1188,6 +1191,7 @@ def _build_confirm_artifacts(
             current_workstream_blurbs=workstream_blurbs,
             archive_root=archive_root,
             reports_root=reports_root,
+            **artifact_root_kwargs,
         )
     )
     freshness_report = build_freshness_report(
@@ -1207,6 +1211,7 @@ def _build_confirm_artifacts(
         issue_number,
         tuple(chapter.id for chapter in continuity_chapters) if _is_continuity_layout(bundle) else tuple(workstream_blurbs),
         reports_root,
+        **artifact_root_kwargs,
     )
     report = ReportData(
         issue_number=issue_number,
@@ -1269,6 +1274,7 @@ def _build_confirm_artifacts(
         issue_number,
         dimension_risks,
         archive_root,
+        **({"programs_root": programs_root} if program_id is not None else {}),
     )
     health = _build_health_summary(
         dimension_risks,
@@ -1417,6 +1423,17 @@ def _build_confirm_artifacts(
         review_status=report.review_status,
         manifest_id=report.manifest_id,
     )
+    manifest_metadata = {
+        "suggested_subject": email_subject,
+        "suggested_preheader": email_preheader,
+        "subject_signal": subject_signal,
+        "forecast_summary": (forecast.summary if forecast is not None else None),
+        "forecast_confidence": (forecast.confidence.value if forecast is not None else None),
+        "forecast_sources": (list(forecast.source_item_ids) if forecast is not None else []),
+        "ai_safety": draft_manifest.ai_safety,
+        "milestone_assessments": draft_manifest.milestone_assessments,
+        "milestone_trajectory_snapshot": draft_manifest.milestone_trajectory_snapshot,
+    }
     provisional_manifest = build_run_manifest(
         manifest_id=report.manifest_id,
         issue_number=issue_number,
@@ -1433,15 +1450,7 @@ def _build_confirm_artifacts(
         freshness_summary={"blocks": freshness_report.blocks, "warns": freshness_report.warns, "infos": freshness_report.infos},
         qg_results={},
         git_sha=_read_git_sha(),
-        metadata={
-            "suggested_subject": email_subject,
-            "suggested_preheader": email_preheader,
-            "subject_signal": subject_signal,
-            "forecast_summary": (forecast.summary if forecast is not None else None),
-            "forecast_confidence": (forecast.confidence.value if forecast is not None else None),
-            "forecast_sources": (list(forecast.source_item_ids) if forecast is not None else []),
-            "ai_safety": deepcopy(draft_manifest.ai_safety),
-        },
+        metadata=deepcopy(manifest_metadata),
         # D-17: read back the gather-run lineage pinned in the draft at
         # generation time -- never re-resolved live, so confirm structurally
         # cannot silently rebind to a newer committed run than the draft used.
@@ -1615,6 +1624,9 @@ def _build_confirm_artifacts(
         db_root=_runtime_db_root_for_reports(reports_root),
         edition_name=edition_name,
         issue_number=issue_number,
+        milestone_assessments=draft_manifest.milestone_assessments,
+        milestone_trajectory_snapshot=draft_manifest.milestone_trajectory_snapshot,
+        programs_root=programs_root,
     )
     qg_report = combine_gate_reports(qg_report, qg_program_fact_drift)
     if program_id is not None:
@@ -1646,16 +1658,7 @@ def _build_confirm_artifacts(
         freshness_summary={"blocks": freshness_report.blocks, "warns": freshness_report.warns, "infos": freshness_report.infos},
         qg_results=qg_report.qg_results,
         git_sha=_read_git_sha(),
-        metadata={
-            "suggested_subject": email_subject,
-            "suggested_preheader": email_preheader,
-            "subject_signal": subject_signal,
-            "forecast_summary": (forecast.summary if forecast is not None else None),
-            "forecast_confidence": (forecast.confidence.value if forecast is not None else None),
-            "forecast_sources": (list(forecast.source_item_ids) if forecast is not None else []),
-            "ai_safety": deepcopy(draft_manifest.ai_safety),
-            "draft_readiness": deepcopy(draft_manifest.draft_readiness),
-        },
+        metadata=deepcopy(manifest_metadata) | {"draft_readiness": deepcopy(draft_manifest.draft_readiness)},
         gather_run_id=draft_state.get("gather_run_id"),
         gather_run_hash=draft_state.get("gather_run_hash"),
     )

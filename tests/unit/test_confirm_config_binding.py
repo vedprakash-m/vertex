@@ -42,7 +42,7 @@ def test_original_config_hash_is_required_not_invented(
     path.write_text(json.dumps(payload), encoding="utf-8")
     before = path.read_bytes()
     with pytest.raises(BadParameter, match="config.*hash"):
-        draft_loaders.load_confirm_draft_manifest("fixture", 7, programs_root=tmp_path)
+        draft_loaders.load_confirm_draft_manifest("fixture", 7, draft_state={}, programs_root=tmp_path)
     assert path.read_bytes() == before
 
 

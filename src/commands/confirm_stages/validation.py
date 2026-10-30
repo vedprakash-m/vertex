@@ -21,7 +21,7 @@ from typing import Any
 from src.core.decision_register import assess_proposed_decision_staleness
 from src.core.edition_resolver import resolve_edition
 from src.core.models import ReportData, ReviewState, ReviewStatus, WorkItem
-from src.core.overrides_store import OverridesDocument
+from src.core.overrides_store import OverridesDocument, _resolve_artifact_edition
 from src.core.program_fact_store import load_current_decision_entries
 from src.core.view_models import WorkstreamData
 
@@ -107,10 +107,15 @@ def build_stale_proposed_decision_warnings(
     edition_name: str,
     as_of: date,
     reports_root: Path,
+    programs_root: Path | None = None,
 ) -> tuple[str, ...]:
-    repo_root = reports_root.parent
-    programs_root = repo_root / "programs"
-    editions_root = repo_root / "editions"
+    if programs_root is None:
+        repo_root = reports_root.parent
+        programs_root = repo_root / "programs"
+        editions_root = repo_root / "editions"
+    else:
+        _resolve_artifact_edition(edition_name, reports_root, programs_root)
+        editions_root = programs_root.parent / "editions"
     resolved_v2 = resolve_edition(
         edition_name,
         editions_root=editions_root,

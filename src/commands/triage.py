@@ -364,6 +364,7 @@ def _build_triage_payload(artifacts: TriageArtifacts) -> dict[str, Any]:
         "vitality_enabled": report.vitality_enabled,
         "vitality_summary": None if report.vitality_summary is None else {
             "freshness_average_days": report.vitality_summary.freshness_average_days,
+            "freshness_known_items": report.vitality_summary.freshness_known_items,
             "stale_owner_aliases": list(report.vitality_summary.stale_owner_aliases),
             "total_items": report.vitality_summary.total_items,
             "updated_this_week": report.vitality_summary.updated_this_week,
@@ -1967,7 +1968,7 @@ def _format_milestone_summary(
     status_label = assessment.computed_health.value.replace("_", " ")
     declared_label = milestone.status.value.replace("_", " ")
     blocked_label = "no blocked signals" if blocked_count == 0 else f"{blocked_count} blocked signal{'s' if blocked_count != 1 else ''}"
-    critical_path_label = " | critical path" if assessment.critical_path else ""
+    critical_path_label = " | longest dependency chain" if assessment.critical_path else ""
     summary = (
         f"{milestone.name} — computed {status_label}, declared {declared_label}; "
         f"{blocked_label}; {round(assessment.slip_probability * 100)}% slip probability{critical_path_label}"

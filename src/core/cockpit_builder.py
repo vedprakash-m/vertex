@@ -33,11 +33,13 @@ from src.core.cockpit_models import (
     ValueConfidence,
     ValueMetric,
     finalize_cockpit_snapshot,
+    select_cockpit_exceptions,
 )
 from src.core.context_proposal_review import load_pending_context_proposal_rows
 from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.exceptions import ConfigError
 from src.core.fact_lineage_coverage import compute_lineage_coverage
+from src.core.fact_sor_state import resolve_family_sor_mode
 from src.core.maturity_engine import load_earned_autonomy_state
 from src.core.outcome_metrics import canary_window_status, compute_om4_audit_coverage
 from src.core.program_synthesis import load_latest_released_program_synthesis
@@ -58,10 +60,6 @@ _AUTONOMY_LEVEL_PERMITTED_ACTION = {
 
 _ACTIVE_RISK_STATUS_VALUES = frozenset({"open", "escalated"})
 _HIGH_RISK_SCORE_THRESHOLD = 9  # e.g. HIGH impact (3) * LIKELY probability (3)
-#: Findings whose next_command is worth surfacing as the single cockpit
-#: headline action (Section 10.2: "up to three next actions"; this picks the
-#: single highest-priority one for ProgramCockpitSummary.next_action).
-_ACTIONABLE_FINDING_STATUSES = ("blocked", "warn")
 
 
 def build_cockpit_snapshot(
@@ -252,17 +250,34 @@ def _build_program_summary(
 ) -> tuple[ProgramCockpitSummary, list[CockpitFinding]]:
     findings: list[CockpitFinding] = []
     try:
-        risks = load_risk_register(program_id, programs_root=programs_root)
+        if resolve_family_sor_mode(
+            program_id,
+            "judgment",
+            programs_root=programs_root,
+        ) == "primary":
+            from src.core.program_reality import ProgramReality
+
+            reality = ProgramReality.load(
+                program_id,
+                programs_root=programs_root,
+                archive_root=None,
+                assessment_as_of=observed_at,
+            )
+            if reality.family_sor_mode("judgment") != "primary":
+                raise ConfigError("Risk authority changed during cockpit read.")
+            risks = tuple(assessment.record for assessment in reality.risks())
+        else:
+            risks = load_risk_register(program_id, programs_root=programs_root)
     except (OSError, ConfigError, UnicodeError) as error:
         findings.append(
             CockpitFinding(
                 finding_id="program.risk.read_failed",
                 area="program",
                 status="blocked",
-                summary="Risk register unavailable; program risk is unknown.",
+                summary="Risk data unavailable; program risk is unknown.",
                 detail=(
-                    f"The risk register could not be read ({type(error).__name__}). "
-                    "Restore or correct the register before relying on its risk summary."
+                    f"The risk inputs could not be read ({type(error).__name__}). "
+                    "Restore or correct the available risk source before relying on its summary."
                 ),
                 owner=None,
                 next_command=f"vertex risks list --program {program_id}",
@@ -462,10 +477,7 @@ def _latest_released_program_synthesis_kwargs(program_id: str, *, programs_root:
     QG-29-*released* ``ProgramSynthesis``, or all-``None`` if none exists
     yet (nothing has called ``src.ai.program_synthesizer.generate_program_synthesis``
     for this program). Never surfaces an unreleased draft."""
-    try:
-        synthesis = load_latest_released_program_synthesis(program_id, programs_root=programs_root)
-    except Exception:
-        synthesis = None
+    synthesis = load_latest_released_program_synthesis(program_id, programs_root=programs_root)
     if synthesis is None:
         return {
             "program_synthesis_through_line": None,
@@ -491,7 +503,31 @@ def _build_intelligence_summary(
     this item.
     """
     findings: list[CockpitFinding] = []
-    synthesis_kwargs = _latest_released_program_synthesis_kwargs(program_id, programs_root=programs_root)
+    try:
+        synthesis_kwargs = _latest_released_program_synthesis_kwargs(program_id, programs_root=programs_root)
+    except ConfigError as error:
+        synthesis_kwargs = {
+            "program_synthesis_through_line": None,
+            "program_synthesis_generated_at": None,
+            "program_synthesis_ai_run_id": None,
+        }
+        findings.append(
+            CockpitFinding(
+                finding_id="intelligence.synthesis.read_failed",
+                area="intelligence",
+                status="blocked",
+                summary="Program synthesis unavailable; retained assessment read failed.",
+                detail=(
+                    f"Retained program synthesis read failed for {program_id} ({type(error).__name__}). "
+                    "Inspect retained synthesis files and permissions before retrying. "
+                    "Retry after correction; no automatic retry or regeneration was attempted."
+                ),
+                owner=None,
+                next_command=f"vertex cockpit explain --program {program_id} --finding intelligence.synthesis.read_failed",
+                evidence_refs=(),
+                observed_at=observed_at,
+            )
+        )
     if synthesis_kwargs["program_synthesis_through_line"] is not None:
         findings.append(
             CockpitFinding(
@@ -749,10 +785,9 @@ def _build_trust_summary(
 def _pick_next_action(findings: list[CockpitFinding]) -> str | None:
     """ADF-W1.11: the single highest-priority next action across all
     findings -- blocked beats warn; first-found wins within a tier."""
-    for status in _ACTIONABLE_FINDING_STATUSES:
-        for finding in findings:
-            if finding.status == status and finding.next_command:
-                return finding.next_command
+    for finding in select_cockpit_exceptions(findings):
+        if finding.next_command:
+            return finding.next_command
     return None
 
 

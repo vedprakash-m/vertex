@@ -3,12 +3,185 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from src.core.narrative_store import REMOVED_SECTION_MARKER, archive_narratives, build_workstream_narrative_history, load_narratives, merge_narratives
 from src.core.narrative_store import reset_narratives_for_next_issue
 from src.core.narrative_store import strip_scaffold_comments
 
 
 EDITION_NAME = "acme_weekly"
+
+
+def _selected_artifact_root(tmp_path: Path) -> Path:
+    root = tmp_path / "custom-programs"
+    editions = root / "fixture" / "editions"
+    editions.mkdir(parents=True)
+    (editions / "fixture_weekly.yaml").write_text("program_id: fixture\n", encoding="utf-8")
+    return root
+
+
+def test_explicit_narrative_root_write_load_reset_and_delete(tmp_path: Path) -> None:
+    from src.core.narrative_store import write_narrative_section, delete_narratives_dir
+
+    root = _selected_artifact_root(tmp_path)
+    reports = tmp_path / "elsewhere" / "reports"
+    decoy = reports / "fixture_weekly" / "narratives" / "issue_007"
+    decoy.mkdir(parents=True)
+    (decoy / "exec_summary.md").write_text("decoy", encoding="utf-8")
+    path = write_narrative_section("fixture_weekly", 7, "exec_summary", "selected", reports, programs_root=root)
+    assert path == root / "fixture" / "narratives" / "issue_007" / "exec_summary.md"
+    assert load_narratives("fixture_weekly", 7, reports, programs_root=root)["exec_summary.md"] == "selected\n"
+    reset_narratives_for_next_issue("fixture_weekly", 8, {"exec_summary.md": "next"}, reports, programs_root=root)
+    delete_narratives_dir("fixture_weekly", 8, reports, programs_root=root)
+    assert not (root / "fixture" / "narratives" / "issue_008").exists()
+    assert (decoy / "exec_summary.md").read_text(encoding="utf-8") == "decoy"
+
+
+@pytest.mark.parametrize("operation", ["merge", "write", "delete", "archive", "load"])
+def test_explicit_missing_narrative_context_never_falls_back(tmp_path: Path, operation: str) -> None:
+    from src.core import narrative_store as store
+    from src.core.exceptions import ConfigError
+
+    root = tmp_path / "custom-programs"
+    root.mkdir()
+    reports = tmp_path / "reports"
+    before = list(tmp_path.rglob("*"))
+    calls = {
+        "merge": lambda: store.merge_narratives("missing", 7, {}, reports, programs_root=root),
+        "write": lambda: store.write_narrative_section("missing", 7, "exec_summary", "text", reports, programs_root=root),
+        "delete": lambda: store.delete_narratives_dir("missing", 7, reports, programs_root=root),
+        "archive": lambda: store.archive_narratives("missing", 7, tmp_path / "archive", reports, programs_root=root),
+        "load": lambda: store.load_narratives("missing", 7, reports, programs_root=root),
+    }
+    with pytest.raises(ConfigError):
+        calls[operation]()
+    assert list(tmp_path.rglob("*")) == before
+
+
+@pytest.mark.parametrize("kind", ["missing", "relative", "file", "flat", "ambiguous", "malformed", "denied"])
+@pytest.mark.parametrize("surface", ["narrative", "override", "review", "sync", "history", "pending"])
+def test_explicit_artifact_context_rejects_invalid_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str, surface: str,
+) -> None:
+    from src.core import narrative_store, overrides_store, review_status_store
+    from src.core.exceptions import ConfigError
+
+    root = _selected_artifact_root(tmp_path)
+    reports = tmp_path / "unrelated" / "reports"
+    decoy = reports / "fixture_weekly"
+    decoy.mkdir(parents=True)
+    (decoy / "overrides.yaml").write_text("decoy", encoding="utf-8")
+    edition = root / "fixture" / "editions" / "fixture_weekly.yaml"
+    if kind == "missing":
+        root = tmp_path / "absent"
+    elif kind == "relative":
+        root = Path("relative-programs")
+    elif kind == "file":
+        root = edition
+    elif kind == "flat":
+        edition.unlink()
+        flat = root.parent / "editions"
+        flat.mkdir()
+        (flat / edition.name).write_text("program_id: fixture\n", encoding="utf-8")
+    elif kind == "ambiguous":
+        other = root / "other" / "editions"
+        other.mkdir(parents=True)
+        (other / edition.name).write_text("program_id: other\n", encoding="utf-8")
+    elif kind == "malformed":
+        edition.write_text("program_id: ../escape\n", encoding="utf-8")
+    else:
+        original = Path.glob
+
+        def denied(path: Path, pattern: str, **kwargs):
+            if path == root:
+                raise PermissionError("synthetic inaccessible root")
+            return original(path, pattern, **kwargs)
+
+        monkeypatch.setattr(Path, "glob", denied)
+    before = sorted(str(path) for path in tmp_path.rglob("*"))
+    with pytest.raises(ConfigError):
+        if surface == "narrative":
+            narrative_store.merge_narratives("fixture_weekly", 7, {}, reports, programs_root=root)
+        elif surface == "override":
+            overrides_store.reset_overrides_for_next_issue("fixture_weekly", 7, (), reports, programs_root=root)
+        elif surface == "review":
+            review_status_store.reset_review_status("fixture_weekly", 7, (), reports, programs_root=root)
+        elif surface == "sync":
+            narrative_store.sync_published_baseline_to_target(
+                "fixture_weekly", target_issue_number=7, source_issue_number=6,
+                reports_root=reports, programs_root=root,
+            )
+        elif surface == "history":
+            narrative_store.build_workstream_narrative_history(
+                "fixture_weekly", 7, (), {}, reports_root=reports, programs_root=root,
+            )
+        else:
+            overrides_store.apply_pending_overrides("fixture_weekly", tmp_path / "absent", reports, programs_root=root)
+    assert sorted(str(path) for path in tmp_path.rglob("*")) == before
+    assert (decoy / "overrides.yaml").read_text(encoding="utf-8") == "decoy"
+
+
+def test_explicit_none_keeps_flat_artifact_paths(tmp_path: Path) -> None:
+    from src.core.overrides_store import get_overrides_path
+    from src.core.review_status_store import get_review_status_path
+    from src.core.narrative_store import get_narratives_dir
+
+    reports = tmp_path / "reports"
+    assert get_narratives_dir("flat", 7, reports, programs_root=None) == reports / "flat" / "narratives" / "issue_007"
+    assert get_overrides_path("flat", reports, programs_root=None) == reports / "flat" / "overrides.yaml"
+    assert get_review_status_path("flat", reports, programs_root=None) == reports / "flat" / "review_status.yaml"
+
+
+def test_explicit_artifact_root_preserves_template_and_legacy_output(tmp_path: Path) -> None:
+    from src.core.narrative_store import get_narratives_dir
+    from src.core.review_status_store import get_review_status_path
+
+    root = tmp_path / "named-home"
+    template = root / "_templates" / "fixture"
+    editions = template / "editions"
+    editions.mkdir(parents=True)
+    (editions / "fixture_weekly.yaml").write_text("program_id: template:fixture\n", encoding="utf-8")
+    legacy = template / "output" / "fixture_weekly"
+    legacy.mkdir(parents=True)
+    reports = tmp_path / "reports"
+    assert get_narratives_dir("fixture_weekly", 7, reports, programs_root=root) == template / "narratives" / "issue_007"
+    assert get_review_status_path("fixture_weekly", reports, programs_root=root) == legacy / "review_status.yaml"
+
+
+def test_explicit_artifact_root_rejects_escaping_program_mapping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from dataclasses import replace
+    from src.core import edition_resolver
+    from src.core import overrides_store as store
+    from src.core.exceptions import ConfigError
+
+    root = _selected_artifact_root(tmp_path)
+    resolved = edition_resolver.resolve_edition_paths("fixture_weekly", programs_root=root)
+    assert resolved is not None
+    monkeypatch.setattr(edition_resolver, "resolve_edition_paths", lambda *_args, **_kwargs: replace(resolved, program_dir=tmp_path / "outside"))
+    with pytest.raises(ConfigError, match="escapes"):
+        store.get_overrides_path("fixture_weekly", tmp_path / "reports", programs_root=root)
+
+
+def test_explicit_archived_history_and_placeholder_scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+    from src.core import narrative_store as store
+
+    root = _selected_artifact_root(tmp_path)
+    reports, archive = tmp_path / "reports", tmp_path / "archive"
+    for issue in (1, 2):
+        store.write_narrative_section("fixture_weekly", issue, "delivery", f"prior {issue}", reports, programs_root=root)
+        store.archive_narratives("fixture_weekly", issue, archive, reports, programs_root=root)
+    monkeypatch.setattr(
+        store, "read_archive_index",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            issues=tuple(SimpleNamespace(kind="confirmed", issue_number=i) for i in (1, 2)),
+        ),
+    )
+    assert store.build_workstream_narrative_history(
+        "fixture_weekly", 3, ("Delivery",), {"delivery": "current"}, archive,
+        reports_root=reports, programs_root=root,
+    ) == {"Delivery": ("current", "prior 2", "prior 1")}
 
 
 def test_merge_narratives_preserves_existing_creates_new_and_marks_removed(tmp_path: Path) -> None:
@@ -354,5 +527,3 @@ def test_inject_narrative_placeholders_ws_lead_from_workstream_narrative(mocker)
         "Velocity: Deployment velocity improved sharply this week.\n"
         "Unknown: [lead pending]"
     )
-
-

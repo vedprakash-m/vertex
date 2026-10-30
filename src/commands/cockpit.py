@@ -41,7 +41,9 @@ from src.core.cockpit_models import (
     cockpit_snapshot_from_json_dict,
     cockpit_snapshot_to_json,
     cockpit_snapshot_to_json_dict,
+    select_cockpit_exceptions,
 )
+from src.core.workspace_paths import is_bare_identifier
 from src.core.alerts import StateError, append_or_suppress_alert, read_alerts
 from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.lineage_regression_detector import (
@@ -63,6 +65,47 @@ _COCKPIT_DIR_NAME = "cockpit"
 _HISTORY_DIR_NAME = "history"
 _LATEST_FILENAME = "latest.json"
 _MAX_NEXT_ACTIONS = 3
+_RETAINED_LIMITATION = (
+    "Current source and action state not evaluated. Recorded commands are historical guidance; "
+    "current CLI revalidation is required."
+)
+_RETAINED_UNAVAILABLE = (
+    "Confidence, current authority, expiry/escalation, diff and expected effect: "
+    "not available in this retained finding."
+)
+
+
+def _validate_cockpit_selection(program_id: str, programs_root: Path) -> None:
+    if not is_bare_identifier(program_id) or program_id.rstrip(". ").upper().split(".")[0] in {
+        "CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10)),
+    }:
+        raise typer.BadParameter("Program must be a bare program identifier.")
+    if not programs_root.is_absolute() or not (programs_root / program_id).resolve().is_relative_to(programs_root.resolve()):
+        raise typer.BadParameter("Cockpit selection must remain within the selected absolute program root.")
+
+
+def _parse_cockpit_time(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            raise ValueError
+        return parsed
+    except ValueError as error:
+        raise typer.BadParameter("Cockpit time must be an ISO timestamp with a timezone.") from error
+
+
+def _load_retained_cockpit(program_id: str, at: datetime) -> CockpitSnapshot | None:
+    try:
+        return find_nearest_history_snapshot(program_id, at, programs_root=PROGRAMS_ROOT)
+    except StateError as error:
+        raise typer.BadParameter(str(error)) from error
+
+
+def _retained_heading(snapshot: CockpitSnapshot) -> str:
+    return (
+        f"Retained cockpit snapshot — generated {snapshot.generated_at.isoformat()}; "
+        f"as of {snapshot.as_of.isoformat()}\n{_RETAINED_LIMITATION}"
+    )
 
 
 def _cockpit_dir(program_id: str, *, programs_root: Path) -> Path:
@@ -214,29 +257,44 @@ def find_nearest_history_snapshot(
     answer a different question than the one asked). Returns ``None`` when
     no history predates ``at`` (a missing snapshot degrades to "unavailable
     for that time," never a nearest-after guess)."""
-    history_dir = _cockpit_dir(program_id, programs_root=programs_root) / _HISTORY_DIR_NAME
-    if not history_dir.is_dir():
-        return None
-    at_utc = at if at.tzinfo is not None else at.replace(tzinfo=timezone.utc)
-    best_path: Path | None = None
-    best_generated_at: datetime | None = None
-    for candidate in history_dir.glob("*.json"):
-        try:
-            stamp = datetime.strptime(candidate.stem, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-        if stamp > at_utc:
-            continue
-        if best_generated_at is None or stamp > best_generated_at:
-            best_generated_at = stamp
-            best_path = candidate
-    if best_path is None:
-        return None
+    _validate_cockpit_selection(program_id, programs_root)
     try:
+        history_dir = _cockpit_dir(program_id, programs_root=programs_root) / _HISTORY_DIR_NAME
+        if not history_dir.exists():
+            return None
+        if not history_dir.is_dir():
+            raise ValueError("Expected history directory")
+        at_utc = at if at.tzinfo is not None else at.replace(tzinfo=timezone.utc)
+        best_path: Path | None = None
+        best_generated_at: datetime | None = None
+        for candidate in history_dir.glob("*.json"):
+            try:
+                stamp = datetime.strptime(candidate.stem, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            if stamp > at_utc:
+                continue
+            if best_generated_at is None or stamp > best_generated_at:
+                best_generated_at = stamp
+                best_path = candidate
+        if best_path is None:
+            return None
+        if not best_path.resolve().is_relative_to(programs_root.resolve()):
+            raise ValueError("Retained file outside selected root")
         payload = json.loads(best_path.read_text(encoding="utf-8"))
-        return cockpit_snapshot_from_json_dict(payload)
-    except (OSError, json.JSONDecodeError, KeyError, ValueError, TypeError):
-        return None
+        if not isinstance(payload, dict):
+            raise ValueError("Expected snapshot object")
+        snapshot = cockpit_snapshot_from_json_dict(payload)
+        if (
+            snapshot.program_id != program_id or snapshot.generated_at.tzinfo is None
+            or snapshot.generated_at > at_utc or cockpit_history_filename(snapshot) != best_path.name
+        ):
+            raise ValueError("Snapshot identity or time mismatch")
+        return snapshot
+    except (OSError, UnicodeError, KeyError, ValueError, TypeError) as error:
+        raise StateError(
+            "Cannot read retained cockpit snapshot; preserve the artifact and check its access, identity and format."
+        ) from error
 
 
 def _render_value_line(value: ValueCockpitSummary) -> str:
@@ -255,7 +313,7 @@ def _render_value_line(value: ValueCockpitSummary) -> str:
     return f"{len(value.metrics)} metric(s) available"
 
 
-def render_cockpit_terminal(snapshot: CockpitSnapshot) -> str:
+def render_cockpit_terminal(snapshot: CockpitSnapshot, *, retained: bool = False) -> str:
     """Section 10.2 terminal contract: at most program-health, readiness, data-trust,
     value, up to three next actions, and a detail pointer."""
     program = snapshot.program_summary
@@ -271,10 +329,15 @@ def render_cockpit_terminal(snapshot: CockpitSnapshot) -> str:
     )
     if any(finding.finding_id == "intelligence.lineage.read_failed" for finding in snapshot.findings):
         lineage = "unavailable (read failed)"
+    synthesis_qualifier = (
+        "; synthesis unavailable (read failed)"
+        if any(finding.finding_id == "intelligence.synthesis.read_failed" for finding in snapshot.findings)
+        else ""
+    )
     value_line = _render_value_line(value)
 
     next_actions: list[str] = []
-    for finding in snapshot.findings:
+    for finding in select_cockpit_exceptions(snapshot.findings):
         if finding.next_command and finding.next_command not in next_actions:
             next_actions.append(finding.next_command)
         if len(next_actions) >= _MAX_NEXT_ACTIONS:
@@ -283,13 +346,25 @@ def render_cockpit_terminal(snapshot: CockpitSnapshot) -> str:
     lines = [
         f"Program health:        {program.overall_risk.upper()} ({blocker_count} high-risk item(s))",
         f"Publication readiness: {readiness}",
-        f"Data trust:            {source.required_healthy}/{source.required_total} required sources healthy; lineage {lineage}",
+        f"Data trust:            {source.required_healthy}/{source.required_total} required sources healthy; lineage {lineage}{synthesis_qualifier}",
         f"Value:                 {value_line}",
     ]
     if next_actions:
         lines.append("Next actions:")
         lines.extend(f"  - {command}" for command in next_actions)
     lines.append(f"Detail: vertex cockpit show --program {snapshot.program_id} --format json")
+    if retained:
+        lines.insert(0, _retained_heading(snapshot))
+        lines[-1] += f" --as-of {snapshot.generated_at.isoformat()}"
+        lines.append("Exceptions:")
+        exceptions = select_cockpit_exceptions(snapshot.findings)
+        if not exceptions:
+            lines.append("No blocked/warn findings in this retained snapshot")
+        lines.extend(_render_finding_explanation(finding) + "\n" + _RETAINED_UNAVAILABLE for finding in exceptions)
+        other_findings = [finding for finding in snapshot.findings if finding.status not in {"blocked", "warn"}]
+        if other_findings:
+            lines.append("Other findings:")
+            lines.extend(_render_finding_explanation(finding) for finding in other_findings)
     return "\n".join(lines)
 
 
@@ -333,11 +408,32 @@ def _is_first_cockpit_run(program_id: str, *, programs_root: Path) -> bool:
 def cockpit_show(
     program: str = typer.Option(..., "--program", help="Program id, e.g. acme."),
     edition: str | None = typer.Option(None, "--edition", help="Optional edition id to scope this snapshot to."),
-    format: str = typer.Option("human", "--format", help="Output format: human or json."),
-    no_persist: bool = typer.Option(
-        False, "--no-persist", help="Build and print the snapshot without writing latest.json/history (read-only preview)."
+    format: str = typer.Option(
+        "human", "--format", help="Fresh output: human or json; retained html requires --as-of."
     ),
+    no_persist: bool = typer.Option(
+        False, "--no-persist", help="Suppress latest.json/history writes; fresh readers are not fully read-only."
+    ),
+    as_of: str | None = typer.Option(None, "--as-of", help="Read retained history at or before this ISO timestamp."),
 ) -> None:
+    if format not in {"human", "json", "html"}:
+        raise typer.BadParameter(f"Unsupported --format {format!r}; use human, json or retained html.")
+    if format == "html" and as_of is None:
+        raise typer.BadParameter("--format html requires --as-of for retained read-only inspection.")
+    at = _parse_cockpit_time(as_of) if as_of is not None else None
+    _validate_cockpit_selection(program, PROGRAMS_ROOT)
+    if at is not None:
+        snapshot = _load_retained_cockpit(program, at)
+        if snapshot is None:
+            typer.echo("No retained cockpit snapshot at or before the requested time; evidence unavailable.", err=True)
+            raise typer.Exit(code=1)
+        if format == "json":
+            typer.echo(json.dumps(cockpit_snapshot_to_json_dict(snapshot), indent=2, sort_keys=True))
+        elif format == "html":
+            typer.echo(render_cockpit_html(snapshot, retained=True))
+        else:
+            typer.echo(render_cockpit_terminal(snapshot, retained=True))
+        return
     # Section 10.7: onboarding walkthrough, checked BEFORE persisting so the
     # "first run" signal (no prior latest.json) is evaluated against
     # pre-this-run state, not this run's own about-to-be-written snapshot.
@@ -382,8 +478,6 @@ def cockpit_show(
     if format == "json":
         typer.echo(json.dumps(cockpit_snapshot_to_json_dict(snapshot), indent=2, sort_keys=True))
         return
-    if format != "human":
-        raise typer.BadParameter(f"Unsupported --format {format!r}; use human or json.")
     if first_run:
         typer.echo(_ONBOARDING_WALKTHROUGH)
     typer.echo(render_cockpit_terminal(snapshot))
@@ -402,11 +496,8 @@ def cockpit_build(
     """Section 10.1: the local HTML dashboard. Never a live time-travel
     reconstruction -- ``--as-of`` reads a retained history snapshot."""
     if as_of is not None:
-        try:
-            at = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
-        except ValueError:
-            raise typer.BadParameter(f"--as-of {as_of!r} is not a valid ISO timestamp.")
-        snapshot = find_nearest_history_snapshot(program, at, programs_root=PROGRAMS_ROOT)
+        at = _parse_cockpit_time(as_of)
+        snapshot = _load_retained_cockpit(program, at)
         if snapshot is None:
             typer.echo(f"No retained cockpit history for {program!r} at or before {as_of}.", err=True)
             raise typer.Exit(code=1)
@@ -426,7 +517,7 @@ def cockpit_build(
             pass
         persist_cockpit_snapshot(snapshot, programs_root=PROGRAMS_ROOT)
 
-    html = render_cockpit_html(snapshot)
+    html = render_cockpit_html(snapshot, retained=as_of is not None)
     html_path = _cockpit_dir(program, programs_root=PROGRAMS_ROOT) / "cockpit.html"
     html_path.parent.mkdir(parents=True, exist_ok=True)
     html_path.write_text(html, encoding="utf-8")
@@ -440,17 +531,31 @@ def cockpit_explain(
     program: str = typer.Option(..., "--program", help="Program id, e.g. acme."),
     edition: str | None = typer.Option(None, "--edition", help="Optional edition id to scope this snapshot to."),
     finding: str = typer.Option(..., "--finding", help="finding_id to explain."),
+    as_of: str | None = typer.Option(None, "--as-of", help="Explain a retained finding without rebuilding."),
 ) -> None:
     """Section 10.4: full explainability for one finding. Renders every
     field ``CockpitFinding`` structurally carries; explicitly labels the
     two Section 10.4 fields it has no dedicated data for yet (calculation/
     rule, and what-Vertex-did-not-do) rather than fabricating content."""
-    snapshot = build_cockpit_snapshot(program, programs_root=PROGRAMS_ROOT, edition_id=edition)
+    at = _parse_cockpit_time(as_of) if as_of is not None else None
+    _validate_cockpit_selection(program, PROGRAMS_ROOT)
+    snapshot = (
+        _load_retained_cockpit(program, at) if at is not None
+        else build_cockpit_snapshot(program, programs_root=PROGRAMS_ROOT, edition_id=edition)
+    )
+    if snapshot is None:
+        typer.echo("No retained cockpit snapshot at or before the requested time; evidence unavailable.", err=True)
+        raise typer.Exit(code=1)
     match = next((f for f in snapshot.findings if f.finding_id == finding), None)
     if match is None:
-        typer.echo(f"No finding {finding!r} in the current cockpit snapshot for {program!r}.", err=True)
+        scope = "retained" if at is not None else "current"
+        typer.echo(f"No finding {finding!r} in the {scope} cockpit snapshot for {program!r}.", err=True)
         raise typer.Exit(code=1)
+    if at is not None:
+        typer.echo(_retained_heading(snapshot))
     typer.echo(_render_finding_explanation(match))
+    if at is not None:
+        typer.echo(_RETAINED_UNAVAILABLE)
 
 
 def _render_finding_explanation(finding: CockpitFinding) -> str:
@@ -494,14 +599,10 @@ def cockpit_compare(
     Operates ONLY on retained history (never recomputed from current
     mutable state) -- if a requested time has no retained snapshot at or
     before it, the comparison is unavailable, not silently substituted."""
-    try:
-        from_at = datetime.fromisoformat(from_iso.replace("Z", "+00:00"))
-        to_at = datetime.fromisoformat(to_iso.replace("Z", "+00:00"))
-    except ValueError:
-        raise typer.BadParameter("--from/--to must be valid ISO timestamps.")
-
-    earlier = find_nearest_history_snapshot(program, from_at, programs_root=PROGRAMS_ROOT)
-    later = find_nearest_history_snapshot(program, to_at, programs_root=PROGRAMS_ROOT)
+    from_at = _parse_cockpit_time(from_iso)
+    to_at = _parse_cockpit_time(to_iso)
+    earlier = _load_retained_cockpit(program, from_at)
+    later = _load_retained_cockpit(program, to_at)
     if earlier is None or later is None:
         missing = "--from" if earlier is None else "--to"
         typer.echo(f"No retained cockpit history for {program!r} at or before the {missing} time.", err=True)

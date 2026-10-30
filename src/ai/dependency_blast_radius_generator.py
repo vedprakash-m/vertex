@@ -51,6 +51,7 @@ from src.core.context_compiler import (
 )
 from src.core.dependency_blast_radius import DependencyBlastRadiusProposal, DependencyBlastRadiusRequest
 from src.core.edition_resolver import PROGRAMS_ROOT
+from src.core.exceptions import StateError
 from src.core.policy_loader import load_ai_feature_policy
 from src.core.quality_gates.ai_release_audit import (
     AIRunState,
@@ -175,6 +176,7 @@ def generate_dependency_blast_radius_proposal(
 def generate_dependency_blast_radius_proposal_via_runner(
     request: DependencyBlastRadiusRequest,
     *,
+    context: RunnerContext,
     client: LLMProvider,
     programs_root: Path = PROGRAMS_ROOT,
 ) -> DependencyBlastRadiusProposal | None:
@@ -186,7 +188,8 @@ def generate_dependency_blast_radius_proposal_via_runner(
     minted per call even on a cache hit, matching the existing feature's
     established test contract), same release-audit lifecycle recorded,
     same AISchemaGateway bounds checks and semantic validation rules —
-    only the dispatch/context/cache mechanics differ:
+    only the dispatch/context/cache mechanics differ. The caller supplies
+    the execution context; its identity is not authenticated here:
 
     - evidence is compiled through ``DeterministicContextCompiler``
       (RELO-W1.2's hardened required-span/token-accounting behavior)
@@ -196,6 +199,10 @@ def generate_dependency_blast_radius_proposal_via_runner(
     - the runner's Sec 8.1.5 call-count ceiling applies (unbounded here,
       matching today's uncapped behavior, but now structurally available).
     """
+    if context.program_id != request.program_id:
+        raise StateError("Runner context program must match the dependency request.")
+    if context.policy_version != POLICY_VERSION:
+        raise StateError("Runner context policy version must match the dependency feature.")
     ai_run_id = new_ai_run_id()
     program_id = request.program_id
     policy = load_ai_feature_policy(_FEATURE)
@@ -265,7 +272,8 @@ def generate_dependency_blast_radius_proposal_via_runner(
                 max_input_tokens=6000, reserved_output_tokens=policy.max_tokens or 700,
             ),
             validation_context=ValidationContext(
-                program_id=req.program_id, run_id=ai_run_id, execution_mode="observe", classification="internal",
+                program_id=req.program_id, run_id=context.run_id, execution_mode="observe",
+                classification=context.classification,
             ),
         )
         return ContextBuildResult(compiled=compiled)
@@ -295,10 +303,7 @@ def generate_dependency_blast_radius_proposal_via_runner(
         return FeatureOutcome(status=FeatureOutcomeStatus.ABSTAINED, value=None, tier=Tier.NONE)
 
     runner = StructuredFeatureRunner(
-        context=RunnerContext(
-            program_id=program_id, run_id=ai_run_id, policy_version=POLICY_VERSION,
-            snapshot_id="no-snapshot-pinning-yet", principal="system",
-        ),
+        context=context,
         frontier_eligible=policy.frontier_eligible,
         released_cache=ReleasedResultCache(_released_cache_path(programs_root, program_id)),
     )

@@ -6,7 +6,7 @@ from typing import Any, Mapping
 
 from src.core.models import WorkItem
 from src.core.models_v2 import PersonDirectory, VitalityAggregate, VitalityArchiveEntry, VitalityArchiveWorkstream, VitalityProgramSnapshot, VitalityScore, Workstream
-from src.core.vitality_scorer import aggregate_vitality
+from src.core.vitality_scorer import aggregate_vitality, freshness_days_for_policy
 from src.core.view_models import AdoVitalityAccountabilityRow, AdoVitalitySectionData
 
 
@@ -100,7 +100,8 @@ def build_vitality_snapshot(
             total_items=0,
             items_fresh=0,
             updated_percentage=0,
-            freshness_average_days=0.0,
+            freshness_average_days=None,
+            freshness_known_items=0,
             avg_richness=0,
             leakage_events=0,
             aggregate_score=0,
@@ -109,7 +110,8 @@ def build_vitality_snapshot(
     total_items = len(scores)
     items_fresh = sum(1 for score in scores if score.freshness_grade == "green")
     updated_percentage = round((items_fresh / total_items) * 100)
-    freshness_average_days = round(sum(score.freshness_days for score in scores) / total_items, 1)
+    known_ages = tuple(score.freshness_days for score in scores if score.freshness_days is not None)
+    freshness_average_days = round(sum(known_ages) / len(known_ages), 1) if known_ages else None
     avg_richness = round(sum(score.richness_score for score in scores) / total_items)
     leakage_events = sum(score.leakage_events for score in scores)
     workiq_signal_count = sum(score.workiq_signal_count for score in scores)
@@ -126,6 +128,7 @@ def build_vitality_snapshot(
         items_fresh=items_fresh,
         updated_percentage=updated_percentage,
         freshness_average_days=freshness_average_days,
+        freshness_known_items=len(known_ages),
         avg_richness=avg_richness,
         leakage_events=leakage_events,
         aggregate_score=aggregate_score,
@@ -245,6 +248,7 @@ def build_vitality_section(
         items_total=snapshot.total_items,
         updated_percentage=snapshot.updated_percentage,
         freshness_average_days=snapshot.freshness_average_days,
+        freshness_known_items=snapshot.freshness_known_items,
         leakage_events=snapshot.leakage_events,
         best_documented_label=best_documented_label,
         best_documented_detail=best_documented_detail,
@@ -285,13 +289,18 @@ def _build_accountability_rows(
 
 def _accountability_sort_key(score: VitalityScore) -> tuple[int, int, int, int]:
     stale_rank = 0 if score.freshness_grade == "red" else 1
-    return (stale_rank, -score.freshness_days, -len(score.richness_missing), score.work_item_id)
+    return (stale_rank, -freshness_days_for_policy(score.freshness_days), -len(score.richness_missing), score.work_item_id)
 
 
 def _fields_to_update(score: VitalityScore) -> tuple[str, ...]:
     fields: list[str] = []
     if score.freshness_grade == "red":
-        fields.append(f"Meaningful ADO update ({score.freshness_days}d stale)")
+        age_detail = (
+            f"{score.freshness_days}d stale"
+            if score.freshness_days is not None
+            else "time unknown"
+        )
+        fields.append(f"Meaningful ADO update ({age_detail})")
     for field_name in score.richness_missing:
         label = _VITALITY_FIELD_LABELS.get(field_name)
         if label is not None and label not in fields:
@@ -351,7 +360,7 @@ def _best_documented_score(scores: tuple[VitalityScore, ...]) -> VitalityScore |
         key=lambda score: (
             score.richness_score,
             score.freshness_grade == "green",
-            -score.freshness_days,
+            -freshness_days_for_policy(score.freshness_days),
             -score.workiq_signal_count,
             -score.work_item_id,
         ),

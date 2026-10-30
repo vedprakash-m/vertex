@@ -254,7 +254,7 @@ from src.core.models import EvidencePacket, FreshnessReport, ProgramContext, Rep
 from src.core.models import ReviewStatus, Revision, RiskLevel, RunManifest, ScorecardDelta, ScorecardEvidencePacket, Snapshot, SnapshotItem, WorkItem
 from src.core.narrative_store import REMOVED_SECTION_MARKER, get_narratives_dir, load_narratives, merge_narratives
 from src.core.overrides_store import DecisionStripAck, DimensionOverride, OverridesDocument, ScorecardOverrides, Top3NowEntry
-from src.core.overrides_store import apply_pending_overrides, get_overrides_path, load_overrides, merge_overrides
+from src.core.overrides_store import _resolve_artifact_edition, apply_pending_overrides, get_overrides_path, load_overrides, merge_overrides
 from src.core.pipeline import StageContext, run_pipeline
 from src.core.program_fact_store import FactSnapshotPin, ProgramFactStore, _resolve_fact_db_root
 from src.core.quality_gates import QualityGateReport, combine_gate_reports, evaluate_continuity_gates, evaluate_phase_1a_gates, evaluate_phase_1b_gates, evaluate_phase_1c_gates
@@ -268,7 +268,7 @@ from src.core.section_proposal_store import load_stale_claim_ids
 from src.core.signal_review import signal_is_approved_for_evidence
 from src.core.risk_register_engine import assess_risk_staleness, compute_risk_score
 from src.core.scorecard_engine import assign_dimension_items, build_scorecard
-from src.core.scorecard_trends import load_scorecard_trends
+from src.core.scorecard_trends import compare_dated_risk_pair, load_scorecard_trends
 from src.core.summary_store import load_summary
 from src.core.knowledge_store import load_program_knowledge
 from src.core.milestone_engine import (
@@ -360,6 +360,7 @@ class DraftState:
     kusto_sections: tuple[KustoSectionData, ...] = ()
     override_snapshot: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
     program_fact_snapshot: ProgramFactSnapshotDraftState | None = None
+    run_evidence_snapshot_sha256: str | None = None
     top_3_now: tuple[str, ...] = ()
     exec_summary_text: str = ""
     # D-17: gather run lineage, pinned once at draft creation (see
@@ -413,7 +414,11 @@ def _pin_program_fact_snapshot(
     )
 
 
-def _runtime_db_root_for_reports(reports_root: Path | None) -> Path | None:
+def _runtime_db_root_for_reports(
+    reports_root: Path | None, *, programs_root: Path | None = None,
+) -> Path | None:
+    if programs_root is not None:
+        return _resolve_fact_db_root(programs_root)
     if reports_root is None:
         return None
     return _resolve_fact_db_root(reports_root.parent / "programs")
@@ -473,6 +478,8 @@ def _compute_healthy_streak(
     issue_number: int,
     dimension_risks: tuple[DimensionRisk, ...],
     archive_root: Path,
+    *,
+    programs_root: Path | None = None,
 ) -> int:
     if not dimension_risks:
         return 0
@@ -482,6 +489,7 @@ def _compute_healthy_streak(
         edition_name,
         archive_root=archive_root,
         before_issue_number=issue_number,
+        **({"programs_root": programs_root} if programs_root is not None else {}),
     )
 
 
@@ -660,15 +668,26 @@ def _spark_char(level: RiskLevel) -> str:
     return mapping[level]
 
 
-def _derive_risk_sparkline(risk: RiskLevel, prior_risk: RiskLevel | None) -> tuple[str | None, str | None]:
-    if prior_risk is None or RiskLevel.UNKNOWN in {prior_risk, risk}:
-        return None, None
-    history = _spark_char(prior_risk) + _spark_char(risk)
-    if _risk_rank(risk) > _risk_rank(prior_risk):
-        return history, "rising vs prior issue"
-    if _risk_rank(risk) < _risk_rank(prior_risk):
-        return history, "falling vs prior issue"
-    return history, "unchanged vs prior issue"
+def _derive_risk_sparkline(
+    risk: RiskLevel,
+    prior_risk: RiskLevel | None,
+    *,
+    current_at: datetime | None = None,
+    prior_at: datetime | None = None,
+) -> tuple[str | None, str | None]:
+    sparkline, direction = compare_dated_risk_pair(
+        risk,
+        prior_risk,
+        current_at=current_at,
+        prior_at=prior_at,
+    )
+    if direction == "rise":
+        return sparkline, "rising vs prior issue"
+    if direction == "fall":
+        return sparkline, "falling vs prior issue"
+    if direction in {"steady", "high"}:
+        return sparkline, "unchanged vs prior issue"
+    return None, None
 
 
 WorkItemLoader = Callable[[ReportBundle, datetime], tuple[tuple[WorkItem, ...], int]]
@@ -799,6 +818,7 @@ def _generate_report_draft_from_context(ctx: StageContext) -> DraftArtifacts:
             items=items,
             as_of=data_as_of,
             reports_root=resolved_reports_root,
+            programs_root=programs_root if resolved_v2 is not None else None,
         )
 
         evidence_window_start = data_as_of - timedelta(days=bundle.config.ado.date_window_days)
@@ -822,7 +842,10 @@ def _generate_report_draft_from_context(ctx: StageContext) -> DraftArtifacts:
         overrides_document, _ = merge_overrides(
             issue_number=resolved_issue_number,
             expected_scorecards=expected_scorecards,
-            existing=load_overrides(edition_name, reports_root=resolved_reports_root, issue_number=resolved_issue_number),
+            existing=load_overrides(
+                edition_name, reports_root=resolved_reports_root, issue_number=resolved_issue_number,
+                programs_root=programs_root if resolved_v2 is not None else None,
+            ),
         )
         override_snapshot = build_override_snapshot(overrides_document)
         top_3_now = tuple(entry.text.strip() for entry in overrides_document.top_3_now if entry.text.strip())
@@ -830,6 +853,7 @@ def _generate_report_draft_from_context(ctx: StageContext) -> DraftArtifacts:
             edition_name,
             resolved_reports_root,
             issue_number=resolved_issue_number,
+            programs_root=programs_root if resolved_v2 is not None else None,
         )
 
         scorecard_packets = _build_scorecard_packets(
@@ -851,6 +875,7 @@ def _generate_report_draft_from_context(ctx: StageContext) -> DraftArtifacts:
             archive_root=resolved_archive_root,
             trusted_issue_number=trusted_baseline_issue_number,
             reports_root=resolved_reports_root,
+            programs_root=programs_root if resolved_v2 is not None else None,
         )
         signal_context = _load_report_signal_context(
             edition_name=edition_name,
@@ -891,7 +916,10 @@ def _generate_report_draft_from_context(ctx: StageContext) -> DraftArtifacts:
         top_items = _build_top_items(overrides_document, scorecards)
         auto_suggestions = _build_auto_suggested_top_items(scorecard_deltas, scorecard_packets)
         continuity_chapters = _visible_continuity_chapters(bundle, resolved_edition_type)
-        existing_narratives = load_narratives(edition_name, resolved_issue_number, reports_root=resolved_reports_root)
+        existing_narratives = load_narratives(
+            edition_name, resolved_issue_number, reports_root=resolved_reports_root,
+            programs_root=programs_root if resolved_v2 is not None else None,
+        )
         section_templates = (
             _build_chapter_templates(resolved_issue_number, continuity_chapters)
             if _is_continuity_layout(bundle)
@@ -946,8 +974,12 @@ def _generate_report_draft_from_context(ctx: StageContext) -> DraftArtifacts:
             resolved_issue_number,
             templates=narrative_templates,
             reports_root=resolved_reports_root,
+            programs_root=programs_root if resolved_v2 is not None else None,
         )
-        loaded_narratives = load_narratives(edition_name, resolved_issue_number, reports_root=resolved_reports_root)
+        loaded_narratives = load_narratives(
+            edition_name, resolved_issue_number, reports_root=resolved_reports_root,
+            programs_root=programs_root if resolved_v2 is not None else None,
+        )
         loaded_exec_summary_text = loaded_narratives.get("exec_summary.md", "").strip()
         exec_summary_text = loaded_exec_summary_text or default_exec_summary
         if _is_continuity_layout(bundle):
@@ -1006,6 +1038,7 @@ def _generate_report_draft_from_context(ctx: StageContext) -> DraftArtifacts:
                 current_workstream_blurbs=workstream_blurbs,
                 archive_root=resolved_archive_root,
                 reports_root=resolved_reports_root,
+                programs_root=programs_root if resolved_v2 is not None else None,
             )
         )
 
@@ -1152,7 +1185,9 @@ def _generate_report_draft_from_context(ctx: StageContext) -> DraftArtifacts:
         edition_name=edition_name,
         issue_number=resolved_issue_number,
         generated_at=started_at,
-        db_root=_runtime_db_root_for_reports(resolved_reports_root),
+        db_root=_runtime_db_root_for_reports(
+            resolved_reports_root, programs_root=programs_root if resolved_v2 is not None else None,
+        ),
         pin=ctx.fact_snapshot_pin,
     )
     html_path: Path | None = None
@@ -1358,7 +1393,12 @@ def _generate_lookback_draft(
     open_browser: bool,
     gather_run_id: str | None = None,
     gather_run_hash: str | None = None,
+    programs_root: Path | None = None,
 ) -> DraftArtifacts:
+    if programs_root is not None:
+        _resolve_artifact_edition(edition_name, reports_root, programs_root)
+    artifact_programs_root = programs_root
+    programs_root = programs_root if programs_root is not None else reports_root.parent / "programs"
     if lookback_range is not None and lookback_range < 2:
         raise ValueError("lookback_range must be at least 2 when edition type is lookback.")
 
@@ -1396,7 +1436,10 @@ def _generate_lookback_draft(
     overrides_document, _ = merge_overrides(
         issue_number=resolved_issue_number,
         expected_scorecards=expected_scorecards,
-        existing=load_overrides(edition_name, reports_root=reports_root, issue_number=resolved_issue_number),
+        existing=load_overrides(
+            edition_name, reports_root=reports_root, issue_number=resolved_issue_number,
+            programs_root=artifact_programs_root,
+        ),
     )
     override_snapshot = build_override_snapshot(overrides_document)
     top_3_now = tuple(entry.text.strip() for entry in overrides_document.top_3_now if entry.text.strip())
@@ -1404,6 +1447,7 @@ def _generate_lookback_draft(
         edition_name,
         reports_root,
         issue_number=resolved_issue_number,
+        programs_root=artifact_programs_root,
     )
     items = _build_lookback_items(snapshots, fetched_at=data_as_of)
     evidence_by_item = {
@@ -1448,8 +1492,11 @@ def _generate_lookback_draft(
         resolved_issue_number,
         templates={"exec_summary.md": default_exec_summary},
         reports_root=reports_root,
+        programs_root=artifact_programs_root,
     )
-    loaded_narratives = load_narratives(edition_name, resolved_issue_number, reports_root=reports_root)
+    loaded_narratives = load_narratives(
+        edition_name, resolved_issue_number, reports_root=reports_root, programs_root=artifact_programs_root,
+    )
     exec_summary_text = loaded_narratives.get("exec_summary.md", default_exec_summary).strip()
     review_status = _ensure_review_status(
         edition_name=edition_name,
@@ -1457,8 +1504,11 @@ def _generate_lookback_draft(
         workstream_section_ids=(),
         skipped_section_ids=set(),
         reports_root=reports_root,
+        programs_root=artifact_programs_root,
     )
-    review_status_path = get_review_status_path(edition_name, reports_root=reports_root)
+    review_status_path = get_review_status_path(
+        edition_name, reports_root=reports_root, programs_root=artifact_programs_root,
+    )
 
     report = ReportData(
         issue_number=resolved_issue_number,
@@ -1505,7 +1555,6 @@ def _generate_lookback_draft(
     preheader = (
         f"Retrospective across {len(snapshots)} confirmed issues ending with Issue {latest_snapshot.issue_number:03d}"
     )
-    programs_root = reports_root.parent / "programs"
     resolved_edition = resolve_edition(
         edition_name,
         programs_root=programs_root,
@@ -1903,7 +1952,7 @@ def _generate_lookback_draft(
                 edition_name=edition_name,
                 issue_number=resolved_issue_number,
                 generated_at=started_at,
-                db_root=_runtime_db_root_for_reports(reports_root),
+                db_root=_runtime_db_root_for_reports(reports_root, programs_root=artifact_programs_root),
             ),
             top_3_now=top_3_now,
             exec_summary_text=exec_summary_text,
@@ -1960,6 +2009,7 @@ def _load_eta_forecasts(
     items: tuple[WorkItem, ...],
     as_of: datetime,
     reports_root: Path,
+    programs_root: Path | None = None,
 ) -> dict[int, ETAForecast]:
     return _load_eta_forecasts_impl(
         edition_name=edition_name,
@@ -1967,6 +2017,7 @@ def _load_eta_forecasts(
         as_of=as_of,
         reports_root=reports_root,
         item_trajectory_points=_item_trajectory_points,
+        programs_root=programs_root,
     )
 
 
@@ -2272,12 +2323,18 @@ def _build_scorecard_data(
     archive_root: Path = ARCHIVE_ROOT,
     trusted_issue_number: int | None = None,
     reports_root: Path = REPORTS_ROOT,
+    current_at: datetime | None = None,
+    prior_at: datetime | None = None,
+    programs_root: Path | None = None,
 ) -> tuple[tuple[ScorecardData, ...], tuple[DimensionRisk, ...], tuple[ScorecardDelta, ...]]:
+    if programs_root is not None and edition_name is not None:
+        _resolve_artifact_edition(edition_name, reports_root, programs_root)
+    programs_root = programs_root if programs_root is not None else reports_root.parent / "programs"
     resolved_edition = None
     if edition_name is not None:
         resolved_edition = resolve_edition(
             edition_name,
-            programs_root=reports_root.parent / "programs",
+            programs_root=programs_root,
         )
     return _build_scorecard_data_impl(
         bundle,
@@ -2289,11 +2346,16 @@ def _build_scorecard_data(
         archive_root=archive_root,
         trusted_issue_number=trusted_issue_number,
         program_id=(resolved_edition.program.id if resolved_edition is not None else None),
-        programs_root=reports_root.parent / "programs",
+        programs_root=programs_root,
         raw_program=(resolved_edition.raw_program if resolved_edition is not None else None),
         resolved_scorecards=(resolved_edition.scorecards if resolved_edition is not None else ()),
         derive_vector_label=_derive_vector_label,
-        derive_risk_sparkline=_derive_risk_sparkline,
+        derive_risk_sparkline=lambda risk, prior_risk: _derive_risk_sparkline(
+            risk,
+            prior_risk,
+            current_at=current_at,
+            prior_at=prior_at,
+        ),
         scorecard_delta_kind=_scorecard_delta_kind,
         risk_rank=_risk_rank,
     )
@@ -2787,6 +2849,8 @@ def _kpi_tiles_for_section(
         tiles: list[KpiTile] = []
         configured_ids = {query.id for query in configured_for_workstream}
         for query in configured_for_workstream:
+            if query.metric_id is not None and query.last_cycle_succeeded is False:
+                continue
             latest_signal = latest_by_query_id.get(query.id)
             tiles.append(_kpi_tile_from_signal(latest_signal, query=query) if latest_signal is not None else _kpi_tile_from_query(query))
         extra_signals = sorted(

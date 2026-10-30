@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from src.core.ado_proposal import ADOUpdateEntry, ADOUpdateProposal, write_proposal_manifest
+from src.core.integration_types import PaginationOutcome
 from src.core.workspace_lease import ACTUATION_DISPATCH_DOMAIN, LeaseHeldByAnotherOwner, acquire_lease
 from src.m365.ado_writer import ADOWriter
 
@@ -60,7 +61,14 @@ class _FakeADOClient:
             rows.append({"id": work_item_id, "rev": stored.get("rev"), "fields": {f: all_fields[f] for f in fields if f in all_fields}})
         return rows
 
-    def list_work_item_comments(self, work_item_id: int) -> list[dict[str, Any]]:
+    def list_work_item_comments(
+        self,
+        work_item_id: int,
+        *,
+        on_pagination: Any | None = None,
+    ) -> list[dict[str, Any]]:
+        if on_pagination is not None:
+            on_pagination(PaginationOutcome(total_fetched=0, page_count=1, is_truncated=False))
         return []
 
 

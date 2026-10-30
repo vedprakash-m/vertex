@@ -84,6 +84,86 @@ def _fixture_item() -> WorkItem:
     )
 
 
+@pytest.mark.parametrize("gather_v2", [False, True])
+@pytest.mark.parametrize("query_fails", [False, True])
+def test_real_uil_discovery_outcome_reaches_committed_manifest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, gather_v2: bool, query_fails: bool,
+) -> None:
+    from types import SimpleNamespace
+
+    from src.commands.gather_pipeline import channel_runtime
+    from src.core.ado_discovery import ADODiscoveryConfig, ADODiscoveryProvider
+    from src.core.exceptions import QueryError
+    from src.core.integration_types import ADOHydrationOutput, ChannelConfig, HydrationResult
+    from src.core.slice_contract_loader import load_slice_contract
+
+    programs_root = tmp_path / "programs"
+    program, workstreams = _fixture_program()
+    program_dir = programs_root / program.id
+    program_dir.mkdir(parents=True)
+    contract_path = program_dir / "slice_contracts.yaml"
+    contract_path.write_text(
+        'schema_version: "1.0"\nslices:\n'
+        "  - id: acme\n    scorecard_name: Acme\n    section: acme\n"
+        "    workstream: Acme\n    slice_kind: scorecard_dimension\n    title: Delivery\n"
+        "    source_of_truth: ado_primary\n    owners:\n      primary: Owner\n"
+        "    source_contract:\n      ado:\n        saved_queries: [good, failed]\n"
+        "        tag_expression:\n          all_of: [Release]\n        required_fields: [state]\n"
+        "    freshness:\n      warn_days: 5\n      block_days: 10\n"
+        "    degradation:\n      blank_filter_is_error: true\n",
+        encoding="utf-8",
+    )
+
+    class Client:
+        def get_saved_query(self, query_id):
+            if query_fails and query_id == "failed":
+                raise QueryError("Synthetic saved query unavailable")
+            return {"id": query_id, "wiql": "Select [System.Id] From WorkItems"}
+
+        def execute_wiql(self, wiql, top=None, **kwargs):
+            return [1234]
+
+    item = _fixture_item()
+    binding = SimpleNamespace(
+        config=ChannelConfig(channel="ado", enabled=True, discovery_threshold_hours=24, ttl_days=30),
+        discovery_provider=ADODiscoveryProvider(Client()),
+        discovery_config=ADODiscoveryConfig(load_slice_contract(contract_path)),
+        hydration_provider=SimpleNamespace(
+            hydrate=lambda *args, **kwargs: HydrationResult(
+                channel="ado", resources=ADOHydrationOutput(work_items=(item,), freshness_items=(item,)),
+                api_call_count=1, errors=(), hydrated_ref_ids=(("1234", "work_item"),), failed_ref_ids=(),
+            ),
+        ),
+        hydration_config=object(),
+    )
+    monkeypatch.setattr(gather, "_load_program_context", lambda *args, **kwargs: (program, workstreams))
+    monkeypatch.setattr(gather, "_load_freshness_thresholds", lambda *args, **kwargs: (14, 30))
+    monkeypatch.setattr(
+        gather, "_resolve_uil_channel_binding_for_gather",
+        lambda program, workstreams, channel, **kwargs: binding if channel == "ado" else None,
+    )
+    monkeypatch.setattr(gather, "_gather_v2_enabled", lambda: gather_v2)
+    monkeypatch.setattr(channel_runtime, "load_arch_data_fix", lambda *args, **kwargs: None)
+    artifacts = gather.gather_program(
+        "acme", as_of=item.fetched_at, programs_root=programs_root, force_discovery=True,
+    )
+
+    committed = resolve_latest_committed_manifest("acme", programs_root=programs_root)
+    assert committed is not None
+    assert artifacts.hydrated_work_item_ids == ("1234",)
+    assert committed.hydrated_count == 1
+    assert committed.discovered_count == 1
+    ado_outcomes = tuple(outcome for outcome in committed.channel_outcomes if outcome.channel == "ado")
+    assert len(ado_outcomes) == 1
+    assert ado_outcomes[0].degraded is query_fails
+    assert bool(ado_outcomes[0].degrade_reason) is query_fails
+    assert committed.required_scope_status is (
+        RequiredScopeStatus.PARTIAL if query_fails else RequiredScopeStatus.FULL
+    )
+    assert any(result.completeness_state == "ERROR" for result in committed.query_results) is query_fails
+    assert (resolve_latest_full_committed_manifest("acme", programs_root=programs_root) is None) is query_fails
+
+
 def test_gather_program_commits_manifest_on_success(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     program, workstreams = _fixture_program()

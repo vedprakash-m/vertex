@@ -87,7 +87,7 @@ def load_risk_register(program_id: str, programs_root: Path = PROGRAMS_ROOT) -> 
     if not isinstance(schema_version, str) or schema_version.split(".", 1)[0] != "1":
         raise ConfigError(f"Unsupported risk register schema_version {schema_version!r} in {path}.")
 
-    raw_entries = document.get("risks") or ()
+    raw_entries = document.get("risks")
     if not isinstance(raw_entries, list):
         raise ConfigError(f"Expected 'risks' list in {path}.")
 
@@ -260,6 +260,14 @@ def compute_risk_score(entry: RiskEntry) -> int:
     if entry.probability is RiskProbability.UNASSESSED or entry.impact is RiskImpact.UNASSESSED:
         return 0
     return _PROBABILITY_ORDINAL[entry.probability] * _IMPACT_ORDINAL[entry.impact]
+
+
+def risk_summary_sort_key(entry: RiskEntry) -> tuple[int, int, str]:
+    return (
+        0 if entry.status == RiskStatus.ESCALATED else 1,
+        -compute_risk_score(entry),
+        entry.title.lower(),
+    )
 
 
 def record_risk_update(

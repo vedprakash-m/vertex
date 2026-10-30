@@ -166,7 +166,11 @@ def generate_program_synthesis(
 
     synthesis = _parse_synthesis(raw, request=request, ai_run_id=ai_run_id)
     if synthesis is None:
-        return _discard(ReleaseTerminal.REJECTED, "response missing a non-empty through_line or failed the text-safety pipeline.")
+        return _discard(
+            ReleaseTerminal.REJECTED,
+            "response missing a non-empty through_line, has invalid recommendation evidence_refs, "
+            "or failed the text-safety pipeline.",
+        )
 
     findings = _validate_program_synthesis_semantics(synthesis, request)
     _lifecycle(AIRunState.SEMANTICALLY_VALIDATED)
@@ -293,7 +297,11 @@ def generate_program_synthesis_via_context_gateway(
 
     synthesis = _parse_synthesis(raw, request=request, ai_run_id=ai_run_id)
     if synthesis is None:
-        return _discard(ReleaseTerminal.REJECTED, "response missing a non-empty through_line or failed the text-safety pipeline.")
+        return _discard(
+            ReleaseTerminal.REJECTED,
+            "response missing a non-empty through_line, has invalid recommendation evidence_refs, "
+            "or failed the text-safety pipeline.",
+        )
 
     findings = _validate_program_synthesis_semantics(synthesis, request)
     _lifecycle(AIRunState.SEMANTICALLY_VALIDATED)
@@ -486,7 +494,12 @@ def _parse_synthesis(
                 continue
             text_raw = str(entry.get("text", "")).strip()
             text = process_generated_text(text_raw).text if text_raw else ""
-            evidence_refs = tuple(str(ref) for ref in entry.get("evidence_refs", []) if isinstance(ref, (str, int)))
+            evidence_refs_raw = entry.get("evidence_refs", [])
+            if not isinstance(evidence_refs_raw, list) or any(
+                not isinstance(ref, str) for ref in evidence_refs_raw
+            ):
+                return None
+            evidence_refs = tuple(evidence_refs_raw)
             recommendations.append(ProgramSynthesisRecommendation(text=text, evidence_refs=evidence_refs))
     except AIPipelineError:
         return None

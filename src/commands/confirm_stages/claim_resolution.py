@@ -31,6 +31,7 @@ from src.core.claim_tracker import (
 from src.core.edition_resolver import PROGRAMS_ROOT, resolve_edition
 from src.core.models import WorkItem
 from src.core.narrative_store import load_narratives
+from src.core.overrides_store import _resolve_artifact_edition
 from src.core.quality_gates import GateEvaluation, QualityGateReport
 
 
@@ -111,9 +112,16 @@ def prepare_confirm_claim_extraction_for_v2(
     reports_root: Path,
     items: tuple[WorkItem, ...],
     legacy_regex_extractor: bool = False,
+    programs_root: Path | None = None,
 ) -> tuple[ClaimExtractionResult | None, str, tuple[str, ...], ClaimExtractionCalibrationRecord | None]:
-    programs_root = reports_root.parent / "programs"
-    editions_root = reports_root.parent / "editions"
+    selected_programs_root = programs_root
+    if selected_programs_root is not None:
+        _resolve_artifact_edition(edition_name, reports_root, selected_programs_root)
+    if programs_root is None:
+        programs_root = reports_root.parent / "programs"
+        editions_root = reports_root.parent / "editions"
+    else:
+        editions_root = programs_root.parent / "editions"
     resolved = resolve_edition(
         edition_name,
         editions_root=editions_root,
@@ -122,7 +130,12 @@ def prepare_confirm_claim_extraction_for_v2(
     if resolved is None:
         return None, "", (), None
     workstream_area_paths = {workstream.id: workstream.area_paths for workstream in resolved.workstreams}
-    narratives = load_narratives(edition_name, issue_number, reports_root=reports_root)
+    narratives = load_narratives(
+        edition_name,
+        issue_number,
+        reports_root=reports_root,
+        **({"programs_root": programs_root} if selected_programs_root is not None else {}),
+    )
     extraction_result, extraction_mode, warnings = resolve_confirm_claim_extraction(
         resolved=resolved,
         edition_name=edition_name,
@@ -163,9 +176,16 @@ def record_confirmed_claims_for_v2(
         extraction_result: ClaimExtractionResult | None = None,
         extraction_mode: str = "regex",
         resolve_extraction_if_missing: bool = True,
+        programs_root: Path | None = None,
 ) -> tuple[str, ...]:
-        programs_root = reports_root.parent / "programs"
-        editions_root = reports_root.parent / "editions"
+        selected_programs_root = programs_root
+        if selected_programs_root is not None:
+            _resolve_artifact_edition(edition_name, reports_root, selected_programs_root)
+        if programs_root is None:
+            programs_root = reports_root.parent / "programs"
+            editions_root = reports_root.parent / "editions"
+        else:
+            editions_root = programs_root.parent / "editions"
         try:
             resolved = resolve_edition(
                 edition_name,
@@ -173,12 +193,19 @@ def record_confirmed_claims_for_v2(
                 programs_root=programs_root,
             )
         except FileNotFoundError:
+            if selected_programs_root is not None:
+                raise
             return ()
         if resolved is None:
             return ()
 
         workstream_area_paths = {workstream.id: workstream.area_paths for workstream in resolved.workstreams}
-        narratives = load_narratives(edition_name, issue_number, reports_root=reports_root)
+        narratives = load_narratives(
+            edition_name,
+            issue_number,
+            reports_root=reports_root,
+            **({"programs_root": programs_root} if selected_programs_root is not None else {}),
+        )
         warnings: list[str] = []
         if extraction_result is None and resolve_extraction_if_missing:
             extraction_result, extraction_mode, extractor_warnings = resolve_confirm_claim_extraction(

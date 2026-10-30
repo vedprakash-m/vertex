@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
+from src.commands.doctor_checks.channel_delta_checks import channel_health_snapshot
 from src.commands.doctor_checks.models import DoctorCheck, DoctorReport
 
 
@@ -67,9 +68,7 @@ def run_channel_doctor(
         program=resolved.program,
         programs_root=programs_root,
     )
-    active_channels = [name for name, entry in channel_entries.items() if bool(entry.get("active"))]
-    channels_at_expected_min = [name for name in active_channels if bool(channel_entries[name].get("meets_expected_min"))]
-    completeness_pct = int(round((len(channels_at_expected_min) / len(active_channels)) * 100)) if active_channels else 100
+    active_channels, channels_at_expected_min, completeness_pct = channel_health_snapshot(channel_entries)
     failed_queries = sorted(
         query_id
         for query_id, state in gather_state.query_states.items()
@@ -132,7 +131,11 @@ def run_channel_doctor(
         if resolved.program.m365 is not None and resolved.program.m365.enabled
         else None
     )
-    detail = f"Channel completeness {completeness_pct}% ({len(channels_at_expected_min)}/{len(active_channels)} active channels met expected minimums)."
+    detail = (
+        "Channel completeness unavailable (no active channels on the latest gather)."
+        if completeness_pct is None
+        else f"Channel completeness {completeness_pct}% ({len(channels_at_expected_min)}/{len(active_channels)} active channels met expected minimums)."
+    )
     if auth_guidance_by_channel:
         guidance_summary = "; ".join(
             f"{channel_name}: {guidance}"
@@ -164,7 +167,7 @@ def run_channel_doctor(
     checks: list[DoctorCheck] = [
         DoctorCheck(
             "Channels",
-            "ok" if completeness_pct >= min_completeness_pct and not degraded_channels and not failed_queries and not stale_queries and not frozen_queries and not (m365_registry_review or {}).get("has_issues") else "warn",
+            "ok" if completeness_pct is not None and completeness_pct >= min_completeness_pct and not degraded_channels and not failed_queries and not stale_queries and not frozen_queries and not (m365_registry_review or {}).get("has_issues") else "warn",
             detail,
             metadata={
                 "gathered_at": gather_state.gathered_at.isoformat(),

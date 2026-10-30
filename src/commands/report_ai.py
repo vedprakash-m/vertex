@@ -497,11 +497,16 @@ def _load_eta_forecasts(
     as_of: datetime,
     reports_root: Path,
     item_trajectory_points: Callable[..., tuple] | None = None,
+    programs_root: Path | None = None,
 ) -> dict[int, ETAForecast]:
     if item_trajectory_points is None:
         raise ValueError("Item trajectory loader must be provided.")
 
-    programs_root = reports_root.parent / "programs"
+    if programs_root is not None:
+        from src.core.overrides_store import _resolve_artifact_edition
+
+        _resolve_artifact_edition(edition_name, reports_root, programs_root)
+    programs_root = programs_root if programs_root is not None else reports_root.parent / "programs"
     load_result = load_bundle_with_mode(
         edition_name,
         reports_root=reports_root,
@@ -1454,7 +1459,7 @@ def _program_synthesis_exec_summary_context_lines(
     """ADF-W2.9: supplements the exec summary's narrow view (up to 3 ranked
     WorkItem deltas only, see `_rank_changes` in exec_summary_drafter.py)
     with a few lines of richer program-level context -- open strategic
-    risks, unresolved contradictions, and at-risk critical-path milestones
+    risks, unresolved contradictions, and active milestones
     -- already assembled by `assemble_program_synthesis_request` for
     `program_synthesizer.py`, rather than building a second evidence-
     assembly path. Reuses the existing `supplemental_context` extension
@@ -1484,7 +1489,7 @@ def _program_synthesis_exec_summary_context_lines(
     for item in [item for item in request.items if item.category == "contradiction"][:limit]:
         lines.append(f"Unresolved contradiction: {item.summary}")
     for item in [item for item in request.items if item.category == "critical_path_milestone"][:limit]:
-        lines.append(f"Critical-path milestone: {item.summary}")
+        lines.append(f"Active milestone: {item.summary}")
     return tuple(lines)
 
 
@@ -1555,7 +1560,7 @@ def _program_synthesis_blurb_context_lines(
             record = assessment.record
             name = getattr(record, "name", None) or getattr(record, "id", "unknown milestone")
             status = str(getattr(record, "status", "")).lower()
-            lines.append(f"Critical-path milestone: {name} | status={status}")
+            lines.append(f"Milestone: {name} | status={status}")
 
         matched_conflicts = [
             conflict for conflict in reality.conflicts(open_only=True)

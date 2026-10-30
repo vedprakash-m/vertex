@@ -9,6 +9,29 @@ from src.core.models import Confidence, RiskLevel, WorkItem
 from src.core.models_v2 import ADOConfig, KustoQuery, Program, Signal
 
 
+def test_load_ado_items_via_uil_forwards_outcome_sinks(tmp_path: Path) -> None:
+    from src.core.gather_run_manifest import ChannelOutcomeEntry
+
+    now = datetime(2026, 10, 28, tzinfo=timezone.utc)
+    errors, captures, outcomes = [], [], []
+    outcome = ChannelOutcomeEntry(channel="ado", degraded=True, degrade_reason="Partial discovery", elapsed_seconds=0)
+
+    def run_channel(binding, store, **kwargs):
+        assert kwargs["integration_error_sink"] is errors
+        assert kwargs["discovery_result_sink"] is captures
+        assert kwargs["channel_outcome_sink"] is outcomes
+        kwargs["channel_outcome_sink"].append(outcome)
+        return None, None
+
+    assert uil_loader_stage.load_ado_items_via_uil(
+        Program(schema_version="2.0", id="demo", name="Demo"), now, since=now,
+        programs_root=tmp_path, binding=SimpleNamespace(), integration_error_sink=errors,
+        env_flag_fn=lambda _name: False, run_channel_fn=run_channel,
+        discovery_result_sink=captures, channel_outcome_sink=outcomes,
+    ) == ((), (), 0)
+    assert outcomes == [outcome]
+
+
 def test_load_ado_items_via_uil_returns_hydrated_items_and_freshness_items(tmp_path: Path) -> None:
     current_time = datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc)
     program = Program(

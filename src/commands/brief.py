@@ -15,8 +15,10 @@ from src.commands.readiness import fetch_readiness_snapshot, render_readiness_sn
 from src.core.brief_intervention_store import BriefInterventionResolution, BriefInterventionStatus, append_brief_intervention_resolution, load_brief_intervention_resolutions
 from src.core.ask_lifecycle import build_decision_ask_lifecycle_proposals, evaluate_decision_ask_lifecycle
 from src.core.analytics_store import load_contradiction_state
+from src.core.ban_list_validator import find_ban_list_violations
 from src.core.catchup_state_store import load_catchup_state
 from src.core.claim_tracker import assess_claim_entries, load_open_claims, load_open_decision_asks
+from src.core.config_loader import EditorialRules, VerbositySettings, load_editorial_rules
 from src.core.edition_resolver import PROGRAMS_ROOT, get_program_output_dir, get_program_output_root
 from src.core.engms_content import summarize_engms_page
 from src.core.exceptions import AuthError, ConfigError, QueryError, StateError
@@ -28,12 +30,17 @@ from src.core.intervention_ranker import InterventionProposal, rank_brief_interv
 from src.core.knowledge_store import load_program_knowledge, select_engms_pages
 from src.core.models import Confidence
 from src.core.models_v2 import ContradictionPacket, IncidentEntry
+from src.core.workspace_paths import REPO_ROOT, resolve_report_workspace_roots
 
 
 @dataclass(frozen=True, slots=True)
 class BriefLine:
     priority: int
     text: str
+
+
+class _EditorialRulesLoadError(Exception):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +86,11 @@ def brief_command(
             except (AuthError, ConfigError, FileNotFoundError, QueryError, StateError) as error:
                 typer.echo(str(error))
                 raise typer.Exit(code=2)
+            if dry_run:
+                for line in applied_outputs:
+                    typer.echo(line)
+                typer.echo(f"Apply command: {proposal.command}")
+                raise typer.Exit(code=0)
         elif dry_run:
             typer.echo(f"Dry run: would mark staged intervention {requested_id} as {status.value}.")
             typer.echo(f"Apply command: {proposal.command}")
@@ -275,6 +287,47 @@ def build_brief(
         for proposal in staged_interventions
     )
 
+    try:
+        program_narrative_lines = _build_program_narrative_lines(program_id, programs_root=programs_root)
+    except ConfigError as error:
+        program_narrative_lines = ()
+        now_items.append(
+            BriefLine(
+                priority=960,
+                text=(
+                    f"Program synthesis unavailable for {program_id} ({type(error).__name__}); retained assessment read failed. "
+                    "Inspect retained synthesis files and permissions before retrying. "
+                    f"Then rerun vertex brief --program {program_id}; no automatic retry or regeneration was attempted."
+                ),
+            )
+        )
+    if program_narrative_lines:
+        try:
+            editorial_rules = _load_brief_editorial_rules(program_id, programs_root=programs_root)
+        except _EditorialRulesLoadError:
+            program_narrative_lines = ()
+            now_items.append(
+                BriefLine(
+                    priority=960,
+                    text=(
+                        f"Program narrative omitted for {program_id}: selected editorial rules could not be loaded. "
+                        "Inspect editorial_rules.yaml before retrying; no synthesis release state was changed."
+                    ),
+                )
+            )
+        else:
+            rendered_contribution = "\n".join(f"- {line}" for line in program_narrative_lines)
+            if find_ban_list_violations({"program_narrative": rendered_contribution}, editorial_rules):
+                program_narrative_lines = ()
+                now_items.append(
+                    BriefLine(
+                        priority=960,
+                        text=(
+                            f"Program narrative omitted for {program_id} because an editorial rule was violated. "
+                            "Review the selected program's editorial_rules.yaml; no synthesis release state was changed."
+                        ),
+                    )
+                )
     now_lines = tuple(line.text for line in sorted(now_items, key=lambda item: (-item.priority, item.text)))
     watch_lines = tuple(line.text for line in sorted(watch_items, key=lambda item: (-item.priority, item.text)))
     return BriefReport(
@@ -285,7 +338,7 @@ def build_brief(
         staged_lines=staged_lines,
         reference_lines=reference_lines,
         staged_interventions=staged_interventions,
-        program_narrative_lines=_build_program_narrative_lines(program_id, programs_root=programs_root),
+        program_narrative_lines=program_narrative_lines,
     )
 
 
@@ -293,25 +346,40 @@ def _build_program_narrative_lines(program_id: str, *, programs_root: Path) -> t
     """ADF-W2.9: surfaces the latest QG-29-*released* ``ProgramSynthesis``
     through-line (and its long poles, since those are the most directly
     action-relevant field for a TPM scanning this list) as a new, always-
-    last "Program Narrative" section -- mirrors ``cockpit_builder.py``'s
-    own additive, best-effort read of the same accessor
-    (`_latest_released_program_synthesis_kwargs`): a deterministic,
-    Zone-A-only read that never surfaces an unreleased draft, and degrades
-    to an empty section (rather than breaking brief generation) if no
-    synthesis has ever been released for this program or the read fails
-    for any reason."""
-    try:
-        from src.core.program_synthesis import load_latest_released_program_synthesis
+    last "Program Narrative" section. This deterministic, Zone-A-only read
+    omits the section when no synthesis is released; read failures propagate
+    to the brief's operator diagnostic rather than impersonating absence."""
+    from src.core.program_synthesis import load_latest_released_program_synthesis
 
-        synthesis = load_latest_released_program_synthesis(program_id, programs_root=programs_root)
-    except Exception:
-        return ()
+    synthesis = load_latest_released_program_synthesis(program_id, programs_root=programs_root)
     if synthesis is None:
         return ()
 
     lines = [synthesis.through_line]
     lines.extend(f"Long pole: {pole}" for pole in synthesis.long_poles)
     return tuple(lines)
+
+
+def _load_brief_editorial_rules(program_id: str, *, programs_root: Path) -> EditorialRules:
+    rules_path = get_program_output_root(program_id, programs_root=programs_root).parent / "editorial_rules.yaml"
+    try:
+        rules_path.lstat()
+    except FileNotFoundError:
+        return EditorialRules(
+            schema_version="1.0",
+            stale_warn_days=14,
+            stale_block_days=30,
+            banned_phrases=(),
+            banned_openings=(),
+            verbosity=VerbositySettings(None, None, None, None, None),
+        )
+    except OSError as error:
+        raise _EditorialRulesLoadError from error
+
+    try:
+        return load_editorial_rules(rules_path)
+    except (ConfigError, KeyError, TypeError, ValueError, AttributeError) as error:
+        raise _EditorialRulesLoadError from error
 
 
 def _build_cost_guard_brief_lines(program_id: str, *, programs_root: Path = PROGRAMS_ROOT) -> tuple[BriefLine, ...]:
@@ -625,9 +693,13 @@ def _apply_supported_intervention(
     escalation_target = _decision_ask_escalation_from_command(proposal.command)
     if escalation_target is not None:
         edition_name, escalation_decision_ask_id = escalation_target
+        _, reports_root, _ = resolve_report_workspace_roots(
+            None if programs_root == REPO_ROOT / "programs" else programs_root,
+        )
         escalation_plan = plan_decision_ask_escalation(
             edition_name=edition_name,
             decision_ask_id=escalation_decision_ask_id,
+            reports_root=reports_root,
         )
         if dry_run:
             return (
@@ -637,6 +709,7 @@ def _apply_supported_intervention(
 
         artifacts = apply_decision_ask_escalation(
             escalation_plan,
+            reports_root=reports_root,
             generated_at=_utc_now(),
         )
         return tuple(f"EML: {path}" for path in artifacts.eml_paths)

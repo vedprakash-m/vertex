@@ -12,7 +12,7 @@ import typer
 from src.commands.doctor_checks.models import DoctorCheck, DoctorReport
 from src.commands.doctor_checks.yaml_support import check_schema_versions, load_yaml_document
 from src.core.context_gap_store import append_context_gap, load_context_gaps, rank_context_gaps
-from src.core.edition_resolver import resolve_edition
+from src.core.edition_resolver import PROGRAMS_ROOT, resolve_edition
 from src.core.ncfl_proposal_store import conflicting_pending_proposals, load_proposals, stale_pending_proposals
 from src.commands.doctor_checks.evidence_checks import check_eta_slippage, check_false_done_lanes, check_evidence_quality_drift
 from src.core.evidence_models import parse_workiq_latest_date
@@ -94,7 +94,12 @@ def run_ranked_gaps(*, edition_name: str | None, programs_root: Path, editions_r
         typer.echo("Run gather or propose to accumulate gap signals in _feedback/context_gaps.jsonl.")
         return
 
-    ranked = rank_context_gaps(gaps)
+    if any(gap.program != program_id for gap in gaps):
+        raise ConfigError("Context gap observations contain a foreign program.")
+    ranked = rank_context_gaps(gaps, programs_root=programs_root)
+    if not ranked:
+        typer.echo("No active context gaps; historical observations retained.")
+        return
 
     typer.echo(typer.style("TOP CONTEXT GAPS (by impact)", bold=True, fg="cyan"))
     typer.echo()
@@ -316,6 +321,7 @@ def run_context_doctor(
         registry_entries=registry_entries,
         kpis_list=kpis_list,
         today=today,
+        programs_root=programs_root,
     )
 
     cadence_issues = check_evidence_cadence_gaps(registry_entries, as_of=today)
@@ -421,6 +427,7 @@ def emit_context_gaps(
     registry_entries: list[dict[str, Any]],
     kpis_list: list[dict[str, Any]],
     today: date,
+    programs_root: Path = PROGRAMS_ROOT,
 ) -> None:
     """Detect context gaps and append them to _feedback/context_gaps.jsonl."""
     feature = "doctor --context"
@@ -438,6 +445,7 @@ def emit_context_gaps(
                 severity="quality_degraded",
                 message="AI proposals for this lane use generic context",
                 impact_estimate="high",
+                programs_root=programs_root,
             )
         if not deep_ctx.get("what"):
             append_context_gap(
@@ -448,6 +456,7 @@ def emit_context_gaps(
                 severity="quality_degraded",
                 message="AI proposals for this lane lack specific content description",
                 impact_estimate="medium",
+                programs_root=programs_root,
             )
 
     for entry in registry_entries:
@@ -464,6 +473,7 @@ def emit_context_gaps(
                 severity="quality_degraded",
                 message="Nudge routing will use alias fallback instead of direct email",
                 impact_estimate="medium",
+                programs_root=programs_root,
             )
 
     for entry in registry_entries:
@@ -483,6 +493,7 @@ def emit_context_gaps(
                         severity="quality_degraded",
                         message=f"M365 meeting evidence is {days_stale} days stale for diagnostics section",
                         impact_estimate="medium",
+                        programs_root=programs_root,
                     )
             except ValueError:
                 pass
@@ -497,6 +508,7 @@ def emit_context_gaps(
                 severity="quality_degraded",
                 message="Live metric fetch may fail silently on gather",
                 impact_estimate="medium",
+                programs_root=programs_root,
             )
 
 

@@ -16293,7 +16293,7 @@ def test_has_sustained_low_vitality_without_history_when_no_items_are_fresh() ->
             work_item_id=2,
             owner_alias="alex",
             workstream_id="acme",
-            freshness_days=18,
+            freshness_days=None,
             freshness_grade="red",
             richness_score=30,
             richness_missing=("recent_comment",),
@@ -16313,6 +16313,23 @@ def test_has_sustained_low_vitality_without_history_when_no_items_are_fresh() ->
         recent_history_scores={},
         threshold=40,
         stale_days=14,
+    )
+    unknown_only = (scores[1],)
+    assert has_sustained_low_vitality(
+        "acme",
+        aggregate,
+        scores=unknown_only,
+        recent_history_scores={},
+        threshold=40,
+        stale_days=9998,
+    )
+    assert not has_sustained_low_vitality(
+        "acme",
+        aggregate,
+        scores=unknown_only,
+        recent_history_scores={},
+        threshold=40,
+        stale_days=9999,
     )
 
 
@@ -17261,3 +17278,209 @@ def test_progress_steps_omit_engms_when_flag_off(monkeypatch) -> None:
     flags["include_engms"] = False
     steps = gather._build_gather_progress_steps(**flags)
     assert "engms" not in steps
+
+
+def test_transcript_fragment_attribution_and_grouped_evidence_keep_distinct_signal_identity(
+    tmp_path: Path,
+) -> None:
+    from src.commands.gather_pipeline import evidence_extraction_stage
+    from src.commands.gather_record_helpers import record_workiq_provenance
+    from src.core.evidence_store import (
+        load_approved_evidence_by_lane,
+        load_evidence_records,
+        load_latest_evidence_by_source,
+    )
+    from src.core.signal_dedup import dedupe_signals
+
+    program_id = "synthetic-transcript"
+    parent_id = "native-occurrence-42"
+    series_id = "series-group-7"
+    as_of = datetime(2026, 10, 29, 12, 0, tzinfo=timezone.utc)
+    transcript_content = (
+        "The deployment remains blocked because the dependency owner has not confirmed "
+        "the recovery date. The team needs a committed owner before the release gate can proceed."
+        "\n\n"
+        "Integration tests are passing in the isolated branch, but the release still awaits "
+        "that external approval and should not be marked ready yet."
+    )
+
+    class _TranscriptBridge:
+        def __init__(self, content: str = transcript_content) -> None:
+            self.content = content
+            self.questions: list[str] = []
+
+        def probe(self) -> AgencyCapabilities:
+            return AgencyCapabilities(available=True, has_workiq=True, tier="synthetic")
+
+        def ask_workiq(self, question: str, **_: object) -> dict[str, object] | None:
+            self.questions.append(question)
+            if "Use my Microsoft 365 calendar and meetings to answer." in question:
+                return {
+                    "events": [{
+                        "id": parent_id,
+                        "meetingId": "online-meeting-42",
+                        "seriesMasterId": series_id,
+                        "subject": "Synthetic weekly review",
+                        "startDateTime": "2026-10-28T15:00:00Z",
+                        "webUrl": "https://teams.microsoft.com/l/meeting/details?eventId=native-occurrence-42",
+                    }]
+                }
+            if "online-meeting-42" in question:
+                return {
+                    "meetingId": "online-meeting-42",
+                    "title": "Synthetic weekly review",
+                    "captured_at": "2026-10-28T15:00:00Z",
+                    "content": self.content,
+                }
+            return {"results": []}
+
+    workstreams = (
+        Workstream(
+            id="lane-synthetic",
+            name="Synthetic transcript lane",
+            signal_sources=WorkstreamSignalSources(
+                teams_meeting_series=(
+                    TeamsMeetingSeries(
+                        display_name="Synthetic weekly review",
+                        series_id="online-meeting-42",
+                    ),
+                ),
+            ),
+        ),
+    )
+    bridge = _TranscriptBridge()
+    signals = gather._build_workiq_signals(
+        program=_m365_query_plan_program(),
+        program_id=program_id,
+        as_of=as_of,
+        items=(),
+        workstreams=workstreams,
+        bridge=bridge,
+    )
+
+    clean_bridge = _TranscriptBridge(" ".join(transcript_content.splitlines()))
+    clean_signals = gather._build_workiq_signals(
+        program=_m365_query_plan_program(),
+        program_id=program_id,
+        as_of=as_of,
+        items=(),
+        workstreams=workstreams,
+        bridge=clean_bridge,
+    )
+    assert len(clean_signals) == 1
+    assert clean_signals[0].metadata["native_message_id"] == parent_id
+    assert clean_signals[0].metadata["message_id"] == parent_id
+    assert series_id not in repr(clean_signals)
+    clean_program_id = f"{program_id}-clean"
+    record_workiq_provenance(
+        workiq_signals=clean_signals,
+        program_id=clean_program_id,
+        programs_root=tmp_path,
+        run_at=as_of,
+    )
+    clean_provenance_path = tmp_path / clean_program_id / "journal" / "evidence_provenance.jsonl"
+    clean_provenance = [
+        json.loads(line) for line in clean_provenance_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert clean_provenance[0]["source_id"] == parent_id
+    clean_enrichments = evidence_extraction_stage._signals_as_enrichments(list(clean_signals))
+    assert clean_enrichments[0].source_id == f"workiq:transcript:{parent_id}"
+
+    assert len(signals) == 2
+    assert any("Use my Microsoft 365 calendar and meetings to answer." in q for q in bridge.questions)
+    assert any("online-meeting-42" in q for q in bridge.questions)
+    assert {signal.metadata["native_message_id"] for signal in signals} == {parent_id}
+    assert {signal.metadata["message_id"] for signal in signals} == {
+        f"{parent_id}:seg:0",
+        f"{parent_id}:seg:1",
+    }
+    assert {signal.metadata["message_id_kind"] for signal in signals} == {"derived_fragment"}
+    assert len({signal.id for signal in signals}) == 2
+    assert len({signal.raw_ref for signal in signals}) == 2
+    assert {signal.timestamp for signal in signals} == {
+        datetime(2026, 10, 28, 15, 0, tzinfo=timezone.utc),
+    }
+    assert series_id not in repr(signals)
+    assert len(gather._dedupe_workiq_signals(signals)) == 2
+    assert len(dedupe_signals(signals)) == 2
+    for signal in signals:
+        append_signal(signal, programs_root=tmp_path, partition_at=as_of)
+    assert {signal.id for signal in read_signals(program_id, programs_root=tmp_path)} == {
+        signal.id for signal in signals
+    }
+
+    record_workiq_provenance(
+        workiq_signals=signals,
+        program_id=program_id,
+        programs_root=tmp_path,
+        run_at=as_of,
+    )
+    provenance_path = tmp_path / program_id / "journal" / "evidence_provenance.jsonl"
+    provenance = [json.loads(line) for line in provenance_path.read_text(encoding="utf-8").splitlines()]
+    assert len(provenance) == 1
+    assert provenance[0]["source_id"] == parent_id
+
+    enrichments = evidence_extraction_stage._signals_as_enrichments(list(signals))
+    assert {item.source_id for item in enrichments} == {f"workiq:transcript:{parent_id}"}
+    assert {item.body_text for item in enrichments} == {signal.text for signal in signals}
+    assert all(
+        evidence_extraction_stage._signals_as_enrichments([
+            replace(signal, metadata={**signal.metadata, "native_message_id": native_id})
+        ])[0].source_id == signal.raw_ref
+        for signal in signals[:1]
+        for native_id in (None, "")
+    )
+
+    responses = (
+        '{"risk_level":"high","etas":[],"blocking_items":["ADO:12345"],"owners":["synthetic-owner"],"raw_excerpts":["Both transcript fragments were considered together."],"confidence":0.8}',
+        '{"risk_level":"high","etas":[],"blocking_items":["ADO:12345"],"owners":["synthetic-owner"],"raw_excerpts":["Both transcript fragments were considered together."],"confidence":0.8}',
+        '{"risk_level":"blocked","etas":[],"blocking_items":["ADO:12345"],"owners":["synthetic-owner"],"raw_excerpts":["A later synthetic extraction revised the combined assessment."],"confidence":0.9}',
+    )
+
+    def _extract(response: str):
+        prompts: list[str] = []
+        result = evidence_extraction_stage.run_evidence_extraction_stage(
+            workiq_signals=signals,
+            program_id=program_id,
+            programs_root=tmp_path,
+            ask_ai_fn=lambda prompt: (prompts.append(prompt) or response),
+            as_of=as_of,
+        )
+        assert len(prompts) == 1
+        assert all(signal.text in prompts[0] for signal in signals)
+        return result
+
+    first = _extract(responses[0])
+    records = load_evidence_records(program_id, programs_root=tmp_path)
+    assert len(first) == len(records) == 1
+    assert len(first["lane-synthetic"].source_refs) == 2
+    assert {ref.canonical_id for ref in first["lane-synthetic"].source_refs} == {
+        f"workiq:transcript:{parent_id}",
+    }
+    assert len({ref.description for ref in first["lane-synthetic"].source_refs}) == 2
+    assert len(records[0].backing_signal_ids) == 2
+    assert set(records[0].backing_signal_ids) == {signal.id for signal in signals}
+
+    partial_approval = load_approved_evidence_by_lane(
+        program_id,
+        programs_root=tmp_path,
+        approved_signal_ids=frozenset({signals[0].id}),
+    )
+    assert "lane-synthetic" not in partial_approval
+    complete_approval = load_approved_evidence_by_lane(
+        program_id,
+        programs_root=tmp_path,
+        approved_signal_ids=frozenset(signal.id for signal in signals),
+    )
+    assert "lane-synthetic" in complete_approval
+
+    _extract(responses[1])
+    assert len(load_evidence_records(program_id, programs_root=tmp_path)) == 1
+    _extract(responses[2])
+    revisions = load_evidence_records(program_id, programs_root=tmp_path)
+    assert len(revisions) == 2
+    latest = load_latest_evidence_by_source(program_id, programs_root=tmp_path)
+    assert len(latest) == 1
+    latest_record = latest[("lane-synthetic", f"workiq:transcript:{parent_id}")]
+    assert latest_record.evidence.risk_level is RiskLevel.BLOCKED
+    assert series_id not in repr((provenance, revisions))

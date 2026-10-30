@@ -6,9 +6,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.ai.dependency_blast_radius_generator import (
+    POLICY_VERSION,
     generate_dependency_blast_radius_proposal,
     generate_dependency_blast_radius_proposal_via_runner,
 )
+from src.ai.structured_feature_runner import RunnerContext
 from src.core.dependency_blast_radius import DependencyBlastRadiusRequest
 from src.core.quality_gates.ai_release_audit import released_terminal_for_run
 
@@ -56,6 +58,13 @@ def _valid_response() -> dict[str, Any]:
         "blast_radius_narrative": "If unresolved, Contoso's platform milestone slips, cascading to two downstream teams.",
         "evidence_refs": ["sig-1"],
     }
+
+
+def _context() -> RunnerContext:
+    return RunnerContext(
+        program_id="acme", run_id="synthetic-pilot-run", policy_version=POLICY_VERSION,
+        snapshot_id="synthetic-pilot-snapshot", principal="synthetic-pilot-reviewer", classification="public",
+    )
 
 
 def test_valid_response_is_released(tmp_path: Path) -> None:
@@ -165,7 +174,7 @@ def test_via_runner_valid_response_is_released(tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     client = _FakeClient(response=_valid_response())
 
-    proposal = generate_dependency_blast_radius_proposal_via_runner(_request(), client=client, programs_root=programs_root)
+    proposal = generate_dependency_blast_radius_proposal_via_runner(_request(), context=_context(), client=client, programs_root=programs_root)
 
     assert proposal is not None
     assert "API contract review" in proposal.next_proving_event
@@ -180,7 +189,7 @@ def test_via_runner_empty_next_proving_event_is_rejected(tmp_path: Path) -> None
     response["next_proving_event"] = ""
     client = _FakeClient(response=response)
 
-    proposal = generate_dependency_blast_radius_proposal_via_runner(_request(), client=client, programs_root=programs_root)
+    proposal = generate_dependency_blast_radius_proposal_via_runner(_request(), context=_context(), client=client, programs_root=programs_root)
     assert proposal is None
 
 
@@ -190,7 +199,7 @@ def test_via_runner_empty_narrative_is_rejected(tmp_path: Path) -> None:
     response["blast_radius_narrative"] = ""
     client = _FakeClient(response=response)
 
-    proposal = generate_dependency_blast_radius_proposal_via_runner(_request(), client=client, programs_root=programs_root)
+    proposal = generate_dependency_blast_radius_proposal_via_runner(_request(), context=_context(), client=client, programs_root=programs_root)
     assert proposal is None
 
 
@@ -200,7 +209,7 @@ def test_via_runner_evidence_ref_outside_dependency_evidence_is_rejected(tmp_pat
     response["evidence_refs"] = ["sig-999"]
     client = _FakeClient(response=response)
 
-    proposal = generate_dependency_blast_radius_proposal_via_runner(_request(), client=client, programs_root=programs_root)
+    proposal = generate_dependency_blast_radius_proposal_via_runner(_request(), context=_context(), client=client, programs_root=programs_root)
     assert proposal is None
 
 
@@ -208,7 +217,7 @@ def test_via_runner_provider_exception_is_discarded_not_raised(tmp_path: Path) -
     programs_root = tmp_path / "programs"
     client = _FakeClient(error=RuntimeError("transport failed"))
 
-    proposal = generate_dependency_blast_radius_proposal_via_runner(_request(), client=client, programs_root=programs_root)
+    proposal = generate_dependency_blast_radius_proposal_via_runner(_request(), context=_context(), client=client, programs_root=programs_root)
     assert proposal is None
 
 
@@ -220,7 +229,7 @@ def test_via_runner_oversized_request_is_discarded_before_calling_the_provider(t
     )
     client = _FakeClient(response=_valid_response())
 
-    proposal = generate_dependency_blast_radius_proposal_via_runner(oversized_request, client=client, programs_root=programs_root)
+    proposal = generate_dependency_blast_radius_proposal_via_runner(oversized_request, context=_context(), client=client, programs_root=programs_root)
     assert proposal is None
     assert client.calls == 0
 
@@ -229,8 +238,8 @@ def test_via_runner_repeat_identical_request_hits_the_cache_no_second_provider_c
     programs_root = tmp_path / "programs"
     client = _FakeClient(response=_valid_response())
 
-    first = generate_dependency_blast_radius_proposal_via_runner(_request(), client=client, programs_root=programs_root)
-    second = generate_dependency_blast_radius_proposal_via_runner(_request(), client=client, programs_root=programs_root)
+    first = generate_dependency_blast_radius_proposal_via_runner(_request(), context=_context(), client=client, programs_root=programs_root)
+    second = generate_dependency_blast_radius_proposal_via_runner(_request(), context=_context(), client=client, programs_root=programs_root)
 
     assert first is not None
     assert second is not None
@@ -249,8 +258,8 @@ def test_via_runner_different_dependency_does_not_hit_the_cache(tmp_path: Path) 
         current_status="active", evidence_texts=("Different evidence.",), evidence_refs=("sig-9",),
     )
 
-    generate_dependency_blast_radius_proposal_via_runner(_request(), client=client, programs_root=programs_root)
-    generate_dependency_blast_radius_proposal_via_runner(other_request, client=client, programs_root=programs_root)
+    generate_dependency_blast_radius_proposal_via_runner(_request(), context=_context(), client=client, programs_root=programs_root)
+    generate_dependency_blast_radius_proposal_via_runner(other_request, context=_context(), client=client, programs_root=programs_root)
 
     assert client.calls == 2
 
@@ -265,5 +274,5 @@ def test_via_runner_and_original_are_independent_caches(tmp_path: Path) -> None:
     generate_dependency_blast_radius_proposal(_request(), client=client, programs_root=programs_root)
     assert client.calls == 1
 
-    generate_dependency_blast_radius_proposal_via_runner(_request(), client=client, programs_root=programs_root)
+    generate_dependency_blast_radius_proposal_via_runner(_request(), context=_context(), client=client, programs_root=programs_root)
     assert client.calls == 2

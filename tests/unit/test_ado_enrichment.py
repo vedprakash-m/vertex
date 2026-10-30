@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
+import pytest
+
 from src.core.ado_enrichment import build_analytics_history, build_child_work_items, build_significant_findings, extract_child_ids_by_parent, infer_ado_risk_level, serialize_trajectory_points
 from src.core.evidence_engine import build_evidence
 from src.core.models import ChildWorkItem, RiskLevel, WorkItem
@@ -12,6 +14,58 @@ def test_infer_ado_risk_level_uses_risk_assessment_mapping() -> None:
     assert infer_ado_risk_level("Active", [], "At Risk") is RiskLevel.MEDIUM
     assert infer_ado_risk_level("Active", [], "Off Track") is RiskLevel.HIGH
     assert infer_ado_risk_level("Blocked", [], "On Track") is RiskLevel.HIGH
+
+
+@pytest.mark.parametrize("assessment", [None, "", "   ", "\t\n"])
+def test_missing_risk_final_fallback_is_unknown(assessment: str | None) -> None:
+    assert infer_ado_risk_level("Active", [], assessment) is RiskLevel.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    ("state", "tags", "assessment", "expected"),
+    [
+        ("Active", [], "Unrecognized assessment", RiskLevel.LOW),
+        ("Active", [], " on_track ", RiskLevel.LOW),
+        ("Active", [], "At Risk", RiskLevel.MEDIUM),
+        ("Active", [], "Off Track", RiskLevel.HIGH),
+        ("Closed", [], "Off Track", RiskLevel.DONE),
+        ("Done", [], None, RiskLevel.DONE),
+        ("Resolved", [], None, RiskLevel.DONE),
+        ("Completed", [], None, RiskLevel.DONE),
+        ("Blocked", [], "On Track", RiskLevel.HIGH),
+        ("Active", ["Blocked"], None, RiskLevel.HIGH),
+        ("Off Track", [], None, RiskLevel.HIGH),
+        ("At Risk", [], None, RiskLevel.MEDIUM),
+    ],
+)
+def test_risk_fallback_preserves_existing_branches(
+    state: str, tags: list[str], assessment: str | None, expected: RiskLevel,
+) -> None:
+    assert infer_ado_risk_level(state, tags, assessment) is expected
+
+
+@pytest.mark.parametrize("assessment", [None, "", "   "])
+def test_missing_risk_propagates_to_children_and_history(assessment: str | None) -> None:
+    child, = build_child_work_items([{
+        "id": 901,
+        "fields": {
+            "System.WorkItemType": "Task",
+            "System.State": "Active",
+            "Custom.RiskAssessment": assessment,
+        },
+    }])
+    assert child.risk_level is RiskLevel.UNKNOWN
+    item = WorkItem(
+        id=901, type="Feature", title="Synthetic", state="Active",
+        assigned_to=None, assigned_to_email=None, area_path="", iteration_path="",
+        target_date=None, risk_level=RiskLevel.LOW, tags=[], custom_fields={},
+    )
+    point, = build_analytics_history([{
+        "WorkItemId": 901, "DateValue": "2026-10-28",
+        "Custom_RiskAssessment": assessment,
+    }], {901: item})[901]
+    assert point.risk_level is RiskLevel.UNKNOWN
+    assert serialize_trajectory_points((point,))[0]["risk_level"] == "unknown"
 
 
 def test_extract_child_ids_and_build_child_work_items() -> None:

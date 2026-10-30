@@ -13,6 +13,55 @@ from src.core.models import FreshnessReport
 from src.core.quality_gates import editorial
 
 
+def test_editorial_command_reads_explicit_root_overrides(tmp_path: Path, monkeypatch) -> None:
+    from tests.unit.test_narrative_store import _selected_artifact_root
+    from src.commands import editor
+    from src.core import overrides_store
+    import typer
+
+    root = _selected_artifact_root(tmp_path)
+    document = overrides_store.OverridesDocument(issue_number=7, top_3_now=(), scorecards=(), edition_intro="selected")
+    selected = root / "fixture" / "overrides" / "issue_007.yaml"
+    selected.parent.mkdir()
+    selected.write_text(overrides_store._render_overrides_document(document), encoding="utf-8")
+    monkeypatch.setattr(editor, "load_editorial_rules", lambda *_args: SimpleNamespace())
+    monkeypatch.setattr(editor, "load_persona_registry", lambda *_args: SimpleNamespace())
+    monkeypatch.setattr(editor, "_load_published_baseline", lambda *_args, **_kwargs: None)
+    runner = Mock(return_value=None)
+    monkeypatch.setattr(editor, "run_persona_checks", runner)
+    with pytest.raises(typer.Exit) as exit_info:
+        editor.editor_report_command(
+            edition="fixture_weekly", issue=7, output_format="json", programs_root=root, reports_root=tmp_path / "reports",
+        )
+    assert exit_info.value.exit_code == 0
+    assert runner.call_args.kwargs["overrides"] == document
+    assert not (tmp_path / "reports").exists()
+
+
+def test_explicit_narrative_placeholder_dependencies_use_selected_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.unit.test_narrative_store import _selected_artifact_root
+    from src.core import section_proposal_store
+
+    root = _selected_artifact_root(tmp_path)
+    reports = tmp_path / "unrelated" / "reports"
+    loader = Mock(return_value={})
+    reality = Mock()
+    hints = Mock(return_value=())
+    monkeypatch.setattr(metric_registry, "load_metric_definition_map", loader)
+    monkeypatch.setattr(reality_store, "RealityStore", reality)
+    monkeypatch.setattr(section_proposal_store, "load_hint_proposals", hints)
+    narratives = {"summary.md": "Synthetic narrative"}
+    assert narrative_store.inject_narrative_placeholders(
+        "fixture_weekly", 7, narratives, reports, programs_root=root,
+    ) == narratives
+    loader.assert_called_once_with(metrics_root=root.parent / "knowledge" / "metrics")
+    reality.assert_called_once_with("fixture", db_root=root.parent / "vertex-db")
+    hints.assert_called_once_with("fixture", 7, programs_root=root)
+    assert not reports.parent.exists()
+
+
 @pytest.mark.parametrize("scope", ["alpha", "beta"])
 def test_narrative_metrics_use_selected_workspace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope: str,
@@ -20,7 +69,9 @@ def test_narrative_metrics_use_selected_workspace(
     reports_root = tmp_path / scope / "reports"
     monkeypatch.setattr(
         "src.core.edition_resolver.resolve_edition_paths",
-        Mock(return_value=SimpleNamespace(program_id="fixture")),
+        Mock(return_value=SimpleNamespace(
+            program_id="fixture", program_dir=reports_root.parent / "programs" / "fixture",
+        )),
     )
     loader = Mock(return_value={})
     monkeypatch.setattr(metric_registry, "load_metric_definition_map", loader)

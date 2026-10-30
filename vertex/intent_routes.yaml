@@ -503,6 +503,7 @@ commands:
       explain:
         flags: []
         value_options:
+        - --as-of
         - --edition
         - --finding
         - --program
@@ -516,6 +517,7 @@ commands:
         flags:
         - --no-persist
         value_options:
+        - --as-of
         - --edition
         - --format
         - --program

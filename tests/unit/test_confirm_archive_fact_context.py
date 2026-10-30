@@ -19,7 +19,7 @@ def test_actual_confirm_archive_fact_capture_preserves_selected_archive(
     load_facts = Mock(wraps=archive_transaction.load_program_facts)
     monkeypatch.setattr(archive_transaction, "load_program_facts", load_facts)
 
-    _exercise_actual_confirm(repo_root, tmp_path)
+    _exercise_actual_confirm(repo_root, tmp_path, monkeypatch)
 
     load_facts.assert_called_once_with(
         "acme",

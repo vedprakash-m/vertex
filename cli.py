@@ -66,7 +66,7 @@ from src.commands.diff import _preflight_diff_workspace, diff_command
 from src.commands.context_diff import context_diff as _context_diff_cmd
 from src.commands.db import app as db_app, maybe_run_scheduled_compaction
 from src.commands.doctor import doctor_command
-from src.commands.edit import edit_command
+from src.commands.edit import _preflight_edit_workspace, edit_command
 from src.commands.editor import app as editor_app
 from src.commands.escalate import escalate_command
 from src.commands.evidence import evidence_command
@@ -101,7 +101,7 @@ from src.commands.observation import app as observation_app
 from src.commands.onboard import onboard_command
 from src.commands.owner_pack import owner_pack_command
 from src.commands.policy import app as policy_app
-from src.commands.override import override_command
+from src.commands.override import _preflight_override_workspace, override_command
 from src.commands.prep import _preflight_prep_workspace, prep_command
 from src.commands.privacy import privacy_app
 from src.commands.observability import observability_app, alerts_app
@@ -123,7 +123,7 @@ from src.commands.reconcile import reconcile_command
 from src.commands.report import _preflight_report_workspace, apply_overrides_command, report_command
 from src.commands.review_debrief import review_debrief_command
 from src.commands.review_full import _preflight_review_full_workspace, review_full_command
-from src.commands.review_sections import app as review_sections_app
+from src.commands.review_sections import _preflight_review_sections_workspace, app as review_sections_app
 from src.commands.rev import app as rev_app
 from src.commands.risks import app as risks_app
 from src.commands.salience import app as salience_app
@@ -158,8 +158,10 @@ class VertexRootGroup(TyperGroup):
     ) -> tuple[str | None, click.Command | None, list[str]]:
         try:
             resolved = super().resolve_command(ctx, args)
-            if resolved[0] == "context" and resolved[2] and resolved[2][0] in {"import-reply", "solicit"}:
+            if resolved[0] == "context" and resolved[2] and resolved[2][0] in {"import-reply", "solicit", "extract"}:
                 ctx.meta["offline_context_command"] = True
+            elif resolved[0] == "admin" and resolved[2][:2] == ["metric", "history"]:
+                ctx.meta["offline_metric_history_command"] = True
             elif resolved[0] == "nudge" and resolved[1] is not None:
                 probe_command = copy(resolved[1])
                 probe_command.params = [copy(parameter) for parameter in resolved[1].params]
@@ -215,7 +217,9 @@ def main(
     if ctx.invoked_subcommand is not None:
         if skip_issue_flag:
             raise typer.BadParameter("--skip-issue cannot be combined with a subcommand.")
-        if ctx.invoked_subcommand in {"report", "draft"}:
+        if ctx.invoked_subcommand in {"setup", "onboard"}:
+            return
+        if ctx.invoked_subcommand in {"report", "draft", "apply-overrides"}:
             _preflight_report_workspace()
         elif ctx.invoked_subcommand == "confirm":
             _preflight_confirm_workspace()
@@ -227,10 +231,18 @@ def main(
             _preflight_prep_workspace()
         elif ctx.invoked_subcommand == "review-full":
             _preflight_review_full_workspace()
+        elif ctx.invoked_subcommand == "review-sections":
+            _preflight_review_sections_workspace()
         elif ctx.invoked_subcommand == "diff":
             _preflight_diff_workspace()
+        elif ctx.invoked_subcommand == "edit":
+            _preflight_edit_workspace()
+        elif ctx.invoked_subcommand == "override":
+            _preflight_override_workspace()
         elif ctx.invoked_subcommand == "config" or (
             ctx.invoked_subcommand == "context" and ctx.meta.get("offline_context_command") is True
+        ) or (
+            ctx.invoked_subcommand == "admin" and ctx.meta.get("offline_metric_history_command") is True
         ) or (
             ctx.invoked_subcommand == "nudge" and ctx.meta.get("offline_nudge_command") is True
         ):

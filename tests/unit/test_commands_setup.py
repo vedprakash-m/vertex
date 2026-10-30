@@ -17,6 +17,241 @@ from src.core.setup_state import (
 )
 
 
+@pytest.mark.parametrize("mode", ["write", "preview", "resume"])
+def test_setup_refuses_missing_workspace_before_collection(monkeypatch, tmp_path: Path, mode: str) -> None:
+    from typer.testing import CliRunner
+    from cli import app
+    import src.commands.onboard as onboard
+    import src.commands.setup as setup
+    from src.core.workspace_paths import REPO_ROOT
+
+    monkeypatch.setattr(onboard, "PROGRAMS_ROOT", REPO_ROOT / "programs", raising=False)
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("Workspace admission must precede collection/session access.")
+    monkeypatch.setattr(setup, "_collect_identity", forbidden)
+    monkeypatch.setattr(setup, "load_session", forbidden)
+    monkeypatch.chdir(tmp_path)
+    args = ["setup", "--manual"]
+    if mode != "write":
+        args.append("--" + mode)
+    result = CliRunner().invoke(app, args)
+    assert result.exit_code == 2, result.output + repr(result.exception)
+    assert "workspace" in result.output
+    assert not list(tmp_path.iterdir())
+
+
+def _synthetic_setup_collectors(monkeypatch) -> None:
+    import src.commands.setup as setup
+    from src.commands.onboard import IdentityStage, ADOStage
+
+    def identity(draft):
+        draft.identity = IdentityStage(
+            program_name="Synthetic Program", program_id="synthetic", objective="Synthetic objective",
+            mission="Synthetic mission", newsletter_title="Synthetic Weekly", cadence="weekly",
+            author_display_name="Synthetic Author", author_email="author@example.com",
+            send_day=None, send_time_local=None, timezone=None,
+        )
+    def ado(draft, *_args, **_kwargs):
+        draft.ado = ADOStage(
+            organization="synthetic", project="Synthetic", area_paths=(), work_item_types=("Feature",),
+            excluded_states=("Removed",), date_window_days=7, api_timeout_seconds=30,
+        )
+        return {}
+    monkeypatch.setattr(setup, "_collect_identity", identity)
+    monkeypatch.setattr(setup, "_collect_workstreams", lambda *_args, **_kwargs: [("Delivery", "Synthetic delivery")])
+    monkeypatch.setattr(setup, "_collect_ado", ado)
+
+
+@pytest.mark.parametrize("artifact_override", [False, True])
+def test_setup_writes_only_canonical_program_home_and_loadable_config(
+    monkeypatch, tmp_path: Path, artifact_override: bool,
+) -> None:
+    from typer.testing import CliRunner
+    from cli import app
+    import src.commands.onboard as onboard
+    from src.core.config_loader import load_bundle_with_mode
+    from unittest.mock import Mock
+
+    canonical = tmp_path / "private" / "programs"
+    monkeypatch.setattr(onboard, "PROGRAMS_ROOT", canonical)
+    generate = Mock(return_value=SimpleNamespace(
+        issue_number=1, exit_code=0, html_path=None, md_path=None, manifest_path=None,
+    ))
+    monkeypatch.setattr("src.commands.report.generate_report_draft", generate)
+    _synthetic_setup_collectors(monkeypatch)
+    cwd = tmp_path / "shell"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    args = ["setup", "--manual", "--from-description", "Synthetic", "--auto-confirm"]
+    if artifact_override:
+        args.extend(["--output-dir", str(tmp_path / "artifacts")])
+    result = CliRunner().invoke(app, args)
+    assert result.exit_code == 0, result.output + repr(result.exception)
+    assert (canonical / "synthetic" / "program.yaml").is_file()
+    assert list(cwd.iterdir()) == []
+    assert not (tmp_path / "artifacts" / "programs").exists()
+    assert generate.call_args.kwargs["programs_root"] == canonical
+    bundle = load_bundle_with_mode(
+        "synthetic_program_weekly", programs_root=canonical, reports_root=canonical.parent / "reports",
+        editions_root=canonical / "synthetic" / "editions",
+    )
+    assert bundle.mode == "v2"
+    assert bundle.bundle.config.edition.name == "synthetic_program_weekly"
+
+
+def test_setup_unsupported_report_mapping_stops_before_generation(monkeypatch, tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+    from cli import app
+    import src.commands.onboard as onboard
+    import src.commands.setup as setup
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(onboard, "PROGRAMS_ROOT", tmp_path / "private" / "custom-programs")
+    collector = Mock(side_effect=AssertionError("Unsupported layout must not generate a partial program."))
+    monkeypatch.setattr(setup, "_collect_identity", collector)
+    result = CliRunner().invoke(app, ["setup", "--manual"])
+    assert result.exit_code == 2, result.output + repr(result.exception)
+    assert "Conflicting report workspace roots" in result.output
+    collector.assert_not_called()
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("mode", ["cancel", "preview", "dry-run"])
+@pytest.mark.parametrize("artifact_override", [False, True])
+def test_setup_artifacts_do_not_default_to_shell_directory(
+    monkeypatch, tmp_path: Path, mode: str, artifact_override: bool,
+) -> None:
+    from typer.testing import CliRunner
+    from cli import app
+    import src.commands.onboard as onboard
+    import src.commands.setup as setup
+
+    canonical = tmp_path / "private" / "programs"
+    monkeypatch.setattr(onboard, "PROGRAMS_ROOT", canonical)
+    _synthetic_setup_collectors(monkeypatch)
+    monkeypatch.setattr(setup, "_show_review", lambda *_args: False)
+    cwd = tmp_path / "shell"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    args = ["setup", "--manual", "--no-open"]
+    if mode != "cancel":
+        args.append("--" + mode)
+    artifacts = tmp_path / "artifacts" if artifact_override else canonical.parent
+    if artifact_override:
+        args.extend(["--output-dir", str(artifacts)])
+    result = CliRunner().invoke(app, args)
+    assert result.exit_code == (1 if mode == "cancel" else 0), result.output + repr(result.exception)
+    assert list(cwd.iterdir()) == []
+    assert not canonical.exists()
+    if mode == "cancel":
+        assert list((artifacts / ".vertex").glob("setup_session_*.json"))
+    elif mode == "preview":
+        assert (artifacts / "setup_preview.html").is_file()
+    else:
+        assert not canonical.parent.exists()
+        assert not artifacts.exists()
+
+
+def test_setup_dry_run_is_write_free_without_declared_context(monkeypatch, tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+    from cli import app
+    import src.commands.onboard as onboard
+    from src.core.workspace_paths import REPO_ROOT
+
+    monkeypatch.setattr(onboard, "PROGRAMS_ROOT", REPO_ROOT / "programs")
+    _synthetic_setup_collectors(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(app, ["setup", "--dry-run", "--manual", "--preview"], input="n\n")
+    assert result.exit_code == 0, result.output + repr(result.exception)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_setup_dry_run_does_not_call_ai_or_ado_discovery(monkeypatch, tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+    from cli import app
+    import src.commands.setup as setup
+    from unittest.mock import Mock
+
+    workstreams, ado = setup._collect_workstreams, setup._collect_ado
+    _synthetic_setup_collectors(monkeypatch)
+    monkeypatch.setattr(setup, "_collect_workstreams", workstreams)
+    monkeypatch.setattr(setup, "_collect_ado", ado)
+    answers = iter(["Delivery", "Synthetic delivery", "", "synthetic-org", "SyntheticProject", "Synthetic\\Delivery"])
+    monkeypatch.setattr(setup, "_ask", lambda *_args, **_kwargs: next(answers))
+    monkeypatch.setattr(setup, "_show_review", lambda *_args: True)
+    ai = Mock(side_effect=AssertionError("Dry-run must not invoke AI."))
+    discovery = Mock(side_effect=AssertionError("Dry-run must not invoke ADO discovery."))
+    monkeypatch.setattr(setup, "_ai_suggest_workstreams", ai)
+    monkeypatch.setattr(setup, "_try_live_ado_area_discovery", discovery)
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(app, ["setup", "--dry-run", "--from-description", "Synthetic objective"])
+    assert result.exit_code == 0, result.output + repr(result.exception)
+    ai.assert_not_called()
+    discovery.assert_not_called()
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("artifact_path", ["relative", "checkout"])
+def test_setup_refuses_unsafe_artifacts_before_collection(monkeypatch, tmp_path: Path, artifact_path: str) -> None:
+    from typer.testing import CliRunner
+    from cli import app
+    import src.commands.onboard as onboard
+    import src.commands.setup as setup
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(onboard, "PROGRAMS_ROOT", tmp_path / "private" / "programs")
+    artifacts = Path("relative")
+    if artifact_path == "checkout":
+        artifacts = tmp_path / "checkout"
+        artifacts.mkdir()
+        (artifacts / ".git").mkdir()
+    collector = Mock(side_effect=AssertionError("Artifacts must be admitted before collection."))
+    monkeypatch.setattr(setup, "_collect_identity", collector)
+    before = list(tmp_path.rglob("*"))
+    result = CliRunner().invoke(app, ["setup", "--manual", "--output-dir", str(artifacts)])
+    assert result.exit_code == 2, result.output + repr(result.exception)
+    collector.assert_not_called()
+    assert list(tmp_path.rglob("*")) == before
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_setup_resume_never_falls_back_to_shell_session(monkeypatch, tmp_path: Path, dry_run: bool) -> None:
+    from typer.testing import CliRunner
+    from cli import app
+    import src.commands.onboard as onboard
+
+    monkeypatch.setattr(onboard, "PROGRAMS_ROOT", tmp_path / "private" / "programs")
+    monkeypatch.chdir(tmp_path)
+    args = ["setup", "--resume"]
+    if dry_run:
+        args.append("--dry-run")
+    result = CliRunner().invoke(app, args)
+    assert result.exit_code == (2 if dry_run else 1), result.output + repr(result.exception)
+    assert "requires a private workspace" in result.output if dry_run else "No saved session found" in result.output
+    assert not list(tmp_path.iterdir())
+
+
+def test_setup_existing_program_is_not_overwritten(monkeypatch, tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+    from cli import app
+    import src.commands.onboard as onboard
+
+    programs = tmp_path / "private" / "programs"
+    program = programs / "synthetic"
+    program.mkdir(parents=True)
+    config = program / "program.yaml"
+    config.write_text("synthetic: retained\n", encoding="utf-8")
+    monkeypatch.setattr(onboard, "PROGRAMS_ROOT", programs)
+    _synthetic_setup_collectors(monkeypatch)
+    result = CliRunner().invoke(
+        app, ["setup", "--manual", "--from-description", "Synthetic", "--auto-confirm"],
+    )
+    assert result.exit_code == 2, result.output + repr(result.exception)
+    assert "already contains this program" in result.output
+    assert list(program.iterdir()) == [config]
+    assert config.read_text(encoding="utf-8") == "synthetic: retained\n"
+
+
 def test_setup_manual_mode_populates_draft_without_ado_or_ai() -> None:
     """T1: manual wizard path produces a complete SetupDraft with no external deps."""
     import src.commands.setup as setup_mod

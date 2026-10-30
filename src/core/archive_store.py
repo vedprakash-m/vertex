@@ -121,6 +121,7 @@ def is_issue_confirmed(
     issue_number: int,
     *,
     archive_root: Path = ARCHIVE_ROOT,
+    programs_root: Path | None = None,
 ) -> bool:
     """Return True if ``issue_number`` is already a confirmed (published) archive entry.
 
@@ -131,7 +132,7 @@ def is_issue_confirmed(
     ``narratives/issue_NNN/`` or ``overrides/issue_NNN.yaml`` should check this
     first and refuse (not silently allow) writes for already-confirmed issues.
     """
-    index = read_archive_index(edition, archive_root=archive_root)
+    index = read_archive_index(edition, archive_root=archive_root, programs_root=programs_root)
     return any(entry.issue_number == issue_number and entry.kind == "confirmed" for entry in index.issues)
 
 
@@ -139,9 +140,11 @@ def load_previous_confirmed_snapshot(
     edition: str,
     issue_number: int,
     archive_root: Path = ARCHIVE_ROOT,
+    *,
+    programs_root: Path | None = None,
 ) -> tuple[Snapshot | None, int | None]:
     previous_entry = find_latest_confirmed_entry(
-        read_archive_index(edition, archive_root),
+        read_archive_index(edition, archive_root, programs_root=programs_root),
         before_issue_number=issue_number,
     )
     if previous_entry is None or previous_entry.snapshot_path is None:
@@ -155,8 +158,10 @@ def load_previous_confirmed_snapshot(
 def read_scorecard_history(
     edition: str,
     archive_root: Path = ARCHIVE_ROOT,
+    *,
+    programs_root: Path | None = None,
 ) -> tuple[dict[str, Any], ...]:
-    path = get_archive_root(edition, archive_root) / "scorecards.json"
+    path = get_archive_root(edition, archive_root, programs_root=programs_root) / "scorecards.json"
     if not path.exists():
         return ()
     payload = json.loads(path.read_text(encoding="utf-8"))
@@ -167,8 +172,10 @@ def read_scorecard_history(
 def read_vitality_history(
     edition: str,
     archive_root: Path = ARCHIVE_ROOT,
+    *,
+    programs_root: Path | None = None,
 ) -> tuple[VitalityArchiveEntry, ...]:
-    path = get_archive_root(edition, archive_root) / "vitality.json"
+    path = get_archive_root(edition, archive_root, programs_root=programs_root) / "vitality.json"
     if not path.exists():
         return ()
     payload = json.loads(path.read_text(encoding="utf-8"))
@@ -192,13 +199,16 @@ def get_dimension_history(
     *,
     archive_root: Path = ARCHIVE_ROOT,
     last_n: int = 5,
+    programs_root: Path | None = None,
 ) -> tuple[dict[str, Any], ...]:
     if last_n <= 0:
+        if programs_root is not None:
+            get_archive_root(edition, archive_root, programs_root=programs_root)
         return ()
     normalized = dimension_name.strip().lower()
     matches = [
         entry
-        for entry in read_scorecard_history(edition, archive_root=archive_root)
+        for entry in read_scorecard_history(edition, archive_root=archive_root, programs_root=programs_root)
         if str(entry.get("dimension", "")).strip().lower() == normalized
     ]
     return tuple(matches[-last_n:])
@@ -209,10 +219,11 @@ def get_all_green_streak(
     *,
     archive_root: Path = ARCHIVE_ROOT,
     before_issue_number: int | None = None,
+    programs_root: Path | None = None,
 ) -> int:
     confirmed_issue_numbers = [
         entry.issue_number
-        for entry in sorted(read_archive_index(edition, archive_root).issues, key=lambda entry: entry.issue_number, reverse=True)
+        for entry in sorted(read_archive_index(edition, archive_root, programs_root=programs_root).issues, key=lambda entry: entry.issue_number, reverse=True)
         if entry.kind == "confirmed"
         and (before_issue_number is None or entry.issue_number < before_issue_number)
     ]
@@ -220,7 +231,7 @@ def get_all_green_streak(
         return 0
 
     risks_by_issue: dict[int, list[str]] = {}
-    for entry in read_scorecard_history(edition, archive_root=archive_root):
+    for entry in read_scorecard_history(edition, archive_root=archive_root, programs_root=programs_root):
         try:
             raw_issue_number = entry.get("issue_number")
             if raw_issue_number is None:
@@ -247,9 +258,11 @@ def get_all_green_streak(
 def find_archive_index_inconsistencies(
     edition: str,
     archive_root: Path = ARCHIVE_ROOT,
+    *,
+    programs_root: Path | None = None,
 ) -> tuple[str, ...]:
-    edition_root = get_archive_root(edition, archive_root)
-    index = read_archive_index(edition, archive_root)
+    edition_root = get_archive_root(edition, archive_root, programs_root=programs_root)
+    index = read_archive_index(edition, archive_root, programs_root=programs_root)
     inconsistencies: list[str] = []
     seen_issue_numbers: set[int] = set()
     expected_names: dict[str, set[str]] = {
@@ -362,6 +375,8 @@ class ArchiveIntegrityResult:
 def verify_archive_integrity(
     edition: str,
     archive_root: Path = ARCHIVE_ROOT,
+    *,
+    programs_root: Path | None = None,
 ) -> ArchiveIntegrityResult:
     """WS-1: read-only structural integrity check for an edition's archive.
 
@@ -370,9 +385,9 @@ def verify_archive_integrity(
     on disk. This is the gate that report.py and confirm.py call as a
     pre-flight (exit 3 on failure unless waived).
     """
-    inconsistencies = find_archive_index_inconsistencies(edition, archive_root)
+    inconsistencies = find_archive_index_inconsistencies(edition, archive_root, programs_root=programs_root)
     checked: list[str] = []
-    edition_root = get_archive_root(edition, archive_root)
+    edition_root = get_archive_root(edition, archive_root, programs_root=programs_root)
     if edition_root.exists():
         for child in sorted(edition_root.iterdir()):
             if child.is_dir():
@@ -416,8 +431,10 @@ def write_confirmed_issue(
     chart_cache_entries: dict[str, dict[str, Any]] | None = None,
     archive_root: Path = ARCHIVE_ROOT,
     acquire_lock: bool = True,
+    *,
+    programs_root: Path | None = None,
 ) -> ConfirmedIssueArchivePaths:
-    edition_root = get_archive_root(edition, archive_root)
+    edition_root = get_archive_root(edition, archive_root, programs_root=programs_root)
     staging_root = edition_root / "staging"
     rollback_root = staging_root / ".rollback"
     snapshot_filename = f"issue_{issue_number:03d}.snapshot.json"
@@ -449,7 +466,7 @@ def write_confirmed_issue(
     lock_context = ArchiveLock(edition_root) if acquire_lock else nullcontext()
     with lock_context:
         if acquire_lock:
-            orphaned_staging = find_orphaned_staging(edition, archive_root)
+            orphaned_staging = find_orphaned_staging(edition, archive_root, programs_root=programs_root)
             if orphaned_staging is not None:
                 raise RuntimeError(f"Incomplete confirm detected at {orphaned_staging}")
 
@@ -480,7 +497,7 @@ def write_confirmed_issue(
                 )
 
             updated_index = _append_archive_entry(
-                read_archive_index(edition, archive_root),
+                read_archive_index(edition, archive_root, programs_root=programs_root),
                 ArchiveEntry(
                     issue_number=issue_number,
                     generated_at=snapshot.generated_at,
@@ -495,7 +512,7 @@ def write_confirmed_issue(
             )
             _write_atomic_json(staging_root / "index.json", _with_schema(_to_jsonable(updated_index)))
             updated_scorecard_history = _append_scorecard_history(
-                read_scorecard_history(edition, archive_root),
+                read_scorecard_history(edition, archive_root, programs_root=programs_root),
                 snapshot,
             )
             _write_atomic_json(
@@ -504,7 +521,7 @@ def write_confirmed_issue(
             )
             if vitality_record is not None:
                 updated_vitality_history = _append_vitality_history(
-                    read_vitality_history(edition, archive_root),
+                    read_vitality_history(edition, archive_root, programs_root=programs_root),
                     vitality_record,
                 )
                 _write_atomic_json(
@@ -617,8 +634,10 @@ def write_skipped_issue(
     archive_root: Path = ARCHIVE_ROOT,
     acquire_lock: bool = True,
     generated_at: datetime | None = None,
+    *,
+    programs_root: Path | None = None,
 ) -> Path:
-    edition_root = get_archive_root(edition, archive_root)
+    edition_root = get_archive_root(edition, archive_root, programs_root=programs_root)
     staging_root = edition_root / "staging"
     rollback_root = staging_root / ".rollback"
     final_path = edition_root / "index.json"
@@ -626,11 +645,11 @@ def write_skipped_issue(
     lock_context = ArchiveLock(edition_root) if acquire_lock else nullcontext()
     with lock_context:
         if acquire_lock:
-            orphaned_staging = find_orphaned_staging(edition, archive_root)
+            orphaned_staging = find_orphaned_staging(edition, archive_root, programs_root=programs_root)
             if orphaned_staging is not None:
                 raise RuntimeError(f"Incomplete confirm detected at {orphaned_staging}")
 
-        archive_index = read_archive_index(edition, archive_root)
+        archive_index = read_archive_index(edition, archive_root, programs_root=programs_root)
         if any(entry.issue_number == issue_number for entry in archive_index.issues):
             raise RuntimeError(f"Issue {issue_number:03d} is already recorded in the archive index.")
 
@@ -661,8 +680,10 @@ def update_archive_issue_metadata(
     metadata_updates: dict[str, Any],
     archive_root: Path = ARCHIVE_ROOT,
     acquire_lock: bool = True,
+    *,
+    programs_root: Path | None = None,
 ) -> Path:
-    edition_root = get_archive_root(edition, archive_root)
+    edition_root = get_archive_root(edition, archive_root, programs_root=programs_root)
     staging_root = edition_root / "staging"
     rollback_root = staging_root / ".rollback"
     final_path = edition_root / "index.json"
@@ -670,11 +691,11 @@ def update_archive_issue_metadata(
     lock_context = ArchiveLock(edition_root) if acquire_lock else nullcontext()
     with lock_context:
         if acquire_lock:
-            orphaned_staging = find_orphaned_staging(edition, archive_root)
+            orphaned_staging = find_orphaned_staging(edition, archive_root, programs_root=programs_root)
             if orphaned_staging is not None:
                 raise RuntimeError(f"Incomplete confirm detected at {orphaned_staging}")
 
-        archive_index = read_archive_index(edition, archive_root)
+        archive_index = read_archive_index(edition, archive_root, programs_root=programs_root)
         existing_entry = next((entry for entry in archive_index.issues if entry.issue_number == issue_number), None)
         if existing_entry is None:
             raise RuntimeError(f"Issue {issue_number:03d} is not recorded in the archive index.")

@@ -10,8 +10,9 @@ merely assumed safe.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,8 @@ from src.core.kb_updates import (
     validate_program_kb,
 )
 from src.core.knowledge_store import load_knowledge
+from src.core.program_fact_store import load_program_facts, project_workstreams
+from src.core.workstream_documents import save_workstreams_document
 
 _NOW = datetime(2026, 7, 20, tzinfo=timezone.utc)
 
@@ -263,6 +266,128 @@ def test_prepare_and_apply_kb_update_round_trip(tmp_path: Path) -> None:
     assert len(audit_records) == 1
     assert audit_records[0]["edited_by"] == "test-operator"
     assert audit_records[0]["correction"] == "set alice title to Staff PM"
+
+
+def _seed_workstream_repair(tmp_path: Path) -> Path:
+    programs_root = tmp_path / "programs"
+    document = {
+        "schema_version": "2.0",
+        "custom_context": {"preserve": "authored"},
+        "workstreams": [
+            {
+                "id": "delivery", "name": "Delivery",
+                "pm_owner": "alice", "eng_owner": "alice", "alternate_owner": "alice",
+                "last_reviewed_date": "2026-06-01", "custom_notes": ["keep"],
+                "ado_repository_ids": ["repo-1"],
+            },
+            {"id": "other", "name": "Other", "pm_owner": "alice"},
+        ],
+    }
+    for program_id in ("acme", "fabrikam"):
+        program_dir = _seed_minimal_program(programs_root, program_id)
+        people_path = program_dir / "knowledge" / "people_directory.yaml"
+        people_path.write_text(
+            people_path.read_text(encoding="utf-8") + '  - alias: "bob"\n    display_name: "Bob"\n',
+            encoding="utf-8",
+        )
+        save_workstreams_document(program_id, document, programs_root=programs_root)
+    editions = programs_root / "acme" / "editions"
+    editions.mkdir()
+    (editions / "acme_weekly.yaml").write_text(
+        'schema_version: "2.0"\nid: acme_weekly\nprogram_id: acme\nname: Weekly\n'
+        'type: weekly\naltitude: program\ncadence: weekly\n',
+        encoding="utf-8",
+    )
+    (programs_root / "acme" / "scorecards.yaml").write_text(
+        'schema_version: "2.0"\nscorecards: []\n', encoding="utf-8",
+    )
+    return programs_root
+
+
+def test_kb_workstream_apply_uses_one_canonical_save_and_preserves_preview_history(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import src.core.kb_updates as kb_updates
+    from src.core.kb_updates import KbUpdateOperation, KbUpdatePlan
+
+    root = _seed_workstream_repair(tmp_path)
+    before_time = datetime.now(timezone.utc)
+    plan = KbUpdatePlan("acme", "repair owner and title", "deterministic", (
+        KbUpdateOperation("workstreams.yaml", "set_fields", "delivery", fields=(("pm_owner", "bob"),)),
+        KbUpdateOperation("knowledge/people_directory.yaml", "set_fields", "alice", fields=(("title", "Staff PM"),)),
+    ))
+    preview = prepare_kb_update(plan, programs_root=root)
+    calls = []
+
+    def save(program_id, document, *, programs_root):
+        calls.append((program_id, document, programs_root))
+        return save_workstreams_document(program_id, document, programs_root=programs_root)
+
+    monkeypatch.setattr(kb_updates, "save_workstreams_document", save, raising=False)
+    result = apply_kb_update(preview, programs_root=root, edited_by="test-operator")
+    current = {entry.id: entry for entry in project_workstreams(load_program_facts(
+        "acme", programs_root=root, as_of=datetime.now(timezone.utc),
+    ))}
+    assert current["delivery"].pm_owner == "bob"
+    assert len(calls) == 1
+    assert calls[0] == ("acme", next(
+        change.after_document for change in preview.changes if change.relative_path == "workstreams.yaml"
+    ), root)
+    for change in preview.changes:
+        assert change.absolute_path.read_bytes() == change.after_text.replace("\n", os.linesep).encode("utf-8")
+    old = {entry.id: entry for entry in project_workstreams(load_program_facts("acme", programs_root=root, as_of=before_time))}
+    assert old["delivery"].pm_owner == "alice"
+    assert current["delivery"].last_reviewed_date == old["delivery"].last_reviewed_date == date(2026, 6, 1)
+    assert current["delivery"].ado_repository_ids == old["delivery"].ado_repository_ids == ("repo-1",)
+    assert current["other"] == old["other"]
+    audit = json.loads(result.audit_path.read_text(encoding="utf-8"))
+    assert audit["edited_by"] == "test-operator"
+    change = next(entry for entry in audit["files"] if entry["path"] == "workstreams.yaml")
+    assert change["before"]["workstreams"][0]["pm_owner"] == "alice"
+    assert change["after"]["workstreams"][0]["pm_owner"] == "bob"
+    assert change["after"]["custom_context"] == {"preserve": "authored"}
+    assert change["after"]["workstreams"][0]["custom_notes"] == ["keep"]
+    assert (root / "acme" / "workstreams.yaml.bak").read_bytes() == next(
+        change.before_text.replace("\n", os.linesep).encode("utf-8")
+        for change in preview.changes if change.relative_path == "workstreams.yaml"
+    )
+
+
+@pytest.mark.parametrize("failure", ["drift", "unreadable"])
+def test_kb_workstream_preflights_later_target_before_canonical_save(
+    tmp_path: Path, monkeypatch, failure: str,
+) -> None:
+    import src.core.kb_updates as kb_updates
+    from dataclasses import replace
+
+    root = _seed_workstream_repair(tmp_path)
+    plan = parse_deterministic_kb_correction("set delivery pm owner to bob", program_id="acme")
+    assert plan is not None
+    preview = prepare_kb_update(plan, programs_root=root)
+    first, = preview.changes
+    later_path = root / "acme" / "scorecards.yaml"
+    later = replace(
+        first, relative_path="scorecards.yaml", absolute_path=later_path,
+        before_text=later_path.read_text(encoding="utf-8"),
+    )
+    preview = replace(preview, changes=(first, later))
+    if failure == "drift":
+        later_path.write_text("changed\n", encoding="utf-8")
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    calls = []
+    monkeypatch.setattr(kb_updates, "save_workstreams_document", lambda *args, **kwargs: calls.append(args), raising=False)
+    original_read = Path.read_text
+
+    def read(path, *args, **kwargs):
+        if failure == "unreadable" and path == later_path:
+            raise PermissionError("synthetic")
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read)
+    with pytest.raises(StateError, match="scorecards.yaml"):
+        apply_kb_update(preview, programs_root=root)
+    assert calls == []
+    assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
 
 
 def _baseline_preview(tmp_path: Path):

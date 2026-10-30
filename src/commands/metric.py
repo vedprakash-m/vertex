@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -419,8 +420,12 @@ def metric_history_command(
 ) -> None:
     output_format = _normalize_format(format)
     store = RealityStore(program.strip(), db_root=_resolve_runtime_db_root(db_root, programs_root=programs_root))
-    store.initialize()
-    observations = store.list_metric_observations(metric.strip())
+    try:
+        observations = store.list_metric_observations(metric.strip(), read_only=True)
+    except (OSError, sqlite3.Error, IndexError, KeyError, TypeError, ValueError):
+        raise typer.BadParameter(
+            "Metric history is unavailable: the selected database is missing, uninitialized, or incompatible."
+        ) from None
     if output_format == "json":
         payload = {
             "program_id": program.strip(),

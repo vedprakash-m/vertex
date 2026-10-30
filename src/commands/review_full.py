@@ -61,7 +61,7 @@ from src.core.models import Confidence, DeltaKind, DimensionRisk, EditionType, E
 from src.core.models import ScorecardEvidencePacket, WorkItem
 from src.core.models_v2 import ActionItem, ActionStatus, Assumption, AssumptionStatus, ClaimEntry, DecisionAsk, DecisionEntry, DecisionStatus, Dependency, DependencyScheduleStatus, LeadershipReader, Milestone, MilestoneAssessment, MilestoneStatus, PersonDirectory, Signal
 from src.core.narrative_store import load_narratives
-from src.core.overrides_store import load_overrides
+from src.core.overrides_store import _resolve_artifact_edition, load_overrides
 from src.core.program_fact_store import (
     load_program_facts,
     project_action_items,
@@ -86,7 +86,7 @@ from src.core.trusted_baseline_store import load_trusted_baseline_issue
 from src.core.trajectory_analyzer import DriftPattern
 from src.core.vitality_reporting import vitality_settings_from_program
 from src.core.vitality_scorer import aggregate_vitality
-from src.core.workspace_paths import validate_report_workspace
+from src.core.workspace_paths import REPO_ROOT, resolve_report_workspace_roots
 from src.core.view_models import WorkstreamData
 from src.core.models_v2 import RiskEntry, RiskStatus
 from src.m365.adaptive_card_renderer import AdaptiveCardRenderer
@@ -162,7 +162,20 @@ def _semantic_similarity_threshold(raw_program: dict[str, Any] | None) -> float:
 
 def _preflight_review_full_workspace() -> None:
     try:
-        validate_report_workspace(programs_root=PROGRAMS_ROOT, reports_root=REPORTS_ROOT, archive_root=ARCHIVE_ROOT)
+        programs_root: Path | None = PROGRAMS_ROOT
+        reports_root: Path | None = REPORTS_ROOT
+        archive_root: Path | None = ARCHIVE_ROOT
+        if programs_root == REPO_ROOT / "programs":
+            programs_root = None
+        if reports_root == REPO_ROOT / "reports":
+            reports_root = None
+        if archive_root == REPO_ROOT / "archive":
+            archive_root = None
+        resolve_report_workspace_roots(
+            programs_root,
+            reports_root,
+            archive_root,
+        )
     except ConfigError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(code=2) from error
@@ -252,20 +265,37 @@ def generate_review_full(
     open_browser: bool = False,
     post_adaptive_cards: bool = False,
 ) -> ReviewFullArtifacts:
-    resolved_reports_root = reports_root or REPORTS_ROOT
-    resolved_archive_root = archive_root or ARCHIVE_ROOT
-    resolved_programs_root = programs_root or (resolved_reports_root.parent / "programs" if reports_root is not None else PROGRAMS_ROOT)
-    validate_report_workspace(
-        programs_root=resolved_programs_root,
-        reports_root=resolved_reports_root,
-        archive_root=resolved_archive_root,
+    selected_programs_root = programs_root
+    if selected_programs_root is None:
+        if reports_root is not None:
+            selected_programs_root = reports_root.parent / "programs"
+        elif PROGRAMS_ROOT != REPO_ROOT / "programs":
+            selected_programs_root = PROGRAMS_ROOT
+    selected_reports_root = reports_root
+    if selected_reports_root is None and REPORTS_ROOT != REPO_ROOT / "reports":
+        selected_reports_root = REPORTS_ROOT
+    selected_archive_root = archive_root
+    if selected_archive_root is None and ARCHIVE_ROOT != REPO_ROOT / "archive":
+        selected_archive_root = ARCHIVE_ROOT
+    resolved_programs_root, resolved_reports_root, resolved_archive_root = resolve_report_workspace_roots(
+        selected_programs_root,
+        selected_reports_root,
+        selected_archive_root,
+    )
+    legacy_roots = (
+        programs_root is None
+        and reports_root is None
+        and archive_root is None
+        and PROGRAMS_ROOT == REPO_ROOT / "programs"
+        and REPORTS_ROOT == REPO_ROOT / "reports"
+        and ARCHIVE_ROOT == REPO_ROOT / "archive"
     )
     review_data = prepare_review_full_context(
         edition_name=edition_name,
         issue_number=issue_number,
-        reports_root=resolved_reports_root,
-        archive_root=resolved_archive_root,
-        programs_root=resolved_programs_root,
+        reports_root=None if legacy_roots else resolved_reports_root,
+        archive_root=None if legacy_roots else resolved_archive_root,
+        programs_root=None if legacy_roots else resolved_programs_root,
         m365_enricher=m365_enricher,
     )
     reviewer_html = ReviewerRenderer(edition_name, reports_root=resolved_reports_root).render(review_data.reviewer_context)
@@ -308,26 +338,37 @@ def prepare_review_full_context(
     programs_root: Path | None = None,
     m365_enricher: M365Enricher | None = None,
 ) -> ReviewFullContextData:
-    resolved_reports_root = reports_root or REPORTS_ROOT
-    resolved_archive_root = archive_root or ARCHIVE_ROOT
-    repo_root = resolved_reports_root.parent
-    programs_root = programs_root or (repo_root / "programs" if reports_root is not None else PROGRAMS_ROOT)
-    validate_report_workspace(
-        programs_root=programs_root,
-        reports_root=resolved_reports_root,
-        archive_root=resolved_archive_root,
+    selected_programs_root = programs_root
+    if selected_programs_root is None:
+        if reports_root is not None:
+            selected_programs_root = reports_root.parent / "programs"
+        elif PROGRAMS_ROOT != REPO_ROOT / "programs":
+            selected_programs_root = PROGRAMS_ROOT
+    selected_reports_root = reports_root
+    if selected_reports_root is None and REPORTS_ROOT != REPO_ROOT / "reports":
+        selected_reports_root = REPORTS_ROOT
+    selected_archive_root = archive_root
+    if selected_archive_root is None and ARCHIVE_ROOT != REPO_ROOT / "archive":
+        selected_archive_root = ARCHIVE_ROOT
+    programs_root, resolved_reports_root, resolved_archive_root = resolve_report_workspace_roots(
+        selected_programs_root,
+        selected_reports_root,
+        selected_archive_root,
     )
+    repo_root = resolved_reports_root.parent
 
     bundle = load_bundle(
         edition_name,
         reports_root=resolved_reports_root,
         programs_root=programs_root,
     )
+    resolved_v2 = resolve_edition(edition_name, programs_root=programs_root)
     resolved_issue_number, review_status = _load_review_full_context(
         edition_name=edition_name,
         issue_number=issue_number,
         reports_root=resolved_reports_root,
         archive_root=resolved_archive_root,
+        programs_root=programs_root if resolved_v2 is not None else None,
     )
     draft_state = _load_draft_state(edition_name, resolved_issue_number, programs_root=programs_root)
     published_html_path = get_program_output_dir(edition_name, programs_root=programs_root) / f"issue_{resolved_issue_number:03d}" / f"issue_{resolved_issue_number:03d}.html"
@@ -387,6 +428,7 @@ def prepare_review_full_context(
         edition_name,
         reports_root=resolved_reports_root,
         issue_number=resolved_issue_number,
+        programs_root=programs_root if resolved_v2 is not None else None,
     )
     if overrides_document is None or overrides_document.issue_number != resolved_issue_number:
         raise typer.BadParameter(
@@ -402,8 +444,12 @@ def prepare_review_full_context(
         overrides_document=overrides_document,
         edition_name=edition_name,
         reports_root=resolved_reports_root,
+        programs_root=programs_root if resolved_v2 is not None else None,
     )
-    loaded_narratives = load_narratives(edition_name, resolved_issue_number, reports_root=resolved_reports_root)
+    loaded_narratives = load_narratives(
+        edition_name, resolved_issue_number, reports_root=resolved_reports_root,
+        programs_root=programs_root if resolved_v2 is not None else None,
+    )
     loaded_exec_summary_text = loaded_narratives.get("exec_summary.md", "").strip()
     draft_exec_summary_text = str(draft_state.get("exec_summary_text", "")).strip()
     exec_summary_text = loaded_exec_summary_text or draft_exec_summary_text
@@ -437,7 +483,6 @@ def prepare_review_full_context(
         issue_number=resolved_issue_number,
     )
     item_urls = _build_item_urls(bundle, items)
-    resolved_v2 = resolve_edition(edition_name, programs_root=programs_root)
     program_facts = (
         load_program_facts(resolved_v2.program.id, db_root=repo_root, programs_root=programs_root, archive_root=resolved_archive_root)
         if resolved_v2 is not None
@@ -600,9 +645,14 @@ def _load_review_full_context(
     issue_number: int | None,
     reports_root: Path,
     archive_root: Path,
+    programs_root: Path | None = None,
 ) -> tuple[int, ReviewStatus]:
+    if programs_root is not None:
+        _resolve_artifact_edition(edition_name, reports_root, programs_root)
     archive_index = read_archive_index(edition_name, archive_root=archive_root)
-    review_status = load_review_status(edition_name, reports_root=reports_root)
+    review_status = load_review_status(
+        edition_name, reports_root=reports_root, programs_root=programs_root,
+    )
     if issue_number is None:
         if review_status is not None and review_status.issue_number > 0:
             resolved_issue_number = review_status.issue_number
@@ -837,6 +887,7 @@ def _build_reviewer_context(
         items=items,
         as_of=data_as_of,
         reports_root=reports_root,
+        programs_root=programs_root if program_id is not None else None,
     )
     issue_rows = _build_issue_rows(
         bundle=bundle,
@@ -1768,7 +1819,7 @@ def _format_milestone_row_title(
         f"{assessment.confidence.value} confidence",
     ]
     if critical_path:
-        labels.append("critical path")
+        labels.append("longest dependency chain")
     return " · ".join(labels)
 
 

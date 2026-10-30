@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from src.core.actuation_outbox import (
     ActuationDispatchOutcome,
     DispatchResult,
@@ -19,6 +21,164 @@ from src.core.actuation_outbox import (
 )
 from src.core.ledger.durable_outbox_store import load_entry
 from src.core.workspace_lease import ACTUATION_DISPATCH_DOMAIN
+
+
+@pytest.mark.parametrize("changed", ["payload_json", "domain", "correlation_id"])
+def test_existing_key_rejects_changed_identity(tmp_path: Path, changed: str) -> None:
+    from src.core._db import open_program_db_with_retry
+    from src.core.ledger.durable_outbox_store import OutboxError
+
+    root = tmp_path / "programs"
+    first = enqueue_create_task_intent(
+        program_id="fixture", idempotency_key="key", operation_intent_id="intent",
+        proposal_id="proposal", payload_json="{}", programs_root=root,
+    )
+    db = outbox_db_path("fixture", programs_root=root)
+    if changed != "payload_json":
+        with open_program_db_with_retry(db, durability="strict") as connection:
+            connection.execute(f"UPDATE outbox SET {changed} = ?", ("different",))
+    before = load_entry(db, first.outbox_id)
+    with pytest.raises(OutboxError):
+        enqueue_create_task_intent(
+            program_id="fixture", idempotency_key="key", operation_intent_id="intent",
+            proposal_id="proposal", payload_json='{"changed":true}' if changed == "payload_json" else "{}",
+            programs_root=root,
+        )
+    assert load_entry(db, first.outbox_id) == before
+
+
+@pytest.mark.parametrize("status", ["uncertain_remote_state", "completed", "active", "missing_expiry", "same_owner"])
+def test_nonclassifiable_dispatch_does_not_acquire_or_drain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str,
+) -> None:
+    import src.core.actuation_outbox as service
+    from src.core._db import open_program_db_with_retry
+    from src.core.ledger import durable_outbox_store as store
+    from src.core.workspace_lease import acquire_lease, read_lease_state
+
+    root = tmp_path / "programs"
+    enqueue_create_task_intent(
+        program_id="fixture", idempotency_key="key", operation_intent_id="intent",
+        proposal_id="proposal", payload_json="{}", programs_root=root,
+    )
+    db = outbox_db_path("fixture", programs_root=root)
+    leased = store.lease_next(db, ACTUATION_DISPATCH_DOMAIN, owner="old", ttl_seconds=300 if status == "active" else 0)
+    assert leased is not None
+    store.mark_dispatched(db, "key", owner="old", fencing_token=leased.lease_fencing_token)
+    if status in {"uncertain_remote_state", "completed"}:
+        with open_program_db_with_retry(db, durability="strict") as connection:
+            connection.execute("UPDATE outbox SET status = ?", (status,))
+    if status == "missing_expiry":
+        with open_program_db_with_retry(db, durability="strict") as connection:
+            connection.execute("UPDATE outbox SET lease_expires_at = NULL")
+    before = store.load_entry(db, "key")
+    workspace = acquire_lease("fixture", "workspace-holder", mutation_domain=ACTUATION_DISPATCH_DOMAIN, programs_root=root)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("No lease acquisition, backlog drain or dispatch is permitted")
+
+    monkeypatch.setattr(service, "acquire_lease", forbidden)
+    monkeypatch.setattr(service, "lease_next", forbidden)
+    for _ in range(2):
+        if status == "uncertain_remote_state":
+            result = service.dispatch_leased_create_task(
+                program_id="fixture", idempotency_key="key", owner="new",
+                dispatch_fn=forbidden, programs_root=root,
+            )
+            assert result.entry == before
+            assert result.status == "uncertain_remote_state"
+            assert result.remote_id is None
+        else:
+            with pytest.raises(store.OutboxError):
+                service.dispatch_leased_create_task(
+                    program_id="fixture", idempotency_key="key",
+                    owner="old" if status == "same_owner" else "new",
+                    dispatch_fn=forbidden, programs_root=root,
+                )
+        assert store.load_entry(db, "key") == before
+        assert read_lease_state("fixture", mutation_domain=ACTUATION_DISPATCH_DOMAIN, programs_root=root) == workspace
+
+
+@pytest.mark.parametrize("identity", ["missing", "domain", "correlation_id"])
+def test_dispatch_refuses_missing_or_foreign_requested_row(tmp_path: Path, identity: str) -> None:
+    from src.core._db import open_program_db_with_retry
+    from src.core.ledger.durable_outbox_store import OutboxError
+
+    root = tmp_path / "programs"
+    if identity != "missing":
+        enqueue_create_task_intent(
+            program_id="fixture", idempotency_key="key", operation_intent_id="intent",
+            proposal_id="proposal", payload_json="{}", programs_root=root,
+        )
+        with open_program_db_with_retry(outbox_db_path("fixture", programs_root=root), durability="strict") as connection:
+            connection.execute(f"UPDATE outbox SET {identity} = 'other'")
+
+    def forbidden(entry):
+        pytest.fail("No callback for missing or foreign requested row")
+
+    with pytest.raises(OutboxError):
+        dispatch_leased_create_task(
+            program_id="fixture", idempotency_key="key", owner="new",
+            dispatch_fn=forbidden, programs_root=root,
+        )
+
+
+def test_classification_refuses_current_other_workspace_owner(tmp_path: Path) -> None:
+    from src.core.ledger import durable_outbox_store as store
+    from src.core.workspace_lease import LeaseHeldByAnotherOwner, acquire_lease, read_lease_state
+
+    root = tmp_path / "programs"
+    enqueue_create_task_intent(
+        program_id="fixture", idempotency_key="key", operation_intent_id="intent",
+        proposal_id="proposal", payload_json="{}", programs_root=root,
+    )
+    db = outbox_db_path("fixture", programs_root=root)
+    old = store.lease_next(db, ACTUATION_DISPATCH_DOMAIN, owner="old", ttl_seconds=0)
+    assert old is not None
+    store.mark_dispatched(db, "key", owner="old", fencing_token=old.lease_fencing_token)
+    current = acquire_lease("fixture", "current", mutation_domain=ACTUATION_DISPATCH_DOMAIN, programs_root=root)
+    before = store.load_entry(db, "key")
+
+    def forbidden(entry):
+        pytest.fail("Current workspace owner must exclude classification and callbacks")
+
+    with pytest.raises(LeaseHeldByAnotherOwner):
+        dispatch_leased_create_task(
+            program_id="fixture", idempotency_key="key", owner="new",
+            dispatch_fn=forbidden, programs_root=root,
+        )
+    assert store.load_entry(db, "key") == before
+    assert read_lease_state("fixture", mutation_domain=ACTUATION_DISPATCH_DOMAIN, programs_root=root) == current
+
+
+def test_expired_dispatched_returns_uncertainty_before_backlog_drain(tmp_path: Path) -> None:
+    from src.core.ledger import durable_outbox_store as store
+    from src.core.workspace_lease import read_lease_state
+
+    root = tmp_path / "programs"
+    original = enqueue_create_task_intent(
+        program_id="fixture", idempotency_key="key", operation_intent_id="intent",
+        proposal_id="proposal", payload_json="{}", programs_root=root,
+    )
+    db = outbox_db_path("fixture", programs_root=root)
+    old = store.lease_next(db, ACTUATION_DISPATCH_DOMAIN, owner="old", ttl_seconds=0)
+    assert old is not None
+    store.mark_dispatched(db, "key", owner="old", fencing_token=old.lease_fencing_token)
+    store.enqueue(db, "backlog", domain=ACTUATION_DISPATCH_DOMAIN, correlation_id="backlog", payload_json="{}")
+
+    def forbidden(entry):
+        pytest.fail("Classification must return before backlog drain or dispatch")
+
+    result = dispatch_leased_create_task(
+        program_id="fixture", idempotency_key="key", owner="new", dispatch_fn=forbidden, programs_root=root,
+    )
+    assert result.status == result.entry.status == "uncertain_remote_state"
+    assert result.remote_id is None
+    assert result.entry.payload_json == original.payload_json
+    assert store.load_entry(db, "key") == result.entry
+    backlog = store.load_entry(db, "backlog")
+    assert backlog is not None and backlog.status == "pending"
+    assert read_lease_state("fixture", mutation_domain=ACTUATION_DISPATCH_DOMAIN, programs_root=root) is None
 
 
 def test_idempotency_key_formula_matches_sec_8_11_3() -> None:

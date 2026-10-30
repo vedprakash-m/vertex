@@ -4,10 +4,51 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Protocol
 
+if TYPE_CHECKING:
+    from src.core.gather_run_manifest import GatherRunManifest
+
+from src.core.file_stores import FileTrajectoryStore
+from src.core.manifest_writer import hash_jsonable
 from src.core.models import ArchiveEntry, ArchiveIndex, EditionType, Snapshot, WorkItem
 from src.core.program_fact_store import FactSnapshotPin, ProgramFactSnapshot
+from src.core.sqlite_stores import SQLiteTrajectoryStore
+
+
+def capture_milestone_trajectory_snapshot(
+    program_id: str,
+    trajectory_store: Any,
+    trajectories: Mapping[int, tuple[Any, ...]],
+) -> dict[str, Any]:
+    if isinstance(trajectory_store, FileTrajectoryStore):
+        backend = "file"
+    elif isinstance(trajectory_store, SQLiteTrajectoryStore):
+        backend = "sqlite"
+    else:
+        raise ValueError("Unsupported milestone trajectory store.")
+    items = []
+    for work_item_id in sorted(trajectories):
+        if not isinstance(work_item_id, int) or isinstance(work_item_id, bool) or work_item_id <= 0:
+            raise ValueError("Milestone trajectory work item IDs must be positive integers.")
+        items.append({
+            "work_item_id": work_item_id,
+            "points": [
+                {
+                    "date": point.date.isoformat(),
+                    "state": point.state,
+                    "target_date": point.target_date.isoformat() if point.target_date is not None else None,
+                }
+                for point in trajectories[work_item_id]
+            ],
+        })
+    payload: dict[str, Any] = {
+        "schema_version": "1",
+        "program_id": program_id,
+        "backend": backend,
+        "items": items,
+    }
+    return {**payload, "sha256": hash_jsonable(payload)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +108,7 @@ class StageContext:
     scorecard_deltas: Any = None
     milestones: Any = None
     milestone_assessments: Any = None
+    milestone_trajectory_snapshot: dict[str, Any] | None = None
     milestone_lineage: dict[str, dict[str, str | None]] | None = None
     milestone_warnings: tuple[str, ...] = ()
     risks: Any = None
@@ -124,6 +166,7 @@ class StageContext:
     # ADF-W2.12 observability trace-correlation ids, not gather-run lineage.
     gather_run_id: str | None = None
     gather_run_hash: str | None = None
+    gather_run_manifest: GatherRunManifest | None = None
 
 
 class PipelineStage(Protocol):

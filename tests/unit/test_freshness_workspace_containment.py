@@ -18,6 +18,27 @@ from tests.unit.test_commands_freshness import (
 )
 
 
+@pytest.mark.parametrize("selection", ("external", "legacy", "checkout", "installation"))
+def test_freshness_preflight_admits_only_safe_external_or_unset_legacy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selection: str,
+) -> None:
+    root = tmp_path / "programs"
+    if selection == "checkout":
+        (tmp_path / ".git").write_text("gitdir: synthetic", encoding="utf-8")
+    elif selection in ("legacy", "installation"):
+        root = freshness.REPO_ROOT / "programs"
+    for name in ("reports", "archive"):
+        monkeypatch.setattr(freshness, name.upper() + "_ROOT", freshness.REPO_ROOT / name)
+    monkeypatch.setattr(freshness, "PROGRAMS_ROOT", root)
+    monkeypatch.setattr("src.core.workspace_paths._PROGRAMS_ROOT_CONFIGURED", selection == "installation")
+    if selection in ("checkout", "installation"):
+        with pytest.raises(typer.Exit) as error:
+            freshness._preflight_freshness_workspace()
+        assert error.value.exit_code == 2
+    else:
+        freshness._preflight_freshness_workspace()
+
+
 def _forbidden(*args, **kwargs):
     raise AssertionError("Invalid workspace reached metadata, a reader, provider, or writer.")
 
@@ -72,7 +93,7 @@ def test_invalid_api_workspace_fails_before_access(
             "load_latest_notification_state", "build_workstream_narrative_history",
         ):
             guard.setattr(freshness, name, _forbidden)
-        for name in ("stat", "exists", "is_file", "is_dir", "open", "mkdir"):
+        for name in ("open", "mkdir"):
             guard.setattr(Path, name, _forbidden)
         with pytest.raises(ConfigError, match="workspace roots"):
             freshness.generate_freshness_report(EDITION_NAME, notify=True, **kwargs)
@@ -118,7 +139,7 @@ def test_direct_preflight_guards_generation(
 def test_preflight_does_not_swallow_unexpected_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(freshness, "validate_report_workspace", Mock(side_effect=RuntimeError("unexpected")))
+    monkeypatch.setattr(freshness, "resolve_report_workspace_roots", Mock(side_effect=RuntimeError("unexpected")))
     with pytest.raises(RuntimeError, match="unexpected"):
         freshness._preflight_freshness_workspace()
 
@@ -159,7 +180,7 @@ def test_optional_program_summaries_do_not_load_facts(
     ) == ()
 
 
-@pytest.mark.parametrize("selection", ("module-defaults", "explicit", "legacy-reports"))
+@pytest.mark.parametrize("selection", ("module-defaults", "explicit", "legacy-reports", "external-defaults", "program-only", "reports-only"))
 @pytest.mark.parametrize("history", (False, True))
 def test_coherent_context_reaches_consumers_and_actual_fact_history(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selection: str, history: bool,
@@ -171,6 +192,10 @@ def test_coherent_context_reaches_consumers_and_actual_fact_history(
     monkeypatch.setattr(freshness, "PROGRAMS_ROOT", programs_root if selection == "module-defaults" else tmp_path / "unselected" / "programs")
     monkeypatch.setattr(freshness, "REPORTS_ROOT", reports_root)
     monkeypatch.setattr(freshness, "ARCHIVE_ROOT", archive_root)
+    if selection in ("external-defaults", "program-only", "reports-only"):
+        monkeypatch.setattr(freshness, "PROGRAMS_ROOT", programs_root)
+        monkeypatch.setattr(freshness, "REPORTS_ROOT", freshness.REPO_ROOT / "reports")
+        monkeypatch.setattr(freshness, "ARCHIVE_ROOT", freshness.REPO_ROOT / "archive")
 
     program_calls: dict[str, list[Path]] = {}
     for name in (
@@ -212,10 +237,13 @@ def test_coherent_context_reaches_consumers_and_actual_fact_history(
 
     monkeypatch.setattr(freshness, "build_workstream_narrative_history", narrative_history)
     kwargs = {}
-    if selection != "module-defaults":
+    if selection in ("explicit", "legacy-reports"):
         kwargs.update(reports_root=reports_root, archive_root=archive_root)
-    if selection == "explicit":
+    if selection in ("explicit", "program-only"):
         kwargs["programs_root"] = programs_root
+    if selection == "reports-only":
+        monkeypatch.setattr(freshness, "PROGRAMS_ROOT", tmp_path / "unselected" / "programs")
+        kwargs["reports_root"] = reports_root
     artifacts = freshness.generate_freshness_report(
         EDITION_NAME, as_of=AS_OF, notify=True,
         work_item_loader=lambda bundle, timestamp, since: (_sample_items(timestamp), 0),

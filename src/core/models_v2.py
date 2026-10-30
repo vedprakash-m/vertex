@@ -448,6 +448,13 @@ class Dependency:
     # approved proposal; None means "no proposal applied yet" (backward compatible).
     next_proving_event: str | None = None
     blast_radius_narrative: str | None = None
+    provider_forecast_ready_date: date | None = None
+    consumer_required_by_date: date | None = None
+    date_margin_calendar: str | None = None
+    date_margin_calendar_version: str | None = None
+    date_margin_timezone: str | None = None
+    date_margin_unit: str | None = None
+    date_margin_lag: int | None = None
 
 
 class RiskImpact(EnumParserMixin, str, Enum):
@@ -1300,7 +1307,7 @@ class VitalityScore:
     work_item_id: int
     owner_alias: str | None
     workstream_id: str | None
-    freshness_days: int
+    freshness_days: int | None
     freshness_grade: Literal["green", "amber", "red"]
     richness_score: int
     richness_missing: tuple[str, ...]
@@ -1340,7 +1347,8 @@ class VitalityProgramSnapshot:
     total_items: int
     items_fresh: int
     updated_percentage: int
-    freshness_average_days: float
+    freshness_average_days: float | None
+    freshness_known_items: int
     avg_richness: int
     leakage_events: int
     aggregate_score: int

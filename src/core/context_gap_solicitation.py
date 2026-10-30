@@ -147,7 +147,14 @@ def record_solicitation_drafted(
             current_value=solicitation.current_value, current_value_hash=solicitation.current_value_hash,
             eml_sha256=eml_sha256,
         )
-    append_jsonl_line(path, json.dumps(payload, ensure_ascii=False))
+    separator = ""
+    if path.exists():
+        with path.open("rb") as handle:
+            if handle.seek(0, 2):
+                handle.seek(-1, 2)
+                if handle.read(1) != b"\n":
+                    separator = "\n"
+    append_jsonl_line(path, separator + json.dumps(payload, ensure_ascii=False) + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -206,10 +213,13 @@ def write_solicitation_draft(
         mark_as_draft=True,
     )
     if solicitation.current_value_hash is not None:
-        binding = json.dumps((
+        binding_parts: tuple[str | None, ...] = (
             solicitation.program_id, solicitation.target_key, solicitation.target_field,
             solicitation.current_value, solicitation.current_value_hash,
-        ), ensure_ascii=False)
+        )
+        if solicitation.gap_fingerprint.startswith(f"{solicitation.program_id}:doctor --context:"):
+            binding_parts += (solicitation.gap_fingerprint,)
+        binding = json.dumps(binding_parts, ensure_ascii=False)
         eml_bytes = (
             f"X-Vertex-Solicitation: {solicitation.id}\r\n"
             f"X-Vertex-Packet-Binding: {sha256(binding.encode('utf-8')).hexdigest()}\r\n"
@@ -268,11 +278,18 @@ def produce_context_gap_solicitation(
         ]
         if any(record.program != program_id for record in records):
             raise ContextGapSolicitationError("Gap observations contain a foreign program.")
-        selected = [gap for gap in rank_context_gaps(records) if _gap_fingerprint(gap) == gap_fingerprint]
+        selected = [
+            gap for gap in rank_context_gaps(records, programs_root=programs_root)
+            if _gap_fingerprint(gap) == gap_fingerprint
+        ]
         if len(selected) != 1:
-            raise ContextGapSolicitationError("Select one existing program gap.")
+            raise ContextGapSolicitationError("Select one active existing program gap.")
         gap = selected[0]
-        if gap.feature != "workstream_registry" or not gap.lane or gap.field not in {"deep_context.why", "deep_context.what", "deep_context.how"}:
+        canonical = gap.feature == "workstream_registry" and gap.field in {
+            "deep_context.why", "deep_context.what", "deep_context.how",
+        }
+        structural = gap.feature == "doctor --context" and gap.field in {"deep_context.why", "deep_context.what"}
+        if not gap.lane or not (canonical or structural):
             raise ContextGapSolicitationError("Only workstream deep_context.why/what/how solicitations are supported.")
         if is_in_cooldown(gap, programs_root=programs_root):
             raise ContextGapSolicitationError("The selected gap is in solicitation cooldown.")
@@ -288,6 +305,11 @@ def produce_context_gap_solicitation(
             paths = get_nudge_paths(program_id, programs_root=programs_root)
             paths.nudge_root.mkdir(parents=True, exist_ok=True)
             with portalocker.Lock(str(paths.run_lock_path), mode="a+", timeout=NUDGE_STATE_LOCK_TIMEOUT_SECONDS):
+                if not any(
+                    _gap_fingerprint(active) == gap_fingerprint
+                    for active in rank_context_gaps(records, programs_root=programs_root)
+                ):
+                    raise ContextGapSolicitationError("Select one active existing program gap.")
                 if is_in_cooldown(gap, programs_root=programs_root):
                     raise ContextGapSolicitationError("The selected gap is in solicitation cooldown.")
                 if read_registry_baseline(program_id, gap.lane, gap.field, programs_root=programs_root) != (current, baseline):
@@ -336,15 +358,24 @@ def validate_solicitation_draft(program_id: str, draft: Path, *, programs_root: 
             or re.fullmatch(r"[0-9a-f]{64}", row["eml_sha256"]) is None
         ):
             raise ContextGapSolicitationError("Malformed solicitation packet binding.")
-        binding = json.dumps((
+        binding_parts: tuple[str | None, ...] = (
             program_id, row.get("target_key"), row.get("target_field"),
             row.get("current_value"), row.get("current_value_hash"),
-        ), ensure_ascii=False)
+        )
+        detector_fingerprint = f"{program_id}:doctor --context:{row.get('target_key')}:{row.get('target_field')}"
+        if row.get("gap_fingerprint") == detector_fingerprint:
+            binding_parts += (detector_fingerprint,)
+        binding = json.dumps(binding_parts, ensure_ascii=False)
+        fingerprints = {
+            f"{program_id}:workstream_registry:{row.get('target_key')}:{row.get('target_field')}",
+        }
+        if row.get("target_field") in {"deep_context.why", "deep_context.what"}:
+            fingerprints.add(detector_fingerprint)
         if (
             row.get("program_id") != program_id
             or row.get("target_store") != "workstream_registry"
             or row.get("target_field") not in {"deep_context.why", "deep_context.what", "deep_context.how"}
-            or row.get("gap_fingerprint") != f"{program_id}:workstream_registry:{row.get('target_key')}:{row.get('target_field')}"
+            or row.get("gap_fingerprint") not in fingerprints
             or row.get("eml_sha256") != sha256(raw).hexdigest()
             or message.get("X-Vertex-Packet-Binding") != sha256(binding.encode("utf-8")).hexdigest()
         ):

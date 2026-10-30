@@ -162,7 +162,7 @@ Query {{ subgroup.query_id }} · {{ subgroup.source_label }} · Confidence {{ su
 {% elif section.kind == "ado_vitality" and ado_vitality %}
 ## {{ ado_vitality.title }}
 - Items updated in ADO: {{ ado_vitality.items_updated }} of {{ ado_vitality.items_total }} active ({{ ado_vitality.updated_percentage }}%)
-- Avg days since last update: {{ '%.1f' | format(ado_vitality.freshness_average_days) }} days
+- Avg days since last meaningful ADO update: {% if ado_vitality.freshness_average_days is none %}unknown{% else %}{{ '%.1f' | format(ado_vitality.freshness_average_days) }} days{% endif %} (known for {{ ado_vitality.freshness_known_items }}/{{ ado_vitality.items_total }} items)
 - Items with leakage signals: {{ ado_vitality.leakage_events }} {{ ado_vitality.leakage_events | pluralize("item") }} discussed outside ADO without a later ADO update in the same 7-day window
 {% if ado_vitality.best_documented_label and ado_vitality.best_documented_detail %}- Best documented: {{ ado_vitality.best_documented_label }} — {{ ado_vitality.best_documented_detail }}
 {% endif %}- Trend: {{ ado_vitality.trend_summary }}

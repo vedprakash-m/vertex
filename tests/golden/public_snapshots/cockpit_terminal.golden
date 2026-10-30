@@ -1,0 +1,7 @@
+Program health:        RED (2 high-risk item(s))
+Publication readiness: not measured yet
+Data trust:            1/3 required sources healthy; lineage not measured yet
+Value:                 report wall-time 1200s -> 420s (780s faster)
+Next actions:
+  - vertex doctor --edition fixture_weekly
+Detail: vertex cockpit show --program fixture_prog --format json

@@ -228,11 +228,11 @@ from src.core.adoption_telemetry import GoldenWorkflow, record_adoption
 from src.core.alerts import append_or_suppress_alert
 from src.core.operation_trace import REF_TYPE_OUTPUT, record_trace_link
 from src.core.people_enrichment import maybe_alert_enrichment_due
-from src.core.edition_resolver import filter_workstreams, resolve_edition, get_program_output_dir
+from src.core.edition_resolver import filter_workstreams, resolve_edition, resolve_edition_paths, get_program_output_dir
 from src.core.eml_writer import write_eml
 from src.core.evidence_engine import build_evidence
 from src.core.exceptions import AuthError, ConfigError, QueryError, QueryTimeoutError, StateError
-from src.core.workspace_paths import validate_report_workspace
+from src.core.workspace_paths import REPO_ROOT, resolve_report_workspace_roots
 from src.core.forecast_engine import ETAForecast, ForecastAssessment, build_forecast_assessment
 from src.core.freshness_engine import build_freshness_report
 from src.core.hygiene_engine import evaluate_hygiene
@@ -245,7 +245,7 @@ from src.core.jinja_filters import build_anchor, configure_ado_web_url, configur
 from src.core.kusto_client import build_live_kusto_query_executor
 from src.core.kusto_query_loader import load_kpi_queries
 from src.core.kusto_rendering import KustoQueryExecutor, build_kusto_sections
-from src.core.manifest_writer import build_run_manifest, write_run_manifest
+from src.core.manifest_writer import build_run_evidence_snapshot, build_run_manifest, write_run_manifest
 from src.core.narrative_store import build_workstream_narrative_history
 from src.core.notification_state_store import load_latest_notification_state
 from src.core.observability import RunLoggerAdapter, configure_file_logging, get_command_trace_path
@@ -485,9 +485,13 @@ def _load_program_reality(
     return ProgramReality.load(program_id, **kwargs)
 
 
-def _preflight_report_workspace() -> None:
+def _preflight_report_workspace() -> tuple[Path, Path, Path]:
     try:
-        validate_report_workspace(programs_root=PROGRAMS_ROOT, reports_root=REPORTS_ROOT, archive_root=ARCHIVE_ROOT)
+        return resolve_report_workspace_roots(
+            PROGRAMS_ROOT if PROGRAMS_ROOT != REPO_ROOT / "programs" else None,
+            REPORTS_ROOT if REPORTS_ROOT != REPO_ROOT / "reports" else None,
+            ARCHIVE_ROOT if ARCHIVE_ROOT != REPO_ROOT / "archive" else None,
+        )
     except ConfigError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(code=2) from error
@@ -533,8 +537,8 @@ def report_command(
         raise typer.BadParameter("--reseed requires --dry-run.")
     if reseed and no_seed:
         raise typer.BadParameter("--reseed cannot be combined with --no-seed.")
-    _preflight_report_workspace()
-    load_result = load_bundle_with_mode(edition, reports_root=REPORTS_ROOT, programs_root=PROGRAMS_ROOT)
+    programs_root, reports_root, archive_root = _preflight_report_workspace()
+    load_result = load_bundle_with_mode(edition, reports_root=reports_root, programs_root=programs_root)
     if str(load_result.bundle.config.edition.type).strip().lower() == "nudge":
         raise typer.BadParameter("Use 'vertex nudge --program <id>' for type: nudge editions.")
     # Historical re-render guard: prevent re-rendering issues before the
@@ -553,7 +557,7 @@ def report_command(
 
     # WS-1 §9a P1: archive integrity pre-flight — blocks dangling refs before any render/write.
     if not archive_integrity_waived():
-        _ai_result = verify_archive_integrity(edition, archive_root=ARCHIVE_ROOT)
+        _ai_result = verify_archive_integrity(edition, archive_root=archive_root)
         if not _ai_result.ok:
             typer.echo(
                 f"[ARCHIVE INTEGRITY FAILURE] {len(_ai_result.inconsistencies)} inconsistency/ies found "
@@ -570,7 +574,7 @@ def report_command(
     if not stdout:
         typer.echo("[MODE: V2 HYBRID JOURNAL]")
 
-    trace_path = get_command_trace_path(edition, "report", programs_root=PROGRAMS_ROOT) if verbose else None
+    trace_path = get_command_trace_path(edition, "report", programs_root=programs_root) if verbose else None
     trace_logger: RunLoggerAdapter | None = None
     if trace_path is not None:
         trace_logger = configure_file_logging(
@@ -618,7 +622,9 @@ def report_command(
             edition_type_override=edition_type,
             lookback_range=lookback_range,
             section_filter_ids=section_filter_ids,
-            programs_root=PROGRAMS_ROOT,
+            reports_root=reports_root,
+            archive_root=archive_root,
+            programs_root=programs_root,
             open_browser=not stdout,
             show_progress=not stdout,
             trace_logger=trace_logger,
@@ -641,7 +647,7 @@ def report_command(
     # preview, not a completed run, matching cockpit's --no-persist gate.
     if not dry_run:
         try:
-            record_adoption(load_result.bundle.program.id, GoldenWorkflow.WEEKLY_REPORT, programs_root=PROGRAMS_ROOT)
+            record_adoption(load_result.bundle.program.id, GoldenWorkflow.WEEKLY_REPORT, programs_root=programs_root)
         except (OSError, StateError):
             pass
 
@@ -652,7 +658,7 @@ def report_command(
         # between-runs alert; it never calls WorkIQ inline, same INV-ADF-2
         # discipline as _maybe_auto_run_workiq_enrich above.
         try:
-            fired = maybe_alert_enrichment_due(program_id=load_result.bundle.program.id, kind="report_run", programs_root=PROGRAMS_ROOT)
+            fired = maybe_alert_enrichment_due(program_id=load_result.bundle.program.id, kind="report_run", programs_root=programs_root)
             if fired and not stdout:
                 typer.echo(
                     f"[People] Routine WorkIQ enrichment is due. Run 'vertex kb people enrich "
@@ -675,7 +681,7 @@ def report_command(
                 stage="render",
                 ref_type=REF_TYPE_OUTPUT,
                 ref_id=str(artifacts.manifest_path) if artifacts.manifest_path is not None else f"issue-{artifacts.issue_number}",
-                programs_root=PROGRAMS_ROOT,
+                programs_root=programs_root,
             )
         except (OSError, portalocker.exceptions.LockException):
             pass
@@ -698,7 +704,10 @@ def report_command(
         if report_dir is None:
             typer.echo("Unable to locate report output directory for override application.", err=True)
             raise typer.Exit(code=2)
-        applied_overrides_path = apply_pending_overrides(edition, report_dir, reports_root=REPORTS_ROOT)
+        applied_overrides_path = apply_pending_overrides(
+            edition, report_dir, reports_root=reports_root,
+            programs_root=programs_root if getattr(load_result.bundle, "program_id", None) is not None else None,
+        )
         if applied_overrides_path is None:
             typer.echo("No pending overrides found to apply. Run 'vertex report' first.", err=True)
             raise typer.Exit(code=2)
@@ -711,7 +720,7 @@ def report_command(
         if no_ai:
             review_summary = "AI review suppressed by --no-ai."
         else:
-            bundle = load_bundle(edition, reports_root=REPORTS_ROOT, programs_root=PROGRAMS_ROOT)
+            bundle = load_bundle(edition, reports_root=reports_root, programs_root=programs_root)
             review_report, info_messages = review_draft(
                 report=artifacts.report,
                 draft_markdown=artifacts.markdown_body,
@@ -719,15 +728,15 @@ def report_command(
                 editorial_rules=bundle.editorial_rules,
                 kusto_settings=bundle.config.kusto,
                 edition_name=edition,
-                archive_root=ARCHIVE_ROOT,
+                archive_root=archive_root,
             )
             review_body = render_review_markdown(review_report, info_messages)
             review_path = _write_output_text(
-                get_program_output_dir(edition, programs_root=PROGRAMS_ROOT) / f"issue_{artifacts.issue_number:03d}" / f"issue_{artifacts.issue_number:03d}.review.md",
+                get_program_output_dir(edition, programs_root=programs_root) / f"issue_{artifacts.issue_number:03d}" / f"issue_{artifacts.issue_number:03d}.review.md",
                 review_body,
             )
             review_json_path = _write_output_json(
-                get_program_output_dir(edition, programs_root=PROGRAMS_ROOT) / f"issue_{artifacts.issue_number:03d}" / f"issue_{artifacts.issue_number:03d}.review.json",
+                get_program_output_dir(edition, programs_root=programs_root) / f"issue_{artifacts.issue_number:03d}" / f"issue_{artifacts.issue_number:03d}.review.json",
                 build_review_artifact(
                     review_report,
                     info_messages=info_messages,
@@ -740,11 +749,11 @@ def report_command(
     if stdout:
         verbose_evidence = None
         if verbose:
-            bundle = load_bundle(edition, reports_root=REPORTS_ROOT, programs_root=PROGRAMS_ROOT)
+            bundle = load_bundle(edition, reports_root=reports_root, programs_root=programs_root)
             trusted_issue = load_trusted_baseline_issue(
-                edition, before_issue_number=artifacts.issue_number, programs_root=PROGRAMS_ROOT,
+                edition, before_issue_number=artifacts.issue_number, programs_root=programs_root,
             )
-            previous_snapshot, _ = _load_previous_snapshot(edition, artifacts.issue_number, ARCHIVE_ROOT, trusted_issue_number=trusted_issue)
+            previous_snapshot, _ = _load_previous_snapshot(edition, artifacts.issue_number, archive_root, trusted_issue_number=trusted_issue)
             evidence_window_start = artifacts.report.ado_data_as_of - timedelta(days=bundle.config.ado.date_window_days)
             evidence_by_item = {
                 item.id: build_evidence(item, evidence_window_start, artifacts.report.ado_data_as_of)
@@ -755,7 +764,7 @@ def report_command(
                 artifacts.report.items,
                 previous_snapshot,
                 edition_name=edition,
-                archive_root=ARCHIVE_ROOT,
+                archive_root=archive_root,
             )
             verbose_evidence = build_verbose_evidence_payload(evidence_by_item, scorecard_packets)
         compact_manifest = build_compact_manifest(
@@ -793,7 +802,7 @@ def report_command(
         if artifacts.html_path is None:
             typer.echo("Draft email not sent because the draft has blocking render errors.")
         else:
-            bundle = load_bundle(edition, reports_root=REPORTS_ROOT, programs_root=PROGRAMS_ROOT)
+            bundle = load_bundle(edition, reports_root=reports_root, programs_root=programs_root)
             try:
                 _build_draft_email_sender()(_build_draft_email_message(bundle, artifacts))
                 typer.echo(f"Draft email sent to {bundle.config.author.email}.")
@@ -989,7 +998,7 @@ def _pin_gather_run_lineage(ctx: StageContext) -> StageContext:
         ) from exc
     if committed is None:
         return ctx
-    return replace(ctx, gather_run_id=committed.run_id, gather_run_hash=committed.manifest_hash)
+    return replace(ctx, gather_run_id=committed.run_id, gather_run_hash=committed.manifest_hash, gather_run_manifest=committed)
 
 
 def _execute_report_pipeline(
@@ -1099,8 +1108,13 @@ def _build_stage_request_context(
     run_id: str = "",
 ) -> StageContext:
     started_at = datetime.now(timezone.utc)
-    resolved_reports_root = reports_root or REPORTS_ROOT
-    resolved_archive_root = archive_root or ARCHIVE_ROOT
+    programs_root, resolved_reports_root, resolved_archive_root = resolve_report_workspace_roots(
+        programs_root if programs_root is not None else (
+            PROGRAMS_ROOT if PROGRAMS_ROOT != REPO_ROOT / "programs" else None
+        ),
+        reports_root,
+        archive_root,
+    )
     data_as_of = _parse_datetime(as_of) if as_of is not None else started_at
     if data_as_of is None:
         data_as_of = started_at
@@ -1227,6 +1241,7 @@ class _LookbackStage:
                 open_browser=ctx.open_browser,
                 gather_run_id=ctx.gather_run_id,
                 gather_run_hash=ctx.gather_run_hash,
+                programs_root=ctx.programs_root if ctx.resolved_v2 is not None else None,
             ),
         )
 
@@ -1270,11 +1285,24 @@ class _OutputStage:
             edition_name=ctx.edition_name,
             issue_number=ctx.resolved_issue_number,
             generated_at=ctx.started_at,
-            db_root=_runtime_db_root_for_reports(ctx.reports_root),
+            db_root=_runtime_db_root_for_reports(
+                ctx.reports_root, programs_root=ctx.programs_root if ctx.resolved_v2 is not None else None,
+            ),
             pin=ctx.fact_snapshot_pin,
         )
         render_state = ctx.render_state
         validation_state = ctx.validation_state
+        if (ctx.gather_run_id, ctx.gather_run_hash) != (validation_state.manifest.gather_run_id, validation_state.manifest.gather_run_hash):
+            raise ConfigError("Run evidence gather aliases are inconsistent.")
+        capture = build_run_evidence_snapshot(
+            ctx.fact_snapshot_pin, ctx.fact_snapshot, ctx.gather_run_manifest,
+            validation_state.manifest, render_state.snapshot,
+        ) if ctx.resolved_v2 is not None else None
+        if capture is not None:
+            validation_state = replace(validation_state, manifest=replace(
+                validation_state.manifest,
+                metadata={**validation_state.manifest.metadata, "run_evidence_snapshot": capture},
+            ))
         diff_summary = None
         if ctx.diff_mode and ctx.previous_dry_run_state is not None and ctx.evidence_by_item is not None:
             ado_lines = _build_draft_ado_diff_lines(
@@ -1408,6 +1436,7 @@ class _OutputStage:
                 kusto_sections=render_state.kusto_sections,
                 override_snapshot=ctx.override_snapshot,
                 program_fact_snapshot=draft_fact_snapshot,
+                run_evidence_snapshot_sha256=capture.sha256 if capture is not None else None,
                 top_3_now=ctx.top_3_now,
                 exec_summary_text=ctx.render_exec_summary_text,
                 gather_run_id=ctx.gather_run_id,
@@ -1519,8 +1548,12 @@ def _maybe_auto_run_workiq_enrich(
 def apply_overrides_command(
     edition: str = typer.Option(..., "--edition", help="Edition name, for example acme_weekly."),
 ) -> None:
-    report_dir = get_program_output_dir(edition, programs_root=PROGRAMS_ROOT)
-    overrides_path = apply_pending_overrides(edition, report_dir, reports_root=REPORTS_ROOT)
+    programs_root, reports_root, _ = _preflight_report_workspace()
+    artifact_programs_root = programs_root if resolve_edition_paths(edition, programs_root=programs_root) is not None else None
+    report_dir = get_program_output_dir(edition, programs_root=programs_root)
+    overrides_path = apply_pending_overrides(
+        edition, report_dir, reports_root=reports_root, programs_root=artifact_programs_root,
+    )
     if overrides_path is None:
         typer.echo("No pending overrides found. Run 'vertex report --dry-run --edition <name>' first.")
         raise typer.Exit(code=2)

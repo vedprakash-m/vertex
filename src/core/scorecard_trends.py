@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -17,6 +18,36 @@ class ScorecardTrend:
     direction: Literal["improving", "stable", "worsening"]
     consecutive_high_count: int
     annotation: str | None
+
+
+def compare_dated_risk_pair(
+    current_risk: RiskLevel,
+    prior_risk: RiskLevel | None,
+    *,
+    current_at: datetime | None,
+    prior_at: datetime | None,
+) -> tuple[str | None, Literal["rise", "fall", "steady", "high"] | None]:
+    if (
+        prior_risk is None
+        or RiskLevel.UNKNOWN in {current_risk, prior_risk}
+        or current_at is None
+        or prior_at is None
+        or current_at.tzinfo is None
+        or prior_at.tzinfo is None
+        or current_at.utcoffset() is None
+        or prior_at.utcoffset() is None
+        or current_at <= prior_at
+    ):
+        return None, None
+
+    sparkline = _spark_char(prior_risk) + _spark_char(current_risk)
+    if current_risk == prior_risk == RiskLevel.HIGH:
+        return sparkline, "high"
+    if _risk_rank(current_risk) > _risk_rank(prior_risk):
+        return sparkline, "rise"
+    if _risk_rank(current_risk) < _risk_rank(prior_risk):
+        return sparkline, "fall"
+    return sparkline, "steady"
 
 
 def load_scorecard_trends(
@@ -110,6 +141,7 @@ def _risk_rank(level: RiskLevel) -> int:
         RiskLevel.LOW: 2,
         RiskLevel.MEDIUM: 3,
         RiskLevel.HIGH: 4,
+        RiskLevel.BLOCKED: 5,
     }[level]
 
 
@@ -119,3 +151,14 @@ def _issue_number(raw_issue_number: object, fallback: int) -> int:
     if isinstance(raw_issue_number, str) and raw_issue_number.strip().isdigit():
         return int(raw_issue_number.strip())
     return fallback
+
+
+def _spark_char(level: RiskLevel) -> str:
+    return {
+        RiskLevel.DONE: "▁",
+        RiskLevel.LOW: "▂",
+        RiskLevel.UNKNOWN: "▅",
+        RiskLevel.MEDIUM: "▄",
+        RiskLevel.HIGH: "▇",
+        RiskLevel.BLOCKED: "█",
+    }[level]

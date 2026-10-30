@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 from typer.testing import CliRunner
 import yaml
+import pytest
 
 from cli import app
 from src.commands import escalate as escalate_module
@@ -30,13 +31,32 @@ AS_OF = datetime(2026, 5, 10, 18, 0, tzinfo=timezone.utc)
 EDITION_NAME = "acme_weekly"
 
 
-def test_escalate_cli_dry_run_prefers_raci_accountable(monkeypatch, repo_root: Path, tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("prior_confirmed_at", "expected_trend"),
+    [
+        (datetime(2040, 5, 3, 12, 0, tzinfo=timezone.utc), "high across 2 observations"),
+        (datetime(2040, 5, 10, 18, 0, tzinfo=timezone.utc), None),
+        (datetime(2040, 5, 12, 12, 0, tzinfo=timezone.utc), None),
+    ],
+)
+def test_escalate_cli_dry_run_prefers_raci_accountable(
+    monkeypatch,
+    repo_root: Path,
+    tmp_path: Path,
+    prior_confirmed_at: datetime,
+    expected_trend: str | None,
+) -> None:
     reports_root, programs_root, output_root = _stage_escalate_workspace(repo_root, tmp_path)
     _write_escalation_rules(programs_root)
     _set_workstream_accountable(programs_root, workstream_id="acme", accountable="priya")
     _seed_people_entry(tmp_path / "knowledge", alias="priya", email="priya@example.com", display_name="Priya Mehta")
     _seed_high_override(programs_root, issue_number=78, dimension_name="Deployment Velocity")
-    _seed_chronic_high_history(programs_root, edition_name=EDITION_NAME, dimension_name="Deployment Velocity")
+    _seed_chronic_high_history(
+        programs_root,
+        edition_name=EDITION_NAME,
+        dimension_name="Deployment Velocity",
+        latest_at=prior_confirmed_at,
+    )
 
     monkeypatch.setattr("src.commands.escalate.REPORTS_ROOT", reports_root)
     monkeypatch.setattr(
@@ -44,9 +64,25 @@ def test_escalate_cli_dry_run_prefers_raci_accountable(monkeypatch, repo_root: P
         lambda bundle, timestamp: (_sample_chronic_high_items(timestamp), 0),
     )
 
+    original_generate_escalations = escalate_module.generate_escalations
+    generated: list[escalate_module.EscalationArtifacts] = []
+
+    def generate_at_synthetic_time(**kwargs):
+        artifacts = original_generate_escalations(
+            **kwargs,
+            as_of=datetime(2040, 5, 10, 18, 0, tzinfo=timezone.utc),
+        )
+        generated.append(artifacts)
+        return artifacts
+
+    monkeypatch.setattr(escalate_module, "generate_escalations", generate_at_synthetic_time)
+
     result = runner.invoke(app, ["escalate", "--edition", EDITION_NAME, "--dry-run"])
 
     assert result.exit_code == 0
+    assert len(generated) == 1
+    assert generated[0].previews[0].trend_label == expected_trend
+    assert generated[0].previews[0].consecutive_high == 4
     assert "ESCALATE PREVIEW" in result.stdout
     assert "To: priya@example.com" in result.stdout
     assert "Dimension: Deployment Velocity" in result.stdout
@@ -88,7 +124,7 @@ def test_escalate_cli_dry_run_supports_json_and_csv(monkeypatch, repo_root: Path
     lines = csv_result.stdout.strip().splitlines()
     assert lines[0] == (
         "edition_name,channel,dry_run,rule_name,preview_type,dimension_name,recipients,"
-        "workstream_ids,workstream_names,consecutive_high,vitality_composite,stale_days,"
+        "workstream_ids,workstream_names,consecutive_high,vitality_composite,stale_days,stale_age_unknown,"
         "milestone_id,milestone_status,milestone_days_to_target,decision_ask_id,"
         "decision_ask_status,decision_ask_age_days,incident_refs,incident_summary,escalation_path_label,subject"
     )
@@ -217,12 +253,26 @@ def test_escalate_cli_writes_eml_and_signal(monkeypatch, repo_root: Path, tmp_pa
     _set_workstream_accountable(programs_root, workstream_id="acme", accountable="priya")
     _seed_people_entry(tmp_path / "knowledge", alias="priya", email="priya@example.com", display_name="Priya Mehta")
     _seed_high_override(programs_root, issue_number=78, dimension_name="Deployment Velocity")
-    _seed_chronic_high_history(programs_root, edition_name=EDITION_NAME, dimension_name="Deployment Velocity")
+    _seed_chronic_high_history(
+        programs_root,
+        edition_name=EDITION_NAME,
+        dimension_name="Deployment Velocity",
+        latest_at=datetime(2040, 5, 3, 12, 0, tzinfo=timezone.utc),
+    )
 
     monkeypatch.setattr("src.commands.escalate.REPORTS_ROOT", reports_root)
     monkeypatch.setattr(
         "src.commands.escalate.report_helpers._load_live_work_items",
         lambda bundle, timestamp: (_sample_chronic_high_items(timestamp), 0),
+    )
+    original_generate_escalations = escalate_module.generate_escalations
+    monkeypatch.setattr(
+        escalate_module,
+        "generate_escalations",
+        lambda **kwargs: original_generate_escalations(
+            **kwargs,
+            as_of=datetime(2040, 5, 10, 18, 0, tzinfo=timezone.utc),
+        ),
     )
 
     result = runner.invoke(app, ["escalate", "--edition", EDITION_NAME], input="y\n")
@@ -236,6 +286,7 @@ def test_escalate_cli_writes_eml_and_signal(monkeypatch, repo_root: Path, tmp_pa
     assert "Wrote 1 escalation draft EML(s). Send manually via Outlook." in result.stdout
     assert len(signals) == 1
     assert "Scorecard Trend" in html_body
+    assert "high across 2 observations" in html_body
     assert "Evidence Packet" in html_body
     assert "Recommended Action" in html_body
     assert signals[0].source == "vertex/escalation"
@@ -266,6 +317,15 @@ def test_escalate_cli_falls_back_to_leadership_reader(monkeypatch, repo_root: Pa
     assert "To: jordan@example.com" in result.stdout
 
 
+def _make_source_age_unknown(items, fetched_at):
+    for item in items:
+        item.custom_fields.pop("changed_date", None)
+        item.revisions = []
+        item.comments = []
+        item.fetched_at = fetched_at
+    return items, 0
+
+
 def test_escalate_cli_dry_run_supports_vitality_rule_fields(monkeypatch, repo_root: Path, tmp_path: Path) -> None:
     reports_root, programs_root, output_root = _stage_escalate_workspace(repo_root, tmp_path)
     _write_escalation_rules(
@@ -273,7 +333,7 @@ def test_escalate_cli_dry_run_supports_vitality_rule_fields(monkeypatch, repo_ro
         conditions=[
             {"field": "consecutive_high", "op": ">=", "value": 4},
             {"field": "vitality_composite", "op": "<=", "value": 30},
-            {"field": "stale_days", "op": ">=", "value": 21},
+            {"field": "stale_days", "op": ">=", "value": 9999},
         ],
     )
     _set_workstream_accountable(programs_root, workstream_id="acme", accountable="priya")
@@ -284,7 +344,7 @@ def test_escalate_cli_dry_run_supports_vitality_rule_fields(monkeypatch, repo_ro
     monkeypatch.setattr("src.commands.escalate.REPORTS_ROOT", reports_root)
     monkeypatch.setattr(
         "src.commands.escalate.report_helpers._load_live_work_items",
-        lambda bundle, timestamp: (_sample_stale_high_items(timestamp), 0),
+        lambda bundle, timestamp: _make_source_age_unknown(_sample_stale_high_items(timestamp), timestamp),
     )
 
     result = runner.invoke(app, ["escalate", "--edition", EDITION_NAME, "--dry-run"])
@@ -292,7 +352,8 @@ def test_escalate_cli_dry_run_supports_vitality_rule_fields(monkeypatch, repo_ro
     assert result.exit_code == 0
     assert "To: priya@example.com" in result.stdout
     assert "Vitality Composite:" in result.stdout
-    assert "Stale Days: 28" in result.stdout
+    assert "Stale Age: unknown" in result.stdout
+    assert "9999" not in result.stdout
     assert "Dry run: no escalation drafts written." in result.stdout
 
 
@@ -318,6 +379,8 @@ def test_escalate_cli_dry_run_tolerates_malformed_scorecard_history(monkeypatch,
     assert result.exit_code == 0
     assert "ESCALATE PREVIEW" in result.stdout
     assert "No escalation rules triggered." in result.stdout
+    assert "Scorecard Trend" not in result.stdout
+    assert "Scorecard trend unavailable: malformed scorecard history" in result.stdout
     assert "Dry run: no escalation drafts written." in result.stdout
 
 
@@ -386,6 +449,32 @@ def test_build_workstream_vitality_context_reads_sqlite_backed_signals_and_traje
                 composite_score=61,
                 suggested_update="Add an owner comment",
             ),
+            VitalityScore(
+                work_item_id=1202,
+                owner_alias="owner",
+                workstream_id=None,
+                freshness_days=None,
+                freshness_grade="red",
+                richness_score=75,
+                richness_missing=("recent_comment",),
+                leakage_events=0,
+                workiq_signal_count=0,
+                composite_score=61,
+                suggested_update="Add an owner comment",
+            ),
+            VitalityScore(
+                work_item_id=1203,
+                owner_alias="owner",
+                workstream_id="acme",
+                freshness_days=14,
+                freshness_grade="yellow",
+                richness_score=75,
+                richness_missing=("recent_comment",),
+                leakage_events=0,
+                workiq_signal_count=0,
+                composite_score=61,
+                suggested_update="Add an owner comment",
+            ),
         )
 
     monkeypatch.setattr(escalate_module, "score_vitality", _capture_score_vitality)
@@ -397,7 +486,7 @@ def test_build_workstream_vitality_context_reads_sqlite_backed_signals_and_traje
         ),
     )
 
-    composite_by_workstream, stale_days_by_workstream = escalate_module._build_workstream_vitality_context(
+    composite_by_workstream, stale_days_by_workstream, stale_age_by_workstream = escalate_module._build_workstream_vitality_context(
         program_id="acme",
         items=(
             WorkItem(
@@ -436,9 +525,172 @@ def test_build_workstream_vitality_context_reads_sqlite_backed_signals_and_traje
 
     assert composite_by_workstream == {"acme": 61}
     assert stale_days_by_workstream == {"acme": 28}
+    assert stale_age_by_workstream == {"acme": 28}
     assert captured["threshold"] == 1
     assert captured["leakage"].signal_counts_by_item == {1201: 1}
     assert captured["leakage"].leakage_counts_by_item == {}
+
+
+def test_escalation_previews_distinguish_unknown_known_and_unlinked_source_age() -> None:
+    assessment = SimpleNamespace(
+        computed_health=SimpleNamespace(value="at_risk"),
+        blocked_criteria=(),
+        reasoning="Review the milestone.",
+    )
+    milestone = SimpleNamespace(
+        id="milestone-1",
+        name="Launch readiness",
+        linked_workstream_ids=("acme",),
+    )
+    ask = SimpleNamespace(
+        id="ask-1",
+        text="Confirm launch readiness.",
+        owner_alias="owner",
+        entity_refs=(),
+    )
+
+    scenarios = (
+        (54, 28, False, "Oldest linked stale item: 28 days", "stale 28d"),
+        (54, None, True, "Oldest linked stale item: source age unknown", "stale age unknown"),
+        (None, None, False, None, None),
+    )
+    for composite, stale_days, age_unknown, body_text, signal_text in scenarios:
+        dimension = escalate_module._build_escalation_preview(
+            edition_name=EDITION_NAME,
+            edition_title="Acme Weekly",
+            dimension_name="Deployment Velocity",
+            dimension_summary="Review rollout risk.",
+            consecutive_high=0,
+            rule_name="vitality_review",
+            linked_workstream_ids=("acme",) if composite is not None else (),
+            linked_workstream_names=("Acme",) if composite is not None else (),
+            recipients=("owner@example.com",),
+            evidence_lines=(),
+            trend_label=None,
+            risk_sparkline=None,
+            recommended_action="Review the evidence.",
+            vitality_composite=composite,
+            stale_days=stale_days,
+            stale_age_unknown=age_unknown,
+        )
+        milestone_preview = escalate_module._build_milestone_escalation_preview(
+            edition_name=EDITION_NAME,
+            edition_title="Acme Weekly",
+            milestone=milestone,
+            assessment=assessment,
+            rule_name="milestone_at_risk",
+            linked_workstream_names=("Acme",) if composite is not None else (),
+            recipients=("owner@example.com",),
+            cooldown_key="milestone:1",
+            vitality_composite=composite,
+            stale_days=stale_days,
+            stale_age_unknown=age_unknown,
+            milestone_days_to_target=10,
+            milestone_schedule_summary=None,
+            milestone_target_date_history_summary=None,
+            milestone_completion_date_history_summary=None,
+        )
+        ask_preview = escalate_module._build_decision_ask_escalation_preview(
+            edition_title="Acme Weekly",
+            edition_name=EDITION_NAME,
+            ask=ask,
+            effective_status="open",
+            ask_age_days=21,
+            linked_workstream_ids=("acme",) if composite is not None else (),
+            linked_workstream_names=("Acme",) if composite is not None else (),
+            recipients=("owner@example.com",),
+            cooldown_key="ask:1",
+            vitality_composite=composite,
+            stale_days=stale_days,
+            stale_age_unknown=age_unknown,
+            rule_name="unresolved_ask",
+            incident_refs=(),
+            incident_summary=None,
+        )
+        for preview in (dimension, milestone_preview, ask_preview):
+            if body_text is None:
+                assert "Oldest linked stale item:" not in preview.md_body
+                assert "stale " not in preview.signal_text
+            else:
+                assert body_text in preview.md_body
+                assert signal_text in preview.signal_text
+            assert "9999" not in preview.md_body
+            assert "9999" not in preview.signal_text
+
+        plaintext = escalate_module.render_escalation_preview_plaintext(
+            escalate_module.EscalationArtifacts((dimension,), (), ())
+        )
+        assert ("Stale Age: unknown" in plaintext) is age_unknown
+        assert ("Stale Days: 28" in plaintext) is (stale_days == 28)
+
+
+def test_build_workstream_vitality_context_returns_empty_maps_without_eligible_items(tmp_path: Path) -> None:
+    assert escalate_module._build_workstream_vitality_context(
+        program_id="acme",
+        items=(),
+        workstreams=(),
+        raw_program={},
+        knowledge=SimpleNamespace(people_directory=()),
+        as_of=AS_OF,
+        programs_root=tmp_path,
+    ) == ({}, {}, {})
+
+
+def test_build_workstream_vitality_context_skips_scores_without_workstream(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    score_calls: list[bool] = []
+    monkeypatch.setattr(
+        escalate_module,
+        "effective_vitality_exempt_aliases",
+        lambda settings, people_directory: (),
+    )
+    monkeypatch.setattr(
+        escalate_module,
+        "build_trajectory_store_for_program_id",
+        lambda program_id, *, programs_root: SimpleNamespace(read=lambda *args: ()),
+    )
+    monkeypatch.setattr(escalate_module, "load_approved_workiq_signals", lambda *args, **kwargs: ())
+    monkeypatch.setattr(
+        escalate_module,
+        "detect_leakage",
+        lambda *args, **kwargs: SimpleNamespace(
+            leakage_counts_by_item={},
+            signal_counts_by_item={},
+        ),
+    )
+    monkeypatch.setattr(
+        escalate_module,
+        "score_vitality",
+        lambda *args, **kwargs: score_calls.append(True) or (
+            VitalityScore(
+                work_item_id=1201,
+                owner_alias="owner",
+                workstream_id=None,
+                freshness_days=None,
+                freshness_grade="red",
+                richness_score=75,
+                richness_missing=("recent_comment",),
+                leakage_events=0,
+                workiq_signal_count=0,
+                composite_score=61,
+                suggested_update="Add an owner comment",
+            ),
+        ),
+    )
+    monkeypatch.setattr(escalate_module, "aggregate_vitality", lambda *args, **kwargs: ())
+
+    assert escalate_module._build_workstream_vitality_context(
+        program_id="acme",
+        items=_sample_stale_high_items(AS_OF),
+        workstreams=(),
+        raw_program={},
+        knowledge=SimpleNamespace(people_directory=()),
+        as_of=AS_OF,
+        programs_root=tmp_path,
+    ) == ({}, {}, {})
+    assert score_calls == [True]
 
 
 def test_escalate_cli_dry_run_supports_milestone_rule_fields(monkeypatch, repo_root: Path, tmp_path: Path) -> None:
@@ -656,6 +908,10 @@ def test_escalate_cli_can_scope_to_single_decision_ask(monkeypatch, repo_root: P
     _seed_people_entry(tmp_path / "knowledge", alias="priya", email="priya@example.com", display_name="Priya Mehta")
     _append_open_decision_ask(programs_root)
     _append_related_incident_entry(programs_root)
+    archive_dir = programs_root / "acme" / "archive" / EDITION_NAME
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    (archive_dir / "index.json").write_text("{malformed", encoding="utf-8")
+    (archive_dir / "scorecards.json").write_text("{malformed", encoding="utf-8")
 
     _orig_gen = escalate_module.generate_escalations
     monkeypatch.setattr(escalate_module, "generate_escalations", lambda **kw: _orig_gen(as_of=AS_OF, **kw))
@@ -677,6 +933,7 @@ def test_escalate_cli_can_scope_to_single_decision_ask(monkeypatch, repo_root: P
     assert payload["previews"][0]["decision_ask_id"] == "ask-1"
     assert payload["previews"][0]["incident_refs"] == "IcM 4321"
     assert payload["previews"][0]["incident_summary"].startswith("WI:1201: rollout sequencing slipped after dependency handoff. Source: IcM 4321.")
+    assert not payload["suppressed"]
 
 
 def test_escalate_cli_writes_signal_for_decision_ask_rule_fields(monkeypatch, repo_root: Path, tmp_path: Path) -> None:
@@ -1207,7 +1464,13 @@ def _seed_high_override(programs_root: Path, *, issue_number: int, dimension_nam
     )
 
 
-def _seed_chronic_high_history(programs_root: Path, *, edition_name: str, dimension_name: str) -> None:
+def _seed_chronic_high_history(
+    programs_root: Path,
+    *,
+    edition_name: str,
+    dimension_name: str,
+    latest_at: datetime | None = None,
+) -> None:
     edition_root = programs_root / "acme" / "archive" / edition_name
     edition_root.mkdir(parents=True, exist_ok=True)
     (edition_root / "scorecards.json").write_text(
@@ -1222,6 +1485,27 @@ def _seed_chronic_high_history(programs_root: Path, *, edition_name: str, dimens
         ),
         encoding="utf-8",
     )
+    if latest_at is not None:
+        (edition_root / "index.json").write_text(
+            json.dumps(
+                {
+                    "edition": edition_name,
+                    "issues": [
+                        {
+                            "issue_number": issue_number,
+                            "generated_at": generated_at.isoformat(),
+                            "kind": "confirmed",
+                        }
+                        for issue_number, generated_at in (
+                            (75, datetime(2040, 5, 1, 12, 0, tzinfo=timezone.utc)),
+                            (76, datetime(2040, 5, 2, 12, 0, tzinfo=timezone.utc)),
+                            (77, latest_at),
+                        )
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
 
 
 def _sample_chronic_high_items(as_of: datetime) -> tuple[WorkItem, ...]:

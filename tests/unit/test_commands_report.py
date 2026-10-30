@@ -1,6 +1,7 @@
 from __future__ import annotations
 from dataclasses import asdict, replace
 import json
+import re
 import os
 import pytest
 import shutil
@@ -38,6 +39,7 @@ from src.core.forecast_engine import ETAForecast
 from src.core.incident_journal_store import append_incident_entry
 from src.core.journal import append_review_decision, append_signal
 from src.core.jinja_filters import JINJA_FILTERS, JINJA_GLOBALS, build_anchor
+from src.core.manifest_writer import hash_jsonable
 from src.core.overrides_store import save_overrides
 from src.core.models import Comment, Confidence, ConfirmedDimension, DeltaKind, EditionType, Revision, RiskLevel, RunManifest, Snapshot
 from src.core.models import SnapshotItem, WorkItem
@@ -66,6 +68,212 @@ from tests.support.slice_contract_fixtures import build_test_ado_source_contract
 
 runner = CliRunner()
 EDITION_NAME = "acme_weekly"
+
+
+@pytest.mark.parametrize("program_backed", [True, False])
+@pytest.mark.parametrize("pending", [True, False])
+def test_apply_overrides_handler_retains_artifact_context(monkeypatch, tmp_path: Path, capsys, program_backed: bool, pending: bool) -> None:
+    from unittest.mock import Mock
+
+    for name in ("programs", "reports", "archive"):
+        monkeypatch.setattr(report_module, name.upper() + "_ROOT", tmp_path / name)
+    monkeypatch.setattr(report_module, "resolve_edition_paths", Mock(return_value=object() if program_backed else None), raising=False)
+    output = tmp_path / "output"
+    monkeypatch.setattr(report_module, "get_program_output_dir", Mock(return_value=output))
+    target = tmp_path / "authored.yaml" if pending else None
+    apply = Mock(return_value=target)
+    monkeypatch.setattr(report_module, "apply_pending_overrides", apply)
+
+    if pending:
+        report_module.apply_overrides_command(edition=EDITION_NAME)
+        assert "Applied overrides:" in capsys.readouterr().out
+    else:
+        with pytest.raises(typer.Exit) as error:
+            report_module.apply_overrides_command(edition=EDITION_NAME)
+        assert error.value.exit_code == 2
+        assert "No pending overrides found" in capsys.readouterr().out
+    apply.assert_called_once_with(
+        EDITION_NAME, output, reports_root=tmp_path / "reports",
+        programs_root=tmp_path / "programs" if program_backed else None,
+    )
+
+
+def test_apply_overrides_handler_rejects_context_before_output_lookup(monkeypatch, tmp_path: Path, capsys) -> None:
+    from unittest.mock import Mock
+
+    for name in ("reports", "archive"):
+        monkeypatch.setattr(report_module, name.upper() + "_ROOT", tmp_path / name)
+    monkeypatch.setattr(report_module, "PROGRAMS_ROOT", tmp_path / "other")
+    output = Mock(side_effect=AssertionError("Must reject before output lookup"))
+    monkeypatch.setattr(report_module, "get_program_output_dir", output)
+
+    with pytest.raises(typer.Exit) as error:
+        report_module.apply_overrides_command(edition=EDITION_NAME)
+
+    assert error.value.exit_code == 2
+    assert "workspace roots" in capsys.readouterr().err
+    output.assert_not_called()
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("program_backed", [True, False])
+def test_deprecated_write_overrides_retains_artifact_context(monkeypatch, tmp_path: Path, program_backed: bool) -> None:
+    from unittest.mock import Mock
+    import cli as cli_module
+
+    for name in ("programs", "reports", "archive"):
+        monkeypatch.setattr(report_module, name.upper() + "_ROOT", tmp_path / name)
+    for name in ("_maybe_register_tier_decision_sink", "_maybe_run_scheduled_db_maintenance", "_maybe_run_session_catchup"):
+        monkeypatch.setattr(cli_module, name, Mock())
+    bundle = SimpleNamespace(
+        config=SimpleNamespace(edition=SimpleNamespace(type="detailed")),
+        program_id="demo" if program_backed else None,
+    )
+    monkeypatch.setattr(report_module, "load_bundle_with_mode", Mock(return_value=SimpleNamespace(bundle=bundle)))
+    monkeypatch.setattr(report_module, "archive_integrity_waived", lambda: True)
+    monkeypatch.setattr(report_module, "_maybe_auto_run_workiq_enrich", Mock())
+    output = tmp_path / "output"
+    monkeypatch.setattr(report_module, "generate_report_draft", Mock(return_value=SimpleNamespace(
+        html_path=output / "draft.html", md_path=None, manifest_path=None, snapshot_path=None,
+    )))
+    apply = Mock(side_effect=RuntimeError("Pending override boundary"))
+    monkeypatch.setattr(report_module, "apply_pending_overrides", apply)
+
+    result = runner.invoke(app, ["report", "--edition", EDITION_NAME, "--dry-run", "--write-overrides"])
+
+    assert isinstance(result.exception, RuntimeError), result.output + repr(result.exception)
+    assert str(result.exception) == "Pending override boundary"
+    assert "--write-overrides is deprecated" in result.stderr
+    apply.assert_called_once_with(
+        EDITION_NAME, output, reports_root=tmp_path / "reports",
+        programs_root=tmp_path / "programs" if program_backed else None,
+    )
+
+
+@pytest.mark.parametrize("mode", ["omitted", "none", "explicit"])
+@pytest.mark.parametrize("boundary", ["artifacts", "pin"])
+def test_lookback_artifacts_selected_root_and_legacy_compatibility(
+    repo_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, boundary: str,
+) -> None:
+    from unittest.mock import Mock
+    from src.commands.report_pipeline import assemble_stage as assembly
+    from src.core.config_loader import load_bundle
+    from src.core.overrides_store import OverridesDocument
+    from src.core.narrative_store import write_narrative_section
+    from src.core.review_status_store import get_review_status_path
+
+    reports, archive = _seed_v2_report_layout(repo_root, tmp_path)
+    root = tmp_path / "programs"
+    bundle = load_bundle(EDITION_NAME, reports_root=reports, programs_root=root)
+    if mode == "explicit":
+        root = root.rename(tmp_path / "named-home")
+    selected = root if mode == "explicit" else None
+    save_overrides(
+        EDITION_NAME, OverridesDocument(issue_number=7, top_3_now=(), scorecards=(), edition_intro="selected"),
+        reports, programs_root=selected,
+    )
+    write_narrative_section(EDITION_NAME, 7, "exec_summary", "selected retrospective", reports, programs_root=selected)
+    if mode == "explicit":
+        write_narrative_section(EDITION_NAME, 7, "exec_summary", "decoy", reports)
+        decoy = reports / EDITION_NAME / "narratives" / "issue_007" / "exec_summary.md"
+        decoy_bytes = decoy.read_bytes()
+    stamp = datetime(2026, 5, 5, tzinfo=timezone.utc)
+    snapshots = tuple(_lookback_snapshot(issue_number=i, as_of=stamp, items=(), scorecard_risks={}) for i in (1, 2))
+    monkeypatch.setattr(assembly, "_load_lookback_snapshots", Mock(return_value=snapshots))
+    target = "ReportData" if boundary == "artifacts" else "_pin_program_fact_snapshot"
+    reader = Mock(side_effect=RuntimeError("Completed lookback selected boundary"))
+    monkeypatch.setattr(assembly, target, reader)
+    runtime = Mock(wraps=assembly._runtime_db_root_for_reports)
+    monkeypatch.setattr(assembly, "_runtime_db_root_for_reports", runtime)
+    resolver = Mock(wraps=assembly.resolve_edition)
+    monkeypatch.setattr(assembly, "resolve_edition", resolver)
+    kwargs = {} if mode == "omitted" else {"programs_root": selected}
+    with pytest.raises(RuntimeError, match="Completed lookback selected boundary"):
+        assembly._generate_lookback_draft(
+            edition_name=EDITION_NAME, bundle=bundle, archive_index=SimpleNamespace(),
+            resolved_issue_number=7, previous_dry_run_state=None, started_at=stamp, data_as_of=stamp,
+            lookback_range=2, diff_mode=False, reports_root=reports, archive_root=archive, open_browser=False,
+            **kwargs,
+        )
+    if boundary == "artifacts":
+        assert reader.call_args.kwargs["exec_summary_text"] == "selected retrospective"
+    else:
+        assert runtime.call_args.kwargs.get("programs_root") == selected
+        resolver.assert_called_once_with(EDITION_NAME, programs_root=root)
+    assert get_review_status_path(EDITION_NAME, reports, programs_root=selected).exists()
+    if mode == "explicit":
+        assert decoy.read_bytes() == decoy_bytes
+
+
+@pytest.mark.parametrize("invalid", ["missing", "relative", "unknown_edition"])
+def test_lookback_explicit_context_fails_before_archive_reads_or_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid: str,
+) -> None:
+    from unittest.mock import Mock
+    from src.commands.report_pipeline import assemble_stage as assembly
+    from tests.unit.test_narrative_store import _selected_artifact_root
+
+    root = _selected_artifact_root(tmp_path)
+    if invalid == "missing":
+        root = tmp_path / "missing"
+    elif invalid == "relative":
+        root = Path("relative-home")
+    edition = "missing_edition" if invalid == "unknown_edition" else "fixture_weekly"
+    reader = Mock(side_effect=AssertionError("Must reject before archive reads"))
+    monkeypatch.setattr(assembly, "_load_lookback_snapshots", reader)
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    stamp = datetime(2026, 5, 5, tzinfo=timezone.utc)
+    with pytest.raises(ConfigError):
+        assembly._generate_lookback_draft(
+            edition_name=edition, bundle=SimpleNamespace(), archive_index=SimpleNamespace(),
+            resolved_issue_number=7, previous_dry_run_state=None, started_at=stamp, data_as_of=stamp,
+            lookback_range=2, diff_mode=False, reports_root=tmp_path / "reports",
+            archive_root=tmp_path / "archive", open_browser=False, programs_root=root,
+        )
+    reader.assert_not_called()
+    assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_ensure_review_status_selected_root_preserves_decoy_and_terminal_sections(tmp_path: Path, existing: bool) -> None:
+    from src.commands.report_review import _ensure_review_status
+    from src.core.models import ReviewSection, ReviewState, ReviewStatus
+    from src.core.review_status_store import get_review_status_path, save_review_status
+    from tests.unit.test_narrative_store import _selected_artifact_root
+
+    root = _selected_artifact_root(tmp_path)
+    reports = tmp_path / "elsewhere" / "reports"
+    _ensure_review_status("fixture_weekly", 99, (), set(), reports)
+    decoy_path = get_review_status_path("fixture_weekly", reports)
+    decoy = decoy_path.read_bytes()
+    if existing:
+        save_review_status(
+            "fixture_weekly", ReviewStatus(issue_number=7, sections=(
+                ReviewSection(section_id="exec_summary", state=ReviewState.APPROVED, reviewer="owner", note=None, updated_at=None),
+            )), reports, programs_root=root,
+        )
+    status = _ensure_review_status("fixture_weekly", 7, ("delivery",), {"ws:delivery"}, reports, programs_root=root)
+    assert status.sections[0].state == (ReviewState.APPROVED if existing else ReviewState.PENDING)
+    assert status.sections[1].state == ReviewState.SKIPPED_NO_DELTA
+    assert load_review_status("fixture_weekly", reports, programs_root=root) == status
+    assert decoy_path.read_bytes() == decoy
+
+
+@pytest.mark.parametrize("relative", [False, True])
+def test_ensure_review_status_explicit_invalid_root_never_changes_flat_decoy(tmp_path: Path, relative: bool) -> None:
+    from src.commands.report_review import _ensure_review_status
+    from src.core.review_status_store import get_review_status_path
+
+    reports = tmp_path / "reports"
+    _ensure_review_status("fixture_weekly", 99, (), set(), reports)
+    decoy = get_review_status_path("fixture_weekly", reports)
+    original = decoy.read_bytes()
+    root = Path("relative-programs") if relative else tmp_path / "missing-programs"
+    with pytest.raises(ConfigError):
+        _ensure_review_status("fixture_weekly", 7, (), set(), reports, programs_root=root)
+    assert decoy.read_bytes() == original
+    assert not (tmp_path / "missing-programs").exists()
+
 
 @pytest.fixture
 def repo_root(tmp_path: Path) -> Path:
@@ -157,6 +365,190 @@ def test_attach_kpi_tiles_to_workstreams_uses_configured_queries_without_signals
     assert attached[0].kpi_tiles[0].label == "Fleet Healthy %"
     assert attached[0].kpi_tiles[0].validated is False
     assert attached[0].kpi_tiles[0].owner_alias == "testowner"
+
+@pytest.mark.parametrize("failure", ["schema", "cardinality", "execution"])
+@pytest.mark.parametrize("aggregate", [True, False])
+@pytest.mark.parametrize("chapter", [True, False])
+def test_failed_bound_kpi_lifecycle_omits_retained_report_claim(
+    tmp_path: Path, failure: str, aggregate: bool, chapter: bool,
+) -> None:
+    from src.commands.gather import _build_kusto_kpi_signals
+    from src.core.gather_state_store import write_gather_state
+    from src.core.html_renderer import HTMLRenderer
+    from src.core.journal import load_latest_review_decisions, read_signals
+    from src.core.kusto_query_loader import load_kpi_queries
+    from src.core.models_v2 import Program
+    from src.core.quality_gates.editorial import evaluate_kpi_degradation_gate
+    from src.core.signal_review import signal_is_approved_for_evidence
+
+    programs_root = tmp_path / "programs"
+    program_root = programs_root / "demo"
+    program_root.mkdir(parents=True)
+    queries = [
+        {
+            "id": query_id, "metric_id": f"demo.{query_id}",
+            "cluster": "synthetic", "database": "synthetic", "kql": "synthetic query",
+            "section": query_id, "label": query_id, "result_column": "Count",
+            "render_as": "metric_highlight", "confidence": "high",
+            "validated": True, "refresh_on_gather": True,
+            "expected_cardinality": "scalar_required", "program_ids": ["demo"],
+            "workstream_ids": [] if chapter else [section],
+            "chapter": section if chapter else None,
+        }
+        for query_id, section in (("active", "ops"), ("independent", "ops"), ("other", "other"))
+    ]
+    (program_root / "kpis.yaml").write_text(json.dumps({"kpis": queries}), encoding="utf-8")
+    program = Program(schema_version="1.0", id="demo", name="Synthetic demo")
+    workstreams = (Workstream(id="ops", name="Operations"), Workstream(id="other", name="Other"))
+    sections = tuple(
+        WorkstreamData(
+            section_id=section, title=section, blurb="", dependency_cascades=(),
+            items=(), citations=(), review_state=report_module.ReviewState.PENDING,
+        )
+        for section in ("ops", "other")
+    )
+    routed_workstreams = (Workstream(id="unmapped", name="Unmapped"),) if chapter else workstreams
+    renderer = HTMLRenderer(
+        "synthetic", reports_root=tmp_path / "reports",
+        templates_root=Path(__file__).resolve().parents[2] / "templates",
+    )
+    now = datetime(2026, 10, 29, 12, tzinfo=timezone.utc)
+
+    def persist_state(states, when):
+        write_gather_state(
+            "demo", gathered_at=when, scanned_items=0, discovered_signals=0,
+            new_signals=0, pending_review=0, trajectory_updates=0,
+            auto_reviews_written=0, ado_calls=0, archived_journal_files=0,
+            background_proposals=0, query_states=states, programs_root=programs_root,
+        )
+
+    def approve(signals, when):
+        for signal in signals:
+            append_signal(signal, programs_root=programs_root, partition_at=when)
+            append_review_decision(
+                "demo", SignalReviewDecision(
+                    signal_id=signal.id, decision="approved", reviewed_at=when,
+                    reviewed_by="synthetic-owner",
+                ), programs_root=programs_root,
+            )
+
+    def attach(when):
+        reviews = load_latest_review_decisions("demo", programs_root=programs_root)
+        approved = tuple(
+            signal for signal in read_signals("demo", end=when, programs_root=programs_root)
+            if signal_is_approved_for_evidence(signal, reviews)
+        )
+        return report_module._attach_kpi_tiles_to_workstreams(
+            sections, approved_signals=approved, workstreams=routed_workstreams,
+            program_id="demo", programs_root=programs_root,
+        )
+
+    def row(value, when, *, incidents=False):
+        result = {"Count": value, "Timestamp": when.isoformat()}
+        if incidents:
+            result.update(Sev0Count=0, Sev1Count=value, Sev2Count=0)
+        return result
+
+    states = {}
+    initial = _build_kusto_kpi_signals(
+        program=program, program_id="demo", programs_root=programs_root,
+        as_of=now, workstreams=workstreams,
+        executor=lambda query: [row(0 if query.id == "active" else 9, now, incidents=aggregate and query.id == "active")],
+        query_state_sink=states,
+    )
+    assert len(initial) == 3 and states["active"]["last_cycle_succeeded"] is True
+    approve(initial, now)
+    persist_state(states, now)
+    healthy = attach(now)
+    assert [tile.value for tile in healthy[0].kpi_tiles] == ["0", "9"]
+    healthy_html = renderer.render_fragment("partials/kpi_bar.j2", ws=healthy[0])
+    assert ("No active Sev 0-2" in healthy_html) if aggregate else (">0</div>" in healthy_html)
+
+    later = now + timedelta(hours=1)
+
+    def failing_executor(query):
+        if query.id != "active":
+            return [row(9, later)]
+        if failure == "execution":
+            raise QueryError("synthetic unavailable")
+        return [{"Count": None}] if failure == "schema" else [{"Count": 1}, {"Count": 2}]
+
+    failed_states = {}
+    failed_signals = _build_kusto_kpi_signals(
+        program=program, program_id="demo", programs_root=programs_root,
+        as_of=later, workstreams=workstreams, executor=failing_executor,
+        query_state_sink=failed_states, previous_query_states=states,
+    )
+    assert len(failed_signals) == 2
+    assert failed_states["active"]["last_cycle_succeeded"] is False
+    assert failed_states["active"]["last_error"]
+    assert failed_states["active"]["value_last_4"] == states["active"]["value_last_4"]
+    approve(failed_signals, later)
+    persist_state(failed_states, later)
+    assert load_kpi_queries("demo", programs_root=programs_root)[0].last_cycle_succeeded is False
+    gate = evaluate_kpi_degradation_gate(program_id="demo", programs_root=programs_root)
+    assert not gate.passed and gate.forceable and "active" in gate.message
+    retained = {path: path.read_bytes() for path in program_root.rglob("*") if path.is_file()}
+    attached = attach(later)
+    assert [tile.query_id for tile in attached[0].kpi_tiles] == ["independent"]
+    assert [tile.query_id for tile in attached[1].kpi_tiles] == ["other"]
+    failed_html = renderer.render_fragment("partials/kpi_bar.j2", ws=attached[0])
+    assert "No active Sev 0-2" not in failed_html and ">0</div>" not in failed_html
+    assert {path: path.read_bytes() for path in program_root.rglob("*") if path.is_file()} == retained
+
+    recovered_at = later + timedelta(hours=1)
+    recovered_states = {}
+    recovered = _build_kusto_kpi_signals(
+        program=program, program_id="demo", programs_root=programs_root,
+        as_of=recovered_at, workstreams=workstreams,
+        executor=lambda query: [row(2 if query.id == "active" else 9, recovered_at, incidents=aggregate and query.id == "active")],
+        query_state_sink=recovered_states, previous_query_states=failed_states,
+    )
+    approve(recovered, recovered_at)
+    persist_state(recovered_states, recovered_at)
+    recovery = attach(recovered_at)
+    assert [tile.value for tile in recovery[0].kpi_tiles] == ["2", "9"]
+    recovery_html = renderer.render_fragment("partials/kpi_bar.j2", ws=recovery[0])
+    assert ("Sev1 2" in recovery_html) if aggregate else (">2</div>" in recovery_html)
+    assert evaluate_kpi_degradation_gate(program_id="demo", programs_root=programs_root).passed
+    assert len(read_signals("demo", programs_root=programs_root)) == 8
+
+
+@pytest.mark.parametrize("metric_id", ["demo.active", None])
+@pytest.mark.parametrize("succeeded", [True, None, False])
+@pytest.mark.parametrize("with_signal", [True, False])
+def test_bound_kpi_failure_admission_preserves_compatible_states(
+    tmp_path: Path, metric_id: str | None, succeeded: bool | None, with_signal: bool,
+) -> None:
+    from src.commands.gather import _build_kusto_kpi_signal
+    from src.core.models_v2 import KustoQuery
+
+    query = KustoQuery(
+        id="active", cluster="synthetic", database="synthetic", kql="synthetic",
+        section="ops", render_as="metric_highlight", confidence="high",
+        metric_id=metric_id, result_column="Count", expected_cardinality="scalar_required",
+        workstream_ids=("ops",), validated=True, last_cycle_succeeded=succeeded,
+    )
+    signal = _build_kusto_kpi_signal(
+        query=query, rows=[{"Count": 0}], program_id="demo",
+        as_of=datetime(2026, 10, 29, tzinfo=timezone.utc),
+    )
+    assert signal is not None
+    section = WorkstreamData(
+        section_id="ops", title="Operations", blurb="", dependency_cascades=(),
+        items=(), citations=(), review_state=report_module.ReviewState.PENDING,
+    )
+    tiles = report_module._kpi_tiles_for_section(
+        section, approved_signals=(signal,) if with_signal else (),
+        workstreams=(Workstream(id="ops", name="Operations"),),
+        configured_queries=(query,),
+    )
+    if metric_id is not None and succeeded is False:
+        assert tiles == ()
+    else:
+        assert len(tiles) == 1
+        assert tiles[0].value == ("0" if with_signal else "")
+
 
 def test_health_templates_render_forecast_confidence() -> None:
     templates_root = Path(__file__).resolve().parents[2] / "templates"
@@ -1253,6 +1645,22 @@ def test_generate_report_draft_writes_outputs(repo_root: Path, tmp_path: Path) -
     assert manifest_payload["ai_cost_by_model"] == {}
     assert "milestone_assessments" in manifest_payload["metadata"]
     assert manifest_payload["metadata"]["milestone_assessments"]
+    milestone_assessments = manifest_payload["metadata"]["milestone_assessments"]
+    trajectory_capture = manifest_payload["metadata"]["milestone_trajectory_snapshot"]
+    assert all(
+        row["linked_work_item_ids"] == sorted(set(row["linked_work_item_ids"]))
+        for row in milestone_assessments
+    )
+    expected_item_ids = sorted({
+        work_item_id
+        for row in milestone_assessments
+        for work_item_id in row["linked_work_item_ids"]
+    })
+    assert [item["work_item_id"] for item in trajectory_capture["items"]] == expected_item_ids
+    assert trajectory_capture["backend"] in {"file", "sqlite"}
+    assert trajectory_capture["sha256"] == hash_jsonable({
+        key: value for key, value in trajectory_capture.items() if key != "sha256"
+    })
     assert "override_snapshot" in draft_payload
     assert "exec_summary_text" in draft_payload
     assert "workstream_blurbs" in draft_payload
@@ -1266,9 +1674,9 @@ def test_generate_report_draft_writes_outputs(repo_root: Path, tmp_path: Path) -
     assert "Highlights: M3 - Code Complete: Tracking 2026-05-28 (10 days late vs target); target history 2026-05-12 -> 2026-05-18." in artifacts.html_body
     assert "Highlights: M3 - Code Complete: Tracking 2026-05-28 (10 days late vs target); target history 2026-05-12 -> 2026-05-18." in artifacts.markdown_body
     assert "Tracked Milestones" in artifacts.html_body
-    assert "M3 - Code Complete | at risk (critical path) | target May 18" in artifacts.html_body
+    assert "M3 - Code Complete | at risk (longest dependency chain) | target May 18" in artifacts.html_body
     assert "Tracked milestones:" in artifacts.markdown_body
-    assert "M3 - Code Complete | at risk (critical path) | target May 18" in artifacts.markdown_body
+    assert "M3 - Code Complete | at risk (longest dependency chain) | target May 18" in artifacts.markdown_body
     assert quality_matrix_payload["schema_version"] == "1.0"
     assert quality_matrix_payload["slices"]
     deployment_velocity = next(slice_row for slice_row in quality_matrix_payload["slices"] if slice_row["slice_id"] == "example_release_readiness.deployment_velocity")
@@ -2338,6 +2746,97 @@ def test_build_risk_register_summary_reports_highest_active_risk() -> None:
     assert summary == "Risk register: 1 active entry, 1 stale review. Highest active: Deployment telemetry may miss the weekly gate (owner operator, score 9)."
 
 
+def test_report_render_caller_binds_named_risk_metadata_without_reloading(monkeypatch) -> None:
+    from src.core.pipeline import StageContext
+    from src.core.stages.render_stage import _build_health_summary_with_risk_fallback
+    from src.core.program_reality import TruthLevel
+    from tests.unit.test_report_deck_reality_consolidation import _risk_assessment
+
+    selected = replace(
+        _risk_assessment(),
+        record=replace(_risk_assessment().record, id="alpha", title="Alpha current"),
+        truth_level=TruthLevel.HUMAN_CONFIRMED, disputed=False, stale=False,
+    )
+    other = replace(
+        _risk_assessment(),
+        record=replace(_risk_assessment().record, id="zulu", title="Zulu stale review"),
+    )
+    monkeypatch.setattr(
+        report_health_module.ProgramReality, "load",
+        lambda *_args, **_kwargs: pytest.fail("Supplied risk records must not reload"),
+    )
+    support = SimpleNamespace(build_health_summary=report_module._build_health_summary)
+    health = _build_health_summary_with_risk_fallback(
+        StageContext(), support, (), None,
+        risks=(other.record, selected.record), risk_assessments=(other, selected),
+        stale_risk_ids=("zulu",),
+    )
+    assert health.risk_register_summary == (
+        "Risk register: 2 active entries, 1 stale review. "
+        "Highest active: Alpha current (owner operator, score 9)."
+    )
+    assert health.risk_register_truth_level == selected.truth_level.value
+    assert health.risk_register_disputed is False
+    assert health.risk_register_stale_evidence is False
+
+
+def test_generated_report_uses_named_risk_assessment(
+    repo_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.core.stages import risk_stage
+    from src.core.program_reality import TruthLevel
+    from tests.unit.test_report_deck_reality_consolidation import _risk_assessment
+
+    reports_root, _ = _seed_v2_report_layout(repo_root, tmp_path)
+    selected = replace(
+        _risk_assessment(),
+        record=replace(
+            _risk_assessment().record, id="alpha", title="Alpha current",
+            last_reviewed_date=date(2026, 5, 5),
+        ),
+        truth_level=TruthLevel.HUMAN_CONFIRMED, disputed=False, stale=False,
+    )
+    other = replace(
+        _risk_assessment(),
+        record=replace(
+            _risk_assessment().record, id="zulu", title="Zulu stale review",
+            last_reviewed_date=date(2026, 4, 1),
+        ),
+    )
+    monkeypatch.setattr(
+        risk_stage, "sor_gated_family_load",
+        lambda **_kwargs: ((other.record, selected.record), (other, selected), (), None),
+    )
+    observed_health = []
+    build_health = report_module._build_health_summary
+
+    def capture_health(*args, **kwargs):
+        health = build_health(*args, **kwargs)
+        observed_health.append(health)
+        return health
+
+    monkeypatch.setattr(report_module, "_build_health_summary", capture_health)
+
+    artifacts = generate_report_draft(
+        edition_name=EDITION_NAME, issue_number=1, reports_root=reports_root,
+        archive_root=tmp_path / "archive",
+        programs_root=reports_root.parent / "programs",
+        work_item_loader=lambda _bundle, timestamp: (_sample_items(timestamp), 0),
+        as_of=datetime(2026, 5, 5, 18, tzinfo=timezone.utc), open_browser=False,
+    )
+
+    assert len(observed_health) == 1
+    health = observed_health[0]
+    assert health.risk_register_summary == (
+        "Risk register: 2 active entries, 1 stale review. "
+        "Highest active: Alpha current (owner operator, score 9)."
+    )
+    assert health.risk_register_truth_level == selected.truth_level.value
+    assert health.risk_register_disputed is False
+    assert health.risk_register_stale_evidence is False
+    assert "Highest active: Alpha current" in artifacts.html_body
+
+
 def test_build_health_summary_loads_risk_register_when_program_context_is_available(repo_root: Path, tmp_path: Path) -> None:
     reports_root, _ = _seed_v2_report_layout(repo_root, tmp_path)
     programs_root = reports_root.parent / "programs"
@@ -2445,7 +2944,7 @@ def test_build_milestone_health_summary_reports_counts_and_critical_path() -> No
         ),
     )
 
-    assert summary == "Milestones: 1 at risk, 1 on track. Critical path: M3 - Code Complete."
+    assert summary == "Milestones: 1 at risk, 1 on track. Longest dependency chain: M3 - Code Complete."
 
 
 def test_build_milestone_health_summary_reads_sqlite_backed_trajectories(tmp_path: Path) -> None:
@@ -6124,6 +6623,37 @@ def test_generate_report_draft_falls_back_to_zero_throughput_velocity_when_no_it
     assert not any("velocity-p50" in warning for warning in artifacts.warnings)
 
 
+def test_teams_vitality_template_renders_unknown_source_age_and_count() -> None:
+    templates_root = Path(__file__).resolve().parents[2] / "templates"
+    environment = Environment(loader=FileSystemLoader(str(templates_root)), trim_blocks=True, lstrip_blocks=True)
+    environment.filters.update(JINJA_FILTERS)
+    environment.globals.update(JINJA_GLOBALS)
+    vitality_data = SimpleNamespace(
+        title="ADO Vitality This Week",
+        items_updated=0,
+        items_total=1,
+        updated_percentage=0,
+        freshness_average_days=None,
+        freshness_known_items=0,
+        leakage_events=0,
+        best_documented_label=None,
+        best_documented_detail=None,
+        trend_summary="No history",
+        accountability_rows=(),
+    )
+
+    output = environment.get_template("base.teams.j2").render(
+        title="Demo",
+        edition=SimpleNamespace(issue_number=1, ado_data_as_of=datetime(2026, 10, 28, 12, 0, tzinfo=timezone.utc), manifest_id="manifest"),
+        ordered_sections=(SimpleNamespace(kind="ado_vitality"),),
+        ado_vitality=vitality_data,
+        health=None,
+    )
+
+    assert "Avg days since last meaningful ADO update: unknown (known for 0/1 items)" in output
+    assert "9999" not in output
+
+
 def test_generate_report_draft_suppresses_degraded_fleet_health_when_ado_vitality_is_available(
     repo_root: Path,
     tmp_path: Path,
@@ -6241,6 +6771,10 @@ def test_generate_report_draft_renders_ado_vitality_section_with_archive_trend(r
     )
 
     assert "ADO Vitality This Week" in artifacts.html_body
+    assert "Avg days since last meaningful ADO update:" in artifacts.html_body
+    assert re.search(r"(?:unknown|[0-9.]+ days) \(known for \d+/\d+ items\)", artifacts.html_body)
+    assert "known for 2/2 items" in artifacts.html_body
+    assert "9999" not in artifacts.html_body
     assert "ADO Vitality This Week" in artifacts.markdown_body
     assert "Best documented: WI:" in artifacts.markdown_body
     assert "Items with leakage signals: 1 item" in artifacts.markdown_body
@@ -7273,7 +7807,19 @@ def _write_lt_deck_dependency_proposals(programs_root: Path) -> None:
     )
 
 
-def test_generate_report_draft_renders_scorecard_trend_annotations_in_v2_lt_deck(repo_root: Path, tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("prior_confirmed_at", "expected_trend"),
+    [
+        (datetime(2040, 4, 28, 18, 0, tzinfo=timezone.utc), "unchanged vs prior issue"),
+        (datetime(2040, 5, 5, 18, 0, tzinfo=timezone.utc), None),
+    ],
+)
+def test_generate_report_draft_renders_scorecard_trend_annotations_in_v2_lt_deck(
+    repo_root: Path,
+    tmp_path: Path,
+    prior_confirmed_at: datetime,
+    expected_trend: str | None,
+) -> None:
     reports_root, archive_root = _seed_v2_report_layout(
         repo_root,
         tmp_path,
@@ -7281,9 +7827,9 @@ def test_generate_report_draft_renders_scorecard_trend_annotations_in_v2_lt_deck
     )
 
     for issue_number, issue_as_of in (
-        (1, datetime(2026, 4, 14, 18, 0, tzinfo=timezone.utc)),
-        (2, datetime(2026, 4, 21, 18, 0, tzinfo=timezone.utc)),
-        (3, datetime(2026, 4, 28, 18, 0, tzinfo=timezone.utc)),
+        (1, datetime(2040, 4, 14, 18, 0, tzinfo=timezone.utc)),
+        (2, datetime(2040, 4, 21, 18, 0, tzinfo=timezone.utc)),
+        (3, prior_confirmed_at),
     ):
         write_confirmed_issue(
             edition="example_lt_deck",
@@ -7309,13 +7855,15 @@ def test_generate_report_draft_renders_scorecard_trend_annotations_in_v2_lt_deck
         reports_root=reports_root,
         archive_root=archive_root,
         programs_root=(tmp_path / "programs"),
-        as_of=datetime(2026, 5, 5, 18, 0, tzinfo=timezone.utc),
+        as_of=datetime(2040, 5, 5, 18, 0, tzinfo=timezone.utc),
         work_item_loader=lambda bundle, timestamp: (_sample_items(timestamp), 0),
         kusto_query_executor=lambda query: [],
         open_browser=False,
     )
 
     assert "High for 4 consecutive issues." in artifacts.markdown_body
+    networking = next(dimension for dimension in artifacts.report.scorecard if dimension.name == "Networking")
+    assert networking.trend_label == expected_trend
 
 
 def test_generate_report_draft_renders_dependency_cascade_in_v2_workstream_section(repo_root: Path, tmp_path: Path) -> None:

@@ -14,6 +14,62 @@ from src.core.context_gap_reply_import import list_pending_replies, parse_reply_
 from src.core.eml_writer import write_eml_atomic
 
 
+@pytest.mark.parametrize("change", ["stale", "tampered", "fingerprint", "valid"])
+def test_detector_bound_reply_retains_pending_only_packet_controls(tmp_path: Path, change: str) -> None:
+    from datetime import date
+    from src.commands.doctor_checks.context_checks import emit_context_gaps
+    from src.core.context_gap_reply_import import ContextGapReplyImportError, import_context_gap_reply
+    from src.core.context_gap_solicitation import produce_context_gap_solicitation
+
+    programs = tmp_path / "programs"
+    program = programs / "sample"
+    program.mkdir(parents=True)
+    registry = program / "workstream_registry.yaml"
+    registry.write_text("workstreams:\n- id: lane\n  deep_context: {}\n")
+    emit_context_gaps(
+        program_id="sample", registry_entries=[{"id": "lane", "deep_context": {}}],
+        kpis_list=[], today=date(2026, 10, 26), programs_root=programs,
+    )
+    fingerprint = "sample:doctor --context:lane:deep_context.why"
+    packet = produce_context_gap_solicitation(
+        program_id="sample", gap_fingerprint=fingerprint, recipient_email="owner@example.com",
+        programs_root=programs,
+    )
+    source = program / "reply.eml"
+    _write_reply_eml(source, from_addr="Spoofed <owner@example.com>", subject="Reply",
+                     body=f"Proposed purpose.\n\n> Reference: {packet.id}\n")
+    if change == "stale":
+        registry.write_text("workstreams:\n- id: lane\n  deep_context:\n    why: Changed\n")
+    elif change == "tampered":
+        draft = program / "nudge" / "drafts" / f"{packet.id}.eml"
+        draft.write_bytes(draft.read_bytes() + b"\nchanged")
+    elif change == "fingerprint":
+        log = program / "_feedback" / "context_gap_solicitations.jsonl"
+        row = json.loads(log.read_text())
+        fingerprint = fingerprint.replace("doctor --context", "workstream_registry")
+        row["gap_fingerprint"] = fingerprint
+        log.write_text(json.dumps(row) + "\n")
+        observations = program / "_feedback" / "context_gaps.jsonl"
+        gap = json.loads(observations.read_text().splitlines()[0])
+        gap["feature"] = "workstream_registry"
+        with observations.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(gap) + "\n")
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    arguments = dict(program_id="sample", edition_id="sample_weekly", issue_number=1, source=source,
+                     gap_fingerprint=fingerprint, solicitation_id=packet.id, programs_root=programs)
+    if change != "valid":
+        with pytest.raises(ContextGapReplyImportError):
+            import_context_gap_reply(**arguments)
+        assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+    else:
+        proposal = import_context_gap_reply(**arguments)
+        assert proposal.status == "pending" and not proposal.batch_eligible
+        assert proposal.current_value_hash == packet.current_value_hash
+        assert "unverified" in proposal.extraction_method_rationale
+        assert import_context_gap_reply(**arguments) == proposal
+        assert all(p.read_bytes() == value for p, value in before.items())
+
+
 def _intake_workspace(root: Path) -> tuple[Path, str]:
     program = root / "sample"
     feedback = program / "_feedback"

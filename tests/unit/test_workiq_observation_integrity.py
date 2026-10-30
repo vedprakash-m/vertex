@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -124,10 +125,69 @@ def test_fragment_identity_is_not_mislabeled_as_native() -> None:
         "summary": "WI 101 needs owner review.\n\nWI 102 has a delivery blocker.",
     })
     assert len(signals) == 2
+    assert len({signal.id for signal in signals}) == 2
+    assert len({signal.raw_ref for signal in signals}) == 2
     for signal in signals:
         assert signal.metadata["native_message_id"] == "native-1"
         assert signal.metadata["message_id_kind"] == "derived_fragment"
         assert signal.metadata["message_id"] != "native-1"
+        assert signal.metadata["source_event_time"] == SOURCE_TIME.replace("Z", "+00:00")
+
+
+def test_transcript_enrichment_uses_nonempty_native_reference() -> None:
+    from src.commands.gather_pipeline.evidence_extraction_stage import _signals_as_enrichments
+
+    signal = Signal(
+        id="signal-fragment-0",
+        timestamp=AS_OF,
+        source="transcript",
+        program_id="fixture",
+        workstream_id="lane",
+        entity_refs=(),
+        text="Known transcript fragment for native reference coverage.",
+        raw_ref="workiq:transcript:fragment-0",
+        confidence=Confidence.NONE,
+        metadata={
+            "native_message_id": "native-occurrence-42",
+            "message_id": "native-occurrence-42:seg:0",
+            "message_id_kind": "derived_fragment",
+        },
+    )
+
+    enrichments = _signals_as_enrichments([signal])
+
+    assert len(enrichments) == 1
+    assert enrichments[0].source_id == "workiq:transcript:native-occurrence-42"
+
+
+@pytest.mark.parametrize("native_message_id", [None, ""])
+def test_transcript_enrichment_uses_legacy_reference_when_native_id_is_empty(
+    native_message_id: str | None,
+) -> None:
+    from src.commands.gather_pipeline.evidence_extraction_stage import _signals_as_enrichments
+
+    signal = _parse({
+        "messageId": "native-1",
+        "receivedDateTime": SOURCE_TIME,
+        "summary": "Known transcript fragment for fallback coverage.",
+    })[0]
+    legacy_signal = replace(
+        signal,
+        metadata={**(signal.metadata or {}), "native_message_id": native_message_id},
+    )
+
+    enrichments = _signals_as_enrichments([legacy_signal])
+
+    assert len(enrichments) == 1
+    assert enrichments[0].source_id == signal.raw_ref
+    assert legacy_signal.metadata["message_id"] == signal.metadata["message_id"]
+    assert legacy_signal.raw_ref == signal.raw_ref
+    assert legacy_signal.id == signal.id
+    no_reference = replace(legacy_signal, raw_ref=None)
+    assert _signals_as_enrichments([no_reference])[0].source_id == signal.id
+    assert _signals_as_enrichments([replace(legacy_signal, text="")]) == []
+    no_metadata = replace(signal, metadata=None)
+    assert _signals_as_enrichments([no_metadata])[0].source_id == signal.raw_ref
 
 
 def test_cached_quarantine_restores_error_visibility_without_live_provider(tmp_path: Path) -> None:

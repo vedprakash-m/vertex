@@ -13,13 +13,15 @@ from src.commands.report import _build_scorecard_packets
 from src.core.config_loader import REPORTS_ROOT, load_bundle
 from src.core.ai_proposal_store import load_ai_proposals, update_ai_proposal_status
 from src.core.archive_store import is_issue_confirmed
-from src.core.edition_resolver import resolve_edition
+from src.core.edition_resolver import PROGRAMS_ROOT, resolve_edition
+from src.core.exceptions import ConfigError
 from src.core.models_v2 import AIProposal, AIProposalStatus
-from src.core.overrides_store import DimensionOverride, OverridesDocument, ScorecardOverrides, get_overrides_path, load_overrides, save_overrides
+from src.core.overrides_store import DimensionOverride, OverridesDocument, ScorecardOverrides, _resolve_artifact_edition, get_overrides_path, load_overrides, save_overrides
 from src.core.snapshot_store import ARCHIVE_ROOT
 from src.commands.report import _load_previous_snapshot
 from src.core.models import RiskLevel
 from src.core.trusted_baseline_store import load_trusted_baseline_issue
+from src.core.workspace_paths import validate_report_workspace
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,13 +50,23 @@ class OverrideResult:
     backup_path: Path
 
 
+def _preflight_override_workspace() -> None:
+    try:
+        validate_report_workspace(programs_root=PROGRAMS_ROOT, reports_root=REPORTS_ROOT, archive_root=ARCHIVE_ROOT)
+    except ConfigError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=2) from error
+
+
 def override_command(
     edition: str = typer.Option(..., "--edition", help="Edition name, e.g. myprogram_weekly."),
     dimension: str | None = typer.Option(None, "--dimension", help="Optional single dimension name to edit."),
 ) -> None:
+    _preflight_override_workspace()
     result = run_override(
         edition_name=edition,
         dimension_filter=dimension,
+        programs_root=PROGRAMS_ROOT,
     )
     typer.echo(f"OVERRIDE COMPLETE — {result.changed_count + result.kept_count}/{result.changed_count + result.kept_count + result.skipped_count} dimensions set")
     typer.echo(f"  Changed: {result.changed_count}  |  Kept: {result.kept_count}  |  Skipped: {result.skipped_count}")
@@ -69,16 +81,25 @@ def run_override(
     reports_root: Path | None = None,
     archive_root: Path | None = None,
     output_root: Path | None = None,
+    programs_root: Path | None = None,
 ) -> OverrideResult:
     resolved_reports_root = reports_root or REPORTS_ROOT
     resolved_archive_root = archive_root or ARCHIVE_ROOT
+    programs_root = programs_root if programs_root is not None else resolved_reports_root.parent / "programs"
+    validate_report_workspace(
+        programs_root=programs_root, reports_root=resolved_reports_root, archive_root=resolved_archive_root,
+    )
 
     bundle = load_bundle(
         edition_name,
         reports_root=resolved_reports_root,
-        programs_root=resolved_reports_root.parent / "programs",
+        programs_root=programs_root,
     )
-    overrides_document = load_overrides(edition_name, reports_root=resolved_reports_root)
+    resolved = resolve_edition(edition_name, programs_root=programs_root)
+    artifact_programs_root = programs_root if resolved is not None else None
+    overrides_document = load_overrides(
+        edition_name, reports_root=resolved_reports_root, programs_root=artifact_programs_root,
+    )
     if overrides_document is None or overrides_document.issue_number is None:
         raise typer.BadParameter("overrides.yaml is missing. Run `vertex report --dry-run` first.")
     if is_issue_confirmed(edition_name, overrides_document.issue_number, archive_root=resolved_archive_root):
@@ -87,12 +108,12 @@ def run_override(
             "are locked — run `vertex report --dry-run` to start the next issue before overriding."
         )
 
-    draft_state = _load_draft_state(edition_name, overrides_document.issue_number, programs_root=resolved_reports_root.parent / "programs")
+    draft_state = _load_draft_state(edition_name, overrides_document.issue_number, programs_root=programs_root)
     items = _deserialize_items(tuple(draft_state.get("items", [])))
     trusted_baseline_issue_number = load_trusted_baseline_issue(
         edition_name,
         before_issue_number=overrides_document.issue_number,
-        programs_root=resolved_reports_root.parent / "programs",
+        programs_root=programs_root,
     )
     previous_snapshot, _ = _load_previous_snapshot(
         edition_name=edition_name,
@@ -104,6 +125,7 @@ def run_override(
     pending_ai_proposals = _load_pending_ai_proposals_by_dimension(
         edition_name,
         reports_root=resolved_reports_root,
+        programs_root=artifact_programs_root,
     )
     candidates = _select_candidates(
         overrides_document,
@@ -180,14 +202,13 @@ def run_override(
             f"\n  ✅ {candidate.dimension_name} → {_format_override_result(new_risk, derived_risk, hide_details)}{_format_resolution_suffix(proposal_update)}\n"
         )
 
-    overrides_path = get_overrides_path(edition_name, reports_root=resolved_reports_root)
+    overrides_path = get_overrides_path(
+        edition_name, reports_root=resolved_reports_root, programs_root=artifact_programs_root,
+    )
     backup_path = overrides_path.with_suffix(overrides_path.suffix + ".bak")
     shutil.copy2(overrides_path, backup_path)
-    saved_path = save_overrides(edition_name, updated_document, reports_root=resolved_reports_root)
-
-    resolved = resolve_edition(
-        edition_name,
-        programs_root=resolved_reports_root.parent / "programs",
+    saved_path = save_overrides(
+        edition_name, updated_document, reports_root=resolved_reports_root, programs_root=artifact_programs_root,
     )
     if resolved is not None and proposal_updates:
         actor = _default_actor_identity()
@@ -199,7 +220,7 @@ def run_override(
                 new_status=proposal_update.new_status,
                 resolved_by=actor,
                 resolved_at=decision_time,
-                programs_root=resolved_reports_root.parent / "programs",
+                programs_root=programs_root,
             )
 
     return OverrideResult(
@@ -381,10 +402,14 @@ def _load_pending_ai_proposals_by_dimension(
     edition_name: str,
     *,
     reports_root: Path,
+    programs_root: Path | None = None,
 ) -> dict[tuple[str, str], AIProposal]:
+    if programs_root is not None:
+        _resolve_artifact_edition(edition_name, reports_root, programs_root)
+    programs_root = programs_root if programs_root is not None else reports_root.parent / "programs"
     resolved = resolve_edition(
         edition_name,
-        programs_root=reports_root.parent / "programs",
+        programs_root=programs_root,
     )
     if resolved is None:
         return {}
@@ -393,7 +418,7 @@ def _load_pending_ai_proposals_by_dimension(
     for proposal in load_ai_proposals(
         resolved.paths.program_id,
         status=AIProposalStatus.PENDING,
-        programs_root=reports_root.parent / "programs",
+        programs_root=programs_root,
     ):
         pending_by_workstream[proposal.workstream_id] = proposal
 

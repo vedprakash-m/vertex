@@ -10,7 +10,7 @@ from src.core.exceptions import ConfigError
 from src.core.fact_sor_state import resolve_family_sor_mode
 from src.core.milestone_engine import assess_milestone_health, build_critical_path
 from src.core.models_v2 import Dependency, LegacyDependency, Milestone
-from src.core.pipeline import StageContext
+from src.core.pipeline import StageContext, capture_milestone_trajectory_snapshot
 from src.core.program_fact_store import ProgramFactSnapshot, load_program_facts, project_dependencies, project_milestones
 from src.core.stages.sor_gated_load import report_reality_scope, retained_report_fact_snapshot
 from src.core.store_factory import build_trajectory_store_for_program_id
@@ -30,9 +30,9 @@ class MilestoneStage:
         if ctx.milestone_assessments is not None:
             return ctx
         if ctx.resolved_edition_type is not None and ctx.resolved_edition_type.value == "lookback":
-            return replace(ctx, milestones=(), milestone_assessments=(), milestone_warnings=())
+            return replace(ctx, milestones=(), milestone_assessments=(), milestone_trajectory_snapshot=None, milestone_warnings=())
         if ctx.resolved_v2 is None or ctx.programs_root is None or ctx.data_as_of is None:
-            return replace(ctx, milestones=(), milestone_assessments=(), milestone_warnings=())
+            return replace(ctx, milestones=(), milestone_assessments=(), milestone_trajectory_snapshot=None, milestone_warnings=())
 
         programs_root = ctx.programs_root
         data_as_of = ctx.data_as_of
@@ -72,6 +72,7 @@ class MilestoneStage:
                     ctx,
                     milestones=(),
                     milestone_assessments=(),
+                    milestone_trajectory_snapshot=None,
                     milestone_lineage={},
                     milestone_warnings=(f"Milestones skipped: {exc}",),
                 )
@@ -79,7 +80,14 @@ class MilestoneStage:
             lineage = {}
 
         if not milestones:
-            return replace(ctx, milestones=(), milestone_assessments=(), milestone_lineage=lineage, milestone_warnings=warnings)
+            return replace(
+                ctx,
+                milestones=(),
+                milestone_assessments=(),
+                milestone_trajectory_snapshot=None,
+                milestone_lineage=lineage,
+                milestone_warnings=warnings,
+            )
 
         trajectory_store = build_trajectory_store_for_program_id(
             program_id,
@@ -103,11 +111,17 @@ class MilestoneStage:
             )
             for milestone in milestones
         )
+        trajectory_snapshot = capture_milestone_trajectory_snapshot(
+            program_id,
+            trajectory_store,
+            trajectories,
+        )
         _emit_coverage_gap_findings(program_id, assessments, programs_root=ctx.programs_root)
         return replace(
             ctx,
             milestones=milestones,
             milestone_assessments=assessments,
+            milestone_trajectory_snapshot=trajectory_snapshot,
             milestone_lineage=lineage,
             milestone_warnings=warnings,
         )

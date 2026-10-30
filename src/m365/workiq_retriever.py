@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,12 +22,16 @@ from src.m365.workiq_ask_support import (
 )
 
 
+_TRANSIENT_WORKIQ_ID_RE = re.compile(r"^turn\d+(?:search|result)\d+$", re.IGNORECASE)
+
+
 @dataclass(frozen=True, slots=True)
 class WorkIQRetrievalResult:
     enrichments: tuple[Enrichment, ...]
     enumeration_count: int
     calls_made: int
     skipped_unchanged: int
+    rejected_identity_count: int = 0
 
 
 def retrieve_workiq_threads(
@@ -56,11 +61,13 @@ def retrieve_workiq_threads(
     cache = load_workiq_freshness_cache(cache_path) if cache_path is not None else {}
     enrichments: list[Enrichment] = []
     skipped = 0
+    rejected = 0
     for record in records[:top_k]:
         if calls >= max_calls or monotonic() - started >= max_wall_clock_seconds:
             break
         source_id = _canonical_source_id(record)
         if source_id is None:
+            rejected += 1
             continue
         newest_identity = str(record.get("id") or record.get("receivedDateTime") or "").strip()
         message_count = _bounded_message_count(record.get("messageCount"))
@@ -101,7 +108,7 @@ def retrieve_workiq_threads(
         }
     if cache_path is not None:
         write_workiq_freshness_cache(cache_path, cache)
-    return WorkIQRetrievalResult(tuple(enrichments), len(records), calls, skipped)
+    return WorkIQRetrievalResult(tuple(enrichments), len(records), calls, skipped, rejected)
 
 
 def _thread_extraction_question(record: dict[str, Any], *, request: DiscoveryRequest, one_hop: bool) -> str:
@@ -121,8 +128,11 @@ def _thread_extraction_question(record: dict[str, Any], *, request: DiscoveryReq
 
 def _canonical_source_id(record: dict[str, Any]) -> str | None:
     for key in ("conversationId", "threadId", "id"):
-        value = str(record.get(key) or "").strip()
-        if value:
+        raw = record.get(key)
+        if not isinstance(raw, str):
+            continue
+        value = raw.strip()
+        if value and not value.casefold().startswith("semantic:") and not _TRANSIENT_WORKIQ_ID_RE.fullmatch(value):
             return value
     return None
 

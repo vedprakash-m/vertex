@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Iterable, Mapping
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, TypedDict
 import os
 from pathlib import Path
 
@@ -193,7 +193,63 @@ def _dependency_fact_payload(dependency: Dependency) -> dict[str, object]:
         # legacy facts without these keys default to AUTHORED / empty on read.
         "evidence_tier": dependency.evidence_tier.value,
         "evidence_refs": list(dependency.evidence_refs),
+        **_serialize_date_margin_fields(dependency),
     }
+
+
+class DependencyDateMarginFields(TypedDict):
+    provider_forecast_ready_date: str | None
+    consumer_required_by_date: str | None
+    date_margin_calendar: str | None
+    date_margin_calendar_version: str | None
+    date_margin_timezone: str | None
+    date_margin_unit: str | None
+    date_margin_lag: int | None
+
+
+def _serialize_date_margin_fields(dependency: Dependency) -> DependencyDateMarginFields:
+    return {
+        "provider_forecast_ready_date": (
+            dependency.provider_forecast_ready_date.isoformat()
+            if dependency.provider_forecast_ready_date is not None else None
+        ),
+        "consumer_required_by_date": (
+            dependency.consumer_required_by_date.isoformat()
+            if dependency.consumer_required_by_date is not None else None
+        ),
+        "date_margin_calendar": dependency.date_margin_calendar,
+        "date_margin_calendar_version": dependency.date_margin_calendar_version,
+        "date_margin_timezone": dependency.date_margin_timezone,
+        "date_margin_unit": dependency.date_margin_unit,
+        "date_margin_lag": dependency.date_margin_lag,
+    }
+
+
+def _parse_date_margin_fields(payload: Mapping[str, object]) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    for name in ("provider_forecast_ready_date", "consumer_required_by_date"):
+        value = payload.get(name)
+        parsed = value if type(value) is date else None
+        if isinstance(value, str):
+            try:
+                parsed = date.fromisoformat(value) if len(value) == 10 else None
+                if parsed is not None and parsed.isoformat() != value:
+                    parsed = None
+            except ValueError:
+                pass
+        if value is not None and parsed is None:
+            raise ConfigError(f"{name} must be an ISO YYYY-MM-DD date or null.")
+        fields[name] = parsed
+    for name in ("date_margin_calendar", "date_margin_calendar_version", "date_margin_timezone", "date_margin_unit"):
+        value = payload.get(name)
+        if value is not None and not isinstance(value, str):
+            raise ConfigError(f"{name} must be a string or null.")
+        fields[name] = value
+    lag = payload.get("date_margin_lag")
+    if lag is not None and type(lag) is not int:
+        raise ConfigError("date_margin_lag must be an integer or null.")
+    fields["date_margin_lag"] = lag
+    return fields
 
 
 def load_inbound_cross_program_dependencies(
@@ -478,6 +534,7 @@ def _parse_dependency(program_id: str, raw_dependency: dict[str, object], *, pat
         linked_risk_ids=linked_risk_ids,
         next_proving_event=next_proving_event,
         blast_radius_narrative=blast_radius_narrative,
+        **_parse_date_margin_fields(raw_dependency),
     )
 
 
@@ -831,6 +888,7 @@ def _serialize_dependency(dependency: Dependency, *, default_program_id: str) ->
         payload["next_proving_event"] = dependency.next_proving_event
     if dependency.blast_radius_narrative:
         payload["blast_radius_narrative"] = dependency.blast_radius_narrative
+    payload.update(_serialize_date_margin_fields(dependency))
     return payload
 
 

@@ -4,11 +4,39 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from src.commands import freshness, gather, report
 from src.core.ado_enrichment import serialize_trajectory_points
 from src.core.models import RiskLevel, WorkItem
 from src.core.models_v2 import TrajectoryPoint
 from src.core.trajectory import backfill_trajectory_points
+
+
+@pytest.mark.parametrize("assessment", [None, "", "   ", "On Track", "At Risk", "Off Track", "Unsupported"])
+@pytest.mark.parametrize("description", ["Everything is on track.", "Blocked and off track."])
+def test_shared_risk_fallback_parser_parity(assessment: str | None, description: str) -> None:
+    fields = {
+        "System.Id": 901, "System.State": "Active",
+        "System.Title": "Synthetic", "System.Description": description,
+    }
+    if assessment is not None:
+        fields["Custom.RiskAssessment"] = assessment
+    common = {
+        "raw": {"WorkItemId": 901},
+        "batch_row": {"fields": fields},
+        "fetched_at": datetime(2026, 10, 28, tzinfo=timezone.utc),
+    }
+    items = (
+        report._work_item_from_sources(**common),
+        gather._work_item_from_sources(**common, revision_rows=[], comment_rows=[]),
+        freshness._work_item_from_sources(**common, revision_rows=[], comment_rows=[]),
+    )
+    expected = {
+        "On Track": RiskLevel.LOW, "At Risk": RiskLevel.MEDIUM,
+        "Off Track": RiskLevel.HIGH, "Unsupported": RiskLevel.LOW,
+    }.get(assessment, RiskLevel.UNKNOWN)
+    assert all(item.risk_level is expected for item in items)
 
 
 def test_gather_work_item_from_sources_uses_risk_assessment_mapping() -> None:

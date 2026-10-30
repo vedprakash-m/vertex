@@ -14,7 +14,8 @@ from typing import Any, Iterator
 from src.core.actuation_outbox import DispatchResult, create_task_idempotency_key, dispatch_leased_create_task, enqueue_create_task_intent
 from src.core.ado_client import ADOClient
 from src.core.ado_proposal import ADOUpdateEntry, ADOUpdateProposal, open_locked_proposal_manifest, read_proposal_manifest_from_handle, write_proposal_manifest_to_handle
-from src.core.exceptions import CredentialExpired, QueryError
+from src.core.exceptions import AuthError, CredentialExpired, QueryError
+from src.core.integration_types import PaginationOutcome
 from src.core.journal import PROGRAMS_ROOT
 from src.core.models import Confidence
 from src.core.models_v2 import Signal, SignalReviewDecision
@@ -366,7 +367,17 @@ class ADOWriter:
             )
 
         if entry.action == "add_comment":
-            if self._has_duplicate_comment(entry):
+            try:
+                duplicate = self._has_duplicate_comment(entry)
+            except (AuthError, QueryError) as error:
+                return replace(entry, entry_status="failed", status_reason=f"comment history lookup failed: {error}")
+            if duplicate is None:
+                return replace(
+                    entry,
+                    entry_status="conflict",
+                    status_reason="comment history incomplete; cannot safely check for duplicate",
+                )
+            if duplicate:
                 return replace(entry, entry_status="skipped", status_reason="duplicate comment")
             with self._actuation_lease(proposal.program_id):
                 response = self._request_json(
@@ -471,7 +482,23 @@ class ADOWriter:
                 action_id=action_id,
                 rolled_back_at=rolled_back_at,
             )
-            if self._has_duplicate_comment_text(entry.work_item_id, rollback_comment):
+            try:
+                duplicate = self._has_duplicate_comment_text(entry.work_item_id, rollback_comment)
+            except (AuthError, QueryError) as error:
+                return ADORollbackEntryResult(
+                    work_item_id=entry.work_item_id,
+                    action=entry.action,
+                    status="failed",
+                    status_reason=f"comment history lookup failed: {error}",
+                )
+            if duplicate is None:
+                return ADORollbackEntryResult(
+                    work_item_id=entry.work_item_id,
+                    action=entry.action,
+                    status="conflict",
+                    status_reason="comment history incomplete; cannot safely check for duplicate",
+                )
+            if duplicate:
                 return ADORollbackEntryResult(
                     work_item_id=entry.work_item_id,
                     action=entry.action,
@@ -591,17 +618,36 @@ class ADOWriter:
         rows = self._client.query_work_items_batch([entry.work_item_id], fields=tuple(sorted(fields)))
         return rows[0] if rows else None
 
-    def _has_duplicate_comment(self, entry: ADOUpdateEntry) -> bool:
-        signature = _comment_signature(entry.proposed_value)
-        if not signature:
-            return False
-        return any(_comment_signature(_comment_text(comment)) == signature for comment in self._client.list_work_item_comments(entry.work_item_id))
+    def _has_duplicate_comment(self, entry: ADOUpdateEntry) -> bool | None:
+        return self._comment_history_has_duplicate(entry.work_item_id, entry.proposed_value)
 
-    def _has_duplicate_comment_text(self, work_item_id: int, comment_text: str) -> bool:
+    def _has_duplicate_comment_text(self, work_item_id: int, comment_text: str) -> bool | None:
+        return self._comment_history_has_duplicate(work_item_id, comment_text)
+
+    def _comment_history_has_duplicate(self, work_item_id: int, comment_text: str) -> bool | None:
         signature = _comment_signature(comment_text)
         if not signature:
             return False
-        return any(_comment_signature(_comment_text(comment)) == signature for comment in self._client.list_work_item_comments(work_item_id))
+        outcomes: list[object] = []
+
+        def capture_pagination(outcome: PaginationOutcome) -> None:
+            outcomes.append(outcome)
+
+        comments = self._client.list_work_item_comments(work_item_id, on_pagination=capture_pagination)
+        if len(outcomes) != 1:
+            return None
+        outcome = outcomes[0]
+        if (
+            not isinstance(outcome, PaginationOutcome)
+            or type(outcome.total_fetched) is not int
+            or outcome.total_fetched != len(comments)
+            or type(outcome.page_count) is not int
+            or outcome.page_count < 1
+            or type(outcome.is_truncated) is not bool
+            or outcome.is_truncated
+        ):
+            return None
+        return any(_comment_signature(_comment_text(comment)) == signature for comment in comments)
 
     def _apply_tag_update(self, entry: ADOUpdateEntry, live_row: dict[str, Any]) -> str | None:
         current_tags = _parse_tags(_field_value(live_row, "System.Tags"))

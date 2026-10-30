@@ -1,11 +1,13 @@
 from __future__ import annotations
 from datetime import datetime
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
 from src.core.exceptions import ConfigError, StateError
 from src.core.gather_state_store import load_gather_query_states
-from src.core.knowledge_store import PROGRAMS_ROOT, load_program_knowledge
+from src.core.knowledge_store import PROGRAMS_ROOT, _optional_slo_target, load_program_knowledge
 from src.core.models_v2 import AttachmentConfig, KustoQuery
 from src.core.yaml_utils import load_yaml_mapping
 
@@ -52,7 +54,7 @@ def load_kpi_queries(
             kusto_no_safety=bool(entry.get("kusto_no_safety", False)),
             metric_id=_optional_str(entry.get("metric_id")),
             unit=_optional_str(entry.get("unit")),
-            slo_target=float(entry["slo_target"]) if entry.get("slo_target") is not None else None,
+            slo_target=_optional_slo_target(entry.get("slo_target"), kpis_path),
             comparison=_optional_str(entry.get("comparison")),
             assertion_ids=_string_tuple(entry.get("assertion_ids", [])),
             engine=_optional_str(entry.get("engine")) or "kusto",
@@ -73,6 +75,8 @@ def load_kpi_queries(
 
     merged: dict[str, KustoQuery] = {}
     for query in (*golden_queries, *kpi_queries):
+        if not _query_applies_to_program(query, program_id):
+            continue
         if query.id in merged:
             raise ConfigError(f"Duplicate Kusto query id '{query.id}' found while loading {kpis_path}")
         merged[query.id] = _apply_gather_query_state(query, gather_query_state.get(query.id))
@@ -126,12 +130,20 @@ def _load_gather_query_state(program_id: str, *, programs_root: Path) -> dict[st
         raise ConfigError(f"Invalid gather state payload for program '{program_id}'") from error
 
 
+def query_history_contract_identity(query: KustoQuery) -> str:
+    payload = (query.unit, query.engine, query.cluster, query.database,
+               query.kql, query.wiql, query.result_column, query.metric_id)
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=True).encode("utf-8")).hexdigest()
+
+
 def _apply_gather_query_state(query: KustoQuery, state: dict[str, Any] | None) -> KustoQuery:
     if state is None:
         return query
-    validated_at = _parse_optional_datetime(state.get("validated_at"))
-    if validated_at is None:
-        validated_at = _parse_optional_datetime(state.get("last_succeeded_at"))
+    validated_at = None
+    if state.get("history_contract_identity") == query_history_contract_identity(query):
+        validated_at = _parse_optional_datetime(state.get("validated_at"))
+        if validated_at is None:
+            validated_at = _parse_optional_datetime(state.get("last_succeeded_at"))
     return KustoQuery(
         id=query.id,
         cluster=query.cluster,
@@ -156,6 +168,9 @@ def _apply_gather_query_state(query: KustoQuery, state: dict[str, Any] | None) -
         kusto_no_safety=query.kusto_no_safety,
         last_cycle_succeeded=_parse_optional_bool(state.get("last_cycle_succeeded")),
         metric_id=query.metric_id,
+        unit=query.unit,
+        slo_target=query.slo_target,
+        comparison=query.comparison,
         assertion_ids=query.assertion_ids,
         engine=query.engine,
         wiql=query.wiql,

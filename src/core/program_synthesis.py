@@ -32,6 +32,7 @@ from typing import TypedDict
 
 from src.core.ai_proposal_store import load_ai_proposals
 from src.core.edition_resolver import PROGRAMS_ROOT, load_program
+from src.core.exceptions import ConfigError
 from src.core.models_v2 import AIProposalStatus
 from src.core.program_reality import ProgramReality
 from src.core.quality_gates.ai_release_audit import is_ai_output_released
@@ -344,17 +345,24 @@ def load_latest_released_program_synthesis(
     synthesis whose ``ai_run_id`` has a durable QG-29 ``released`` terminal.
     Returns ``None`` if none exists or none is released yet -- callers (e.g.
     ``cockpit_builder.py``) must treat that as "no synthesis to show", never
-    fall back to an unreleased one (Section 8.9.4)."""
+    fall back to an unreleased one (Section 8.9.4). Unreadable or invalid
+    retained candidates raise ``ConfigError`` rather than imply absence."""
     directory = _program_synthesis_dir(program_id, programs_root=programs_root)
-    if not directory.exists():
+    try:
+        paths = tuple(directory.iterdir())
+    except FileNotFoundError:
         return None
+    except OSError as error:
+        raise ConfigError(f"Retained program synthesis enumeration failed ({type(error).__name__}).") from error
     candidates: list[ProgramSynthesis] = []
-    for path in directory.glob("*.json"):
+    for path in paths:
+        if path.suffix.lower() != ".json":
+            continue
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
             candidates.append(_synthesis_from_dict(payload, program_id=program_id))
-        except (OSError, json.JSONDecodeError, KeyError, ValueError):
-            continue
+        except (OSError, UnicodeError, KeyError, ValueError, TypeError) as error:
+            raise ConfigError(f"Retained program synthesis read failed ({type(error).__name__}).") from error
     released = [
         candidate
         for candidate in candidates

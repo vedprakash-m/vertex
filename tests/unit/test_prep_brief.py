@@ -146,7 +146,7 @@ def _seed_v2_report_layout(
     return reports_root, tmp_path / "archive"
 
 
-@pytest.mark.parametrize("selection", ("defaults", "explicit", "legacy-reports"))
+@pytest.mark.parametrize("selection", ("defaults", "explicit", "legacy-reports", "external-defaults", "program-only", "reports-only"))
 def test_generate_prep_brief_keeps_selected_context_at_consumers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selection: str,
 ) -> None:
@@ -197,11 +197,21 @@ def test_generate_prep_brief_keeps_selected_context_at_consumers(
     monkeypatch.setattr(prep_module, "_build_workstream_data", build_workstreams)
     monkeypatch.setattr(ProgramReality, "load", staticmethod(load_reality))
     kwargs = {}
+    if selection in ("external-defaults", "program-only", "reports-only"):
+        from src.core.workspace_paths import REPO_ROOT
+        monkeypatch.setattr(prep_module, "PROGRAMS_ROOT", programs_root)
+        monkeypatch.setattr(prep_module, "REPORTS_ROOT", REPO_ROOT / "reports")
+        monkeypatch.setattr(prep_module, "ARCHIVE_ROOT", REPO_ROOT / "archive")
     if selection == "explicit":
         kwargs = dict(programs_root=programs_root, reports_root=reports_root, archive_root=archive_root)
     elif selection == "legacy-reports":
         monkeypatch.setattr(prep_module, "PROGRAMS_ROOT", tmp_path / "unselected")
         kwargs = dict(reports_root=reports_root, archive_root=archive_root)
+    elif selection == "program-only":
+        kwargs = dict(programs_root=programs_root)
+    elif selection == "reports-only":
+        monkeypatch.setattr(prep_module, "PROGRAMS_ROOT", tmp_path / "unselected")
+        kwargs = dict(reports_root=reports_root)
     artifacts = generate_prep_brief(edition_name="example_lt_deck", as_of=as_of, **kwargs)
     assert artifacts.markdown_path.is_relative_to(programs_root)
     assert fact_calls == ["acme", "acme", "acme"]

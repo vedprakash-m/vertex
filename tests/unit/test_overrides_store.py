@@ -1,5 +1,46 @@
 from __future__ import annotations
 
+
+def test_explicit_pending_override_context_is_forwarded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+    from tests.unit.test_narrative_store import _selected_artifact_root
+    from src.core import overrides_store as store
+
+    root = _selected_artifact_root(tmp_path)
+    reports = tmp_path / "reports"
+    seen = {}
+
+    def bundle(edition, **kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(config=SimpleNamespace(scorecards=()))
+
+    monkeypatch.setattr(store, "load_bundle", bundle)
+    monkeypatch.setattr(store, "_resolve_pending_override_issue_number", lambda _path: 7)
+    path = store.apply_pending_overrides("fixture_weekly", tmp_path / "issue_007", reports, programs_root=root)
+    assert path == root / "fixture" / "overrides" / "issue_007.yaml"
+    assert seen == {"reports_root": reports, "programs_root": root}
+    assert not reports.exists()
+    seen.clear()
+    legacy = store.apply_pending_overrides("legacy", tmp_path / "issue_007", reports)
+    assert legacy == reports / "legacy" / "overrides.yaml"
+    assert seen == {"reports_root": reports}
+
+
+def test_explicit_override_root_operations_are_scoped(tmp_path: Path) -> None:
+    from tests.unit.test_narrative_store import _selected_artifact_root
+    from src.core import overrides_store as store
+
+    root = _selected_artifact_root(tmp_path)
+    reports = tmp_path / "reports"
+    document = store.OverridesDocument(issue_number=7, top_3_now=(), scorecards=())
+    path = store.save_overrides("fixture_weekly", document, reports, programs_root=root)
+    assert path == root / "fixture" / "overrides" / "issue_007.yaml"
+    assert store.load_overrides("fixture_weekly", reports, issue_number=7, programs_root=root) == document
+    store.reset_overrides_for_next_issue("fixture_weekly", 8, (), reports, programs_root=root)
+    assert store.delete_seedable_overrides("fixture_weekly", 8, reports, programs_root=root)
+    assert not reports.exists()
+
+
 from datetime import date
 from pathlib import Path
 

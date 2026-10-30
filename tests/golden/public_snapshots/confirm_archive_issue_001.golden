@@ -88,8 +88,8 @@
           <td style="padding:0 0 8px 0; text-align:right; color:#111827;">0 of 4 active (0%)</td>
         </tr>
         <tr>
-          <td style="padding:0 0 8px 0; font-weight:600; color:#111827;">Avg days since last update</td>
-          <td style="padding:0 0 8px 0; text-align:right; color:#111827;">9999.0 days</td>
+          <td style="padding:0 0 8px 0; font-weight:600; color:#111827;">Avg days since last meaningful ADO update:</td>
+          <td style="padding:0 0 8px 0; text-align:right; color:#111827;">unknown (known for 0/4 items)</td>
         </tr>
         <tr>
           <td style="padding:0; font-weight:600; color:#111827;">Items with leakage signals</td>
@@ -97,7 +97,7 @@
         </tr>
       </table>
       <p style="margin:16px 0 0 0; font-size:14px; line-height:1.6; color:#111827;"><strong>Best documented:</strong> WI:910001 — 0 ADO touches in the last 7 days by Example Owner</p>
-      <p style="margin:8px 0 0 0; font-size:14px; line-height:1.6; color:#111827;"><strong>Trend:</strong> 19% (baseline issue)</p>
+      <p style="margin:8px 0 0 0; font-size:14px; line-height:1.6; color:#111827;"><strong>Trend:</strong> 18% (baseline issue)</p>
       <p style="margin:16px 0 8px 0; font-size:14px; line-height:1.6; color:#111827;"><strong>Needs ADO update:</strong></p>
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0; border:1px solid #E5E7EB; table-layout:fixed;">
         <tr style="background-color:#F3F4F6;">
@@ -110,25 +110,25 @@
           <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">Networking</td>
           <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">ADO assignee: Example Owner</td>
           <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;"><strong>ADO#910002</strong><br/>Networking example dependency</td>
-          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">Meaningful ADO update (9999d stale); Owner update or comment; Description; Blocker clarity; Next step</td>
-        </tr>
-        <tr>
-          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">Deployment Readiness</td>
-          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">ADO assignee: Example Owner</td>
-          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;"><strong>ADO#910001</strong><br/>Deployment example feature</td>
-          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">Meaningful ADO update (9999d stale); Owner update or comment; Description; Next step</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">Meaningful ADO update (time unknown); Owner update or comment; Description; Blocker clarity; Next step</td>
         </tr>
         <tr>
           <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">Artifact Service</td>
           <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">ADO assignee: Example Owner</td>
           <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;"><strong>ADO#910003</strong><br/>Service validation example</td>
-          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">Meaningful ADO update (9999d stale); Owner update or comment; Description; Next step</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">Meaningful ADO update (time unknown); Owner update or comment; Risk assessment or tags; Description; Next step</td>
+        </tr>
+        <tr>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">Deployment Readiness</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">ADO assignee: Example Owner</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;"><strong>ADO#910001</strong><br/>Deployment example feature</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">Meaningful ADO update (time unknown); Owner update or comment; Description; Next step</td>
         </tr>
         <tr>
           <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">Package Currency</td>
           <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">ADO assignee: Example Owner</td>
           <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;"><strong>ADO#910004</strong><br/>Package readiness example</td>
-          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">Meaningful ADO update (9999d stale); Owner update or comment; Description; Next step</td>
+          <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">Meaningful ADO update (time unknown); Owner update or comment; Description; Next step</td>
         </tr>
       </table>
     </td>

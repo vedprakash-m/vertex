@@ -193,7 +193,7 @@ def test_program_synthesis_context_lines_covers_three_categories(monkeypatch, tm
 
     assert any("Vendor delay risk." in line and "[high]" in line for line in lines)
     assert any("Milestone date disagreement." in line for line in lines)
-    assert any("M1 code complete" in line for line in lines)
+    assert "Active milestone: M1 code complete | status=at_risk" in lines
     assert not any("Latency SLO breached." in line for line in lines)
 
 

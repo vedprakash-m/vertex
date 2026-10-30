@@ -10,7 +10,7 @@ from src.core.models import Confidence, DimensionRisk, EditionType, RiskLevel, S
 from src.core.models_v2 import Milestone, MilestoneAssessment, MilestoneStatus, RiskEntry, RiskStatus
 from src.core.overrides_store import OverridesDocument
 from src.core.program_reality import FactAssessment, ProgramReality
-from src.core.risk_register_engine import assess_risk_staleness, compute_risk_score
+from src.core.risk_register_engine import assess_risk_staleness, compute_risk_score, risk_summary_sort_key
 from src.core.signal_review import signal_is_approved_for_evidence
 from src.core.store_factory import build_signal_store_for_program_id, build_trajectory_store_for_program_id
 from src.core.telemetry_summary import build_program_telemetry_summary
@@ -223,8 +223,8 @@ def _build_health_summary(
     if resolved_risks and not resolved_risk_assessments:
         resolved_risk_assessments = ()
     highlighted_risk_assessment = _select_active_risk_assessment(
+        resolved_risks,
         resolved_risk_assessments,
-        stale_risk_ids=resolved_stale_risk_ids,
     )
 
     return HealthSummary(
@@ -296,27 +296,21 @@ def _build_health_summary(
 
 
 def _select_active_risk_assessment(
+    risks: tuple[RiskEntry, ...],
     assessments: tuple[FactAssessment, ...],
-    *,
-    stale_risk_ids: tuple[str, ...] = (),
 ) -> FactAssessment | None:
-    active_assessments = tuple(
-        assessment
-        for assessment in assessments
-        if assessment.record.status in {RiskStatus.OPEN, RiskStatus.ESCALATED}
+    active_risks = tuple(
+        risk
+        for risk in risks
+        if risk.status in {RiskStatus.OPEN, RiskStatus.ESCALATED}
     )
-    if not active_assessments:
+    if not active_risks:
         return None
-    stale_risk_id_set = set(stale_risk_ids)
-    return sorted(
-        active_assessments,
-        key=lambda assessment: (
-            0 if assessment.record.status == RiskStatus.ESCALATED else 1,
-            -compute_risk_score(assessment.record),
-            0 if assessment.record.id in stale_risk_id_set else 1,
-            assessment.record.title.lower(),
-        ),
-    )[0]
+    selected_risk = min(active_risks, key=risk_summary_sort_key)
+    return next(
+        (assessment for assessment in assessments if assessment.record == selected_risk),
+        None,
+    )
 
 
 def _build_health_telemetry_confidence(
@@ -379,7 +373,7 @@ def _build_milestone_health_summary(
     ]
     critical_summary = ""
     if critical_path_names:
-        critical_summary = f" Critical path: {', '.join(critical_path_names[:2])}."
+        critical_summary = f" Longest dependency chain: {', '.join(critical_path_names[:2])}."
 
     highlight_summary = ""
     if items and program_id is not None and as_of is not None:
@@ -453,14 +447,7 @@ def _build_risk_register_summary(
     stale_risk_id_set = set(stale_risk_ids)
     escalated_count = sum(1 for risk in active_risks if risk.status == RiskStatus.ESCALATED)
     stale_count = sum(1 for risk in active_risks if risk.id in stale_risk_id_set)
-    highest_risk = sorted(
-        active_risks,
-        key=lambda risk: (
-            0 if risk.status == RiskStatus.ESCALATED else 1,
-            -compute_risk_score(risk),
-            risk.title.lower(),
-        ),
-    )[0]
+    highest_risk = min(active_risks, key=risk_summary_sort_key)
 
     summary = f"Risk register: {len(active_risks)} active entr{'y' if len(active_risks) == 1 else 'ies'}"
     if escalated_count:

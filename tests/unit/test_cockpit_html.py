@@ -118,6 +118,23 @@ def test_no_findings_renders_a_placeholder() -> None:
     assert "No findings." in html
 
 
+def test_retained_html_exceptions_are_identified_ordered_and_non_actionable() -> None:
+    findings = tuple(
+        CockpitFinding(identifier, "program", status, identifier, "<unsafe>", None, "command", ("javascript:bad",), _NOW)
+        for identifier, status in (("warning-id", "warn"), ("blocked-id", "blocked"), ("information-id", "info"))
+    )
+    html = render_cockpit_html(_snapshot(findings=findings), retained=True)
+    assert html.index("blocked-id") < html.index("warning-id") < html.index("information-id")
+    assert "Retained cockpit snapshot" in html
+    assert "not available in this retained finding" in html
+    assert "&lt;unsafe&gt;" in html
+    assert '<a href="javascript:' not in html
+    assert "<script" not in html and "<form" not in html and "<button" not in html
+    assert "overflow-wrap: anywhere" in html
+    assert "li.finding-blocked {" not in html and "li.finding-warn {" not in html
+    assert "li.finding-ok {" not in html
+
+
 def test_risk_color_reflects_overall_risk() -> None:
     green_html = render_cockpit_html(_snapshot())
     assert "#1a7f37" in green_html  # green

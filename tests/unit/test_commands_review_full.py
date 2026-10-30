@@ -38,6 +38,7 @@ from src.core.review_status_store import load_review_status, save_review_status
 from src.core.sqlite_stores import SQLiteSignalStore, SQLiteTrajectoryStore
 from src.core.summary_store import RollingSummary, save_summary
 from src.core.trajectory import backfill_trajectory_points
+from src.core.workspace_paths import REPO_ROOT
 from tests.unit.test_commands_report import _append_approved_v2_signal, _forecast_items, _lookback_snapshot, _manifest, _sample_items, _set_v2_program_artifact_base_url, _snapshot_item_from_work_item
 from tests.unit.test_config_loader import _write_demo_v2_layout
 from tests.support.slice_contract_fixtures import build_test_ado_source_contract, build_test_slice_contract
@@ -130,8 +131,9 @@ def _seed_v2_report_layout(
 
 
 @pytest.mark.parametrize("selection", ("defaults", "explicit", "legacy-reports"))
+@pytest.mark.parametrize("program_backed", (False, True))
 def test_review_full_selected_workspace_reaches_real_consumers(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selection: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selection: str, program_backed: bool,
 ) -> None:
     reports_root, archive_root = _seed_v2_report_layout(tmp_path, tmp_path)
     programs_root = tmp_path / "programs"
@@ -140,13 +142,24 @@ def test_review_full_selected_workspace_reaches_real_consumers(
         programs_root=programs_root, as_of=datetime(2026, 5, 5, 18, tzinfo=timezone.utc),
         work_item_loader=lambda bundle, timestamp: (_sample_items(timestamp), 0), open_browser=False,
     )
+    if not program_backed:
+        monkeypatch.setattr(review_full_module, "resolve_edition", lambda *args, **kwargs: None)
     calls = []
-    for name in ("load_program_facts", "_load_guarded_review_evidence", "_load_previous_snapshot", "_build_workstream_data", "load_trusted_baseline_issue"):
+    artifact_readers = {
+        "_load_review_full_context", "load_overrides", "load_narratives",
+        "_build_scorecard_data", "_load_eta_forecasts",
+    }
+    for name in (
+        "load_program_facts", "_load_guarded_review_evidence", "_load_previous_snapshot",
+        "_build_workstream_data", "load_trusted_baseline_issue", *sorted(artifact_readers),
+    ):
         original = getattr(review_full_module, name)
 
         def capture(*args, _name=name, _original=original, **kwargs):
             if _name in {"load_program_facts", "_build_workstream_data", "load_trusted_baseline_issue"}:
                 assert kwargs["programs_root"] == programs_root
+            if _name in artifact_readers:
+                assert kwargs["programs_root"] == (programs_root if program_backed else None)
             if _name == "_load_guarded_review_evidence":
                 assert kwargs["reports_root"] == reports_root
             if _name in {"load_program_facts", "_load_guarded_review_evidence", "_load_previous_snapshot"}:
@@ -164,11 +177,93 @@ def test_review_full_selected_workspace_reaches_real_consumers(
         monkeypatch.setattr(review_full_module, "PROGRAMS_ROOT", tmp_path / "unselected")
     artifacts = generate_review_full(edition_name=EDITION_NAME, **kwargs)
     assert artifacts.html_path.is_relative_to(programs_root)
-    assert calls.count("load_program_facts") == 3
+    assert calls.count("load_program_facts") == (3 if program_backed else 0)
     assert set(calls) == {
-        "load_program_facts", "_load_guarded_review_evidence", "_load_previous_snapshot",
+        "_load_guarded_review_evidence", "_load_previous_snapshot",
         "_build_workstream_data", "load_trusted_baseline_issue",
+    } | artifact_readers | ({"load_program_facts"} if program_backed else set())
+
+
+def test_review_full_uses_external_program_root_for_runtime_siblings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repo_root: Path,
+) -> None:
+    reports_root, archive_root = _seed_v2_report_layout(repo_root, tmp_path)
+    programs_root = tmp_path / "programs"
+    generate_report_draft(
+        edition_name=EDITION_NAME, reports_root=reports_root, archive_root=archive_root,
+        programs_root=programs_root, as_of=datetime(2026, 5, 5, 18, tzinfo=timezone.utc),
+        work_item_loader=lambda bundle, timestamp: (_sample_items(timestamp), 0), open_browser=False,
+    )
+    monkeypatch.setattr(review_full_module, "PROGRAMS_ROOT", programs_root)
+    monkeypatch.setattr(review_full_module, "REPORTS_ROOT", REPO_ROOT / "reports")
+    monkeypatch.setattr(review_full_module, "ARCHIVE_ROOT", REPO_ROOT / "archive")
+
+    artifacts = generate_review_full(edition_name=EDITION_NAME)
+
+    assert artifacts.html_path.is_relative_to(programs_root)
+
+
+@pytest.mark.parametrize("selection", ("omitted", "none", "explicit"))
+def test_review_full_status_helper_selects_root_without_decoy_fallback(
+    tmp_path: Path, selection: str,
+) -> None:
+    reports_root, archive_root = _seed_v2_report_layout(tmp_path, tmp_path)
+    selected_root = tmp_path / "named-home"
+    (tmp_path / "programs").rename(selected_root)
+    _seed_v2_report_layout(tmp_path, tmp_path / "decoy")
+    (tmp_path / "decoy" / "programs").rename(tmp_path / "programs")
+    for root, issue in ((selected_root, 7), (tmp_path / "programs", 3)):
+        status_path = save_review_status(
+            EDITION_NAME, ReviewStatus(issue_number=issue, sections=()),
+            reports_root=reports_root, programs_root=root,
+        )
+        if root == selected_root:
+            selected_status_path = status_path
+    kwargs = {} if selection == "omitted" else {
+        "programs_root": selected_root if selection == "explicit" else None,
     }
+    issue, status = review_full_module._load_review_full_context(
+        edition_name=EDITION_NAME, issue_number=None,
+        reports_root=reports_root, archive_root=archive_root, **kwargs,
+    )
+    assert issue == status.issue_number == (7 if selection == "explicit" else 3)
+    if selection == "explicit":
+        with pytest.raises(typer.BadParameter, match="Issue 008"):
+            review_full_module._load_review_full_context(
+                edition_name=EDITION_NAME, issue_number=8,
+                reports_root=reports_root, archive_root=archive_root, **kwargs,
+            )
+        selected_status_path.unlink()
+        with pytest.raises(typer.BadParameter, match="review_status.yaml is not initialized"):
+            review_full_module._load_review_full_context(
+                edition_name=EDITION_NAME, issue_number=None,
+                reports_root=reports_root, archive_root=archive_root, **kwargs,
+            )
+
+
+@pytest.mark.parametrize("selection", ("omitted", "none"))
+def test_review_full_status_helper_preserves_flat_and_missing_status(
+    tmp_path: Path, selection: str,
+) -> None:
+    reports_root, archive_root = tmp_path / "reports", tmp_path / "archive"
+    kwargs = {} if selection == "omitted" else {"programs_root": None}
+    for issue_number in (None, 2):
+        with pytest.raises(typer.BadParameter, match="review_status.yaml is not initialized"):
+            review_full_module._load_review_full_context(
+                edition_name=EDITION_NAME, issue_number=issue_number,
+                reports_root=reports_root, archive_root=archive_root, **kwargs,
+            )
+    save_review_status(EDITION_NAME, ReviewStatus(issue_number=4, sections=()), reports_root=reports_root)
+    issue, status = review_full_module._load_review_full_context(
+        edition_name=EDITION_NAME, issue_number=None,
+        reports_root=reports_root, archive_root=archive_root, **kwargs,
+    )
+    assert issue == status.issue_number == 4
+    with pytest.raises(typer.BadParameter, match="Issue 005"):
+        review_full_module._load_review_full_context(
+            edition_name=EDITION_NAME, issue_number=5,
+            reports_root=reports_root, archive_root=archive_root, **kwargs,
+        )
 
 
 @pytest.mark.parametrize("missing", ("html", "overrides"))
@@ -272,7 +367,7 @@ def test_format_milestone_row_title_includes_confidence() -> None:
         critical_path=True,
     )
 
-    assert title == "m3-code-complete · declared on_track · computed at_risk · high confidence · critical path"
+    assert title == "m3-code-complete · declared on_track · computed at_risk · high confidence · longest dependency chain"
 
 
 def test_format_milestone_row_detail_includes_confidence() -> None:
@@ -2246,7 +2341,7 @@ def test_generate_review_full_v2_renders_open_claims_and_asks(repo_root: Path, t
     assert "<div class=\"milestone-timeline\">" in reviewer_html
     assert "Tracking 2026-05-28 (3 days late vs target)" in reviewer_html
     assert "Completed 2026-05-18 (1 day late vs target)" in reviewer_html
-    assert "m3-code-complete · declared on_track · computed at_risk · high confidence · critical path" in reviewer_html
+    assert "m3-code-complete · declared on_track · computed at_risk · high confidence · longest dependency chain" in reviewer_html
     assert "m4-pilot-rollout-validation · declared on_track · computed completed · high confidence" in reviewer_html
     assert "Target 2026-05-25 | Owner maintainer | High confidence | Linked WI:900001 | Workstream deployment_readiness" in reviewer_html
     assert "Target 2026-05-17 | Owner maintainer | High confidence | Linked WI:900003 | Workstream deployment_readiness" in reviewer_html

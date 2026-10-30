@@ -6,7 +6,8 @@ from typing import Any
 
 import yaml
 
-from src.core.edition_resolver import get_program_output_dir, resolve_edition_paths
+from src.core.edition_resolver import get_program_output_dir
+from src.core.overrides_store import _resolve_artifact_edition
 from src.core.models import ReviewSection, ReviewState, ReviewStatus
 from src.core.snapshot_store import ARCHIVE_ROOT, get_archive_root
 
@@ -15,21 +16,24 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 REPORTS_ROOT = REPO_ROOT / "reports"
 
 
-def get_review_status_path(edition: str, reports_root: Path = REPORTS_ROOT) -> Path:
-    resolved_paths = resolve_edition_paths(
-        edition,
-        programs_root=reports_root.parent / "programs",
-    )
+def get_review_status_path(
+    edition: str, reports_root: Path = REPORTS_ROOT, *, programs_root: Path | None = None,
+) -> Path:
+    resolved_paths = _resolve_artifact_edition(edition, reports_root, programs_root)
     if resolved_paths is not None:
-        return get_program_output_dir(edition, programs_root=reports_root.parent / "programs") / "review_status.yaml"
+        return get_program_output_dir(
+            edition, programs_root=programs_root if programs_root is not None else reports_root.parent / "programs",
+        ) / "review_status.yaml"
     return reports_root / edition / "review_status.yaml"
 
 
 def load_review_status(
     edition: str,
     reports_root: Path = REPORTS_ROOT,
+    *,
+    programs_root: Path | None = None,
 ) -> ReviewStatus | None:
-    path = get_review_status_path(edition, reports_root)
+    path = get_review_status_path(edition, reports_root, programs_root=programs_root)
     if not path.exists():
         return None
     raw_document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -58,8 +62,10 @@ def save_review_status(
     edition: str,
     review_status: ReviewStatus,
     reports_root: Path = REPORTS_ROOT,
+    *,
+    programs_root: Path | None = None,
 ) -> Path:
-    path = get_review_status_path(edition, reports_root)
+    path = get_review_status_path(edition, reports_root, programs_root=programs_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "issue_number": review_status.issue_number,
@@ -90,6 +96,8 @@ def reset_review_status(
     issue_number: int,
     section_ids: tuple[str, ...],
     reports_root: Path = REPORTS_ROOT,
+    *,
+    programs_root: Path | None = None,
 ) -> ReviewStatus:
     review_status = ReviewStatus(
         issue_number=issue_number,
@@ -105,7 +113,7 @@ def reset_review_status(
             for section_id in section_ids
         ),
     )
-    save_review_status(edition, review_status, reports_root)
+    save_review_status(edition, review_status, reports_root, programs_root=programs_root)
     return review_status
 
 

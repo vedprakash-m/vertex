@@ -17,6 +17,49 @@ from tests.support.report_test_setup import disable_kusto_in_report_copy, stage_
 EDITION_NAME = "acme_weekly"
 
 
+def test_explicit_override_seeding_uses_selected_storage(tmp_path) -> None:
+    from tests.unit.test_narrative_store import _selected_artifact_root
+    from src.core import overrides_store as store
+
+    root = _selected_artifact_root(tmp_path)
+    reports = tmp_path / "reports"
+    source = store.OverridesDocument(issue_number=1, top_3_now=(), scorecards=(), edition_intro="selected")
+    store.save_overrides("fixture_weekly", source, reports, programs_root=root)
+    state = store.seed_overrides_from_prior(
+        "fixture_weekly", target_issue_number=2, source_issue_number=1, reports_root=reports,
+        archive_root=tmp_path / "archive", programs_root=root,
+    )
+    assert state.seeded
+    assert "selected" in store.load_overrides("fixture_weekly", reports, issue_number=2, programs_root=root).edition_intro
+    assert not reports.exists()
+
+
+def test_omitted_override_seeding_keeps_legacy_overlay_root(tmp_path, monkeypatch) -> None:
+    from tests.unit.test_narrative_store import _selected_artifact_root
+    from src.core import overrides_store as store
+
+    root = _selected_artifact_root(tmp_path)
+    root = root.rename(tmp_path / "programs")
+    reports = tmp_path / "reports"
+    source = store.OverridesDocument(issue_number=1, top_3_now=(), scorecards=())
+    store.save_overrides("fixture_weekly", source, reports)
+    roots = []
+
+    def overlay(scorecards, program_id, programs_root):
+        roots.append(programs_root)
+        return scorecards
+
+    monkeypatch.setattr(store, "_overlay_judgment_facts", overlay)
+    for target, kwargs in ((2, {}), (3, {"programs_root": root})):
+        state = store.seed_overrides_from_prior(
+            "fixture_weekly", target_issue_number=target, source_issue_number=1,
+            reports_root=reports, archive_root=tmp_path / "archive", **kwargs,
+        )
+        assert state.seeded
+        assert (root / "fixture" / "overrides" / f"issue_{target:03d}.yaml").exists()
+    assert roots == [store.PROGRAMS_ROOT, root]
+
+
 def test_resolution_stage_seeds_overrides_from_trusted_prior_issue(repo_root, tmp_path) -> None:
     reports_root = stage_v2_report_workspace(repo_root, tmp_path)
     archive_root = tmp_path / "archive"

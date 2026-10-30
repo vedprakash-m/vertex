@@ -336,18 +336,17 @@ def stale_pending_proposals(
     max_issue_lag: int = 2,
     programs_root: Path = PROGRAMS_ROOT,
 ) -> tuple[ContextUpdateProposal, ...]:
-    pending = load_proposals(
+    proposals = load_proposals(
         program_id,
-        status_filter={"pending"},
         programs_root=programs_root,
     )
-    if not pending:
+    if not proposals:
         return ()
-    newest_issue = max(proposal.issue_number for proposal in pending)
+    newest_issue = max(proposal.issue_number for proposal in proposals)
     return tuple(
         proposal
-        for proposal in pending
-        if newest_issue - proposal.issue_number > max_issue_lag
+        for proposal in proposals
+        if proposal.status == "pending" and newest_issue - proposal.issue_number > max_issue_lag
     )
 
 

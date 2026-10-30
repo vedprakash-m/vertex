@@ -12,6 +12,7 @@ under their historical private aliases; ``load_optional_yaml_mapping`` and
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Mapping
 from pathlib import Path
 import re
 from typing import Any
@@ -22,8 +23,9 @@ import yaml
 from src.core.edition_resolver import find_edition_yaml, get_program_output_dir, PROGRAMS_ROOT
 from src.core.draft_artifact_store import load_draft_state as load_optional_draft_state
 from src.core.draft_artifact_store import load_draft_manifest as load_optional_draft_manifest
-from src.core.exceptions import StateError
-from src.core.models import ReviewSection, ReviewState, ReviewStatus
+from src.core.exceptions import ConfigError, StateError
+from src.core.manifest_writer import load_run_evidence_snapshot
+from src.core.models import ReviewSection, ReviewState, ReviewStatus, RunEvidenceSnapshot
 from src.core.overrides_store import OverridesDocument, load_overrides, merge_overrides
 from src.core.review_status_store import load_review_status
 
@@ -37,10 +39,13 @@ class ConfirmDraftManifest:
     config_hash: str
     ai_safety: dict[str, Any] | None
     draft_readiness: dict[str, Any] | None
+    milestone_assessments: Any
+    milestone_trajectory_snapshot: Any
+    run_evidence_snapshot: RunEvidenceSnapshot | None = None
 
 
 def load_confirm_draft_manifest(
-    edition_name: str, issue_number: int, *, programs_root: Path = PROGRAMS_ROOT,
+    edition_name: str, issue_number: int, *, draft_state: Mapping[str, Any], programs_root: Path = PROGRAMS_ROOT,
 ) -> ConfirmDraftManifest:
     payload = _load_manifest(edition_name, issue_number, programs_root=programs_root)
     manifest_id = _require_manifest_id(payload, edition_name, issue_number, programs_root=programs_root)
@@ -50,19 +55,42 @@ def load_confirm_draft_manifest(
             f"Invalid or missing draft config hash for edition {edition_name!r}, issue {issue_number:03d}. "
             "Preserve the existing artifacts and re-run `vertex report --dry-run` before confirming."
         )
+    try:
+        capture = load_run_evidence_snapshot(payload or {}, draft_state)
+    except ConfigError as error:
+        raise typer.BadParameter(str(error)) from error
     return ConfirmDraftManifest(
         edition_name=edition_name,
         issue_number=issue_number,
         programs_root=programs_root.absolute(),
         manifest_id=manifest_id,
         config_hash=config_hash,
+        run_evidence_snapshot=capture,
         ai_safety=_project_draft_metadata_field(payload, "ai_safety", edition_name, issue_number),
         draft_readiness=_project_draft_metadata_field(payload, "draft_readiness", edition_name, issue_number),
+        milestone_assessments=_project_draft_metadata_value(
+            payload, "milestone_assessments", edition_name, issue_number,
+        ),
+        milestone_trajectory_snapshot=_project_draft_metadata_value(
+            payload, "milestone_trajectory_snapshot", edition_name, issue_number,
+        ),
     )
 
 
-def load_confirm_overrides(edition_name: str, issue_number: int, bundle, reports_root: Path) -> OverridesDocument:
-    existing = load_overrides(edition_name, reports_root=reports_root, issue_number=issue_number)
+def load_confirm_overrides(
+    edition_name: str,
+    issue_number: int,
+    bundle,
+    reports_root: Path,
+    *,
+    programs_root: Path | None = None,
+) -> OverridesDocument:
+    existing = load_overrides(
+        edition_name,
+        reports_root=reports_root,
+        issue_number=issue_number,
+        **({"programs_root": programs_root} if programs_root is not None else {}),
+    )
     if existing is None:
         raise typer.BadParameter("overrides.yaml is missing. Run `vertex report --dry-run` first.")
     expected_scorecards = {
@@ -126,6 +154,22 @@ def _project_draft_metadata_field(
             "expected a JSON object. Preserve the existing artifact and review it before retrying."
         )
     return dict(value)
+
+
+def _project_draft_metadata_value(
+    payload: dict[str, Any] | None, field: str, edition_name: str, issue_number: int,
+) -> Any:
+    if payload is None:
+        return None
+    metadata = payload.get("metadata")
+    if metadata is None:
+        return None
+    if not isinstance(metadata, dict):
+        raise typer.BadParameter(
+            f"Invalid draft manifest metadata for edition {edition_name!r}, issue {issue_number:03d}: "
+            "expected a JSON object. Preserve the existing artifact and review it before retrying."
+        )
+    return metadata.get(field)
 
 
 def load_readiness_gate_settings(
@@ -242,9 +286,15 @@ def load_confirm_review_status(
     issue_number: int,
     workstream_section_ids: tuple[str, ...],
     reports_root: Path,
+    *,
+    programs_root: Path | None = None,
 ) -> ReviewStatus:
     expected_section_ids = ("exec_summary",) + tuple(f"ws:{section_id}" for section_id in workstream_section_ids)
-    existing = load_review_status(edition_name, reports_root=reports_root)
+    existing = load_review_status(
+        edition_name,
+        reports_root=reports_root,
+        **({"programs_root": programs_root} if programs_root is not None else {}),
+    )
     if existing is not None and existing.issue_number == issue_number:
         existing_sections = {section.section_id: section for section in existing.sections}
         return ReviewStatus(

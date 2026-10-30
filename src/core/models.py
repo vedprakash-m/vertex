@@ -438,6 +438,43 @@ class RunManifest:
 
 
 @dataclass(frozen=True, slots=True)
+class SourceScopeContract:
+    query_id: str
+    scope_id: str
+    query_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceBinding:
+    fact_revision_id: str
+    entity_refs: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RunEvidenceSnapshot:
+    program_id: str
+    fact_snapshot_id: str
+    fact_content_sha256: str
+    as_of: datetime
+    valid_at: datetime
+    gather_run_id: str | None
+    gather_run_hash: str | None
+    source_scopes: tuple[SourceScopeContract, ...]
+    binding_declarations: tuple[EvidenceBinding, ...]
+    fetched_item_ids: tuple[int, ...]
+    report_snapshot_hash: str
+    config_hash: str
+    sha256: str
+    schema_version: str = "run-evidence-capture.v1"
+    capture_state: str = "unqualified_capture"
+    limitations: tuple[str, ...] = (
+        "source_scope_unknown_legacy", "binding_unevaluated", "gather_fetch_join_unknown",
+        "source_principal_uncaptured", "effective_policy_uncaptured",
+        "authorization_uncaptured", "nonfact_inputs_unsealed",
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class Workstream:
     name: str
     aliases: tuple[str, ...]

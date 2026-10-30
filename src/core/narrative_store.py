@@ -13,7 +13,7 @@ import shutil
 log = logging.getLogger(__name__)
 
 from src.core.archive_store import read_archive_index
-from src.core.edition_resolver import resolve_edition_paths
+from src.core.overrides_store import _resolve_artifact_edition
 from src.core.exceptions import ConfigError
 from src.core.jinja_filters import build_anchor
 from src.core.published_narrative_store import load_published_narratives
@@ -80,11 +80,10 @@ def get_narratives_dir(
     edition: str,
     issue_number: int,
     reports_root: Path = REPORTS_ROOT,
+    *,
+    programs_root: Path | None = None,
 ) -> Path:
-    resolved_paths = resolve_edition_paths(
-        edition,
-        programs_root=reports_root.parent / "programs",
-    )
+    resolved_paths = _resolve_artifact_edition(edition, reports_root, programs_root)
     if resolved_paths is not None:
         return resolved_paths.program_dir / "narratives" / f"issue_{issue_number:03d}"
     return reports_root / edition / "narratives" / f"issue_{issue_number:03d}"
@@ -94,15 +93,17 @@ def load_narratives(
     edition: str,
     issue_number: int,
     reports_root: Path = REPORTS_ROOT,
+    *,
+    programs_root: Path | None = None,
 ) -> dict[str, str]:
-    directory = get_narratives_dir(edition, issue_number, reports_root)
+    directory = get_narratives_dir(edition, issue_number, reports_root, programs_root=programs_root)
     if not directory.exists():
         return {}
     narratives = {
         path.name: strip_scaffold_comments(path.read_text(encoding="utf-8"))
         for path in sorted(directory.glob("*.md"))
     }
-    return inject_narrative_placeholders(edition, issue_number, narratives, reports_root=reports_root)
+    return inject_narrative_placeholders(edition, issue_number, narratives, reports_root=reports_root, programs_root=programs_root)
 
 
 def load_archived_narratives(
@@ -111,7 +112,10 @@ def load_archived_narratives(
     archive_root: Path = ARCHIVE_ROOT,
     *,
     reports_root: Path | None = None,
+    programs_root: Path | None = None,
 ) -> dict[str, str]:
+    if programs_root is not None:
+        _resolve_artifact_edition(edition, reports_root or REPORTS_ROOT, programs_root)
     directory = get_archive_root(edition, archive_root) / "narratives" / f"issue_{issue_number:03d}"
     if not directory.exists():
         return {}
@@ -120,7 +124,7 @@ def load_archived_narratives(
         for path in sorted(directory.glob("*.md"))
     }
     resolved_reports_root = reports_root if reports_root is not None else archive_root.parent / "reports"
-    return inject_narrative_placeholders(edition, issue_number, narratives, reports_root=resolved_reports_root)
+    return inject_narrative_placeholders(edition, issue_number, narratives, reports_root=resolved_reports_root, programs_root=programs_root)
 
 
 def inject_narrative_placeholders(
@@ -128,7 +132,12 @@ def inject_narrative_placeholders(
     issue_number: int,
     narratives: dict[str, str],
     reports_root: Path = REPORTS_ROOT,
+    *,
+    programs_root: Path | None = None,
 ) -> dict[str, str]:
+    selected_paths = (
+        _resolve_artifact_edition(edition, reports_root, programs_root) if programs_root is not None else None
+    )
     try:
         from src.core.edition_resolver import resolve_edition_paths
         from src.core.overrides_store import load_overrides
@@ -137,16 +146,18 @@ def inject_narrative_placeholders(
     except ImportError:
         return narratives
 
-    paths = resolve_edition_paths(
-        edition,
-        programs_root=reports_root.parent / "programs",
+    paths = (
+        selected_paths
+        if programs_root is not None
+        else resolve_edition_paths(edition, programs_root=reports_root.parent / "programs")
     )
     if not paths:
         return narratives
 
     program_id = paths.program_id
+    workspace_root = programs_root.resolve().parent if programs_root is not None else reports_root.parent
 
-    overrides = load_overrides(edition, reports_root=reports_root, issue_number=issue_number)
+    overrides = load_overrides(edition, reports_root=reports_root, issue_number=issue_number, programs_root=programs_root)
     decisions_by_id = {}
     if overrides and overrides.decisions:
         for d in overrides.decisions:
@@ -157,7 +168,7 @@ def inject_narrative_placeholders(
     try:
         from src.core.section_proposal_store import load_hint_proposals
 
-        for hint in load_hint_proposals(program_id, issue_number, programs_root=reports_root.parent / "programs"):
+        for hint in load_hint_proposals(program_id, issue_number, programs_root=programs_root if programs_root is not None else reports_root.parent / "programs"):
             if hint.status in ("accepted", "modified"):
                 hints_by_id[hint.hint_id] = hint.accepted_text or hint.suggested_sentence
     except Exception as exc:  # noqa: BLE001 — best-effort hint injection
@@ -177,14 +188,14 @@ def inject_narrative_placeholders(
 
     metric_map = {}
     try:
-        metric_map = load_metric_definition_map(metrics_root=reports_root.parent / "knowledge" / "metrics")
+        metric_map = load_metric_definition_map(metrics_root=workspace_root / "knowledge" / "metrics")
     except Exception as exc:  # noqa: BLE001 — best-effort metric map
         # WS-13 PB-29: metric map is advisory; absence is non-fatal.
         log.debug("narrative_store: metric map not loaded: %s", exc)
 
     # Keep render-time placeholder injection hermetic to the repo/runtime root
     # instead of silently reaching into the user's profile DB.
-    store = RealityStore(program_id, db_root=reports_root.parent / "vertex-db")
+    store = RealityStore(program_id, db_root=workspace_root / "vertex-db")
     store.initialize()
 
     injected = {}
@@ -289,24 +300,30 @@ def get_narrative_seeding_manifest_path(
     edition: str,
     issue_number: int,
     reports_root: Path = REPORTS_ROOT,
+    *,
+    programs_root: Path | None = None,
 ) -> Path:
-    return get_narratives_dir(edition, issue_number, reports_root) / SEEDING_MANIFEST_FILENAME
+    return get_narratives_dir(edition, issue_number, reports_root, programs_root=programs_root) / SEEDING_MANIFEST_FILENAME
 
 
 def narrative_seeding_disabled(
     edition: str,
     issue_number: int,
     reports_root: Path = REPORTS_ROOT,
+    *,
+    programs_root: Path | None = None,
 ) -> bool:
-    return (get_narratives_dir(edition, issue_number, reports_root) / NO_SEED_SENTINEL_FILENAME).exists()
+    return (get_narratives_dir(edition, issue_number, reports_root, programs_root=programs_root) / NO_SEED_SENTINEL_FILENAME).exists()
 
 
 def load_narrative_seeding_state(
     edition: str,
     issue_number: int,
     reports_root: Path = REPORTS_ROOT,
+    *,
+    programs_root: Path | None = None,
 ) -> NarrativeSeedingState | None:
-    path = get_narrative_seeding_manifest_path(edition, issue_number, reports_root)
+    path = get_narrative_seeding_manifest_path(edition, issue_number, reports_root, programs_root=programs_root)
     if not path.exists():
         return None
     payload = json.loads(path.read_text(encoding="utf-8"))
@@ -333,16 +350,18 @@ def seed_narratives_from_prior(
     removed_section_ids: set[str],
     reports_root: Path = REPORTS_ROOT,
     archive_root: Path = ARCHIVE_ROOT,
+    programs_root: Path | None = None,
 ) -> NarrativeSeedingState | None:
-    target_dir = get_narratives_dir(edition, target_issue_number, reports_root)
+    target_dir = get_narratives_dir(edition, target_issue_number, reports_root, programs_root=programs_root)
     if not _directory_is_seedable(target_dir):
-        return load_narrative_seeding_state(edition, target_issue_number, reports_root)
+        return load_narrative_seeding_state(edition, target_issue_number, reports_root, programs_root=programs_root)
 
     source_narratives, source_path = _load_seed_source_narratives(
         edition,
         source_issue_number,
         reports_root=reports_root,
         archive_root=archive_root,
+        programs_root=programs_root,
     )
     if not source_narratives:
         return None
@@ -364,7 +383,7 @@ def seed_narratives_from_prior(
     if not seeded_files:
         return None
 
-    manifest_path = get_narrative_seeding_manifest_path(edition, target_issue_number, reports_root)
+    manifest_path = get_narrative_seeding_manifest_path(edition, target_issue_number, reports_root, programs_root=programs_root)
     if not manifest_path.exists():
         manifest_path.write_text(
             json.dumps(
@@ -382,7 +401,7 @@ def seed_narratives_from_prior(
             encoding="utf-8",
         )
 
-    return load_narrative_seeding_state(edition, target_issue_number, reports_root)
+    return load_narrative_seeding_state(edition, target_issue_number, reports_root, programs_root=programs_root)
 
 
 def sync_published_baseline_to_target(
@@ -397,7 +416,10 @@ def sync_published_baseline_to_target(
     removed_section_ids: set[str] | None = None,
     published_narratives: Mapping[str, str] | None = None,
     published_source_hashes: Mapping[str, str] | None = None,
+    programs_root: Path | None = None,
 ) -> PublishedBaselineSyncResult | None:
+    if programs_root is not None:
+        _resolve_artifact_edition(edition, reports_root, programs_root)
     published_source = dict(published_narratives or load_published_narratives(edition, source_issue_number, archive_root=archive_root))
     if not published_source:
         return None
@@ -407,6 +429,7 @@ def sync_published_baseline_to_target(
         source_issue_number,
         reports_root=reports_root,
         archive_root=archive_root,
+        programs_root=programs_root,
     )
     merged_source = dict(fallback_source)
     merged_source.update(published_source)
@@ -423,7 +446,7 @@ def sync_published_baseline_to_target(
             f"sha256:{hashlib.sha256(content.encode('utf-8')).hexdigest()}",
         )
 
-    target_dir = get_narratives_dir(edition, target_issue_number, reports_root)
+    target_dir = get_narratives_dir(edition, target_issue_number, reports_root, programs_root=programs_root)
     if write:
         target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -464,6 +487,7 @@ def sync_published_baseline_to_target(
             source_issue_number=source_issue_number,
             source_entries=source_entries,
             reports_root=reports_root,
+            programs_root=programs_root,
         )
 
     return PublishedBaselineSyncResult(
@@ -504,8 +528,10 @@ def find_unresolved_scaffold_placeholders(
     edition: str,
     issue_number: int,
     reports_root: Path = REPORTS_ROOT,
+    *,
+    programs_root: Path | None = None,
 ) -> dict[str, tuple[str, ...]]:
-    directory = get_narratives_dir(edition, issue_number, reports_root)
+    directory = get_narratives_dir(edition, issue_number, reports_root, programs_root=programs_root)
     if not directory.exists():
         return {}
     unresolved: dict[str, tuple[str, ...]] = {}
@@ -525,7 +551,10 @@ def build_workstream_narrative_history(
     archive_root: Path = ARCHIVE_ROOT,
     *,
     reports_root: Path | None = None,
+    programs_root: Path | None = None,
 ) -> dict[str, tuple[str, ...]]:
+    if programs_root is not None:
+        _resolve_artifact_edition(edition, reports_root or REPORTS_ROOT, programs_root)
     archive_index = read_archive_index(edition, archive_root=archive_root)
     previous_confirmed_issue_numbers = [
         entry.issue_number
@@ -539,6 +568,7 @@ def build_workstream_narrative_history(
         previous_issue_number: load_archived_narratives(
             edition, previous_issue_number, archive_root=archive_root,
             **({"reports_root": reports_root} if reports_root is not None else {}),
+            **({"programs_root": programs_root} if programs_root is not None else {}),
         )
         for previous_issue_number in previous_confirmed_issue_numbers
     }
@@ -567,8 +597,10 @@ def merge_narratives(
     issue_number: int,
     templates: dict[str, str],
     reports_root: Path = REPORTS_ROOT,
+    *,
+    programs_root: Path | None = None,
 ) -> Path:
-    directory = get_narratives_dir(edition, issue_number, reports_root)
+    directory = get_narratives_dir(edition, issue_number, reports_root, programs_root=programs_root)
     directory.mkdir(parents=True, exist_ok=True)
     existing_paths = {path.name: path for path in directory.glob("*.md")}
 
@@ -599,8 +631,10 @@ def archive_narratives(
     issue_number: int,
     archive_root: Path = ARCHIVE_ROOT,
     reports_root: Path = REPORTS_ROOT,
+    *,
+    programs_root: Path | None = None,
 ) -> Path:
-    source_dir = get_narratives_dir(edition, issue_number, reports_root)
+    source_dir = get_narratives_dir(edition, issue_number, reports_root, programs_root=programs_root)
     archive_dir = get_archive_root(edition, archive_root) / "narratives" / f"issue_{issue_number:03d}"
     if archive_dir.exists():
         shutil.rmtree(archive_dir)
@@ -615,8 +649,10 @@ def write_narrative_section(
     section_id: str,
     text: str,
     reports_root: Path = REPORTS_ROOT,
+    *,
+    programs_root: Path | None = None,
 ) -> Path:
-    directory = get_narratives_dir(edition, issue_number, reports_root)
+    directory = get_narratives_dir(edition, issue_number, reports_root, programs_root=programs_root)
     directory.mkdir(parents=True, exist_ok=True)
     target_path = directory / narrative_filename_for_section(section_id)
     normalized = text if text.endswith("\n") else f"{text}\n"
@@ -641,8 +677,10 @@ def delete_narratives_dir(
     edition: str,
     issue_number: int,
     reports_root: Path = REPORTS_ROOT,
+    *,
+    programs_root: Path | None = None,
 ) -> None:
-    directory = get_narratives_dir(edition, issue_number, reports_root)
+    directory = get_narratives_dir(edition, issue_number, reports_root, programs_root=programs_root)
     if directory.exists():
         shutil.rmtree(directory)
 
@@ -652,8 +690,10 @@ def reset_narratives_for_next_issue(
     next_issue_number: int,
     templates: dict[str, str],
     reports_root: Path = REPORTS_ROOT,
+    *,
+    programs_root: Path | None = None,
 ) -> Path:
-    return merge_narratives(edition, next_issue_number, templates, reports_root)
+    return merge_narratives(edition, next_issue_number, templates, reports_root, programs_root=programs_root)
 
 
 def _write_markdown(path: Path, content: str) -> None:
@@ -698,16 +738,17 @@ def _load_seed_source_narratives(
     *,
     reports_root: Path,
     archive_root: Path,
+    programs_root: Path | None = None,
 ) -> tuple[dict[str, str], str | None]:
     published = load_published_narratives(edition, issue_number, archive_root=archive_root)
-    archived = load_archived_narratives(edition, issue_number, archive_root=archive_root, reports_root=reports_root)
+    archived = load_archived_narratives(edition, issue_number, archive_root=archive_root, reports_root=reports_root, programs_root=programs_root)
     if published:
         merged = dict(archived)
         merged.update(published)
         return merged, "published_archive_preferred"
     if archived:
         return archived, "archive"
-    local = load_narratives(edition, issue_number, reports_root=reports_root)
+    local = load_narratives(edition, issue_number, reports_root=reports_root, programs_root=programs_root)
     if local:
         return local, "program_local"
     return {}, None
@@ -719,11 +760,12 @@ def _load_fallback_source_narratives(
     *,
     reports_root: Path,
     archive_root: Path,
+    programs_root: Path | None = None,
 ) -> tuple[dict[str, str], str | None]:
-    archived = load_archived_narratives(edition, issue_number, archive_root=archive_root, reports_root=reports_root)
+    archived = load_archived_narratives(edition, issue_number, archive_root=archive_root, reports_root=reports_root, programs_root=programs_root)
     if archived:
         return archived, "archive"
-    local = load_narratives(edition, issue_number, reports_root=reports_root)
+    local = load_narratives(edition, issue_number, reports_root=reports_root, programs_root=programs_root)
     if local:
         return local, "program_local"
     return {}, None
@@ -764,11 +806,13 @@ def _update_published_sync_seeding_manifest(
     source_issue_number: int,
     source_entries: Mapping[str, Mapping[str, str]],
     reports_root: Path,
+    programs_root: Path | None = None,
 ) -> None:
     manifest_path = get_narrative_seeding_manifest_path(
         edition,
         target_issue_number,
         reports_root=reports_root,
+        programs_root=programs_root,
     )
     payload = {}
     if manifest_path.exists():

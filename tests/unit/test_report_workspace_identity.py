@@ -13,12 +13,14 @@ import dotenv
 from typer import Typer
 from typer.testing import CliRunner
 
-from src.commands import propose, report, report_history
+from src.commands import confirm, propose, report, report_history
 from src.core import workspace_paths
 from src.core.exceptions import ConfigError, QueryError, StateError
 from src.core.models import ArchiveEntry, ArchiveIndex
 from src.core.pipeline import StageContext
 from src.core.stages import resolution_stage
+from tests.support.report_test_setup import disable_kusto_in_report_copy, reset_overrides_to_seed_state, stage_v2_report_workspace
+from tests.support.synthetic_report_source import build_synthetic_report_source
 
 
 def _files(root: Path) -> dict[Path, bytes | None]:
@@ -78,6 +80,17 @@ def test_report_roots_accept_coherent_nonexistent_workspace_without_initializing
     assert not workspace.exists()
 
 
+def test_report_root_resolution_preserves_unset_legacy_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(workspace_paths, "_PROGRAMS_ROOT_CONFIGURED", False)
+    monkeypatch.setattr(workspace_paths, "PROGRAMS_ROOT", workspace_paths.REPO_ROOT / "programs")
+
+    assert workspace_paths.resolve_report_workspace_roots() == (
+        workspace_paths.REPO_ROOT / "programs",
+        workspace_paths.REPO_ROOT / "reports",
+        workspace_paths.REPO_ROOT / "archive",
+    )
+
+
 @pytest.mark.parametrize("selected", [False, True])
 @pytest.mark.parametrize("conflicting", ["reports", "archive"])
 def test_resolution_rejects_conflicts_before_any_store_or_reseed(
@@ -127,8 +140,11 @@ def test_coherent_resolution_preserves_selected_or_shared_root(
     assert ctx.bundle is None
     assert ctx.programs_root is (root if selected else None)
     dependencies["load_bundle"].assert_called_once_with("weekly", reports_root=ctx.reports_root, programs_root=root)
+    dependencies["read_archive_index"].assert_called_once_with(
+        "weekly", archive_root=ctx.archive_root,
+    )
     assert dependencies["load_trusted_baseline_issue"].call_args.kwargs["programs_root"] is root
-    assert dependencies["_resolve_previous_snapshot"].call_args.kwargs["programs_root"] is root
+    assert "programs_root" not in dependencies["_resolve_previous_snapshot"].call_args.kwargs
     assert _files(tmp_path) == before
 
 
@@ -174,9 +190,12 @@ def test_coherent_resolution_keeps_issue_baseline_and_reseed_behavior(
     fact_store.load_pinned_snapshot.assert_called_once_with(fact_store.pin_snapshot.return_value.snapshot_id)
     assert resolved.fact_snapshot_pin is fact_store.pin_snapshot.return_value
     assert resolved.fact_snapshot is fact_store.load_pinned_snapshot.return_value
+    dependencies["read_archive_index"].assert_called_once_with(
+        "weekly", archive_root=ctx.archive_root, programs_root=root,
+    )
     for name in ("delete_narratives_dir", "delete_seedable_overrides"):
         dependencies[name].assert_called_once_with(
-            "weekly", resolved.resolved_issue_number, reports_root=ctx.reports_root,
+            "weekly", resolved.resolved_issue_number, reports_root=ctx.reports_root, programs_root=root,
         )
     if baseline == "empty":
         dependencies["seed_overrides_from_prior"].assert_not_called()
@@ -184,7 +203,7 @@ def test_coherent_resolution_keeps_issue_baseline_and_reseed_behavior(
     else:
         dependencies["seed_overrides_from_prior"].assert_called_once_with(
             "weekly", target_issue_number=4, source_issue_number=3,
-            reports_root=ctx.reports_root, archive_root=ctx.archive_root,
+            reports_root=ctx.reports_root, archive_root=ctx.archive_root, programs_root=root,
         )
         assert resolved.overrides_seeding is dependencies["seed_overrides_from_prior"].return_value
     assert _files(tmp_path) == before
@@ -281,6 +300,91 @@ def test_coherent_report_cli_passes_selected_root_to_configuration_and_generatio
         enrichment.assert_not_called()
     loader.assert_called_once_with("weekly", reports_root=reports, programs_root=root)
     assert not list(tmp_path.iterdir())
+
+
+def test_direct_report_api_uses_selected_external_workspace_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "external" / "programs"
+    expected_artifacts = object()
+    captured = {}
+
+    def stop_after_context(context, **_kwargs):
+        captured["context"] = context
+        return SimpleNamespace(artifacts=expected_artifacts)
+
+    monkeypatch.setattr(report, "_execute_report_pipeline", stop_after_context)
+
+    artifacts = report.generate_report_draft(
+        "weekly", dry_run=True, offline=True, programs_root=root,
+    )
+
+    assert artifacts is expected_artifacts
+    context = captured["context"]
+    assert context.programs_root == root.resolve()
+    assert context.reports_root == root.parent / "reports"
+    assert context.archive_root == root.parent / "archive"
+
+
+def test_installed_report_command_runs_offline_dry_run_in_external_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_root = build_synthetic_report_source(tmp_path / "synthetic-source")
+    workspace = tmp_path / "external"
+    reports_root = stage_v2_report_workspace(source_root, workspace)
+    programs_root = workspace / "programs"
+    archive_root = workspace / "archive"
+    import yaml
+
+    milestones_path = programs_root / "acme" / "milestones.yaml"
+    milestones = yaml.safe_load(milestones_path.read_text(encoding="utf-8"))
+    for milestone in milestones["milestones"]:
+        milestone["target_date"] = "2099-12-31"
+        milestone["linked_work_item_ids"] = []
+    milestones_path.write_text(yaml.safe_dump(milestones), encoding="utf-8")
+    disable_kusto_in_report_copy(reports_root)
+    reset_overrides_to_seed_state(reports_root)
+
+    seeded = report.generate_report_draft(
+        "acme_weekly",
+        issue_number=7,
+        reports_root=reports_root,
+        archive_root=archive_root,
+        programs_root=programs_root,
+        dry_run=True,
+        work_item_loader=lambda _bundle, _timestamp: ((), 0),
+        open_browser=False,
+    )
+    assert seeded.snapshot_path is not None and seeded.snapshot_path.is_file()
+    snapshot_before = seeded.snapshot_path.read_bytes()
+    assert not archive_root.exists()
+
+    monkeypatch.setattr(report, "PROGRAMS_ROOT", programs_root)
+    app = Typer()
+    app.command()(report.report_command)
+    result = CliRunner().invoke(
+        app,
+        ["--edition", "acme_weekly", "--issue", "7", "--dry-run", "--offline", "--stdout"],
+    )
+
+    assert result.exit_code == 0, result.output + repr(result.exception)
+    assert result.stdout
+    assert not archive_root.exists()
+    assert seeded.snapshot_path.read_bytes() == snapshot_before
+
+    from src.core.narrative_store import get_narratives_dir
+
+    narrative_dir = get_narratives_dir(
+        "acme_weekly", 7, reports_root, programs_root=programs_root,
+    )
+    (narrative_dir / "exec_summary.md").write_text("Synthetic offline summary.\n", encoding="utf-8")
+    confirm_result = confirm.confirm_issue(
+        "acme_weekly", 7, dry_run=True, reports_root=reports_root,
+        archive_root=archive_root, programs_root=programs_root, force=True,
+    )
+    assert confirm_result.exit_code == 0, confirm_result.failures
+    assert not archive_root.exists()
+    assert (workspace / "vertex-db" / "acme" / "vertex.sqlite3").is_file()
 
 
 @pytest.mark.parametrize("command", ["report", "draft"])

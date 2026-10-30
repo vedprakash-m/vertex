@@ -35,7 +35,8 @@ def _baseline_hash(current: str, state: str) -> str:
 
 
 def _read_registry_value(
-    program_id: str, target_key: str, target_field: str, *, programs_root: Path
+    program_id: str, target_key: str, target_field: str, *, programs_root: Path,
+    registry_documents: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     if not program_id or program_id in {".", ".."} or any(char in program_id for char in "/\\:"):
         raise ManualRegistryDiffError("invalid program identifier")
@@ -46,7 +47,12 @@ def _read_registry_value(
     path = programs_root / program_id / "workstream_registry.yaml"
     if not path.resolve().is_relative_to((programs_root / program_id).resolve()):
         raise ManualRegistryDiffError("registry path leaves the selected program")
-    payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if registry_documents is not None and program_id in registry_documents:
+        payload = registry_documents[program_id]
+    else:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        if registry_documents is not None:
+            registry_documents[program_id] = payload
     if not isinstance(payload, dict) or not isinstance(payload.get("workstreams"), list):
         raise ManualRegistryDiffError(f"{path} must contain a workstreams list")
     entries = [entry for entry in payload["workstreams"] if isinstance(entry, dict) and entry.get("id") == target_key]
