@@ -22,23 +22,23 @@ def freshness_prep_external_homes(tmp_path_factory):
     from tests.unit.test_prep_brief import _seed_v2_report_layout
 
     root = tmp_path_factory.mktemp("freshness-prep-external")
-    installation = Path(__file__).resolve().parents[2]
+    checkout = Path(__file__).resolve().parents[2]
+    installation = root / "installation"
     selected, cwd = root / "selected", root / "misleading-cwd"
     for home in (selected, cwd, installation):
-        fixture = root / "installation-fixture" if home == installation else home
-        fixture.mkdir(parents=True, exist_ok=True)
+        home.mkdir(parents=True, exist_ok=True)
         reports, archive = _seed_v2_report_layout(
-            fixture, fixture, edition_names=("acme_weekly", "example_lt_deck"),
+            home, home, edition_names=("acme_weekly", "example_lt_deck"),
         )
         generate_report_draft(
             edition_name="example_lt_deck", reports_root=reports, archive_root=archive,
-            programs_root=fixture / "programs",
+            programs_root=home / "programs",
             as_of=datetime(2026, 5, 5, 18, tzinfo=timezone.utc),
             work_item_loader=lambda bundle, timestamp: (_sample_items(timestamp), 0),
             kusto_query_executor=lambda query: [], open_browser=False,
         )
         for edition in ("acme_weekly", "example_lt_deck"):
-            index = fixture / "programs" / "acme" / "archive" / edition / "index.json"
+            index = home / "programs" / "acme" / "archive" / edition / "index.json"
             index.parent.mkdir(parents=True, exist_ok=True)
             index.write_text(json.dumps({
                 "edition": edition,
@@ -47,9 +47,17 @@ def freshness_prep_external_homes(tmp_path_factory):
                     "kind": "confirmed",
                 }],
             }), encoding="utf-8")
-        if home == installation:
-            shutil.copytree(fixture / "programs", installation / "programs", dirs_exist_ok=True)
+    for name in ("src", "templates", "vertex"):
+        shutil.copytree(checkout / name, installation / name, ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copyfile(checkout / "cli.py", installation / "cli.py")
+    shutil.copytree(checkout / "reports" / "schemas", installation / "reports" / "schemas")
     return selected, cwd, installation
+
+
+def test_freshness_prep_fixture_uses_temporary_installation(freshness_prep_external_homes) -> None:
+    selected, _, installation = freshness_prep_external_homes
+    assert installation.parent == selected.parent
+    assert not installation.is_relative_to(Path(__file__).resolve().parents[2])
 
 
 @pytest.mark.parametrize("command", ("freshness", "prep"))
@@ -79,7 +87,9 @@ def test_freshness_prep_actual_external_and_nested_legacy(
     before = protected()
     env = dict(os.environ)
     env.pop("VERTEX_PROGRAMS_ROOT", None)
-    env["PYTHONPATH"] = os.pathsep.join((str(installation), env.get("PYTHONPATH", "")))
+    env["PYTHONPATH"] = os.pathsep.join((
+        str(installation), str(Path(__file__).resolve().parents[2]), env.get("PYTHONPATH", ""),
+    ))
     if entrypoint != "legacy":
         env["VERTEX_PROGRAMS_ROOT"] = str(selected / "programs")
     code = f"""
@@ -156,8 +166,11 @@ def test_freshness_prep_actual_nested_unset_legacy_in_process(
 
     _, cwd, installation = freshness_prep_external_homes
     module = freshness if command == "freshness" else prep
+    monkeypatch.setattr(module, "REPO_ROOT", installation)
     for name in ("programs", "reports", "archive"):
         monkeypatch.setattr(module, name.upper() + "_ROOT", installation / name)
+    monkeypatch.setattr("src.core.workspace_paths.REPO_ROOT", installation)
+    monkeypatch.setattr("src.core.workspace_paths.PROGRAMS_ROOT", installation / "programs")
     monkeypatch.setattr("src.core.workspace_paths._PROGRAMS_ROOT_CONFIGURED", False)
     monkeypatch.chdir(cwd)
     monkeypatch.setattr("src.core.engms_content.fetch_engms_page_summary", lambda *args, **kwargs: None)
