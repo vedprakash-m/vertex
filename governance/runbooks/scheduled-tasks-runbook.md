@@ -16,7 +16,7 @@ WorkIQ call (Section 10.6, INV-ADF-2).
 | `vertex gather --program <id>` | Refreshes authorized evidence using the selected program and approved identity | Use the deployment owner's private cadence policy |
 | `vertex prefetch --program <id> [--edition <edition>] [--ttl-seconds N]` | Runs the slow live WorkIQ NL-search step out-of-band and commits a snapshot `gather` prefers over a live call | Every 1–4 hours during business hours (WorkIQ historical p50 latency is minutes, so more than a few runs/day has diminishing value) |
 | `vertex cockpit build --program <id> [--open]` | Refreshes the local HTML dashboard | Once per gather cycle, or daily |
-| `vertex cockpit show --program <id> --no-persist` | Read-only health check without writing history (safe to run more often than the above) | As needed |
+| `vertex cockpit show --program <id> --no-persist` | Fresh health preview suppressing cockpit history writes only; fresh readers are not qualified as non-mutating. Use `show --as-of <timestamp>` for retained inspection without rebuilding | As needed |
 | `vertex admin metrics-rollup --program <id>` *(ADF-W5.13)* | Rolls up the current ISO week's raw tier-decision/AI-telemetry/run-telemetry rows into `runtime/metrics/weekly/<family>.jsonl` (Section 9.7's 13-month aggregate) | Once per week, after the week has fully elapsed (e.g. Monday morning for the prior week) |
 
 `vertex prefetch` and `vertex cockpit build` are both plain, idempotent CLI

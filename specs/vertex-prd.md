@@ -1108,9 +1108,11 @@ The `PROVIDER_REGISTRY` in `channel_wiring.py` maps channel names to their provi
 
 | Signal | What It Measures | Source |
 |--------|-----------------|--------|
-| **Freshness** | Days since last meaningful ADO update | Trajectory data, ADO revisions/comments |
+| **Freshness** | Days since last meaningful ADO update when source time is known; otherwise unknown | Trajectory data, ADO revisions/comments |
 | **Richness** | Field completeness (0–100 rubric) | ADO item fields |
 | **Leakage** | WorkIQ signals with no ADO update in same window | Journal + trajectory |
+
+When no meaningful ADO source timestamp is known, source age is unknown—not the time since fetch or assessment—and the item retains the existing red freshness contribution to its composite score.
 
 **Richness rubric (per item, 0–100):**
 
@@ -1232,6 +1234,8 @@ Loads last N confirmed scorecards from archive (default: 4 issues). Per-dimensio
 
 When a signal or drift pattern fires on a `from_item` in `Program.key_dependencies`, the pipeline surfaces downstream impact in the affected workstream's section. Single-hop only (no transitive closure).
 
+**Explicit dependency date margins:** Structured dependencies may separately declare provider forecast-ready and consumer required-by dates. The initial supported comparison is required-by minus forecast-ready in explicitly versioned calendar days/UTC, for `blocks` with zero lag only. Positive/zero/negative values mean buffer/no buffer/breach under those declarations; missing or unsupported semantics remain unknown. Existing planned-resolution, target and due dates do not substitute for either role. The milestones assessment command exposes each selected dependency once. Node-count chain membership is not duration-based criticality or total float.
+
 ### 9.17 Anticipation Engine
 
 **Layer 1 (Zone A, deterministic):** Detects patterns warranting leadership questions — ETA drift on a reader's topic, risk escalation, stale workstreams, dependency chain impact.
@@ -1334,9 +1338,9 @@ The L1 engine provides a typed telemetry substrate for hypothesis-driven program
 **Interactive review surface:** `vertex cockpit tui` is also the review-and-launch point for every human-reviewable AI proposal type (risk promotions and all AISchemaGateway-generated proposal classes) — approve/reject a staged proposal without leaving the cockpit.
 
 **Acceptance criteria:**
-1. `vertex cockpit show --program <id>` renders a snapshot (terminal or `--format html`) reflecting the program's current state within the last `build` cycle.
+1. `vertex cockpit show --program <id>` builds a fresh snapshot in human/JSON format; `--as-of <timestamp>` reads retained history without rebuilding, with `--format html` available only for retained selection. Historical output does not assess current readiness.
 2. A subsystem failure (e.g., no released synthesis yet, a source degraded) degrades that section to an honest empty/default state, never a crash or a silently stale figure.
-3. `vertex cockpit explain <finding_id>` traces any surfaced finding back to its underlying evidence.
+3. `vertex cockpit explain --program <id> --finding <finding_id>` traces a finding to its evidence; optional `--as-of <timestamp>` explains retained history without rebuilding.
 4. No value metric renders as `measured` without a certified `TimeSavingsCertification` behind it.
 
 ### 9.29 Gap-Driven Solicitation
@@ -2084,6 +2088,8 @@ These are properties that must hold at all times. Violations are bugs.
 | INV-DM-4 | **Projection determinism:** Replaying the same event log must always produce the same projection, regardless of ingestion order | Golden fixture test `test_qg_dm_2_projection_golden`; shuffle-property test |
 | INV-DM-5 | **No wall-clock reads in projection:** `project_program_events()` is a pure function over the event log; no `datetime.now()` calls allowed inside the projection engine | `test_no_wall_clock_in_projection` in `tests/golden/test_ledger_projection.py` |
 | INV-DM-6 | **Zone B/C discovery never writes events:** Zone B AI extractors (`src/ai/discovery/`) and Zone C M365 connectors (`src/m365/discovery/`) must never import or call the event write API (`write_event`, `write_events_atomic`, `index_event`, `append_jsonl_line`); only Zone A `discovery_run_recorder.py` writes ledger events | AST scan in `tests/contracts/test_import_boundaries.py::test_inv_dm_6_zone_b_c_discovery_never_calls_event_write_api` |
+
+**Unqualified draft capture (RELO-W2.8o):** Resolved ordinary drafts bind their original retained fact pin, selected gather reference, query declarations, unevaluated fact entity refs and rendered item population in one integrity-checked capture. The draft checksum and captured manifest must agree before confirmation artifact construction. This does not certify source completeness, entity resolution, effective policy closure, principal/audience authority or all assessment inputs; those limitations are explicit and checksum-bound. Existing absent-capture compatibility and release gates remain unchanged.
 
 **Program Fact Store invariants (INV-SG):** the signal-fidelity / fact-layer subsystem carries its own invariant family (INV-SG-1…13), enforced by `tests/contracts/test_signal_invariants.py`. The actively enforced set: INV-SG-1 (a fact promoted with no entity ref is rejected; program-level facts bind a `PROGRAM:` sentinel), INV-SG-3 (the Program Fact layer carries no `src.ai`/`src.m365` imports — Zone A placement), INV-SG-9 (program-scoped identity — no `issue_number`/`edition_id` as a primary key), INV-SG-10 (per-module fact-read allow-list — migrated current-state reads route through `load_program_facts()`), INV-SG-11 (a lower-precedence write contradicting a higher-precedence accepted fact is queued as a Proposed Revision, never a silent overwrite), INV-SG-12 (snapshot-pin drift detection), and INV-SG-13 (bitemporal append-only with real `as_of` time-travel). INV-SG-2/4/5/6/7/8 are forward-declared placeholders tied to gated phases (extraction depth, source-health enforcement breadth, AI drafting, learning loops) and activate when their owning feature lands.
 

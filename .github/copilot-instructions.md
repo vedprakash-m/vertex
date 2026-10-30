@@ -4,15 +4,15 @@
 
 Vertex is a governed intelligence platform for Technical Program Managers (TPMs) and Engineering Managers (EMs): ingest multi-source evidence, compute deltas/judgments, render Outlook-compatible HTML newsletters and related delivery surfaces.
 
-Three-zone hybrid: A = deterministic core, B = AI, C = M365/external. Current phase: L0 (Deterministic Kernel) with L1 foundations; ~117K LOC, 163 Zone A / 28 Zone B / 13 Zone C modules, 101 CLI command modules, 2332+ tests. Roadmap: `specs/reimagine.md`.
+Three-zone hybrid: A = deterministic core, B = AI, C = M365/external. The canonical specs describe implementation contracts; operational qualification requires separate evidence and approval. Derive current source/module counts with `scripts/derive_spec_counts.py` rather than relying on historical counts.
 
 **Read specs before changing anything.** The binding spec for each domain wins disagreements:
 
 | Domain | Canonical spec |
 |---|---|
-| Requirements, semantics, phases | [PRD v0.8](../specs/vertex-prd.md) |
-| Architecture, data models, CLI, config | [Tech Spec v0.16](../specs/vertex-tech-spec.md) |
-| UX, ergonomics, layout, tokens, rendering | [UX Spec v3.4](../specs/vertex-ux-spec.md) |
+| Requirements, semantics, phases | [PRD](../specs/vertex-prd.md) |
+| Architecture, data models, CLI, config | [Tech Spec](../specs/vertex-tech-spec.md) |
+| UX, ergonomics, layout, tokens, rendering | [UX Spec](../specs/vertex-ux-spec.md) |
 
 Architecture decision records, superseded plans, and completed feature specs: `.archive/specs/` (gitignored, available locally). Canonical specs are reviewed by multiple AI models and the author: make precise, justified changes that preserve their structure. Use Python scripts for complex multi-site bulk edits across large Markdown specs.
 
@@ -66,12 +66,12 @@ python -m pytest tests/ -q
 **Follow in order; do not skip steps:**
 1. **Spec:** write `specs/<feature>.md` covering requirements, data model, alternatives considered, risks, assumptions, and acceptance criteria. Iterate with the user until approved; **no implementation before approval**.
 2. **TDD:** write failing tests first, then implement to pass.
-3. **Validate:** `pytest tests/`, coverage >= 95%, `scripts/verify_specs.py`, and parity checks.
+3. **Validate:** `pytest tests/`, coverage >= 95%, `python scripts/check_spec_drift.py`, `python scripts/verify_spec_citations.py`, and parity checks. Report pre-existing failures and excluded qualification explicitly; do not treat bounded checks as full-suite certification.
 4. **UAT:** generate real HTML (`python -m src run --view all`); visually confirm default and projector profiles.
 5. **Finalize:**
    - Backfill the three canonical specs if the feature added components/rules.
    - Archive: `Move-Item specs/<feature>.md .archive/specs/`.
    - Update `CHANGELOG.md`: dated entry, feature table, modified files, test files.
    - Audit `.gitignore` for PII/secrets.
-   - Commit (a) feature code + tests, (b) spec updates + archive.
-   - Push and confirm CI passes.
+   - Commit only when explicitly authorized: (a) feature code + tests, (b) spec updates + archive. Never stage unrelated or ignored private work.
+   - Publish only with separate authorization after reviewing the exact eligible content, outgoing objects and metadata for private information. A passing test or secret scan is not publication approval. When authorized, push normally and confirm CI passes; otherwise retain verified changes locally.

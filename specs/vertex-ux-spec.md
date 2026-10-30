@@ -365,6 +365,8 @@ Awaiting-data tile. For KPIs with `validated: false` and `refresh_on_gather: fal
 
 Awaiting-validation tile. For KPIs with `validated: false` and `refresh_on_gather: true` (the transitional state between the Wave A merge and Wave B live probe success): label + `Awaiting validation - gather pending` in 14px secondary text, no owner footer. Background `#FAFAFA`; border `1px dashed #E1E1E1`.
 
+Explicitly failed bound KPI (RELO-W3.6a). Omit its current report workstream/chapter tile, including retained-signal fallback; do not display an old value or green zero-active statement as current. Independent valid tiles remain. Existing QG-28 reports the failure with unchanged forceable semantics. Unknown execution state and unbound diagnostics retain existing behavior; no awaiting-validation or last-known-value presentation is substituted.
+
 Aggregate-incidents tile. Schema: `{Sev0Count, Sev1Count, Sev2Count, OldestAgeHours, OldestIncidentId, OldestUrl}`. When the Sev0/1/2 sum is greater than zero, render three count badges (Sev0 red `#A4262C`, Sev1 amber `#BC7C00`, Sev2 slate `#605E5C`) plus a one-line footer `Oldest: <Age>h - <IncidentId>` hyperlinked to `OldestUrl`. When the sum is zero, render a single green `✓ No active Sev 0-2 (<scope label>)` tile with no footer.
 
 **Cell rendering rules:**
@@ -435,6 +437,7 @@ In CLI terminal output, emit the line as plain text prefixed with a blank line: 
 - The token `[DISPUTED ⚠]` is reserved for unresolved material conflicts only — never use it for minor conflicts or staleness warnings.
 - The `⚠ includes unconfirmed sources` line is informational only; it does not block publishing unless QG-27 fires.
 - Both markers are controlled by Zone A (`program_reality.py` flags) injected at render time; templates must not re-derive dispute/confirmation state independently.
+- Report health badges describe the exact risk named by the highest-active summary, not another risk selected by review age. Missing matching assessment leaves that risk's metadata absent; the section-wide unconfirmed-source disclosure remains independent (RELO-W2.8p).
 
 ### 3.6c Truth-Level Badge Vocabulary *(WI-8.0)*
 
@@ -514,7 +517,7 @@ Header: `11px/600 uppercase, #6B7280, bg: #F9FAFB, border-bottom: 1px solid #E5E
 
 **Metrics table:** Labels in 600-weight `#111827`, values right-aligned `#111827`.
 
-Metrics shown: Items updated (count/total/percentage), freshness average days, leakage events, best documented item, trend summary.
+Metrics shown: Items updated (count/total/percentage), mean days since the latest meaningful ADO update when known, leakage events, best documented item, and trend summary. Show the known/total source-age count beside the mean, or `unknown` when no ages are known; never display a policy sentinel as elapsed days. Keep the existing table layout and width.
 
 ### 3.10 Provenance Footer (`partials/provenance_footer.j2`)
 
@@ -561,6 +564,8 @@ Rendered within the detailed archetype when Kusto queries return data.
 Phase-1 table notice. For KPIs with `render_as: table` and `refresh_on_gather: true`, the body may render the 13px regular notice `Data available - see CLI inspector (python cli.py inspect kusto --query <id>).` Wave H replaces this with the inline table renderer.
 
 **Degraded state:** `color: #9A3412` message text when cluster is unreachable. Reference URL link as fallback.
+
+**Invalid SLO targets (RELO-W3.5f):** A nonfinite configured target is a configuration/hydration failure, never an OK/BREACH verdict or successful numeric-history update. Valid zero, absent targets and existing zero-row data-gap presentation remain distinct.
 
 **Caveats:** 12px, `color: #6B7280` — displayed below the section when present.
 
@@ -919,6 +924,60 @@ Per-DRI message with item list, ADO links including "Edit in ADO" deep links.
 
 When catchup is enabled and unseen items exist, the CLI may emit a short session-start catchup banner before the requested command output. The banner is advisory, bounded, and summarizes the highest-salience unseen changes rather than replaying full history.
 
+Backup creation failures, including SQLite capture failures, return exit 2 with an explicit error in the selected human/JSON/CSV format rather than a success count or an unformatted traceback (RELO-W0.13c). A verified checksum establishes the captured files' integrity, not complete workspace scope or operational recovery readiness.
+
+Repository backup output explicitly identifies its bounded subset and recovery as not assessed. Version 1.1 verification distinguishes listed-file integrity and declared canonical database capture obligations; absent stores and legacy scope remain unassessed. Restore with skipped preflight reports unchecked scope, not verification success. Existing JSON keys and CSV columns retain their order, with scope/qualification fields appended; unsupported mappings and malformed manifests fail explicitly (RELO-W0.13d).
+
+Default restore reports success only after copied destination bytes match its single verified manifest. Copy/hash I/O failures produce the existing human/JSON/CSV exit-2 error rather than a success payload. Earlier copied files may remain after a later failure; no automatic cleanup, rollback or safe-resume guarantee is implied. Explicit skip-preflight remains unchecked (RELO-W0.13e).
+
+Bounded backup creation refuses linked/reparse or unsupported roots/members and failed enumeration before copying payload or publishing a manifest. Existing human/JSON/CSV create-error output reports exit 2, not a successful count. Linked workspaces require correction before retry; no target is silently followed or omitted. This does not certify historical backup provenance or complete recovery (RELO-W0.13f).
+
+Backup manifests with repeated decoded property names fail explicitly, even when values agree or the manifest is legacy. Verify uses the existing human/JSON/CSV exit-2 error; restore refuses before destination mutation even with skipped preflight, and reference search reports malformed input rather than silently discarding declarations. Valid uniquely declared manifests remain compatible; the error does not echo arbitrary values or imply authenticated inventory (RELO-W0.13g).
+
+Status shows risk-fact configuration failures as unavailable with correction-before-retry guidance, consistently in human/JSON/CSV. Successful empty risk facts keep their existing absent summary; unrelated available status facts remain visible and raw exception details are not displayed. This does not change status exit codes or publication gates (RELO-W0.15k).
+
+Status refuses malformed quality-gate result maps rather than displaying readiness or blocker counts inferred from strings/numbers. Human/JSON/CSV modes emit a safe stderr error and exit 2, with manifest-preservation and report-regeneration guidance and no success payload. Missing/null/empty result maps remain unknown; valid boolean evidence and snapshot blocker precedence are unchanged (RELO-W0.15l).
+
+Milestone assessment displays explicit dependency date margins once per selected dependency: signed days with buffer/no buffer/breach, or unknown with reasons. Known values state the calendar-day/version/UTC/day-unit/zero-lag assumptions; absent or unsupported inputs never borrow old date roles. Human node-count labels say longest dependency chain, not critical path. JSON retains legacy machine keys with named chain equivalents; CSV distinguishes milestone and dependency-margin records without duplicating margins across milestones. These results do not claim duration-based scheduling, total float or approved program baselines.
+
+Report/escalation descriptive risk trends require two known-risk observations with explicit increasing timezone-aware publication/assessment clocks. Otherwise omit the sparkline/trend rather than inventing dates, repeated samples or elapsed weeks. A valid comparison keeps the surface's existing two-observation labels; independent consecutive-high rule inputs remain unchanged. Publication time is not source-event time.
+
+New onboarding/setup creation requires a safe explicitly configured external workspace; unsafe, missing, conflicting or unsupported report mappings fail before creation state access. Setup output directories select only preview/session artifacts, never another production program home. Setup/onboard run without unrelated startup maintenance/catchup; setup demo/write-free dry-run stay offline, with no AI/ADO discovery. Existing explicit updates/migrations remain supported. Arbitrarily named programs roots remain blocked by the existing report mapper until its remaining selected-root consumers are wired; no state is moved automatically.
+
+Automatic onboarding validation requests the documented report dry-run, retaining output artifacts and gate results. It does not imply offline acquisition, write-free program initialization or suppressed browser opening (RELO-W0.70).
+
+Ordinary `onboard --update` continues in the selected external workspace and rejects conflicting roots before reading an edition or prompting. Same-name installation editions are not fallback targets; coherent explicit-root and unset legacy updates remain compatible. A generated empty risk register is readable without inventing a risk or weakening malformed-input checks (RELO-W0.17o).
+
+Explicitly selected authored-artifact/editorial context never falls back to another program tree or flat artifact directory. Invalid selection fails before mutation; legacy omitted-context calls remain compatible. Selected-root helper support alone does not enable arbitrary-root reporting or confirmation.
+
+Report and confirm support explicitly selected external programs roots with conventional sibling reports/archive runtime roots. Unsafe roots fail before startup or store access; installation assets remain installation-relative and external archives never fall back to installation history. Unset legacy behavior remains unchanged. This does not enable independent root mappings, relocate existing state or qualify other commands (RELO-W0.17w).
+
+Full/section review uses the same admitted external workspace for selected issue/history, review status and exports. Read-only show does not mutate archives or decoys; invalid or mismatched roots fail before state access rather than using installation or cwd context. Unset legacy and existing explicitly requested review actions remain compatible; no migration or new external-effect authority is implied (RELO-W0.17x).
+
+Freshness and prep also use the admitted external workspace for selected history/status/output and local notification previews. Existing explicit report-root inference, warnings, blocking exits and satellite restrictions remain; unsafe/mismatched roots fail before startup or state access. Captured selection and nested unset-legacy generation remain compatible. No notification-send permission or migration is added (RELO-W0.17y).
+
+Brief escalation plan/apply uses the selected workspace. Approve with dry-run shows the actual preview without recording approval resolution or writing EML, ask-touch or audit effects; ordinary explicit local approval stays supported. Invalid handoff roots fail before planner effects, without promising startup-wide brief containment or send authority (RELO-W0.17z).
+
+`context extract` uses the admitted selected workspace for extraction previews and proposal-staging handoff, without reading same-name installation overrides. Unsafe or conflicting roots fail before edition/content access; the command does not run unrelated startup maintenance/catchup. Coherent explicit roots, captured selection, unset legacy behavior and existing proposal review remain compatible. This adds neither automatic apply nor send authority (RELO-W0.17j).
+
+Explicitly selected snapshot/archive storage context likewise fails before locks or writes rather than selecting a different archive. Legacy omitted-context calls remain compatible; storage-helper support alone does not enable arbitrary-root commands or authorize relocation.
+
+The program-backed confirmation transaction keeps lock, staging/commit and prior-entry reads in that selected archive. Flat transactions retain existing behavior; later history/index adoption and arbitrary-root command admission remain separate.
+
+Its semantic refresh and failure dirty marker also retain selected context for indexed narratives/incidents and index/state storage. Existing warning behavior remains; this does not make post-confirm indexing atomic with archive commit or enable arbitrary-root commands.
+
+Report baseline, vitality history and report/confirmation healthy-streak calculations retain the selected archive rather than borrowing another program tree. Flat compatibility and existing command-admission restrictions remain unchanged.
+
+Editing validates workspace coherence before draft/history access and retains selected context for the narrative target and built-in report rerun. Conflicting context cannot open the editor or create a fallback draft; confirmed/read-only handling remains unchanged.
+
+Interactive override validates workspace coherence before state reads or author prompts and retains selected context for authored overrides, backups and AI-proposal decisions. Missing drafts and published-issue locks retain their existing errors; prompt choices, summary limits and output are unchanged. This command-level containment does not establish startup-wide or arbitrary-root workspace support.
+
+Installed edit/override commands also validate before unrelated startup telemetry, maintenance or catchup. Invalid workspace configuration produces stderr and exit 2 without a success banner or editor/prompt access; coherent invocations keep their existing startup behavior. Other command surfaces and arbitrary-root admission require separate adoption.
+
+Review-section show output identifies the actual resolved review-status source in human, JSON and CSV formats. Set/clear/export retain the selected artifact context without changing export destination semantics; optional manifest display does not conceal invalid explicit context.
+
+Installed review-sections and standalone apply-overrides also reject invalid workspace configuration before unrelated startup telemetry, maintenance or catchup. Coherent invocations retain their existing behavior; pending-override messages and deprecated report-flag warnings are unchanged.
+
 ### 12.2 Dry-Run Behavior
 
 `vertex report --dry-run` generates all output artifacts (HTML, EML, MD, manifest, snapshot) but:
@@ -974,9 +1033,15 @@ Optional summary ≤50 words. Backup to `.bak` before each write.
 
 **`vertex doctor --context --fix-hints`** appends one `[Fix hint]` line per invariant violation and one per staleness flag with actionable remediation text. Fix hints are informational; exit code is unchanged.
 
+Selected-root context-gap ranking hides doctor `deep_context.why/what` missing-field observations once a current string is populated; clearing the field reopens the same fingerprint without deleting history. These detector fingerprints can be selected for the existing revision-bound solicitation and pending reply workflow. A repaired structural field is not an authenticated reply, semantic review, renewed review date or business-resolution approval; legacy change requests retain their meaning. When only historical observations remain, ranked-gap output explicitly reports no active context gaps.
+
 Exit code for `--context`: 0 = L4, 2 = L2–L3 (warnings/gaps), 3 = L0–L1 (errors).
 
 ### 12.6.1 Confidence-Preserving CLI Rows
+
+Risk-list JSON, CSV and human output label active open/escalated entries `unreviewed` when the authored review date is absent or future, never `current` merely because identification is recent. Valid reviews retain the existing 30-day inclusive current threshold and stale label thereafter; inactive labels remain compatible. This limitation does not change business severity, fact confidence, review dates or approval authority (RELO-W0.30a).
+
+`admin metric history` reads initialized storage without unrelated startup maintenance or database/schema initialization. Missing or invalid storage reports unavailable, not an empty successful history or automatic repair; valid empty history remains successful. Existing output and DB-root selection remain compatible, without claiming override/workspace coherence (RELO-W3.5p).
 
 Human CLI surfaces that consume confidence-bearing Zone A records must preserve that confidence inline rather than flattening the row to source/status text only.
 
@@ -998,6 +1063,8 @@ Source health (by slice role):
 ```
 
 A required role that is `stale`, `zero_yield`, or `auth_failed` is forceable and may be waived in `source_waivers.yaml` with owner/date/reason; an `unbound` structural misconfiguration is non-waivable and blocks `confirm` via QG-SG-01. Optional roles use the same status vocabulary in the doctor output but remain warning-only and never escalate the sub-check to a blocking failure.
+
+The channel expected-minimum summary reports completeness unavailable with advisory `warn` when no channels are active, never `100% (0/0)`. Comparisons with an unavailable side show no numeric point change, retain any known percentage and observation time, and preserve independent regression diagnostics. JSON/CSV metadata keys remain present with null unavailable percentages/deltas. Known active-channel ratios, including measured 0% and 100%, keep their existing output and threshold behavior. This is diagnostic availability, not source-scope completeness or a new role/publish gate (RELO-W2.5a).
 
 **`vertex doctor --storage`** emits checks for storage health and program directory layout:
 
@@ -1051,6 +1118,8 @@ Each row includes the source label, last attempt time, best candidate confidence
 Structured WorkIQ enumeration does not add a new end-user surface. Accepted records enter the existing pending signal-review queue and use the standard gather counts, source-health diagnostics, and privacy-safe source explanations. Malformed, unsafe, or out-of-window records are omitted rather than partially rendered; connector-level failure remains a degraded-source warning, not fabricated empty success.
 
 Rich per-thread evidence remains opt-in and invisible to readers until its source-specific review signal is approved. Published attribution continues to use the standard `Signal sources:` footnote; unapproved or quarantined thread content must never appear in a draft, reviewer pane, source footnote, or generated artifact. Grounding state is provenance, not a confidence synonym: only `human_verified` and `source_verified` count as grounded.
+
+Identity-rejected rich candidates produce a bounded count-only enrichment warning while valid native candidates continue (RELO-W3.3a). Do not print rejected identifiers, subjects or participants; a rejected-only result is not a successful empty collection.
 
 Qualification tooling is operator-only. It may show private subjects and previews only in the local interactive session and writes captures solely to an ignored/restricted directory. Committed documentation, examples, diagnostics, and test fixtures must not reveal mailbox identity, real participants, private subjects, or internal permalinks.
 
@@ -1528,6 +1597,8 @@ Pass condition: the generated nudge EML renders within the standard email width,
 - Condensation rule: inline attribution chains are collapsed into short evidence phrases rather than repeated source lists.
 - Teams delivery compatibility is mandatory: if a brief is reposted into Teams or chat surfaces, it must remain legible as wrapped plain text with no dependency on HTML tables, color, or hover affordances.
 - **Program Narrative section (added `.archive/specs/arch-data-fix.md` v1.77):** a new, always-last section surfaces the latest QG-29-released `ProgramSynthesis` through-line plus its long-pole lines, when one exists for the program — same plain-text-first rendering as every other section, appended after `Now`/`Watch`/`Staged`/`Reference Docs`. Degrades to fully omitted (not an empty header) when no synthesis has been released yet, preserving today's exact output for every program that hasn't wired the synthesis pipeline in.
+- **Retained synthesis read failure (RELO-W2.8q):** Failed reads are not no-release omission: show a bounded operator diagnostic in the existing Now section without presenting it as narrative evidence. Cockpit shows a blocked synthesis-read finding and `synthesis unavailable (read failed)` terminal qualifier while preserving independent high risk/lineage. Guidance identifies source, affected program and safe reason with inspect-before-retry action; no raw exception/path/payload, automatic regeneration or new gate policy. Genuine absent/empty/unreleased behavior remains unchanged.
+- **Brief synthesis editorial refusal (RELO-W2.8s):** Omit Program Narrative when its through-line or long poles violate built-in or selected-program editorial rules; show a safe Now diagnostic without repeating rejected wording. Missing optional extension files retain built-in checks. Invalid or unreadable present rules get a distinct configuration diagnostic, not silent defaults or a synthesis-read error. Preserve independent sections and retained release history; this does not certify every other rendered brief field.
 - Acceptance mapping: §17 C-11, C-12, C-16, C-27.
 Pass condition: the brief stays within section budgets, reads cleanly as wrapped plaintext, does not rely on HTML-only formatting for operator comprehension, and the Program Narrative section (when present) reads as one more plain-text section, not a formatting exception.
 
@@ -1552,15 +1623,17 @@ Pass condition: generated cards stay within body/action limits, preserve risk em
 
 ### 18.5 Cockpit (added from `.archive/specs/arch-data-fix.md`, ADF-F01/ADF-W5.5)
 
-- Terminal (`vertex cockpit show`) and standalone HTML (`vertex cockpit show --format html` / `build`) are the two supported renders; the HTML output is one self-contained document (inline `<style>` only, no external JS/CSS, no network requests — safe to open via `file://`).
+- Terminal (`vertex cockpit show`) and standalone HTML (`vertex cockpit show --as-of <timezone-aware-ISO> --format html` / `build`) are the two supported renders; the HTML output is one self-contained document (inline `<style>` only, no external JS/CSS, no network requests — safe to open via `file://`). Retained show emits HTML to stdout without writing a file; fresh show supports human/JSON, not HTML.
 - **System-health labels are distinct from program-risk colors**: system/source-health state (`[OK]` / `[Degraded]`) renders as text labels or neutral icons, never the canonical risk-color palette (`RISK_COLORS`) — program risk continues to be the only concept color is reserved for, per §1.2's platform-wide "Color = Risk. Always. Only." rule.
 - Accessibility: skip-link + semantic landmarks (`<header>`/`<main>`/`<section aria-labelledby>`) for keyboard navigation; targets WCAG 2.2 AA (§15.1's reconciled note) rather than the platform-wide 2.1 AA baseline.
 - Every evidence-derived string is escaped; an evidence ref renders as a real clickable link only when it parses as an allowlisted `http`/`https` URL — anything else (`javascript:`, `file:`, a bare id) renders as plain escaped text, never a clickable link.
 - `explain <finding_id>` renders every explainability field a `CockpitFinding` actually carries (why, detail, owner, source-age, evidence, next-command) and honestly labels the fields it doesn't yet have data for (calculation/rule, confidence, what-Vertex-did-not-do) rather than fabricating content.
 - `compare <earlier> <later>` operates only on retained history snapshots — never a live recompute — so a comparison is always reproducible from the same two points in time.
+- Fresh primary-judgment risk summaries use retained primary risk records rather than the authored mirror. Unreadable or inconsistent authority displays unknown risk and a blocked finding, never a mirror-derived green result. Existing non-primary mode remains compatible; this is not historical snapshot or coverage certification.
 - Value/time-savings figures always render their confidence tier (`measured`/`calibrated`/`proxy`/`unavailable`) alongside the number — a figure is never presented as a bare percentage without its evidence tier visible.
 - A failed lineage read is not "no facts": terminal data trust shows `lineage unavailable (read failed)`, while JSON and HTML retain unknown coverage with the blocked `intelligence.lineage.read_failed` explanation and manual diagnostic guidance. Successful-empty lineage remains `not measured yet` with an informational finding. Known program risk and independently released synthesis remain visible; raw exception messages are not rendered.
 - No formal §17 acceptance-mapping ID exists for this surface yet. Golden snapshots (`tests/golden/test_cockpit_html_golden.py`) and automated accessibility checks provide regression coverage, not independent audit certification. Record actual client-validation evidence, audit results, and any approved limitations privately; do not imply that automated coverage satisfies an independent human audit.
+- Retained show/explain (`--as-of`, with `explain --finding <id>`) labels the actual snapshot time and “Current source and action state not evaluated.” Blocked findings precede warnings in stable recorded order; every exception ID and its evidence remain reachable, including findings without a command. The action glance has at most three distinct commands; other findings remain available separately. No exceptions means “No blocked/warn findings in this retained snapshot,” not current clearance. Commands are historical guidance requiring current CLI revalidation; absent confidence, current authority, expiry/escalation, diff and expected effect are explicitly unavailable. Missing history differs from unreadable/inconsistent history, which fails without fallback. System-status borders are neutral, long evidence/commands wrap, and HTML has no action controls. These bounded synthetic checks do not certify a current inbox, independent accessibility audit or operator proficiency (RELO-W4.12b).
 Pass condition: the HTML render opens safely from a local file with no external requests, risk color is never reused for system-health state, every finding's explanation is either real data or an honest "not yet available" label, and no evidence-derived string can inject markup.
 
 ---
