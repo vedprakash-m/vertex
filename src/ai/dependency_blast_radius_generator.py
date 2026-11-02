@@ -92,6 +92,10 @@ def generate_dependency_blast_radius_proposal(
 
     _lifecycle(AIRunState.PLANNED)
 
+    if len(request.evidence_refs) != len(request.evidence_texts):
+        _discard(ReleaseTerminal.DISCARDED, "Evidence references and texts must be paired.")
+        return None
+
     request_payload = {
         "from_summary": request.from_summary,
         "to_summary": request.to_summary,

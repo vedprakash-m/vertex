@@ -13,10 +13,11 @@ import typer
 
 from src.core.adoption_telemetry import GoldenWorkflow, record_adoption
 from src.core.journal import PROGRAMS_ROOT
+from src.core.exceptions import ConfigError
 from src.core.program_reality import FactAssessment, ProgramReality
 from src.core.raid_graph import RaidChainResult, build_raid_chain_index
 from src.core.models_v2 import RiskCategory, RiskEntry, RiskImpact, RiskProbability, RiskStatus
-from src.core.risk_register_engine import assess_risk_staleness, build_risk_id, compute_risk_score, link_risk_action, record_risk_update, save_risk_register
+from src.core.risk_register_engine import assess_risk_staleness, build_risk_id, compute_risk_score, link_risk_action, load_archived_risk_history, load_risk_history, record_risk_update, save_risk_register
 from src.core.truth_levels import TruthLevel
 
 
@@ -108,6 +109,46 @@ def add_risk_command(
     entries.append(risk_entry)
     save_risk_register(program_id, _sort_risks(tuple(entries)), programs_root=PROGRAMS_ROOT)
     typer.echo(f"Added risk {risk_entry.id} to {program_id}.")
+    raise typer.Exit(code=0)
+
+
+@app.command("history")
+def risk_history_command(
+    program: str = typer.Option(..., "--program", help="Program id, e.g. myprogram."),
+    risk_id: str | None = typer.Option(None, "--risk-id", help="Optional retained risk id."),
+) -> None:
+    program_id = program.strip()
+    risk_key = risk_id.strip() if risk_id is not None else None
+    try:
+        archives = load_archived_risk_history(program_id, risk_key, programs_root=PROGRAMS_ROOT)
+        updates = load_risk_history(program_id, None, programs_root=PROGRAMS_ROOT)
+    except ConfigError as error:
+        raise typer.BadParameter(str(error)) from error
+    if risk_key is not None:
+        updates = tuple(record for record in updates if str(record.get("risk_id") or "") == risk_key)
+    if not archives and not updates:
+        if risk_key is not None:
+            raise typer.BadParameter(f"Risk history for '{risk_key}' was not found in {program_id}.")
+        typer.echo(f"No risk history for {program_id}.")
+        raise typer.Exit(code=0)
+    if archives:
+        typer.echo(f"ARCHIVE OCCURRENCES — {program_id}")
+        for occurrence in archives:
+            entry = occurrence.record
+            typer.echo(f"{entry.id} | {entry.status.value} | {entry.title}")
+            typer.echo(f"  {entry.description}")
+            typer.echo(f"  Archived: {occurrence.archived_at} | {occurrence.archive_path}")
+            typer.echo(f"  SHA256: {occurrence.content_hash}")
+            typer.echo(f"  Owner: {entry.owner_alias} | Sources: {', '.join(entry.source_signal_ids) or '-'} | Claims: {', '.join(entry.linked_claim_ids) or '-'}")
+            typer.echo(f"  Entity refs: {', '.join(entry.entity_refs) or '-'} | Work items: {', '.join(str(item_id) for item_id in entry.linked_work_item_ids) or '-'}")
+    if updates:
+        typer.echo(f"STATUS UPDATES — {program_id}")
+        for update in updates:
+            typer.echo(
+                f"{update.get('risk_id', '-')} | {update.get('timestamp', '-')} | "
+                f"{update.get('old_status', '-')} -> {update.get('new_status', '-')} | "
+                f"{update.get('author', '-')} | {update.get('note') or '-'}"
+            )
     raise typer.Exit(code=0)
 
 

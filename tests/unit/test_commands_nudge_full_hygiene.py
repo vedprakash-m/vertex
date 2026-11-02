@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from pathlib import Path
+from unittest.mock import Mock
 
 import yaml
 import pytest
@@ -19,6 +20,7 @@ from src.commands.nudge import (
 )
 from src.core.alerts import read_alerts
 from src.core.models import RiskLevel, WorkItem
+from src.core.exceptions import ConfigError
 from src.core.policy_loader import FreshnessPolicy
 from tests.support.report_test_setup import stage_v2_report_workspace
 from tests.support.synthetic_report_source import synthetic_report_root
@@ -765,3 +767,122 @@ def test_nudge_cli_real_run_fires_enrichment_cadence_alert(
     assert "Dry run:" not in result.output
     assert "EML:" in result.output
     assert len(tuple((programs_root / "acme" / "nudge" / "drafts").glob("*.eml"))) == 1
+
+
+@pytest.fixture
+def audience_workspace(monkeypatch, repo_root: Path, tmp_path: Path) -> Path:
+    stage_v2_report_workspace(repo_root, tmp_path, edition_names=("acme_weekly", "acme_nudge"))
+    _seed_full_hygiene_config(tmp_path / "programs")
+    _seed_people(tmp_path / "knowledge")
+    _seed_registry(tmp_path / "programs")
+    people_path = tmp_path / "knowledge" / "people_directory.yaml"
+    people = yaml.safe_load(people_path.read_text(encoding="utf-8"))
+    people["people"][0]["email"] = "towner@example.test"
+    people["people"].append({"alias": "other", "email": "other@example.test", "display_name": "Other"})
+    people_path.write_text(yaml.safe_dump(people), encoding="utf-8")
+    edition_path = tmp_path / "programs" / "acme" / "editions" / "acme_nudge.yaml"
+    edition = yaml.safe_load(edition_path.read_text(encoding="utf-8"))
+    edition["full_hygiene"]["sections"] = [{
+        "id": "hygiene", "title": "Hygiene", "stale_business_days": 4,
+        "criteria": {"source": "tag", "tags": ["EXAMPLETAG1"]},
+    }]
+    edition["full_hygiene"]["audience_policy"] = {
+        "allowed_domains": ["example.test"], "delivery_mode": "bcc",
+        "opt_out_fallback": "escalate",
+    }
+    edition_path.write_text(yaml.safe_dump(edition), encoding="utf-8")
+
+    class AudienceClient(_FullHygieneFakeADOClient):
+        def query_work_items_batch(self, work_item_ids, fields):
+            rows = super().query_work_items_batch(work_item_ids, fields)
+            for row in rows:
+                row["fields"]["System.AssignedTo"] = {
+                    "displayName": "Other", "uniqueName": "other@example.test",
+                }
+            return rows
+
+    monkeypatch.setattr("src.commands.nudge.ADOClient", AudienceClient)
+    monkeypatch.setattr("src.commands.nudge.PROGRAMS_ROOT", tmp_path / "programs")
+    return tmp_path
+
+
+@pytest.mark.parametrize("opt_out", ["towner", "towner@example.test"])
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_bcc_removed_primary_rejects_before_artifact_mutation(
+    monkeypatch, audience_workspace: Path, opt_out: str, dry_run: bool,
+) -> None:
+    import src.commands.nudge as nudge
+
+    edition_path = audience_workspace / "programs" / "acme" / "editions" / "acme_nudge.yaml"
+    edition = yaml.safe_load(edition_path.read_text(encoding="utf-8"))
+    edition["full_hygiene"]["audience_policy"]["opt_out"] = [opt_out]
+    edition_path.write_text(yaml.safe_dump(edition), encoding="utf-8")
+    paths = nudge.get_nudge_paths("acme", programs_root=audience_workspace / "programs")
+    paths.drafts_dir.mkdir(parents=True)
+    preserved = [paths.drafts_dir / "existing.eml", paths.state_path, paths.audit_path, paths.published_eml_index_path]
+    for path in preserved:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"existing")
+    spies = []
+    for name in ("_render_full_hygiene_html", "_prune_drafts", "write_eml_atomic",
+                 "append_nudge_event", "_append_audit", "update_nudge_state"):
+        spy = Mock(wraps=getattr(nudge, name))
+        monkeypatch.setattr(nudge, name, spy)
+        spies.append(spy)
+
+    with pytest.raises(ConfigError, match="Audience policy removed the primary Bcc recipient"):
+        generate_full_hygiene_nudges(
+            program_id="acme", dry_run=dry_run,
+            as_of=datetime(2026, 5, 22, 18, tzinfo=timezone.utc),
+            programs_root=audience_workspace / "programs",
+        )
+    for spy in spies:
+        spy.assert_not_called()
+    assert all(path.read_bytes() == b"existing" for path in preserved)
+    assert tuple(paths.drafts_dir.iterdir()) == (preserved[0],)
+
+
+def test_bcc_removed_primary_cli_exits_two(monkeypatch, audience_workspace: Path) -> None:
+    edition_path = audience_workspace / "programs" / "acme" / "editions" / "acme_nudge.yaml"
+    edition = yaml.safe_load(edition_path.read_text(encoding="utf-8"))
+    edition["full_hygiene"]["audience_policy"]["opt_out"] = ["towner"]
+    edition_path.write_text(yaml.safe_dump(edition), encoding="utf-8")
+    result = runner.invoke(app, ["nudge", "--program", "acme", "--dry-run"])
+    assert result.exit_code == 2, result.output
+    assert "Audience policy removed the primary Bcc recipient for program 'acme'." in result.output
+    assert "EML:" not in result.output
+    assert "Dry run:" not in result.output
+    assert "towner@example.test" not in result.output
+
+
+@pytest.mark.parametrize("mode", ["bcc", "to"])
+def test_admitted_primary_audience_output(monkeypatch, audience_workspace: Path, mode: str) -> None:
+    from email import policy
+    from email.parser import BytesParser
+
+    edition_path = audience_workspace / "programs" / "acme" / "editions" / "acme_nudge.yaml"
+    edition = yaml.safe_load(edition_path.read_text(encoding="utf-8"))
+    edition["full_hygiene"]["audience_policy"]["delivery_mode"] = mode
+    edition_path.write_text(yaml.safe_dump(edition), encoding="utf-8")
+    artifacts = generate_full_hygiene_nudges(
+        program_id="acme", dry_run=True,
+        as_of=datetime(2026, 5, 22, 18, tzinfo=timezone.utc),
+        programs_root=audience_workspace / "programs",
+    )
+    message = BytesParser(policy=policy.default).parsebytes(artifacts.eml_paths[0].read_bytes())
+    assert str(message["To"]) == ("towner@example.test" if mode == "bcc" else "towner@example.test, other@example.test")
+    assert message.get("Bcc") == ("other@example.test" if mode == "bcc" else None)
+    assert message["X-Unsent"] == "1"
+
+
+def test_bcc_primary_domain_rejection_unchanged(monkeypatch, audience_workspace: Path) -> None:
+    edition_path = audience_workspace / "programs" / "acme" / "editions" / "acme_nudge.yaml"
+    edition = yaml.safe_load(edition_path.read_text(encoding="utf-8"))
+    edition["full_hygiene"]["audience_policy"]["allowed_domains"] = ["allowed.example.test"]
+    edition_path.write_text(yaml.safe_dump(edition), encoding="utf-8")
+    with pytest.raises(ConfigError, match="Audience policy blocked recipient domain"):
+        generate_full_hygiene_nudges(
+            program_id="acme", dry_run=True,
+            as_of=datetime(2026, 5, 22, 18, tzinfo=timezone.utc),
+            programs_root=audience_workspace / "programs",
+        )

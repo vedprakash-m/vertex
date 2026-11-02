@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -89,7 +89,7 @@ class ActionExtractor:
         transcript_signals = tuple(signal for signal in signals if _supports_ai_extraction(signal))
         if not transcript_signals:
             return ()
-        deterministic_actions, deterministic_confidence = _extract_deterministic_actions(
+        deterministic_actions, deterministic_confidence, preserved_actions, extraction_signals = _extract_deterministic_actions(
             program_id=program_id,
             signals=transcript_signals,
         )
@@ -98,7 +98,7 @@ class ActionExtractor:
             system_prompt = _load_prompt()
             actions: list[ActionItem] = []
             seen_ids: set[str] = set()
-            for signal in transcript_signals:
+            for signal in extraction_signals:
                 user_prompt = _build_user_prompt(signal=signal)
                 try:
                     candidates = self._client.structured(
@@ -131,44 +131,45 @@ class ActionExtractor:
             frontier_fn=_frontier_extract,
             policy=load_ai_feature_policy(_FEATURE),
         )
-        return outcome.value or ()
+        preserved_ids = {action.id for action in preserved_actions}
+        return preserved_actions + tuple(action for action in (outcome.value or ()) if action.id not in preserved_ids)
 
 
 def _extract_deterministic_actions(
     *,
     program_id: str,
     signals: tuple[Signal, ...],
-) -> tuple[tuple[ActionItem, ...] | None, float]:
-    explicit_actions = _extract_explicit_deterministic_actions(
-        program_id=program_id,
-        signals=signals,
-    )
-    if explicit_actions is not None:
-        return explicit_actions, 1.0
-    heuristic_actions = extract_actions_from_signals(signals, program_id)
-    if heuristic_actions:
-        return tuple(_normalize_heuristic_action_item(action) for action in heuristic_actions), 0.95
-    return None, 0.0
-
-
-def _extract_explicit_deterministic_actions(
-    *,
-    program_id: str,
-    signals: tuple[Signal, ...],
-) -> tuple[ActionItem, ...] | None:
+) -> tuple[tuple[ActionItem, ...] | None, float, tuple[ActionItem, ...], tuple[Signal, ...]]:
     actions: list[ActionItem] = []
+    remaining_signals: list[Signal] = []
+    malformed = False
     for signal in signals:
-        for raw_line in signal.text.splitlines():
+        remaining_lines: list[str] = []
+        for raw_line in signal.text.splitlines(keepends=True):
             line = raw_line.strip()
             if not line or not _starts_with_action_marker(line):
+                remaining_lines.append(raw_line)
                 continue
             candidate = _parse_deterministic_action_line(line=line, signal=signal)
             if candidate is None:
-                return None
+                malformed = True
+                remaining_lines.append(raw_line)
+                continue
             actions.append(_to_action_item(candidate=candidate, program_id=program_id, signal=signal))
-    if not actions:
-        return None
-    return tuple(actions)
+        remaining_signals.append(replace(signal, text="".join(remaining_lines)))
+    if actions and not malformed:
+        return tuple(actions), 1.0, (), signals
+    preserved_actions = tuple(actions) if malformed else ()
+    extraction_signals = tuple(remaining_signals) if malformed and actions else signals
+    heuristic_actions = extract_actions_from_signals(extraction_signals, program_id)
+    if heuristic_actions:
+        return (
+            tuple(_normalize_heuristic_action_item(action) for action in heuristic_actions),
+            0.95,
+            preserved_actions,
+            extraction_signals,
+        )
+    return None, 0.0, preserved_actions, extraction_signals
 
 
 def _normalize_heuristic_action_item(action: ActionItem) -> ActionItem:

@@ -9,6 +9,7 @@ from src.ai.safety.pii_scrubber import filter_text
 from src.commands.gather_pipeline.ado_pipeline_stage import _parse_datetime, _parse_float
 from src.core.m365_payload_support import optional_string as _optional_string
 from src.core.models import Confidence, WorkItem
+from src.core.kusto_signal_extractor import kusto_source_event_time
 from src.core.models_v2 import KustoQuery
 
 
@@ -142,21 +143,9 @@ def kusto_kpi_value(query: KustoQuery, row: dict[str, Any]) -> str | None:
 
 
 def kusto_event_timestamp(rows: list[dict[str, Any]], *, as_of: datetime) -> datetime:
-    candidates: list[datetime] = []
-    for row in rows:
-        for key, value in row.items():
-            normalized = key.strip().lower()
-            if normalized not in {"timestamp", "date", "event_timestamp", "createdate", "resolveddate", "snapshot"}:
-                continue
-            parsed = _parse_datetime(value)
-            if parsed is not None:
-                candidates.append(parsed)
-                continue
-            parsed_date = parse_date(value)
-            if parsed_date is not None:
-                candidates.append(datetime.combine(parsed_date, time.min, tzinfo=timezone.utc))
-    if candidates:
-        return max(candidates)
+    event_timestamp = kusto_source_event_time(rows)
+    if event_timestamp is not None:
+        return event_timestamp
     return datetime.combine(as_of.astimezone(timezone.utc).date(), time.min, tzinfo=timezone.utc)
 
 

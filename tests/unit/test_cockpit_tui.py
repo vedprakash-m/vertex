@@ -91,6 +91,23 @@ def test_quit_immediately_exits_after_showing_summary(_stub_builder) -> None:
     assert any("[1]" in line for line in output)
 
 
+def test_actual_tui_start_and_refresh_show_earned_state_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.core.cockpit_builder import build_cockpit_snapshot
+    from src.core.maturity_engine import get_earned_autonomy_state_path
+
+    root = tmp_path / "programs"
+    path = get_earned_autonomy_state_path("samplealpha", programs_root=root)
+    path.parent.mkdir(parents=True)
+    path.write_text("proposal_classes: [\n", encoding="utf-8")
+    monkeypatch.setattr(tui_module, "build_cockpit_snapshot", build_cockpit_snapshot)
+    output: list[str] = []
+    run_cockpit_tui_loop(
+        "samplealpha", programs_root=root, input_fn=_scripted_input(["r", "q"]), output_fn=output.append,
+    )
+    assert sum("Earned-autonomy state unavailable" in line for line in output) == 2
+    assert not any("No proposal class has been evaluated" in line for line in output)
+
+
 def test_finding_number_shows_explain_detail(_stub_builder) -> None:
     output: list[str] = []
     run_cockpit_tui_loop("samplealpha", input_fn=_scripted_input(["1", "q"]), output_fn=output.append)

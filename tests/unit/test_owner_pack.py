@@ -2,10 +2,18 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
+from typer.testing import CliRunner
+
+import cli
+from src.commands import owner_pack as owner_pack_command_module
 from src.core.ado_proposal import ADOUpdateEntry, ADOUpdateProposal, write_proposal_manifest
+from src.core.exceptions import ConfigError
 from src.core.models import RiskLevel, WorkItem
-from src.core.models_v2 import ActionItem, ActionSourceType, ActionStatus, DecisionAsk, Milestone, MilestoneStatus, RiskCategory, RiskEntry, RiskImpact, RiskProbability, RiskStatus
+from src.core.models_v2 import ADOConfig, ActionItem, ActionSourceType, ActionStatus, DecisionAsk, Milestone, MilestoneStatus, Program, RiskCategory, RiskEntry, RiskImpact, RiskProbability, RiskStatus
+from src.core import owner_pack as owner_pack_writer
 from src.core.owner_pack import OwnerPackCalibrationSummary, OwnerPackVitalitySummary, build_owner_pack, render_owner_pack_markdown, write_owner_pack
 
 
@@ -319,6 +327,216 @@ def test_build_owner_pack_includes_raci_scoped_related_entries() -> None:
     assert "Need accountable decision on scoped workstream." in markdown
 
 
+@pytest.mark.parametrize("custom_rules", [False, True])
+def test_write_owner_pack_blocks_banned_markdown_before_create_or_replace(
+    tmp_path: Path,
+    custom_rules: bool,
+) -> None:
+    programs_root = tmp_path / "programs"
+    program_dir = programs_root / "synthetic"
+    program_dir.mkdir(parents=True)
+    phrase = "customsyntheticphrase" if custom_rules else "Furthermore"
+    if custom_rules:
+        (program_dir / "editorial_rules.yaml").write_text(
+            "schema_version: '1.0'\nstale_warn_days: 14\nstale_block_days: 30\n"
+            "banned_phrases: [customsyntheticphrase]\nbanned_openings: []\nverbosity: {}\n",
+            encoding="utf-8",
+        )
+    pack = _direct_owner_pack(tmp_path, f"{phrase} SECRET-SYNTHETIC-CONTENT")
+    output_path = program_dir / "owner_packs" / "operator.md"
+
+    with pytest.raises(ConfigError, match="editorial") as refusal:
+        write_owner_pack(pack, programs_root=programs_root)
+
+    assert "SECRET-SYNTHETIC-CONTENT" not in str(refusal.value)
+    assert str(programs_root) not in str(refusal.value)
+    assert not output_path.exists()
+    assert not output_path.parent.exists()
+
+
+def test_write_owner_pack_preserves_clean_output_and_existing_bytes(tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    clean_pack = _direct_owner_pack(tmp_path, "Clean synthetic delivery follow-up.")
+    output_path = write_owner_pack(clean_pack, programs_root=programs_root)
+    original_bytes = output_path.read_bytes()
+
+    with pytest.raises(ConfigError, match="editorial"):
+        write_owner_pack(
+            _direct_owner_pack(tmp_path, "Furthermore SECRET-SYNTHETIC-CONTENT"),
+            programs_root=programs_root,
+        )
+
+    assert output_path.read_bytes() == original_bytes
+    assert "Clean synthetic delivery follow-up." in output_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("output_format", ["human", "json", "csv"])
+@pytest.mark.parametrize("phrase", ["Furthermore", "customsyntheticphrase"])
+def test_owner_pack_cli_blocks_banned_rendered_content_before_artifact_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    output_format: str,
+    phrase: str,
+) -> None:
+    programs_root = tmp_path / "programs"
+    program_dir = programs_root / "synthetic"
+    program_dir.mkdir(parents=True)
+    if phrase == "customsyntheticphrase":
+        (program_dir / "editorial_rules.yaml").write_text(
+            "schema_version: '1.0'\nstale_warn_days: 14\nstale_block_days: 30\n"
+            "banned_phrases: [customsyntheticphrase]\nbanned_openings: []\nverbosity: {}\n",
+            encoding="utf-8",
+        )
+    writer_roots = _mock_owner_pack_cli(monkeypatch, programs_root, f"{phrase} SECRET-SYNTHETIC-CONTENT")
+
+    result = CliRunner().invoke(
+        cli.app,
+        ["owner-pack", "--program", "synthetic", "--owner", "operator", "--format", output_format],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "editorial" in result.output.casefold()
+    assert phrase.casefold() not in result.output.casefold()
+    assert "SECRET-SYNTHETIC-CONTENT" not in result.output
+    assert str(programs_root) not in result.output
+    assert not (program_dir / "owner_packs" / "operator.md").exists()
+    assert writer_roots == ([] if output_format in {"json", "csv"} else [programs_root])
+
+
+@pytest.mark.parametrize("output_format", ["human", "json", "csv"])
+def test_owner_pack_cli_keeps_clean_output_and_missing_rules_compatible(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    output_format: str,
+) -> None:
+    programs_root = tmp_path / "programs"
+    program_dir = programs_root / "synthetic"
+    program_dir.mkdir(parents=True)
+    writer_roots = _mock_owner_pack_cli(monkeypatch, programs_root, "Clean synthetic delivery follow-up.")
+
+    result = CliRunner().invoke(
+        cli.app,
+        ["owner-pack", "--program", "synthetic", "--owner", "operator", "--format", output_format],
+    )
+
+    assert result.exit_code == 0, result.output
+    output_path = program_dir / "owner_packs" / "operator.md"
+    assert output_path.is_file()
+    assert "Clean synthetic delivery follow-up." in output_path.read_text(encoding="utf-8")
+    if output_format in {"json", "csv"}:
+        assert "Clean synthetic delivery follow-up." in result.output
+    assert writer_roots == [programs_root]
+
+
+@pytest.mark.parametrize("output_format", ["human", "json", "csv"])
+def test_owner_pack_cli_blocks_malformed_present_rules_without_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    output_format: str,
+) -> None:
+    programs_root = tmp_path / "programs"
+    program_dir = programs_root / "synthetic"
+    program_dir.mkdir(parents=True)
+    rules_path = program_dir / "editorial_rules.yaml"
+    rules_path.write_text(
+        "schema_version: invalid\nprivate: SECRET-SYNTHETIC-CONTENT\n",
+        encoding="utf-8",
+    )
+    writer_roots = _mock_owner_pack_cli(monkeypatch, programs_root, "Clean synthetic delivery follow-up.")
+
+    result = CliRunner().invoke(
+        cli.app,
+        ["owner-pack", "--program", "synthetic", "--owner", "operator", "--format", output_format],
+    )
+
+    assert result.exit_code == 2
+    assert "editorial" in result.output.casefold()
+    assert "SECRET-SYNTHETIC-CONTENT" not in result.output
+    assert str(rules_path) not in result.output
+    assert not (program_dir / "owner_packs" / "operator.md").exists()
+    assert writer_roots == ([] if output_format in {"json", "csv"} else [programs_root])
+
+
+def _direct_owner_pack(tmp_path: Path, title: str):
+    return build_owner_pack(
+        program_id="synthetic",
+        owner_alias="operator",
+        items=(_item(987654, title, "operator@example.invalid", RiskLevel.HIGH, "2026-10-30T00:00:00+00:00"),),
+        risk_register_entries=(),
+        milestones=(),
+        open_actions=(),
+        assumptions=(),
+        open_decision_asks=(),
+        generated_at=datetime(2026, 11, 1, tzinfo=timezone.utc),
+        programs_root=tmp_path / "programs",
+    )
+
+
+def _mock_owner_pack_cli(
+    monkeypatch: pytest.MonkeyPatch,
+    programs_root: Path,
+    title: str,
+) -> list[Path | None]:
+    writer_roots: list[Path | None] = []
+    program = Program(
+        schema_version="2.0",
+        id="synthetic",
+        name="Synthetic Program",
+        ado=ADOConfig(
+            organization="synthetic-org",
+            project="Synthetic",
+            area_paths=("Synthetic\\Program",),
+            work_item_types=("Feature",),
+            excluded_states=("Removed",),
+            date_window_days=14,
+        ),
+    )
+    item = _item(987654, title, "operator@example.invalid", RiskLevel.HIGH, "2026-10-30T00:00:00+00:00")
+    monkeypatch.setattr(owner_pack_command_module, "PROGRAMS_ROOT", programs_root)
+    monkeypatch.setattr(owner_pack_command_module, "ADOClient", lambda **kwargs: SimpleNamespace())
+    monkeypatch.setattr(
+        owner_pack_command_module.gather_helpers,
+        "_load_program_context",
+        lambda _program_id, _programs_root: (program, ()),
+    )
+    monkeypatch.setattr(owner_pack_command_module, "_load_owner_items", lambda *_args: ((item,), 0))
+    monkeypatch.setattr(
+        owner_pack_command_module,
+        "generate_vitality_report",
+        lambda *_args, **_kwargs: SimpleNamespace(owner_aggregates=(), ado_calls=0),
+    )
+    monkeypatch.setattr(
+        owner_pack_command_module,
+        "load_program_facts",
+        lambda *_args, **_kwargs: SimpleNamespace(facts=()),
+    )
+    monkeypatch.setattr(owner_pack_command_module, "_load_current_milestones", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(owner_pack_command_module, "_load_current_assumptions", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(
+        owner_pack_command_module,
+        "load_action_resolution_candidate_ids",
+        lambda *_args, **_kwargs: frozenset(),
+    )
+    monkeypatch.setattr(owner_pack_command_module, "load_open_decision_asks", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(
+        owner_pack_command_module,
+        "build_program_telemetry_summary",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        owner_pack_command_module,
+        "_load_owner_calibration_summary",
+        lambda **_kwargs: None,
+    )
+
+    def write_to_selected_root(pack, **kwargs):
+        writer_roots.append(kwargs.get("programs_root"))
+        return owner_pack_writer.write_owner_pack(pack, programs_root=programs_root)
+
+    monkeypatch.setattr(owner_pack_command_module, "write_owner_pack", write_to_selected_root)
+    return writer_roots
+
+
 def _item(work_item_id: int, title: str, owner: str, risk_level: RiskLevel, changed_date: str) -> WorkItem:
     return WorkItem(
         id=work_item_id,
@@ -337,4 +555,3 @@ def _item(work_item_id: int, title: str, owner: str, risk_level: RiskLevel, chan
         comments=[],
         fetched_at=datetime(2026, 5, 15, 18, 0, tzinfo=timezone.utc),
     )
-

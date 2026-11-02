@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+import json
 from pathlib import Path
+import sqlite3
 from typing import Any, Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -17,7 +19,7 @@ from src.core.ncfl_proposal_store import conflicting_pending_proposals, load_pro
 from src.commands.doctor_checks.evidence_checks import check_eta_slippage, check_false_done_lanes, check_evidence_quality_drift
 from src.core.evidence_models import parse_workiq_latest_date
 from src.core.exceptions import ConfigError
-from src.core.program_context import InvariantSeverity, load_program_context
+from src.core.program_context import InvariantSeverity, load_program_context, summarize_context_limitations
 
 
 _FIX_HINT_MAP: dict[str, str] = {
@@ -88,7 +90,10 @@ def run_ranked_gaps(*, edition_name: str | None, programs_root: Path, editions_r
     if program_id is None:
         return
 
-    gaps = load_context_gaps(program_id, programs_root=programs_root)
+    try:
+        gaps = load_context_gaps(program_id, programs_root=programs_root)
+    except json.JSONDecodeError as error:
+        raise typer.BadParameter("Context gap history is invalid JSON; repair it before retrying.") from error
     if not gaps:
         typer.echo(typer.style("No context gaps recorded yet.", fg="green"))
         typer.echo("Run gather or propose to accumulate gap signals in _feedback/context_gaps.jsonl.")
@@ -171,13 +176,23 @@ def run_context_doctor(
             today=today,
             raise_on_error=False,
         )
-    except (OSError, ValueError) as exc:
+    except (ConfigError, OSError, ValueError, sqlite3.OperationalError, sqlite3.DataError):
         return DoctorReport(
             edition=program_id,
-            checks=(DoctorCheck("Context", "fail", f"Failed to load program context: {exc}"),),
+            checks=(DoctorCheck(
+                "Context", "fail", "Context unavailable; compilation could not be completed.",
+                metadata={
+                    "context_maturity_level": None,
+                    "context_invariant_errors": None,
+                    "context_stale_file_count": None,
+                    "context_evaluated_at": None,
+                    "context_limitations": ["Context unavailable; compilation could not be completed."],
+                },
+            ),),
         )
 
     maturity_level = ctx.maturity_level.value
+    limitations = summarize_context_limitations(ctx)
     checks.append(DoctorCheck(
         "Maturity level",
         "ok" if maturity_level >= 2 else "warn",
@@ -186,6 +201,19 @@ def run_context_doctor(
             f" — {len(ctx.maturity_blockers)} blocker{'s' if len(ctx.maturity_blockers) != 1 else ''} to L{maturity_level + 1}"
             if ctx.maturity_blockers else " — no blockers"
         ),
+        metadata={
+            "context_maturity_level": maturity_level,
+            "context_invariant_errors": sum(
+                1 for violation in ctx.invariant_violations if violation.severity == InvariantSeverity.ERROR
+            ),
+            "context_stale_file_count": len(ctx.staleness_flags),
+            "context_evaluated_at": ctx.loaded_at.isoformat(),
+            "context_limitations": list(limitations),
+        },
+    ))
+    checks.append(DoctorCheck(
+        "Context evaluation", "ok",
+        f"Evaluated at {ctx.loaded_at.isoformat()}. " + " ".join(limitations),
     ))
     for blocker in ctx.maturity_blockers[:3]:
         checks.append(DoctorCheck("Maturity blocker", "warn", blocker))

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -89,6 +90,47 @@ def test_write_then_load_round_trips(tmp_path: Path) -> None:
 
 def test_load_entities_document_returns_none_when_missing(tmp_path: Path) -> None:
     assert load_entities_document(tmp_path / "entities.yaml") is None
+
+
+@pytest.mark.parametrize("text", ["", "entities: []\n", "[]\n", "null\n"])
+def test_shared_entities_reader_ignores_legacy_without_weakening_strict_loader(tmp_path: Path, text: str) -> None:
+    from src.core.people_entity_schema import load_shared_entities_document
+
+    path = tmp_path / "entities.yaml"
+    path.write_text(text, encoding="utf-8")
+    assert load_shared_entities_document(path) is None
+    with pytest.raises(ConfigError):
+        load_entities_document(path)
+
+
+def test_shared_entities_reader_missing(tmp_path: Path) -> None:
+    from src.core.people_entity_schema import load_shared_entities_document
+
+    assert load_shared_entities_document(tmp_path / "entities.yaml") is None
+
+
+def test_shared_entities_reader_uses_one_read_during_atomic_replacement(tmp_path: Path) -> None:
+    from src.core import people_entity_schema
+
+    path = tmp_path / "entities.yaml"
+    original = EntitiesDocument(
+        schema_version=ENTITIES_SCHEMA_VERSION,
+        entities=(_entity("person:1", "person", aliases=(_alias("alice"),)),),
+        redirects=(EntityRedirect(from_entity_id="person:old", to_entity_id="person:1", recorded_at=_NOW, principal_id="steward", reason="rename"),),
+    )
+    write_entities_document(path, original)
+    parse = people_entity_schema.fast_safe_load
+
+    def replacing_parse(text: str) -> dict:
+        raw = parse(text)
+        write_entities_document(path, EntitiesDocument(schema_version=ENTITIES_SCHEMA_VERSION, entities=()))
+        return raw
+
+    with patch.object(people_entity_schema, "fast_safe_load", side_effect=replacing_parse) as parsed:
+        actual = people_entity_schema.load_shared_entities_document(path)
+    assert actual == original
+    assert parsed.call_count == 1
+    assert load_entities_document(path).entities == ()
 
 
 def test_load_entities_document_rejects_wrong_schema_version(tmp_path: Path) -> None:

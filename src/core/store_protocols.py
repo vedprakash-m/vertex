@@ -16,6 +16,8 @@ class SignalStore(Protocol):
         program_id: str,
         start: datetime | None = None,
         end: datetime | None = None,
+        *,
+        read_only: bool = False,
         **filters: Any,
     ) -> tuple[Signal, ...]: ...
 

@@ -22,6 +22,8 @@ class FileSignalStore:
         program_id: str,
         start: datetime | None = None,
         end: datetime | None = None,
+        *,
+        read_only: bool = False,
         **filters: Any,
     ) -> tuple[Signal, ...]:
         unexpected_filters = sorted(key for key in filters if key not in {"workstream_id", "require_committed_gather_run"})

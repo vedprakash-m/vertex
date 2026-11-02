@@ -66,6 +66,8 @@ class SQLiteSignalStore:
         program_id: str,
         start: datetime | None = None,
         end: datetime | None = None,
+        *,
+        read_only: bool = False,
         **filters: Any,
     ) -> tuple[Signal, ...]:
         unexpected_filters = sorted(key for key in filters if key != "workstream_id")
@@ -89,9 +91,13 @@ class SQLiteSignalStore:
             "SELECT signal_id, timestamp, source, workstream_id, entity_refs_json, text, raw_ref, confidence, metadata_json, thread_id, review_policy "
             "FROM signals WHERE " + " AND ".join(clauses) + " ORDER BY timestamp ASC, signal_id ASC"
         )
-        with _connect_program_db(program_id, programs_root=self._programs_root) as connection:
+        with _connect_program_db(
+            program_id,
+            programs_root=self._programs_root,
+            read_only=read_only,
+        ) as connection:
             rows = connection.execute(query, params).fetchall()
-            thread_links = self.read_threads(program_id)
+            thread_links = self.read_threads(program_id, read_only=read_only)
 
         signals: list[Signal] = []
         for row in rows:
@@ -200,8 +206,12 @@ class SQLiteSignalStore:
                 ),
             )
 
-    def read_threads(self, program_id: str) -> dict[str, SignalThreadLink]:
-        with _connect_program_db(program_id, programs_root=self._programs_root) as connection:
+    def read_threads(self, program_id: str, *, read_only: bool = False) -> dict[str, SignalThreadLink]:
+        with _connect_program_db(
+            program_id,
+            programs_root=self._programs_root,
+            read_only=read_only,
+        ) as connection:
             rows = connection.execute(
                 """
                 SELECT signal_id, thread_id, linked_at, linked_by
@@ -368,7 +378,12 @@ def read_sqlite_signal_review_log(
 
 
 @contextmanager
-def _connect_program_db(program_id: str, *, programs_root: Path) -> Iterator[sqlite3.Connection]:
+def _connect_program_db(
+    program_id: str,
+    *,
+    programs_root: Path,
+    read_only: bool = False,
+) -> Iterator[sqlite3.Connection]:
     """INV-AF-13 (WO-2 item 2): routed through ``open_program_db()`` instead of
     a hand-rolled ``sqlite3.connect`` + hardcoded ``PRAGMA journal_mode=WAL``,
     so this store picks WAL/DELETE by filesystem like every other store
@@ -378,8 +393,9 @@ def _connect_program_db(program_id: str, *, programs_root: Path) -> Iterator[sql
     SQLite's library default of FULL in effect).
     """
     path = get_program_sqlite_store_path(program_id, programs_root=programs_root)
-    with open_program_db(path, durability="strict") as connection:
-        _ensure_schema(connection)
+    with open_program_db(path, read_only=read_only, durability="strict") as connection:
+        if not read_only:
+            _ensure_schema(connection)
         yield connection
 
 

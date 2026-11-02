@@ -6,7 +6,10 @@ from pathlib import Path
 
 from src.core.ado_proposal import read_proposal_manifest
 from src.core.assumption_tracker import check_validation_due
+from src.core.ban_list_validator import find_ban_list_violations
+from src.core.config_loader import load_program_editorial_rules
 from src.core.edition_resolver import PROGRAMS_ROOT, get_program_output_dir, _output_subdir, _OUTPUT_SUBDIR_LEGACY
+from src.core.exceptions import ConfigError
 from src.core.models import RiskLevel, WorkItem
 from src.core.models_v2 import ActionItem, Assumption, AssumptionStatus, DecisionAsk, Milestone, RiskEntry, RiskStatus
 from src.core.risk_register_engine import assess_risk_staleness, compute_risk_score
@@ -423,9 +426,25 @@ def get_owner_pack_output_path(
 
 def write_owner_pack(pack: OwnerPack, *, programs_root: Path = PROGRAMS_ROOT) -> Path:
     path = get_owner_pack_output_path(pack.program_id, pack.owner_alias, programs_root=programs_root)
+    rendered = render_owner_pack_markdown(pack)
+    validate_owner_pack_editorial(pack.program_id, rendered, programs_root=programs_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_owner_pack_markdown(pack), encoding="utf-8")
+    path.write_text(rendered, encoding="utf-8")
     return path
+
+
+def validate_owner_pack_editorial(
+    program_id: str,
+    rendered: str,
+    *,
+    programs_root: Path = PROGRAMS_ROOT,
+) -> None:
+    try:
+        editorial_rules = load_program_editorial_rules(program_id, programs_root=programs_root)
+    except ConfigError as error:
+        raise ConfigError("Owner-pack editorial rules could not be loaded.") from error
+    if find_ban_list_violations({"owner_pack": rendered}, editorial_rules):
+        raise ConfigError("Owner-pack output blocked by editorial rules; review the source content and editorial_rules.yaml.")
 
 
 def _item_changed_at(item: WorkItem) -> datetime | None:

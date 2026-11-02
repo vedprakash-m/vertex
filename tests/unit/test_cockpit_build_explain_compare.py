@@ -1,6 +1,85 @@
 """ADF-W5.5: `vertex cockpit build/explain/compare` CLI + find_nearest_history_snapshot."""
 from __future__ import annotations
 
+
+def test_context_gap_only_cockpit_and_corrupt_history(tmp_path) -> None:
+    from datetime import datetime, timezone
+    from src.core.cockpit_builder import build_cockpit_snapshot
+    from src.core.cockpit_models import cockpit_snapshot_to_json_dict
+
+    root = tmp_path / "programs"
+    path = root / "fixture" / "_feedback" / "context_gaps.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        '{"ts":"2026-10-01T00:00:00Z","feature":"synthetic","program":"fixture","lane":null,'
+        '"field":"purpose","severity":"quality_degraded","message":"Purpose missing","impact_estimate":"high"}\n',
+        encoding="utf-8",
+    )
+    now = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    before = path.read_bytes()
+    snapshot = build_cockpit_snapshot("fixture", programs_root=root, now=now)
+    findings = [row for row in snapshot.findings if "context_gap" in row.finding_id]
+    assert len(findings) == 1 and findings[0].owner is None and findings[0].next_command is None
+    assert findings[0].observed_at == now
+    assert "unknown" in findings[0].detail and "observation" in findings[0].detail
+    assert "2026-10-01" in findings[0].detail
+    assert path.read_bytes() == before
+    assert any("context_gap" in row["finding_id"] for row in cockpit_snapshot_to_json_dict(snapshot)["findings"])
+    path.write_text("{private_canary:invalid", encoding="utf-8")
+    snapshot = build_cockpit_snapshot("fixture", programs_root=root, edition_id="fixture_weekly", now=now)
+    finding = next(row for row in snapshot.findings if row.finding_id == "trust.context_gaps.unavailable")
+    assert finding.status == "warn" and "unavailable" in finding.summary.lower()
+    assert "private_canary" not in finding.detail
+    assert "--edition fixture_weekly" in finding.next_command
+
+
+def test_context_gap_cockpit_cli_once_without_added_writes(tmp_path, monkeypatch) -> None:
+    from unittest.mock import Mock
+    from typer.testing import CliRunner
+    from src.commands import cockpit
+    import src.core.context_proposal_review as projection
+    import json
+
+    root = tmp_path / "programs"
+    path = root / "fixture" / "_feedback" / "context_gaps.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        '{"ts":"2026-10-01T00:00:00Z","feature":"synthetic","program":"fixture","lane":null,'
+        '"field":"purpose","severity":"quality_degraded","message":"Purpose missing","impact_estimate":"high"}\n',
+        encoding="utf-8",
+    )
+    before = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+    monkeypatch.setattr(cockpit, "PROGRAMS_ROOT", root)
+    load = Mock(wraps=projection.load_context_gaps)
+    monkeypatch.setattr(projection, "load_context_gaps", load)
+    result = CliRunner().invoke(cockpit.app, ["show", "--program", "fixture", "--format", "json", "--no-persist"])
+    assert result.exit_code == 0, repr(result.exception)
+    payload = json.loads(result.stdout)
+    assert any("context_gap" in row["finding_id"] for row in payload["findings"])
+    load.assert_called_once_with("fixture", programs_root=root)
+    assert before == {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+
+def test_corrupt_proposal_cockpit_keeps_active_unknown_impact_gap(tmp_path) -> None:
+    from src.core.cockpit_builder import build_cockpit_snapshot
+
+    root = tmp_path / "programs"
+    program = root / "fixture"
+    (program / "context_proposals").mkdir(parents=True)
+    (program / "context_proposals" / "issue_001.proposals.json").write_text("{private_canary:invalid", encoding="utf-8")
+    (program / "_feedback").mkdir()
+    (program / "_feedback" / "context_gaps.jsonl").write_text(
+        '{"ts":"2026-10-01T00:00:00Z","feature":"synthetic","program":"fixture","lane":null,'
+        '"field":"purpose","severity":"quality_degraded","message":"Purpose missing","impact_estimate":null}\n',
+        encoding="utf-8",
+    )
+    snapshot = build_cockpit_snapshot("fixture", programs_root=root)
+    gap = next(row for row in snapshot.findings if row.finding_id.startswith("trust.context_gap."))
+    assert "unknown impact" in gap.detail
+    diagnostic = next(row for row in snapshot.findings if row.finding_id == "trust.context_proposals.unavailable")
+    assert "proposal" in diagnostic.summary.lower() and "private_canary" not in diagnostic.detail
+    assert diagnostic.evidence_refs == ("context_proposals",)
+
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock
@@ -88,6 +167,59 @@ def programs_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "programs"
     monkeypatch.setattr(cockpit_module, "PROGRAMS_ROOT", root)
     return root
+
+
+@pytest.mark.parametrize("command", ["show", "build", "explain"])
+def test_fresh_commands_expose_earned_state_read_failure(programs_root: Path, command: str) -> None:
+    import json
+    from src.core.maturity_engine import get_earned_autonomy_state_path
+
+    path = get_earned_autonomy_state_path("acme", programs_root=programs_root)
+    path.parent.mkdir(parents=True)
+    content = b"earned_tier: private-marker\n"
+    path.write_bytes(content)
+    args = [command, "--program", "acme"]
+    if command == "show":
+        args += ["--format", "json", "--no-persist"]
+    elif command == "explain":
+        args += ["--finding", "trust.autonomy_ladder.read_failed"]
+    result = runner.invoke(app, args)
+    assert result.exit_code == 0, result.exception
+    if command == "show":
+        payload = json.loads(result.stdout)
+        assert payload["trust_summary"]["classes"] == []
+        assert any(f["finding_id"] == "trust.autonomy_ladder.read_failed" for f in payload["findings"])
+    elif command == "build":
+        html = (programs_root / "acme" / "runtime" / "cockpit" / "cockpit.html").read_text(encoding="utf-8")
+        assert "Earned-autonomy state unavailable" in html
+        assert "private-marker" not in html
+    else:
+        assert "earned_autonomy_state.yaml" in result.stdout
+    assert "private-marker" not in result.stdout
+    assert path.read_bytes() == content
+
+
+def test_retained_earned_state_failure_renders_without_current_reads(programs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.core.cockpit_builder import build_cockpit_snapshot
+    from src.core.maturity_engine import get_earned_autonomy_state_path
+
+    path = get_earned_autonomy_state_path("acme", programs_root=programs_root)
+    path.parent.mkdir(parents=True)
+    path.write_text("earned_tier: invalid\n", encoding="utf-8")
+    snapshot = build_cockpit_snapshot("acme", programs_root=programs_root, now=_T0)
+    persist_cockpit_snapshot(snapshot, programs_root=programs_root)
+    monkeypatch.setattr(cockpit_module, "build_cockpit_snapshot", Mock(side_effect=AssertionError("No current read")))
+    for format in ("human", "json", "html"):
+        result = runner.invoke(app, [
+            "show", "--program", "acme", "--as-of", _T0.isoformat(), "--format", format,
+        ])
+        assert result.exit_code == 0, result.exception
+        assert "trust.autonomy_ladder.read_failed" in result.stdout
+    result = runner.invoke(app, [
+        "explain", "--program", "acme", "--as-of", _T0.isoformat(),
+        "--finding", "trust.autonomy_ladder.read_failed",
+    ])
+    assert result.exit_code == 0 and "Earned-autonomy state unavailable" in result.stdout
 
 
 # --- find_nearest_history_snapshot ---

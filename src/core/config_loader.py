@@ -726,6 +726,30 @@ def load_editorial_rules(path: Path) -> EditorialRules:
     )
 
 
+def load_program_editorial_rules(program_id: str, *, programs_root: Path) -> EditorialRules:
+    from src.core.edition_resolver import get_program_output_root
+
+    rules_path = get_program_output_root(program_id, programs_root=programs_root).parent / "editorial_rules.yaml"
+    try:
+        rules_path.lstat()
+    except FileNotFoundError:
+        return EditorialRules(
+            schema_version="1.0",
+            stale_warn_days=14,
+            stale_block_days=30,
+            banned_phrases=(),
+            banned_openings=(),
+            verbosity=VerbositySettings(None, None, None, None, None),
+        )
+    except OSError as error:
+        raise ConfigError("Selected program editorial rules could not be loaded.") from error
+
+    try:
+        return load_editorial_rules(rules_path)
+    except (ConfigError, KeyError, TypeError, ValueError, AttributeError) as error:
+        raise ConfigError("Selected program editorial rules could not be loaded.") from error
+
+
 def load_persona_registry(path: Path) -> PersonaRegistry | None:
     if not path.exists():
         return None

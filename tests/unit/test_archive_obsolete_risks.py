@@ -159,6 +159,33 @@ def test_content_hash_stable_and_distinct() -> None:
     assert h1 != h3
 
 
+def test_writer_and_reader_share_exact_canonical_hash_contract() -> None:
+    import hashlib
+    from scripts.archive_obsolete_risks import _content_hash
+    from src.core.risk_register_engine import risk_record_content_hash
+
+    assert _content_hash is risk_record_content_hash
+    record = {"z": ["é", "a"], "a": {"b": 1}, "date": Path("synthetic")}
+    expected = hashlib.sha256(json.dumps(record, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
+    assert _content_hash(record) == expected
+    assert _content_hash(record) == _content_hash(dict(reversed(list(record.items()))))
+    assert _content_hash(record) != _content_hash(record | {"z": ["a", "é"]})
+
+
+def test_actual_archive_history_and_rollback_preserve_hashes_and_current_bytes(tmp_path: Path) -> None:
+    from src.core.risk_register_engine import load_archived_risk_history
+
+    _write_register(tmp_path / "samplealpha", [_risk("r1", kind="candidate", status="closed")])
+    manifest = execute_archive("samplealpha", programs_root=tmp_path)
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    rows = load_archived_risk_history("samplealpha", programs_root=tmp_path)
+    assert rows[0].content_hash == manifest.archived[0].content_hash
+    assert rows[0].record.id == "r1"
+    assert before == {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    rollback_archive("samplealpha", tmp_path / "samplealpha" / manifest.archive_path.replace("archived_risks.yaml", "rollback_manifest.json"), programs_root=tmp_path)
+    assert load_archived_risk_history("samplealpha", programs_root=tmp_path) == rows
+
+
 def test_main_dry_run_reports(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
     from scripts.archive_obsolete_risks import main
 

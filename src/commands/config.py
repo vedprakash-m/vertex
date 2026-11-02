@@ -19,6 +19,7 @@ from src.core.journal import PROGRAMS_ROOT
 from src.core.kb_updates import supported_kb_paths, validate_program_kb
 from src.core.knowledge_store import get_shared_knowledge_root
 from src.core.metric_binding_validator import MetricBindingValidation, validate_metric_binding_documents
+from src.core.policy_loader import load_freshness_policy
 from src.core.workspace_paths import is_bare_identifier
 from src.core.yaml_utils import load_yaml_document_strict, load_yaml_mapping_strict
 
@@ -171,6 +172,18 @@ def validate_command(
     if kb_status == "fail":
         status = "fail"
     try:
+        load_freshness_policy(override_path=program_dir / "freshness_policy.yaml")
+    except ConfigError:
+        context_review_status = "fail"
+        context_review_detail = (
+            "Context-review policy validation failed (ConfigError). Preserve policy files; "
+            "check the base freshness policy and the selected program's context_review rules."
+        )
+        status = "fail"
+    else:
+        context_review_status = "ok"
+        context_review_detail = "The base and selected program context-review rules are valid."
+    try:
         metrics = _validate_config_metric_bindings(program_dir, programs_root=PROGRAMS_ROOT)
     except ConfigError as error:
         metric_status = "fail"
@@ -208,6 +221,11 @@ def validate_command(
                 "milestones.yaml", "dependencies.yaml",
             ],
         },
+        "context_review_policy_validation": {
+            "status": context_review_status,
+            "scope": "base_and_selected_program_freshness_policy",
+            "detail": context_review_detail,
+        },
         "metric_validation": metric_payload,
         "edition": edition.strip() if isinstance(edition, str) and edition.strip() else None,
         "program": next(
@@ -242,6 +260,11 @@ def validate_command(
         typer.echo(f"- Offline metric bindings: {metric_status.upper()}")
         for detail in (*metric_payload["errors"], *metric_payload["warnings"]):
             typer.echo(f"  {detail}")
+        typer.echo(f"- Context-review policy: {context_review_status.upper()}")
+        typer.echo(
+            "  Scope: base freshness policy and selected program freshness_policy.yaml context_review rules."
+        )
+        typer.echo(f"  {context_review_detail}")
 
     if status == "fail":
         raise typer.Exit(code=1)

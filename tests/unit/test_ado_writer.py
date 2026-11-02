@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -83,6 +84,42 @@ def _comment_proposal(proposal_id: str, at: datetime, *, entry_status: str = "pe
             ),
         ),
     )
+
+
+@pytest.mark.parametrize(
+    ("update_type", "existing_text", "expected_applied"),
+    [
+        ("meeting_action", "Vertex shared title\nDifferent obligation", 1),
+        ("meeting_action", "Vertex shared title\nApproved obligation", 0),
+        ("meeting_action", "Vertex shared title\nApproved obligation\n", 1),
+        ("meeting_action", " Vertex shared title\nApproved obligation", 1),
+        ("meeting_action", "Vertex shared title\r\nApproved obligation", 1),
+        ("comment", "Vertex shared title\nDifferent obligation", 0),
+        ("vitality_nudge", "Vertex shared title\nDifferent obligation", 0),
+    ],
+)
+def test_apply_manifest_uses_exact_body_only_for_typed_meeting_actions(
+    tmp_path: Path, update_type: str, existing_text: str, expected_applied: int,
+) -> None:
+    at = datetime(2026, 5, 13, 18, tzinfo=timezone.utc)
+    original = _comment_proposal("prop-typed-identity", at)
+    proposal = replace(
+        original, update_type=update_type,
+        entries=(replace(original.entries[0], proposed_value="Vertex shared title\nApproved obligation"),),
+    )
+    programs_root = tmp_path / "programs"
+    path = write_proposal_manifest(proposal, programs_root=programs_root)
+    client = _FakeADOClient(
+        rows_by_id={1001: {"rev": 7, "fields": {"System.Id": 1001, "System.Rev": 7}}},
+        comments_by_id={1001: [{"id": 9, "text": existing_text}]},
+    )
+    artifacts = _apply_ado_proposal_with_fake_client(
+        str(path), applied_at=at, programs_root=programs_root, program=_comment_program(), client=client,
+    )
+    assert artifacts.applied_count == expected_applied
+    assert artifacts.skipped_count == 1 - expected_applied
+    assert len(client.session.calls) == expected_applied
+    assert read_proposal_manifest(path)[1] == "applied"
 
 
 def test_apply_manifest_updates_entries_and_logs_audit_signals(tmp_path: Path) -> None:
@@ -255,7 +292,8 @@ def test_apply_manifest_writes_sqlite_backed_audit_signals(tmp_path: Path) -> No
     assert reviews[signals[0].id].decision == "approved"
 
 
-def test_rollback_manifest_reverts_applied_entries_idempotently(tmp_path: Path) -> None:
+@pytest.mark.parametrize("update_type", ["comment", "meeting_action"])
+def test_rollback_manifest_reverts_applied_entries_idempotently(tmp_path: Path, update_type: str) -> None:
     programs_root = tmp_path / "programs"
     applied_at = datetime(2026, 5, 13, 18, 0, tzinfo=timezone.utc)
     rollback_at = datetime(2026, 5, 14, 9, 30, tzinfo=timezone.utc)
@@ -264,7 +302,7 @@ def test_rollback_manifest_reverts_applied_entries_idempotently(tmp_path: Path) 
         program_id="demo",
         edition_id="demo_weekly",
         issue_number=7,
-        update_type="comment",
+        update_type=update_type,
         created_at=applied_at - timedelta(hours=2),
         expires_at=applied_at + timedelta(hours=70),
         entries=(
@@ -323,7 +361,9 @@ def test_rollback_manifest_reverts_applied_entries_idempotently(tmp_path: Path) 
     assert client.session.calls[0]["method"] == "POST"
     assert client.session.calls[1]["method"] == "PATCH"
 
-    rerun = ADOWriter(client).rollback_manifest(manifest_path, action_id="action-123", rolled_back_at=rollback_at)
+    rerun = ADOWriter(client).rollback_manifest(
+        manifest_path, action_id="action-123", rolled_back_at=rollback_at + timedelta(days=1),
+    )
 
     assert rerun.rolled_back_count == 0
     assert rerun.skipped_count == 3

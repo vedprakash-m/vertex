@@ -88,7 +88,7 @@ def read_action_log(program_id: str, programs_root: Path = PROGRAMS_ROOT) -> tup
         if record_type == "status_update":
             entries.append(_status_update_from_record(record))
         elif record_type == "action":
-            entries.append(_action_from_record(record))
+            entries.append(_action_from_record(record, program_id=program_id))
         else:
             raise ValueError(f"Unknown action log record_type '{record_type}'")
     return tuple(entries)
@@ -127,7 +127,7 @@ def load_actions(program_id: str, programs_root: Path = PROGRAMS_ROOT) -> tuple[
             ),
             field_name="action row",
         )
-        action = _action_from_record(record)
+        action = _action_from_record(record, program_id=program_id)
         if action.id not in base_entries:
             base_entries[action.id] = action
     latest_statuses = load_latest_action_statuses(program_id, programs_root)
@@ -180,6 +180,8 @@ def associate_action_with_work_item(
     records = read_jsonl_records(path)
     updated_records = []
     for record in records:
+        if record.get("record_type", "action") == "action":
+            _action_from_record(record, program_id=program_id)
         if record.get("record_type") == "action" and record.get("id") == action_id:
             record["status"] = "open"
             linked = record.get("linked_work_item_ids") or []
@@ -284,6 +286,8 @@ def _sync_action_fact(
     correlation_id: str = "",
     gather_run_id: str | None = None,
 ) -> None:
+    if action.program_id != program_id:
+        raise ValueError("Action program does not match selected program.")
     from src.core.program_fact_store import FactPrecedence, ProgramFactInput, ProgramFactStore
 
     write_result = ProgramFactStore(program_id, db_root=_resolve_fact_db_root(programs_root)).append_fact(
@@ -361,10 +365,13 @@ def _action_to_record(action: ActionItem) -> dict[str, Any]:
     }
 
 
-def _action_from_record(record: dict[str, Any]) -> ActionItem:
+def _action_from_record(record: dict[str, Any], *, program_id: str) -> ActionItem:
+    recorded_program_id = _required_string(record["program_id"], field_name="program_id")
+    if recorded_program_id != program_id:
+        raise ValueError("Action program does not match selected program.")
     return ActionItem(
         id=_required_string(record["id"], field_name="id"),
-        program_id=_required_string(record["program_id"], field_name="program_id"),
+        program_id=recorded_program_id,
         text=_required_string(record["text"], field_name="text"),
         owner_alias=_required_string(record["owner_alias"], field_name="owner_alias"),
         due_date=_parse_optional_date(record.get("due_date")),

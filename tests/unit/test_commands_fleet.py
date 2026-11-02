@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import csv
+from dataclasses import replace
 import json
 import shutil
+import sqlite3
 from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 from typer.testing import CliRunner
 import yaml
+import pytest
 
 from cli import app
 from src.commands import fleet as fleet_module
@@ -28,6 +31,261 @@ from src.core.sqlite_stores import SQLiteSignalStore
 
 runner = CliRunner()
 FROZEN_NOW = datetime(2026, 5, 10, 18, 0, tzinfo=timezone.utc)
+
+
+def _context_diagnostic_fleet_workspace(tmp_path: Path) -> Path:
+    from tests.unit.test_doctor_context_checks import _diagnostic_workspace
+    from tests.unit.test_program_context import _write_yaml
+
+    root = _diagnostic_workspace(tmp_path)
+    path = root / "test_prog" / "program.yaml"
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data["communication_plan"] = [{"edition": "test_weekly"}]
+    _write_yaml(path, data)
+    return root
+
+
+def _context_diagnostic_output(report, format: str) -> str:
+    renderers = {
+        "human": fleet_module.render_fleet_report, "csv": fleet_module.render_fleet_csv,
+        "md": fleet_module.render_fleet_markdown, "html": fleet_module.render_fleet_html,
+    }
+    if format == "json":
+        return json.dumps(report.to_payload())
+    return renderers[format](report)
+
+
+@pytest.mark.parametrize("format", ["human", "json", "csv", "md", "html"])
+def test_fleet_context_diagnostic_preserves_evaluation_and_material_limits(
+    monkeypatch, tmp_path: Path, format: str,
+) -> None:
+    from src.core.program_context import load_program_context
+    from tests.unit.test_program_context import _write_yaml
+
+    root = _context_diagnostic_fleet_workspace(tmp_path)
+    path = root / "test_prog" / "workstream_registry.yaml"
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data["workstreams"][0]["last_reviewed_date"] = "not-a-date"
+    data["workstreams"][0]["deep_context"] = {"why": "", "what": ""}
+    _write_yaml(path, data)
+    compiled = []
+
+    def load(*args, **kwargs):
+        ctx = load_program_context(*args, **kwargs)
+        compiled.append(ctx)
+        return ctx
+
+    monkeypatch.setattr(fleet_module, "load_program_context", load)
+    report = build_fleet_report(programs_root=root, as_of=FROZEN_NOW)
+    program, = report.programs
+    ctx, = compiled
+    output = _context_diagnostic_output(report, format)
+
+    assert ctx.loaded_at.isoformat() in output
+    assert program.context_evaluated_at == ctx.loaded_at
+    assert program.context_maturity_level == ctx.maturity_level.value
+    assert program.context_unavailable_reason is None
+    assert "compatibility ladder" in output
+    assert "Context trend unknown" in output
+    assert "unknown" in output
+    assert "last_reviewed_date" in output
+    assert "deep_context.why" in output
+    assert all(blocker in program.context_limitations for blocker in ctx.maturity_blockers)
+    assert program.overall_risk.value == "unknown"
+    assert program.trend == "stable"
+    if format == "html":
+        assert "Context" in output.split("<td>onboarding", 1)[1].split("</td>", 1)[0]
+
+
+@pytest.mark.parametrize("format", ["human", "json", "csv", "md", "html"])
+def test_fleet_context_diagnostic_failed_read_is_null_not_zero(
+    tmp_path: Path, format: str,
+) -> None:
+    root = _context_diagnostic_fleet_workspace(tmp_path)
+    (root / "test_prog" / "editorial_rules.yaml").write_text("[private-invalid-value]\n", encoding="utf-8")
+    report = build_fleet_report(programs_root=root, as_of=FROZEN_NOW)
+    program, = report.programs
+    output = _context_diagnostic_output(report, format)
+
+    assert program.context_maturity_level is None
+    assert program.context_invariant_errors is None
+    assert program.context_stale_file_count is None
+    assert program.context_evaluated_at is None
+    assert "Context unavailable" in output
+    assert "private-invalid-value" not in output
+    assert str(root) not in output
+    assert program.overall_risk.value == "unknown"
+    assert program.trend == "stable"
+    if format == "csv":
+        row, = csv.DictReader(output.splitlines())
+        assert row["context_maturity_level"] == ""
+        assert row["context_invariant_errors"] == ""
+        assert row["context_stale_file_count"] == ""
+        assert row["context_evaluated_at"] == ""
+
+
+@pytest.mark.parametrize("level", [0, 4])
+def test_fleet_context_diagnostic_measured_zero_and_level_are_preserved(
+    monkeypatch, tmp_path: Path, level: int,
+) -> None:
+    from src.core.program_context import load_program_context
+    from tests.unit.test_program_context import _write_yaml
+
+    root = _context_diagnostic_fleet_workspace(tmp_path)
+    if level == 0:
+        for filename in ("workstreams.yaml", "workstream_registry.yaml"):
+            _write_yaml(root / "test_prog" / filename, {
+                "schema_version": "1.0", "workstreams": [], "last_reviewed_date": date.today().isoformat(),
+            })
+    ctx = load_program_context("test_prog", programs_root=root, raise_on_error=False)
+    assert ctx.maturity_level.value == level
+    monkeypatch.setattr(fleet_module, "load_program_context", lambda *args, **kwargs: ctx)
+    report = build_fleet_report(programs_root=root)
+    program, = report.programs
+
+    assert program.context_maturity_level == level
+    assert program.context_invariant_errors == 0
+    assert program.context_stale_file_count == 0
+    assert program.context_evaluated_at == ctx.loaded_at
+    row, = csv.DictReader(fleet_module.render_fleet_csv(report).splitlines())
+    assert row["context_maturity_level"] == str(level)
+    assert row["context_invariant_errors"] == "0"
+    assert row["context_stale_file_count"] == "0"
+
+
+@pytest.mark.parametrize("error_type", [
+    ConfigError, OSError, ValueError, sqlite3.OperationalError, sqlite3.DataError,
+])
+def test_fleet_context_diagnostic_expected_compiler_failure(
+    monkeypatch, tmp_path: Path, error_type,
+) -> None:
+    root = _context_diagnostic_fleet_workspace(tmp_path)
+
+    def fail(*args, **kwargs):
+        raise error_type("private error payload")
+
+    monkeypatch.setattr(fleet_module, "load_program_context", fail)
+    report = build_fleet_report(programs_root=root)
+    program, = report.programs
+    assert program.context_maturity_level is None
+    assert program.context_evaluated_at is None
+    assert "private error payload" not in _context_diagnostic_output(report, "json")
+    assert program.context_unavailable_reason == "Context unavailable; compilation could not be completed."
+
+
+@pytest.mark.parametrize("error_type", [
+    RuntimeError, TypeError, AttributeError, KeyError, sqlite3.ProgrammingError, sqlite3.DatabaseError,
+])
+def test_fleet_context_diagnostic_unexpected_compiler_failure_propagates(
+    monkeypatch, tmp_path: Path, error_type,
+) -> None:
+    root = _context_diagnostic_fleet_workspace(tmp_path)
+
+    def fail(*args, **kwargs):
+        raise error_type("unexpected")
+
+    monkeypatch.setattr(fleet_module, "load_program_context", fail)
+    with pytest.raises(error_type):
+        build_fleet_report(programs_root=root)
+
+
+def test_fleet_context_diagnostic_escapes_existing_authored_limits(monkeypatch, tmp_path: Path) -> None:
+    from src.core.program_context import ContextGapInfo, InvariantSeverity, InvariantViolation, StalenessFlag, load_program_context
+
+    root = _context_diagnostic_fleet_workspace(tmp_path)
+    ctx = load_program_context("test_prog", programs_root=root, raise_on_error=False)
+    ctx = replace(
+        ctx, maturity_blockers=("<script>private</script>",),
+        invariant_violations=(
+            InvariantViolation("WS-01", InvariantSeverity.ERROR, "workstreams.yaml", None, "Missing owner"),
+            InvariantViolation("WS-02", InvariantSeverity.WARN, "workstreams.yaml", "ws1", "Missing lane"),
+        ),
+        staleness_flags=(
+            StalenessFlag("program.yaml", None, "last_reviewed_date", None, None, 7, 14, "warn"),
+            StalenessFlag("registry.yaml", "ws1", "last_reviewed_date", date(2026, 1, 1), 12, 7, 14, "warn"),
+        ),
+        context_gaps=(
+            ContextGapInfo("report", None, "purpose", "quality_degraded", "high", "Purpose missing"),
+            ContextGapInfo("gather", "ws1", "owner", "quality_degraded", "medium", "Owner missing"),
+        ),
+    )
+    monkeypatch.setattr(fleet_module, "load_program_context", lambda *args, **kwargs: ctx)
+    output = fleet_module.render_fleet_html(build_fleet_report(programs_root=root))
+    assert "&lt;script&gt;private&lt;/script&gt;" in output
+    assert "<script>" not in output
+    assert "review age unknown" in output
+    assert "12d stale" in output
+    assert "report / program / purpose" in output
+    assert "gather / ws1 / owner" in output
+    from src.core.program_context import summarize_context_limitations
+
+    summary = build_fleet_report(programs_root=root).programs[0]
+    assert summary.context_limitations == summarize_context_limitations(ctx)
+
+
+def test_fleet_context_diagnostic_legacy_manual_summary_has_no_fabricated_time(tmp_path: Path) -> None:
+    root = _context_diagnostic_fleet_workspace(tmp_path)
+    program, = build_fleet_report(programs_root=root).programs
+    program = replace(
+        program, context_maturity_level=0, context_evaluated_at=None, context_limitations=(),
+    )
+    summary = fleet_module._format_context_diagnostic(program)
+    assert "L0" in summary
+    assert "Evaluated at" not in summary
+    program = replace(program, context_maturity_level=None, context_unavailable_reason=None)
+    assert fleet_module._format_context_diagnostic(program) == "Context unavailable; no evaluation recorded."
+
+
+@pytest.mark.parametrize("format", ["human", "json", "csv", "md", "html"])
+def test_fleet_context_diagnostic_manual_level_keeps_unknown_counts_explicit(tmp_path: Path, format: str) -> None:
+    root = _context_diagnostic_fleet_workspace(tmp_path)
+    report = build_fleet_report(programs_root=root)
+    program, = report.programs
+    report = replace(report, programs=(replace(
+        program, context_maturity_level=0, context_invariant_errors=None, context_stale_file_count=None,
+    ),))
+    output = _context_diagnostic_output(report, format)
+    if format in {"human", "md", "html"}:
+        assert "L0" in output
+        assert "unknown invariant error(s)" in output
+        assert "unknown stale or unreviewed entry(s)" in output
+        assert "None invariant" not in output
+    elif format == "json":
+        row, = json.loads(output)["programs"]
+        assert row["context_maturity_level"] == 0
+        assert row["context_invariant_errors"] is None
+        assert row["context_stale_file_count"] is None
+    else:
+        row, = csv.DictReader(output.splitlines())
+        assert row["context_maturity_level"] == "0"
+        assert row["context_invariant_errors"] == ""
+        assert row["context_stale_file_count"] == ""
+
+
+def test_fleet_context_diagnostic_unexpected_projection_failure_propagates(monkeypatch, tmp_path: Path) -> None:
+    root = _context_diagnostic_fleet_workspace(tmp_path)
+    monkeypatch.setattr(fleet_module, "load_program_context", lambda *args, **kwargs: object())
+    with pytest.raises(AttributeError):
+        build_fleet_report(programs_root=root)
+
+
+def test_fleet_context_diagnostic_keeps_existing_source_recency_blocker(tmp_path: Path) -> None:
+    from datetime import timedelta
+    from tests.unit.test_program_context import _write_yaml
+
+    root = _context_diagnostic_fleet_workspace(tmp_path)
+    path = root / "test_prog" / "workstream_registry.yaml"
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data["workstreams"][0]["workiq_latest"] = (
+        (date.today() - timedelta(days=8)).isoformat() + ": existing evidence"
+    )
+    _write_yaml(path, data)
+    report = build_fleet_report(programs_root=root)
+    program, = report.programs
+    assert program.context_maturity_level == 2
+    assert any("workiq_latest" in limitation and "8d stale" in limitation for limitation in program.context_limitations)
+    assert program.overall_risk.value == "unknown"
+    assert program.trend == "stable"
 
 
 def test_format_fleet_issue_detail_includes_confidence() -> None:

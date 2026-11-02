@@ -18,7 +18,7 @@ from src.core.analytics_store import load_contradiction_state
 from src.core.ban_list_validator import find_ban_list_violations
 from src.core.catchup_state_store import load_catchup_state
 from src.core.claim_tracker import assess_claim_entries, load_open_claims, load_open_decision_asks
-from src.core.config_loader import EditorialRules, VerbositySettings, load_editorial_rules
+from src.core.config_loader import EditorialRules, load_program_editorial_rules
 from src.core.edition_resolver import PROGRAMS_ROOT, get_program_output_dir, get_program_output_root
 from src.core.engms_content import summarize_engms_page
 from src.core.exceptions import AuthError, ConfigError, QueryError, StateError
@@ -112,10 +112,15 @@ def brief_command(
         typer.echo(f"Apply command: {proposal.command}")
         report = build_brief(program_id, programs_root=PROGRAMS_ROOT)
 
-    rendered = render_brief(report)
+    try:
+        rendered = render_brief(report, programs_root=PROGRAMS_ROOT)
+        if not dry_run:
+            path = write_brief_artifact(report, rendered, programs_root=PROGRAMS_ROOT)
+    except ConfigError as error:
+        typer.echo(str(error))
+        raise typer.Exit(code=2)
     typer.echo(rendered)
     if not dry_run:
-        path = write_brief_artifact(report, rendered, programs_root=PROGRAMS_ROOT)
         typer.echo(f"Saved brief: {path}")
     raise typer.Exit(code=0)
 
@@ -361,24 +366,9 @@ def _build_program_narrative_lines(program_id: str, *, programs_root: Path) -> t
 
 
 def _load_brief_editorial_rules(program_id: str, *, programs_root: Path) -> EditorialRules:
-    rules_path = get_program_output_root(program_id, programs_root=programs_root).parent / "editorial_rules.yaml"
     try:
-        rules_path.lstat()
-    except FileNotFoundError:
-        return EditorialRules(
-            schema_version="1.0",
-            stale_warn_days=14,
-            stale_block_days=30,
-            banned_phrases=(),
-            banned_openings=(),
-            verbosity=VerbositySettings(None, None, None, None, None),
-        )
-    except OSError as error:
-        raise _EditorialRulesLoadError from error
-
-    try:
-        return load_editorial_rules(rules_path)
-    except (ConfigError, KeyError, TypeError, ValueError, AttributeError) as error:
+        return load_program_editorial_rules(program_id, programs_root=programs_root)
+    except ConfigError as error:
         raise _EditorialRulesLoadError from error
 
 
@@ -419,7 +409,7 @@ def _edition_matches_program(program_id: str, edition_name: str) -> bool:
     return edition_name == program_id or edition_name.startswith(f"{program_id}_")
 
 
-def render_brief(report: BriefReport) -> str:
+def render_brief(report: BriefReport, *, programs_root: Path = PROGRAMS_ROOT) -> str:
     lines = [
         f"Morning Brief - {report.program_id}",
         f"Generated: {report.generated_at.isoformat()}",
@@ -447,10 +437,26 @@ def render_brief(report: BriefReport) -> str:
     if report.program_narrative_lines:
         lines.extend(("", "Program Narrative", "-----------------"))
         lines.extend(f"- {line}" for line in report.program_narrative_lines)
-    return "\n".join(lines)
+    rendered = "\n".join(lines)
+    _validate_brief_editorial(report.program_id, rendered, programs_root=programs_root)
+    return rendered
+
+
+def _validate_brief_editorial(program_id: str, rendered: str, *, programs_root: Path) -> None:
+    try:
+        editorial_rules = _load_brief_editorial_rules(program_id, programs_root=programs_root)
+    except _EditorialRulesLoadError as error:
+        raise ConfigError("Brief output blocked: selected editorial rules could not be loaded; inspect editorial_rules.yaml.") from error
+    content = {
+        "brief": rendered,
+        "brief_lines": "\n".join(line.removeprefix("- ") for line in rendered.splitlines()),
+    }
+    if find_ban_list_violations(content, editorial_rules):
+        raise ConfigError("Brief output blocked by editorial rules; review the brief source content and editorial_rules.yaml.")
 
 
 def write_brief_artifact(report: BriefReport, rendered: str, *, programs_root: Path = PROGRAMS_ROOT) -> Path:
+    _validate_brief_editorial(report.program_id, rendered, programs_root=programs_root)
     output_dir = get_program_output_root(report.program_id, programs_root=programs_root) / "briefs"
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"brief_{report.generated_at.date().isoformat()}.txt"

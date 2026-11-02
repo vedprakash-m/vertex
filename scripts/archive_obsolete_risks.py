@@ -28,7 +28,6 @@ Usage::
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import sys
 from dataclasses import asdict, dataclass
@@ -44,6 +43,7 @@ from src.core.risk_register_engine import (
     _risk_entry_to_record,
     get_risk_register_path,
     load_risk_register,
+    risk_record_content_hash as _content_hash,
     save_risk_register,
 )
 
@@ -81,11 +81,6 @@ class RiskArchiveManifest:
             "archive_path": self.archive_path,
             "archived": [asdict(entry) for entry in self.archived],
         }
-
-
-def _content_hash(record: dict[str, object]) -> str:
-    canonical = json.dumps(record, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def select_archive_candidates(

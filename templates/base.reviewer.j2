@@ -1309,14 +1309,14 @@
           {% endif %}
           {% if context_revision_rows %}
           <div class="section-card">
-            <h3>Context Revisions</h3>
-            <p>Pending proposals are review-only until an operator makes an explicit decision. Registry proposals remain manual-diff-only.</p>
+            <h3>Context Maintenance</h3>
+            <p>Active gaps and pending revisions are separate review-only attention. Observation and evaluation times do not renew review. Registry proposals remain manual-diff-only.</p>
             <ul class="review-list">
               {% for row in context_revision_rows %}
               <li{% if row.anchor_id %} id="{{ row.anchor_id }}"{% endif %}>
-                <strong>{{ row.title }}</strong>
-                {% if row.detail %}<span>{{ row.detail }}</span>{% endif %}
-                <p>{{ row.summary }}</p>
+                <strong>{{ row.title | e }}</strong>
+                {% if row.detail %}<span>{{ row.detail | e }}</span>{% endif %}
+                <p>{{ row.summary | e }}</p>
               </li>
               {% endfor %}
             </ul>

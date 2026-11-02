@@ -9,6 +9,7 @@ Covers: append_context_gap (ADR-001 atomic write), load_context_gaps,
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,57 @@ from src.core.context_gap_store import (
     load_context_gaps,
     rank_context_gaps,
 )
+
+
+@pytest.mark.parametrize("placement", ["only", "before", "after"])
+@pytest.mark.parametrize("filters", [{}, {"since": datetime(2026, 10, 30, tzinfo=timezone.utc)}, {"impact_filter": "low"}])
+def test_load_rejects_json_syntax_damage_without_mutating_history(
+    tmp_path: Path, placement: str, filters: dict,
+) -> None:
+    program = tmp_path / "sample" / "_feedback"
+    program.mkdir(parents=True)
+    record = ContextGapRecord(
+        ts=datetime(2026, 10, 26, tzinfo=timezone.utc), feature="unknown", program="sample",
+        lane=None, field="unknown", severity="quality_degraded", message="Retained gap",
+        impact_estimate="high",
+    )
+    valid = json.dumps(record.to_json()) + "\n"
+    damaged = "{broken retained observation\n"
+    content = damaged if placement == "only" else damaged + valid if placement == "before" else valid + damaged
+    path = program / "context_gaps.jsonl"
+    path.write_text(content, encoding="utf-8")
+    before = path.read_bytes()
+    with pytest.raises(json.JSONDecodeError):
+        load_context_gaps("sample", programs_root=tmp_path, **filters)
+    assert path.read_bytes() == before
+    assert list(program.iterdir()) == [path]
+
+
+@pytest.mark.parametrize("content", ["", "\n \n"])
+def test_load_empty_gap_history_is_nonmutating(tmp_path: Path, content: str) -> None:
+    program = tmp_path / "sample" / "_feedback"
+    program.mkdir(parents=True)
+    path = program / "context_gaps.jsonl"
+    path.write_text(content, encoding="utf-8")
+    before = path.read_bytes()
+    assert load_context_gaps("sample", programs_root=tmp_path) == []
+    assert path.read_bytes() == before
+
+
+def test_load_preserves_historical_defaults_unknown_fields_and_coercion(tmp_path: Path) -> None:
+    program = tmp_path / "sample" / "_feedback"
+    program.mkdir(parents=True)
+    path = program / "context_gaps.jsonl"
+    path.write_text(json.dumps({
+        "ts": "2026-10-26T14:00:00+02:00", "feature": 7, "program": "sample",
+        "field": "legacy.unknown", "severity": "legacy", "message": 9, "extra": "preserved",
+    }) + "\n", encoding="utf-8")
+    before = path.read_bytes()
+    record, = load_context_gaps("sample", programs_root=tmp_path)
+    assert record.ts == datetime(2026, 10, 26, 12, tzinfo=timezone.utc)
+    assert (record.feature, record.message, record.lane, record.impact_estimate) == ("7", "9", None, "medium")
+    assert (record.field, record.severity) == ("legacy.unknown", "legacy")
+    assert path.read_bytes() == before
 
 
 # ---------------------------------------------------------------------------

@@ -368,7 +368,7 @@ class ADOWriter:
 
         if entry.action == "add_comment":
             try:
-                duplicate = self._has_duplicate_comment(entry)
+                duplicate = self._has_duplicate_comment(entry, update_type=proposal.update_type)
             except (AuthError, QueryError) as error:
                 return replace(entry, entry_status="failed", status_reason=f"comment history lookup failed: {error}")
             if duplicate is None:
@@ -618,14 +618,16 @@ class ADOWriter:
         rows = self._client.query_work_items_batch([entry.work_item_id], fields=tuple(sorted(fields)))
         return rows[0] if rows else None
 
-    def _has_duplicate_comment(self, entry: ADOUpdateEntry) -> bool | None:
-        return self._comment_history_has_duplicate(entry.work_item_id, entry.proposed_value)
+    def _has_duplicate_comment(self, entry: ADOUpdateEntry, *, update_type: str | None = None) -> bool | None:
+        return self._comment_history_has_duplicate(entry.work_item_id, entry.proposed_value, update_type=update_type)
 
     def _has_duplicate_comment_text(self, work_item_id: int, comment_text: str) -> bool | None:
         return self._comment_history_has_duplicate(work_item_id, comment_text)
 
-    def _comment_history_has_duplicate(self, work_item_id: int, comment_text: str) -> bool | None:
-        signature = _comment_signature(comment_text)
+    def _comment_history_has_duplicate(
+        self, work_item_id: int, comment_text: str, *, update_type: str | None = None,
+    ) -> bool | None:
+        signature = comment_text if update_type == "meeting_action" else _comment_signature(comment_text)
         if not signature:
             return False
         outcomes: list[object] = []
@@ -647,7 +649,10 @@ class ADOWriter:
             or outcome.is_truncated
         ):
             return None
-        return any(_comment_signature(_comment_text(comment)) == signature for comment in comments)
+        return any(
+            (_comment_text(comment) if update_type == "meeting_action" else _comment_signature(_comment_text(comment)))
+            == signature for comment in comments
+        )
 
     def _apply_tag_update(self, entry: ADOUpdateEntry, live_row: dict[str, Any]) -> str | None:
         current_tags = _parse_tags(_field_value(live_row, "System.Tags"))

@@ -26,7 +26,10 @@ from src.core.milestone_engine import (
 from src.core.models import WorkItem
 from src.core.dependency_graph import DependencyDateMarginFields, _serialize_date_margin_fields
 from src.core.models_v2 import Dependency, Milestone, MilestoneAssessment, MilestoneStatus, Program, Workstream
-from src.core.program_fact_store import load_program_facts, project_dependencies, project_milestones
+from src.core.program_fact_store import (
+    FactLifecycleState, FactReviewState, ProgramFactStore, _deserialize_required_date, _resolve_fact_db_root,
+    load_program_facts, project_dependencies, project_milestones,
+)
 from src.core.store_factory import build_trajectory_store_for_program_id
 
 
@@ -51,6 +54,15 @@ class DependencyDateMarginRow(DependencyDateMarginFields):
 
 
 @dataclass(frozen=True, slots=True)
+class CommitmentDateRevision:
+    target_date: str
+    recorded_at: str
+    superseded_at: str | None
+    created_by: str
+    revision_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class MilestoneAssessmentRow:
     id: str
     name: str
@@ -68,6 +80,7 @@ class MilestoneAssessmentRow:
     linked_work_item_count: int
     blocked_criteria: tuple[str, ...]
     reasoning: str
+    commitment_date_history: tuple[CommitmentDateRevision, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,6 +252,33 @@ def build_milestone_assessment_report(
             dependency_date_margins=dependency_date_margins,
         )
 
+    milestone_ids_by_key = {
+        fact.natural_key: fact.payload["id"]
+        for fact in fact_snapshot.facts
+        if fact.fact_type == "milestone.entry"
+        and fact.lifecycle_state == FactLifecycleState.ACTIVE
+        and fact.review_state == FactReviewState.ACCEPTED
+    }
+    commitment_history: dict[str, list[CommitmentDateRevision]] = {}
+    revisions = ProgramFactStore(
+        program_id, db_root=_resolve_fact_db_root(resolved_programs_root),
+    ).list_accepted_milestone_revisions(tuple(milestone_ids_by_key), as_of=fact_snapshot.as_of)
+    for revision in revisions:
+        milestone_id = milestone_ids_by_key[revision.natural_key]
+        try:
+            target_date = _deserialize_required_date(revision.payload.get("target_date"), field_name="target_date")
+        except ValueError as error:
+            raise ConfigError(
+                f"Invalid target_date in milestone commitment revision {revision.revision_id}."
+            ) from error
+        commitment_history.setdefault(milestone_id, []).append(CommitmentDateRevision(
+            target_date=target_date.isoformat(),
+            recorded_at=revision.recorded_at.isoformat(),
+            superseded_at=revision.superseded_at.isoformat() if revision.superseded_at is not None else None,
+            created_by=revision.created_by,
+            revision_id=revision.revision_id,
+        ))
+
     program, workstreams = (program_loader or _load_program_context)(program_id, resolved_programs_root)
     items, ado_calls = (item_loader or _load_live_items)(program, workstreams, current_time)
     critical_path_ids = tuple(
@@ -275,6 +315,7 @@ def build_milestone_assessment_report(
             schedule_summary=describe_milestone_schedule_variance(milestone, items, trajectory_map, current_time),
             completion_date_history=completion_date_history.get(milestone.id, ()),
             target_date_history=target_date_history.get(milestone.id, ()),
+            commitment_date_history=tuple(commitment_history.get(milestone.id, ())),
         )
         for milestone, assessment in zip(milestones, assessments, strict=False)
     )
@@ -314,6 +355,14 @@ def render_milestone_assessment_report(report: MilestoneAssessmentReport) -> str
         history_summary = summarize_milestone_target_date_history(row.target_date_history)
         if history_summary:
             lines.append(f"  {history_summary}")
+        if row.commitment_date_history:
+            lines.append("  Commitment revisions:")
+            for revision in row.commitment_date_history:
+                lines.append(
+                    f"    {revision.target_date} | recorded {revision.recorded_at} | "
+                    f"superseded {revision.superseded_at or 'none'} | "
+                    f"by {revision.created_by} | {revision.revision_id}"
+                )
         lines.append(f"  {row.reasoning}")
         if row.blocked_criteria:
             blocked_detail = row.blocked_criteria[0]
@@ -357,6 +406,7 @@ def render_milestone_assessment_csv(report: MilestoneAssessmentReport) -> str:
             "record_type",
             "longest_dependency_chain",
             "dependency_date_margin",
+            "commitment_date_history",
         )
     )
     for row in report.rows:
@@ -384,6 +434,7 @@ def render_milestone_assessment_csv(report: MilestoneAssessmentReport) -> str:
                 "milestone",
                 "true" if row.critical_path else "false",
                 "",
+                json.dumps([asdict(revision) for revision in row.commitment_date_history], sort_keys=True),
             )
         )
     for margin in report.dependency_date_margins:
@@ -391,6 +442,7 @@ def render_milestone_assessment_csv(report: MilestoneAssessmentReport) -> str:
             report.program_id, report.generated_at.isoformat(), report.ado_calls,
             *("" for _ in range(16)), "dependency_date_margin", "",
             json.dumps(margin, sort_keys=True),
+            "",
         ))
     return buffer.getvalue()
 
@@ -493,6 +545,7 @@ def _build_assessment_row(
     schedule_summary: str | None,
     completion_date_history: tuple[str, ...],
     target_date_history: tuple[str, ...],
+    commitment_date_history: tuple[CommitmentDateRevision, ...] = (),
 ) -> MilestoneAssessmentRow:
     return MilestoneAssessmentRow(
         id=milestone.id,
@@ -511,6 +564,7 @@ def _build_assessment_row(
         linked_work_item_count=len(milestone.linked_work_item_ids),
         blocked_criteria=assessment.blocked_criteria,
         reasoning=assessment.reasoning,
+        commitment_date_history=commitment_date_history,
     )
 
 

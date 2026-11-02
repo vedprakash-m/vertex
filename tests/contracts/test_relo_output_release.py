@@ -33,4 +33,6 @@ def test_blocked_draft_has_no_recipients_and_visible_gate_reason() -> None:
     assert blocked["Subject"].startswith("[BLOCKED DRAFT]")
     assert blocked["To"] is None and blocked["Cc"] is None
     assert "QG-01" in blocked.get_payload(0).get_payload(decode=True).decode()
+    assert clean["Subject"] == "Status"
     assert clean["To"] == "owner@example.test"
+    assert clean["Cc"] is None

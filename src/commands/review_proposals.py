@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 import re
+import sqlite3
 import webbrowser
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, TemplateNotFound, select_autoescape
@@ -222,10 +223,13 @@ def generate_review_proposals(
         resolved_paths.program_id,
         programs_root=resolved_reports_root.parent / "programs",
     )
-    signal_map = {
-        signal.id: signal
-        for signal in signal_store.read(resolved_paths.program_id)
-    }
+    try:
+        signal_map = {
+            signal.id: signal
+            for signal in signal_store.read(resolved_paths.program_id, read_only=True)
+        }
+    except (OSError, sqlite3.Error, TypeError, ValueError) as error:
+        raise typer.BadParameter("Proposal review signal store is unavailable or incompatible.") from error
 
     sections = tuple(
         _build_review_section(

@@ -12,6 +12,35 @@ from src.core.triage import ReadinessAssessment, TriageReport, _render_vitality_
 from src.core.vitality_scorer import VitalitySummary
 
 
+def test_context_maintenance_model_human_json_csv_are_read_only(monkeypatch) -> None:
+    from src.commands.triage import TriageArtifacts, render_triage_output
+    from src.core.context_gap_store import RankedGap
+    import json
+
+    observed = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    evaluated = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    gap = RankedGap("synthetic", "fixture", None, "purpose", "quality_degraded", "high",
+                    2, observed, observed, "Purpose missing", "Inspect purpose")
+    report = TriageReport(
+        edition_name="fixture_weekly", issue_number=1, program_id="fixture",
+        readiness=ReadinessAssessment(100, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        blockers=(), needs_attention=(), milestones=(), risks=(), actions=(), decisions=(), assumptions=(),
+        cross_program_cascades=(), active_issues=(), coverage_gaps=(), ready=(), coverage_gap_window_days=14,
+        context_gaps=(gap,), context_evaluated_at=evaluated,
+        context_gap_diagnostic="Context gap history unavailable; inspect and repair it before retrying.",
+    )
+    monkeypatch.setattr("src.core.context_gap_store.load_context_gaps", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("render reread")))
+    human = render_triage_report(report)
+    payload = json.loads(render_triage_output(TriageArtifacts(report, 0), format="json"))
+    csv = render_triage_output(TriageArtifacts(report, 0), format="csv")
+    assert "2 observation(s)" in human and "owner=unknown / due=unknown" in human
+    assert "2026-10-01" in human and "2026-11-01" in human
+    assert "unavailable" in human and "unavailable" in csv
+    assert payload["context_gaps"][0]["observation_count"] == 2
+    assert payload["context_gaps"][0]["lane"] is None
+    assert "context_gap_diagnostic" in csv and "context_gap," in csv
+
+
 def test_build_readiness_assessment_uses_quality_and_gap_counts() -> None:
     readiness = build_readiness_assessment(
         quality_gate_report=QualityGateReport(

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal, TypedDict
 from pathlib import Path
 
+from src.commands.risks import _risk_review_label
 from src.core.forecast_engine import ForecastAssessment
 from src.core.milestone_engine import describe_milestone_schedule_variance, load_milestone_completion_date_history_map, load_milestone_target_date_history_map, summarize_milestone_completion_date_history, summarize_milestone_target_date_history
 from src.core.models import Confidence, DimensionRisk, EditionType, RiskLevel, Snapshot, WorkItem
@@ -260,6 +261,7 @@ def _build_health_summary(
         risk_register_summary=_build_risk_register_summary(
             resolved_risks,
             stale_risk_ids=resolved_stale_risk_ids,
+            as_of=as_of.date() if as_of is not None else None,
         ),
         telemetry_summary=(
             build_program_telemetry_summary(
@@ -432,6 +434,7 @@ def _build_risk_register_summary(
     risks: tuple[RiskEntry, ...],
     *,
     stale_risk_ids: tuple[str, ...] = (),
+    as_of: date | None = None,
 ) -> str | None:
     if not risks:
         return None
@@ -447,13 +450,25 @@ def _build_risk_register_summary(
     stale_risk_id_set = set(stale_risk_ids)
     escalated_count = sum(1 for risk in active_risks if risk.status == RiskStatus.ESCALATED)
     stale_count = sum(1 for risk in active_risks if risk.id in stale_risk_id_set)
+    unreviewed_count = (
+        sum(1 for risk in active_risks if _risk_review_label(risk, as_of) == "unreviewed")
+        if as_of is not None
+        else 0
+    )
     highest_risk = min(active_risks, key=risk_summary_sort_key)
 
     summary = f"Risk register: {len(active_risks)} active entr{'y' if len(active_risks) == 1 else 'ies'}"
     if escalated_count:
         summary += f" ({escalated_count} escalated)"
-    if stale_count:
+    if stale_count and unreviewed_count:
+        summary += (
+            f", {stale_count} stale review{'s' if stale_count != 1 else ''}; "
+            f"{unreviewed_count} unreviewed (may overlap stale count)."
+        )
+    elif stale_count:
         summary += f", {stale_count} stale review{'s' if stale_count != 1 else ''}."
+    elif unreviewed_count:
+        summary += f", {unreviewed_count} unreviewed."
     else:
         summary += ", reviews current."
     summary += (

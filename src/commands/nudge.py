@@ -1946,11 +1946,11 @@ def _apply_audience_policy(
 
     if len(filtered) > policy.max_recipients:
         raise ConfigError(
-            f"Audience policy max_recipients={policy.max_recipients} exceeded "
-            f"({len(filtered)} resolved recipients)."
-        )
+            f"Audience policy max_recipients={policy.max_recipients} exceeded ({len(filtered)} resolved recipients).")
 
     if policy.delivery_mode == "bcc":
+        if primary_recipient.email not in [recipient.email for recipient in filtered]:
+            raise ConfigError(f"Audience policy removed the primary Bcc recipient for program {program_id!r}.")
         return [primary_recipient], [r for r in filtered if r.email.lower() != primary_recipient.email.lower()]
     return filtered, []
 

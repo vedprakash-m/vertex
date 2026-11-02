@@ -77,7 +77,8 @@ from src.core.trusted_baseline_store import load_trusted_baseline_issue
 from src.core.trajectory_analyzer import analyze_trajectories
 from src.core.config_loader import REPORTS_ROOT, load_bundle_with_mode
 from src.core.continuation_contract import get_continuation_contract_path, load_continuation_contract
-from src.core.context_proposal_review import ContextProposalReviewRow, load_pending_context_proposal_rows
+from src.core.context_proposal_review import ContextProposalReviewRow, load_context_maintenance_review
+from src.core.context_gap_store import RankedGap
 from src.core.archive_store import get_dimension_history, read_archive_index
 from src.core.edition_resolver import get_nudge_paths, get_program_output_dir, resolve_edition, PROGRAMS_ROOT
 from src.core.freshness_engine import build_freshness_report
@@ -184,6 +185,10 @@ def render_triage_output(artifacts: TriageArtifacts, *, format: str) -> str:
             writer.writerow(("dependency_proposal", payload["edition_name"], payload["issue_number"], payload["program_id"], proposal["status"], proposal["id"], proposal["summary"], None, None, json.dumps({"accept_command": proposal["accept_command"], "confidence": proposal["confidence"], "detection_method": proposal["detection_method"], "from_item_id": proposal["from_item_id"], "from_workstream_id": proposal["from_workstream_id"], "occurrence_count": proposal["occurrence_count"], "to_item_id": proposal["to_item_id"], "to_workstream_id": proposal["to_workstream_id"]}, sort_keys=True)))
         for proposal in payload["context_revisions"]:
             writer.writerow(("context_revision", payload["edition_name"], proposal["issue_number"], payload["program_id"], "pending", proposal["proposal_id"], proposal["target"], None, None, json.dumps(proposal, sort_keys=True)))
+        for gap in payload["context_gaps"]:
+            writer.writerow(("context_gap", payload["edition_name"], payload["issue_number"], payload["program_id"], "active", gap["field"], gap["message"], None, gap["lane"], json.dumps(gap, sort_keys=True)))
+        for diagnostic in payload["context_diagnostics"]:
+            writer.writerow((diagnostic["kind"], payload["edition_name"], payload["issue_number"], payload["program_id"], "unavailable", None, diagnostic["message"], None, None, json.dumps(diagnostic, sort_keys=True)))
         for learning in payload["incident_learnings"]:
             writer.writerow(("incident_learning", payload["edition_name"], payload["issue_number"], payload["program_id"], learning["confidence"], None, learning["summary"], None, None, learning["summary_with_confidence"]))
         return buffer.getvalue()
@@ -232,6 +237,7 @@ def _build_triage_payload(artifacts: TriageArtifacts) -> dict[str, Any]:
             "coverage_gaps": len(report.coverage_gaps),
             "cross_program_cascades": len(report.cross_program_cascades),
             "context_revisions": len(report.context_proposals),
+            "context_gaps": len(report.context_gaps),
             "dependency_proposals": len(report.dependency_proposals),
             "decision_debt": len(report.decision_debt),
             "decisions": len(report.decisions),
@@ -273,6 +279,37 @@ def _build_triage_payload(artifacts: TriageArtifacts) -> dict[str, Any]:
                 "target": proposal.target,
             }
             for proposal in report.context_proposals
+        ],
+        "context_evaluated_at": report.context_evaluated_at.isoformat() if report.context_evaluated_at else None,
+        "context_gap_diagnostic": report.context_gap_diagnostic,
+        "context_proposal_diagnostic": report.context_proposal_diagnostic,
+        "context_diagnostics": [
+            {
+                "kind": kind, "message": message,
+                "evaluated_at": report.context_evaluated_at.isoformat() if report.context_evaluated_at else None,
+                "owner": None, "due_at": None, "evidence": evidence, "next_command": next_command,
+            }
+            for kind, message, evidence, next_command in (
+                ("context_gap_diagnostic", report.context_gap_diagnostic, "_feedback/context_gaps.jsonl",
+                 f"vertex doctor --context --ranked --edition {report.edition_name}"),
+                ("context_proposal_diagnostic", report.context_proposal_diagnostic, "context_proposals",
+                 f"vertex context proposals --edition {report.edition_name}"),
+            )
+            if message
+        ],
+        "context_gaps": [
+            {
+                "program": gap.program, "feature": gap.feature, "lane": gap.lane, "field": gap.field,
+                "severity": gap.severity,
+                "impact_estimate": gap.impact_estimate if gap.impact_estimate not in (None, "", "None") else None,
+                "message": gap.message, "observation_count": gap.count,
+                "first_seen": gap.first_seen.isoformat(), "last_seen": gap.last_seen.isoformat(),
+                "owner": None, "due_at": None, "evidence": "_feedback/context_gaps.jsonl",
+                "evaluated_at": report.context_evaluated_at.isoformat() if report.context_evaluated_at else None,
+                "fix_hint": gap.fix_hint,
+                "next_command": f"vertex doctor --context --ranked --edition {report.edition_name}",
+            }
+            for gap in report.context_gaps
         ],
         "dependency_proposals": [
             {
@@ -555,6 +592,9 @@ def generate_triage_report(
     contradiction_lines: tuple[str, ...] = ()
     decision_debt_lines: tuple[str, ...] = ()
     context_proposals: tuple[ContextProposalReviewRow, ...] = ()
+    context_gaps: tuple[RankedGap, ...] = ()
+    context_gap_diagnostic = None
+    context_proposal_diagnostic = None
     vitality_summary = None
     stale_narratives: tuple[StaleNarrativeFinding, ...] = ()
     open_claims: tuple[ClaimEntry, ...] = ()
@@ -684,10 +724,15 @@ def generate_triage_report(
             program_id=program_id,
             programs_root=programs_root,
         )
-        context_proposals = load_pending_context_proposal_rows(
+        context_maintenance = load_context_maintenance_review(
             program_id,
             programs_root=programs_root,
+            as_of=current_time,
         )
+        context_proposals = context_maintenance.proposals
+        context_gaps = context_maintenance.gaps
+        context_gap_diagnostic = context_maintenance.gap_diagnostic
+        context_proposal_diagnostic = context_maintenance.proposal_diagnostic
         item_urls = report_command_helpers._build_item_urls(bundle, items)
         workstream_data = report_command_helpers._build_workstream_data(
             issue_number=resolved_issue_number,
@@ -945,6 +990,10 @@ def generate_triage_report(
         dependency_proposals=dependency_proposals,
         incident_learnings=incident_learning_lines,
         context_proposals=context_proposals,
+        context_gaps=context_gaps,
+        context_gap_diagnostic=context_gap_diagnostic,
+        context_proposal_diagnostic=context_proposal_diagnostic,
+        context_evaluated_at=current_time,
         auto_approved_signal_count=auto_approved_signal_count,
         provisional_signal_count=provisional_signal_count,
         material_conflict_count=material_conflict_count,

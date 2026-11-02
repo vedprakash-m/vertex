@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+import sqlite3
 
 import pytest
 
@@ -72,6 +73,111 @@ from src.core.fact_sor_state import save_fact_sor_state
 from src.core.risk_register_engine import load_risk_register, save_risk_register
 from src.core.trusted_baseline_store import advance_trusted_baseline, load_trusted_baseline_for_program, record_untrusted_issue
 from src.core.workstream_documents import save_workstreams_document
+
+
+def test_accepted_milestone_revisions_retain_attribution_and_cutoff(tmp_path: Path) -> None:
+    store = ProgramFactStore("demo", db_root=tmp_path)
+    key = build_natural_key("milestone.entry", entity_refs=("MILESTONE:launch",), scope="program")
+    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    fact = ProgramFactInput(
+        fact_type="milestone.entry", entity_refs=("MILESTONE:launch",),
+        payload={"id": "launch", "target_date": "2024-11-01"},
+        precedence=FactPrecedence.ACTIVE_PM_JUDGMENT, created_by="synthetic-owner",
+    )
+    first = store.append_fact(fact, recorded_at=start).revision
+    second = store.append_fact(
+        replace(fact, payload={**fact.payload, "target_date": "2025-11-01"}),
+        recorded_at=start + timedelta(days=1),
+    ).revision
+    repeated = store.append_fact(
+        replace(fact, payload={**fact.payload, "target_date": "2025-11-01", "notes": "Reviewed"}),
+        recorded_at=start + timedelta(days=2),
+    ).revision
+    store.append_fact(
+        replace(fact, payload={**fact.payload, "target_date": "2029-11-01"}),
+        recorded_at=start + timedelta(days=3),
+    )
+    store.append_fact(
+        replace(fact, payload={"target_date": "2030-11-01"}, precedence=FactPrecedence.RAW_TELEMETRY),
+        recorded_at=start + timedelta(days=2),
+    )
+    store.append_fact(
+        replace(fact, entity_refs=("MILESTONE:other",), payload={"id": "other"}),
+        recorded_at=start,
+    )
+    store.append_fact(
+        replace(fact, fact_type="dependency.link", natural_key=key + "-dependency"),
+        recorded_at=start,
+    )
+    ProgramFactStore("foreign", db_root=store.db_path).append_fact(fact, recorded_at=start)
+    before = store.db_path.read_bytes()
+    history = store.list_accepted_milestone_revisions((key,), as_of=start + timedelta(days=2))
+    assert tuple(row.revision_id for row in history) == (
+        first.revision_id, second.revision_id, repeated.revision_id,
+    )
+    assert tuple(row.payload["target_date"] for row in history) == (
+        "2024-11-01", "2025-11-01", "2025-11-01",
+    )
+    assert all(row.program_id == "demo" and row.natural_key == key for row in history)
+    assert all(row.created_by == "synthetic-owner" for row in history)
+    assert history[0].recorded_at == start
+    assert history[0].superseded_at == start + timedelta(days=1)
+    assert history[-1].superseded_at == start + timedelta(days=3)
+    assert store.db_path.read_bytes() == before
+    assert store.list_accepted_milestone_revisions((), as_of=start) == ()
+
+
+def test_accepted_milestone_revisions_order_tied_observations_by_revision_id(tmp_path: Path) -> None:
+    store = ProgramFactStore("demo", db_root=tmp_path)
+    time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    fact = ProgramFactInput(
+        fact_type="milestone.entry", entity_refs=("MILESTONE:launch",),
+        payload={"target_date": "2026-01-01"},
+        precedence=FactPrecedence.ACTIVE_PM_JUDGMENT, created_by="synthetic",
+    )
+    first = store.append_fact(fact, recorded_at=time).revision
+    second = store.append_fact(
+        replace(fact, payload={"target_date": "2026-02-01"}), recorded_at=time,
+    ).revision
+    rows = store.list_accepted_milestone_revisions((first.natural_key,), as_of=time)
+    assert tuple(row.revision_id for row in rows) == tuple(sorted((first.revision_id, second.revision_id)))
+    assert rows[0].recorded_at == rows[1].recorded_at == time
+
+
+def test_accepted_milestone_revisions_do_not_initialize_absent_storage(tmp_path: Path) -> None:
+    store = ProgramFactStore("demo", db_root=tmp_path / "missing")
+    time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    assert store.list_accepted_milestone_revisions(("key",), as_of=time) == ()
+    assert not store.db_path.parent.exists()
+    store.db_path.parent.mkdir(parents=True)
+    with sqlite3.connect(store.db_path) as connection:
+        connection.execute("CREATE TABLE unrelated (id INTEGER)")
+    before = store.db_path.read_bytes()
+    assert store.list_accepted_milestone_revisions(("key",), as_of=time) == ()
+    assert store.db_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("damage", ("invalid_database", "malformed_table", "access_denied", "unexpected"))
+def test_accepted_milestone_revision_read_errors_are_visible(monkeypatch, tmp_path: Path, damage: str) -> None:
+    store = ProgramFactStore("demo", db_root=tmp_path)
+    store.db_path.parent.mkdir(parents=True)
+    error: type[Exception] = sqlite3.DatabaseError
+    if damage == "invalid_database":
+        store.db_path.write_bytes(b"not sqlite")
+    else:
+        with sqlite3.connect(store.db_path) as connection:
+            connection.execute("CREATE TABLE program_fact_revisions (revision_id TEXT)")
+        if damage in {"access_denied", "unexpected"}:
+            error = PermissionError if damage == "access_denied" else RuntimeError
+
+            def fail_open(*args: object, **kwargs: object) -> None:
+                raise error("Synthetic read failure")
+
+            monkeypatch.setattr("src.core.program_fact_store.open_program_db", fail_open)
+    before = store.db_path.read_bytes()
+    with pytest.raises(error):
+        store.list_accepted_milestone_revisions(("key",), as_of=datetime(2026, 1, 1, tzinfo=timezone.utc))
+    assert store.db_path.read_bytes() == before
 
 
 def test_date_margin_fact_precedence_and_history(tmp_path: Path) -> None:

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import csv
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from dataclasses import asdict
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -17,9 +18,160 @@ from src.core.models_v2 import ADOConfig, Milestone, MilestoneStatus, Program, T
 from src.core.milestone_engine import load_milestones, save_milestones
 from src.core.sqlite_stores import SQLiteTrajectoryStore
 from src.core.trajectory import backfill_trajectory_points
+from src.core.program_fact_store import ProgramFactInput, ProgramFactSnapshot, ProgramFactStore, load_program_facts
 
 
 runner = CliRunner()
+
+
+@pytest.mark.parametrize("with_archive", (False, True))
+def test_assess_additive_commitment_revisions_preserve_existing_outputs(monkeypatch, tmp_path: Path, with_archive: bool) -> None:
+    programs_root = tmp_path / "programs"
+    monkeypatch.setattr(milestones_module, "PROGRAMS_ROOT", programs_root)
+    monkeypatch.setattr(milestones_module, "_load_program_context", _fake_program_loader)
+    monkeypatch.setattr(milestones_module, "_load_live_items", _fake_item_loader)
+    _seed_milestones(programs_root)
+    _set_program_storage_backend(programs_root, program_id="demo", storage_backend="sqlite")
+    if with_archive:
+        _seed_milestone_archive(programs_root)
+    store = ProgramFactStore("demo", db_root=tmp_path)
+    first = next(fact for fact in store.snapshot().facts if fact.payload["id"] == "m1")
+    expected_revisions = [first]
+    for target in ("2027-05-10", "2026-05-10"):
+        result = runner.invoke(app, [
+            "milestones", "update", "--program", "demo", "--id", "m1", "--target-date", target,
+        ])
+        assert result.exit_code == 0, result.output
+        expected_revisions.append(next(fact for fact in store.snapshot().facts if fact.payload["id"] == "m1"))
+    report = milestones_module.build_milestone_assessment_report(
+        "demo", programs_root=programs_root, as_of=datetime(2026, 5, 10, 12, tzinfo=timezone.utc),
+    )
+    old_rows = [{key: value for key, value in asdict(row).items() if key != "commitment_date_history"}
+                for row in report.rows]
+    before = {path: path.read_bytes() for path in (store.db_path, programs_root / "demo" / "milestones.yaml")}
+    outputs = {}
+    for fmt in ("json", "human", "csv"):
+        result = runner.invoke(app, [
+            "milestones", "assess", "--program", "demo", "--as-of", "2026-05-10", "--format", fmt,
+        ])
+        assert result.exit_code == 0, result.output
+        outputs[fmt] = result.stdout
+    assert all(path.read_bytes() == content for path, content in before.items())
+    payload = json.loads(outputs["json"])
+    for actual, old in zip(payload["rows"], old_rows, strict=True):
+        expected_old = json.loads(json.dumps(old))
+        assert {key: value for key, value in actual.items()
+                if key not in {"commitment_date_history", "longest_dependency_chain"}} == expected_old
+    row = next(row for row in payload["rows"] if row["id"] == "m1")
+    assert "commitment_date_history" in row
+    expected = [{
+        "target_date": revision.payload["target_date"],
+        "recorded_at": revision.recorded_at.isoformat(),
+        "superseded_at": expected_revisions[index + 1].recorded_at.isoformat()
+        if index + 1 < len(expected_revisions) else None,
+        "created_by": revision.created_by,
+        "revision_id": revision.revision_id,
+    } for index, revision in enumerate(expected_revisions)]
+    assert row["commitment_date_history"] == expected
+    assert row["target_date_history"] == (
+        ["2026-05-08", "2026-05-10"] if with_archive else ["2026-05-10"]
+    )
+    assert "Commitment revisions:" in outputs["human"]
+    for revision in expected:
+        assert revision["revision_id"] in outputs["human"]
+        assert revision["recorded_at"] in outputs["human"]
+        assert revision["created_by"] in outputs["human"]
+    csv_rows = list(csv.DictReader(outputs["csv"].splitlines()))
+    csv_row = next(row for row in csv_rows if row["id"] == "m1")
+    assert tuple(csv_row)[-1] == "commitment_date_history"
+    assert json.loads(csv_row["commitment_date_history"]) == expected
+    assert csv_row["target_date_history"] == "|".join(row["target_date_history"])
+
+
+def test_assess_commitment_revisions_use_selected_snapshot_cutoff(monkeypatch, tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    _seed_milestones(programs_root)
+    _set_program_storage_backend(programs_root, program_id="demo", storage_backend="sqlite")
+    snapshot = load_program_facts("demo", programs_root=programs_root)
+    first = next(fact for fact in snapshot.facts if fact.payload["id"] == "m1")
+    store = ProgramFactStore("demo", db_root=tmp_path)
+    later = store.append_fact(ProgramFactInput(
+        fact_type=first.fact_type, entity_refs=first.entity_refs, payload={**first.payload, "target_date": "2030-05-10"},
+        precedence=first.precedence, created_by="synthetic-later",
+    ), recorded_at=snapshot.as_of + timedelta(days=1)).revision
+    monkeypatch.setattr(milestones_module, "load_program_facts", lambda *args, **kwargs: snapshot)
+    report = milestones_module.build_milestone_assessment_report(
+        "demo", programs_root=programs_root, program_loader=_fake_program_loader,
+        item_loader=_fake_item_loader, as_of=snapshot.as_of - timedelta(days=30),
+    )
+    row = next(row for row in report.to_payload()["rows"] if row["id"] == "m1")
+    assert "commitment_date_history" in row
+    assert [entry["revision_id"] for entry in row["commitment_date_history"]] == [first.revision_id]
+    assert row["commitment_date_history"][0]["superseded_at"] == later.recorded_at.isoformat()
+    assert row["target_date"] == first.payload["target_date"]
+
+
+def test_assess_shim_does_not_fabricate_commitment_revisions(monkeypatch, tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    _seed_milestones(programs_root)
+    store = ProgramFactStore("demo", db_root=tmp_path)
+    with store._connect() as connection:
+        connection.execute("DELETE FROM program_fact_revisions")
+    report = milestones_module.build_milestone_assessment_report(
+        "demo", programs_root=programs_root, program_loader=_fake_program_loader, item_loader=_fake_item_loader,
+    )
+    assert report.rows
+    assert all("commitment_date_history" in row for row in report.to_payload()["rows"])
+    assert all(row["commitment_date_history"] == () for row in report.to_payload()["rows"])
+    assert "Commitment revisions:" not in milestones_module.render_milestone_assessment_report(report)
+    csv_rows = list(csv.DictReader(milestones_module.render_milestone_assessment_csv(report).splitlines()))
+    assert all(row["commitment_date_history"] == "[]" for row in csv_rows)
+
+
+def test_assess_commitment_read_errors_surface(monkeypatch, tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    _seed_milestones(programs_root)
+    monkeypatch.setattr(milestones_module, "PROGRAMS_ROOT", programs_root)
+    monkeypatch.setattr(milestones_module, "_load_program_context", _fake_program_loader)
+    monkeypatch.setattr(milestones_module, "_load_live_items", _fake_item_loader)
+
+    def fail_read(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("Synthetic history read failed")
+
+    monkeypatch.setattr(ProgramFactStore, "list_accepted_milestone_revisions", fail_read, raising=False)
+    result = runner.invoke(app, ["milestones", "assess", "--program", "demo", "--format", "json"])
+    assert result.exit_code != 0
+    assert isinstance(result.exception, RuntimeError)
+    assert "Synthetic history read failed" in str(result.exception)
+
+
+@pytest.mark.parametrize("malformed_date", ("bad-date", None, 123))
+def test_assess_malformed_historical_commitment_date_is_visible(monkeypatch, tmp_path: Path, malformed_date: object) -> None:
+    programs_root = tmp_path / "programs"
+    _seed_milestones(programs_root)
+    store = ProgramFactStore("demo", db_root=tmp_path)
+    current = next(row for row in store.snapshot().facts if row.payload["id"] == "m1")
+    fact = ProgramFactInput(
+        fact_type=current.fact_type, entity_refs=current.entity_refs,
+        payload={**current.payload, "target_date": malformed_date},
+        precedence=current.precedence, created_by="synthetic",
+    )
+    store.append_fact(fact)
+    store.append_fact(ProgramFactInput(
+        fact_type=current.fact_type, entity_refs=current.entity_refs,
+        payload=current.payload, precedence=current.precedence, created_by="synthetic",
+    ))
+    monkeypatch.setattr(milestones_module, "PROGRAMS_ROOT", programs_root)
+    monkeypatch.setattr(milestones_module, "_load_program_context", _fake_program_loader)
+    monkeypatch.setattr(milestones_module, "_load_live_items", _fake_item_loader)
+    before = store.db_path.read_bytes()
+    with pytest.raises(ConfigError, match="target_date"):
+        milestones_module.build_milestone_assessment_report("demo", programs_root=programs_root)
+    result = runner.invoke(app, ["milestones", "assess", "--program", "demo", "--format", "json"])
+    assert result.exit_code == 2
+    assert "target_date" in result.output
+    assert "bad-date" not in result.output
+    assert store.db_path.read_bytes() == before
 
 
 @pytest.mark.parametrize("emitter", ("deck", "health", "review", "triage", "prep", "timeline"))
@@ -121,6 +273,7 @@ def test_date_margin_cli_all_formats_once_per_dependency(monkeypatch, tmp_path: 
     margin_rows = [row for row in csv_rows if row["record_type"] == "dependency_date_margin"]
     assert len(margin_rows) == 2
     assert {json.loads(row["dependency_date_margin"])["dependency_id"] for row in margin_rows} == {"margin", "unknown"}
+    assert all(row["commitment_date_history"] == "" for row in margin_rows)
 
 
 def test_date_margins_visible_without_milestones(monkeypatch, tmp_path: Path) -> None:
@@ -322,7 +475,9 @@ def test_build_milestone_assessment_report_reads_milestones_from_program_facts(
     tmp_path: Path,
 ) -> None:
     captured: dict[str, object] = {}
-    sentinel_snapshot = object()
+    sentinel_snapshot = ProgramFactSnapshot(
+        program_id="demo", as_of=datetime(2026, 5, 8, tzinfo=timezone.utc), facts=(),
+    )
 
     monkeypatch.setattr("src.commands.milestones._load_program_context", _fake_program_loader)
     monkeypatch.setattr("src.commands.milestones._load_live_items", _fake_item_loader)

@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from dataclasses import replace
+import builtins
+import os
 from pathlib import Path
+import shutil
 
 import pytest
 import yaml
@@ -118,28 +122,46 @@ def _seed_registry(programs_root: Path, *, program_id: str = "samplealpha") -> P
     return path
 
 
-def test_apply_writes_the_field_and_preserves_other_workstreams(tmp_path: Path) -> None:
+def _assert_manual_only_refusal(proposal: ContextGapAnswerProposal, programs_root: Path) -> None:
+    def unexpected_io(*args, **kwargs):
+        pytest.fail("Legacy reply application attempted filesystem I/O")
+
+    with pytest.MonkeyPatch.context() as patch:
+        for method in ("exists", "stat", "open", "read_text", "read_bytes", "write_text", "write_bytes", "mkdir", "replace"):
+            patch.setattr(Path, method, unexpected_io)
+        patch.setattr(builtins, "open", unexpected_io)
+        patch.setattr(shutil, "copy2", unexpected_io)
+        patch.setattr(os, "replace", unexpected_io)
+        with pytest.raises(ContextGapReplyError, match="manual-diff-only.*vertex context manual-diff"):
+            apply_context_gap_answer(proposal, programs_root=programs_root)
+
+
+@pytest.mark.parametrize("field", ["why", "what", "how"])
+@pytest.mark.parametrize("stale", [False, True])
+def test_apply_refuses_approved_field_without_io(tmp_path: Path, field: str, stale: bool) -> None:
     programs_root = tmp_path / "programs"
     path = _seed_registry(programs_root)
-    gap = _deep_context_gap()  # lane="deployment", field="why"
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    document["workstreams"][0]["deep_context"][field] = "Prior scalar"
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    gap = replace(_deep_context_gap(), field=field)
     proposal = approve_context_gap_answer(
         assemble_context_gap_answer_proposal(
             _parsed_reply("The reason this workstream exists is X."),
             gap=gap, solicitation_id="solicitation-1", proposal_id="answer-1",
         )
     )
+    assert proposal.status == "approved"
+    assert proposal.target == ConfigWriteTarget(workstream_id="deployment", field=field)
+    if stale:
+        document["workstreams"][0]["deep_context"][field] = "New manual scalar"
+        path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    _assert_manual_only_refusal(proposal, programs_root)
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
 
-    apply_context_gap_answer(proposal, programs_root=programs_root)
 
-    updated = yaml.safe_load(path.read_text(encoding="utf-8"))
-    deployment = next(entry for entry in updated["workstreams"] if entry["id"] == "deployment")
-    assert deployment["deep_context"]["why"] == "The reason this workstream exists is X."
-    assert deployment["deep_context"]["what"] == "existing what text"  # untouched
-    repair = next(entry for entry in updated["workstreams"] if entry["id"] == "repair")
-    assert repair == {"id": "repair", "name": "Repair"}  # untouched
-
-
-def test_apply_writes_a_backup_file(tmp_path: Path) -> None:
+def test_apply_preserves_existing_backup_without_io(tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     path = _seed_registry(programs_root)
     proposal = approve_context_gap_answer(
@@ -148,13 +170,11 @@ def test_apply_writes_a_backup_file(tmp_path: Path) -> None:
         )
     )
 
-    apply_context_gap_answer(proposal, programs_root=programs_root)
-
     backup_path = path.with_suffix(f"{path.suffix}.bak")
-    assert backup_path.exists()
-    backed_up = yaml.safe_load(backup_path.read_text(encoding="utf-8"))
-    deployment = next(entry for entry in backed_up["workstreams"] if entry["id"] == "deployment")
-    assert "why" not in deployment.get("deep_context", {})  # backup has the pre-apply content
+    backup_path.write_bytes(b"Existing retained backup")
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    _assert_manual_only_refusal(proposal, programs_root)
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
 
 
 def test_apply_raises_when_workstream_not_found(tmp_path: Path) -> None:
@@ -168,16 +188,23 @@ def test_apply_raises_when_workstream_not_found(tmp_path: Path) -> None:
     proposal = approve_context_gap_answer(
         assemble_context_gap_answer_proposal(_parsed_reply(), gap=gap, solicitation_id="solicitation-1", proposal_id="answer-1")
     )
-    with pytest.raises(ContextGapReplyError, match="not found"):
-        apply_context_gap_answer(proposal, programs_root=programs_root)
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    _assert_manual_only_refusal(proposal, programs_root)
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
 
 
-def test_apply_raises_when_registry_file_missing(tmp_path: Path) -> None:
+@pytest.mark.parametrize("registry", [None, "not: [valid", "false", "workstreams: not-a-list"])
+def test_apply_refuses_missing_or_corrupt_registry_without_io(tmp_path: Path, registry: str | None) -> None:
     programs_root = tmp_path / "programs"
+    if registry is not None:
+        path = registry_path_for_program("samplealpha", programs_root=programs_root)
+        path.parent.mkdir(parents=True)
+        path.write_text(registry, encoding="utf-8")
     proposal = approve_context_gap_answer(
         assemble_context_gap_answer_proposal(
             _parsed_reply(), gap=_deep_context_gap(), solicitation_id="solicitation-1", proposal_id="answer-1"
         )
     )
-    with pytest.raises(ContextGapReplyError, match="does not exist"):
-        apply_context_gap_answer(proposal, programs_root=programs_root)
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    _assert_manual_only_refusal(proposal, programs_root)
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before

@@ -7,7 +7,7 @@ Installed entry points: `vertex`, `vx`.
 
 ## `vertex`
 
-**Usage:** `vertex [OPTIONS] [COMMAND] [ARGS]...`
+**Usage:** `vertex [OPTIONS] COMMAND [ARGS]...`
 
 Vertex hybrid journal automation CLI.
 
@@ -1174,7 +1174,7 @@ List configured Vertex resources.
 
 ### `vertex actions`
 
-**Usage:** `vertex actions [OPTIONS] [COMMAND] [ARGS]...`
+**Usage:** `vertex actions [OPTIONS] COMMAND [ARGS]...`
 
 List and review extracted actions.
 
@@ -2315,7 +2315,7 @@ Author composite assertions over existing telemetry assertions.
 
 ### `vertex assumptions`
 
-**Usage:** `vertex assumptions [OPTIONS] [COMMAND] [ARGS]...`
+**Usage:** `vertex assumptions [OPTIONS] COMMAND [ARGS]...`
 
 Manage the program assumptions register.
 
@@ -2390,7 +2390,7 @@ Manage the program assumptions register.
 
 ### `vertex claims`
 
-**Usage:** `vertex claims [OPTIONS] [COMMAND] [ARGS]...`
+**Usage:** `vertex claims [OPTIONS] COMMAND [ARGS]...`
 
 List and resolve tracked claims and decision asks.
 
@@ -2629,7 +2629,7 @@ evaluator cannot detect (Section 8.15.1).
 
 ### `vertex calibration`
 
-**Usage:** `vertex calibration [OPTIONS] [COMMAND] [ARGS]...`
+**Usage:** `vertex calibration [OPTIONS] COMMAND [ARGS]...`
 
 Inspect historical claim calibration.
 
@@ -2676,7 +2676,7 @@ Show draft↔confirm edit distance trend per task type (WS-22 learning-loop effi
 
 ### `vertex commitment`
 
-**Usage:** `vertex commitment [OPTIONS] [COMMAND] [ARGS]...`
+**Usage:** `vertex commitment [OPTIONS] COMMAND [ARGS]...`
 
 Manage program commitments (inbound/outbound).
 
@@ -2898,7 +2898,7 @@ and apply with ``vertex context apply``.
 
 ### `vertex config`
 
-**Usage:** `vertex config [OPTIONS] [COMMAND] [ARGS]...`
+**Usage:** `vertex config [OPTIONS] COMMAND [ARGS]...`
 
 Inspect and update governed program configuration.
 
@@ -3073,7 +3073,7 @@ Results are persisted to programs/{program}/external_dependencies.jsonl unless -
 
 ### `vertex audit`
 
-**Usage:** `vertex audit [OPTIONS] [COMMAND] [ARGS]...`
+**Usage:** `vertex audit [OPTIONS] COMMAND [ARGS]...`
 
 Inspect audit history and autonomy governance state.
 
@@ -3190,7 +3190,7 @@ Redact PII in one autonomy-audit line; the chain validator forgives the line.
 
 ### `vertex decisions`
 
-**Usage:** `vertex decisions [OPTIONS] [COMMAND] [ARGS]...`
+**Usage:** `vertex decisions [OPTIONS] COMMAND [ARGS]...`
 
 Manage the program decision register.
 
@@ -3327,7 +3327,7 @@ digest. Free-text assumptions drift only via human dispute in triage.
 
 #### `vertex decisions governance`
 
-**Usage:** `vertex decisions governance [OPTIONS] [COMMAND] [ARGS]...`
+**Usage:** `vertex decisions governance [OPTIONS] COMMAND [ARGS]...`
 
 Show and edit governance state (DFD, escalation) in issue overrides.
 
@@ -3372,7 +3372,7 @@ Edit governance state in an issue's overrides YAML.
 
 ### `vertex dependencies`
 
-**Usage:** `vertex dependencies [OPTIONS] [COMMAND] [ARGS]...`
+**Usage:** `vertex dependencies [OPTIONS] COMMAND [ARGS]...`
 
 Inspect and manage inferred dependency proposals.
 
@@ -5736,7 +5736,7 @@ Manage the local semantic archive index.
 
 ### `vertex milestones`
 
-**Usage:** `vertex milestones [OPTIONS] [COMMAND] [ARGS]...`
+**Usage:** `vertex milestones [OPTIONS] COMMAND [ARGS]...`
 
 Manage milestone health and authored milestone data.
 
@@ -6132,7 +6132,7 @@ Inject manual telemetry observations into L1 reality state.
 
 ### `vertex policy`
 
-**Usage:** `vertex policy [OPTIONS] [COMMAND] [ARGS]...`
+**Usage:** `vertex policy [OPTIONS] COMMAND [ARGS]...`
 
 Promote governed policy proposals into active local rules.
 
@@ -6393,7 +6393,7 @@ Print the next-run banner (or nothing if all clear).
 
 ### `vertex readiness`
 
-**Usage:** `vertex readiness [OPTIONS] [COMMAND] [ARGS]...`
+**Usage:** `vertex readiness [OPTIONS] COMMAND [ARGS]...`
 
 Manage launch readiness snapshots.
 
@@ -6941,7 +6941,7 @@ candidates.  Run ``vertex rev export-corpus`` to dump the full bundle.
 
 ### `vertex risks`
 
-**Usage:** `vertex risks [OPTIONS] [COMMAND] [ARGS]...`
+**Usage:** `vertex risks [OPTIONS] COMMAND [ARGS]...`
 
 Manage the program risk register.
 
@@ -6959,6 +6959,7 @@ Manage the program risk register.
 |---|---|
 | `list` |  |
 | `add` |  |
+| `history` |  |
 | `update` |  |
 | `review` |  |
 | `link` |  |
@@ -7001,6 +7002,17 @@ Manage the program risk register.
 | --entity-ref TEXT | text | No |  | Repeat to add entity refs. |
 | --issue INTEGER | integer | No |  | Optional Vertex issue number that identified the risk. |
 | --identified-date TEXT | text | No |  | Optional YYYY-MM-DD identified date. |
+
+#### `vertex risks history`
+
+**Usage:** `vertex risks history [OPTIONS]`
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | Yes |  | Program id, e.g. myprogram. |
+| --risk-id TEXT | text | No |  | Optional retained risk id. |
 
 #### `vertex risks update`
 
@@ -7049,7 +7061,7 @@ Manage the program risk register.
 
 ### `vertex salience`
 
-**Usage:** `vertex salience [OPTIONS] [COMMAND] [ARGS]...`
+**Usage:** `vertex salience [OPTIONS] COMMAND [ARGS]...`
 
 Inspect author salience feedback state.
 
@@ -7081,7 +7093,7 @@ Inspect author salience feedback state.
 
 ### `vertex signals`
 
-**Usage:** `vertex signals [OPTIONS] [COMMAND] [ARGS]...`
+**Usage:** `vertex signals [OPTIONS] COMMAND [ARGS]...`
 
 List and review journal signals.
 

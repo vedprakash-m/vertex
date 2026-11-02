@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable, Mapping
+from datetime import date, datetime, time, timezone
 from typing import Callable
 
 from src.core.integration_types import ExtractionResult, KustoHydrationOutput, KustoResultSet
@@ -17,6 +19,28 @@ from src.core.signal_ref_utils import merge_entity_refs
 #: ``source_waiver_store.find_waiver_for_query`` with the loaded waivers
 #: and slice contracts.
 WaiverLookup = Callable[[str], "object | None"]
+
+
+def kusto_source_event_time(rows: Iterable[Mapping[str, object]]) -> datetime | None:
+    candidates: list[datetime] = []
+    for row in rows:
+        for key, value in row.items():
+            if key.strip().lower() not in {"timestamp", "date", "event_timestamp", "createdate", "resolveddate", "snapshot"}:
+                continue
+            if value in (None, ""):
+                continue
+            if isinstance(value, datetime):
+                parsed = value.astimezone(timezone.utc) if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+            else:
+                try:
+                    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                except ValueError:
+                    if not isinstance(value, date):
+                        continue
+                    parsed = datetime.combine(value, time.min, tzinfo=timezone.utc)
+                parsed = parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+            candidates.append(parsed)
+    return max(candidates) if candidates else None
 
 
 class KustoSignalExtractor:
@@ -147,8 +171,28 @@ def _build_signals(
 ) -> list[Signal]:
     signals: list[Signal] = []
     result_hash = hashlib.sha256(json.dumps(result_set.rows, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:12]
+    source_event_time = kusto_source_event_time(result_set.rows)
     for workstream_id, suffix in _workstream_suffixes(result_set.workstream_ids):
         raw_ref = f"kusto/{result_set.query_id}/{result_hash}/{suffix}"
+        metadata: dict[str, object] = {
+            "query_id": result_set.query_id,
+            "row_count": len(result_set.rows),
+            "result_hash": result_hash,
+            "metric_id": result_set.metric_id,
+            "observed_value": result_set.observed_value,
+            "unit": result_set.unit,
+            "slo_target": result_set.slo_target,
+            "comparison": result_set.comparison,
+            "is_breach": result_set.is_breach,
+            # ADF-W2.3 (Section 8.5.3): waiver annotation for downstream
+            # consumers (report rendering, cockpit). False (not None)
+            # when no waiver was looked up, so a reader can distinguish
+            # "actively waived" from "not waived" without a None check.
+            "waiver_active": waiver is not None,
+            "waiver_contract_id": getattr(waiver, "contract_id", None) if waiver is not None else None,
+        }
+        if source_event_time is not None:
+            metadata["event_timestamp"] = source_event_time.isoformat()
         entity_refs = merge_entity_refs(
             provider_refs=(f"kusto:{result_set.query_id}",),
             workstream_id=workstream_id,
@@ -166,23 +210,7 @@ def _build_signals(
                 raw_ref=raw_ref,
                 confidence=confidence,
                 review_policy=None,
-                metadata={
-                    "query_id": result_set.query_id,
-                    "row_count": len(result_set.rows),
-                    "result_hash": result_hash,
-                    "metric_id": result_set.metric_id,
-                    "observed_value": result_set.observed_value,
-                    "unit": result_set.unit,
-                    "slo_target": result_set.slo_target,
-                    "comparison": result_set.comparison,
-                    "is_breach": result_set.is_breach,
-                    # ADF-W2.3 (Section 8.5.3): waiver annotation for downstream
-                    # consumers (report rendering, cockpit). False (not None)
-                    # when no waiver was looked up, so a reader can distinguish
-                    # "actively waived" from "not waived" without a None check.
-                    "waiver_active": waiver is not None,
-                    "waiver_contract_id": getattr(waiver, "contract_id", None) if waiver is not None else None,
-                },
+                metadata=metadata,
             )
         )
     return signals

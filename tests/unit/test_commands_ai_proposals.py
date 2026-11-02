@@ -13,13 +13,20 @@ from dataclasses import replace
 from datetime import date, datetime, timezone
 import json
 from pathlib import Path
+from typing import Any, Callable
 
+import pytest
 import yaml
 from typer.testing import CliRunner
 
+import src.ai.dependency_blast_radius_generator as blast_radius_generator
+import src.ai.governance_decision_brief_generator as brief_generator
+import src.ai.risk_proposal_generator as risk_generator
+import src.commands.ai_proposals as ai_proposals
 from cli import app
 from src.core.adoption_telemetry import GoldenWorkflow, read_adoption_events
-from src.core.ai_review_proposal_store import load_proposal, stage_proposal
+from src.core.ai_review_proposal_store import load_proposal, load_proposals, stage_proposal
+from src.core.ledger.event_log import read_events
 from src.core.proposal_audit import read_proposal_audit
 from src.core.proposal_autonomy_ladder import advance_proposal_class_autonomy, promote_proposal_class_explicit
 from src.core.dependency_blast_radius import DependencyBlastRadiusProposal
@@ -43,6 +50,228 @@ from src.core.risk_register_engine import save_risk_register
 from src.core.top_three_candidates import TopThreeCandidateProposal
 
 runner = CliRunner()
+
+
+class _ProposalGenerationClient:
+    def __init__(self, response: dict[str, Any]) -> None:
+        self.response = response
+        self.calls = 0
+
+    def structured(
+        self,
+        system: str,
+        user: str,
+        *,
+        parser: Callable[[dict[str, Any]], Any],
+        max_tokens: int = 800,
+        prompt_version: str | None = None,
+    ) -> Any:
+        self.calls += 1
+        return parser(self.response)
+
+    def chat(
+        self,
+        system: str,
+        user: str,
+        *,
+        max_tokens: int = 800,
+        prompt_version: str | None = None,
+    ) -> str:
+        raise AssertionError("Unexpected chat dispatch")
+
+
+_PAIRING_CLI_TYPES = ("risk", "governance_decision_brief", "dependency_blast_radius")
+_PAIRING_CLI_MISMATCHES = (
+    ("refs_without_text", ("selected-ref", "orphan-ref"), ("selected text",), "orphan-ref"),
+    ("text_without_ref", ("selected-ref",), ("selected text", "orphan text"), "selected-ref"),
+)
+_PAIRING_GENERATORS = {
+    "risk": (risk_generator, "risk_proposal_generator"),
+    "governance_decision_brief": (brief_generator, "governance_decision_brief_generator"),
+    "dependency_blast_radius": (blast_radius_generator, "dependency_blast_radius_generator"),
+}
+
+
+def _pairing_cli_response(proposal_type: str, evidence_ref: str | None) -> dict[str, Any]:
+    evidence_refs = [evidence_ref] if evidence_ref is not None else []
+    if proposal_type == "risk":
+        return {
+            "causal_title": "Synthetic supplier delay",
+            "why_it_matters": "The synthetic milestone could slip.",
+            "probability": "likely",
+            "impact": "high",
+            "category": "external",
+            "mitigation": "Verify the supplier plan.",
+            "owner": "synthetic-owner",
+            "by_when": "2026-11-15",
+            "fallback": "Use the synthetic contingency.",
+            "evidence_refs": evidence_refs,
+        }
+    if proposal_type == "governance_decision_brief":
+        return {
+            "decision": "Escalate the synthetic supplier delay.",
+            "context": "Synthetic context.",
+            "options": [
+                {
+                    "label": "Escalate",
+                    "tradeoffs": "Faster response.",
+                    "evidence_refs": evidence_refs,
+                    "unknowns": ["Evidence was not supplied."] if evidence_ref is None else [],
+                },
+                {
+                    "label": "Wait",
+                    "tradeoffs": "Lower immediate effort.",
+                    "evidence_refs": [],
+                    "unknowns": ["Whether delivery slips."],
+                },
+            ],
+            "recommendation": "Escalate.",
+            "consequences_of_delay": "Synthetic milestone risk.",
+            "owner": "synthetic-owner",
+            "due_date": "2026-11-15",
+            "follow_up_action": "Review the supplier plan.",
+            "evidence_refs": evidence_refs,
+        }
+    return {
+        "next_proving_event": "Verify delivery at the next checkpoint.",
+        "blast_radius_narrative": "A missed delivery could delay the downstream milestone.",
+        "evidence_refs": evidence_refs,
+    }
+
+
+def _pairing_cli_args(proposal_type: str, refs: tuple[str, ...], texts: tuple[str, ...]) -> list[str]:
+    type_args = {
+        "risk": [
+            "--candidate-risk-id", "risk-synthetic", "--title", "Synthetic supplier delay",
+            "--description", "Synthetic description",
+        ],
+        "governance_decision_brief": [
+            "--decision-ask-id", "ask-synthetic", "--decision-text", "Synthetic decision?",
+        ],
+        "dependency_blast_radius": [
+            "--dependency-id", "dep-synthetic", "--from-summary", "Synthetic upstream",
+            "--to-summary", "Synthetic downstream", "--risk-if-broken", "Synthetic risk",
+            "--current-status", "active",
+        ],
+    }
+    args = ["ai-proposals", "generate", "--program", "acme", "--type", proposal_type, *type_args[proposal_type]]
+    for text in texts:
+        args.extend(("--evidence-text", text))
+    for ref in refs:
+        args.extend(("--evidence-ref", ref))
+    return args
+
+
+def _setup_pairing_cli(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    proposal_type: str,
+    response_ref: str | None,
+    *,
+    check_admission: bool = True,
+) -> tuple[Path, _ProposalGenerationClient]:
+    programs_root = tmp_path / "programs"
+    program_dir = programs_root / "acme"
+    program_dir.mkdir(parents=True)
+    (program_dir / "program.yaml").write_text(
+        yaml.safe_dump({
+            "schema_version": "2.0",
+            "id": "acme",
+            "name": "Synthetic Acme",
+            "ai": {"enabled": True, "budget_usd_per_run": 0.5, "temperature": 0.2},
+        }),
+        encoding="utf-8",
+    )
+    client = _ProposalGenerationClient(_pairing_cli_response(proposal_type, response_ref))
+    monkeypatch.setattr(ai_proposals, "PROGRAMS_ROOT", programs_root)
+    monkeypatch.setattr(ai_proposals, "get_ai_mode", lambda: ai_proposals.AIMode.ACTIVE)
+    monkeypatch.setattr(ai_proposals, "resolve_ai_deployments_for_feature", lambda **kwargs: ("synthetic-deployment",))
+    monkeypatch.setattr(ai_proposals, "FallbackAIClient", lambda **kwargs: client)
+    if check_admission:
+        generator = _PAIRING_GENERATORS[proposal_type][0]
+        monkeypatch.setattr(generator, "load_ai_feature_policy", lambda *args: pytest.fail("unpaired evidence reached policy"))
+        monkeypatch.setattr(generator, "_cached_response", lambda *args, **kwargs: pytest.fail("unpaired evidence reached cache"))
+        monkeypatch.setattr(generator, "_load_prompt_template", lambda *args: pytest.fail("unpaired evidence reached prompt construction"))
+    return programs_root, client
+
+
+@pytest.mark.parametrize("proposal_type", _PAIRING_CLI_TYPES)
+@pytest.mark.parametrize(
+    ("case", "refs", "texts", "response_ref"),
+    _PAIRING_CLI_MISMATCHES,
+)
+def test_generate_cli_discards_unpaired_evidence_before_release(
+    proposal_type: str,
+    case: str,
+    refs: tuple[str, ...],
+    texts: tuple[str, ...],
+    response_ref: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    programs_root, client = _setup_pairing_cli(
+        monkeypatch, tmp_path, proposal_type, response_ref, check_admission=False,
+    )
+
+    result = runner.invoke(app, _pairing_cli_args(proposal_type, refs, texts))
+
+    assert result.exit_code == 0, (case, result.stdout)
+    assert "discarded or rejected" in result.stdout
+    assert "Nothing was staged." in result.stdout
+    assert client.calls == 0
+    assert load_proposals("acme", proposal_type=proposal_type, programs_root=programs_root) == ()
+    feature = _PAIRING_GENERATORS[proposal_type][1]
+    events = list(read_events("acme", programs_root=programs_root))
+    run_ids = {
+        event.payload.get("ai_run_id")
+        for event in events
+        if event.event_type == "ai.run_lifecycle.v1" and event.payload.get("feature") == feature
+    }
+    assert len(run_ids) == 1
+    run_id = next(iter(run_ids))
+    assert [event.payload["state"] for event in events if event.payload.get("ai_run_id") == run_id and event.event_type == "ai.run_lifecycle.v1"] == ["planned"]
+    assert [event.payload["terminal"] for event in events if event.payload.get("ai_run_id") == run_id and event.event_type == "ai.release_decision.v1"] == ["discarded"]
+
+
+@pytest.mark.parametrize("proposal_type", _PAIRING_CLI_TYPES)
+def test_generate_cli_keeps_matched_evidence_supported(
+    proposal_type: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    programs_root, client = _setup_pairing_cli(monkeypatch, tmp_path, proposal_type, "selected-ref", check_admission=False)
+    result = runner.invoke(app, _pairing_cli_args(proposal_type, ("selected-ref",), ("selected text",)))
+
+    assert result.exit_code == 0, result.stdout
+    assert client.calls == 1
+    assert len(load_proposals("acme", proposal_type=proposal_type, programs_root=programs_root)) == 1
+
+
+@pytest.mark.parametrize("proposal_type", ("governance_decision_brief", "dependency_blast_radius"))
+def test_generate_cli_keeps_both_empty_evidence_supported(
+    proposal_type: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    programs_root, client = _setup_pairing_cli(monkeypatch, tmp_path, proposal_type, None, check_admission=False)
+    result = runner.invoke(app, _pairing_cli_args(proposal_type, (), ()))
+
+    assert result.exit_code == 0, result.stdout
+    assert client.calls == 1
+    assert len(load_proposals("acme", proposal_type=proposal_type, programs_root=programs_root)) == 1
+
+
+def test_generate_cli_keeps_risk_empty_evidence_restriction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    programs_root, client = _setup_pairing_cli(monkeypatch, tmp_path, "risk", None, check_admission=False)
+    result = runner.invoke(app, _pairing_cli_args("risk", (), ()))
+
+    assert result.exit_code != 0
+    assert "at least one --evidence-text are required" in result.output
+    assert client.calls == 0
+    assert load_proposals("acme", proposal_type="risk", programs_root=programs_root) == ()
 
 
 def _risk_proposal(**overrides: object) -> RiskProposal:

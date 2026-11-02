@@ -33,7 +33,7 @@ from src.core.attribution_engine import build_inline_citations, build_section_ci
 from src.core.cascade_detector import detect_dependency_cascades
 from src.core.claim_tracker import assess_claim_entries, load_open_claims, load_open_decision_asks
 from src.core.config_loader import REPORTS_ROOT, ReportBundle, ScorecardSettings, load_bundle
-from src.core.context_proposal_review import load_pending_context_proposal_rows
+from src.core.context_proposal_review import load_context_maintenance_review
 from src.core.coverage_gap import CoverageGap, build_coverage_gaps, coverage_gap_confidence_label
 from src.core.decision_register import assess_proposed_decision_staleness
 from src.core.dependency_graph import load_inbound_cross_program_dependencies
@@ -908,6 +908,8 @@ def _build_reviewer_context(
     context_revision_rows = _build_context_revision_rows(
         program_id,
         programs_root=programs_root,
+        as_of=data_as_of,
+        edition_name=edition_name,
     )
     raci_entries = _build_raci_entries(raw_workstreams)
 
@@ -1219,15 +1221,16 @@ def _build_context_revision_rows(
     program_id: str | None,
     *,
     programs_root: Path,
+    as_of: datetime | None = None,
+    edition_name: str | None = None,
 ) -> tuple[ReviewerTrackedEntryRow, ...]:
     """Render pending NCFL revisions as reviewable, not-applied context."""
     if program_id is None:
         return ()
-    try:
-        proposals = load_pending_context_proposal_rows(program_id, programs_root=programs_root)
-    except Exception:
-        return ()
-    return tuple(
+    review = load_context_maintenance_review(
+        program_id, programs_root=programs_root, as_of=as_of or datetime.now(timezone.utc),
+    )
+    rows = tuple(
         ReviewerTrackedEntryRow(
             title=f"{proposal.proposal_id} · {proposal.target}",
             detail=(
@@ -1240,8 +1243,43 @@ def _build_context_revision_rows(
             ),
             anchor_id=_review_entity_anchor(proposal.proposal_id),
         )
-        for proposal in proposals
+        for proposal in review.proposals
     )
+    next_action = (
+        f"Next: vertex doctor --context --ranked --edition {edition_name}"
+        if edition_name else "Select the program's edition for doctor --context --ranked."
+    )
+    if review.proposal_diagnostic:
+        proposal_next_action = (
+            f"Next: vertex context proposals --edition {edition_name}"
+            if edition_name else "Select the program's edition for context proposals."
+        )
+        rows += (ReviewerTrackedEntryRow(
+            title="Context proposal history unavailable",
+            summary=f"{review.proposal_diagnostic} Evidence: context_proposals. {proposal_next_action}",
+            detail=f"Evaluated: {review.evaluated_at.isoformat()} (not a review renewal); owner=unknown / due=unknown.",
+        ),)
+    if review.gap_diagnostic:
+        rows += (ReviewerTrackedEntryRow(
+            title="Context gap history unavailable",
+            summary=f"{review.gap_diagnostic} Evidence: _feedback/context_gaps.jsonl. {next_action}",
+            detail=f"Evaluated: {review.evaluated_at.isoformat()} (not a review renewal); owner=unknown / due=unknown.",
+        ),)
+    rows += tuple(
+        ReviewerTrackedEntryRow(
+            title=f"Active context gap · {gap.lane or 'global'}.{gap.field}",
+            summary=(
+                f"{gap.message}. {gap.impact_estimate if gap.impact_estimate not in (None, '', 'None') else 'unknown'} "
+                f"impact / {gap.severity}; "
+                f"{gap.count} observation(s); first={gap.first_seen.isoformat()} / last={gap.last_seen.isoformat()}; "
+                f"evaluated={review.evaluated_at.isoformat()} (not a review renewal); owner=unknown / due=unknown. "
+                f"Evidence: _feedback/context_gaps.jsonl. Fix: {gap.fix_hint}. {next_action}"
+            ),
+            detail=f"Program: {gap.program}; feature: {gap.feature}",
+        )
+        for gap in review.gaps
+    )
+    return rows
 
 
 def _build_open_ask_rows(

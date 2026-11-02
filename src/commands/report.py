@@ -1375,6 +1375,11 @@ class _OutputStage:
                     markdown_body=render_state.markdown_body,
                     suggested_subject=render_state.email_subject,
                     generated_at=ctx.started_at,
+                    blocking_gate_ids=tuple(
+                        gate_id
+                        for gate_id, passed in validation_state.manifest.qg_results.items()
+                        if not passed
+                    ),
                 ),
             )
             html_path = _write_output_text(issue_dir / f"issue_{ctx.resolved_issue_number:03d}.html", render_state.html_body)

@@ -1395,6 +1395,40 @@ class ProgramFactStore:
             valid_at=resolved_valid_at,
         )
 
+    def list_accepted_milestone_revisions(
+        self,
+        natural_keys: tuple[str, ...],
+        *,
+        as_of: datetime,
+    ) -> tuple[ProgramFactRevision, ...]:
+        if not natural_keys or not self._db_path.exists():
+            return ()
+        with open_program_db(self._db_path, read_only=True) as connection:
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'program_fact_revisions'"
+            ).fetchone() is None:
+                return ()
+            placeholders = ", ".join("?" for _ in natural_keys)
+            rows = connection.execute(
+                f"""
+                SELECT * FROM program_fact_revisions
+                WHERE program_id = ?
+                  AND fact_type = ?
+                  AND review_state = ?
+                  AND natural_key IN ({placeholders})
+                  AND recorded_at <= ?
+                ORDER BY recorded_at, revision_id
+                """,
+                (
+                    self._program_id,
+                    "milestone.entry",
+                    FactReviewState.ACCEPTED.value,
+                    *natural_keys,
+                    _serialize_datetime(as_of),
+                ),
+            ).fetchall()
+        return tuple(self._row_to_revision(row) for row in rows)
+
     def pin_snapshot(
         self,
         *,

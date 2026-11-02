@@ -55,7 +55,7 @@ from pathlib import Path
 from src.core._db import open_program_db
 from src.core.jsonl_utils import compute_file_checksum
 from src.core.people_directory_schema import load_people_directory, load_teams
-from src.core.people_entity_schema import is_legacy_schema_0_entities_document, load_entities_document
+from src.core.people_entity_schema import load_shared_entities_document
 from src.core.people_registry_identity import REGISTRY_COMPILER_VERSION
 
 CACHE_SCHEMA_VERSION = "1.0"
@@ -165,28 +165,14 @@ def _build_index_rows(
     already-loaded `_SharedRegistrySnapshot`), skip the fresh disk load
     for that collection entirely -- closing the last of PPL-W3.5c's three
     named redundant one-time full-registry-parse call sites. `None` (the
-    default) preserves the exact original always-load-from-disk behavior
-    for every other caller, including the exact original failure mode for
-    a legacy schema-0 `entities.yaml` (`load_entities_document` raises
-    `ConfigError` for it -- not this function's concern to change)."""
+    default) loads from disk for every other caller. The shared entities
+    reader ignores versionless legacy documents and retains strict
+    validation for versioned documents."""
     rows: list[tuple[str, str, str]] = []
 
     if entities is None:
         entities_path = knowledge_root / "entities.yaml"
-        # PPL-W3.5d fix: a legacy schema-0 entities.yaml (no schema_version
-        # key) previously reached load_entities_document unguarded here,
-        # which raises ConfigError for it -- not caught by
-        # registry_dir13_cache_check's own `except (OSError, ValueError)`,
-        # so a workspace with a legacy shared entities.yaml and a missing/
-        # stale cache crashed the ENTIRE `doctor --kb` run uncaught.
-        # Confirmed empirically before this fix, not assumed. Mirrors
-        # kb_checks.py::_load_shared_registry_snapshot's own already-safe
-        # `has_schema2_entities` gate.
-        entities_doc = (
-            load_entities_document(entities_path)
-            if entities_path.exists() and not is_legacy_schema_0_entities_document(entities_path)
-            else None
-        )
+        entities_doc = load_shared_entities_document(entities_path)
         entities = entities_doc.entities if entities_doc else ()
     for entity in entities:
         for alias in entity.aliases:

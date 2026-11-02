@@ -5,13 +5,19 @@ from datetime import date, datetime, timezone
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
+import pytest
 from typer.testing import CliRunner
 
 from cli import app
+from src.commands.ado import apply_ado_proposal
+from src.core.action_mapper import build_meeting_action_proposal, map_actions_to_work_items
+from src.core.ado_proposal import read_proposal_manifest, write_proposal_manifest
 from src.core.config_loader import ConfigError
 from src.core.action_tracker import append_action, load_actions
-from src.core.models_v2 import ActionItem, ActionSourceType, ActionStatus, TrajectoryPoint
+from src.core.integration_types import PaginationOutcome
+from src.core.models_v2 import ADOConfig, ActionItem, ActionSourceType, ActionStatus, Program, TrajectoryPoint
 from src.core.trajectory import backfill_trajectory_points
 
 
@@ -282,6 +288,108 @@ def test_actions_review_cli_skips_apply_ado_for_non_fully_approved_meeting_batch
     assert {action.status for action in actions} == {ActionStatus.OPEN, ActionStatus.CANCELLED}
     assert apply_calls == []
     assert "Skipped meeting-close ADO apply for lt-sync-123: only fully approved batches can be applied." in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("mode", "applied", "skipped", "conflicts"),
+    [
+        ("same_target", 2, 0, 0),
+        ("different_targets", 2, 0, 0),
+        ("unrelated_title", 2, 0, 0),
+        ("exact_replay", 1, 1, 0),
+        ("partial_revision", 1, 0, 1),
+        ("truncated", 0, 0, 2),
+        ("missing_history", 0, 0, 2),
+        ("cancelled", 0, 0, 0),
+        ("unapproved", 0, 0, 0),
+    ],
+)
+def test_actions_review_cli_preserves_typed_meeting_payloads(
+    monkeypatch, tmp_path: Path, mode: str, applied: int, skipped: int, conflicts: int,
+) -> None:
+    programs_root = tmp_path / "programs"
+    monkeypatch.setattr("src.commands.actions.PROGRAMS_ROOT", programs_root)
+    same_target = mode == "same_target"
+    for index, item_id in enumerate((1001, 1001 if same_target else 1002), 1):
+        _seed_action(
+            programs_root, action_id=f"action-demo-{index}", text=f"Distinct obligation {index}",
+            source_signal_id="meeting-close:demo:synthetic-meeting", linked_work_item_ids=(item_id,),
+        )
+    rows = {item_id: {"id": item_id, "rev": 7, "fields": {"System.Id": item_id, "System.Rev": 7}}
+            for item_id in (1001, 1002)}
+    proposal = build_meeting_action_proposal(
+        program_id="demo", meeting_id="synthetic-meeting", meeting_title="Shared display title",
+        mappings=map_actions_to_work_items(
+            load_actions("demo", programs_root=programs_root), item_rows_by_id=rows, workstreams=(),
+        ),
+    )
+    manifest_path = write_proposal_manifest(proposal, programs_root=programs_root)
+    comments: dict[int, list[dict]] = {1001: [], 1002: []}
+    if mode == "unrelated_title":
+        comments[1001].append({"text": proposal.entries[0].proposed_value.splitlines()[0] + "\nUnrelated obligation"})
+    elif mode == "exact_replay":
+        comments[1001].append({"text": proposal.entries[0].proposed_value})
+    elif mode == "partial_revision":
+        rows[1002]["rev"] = 8
+        rows[1002]["fields"]["System.Rev"] = 8
+    client = MagicMock()
+    client._rest_base_url = "https://dev.azure.com/synthetic/demo/_apis/wit/"
+    client.timeout = 30
+    client._headers.return_value = {}
+    client.query_work_items_batch.side_effect = lambda ids, fields: [rows[item_id] for item_id in ids]
+
+    def history(item_id, *, on_pagination):
+        if mode != "missing_history":
+            on_pagination(PaginationOutcome(
+                total_fetched=len(comments[item_id]), page_count=1, is_truncated=mode == "truncated",
+            ))
+        return list(comments[item_id])
+
+    def post(method, url, **kwargs):
+        assert method == "POST"
+        item_id = int(url.split("/workItems/")[1].split("/")[0])
+        payload = {"id": len(comments[item_id]) + 1, "text": kwargs["json"]["text"]}
+        comments[item_id].append(payload)
+        return SimpleNamespace(status_code=200, text=json.dumps(payload), json=lambda: payload)
+
+    client.list_work_item_comments.side_effect = history
+    client._mutation_session.request.side_effect = post
+    program = Program(
+        schema_version="2.0", id="demo", name="Demo",
+        ado=ADOConfig(organization="synthetic", project="demo", area_paths=(), work_item_types=("Task",),
+                      excluded_states=(), date_window_days=30),
+    )
+    results = []
+
+    def apply(reference, *, programs_root):
+        result = apply_ado_proposal(
+            reference, programs_root=programs_root, program_loader=lambda *_: (program, ()),
+            client_factory=lambda _: client,
+        )
+        results.append(result)
+        return result
+
+    monkeypatch.setattr("src.commands.actions.apply_ado_proposal", apply)
+    decisions = "a\n\nc\n\n" if mode == "cancelled" else "a\n\ns\n" if mode == "unapproved" else "a\n\na\n\n"
+    result = runner.invoke(app, ["actions", "review", "--program", "demo", "--reviewer", "owner", "--apply-ado"],
+                           input=decisions)
+    assert result.exit_code == 0, result.exception
+    assert client._mutation_session.request.call_count == applied
+    if mode in {"cancelled", "unapproved"}:
+        assert results == []
+        persisted, status = read_proposal_manifest(manifest_path)
+        assert status == "pending"
+        assert all(entry.entry_status == "pending" for entry in persisted.entries)
+        return
+    assert len(results) == 1
+    assert (results[0].applied_count, results[0].skipped_count, results[0].conflict_count) == (applied, skipped, conflicts)
+    persisted, status = read_proposal_manifest(manifest_path)
+    assert status == results[0].proposal_status
+    if not conflicts:
+        assert {entry.proposed_value for entry in proposal.entries} <= {
+            comment["text"] for batch in comments.values() for comment in batch
+        }
+    assert "Reviewed 2 action(s)" in result.stdout
 
 
 def test_actions_review_cli_reports_multi_meeting_batch_summary(monkeypatch, tmp_path: Path) -> None:

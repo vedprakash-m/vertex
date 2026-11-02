@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from difflib import unified_diff
 import json
@@ -398,12 +398,53 @@ def validate_program_kb(
     programs_root: Path = PROGRAMS_ROOT,
     document_cache: dict[Path, dict[str, Any]] | None = None,
     shared_knowledge_cache: "SharedKnowledgeTempCache | None" = None,
+    compiled_knowledge_cache: dict[tuple[Path, ...], KnowledgeStore] | None = None,
 ) -> KnowledgeStore:
-    """Validate in memory; shared_knowledge_cache is retained only for caller compatibility."""
-    documents = read_program_kb_documents(program_id, programs_root=programs_root, document_cache=document_cache)
-    return _validate_program_documents(
+    """Validate in memory; compiled reuse is scoped to one doctor invocation.
+
+    shared_knowledge_cache is retained only for caller compatibility.
+    """
+    shared_root = get_shared_knowledge_root(programs_root)
+    shared_paths = tuple(
+        _resolve_document_path(path, program_dir=programs_root / program_id, programs_root=programs_root)
+        for path in _SUPPORTED_DOCUMENTS
+        if path.startswith("knowledge/") and path != "knowledge/engms_pages.yaml"
+    ) if compiled_knowledge_cache is not None and shared_root.exists() else ()
+    knowledge = compiled_knowledge_cache.get(shared_paths) if compiled_knowledge_cache is not None and shared_root.exists() else None
+    if knowledge is None:
+        documents = read_program_kb_documents(program_id, programs_root=programs_root, document_cache=document_cache)
+    else:
+        documents = {}
+        for path in ("knowledge/engms_pages.yaml", "workstreams.yaml", "scorecards.yaml"):
+            resolved = _resolve_document_path(path, program_dir=programs_root / program_id, programs_root=programs_root)
+            if path == "knowledge/engms_pages.yaml" and resolved.parent == shared_root and document_cache is not None and resolved in document_cache:
+                documents[path] = document_cache[resolved]
+            else:
+                documents[path] = _read_yaml_or_default(resolved, _SUPPORTED_DOCUMENTS[path])
+        for path, document in documents.items():
+            _validate_document_shape(path, document, _SUPPORTED_DOCUMENTS[path])
+        # KQL files are external to the cached YAML snapshot and must still be read.
+        queries_path = shared_root / "golden_queries.yaml"
+        queries = document_cache.get(queries_path, {}) if document_cache is not None else _read_yaml_or_default(
+            queries_path, _SUPPORTED_DOCUMENTS["knowledge/golden_queries.yaml"],
+        )
+        if document_cache is None:
+            _validate_document_shape("knowledge/golden_queries.yaml", queries, _SUPPORTED_DOCUMENTS["knowledge/golden_queries.yaml"])
+        if any(entry.get("kql_file") for entry in queries.get("queries", []) if isinstance(entry, dict)):
+            knowledge = replace(knowledge, golden_queries=parse_knowledge_documents(
+                {"golden_queries.yaml": queries}, knowledge_root=shared_root,
+            ).golden_queries)
+        pages = documents["knowledge/engms_pages.yaml"]
+        knowledge = replace(knowledge, engms_pages=parse_knowledge_documents(
+            {"engms_pages.yaml": pages}, knowledge_root=shared_root,
+        ).engms_pages) if pages.get("pages") else replace(knowledge, engms_pages=())
+    result = _validate_program_documents(
         program_id=program_id, documents=documents, programs_root=programs_root,
+        knowledge=knowledge,
     )
+    if compiled_knowledge_cache is not None and shared_root.exists() and knowledge is None:
+        compiled_knowledge_cache[shared_paths] = result
+    return result
 
 
 def prepare_kb_update(
@@ -644,18 +685,21 @@ def _validate_program_documents(
     program_id: str,
     documents: dict[str, dict[str, Any]],
     programs_root: Path,
+    knowledge: KnowledgeStore | None = None,
 ) -> KnowledgeStore:
     for relative_path, spec in _SUPPORTED_DOCUMENTS.items():
-        _validate_document_shape(relative_path, documents[relative_path], spec)
+        if knowledge is None or relative_path in documents:
+            _validate_document_shape(relative_path, documents[relative_path], spec)
 
     program_dir = programs_root / program_id
     shared_knowledge_root = get_shared_knowledge_root(programs_root)
     uses_shared_knowledge = shared_knowledge_root.exists()
-    knowledge = parse_knowledge_documents(
-        {Path(relative_path).name: document for relative_path, document in documents.items()
-         if relative_path.startswith("knowledge/")},
-        knowledge_root=shared_knowledge_root if uses_shared_knowledge else program_dir / "knowledge",
-    )
+    if knowledge is None:
+        knowledge = parse_knowledge_documents(
+            {Path(relative_path).name: document for relative_path, document in documents.items()
+             if relative_path.startswith("knowledge/")},
+            knowledge_root=shared_knowledge_root if uses_shared_knowledge else program_dir / "knowledge",
+        )
     known_program_ids = tuple(
         sorted(
             path.name
@@ -1009,6 +1053,12 @@ def _read_yaml_or_default(path: Path, spec: KbDocumentSpec) -> dict[str, Any]:
         memberships = load_memberships(path.parent / "memberships.yaml")
         teams = load_teams(path.parent / "teams.yaml")
         team_by_entity_id = {team.entity_id: team.id for team in (teams.teams if teams is not None else ())}
+        team_ids_by_person: dict[str | None, list[str]] = {}
+        for membership in memberships:
+            if membership.status == MembershipStatus.ACTIVE:
+                team_id = team_by_entity_id.get(membership.team_entity_id)
+                if team_id is not None:
+                    team_ids_by_person.setdefault(membership.person_entity_id, []).append(team_id)
         return {
             "schema_version": "1.0",
             "people": [
@@ -1020,13 +1070,7 @@ def _read_yaml_or_default(path: Path, spec: KbDocumentSpec) -> dict[str, Any]:
                     ),
                     "display_name": person.display_name,
                     "title": person.title,
-                    "team_ids": [
-                        team_id
-                        for membership in memberships
-                        if membership.person_entity_id == person.entity_id
-                        and membership.status == MembershipStatus.ACTIVE
-                        and (team_id := team_by_entity_id.get(membership.team_entity_id)) is not None
-                    ],
+                    "team_ids": list(team_ids_by_person.get(person.entity_id, ())),
                 }
                 for person in loaded.people
             ],

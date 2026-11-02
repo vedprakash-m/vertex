@@ -18,6 +18,7 @@ from src.core.action_tracker import load_action_resolution_candidate_ids, load_a
 from src.core.assumption_tracker import load_assumptions
 from src.core.claim_tracker import load_open_decision_asks
 from src.core.edition_resolver import PROGRAMS_ROOT
+from src.core.exceptions import ConfigError
 from src.core.feedback.calibration_router import load_forecast_calibration_dri_profile
 from src.core.milestone_engine import (
     assess_milestone_health,
@@ -30,7 +31,7 @@ from src.core.milestone_engine import (
 )
 from src.core.models import WorkItem
 from src.core.models_v2 import ActionStatus, Program, VitalityAggregate, Workstream
-from src.core.owner_pack import OwnerPack, OwnerPackCalibrationSummary, OwnerPackMilestoneContribution, OwnerPackVitalitySummary, build_owner_pack, write_owner_pack
+from src.core.owner_pack import OwnerPack, OwnerPackCalibrationSummary, OwnerPackMilestoneContribution, OwnerPackVitalitySummary, build_owner_pack, get_owner_pack_output_path, validate_owner_pack_editorial, write_owner_pack
 from src.core.program_fact_store import load_program_facts, project_action_items, project_assumptions, project_milestones, project_risk_entries
 from src.core.query_builder import ODataFilter
 from src.core.store_factory import build_trajectory_store_for_program_id
@@ -83,7 +84,11 @@ def owner_pack_command(
     owner: str = typer.Option(..., "--owner", help="Owner alias, for example priya."),
     format: str = typer.Option("human", "--format", help="Output format: human, json, or csv."),
 ) -> None:
-    artifacts = generate_owner_pack(program, owner)
+    try:
+        artifacts = generate_owner_pack(program, owner, output_format=format)
+    except ConfigError:
+        typer.echo("Owner pack blocked by configuration or editorial rules.")
+        raise typer.Exit(code=2)
     if format == "human":
         typer.echo(f"Owner pack written: {artifacts.output_path}")
         typer.echo(
@@ -433,6 +438,7 @@ def generate_owner_pack(
     output_root: Path | None = None,
     program_loader: ProgramLoader | None = None,
     item_loader: ItemLoader | None = None,
+    output_format: str = "human",
 ) -> OwnerPackArtifacts:
     resolved_programs_root = programs_root or PROGRAMS_ROOT
     current_time = as_of or datetime.now(timezone.utc)
@@ -511,8 +517,17 @@ def generate_owner_pack(
             programs_root=resolved_programs_root,
         ),
     )
-    output_path = write_owner_pack(pack)
-    return OwnerPackArtifacts(pack=pack, output_path=output_path, ado_calls=ado_calls + vitality_artifacts.ado_calls)
+    output_path = get_owner_pack_output_path(pack.program_id, pack.owner_alias, programs_root=resolved_programs_root)
+    artifacts = OwnerPackArtifacts(
+        pack=pack,
+        output_path=output_path,
+        ado_calls=ado_calls + vitality_artifacts.ado_calls,
+    )
+    if output_format in {"json", "csv"}:
+        rendered_output = render_owner_pack_output(_build_owner_pack_payload(artifacts), format=output_format)
+        validate_owner_pack_editorial(program_id, rendered_output, programs_root=resolved_programs_root)
+    output_path = write_owner_pack(pack, programs_root=resolved_programs_root)
+    return OwnerPackArtifacts(pack=pack, output_path=output_path, ado_calls=artifacts.ado_calls)
 
 
 def _enrich_milestone_contributions(

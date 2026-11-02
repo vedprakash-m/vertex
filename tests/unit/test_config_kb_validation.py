@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 
 from src.commands import config
 from src.core import kb_updates
+from src.core import policy_loader
 from src.core.exceptions import ConfigError
 
 
@@ -86,7 +87,193 @@ def test_config_validation_exposes_bounded_scope_and_makes_no_copies(
     assert "workstream_registry.yaml" in payload["kb_validation"]["scope"]
     assert payload["content_validated"] is False
     assert payload["references_validated"] is False
+    assert payload["context_review_policy_validation"] == {
+        "status": "ok",
+        "scope": "base_and_selected_program_freshness_policy",
+        "detail": "The base and selected program context-review rules are valid.",
+    }
     assert {path: path.read_bytes() for path in program.rglob("*") if path.is_file()} == before
+
+
+def test_config_validation_accepts_valid_selected_context_review_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "programs"
+    program = _seed(root)
+    policy_path = program / "freshness_policy.yaml"
+    policy_path.write_text(
+        "context_review:\n  entries:\n    workstreams.yaml:\n      warn_days: 15\n",
+        encoding="utf-8",
+    )
+    for name in ("readiness", "template_contract", "slice_contracts", "chapter_contract"):
+        (program / f"{name}.yaml").write_text("schema_version: '1.0'\n", encoding="utf-8")
+    before = {path: path.read_bytes() for path in program.rglob("*") if path.is_file()}
+    monkeypatch.setattr(config, "PROGRAMS_ROOT", root)
+
+    result = CliRunner().invoke(config.app, ["validate", "--program", "fixture", "--format", "json"])
+
+    assert result.exit_code == 0, result.output + repr(result.exception)
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "ok"
+    assert payload["context_review_policy_validation"]["status"] == "ok"
+    assert {path: path.read_bytes() for path in program.rglob("*") if path.is_file()} == before
+
+
+@pytest.mark.parametrize("selector", ["program", "edition"])
+@pytest.mark.parametrize("invalid_policy", [
+    "context_review:\n  entries:\n    unrecognized.yaml:\n      warn_days: 10\n",
+    "context_review:\n  files:\n    program.yaml: {}\n    program.yaml: {}\n",
+    "context_review: [PRIVATE-MALFORMED\n",
+    "null\n",
+    "context_review:\n  entries:\n    workstreams.yaml:\n      warn_days: PRIVATE-INVALID\n",
+])
+def test_config_validation_fails_for_invalid_selected_context_review_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    selector: str,
+    invalid_policy: str,
+) -> None:
+    root = tmp_path / "programs"
+    program = _seed(root)
+    if selector == "edition":
+        editions = program / "editions"
+        editions.mkdir()
+        (editions / "weekly.yaml").write_text(
+            "schema_version: '2.0'\nid: weekly\nprogram_id: fixture\n", encoding="utf-8",
+        )
+    (program / "freshness_policy.yaml").write_text(invalid_policy, encoding="utf-8")
+    before = {path: path.read_bytes() for path in program.rglob("*") if path.is_file()}
+    monkeypatch.setattr(config, "PROGRAMS_ROOT", root)
+
+    result = CliRunner().invoke(
+        config.app,
+        ["validate", f"--{selector}", "fixture" if selector == "program" else "weekly", "--format", "json"],
+    )
+
+    assert result.exit_code == 1, result.output + repr(result.exception)
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "fail"
+    assert payload["validation_scope"] == "schema_versions_kb_and_metrics"
+    assert payload["context_review_policy_validation"] == {
+        "status": "fail",
+        "scope": "base_and_selected_program_freshness_policy",
+        "detail": (
+            "Context-review policy validation failed (ConfigError). Preserve policy files; "
+            "check the base freshness policy and the selected program's context_review rules."
+        ),
+    }
+    assert payload["content_validated"] is False
+    assert payload["references_validated"] is False
+    assert "PRIVATE-" not in result.stdout + result.stderr
+    assert {path: path.read_bytes() for path in program.rglob("*") if path.is_file()} == before
+
+
+def test_config_validation_reports_context_policy_failure_in_human_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "programs"
+    program = _seed(root)
+    (program / "freshness_policy.yaml").write_text(
+        "context_review:\n  entries:\n    unknown.yaml: {}\n", encoding="utf-8",
+    )
+    monkeypatch.setattr(config, "PROGRAMS_ROOT", root)
+
+    result = CliRunner().invoke(config.app, ["validate", "--program", "fixture"])
+
+    assert result.exit_code == 1, result.output + repr(result.exception)
+    assert "- Context-review policy: FAIL" in result.stdout
+    assert "base freshness policy and selected program freshness_policy.yaml context_review rules" in result.stdout
+    assert "Context-review policy validation failed (ConfigError)." in result.stdout
+    assert "schema versions, existing KB checks and offline metric bindings" in result.stdout
+
+
+@pytest.mark.parametrize("selector", ["program", "edition"])
+def test_config_validation_does_not_hide_invalid_base_context_policy_with_program_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    selector: str,
+) -> None:
+    root = tmp_path / "programs"
+    program = _seed(root)
+    if selector == "edition":
+        editions = program / "editions"
+        editions.mkdir()
+        (editions / "weekly.yaml").write_text(
+            "schema_version: '2.0'\nid: weekly\nprogram_id: fixture\n", encoding="utf-8",
+        )
+    base_policy = tmp_path / "base_freshness_policy.yaml"
+    base_policy.write_text("context_review: null\n", encoding="utf-8")
+    (program / "freshness_policy.yaml").write_text(
+        "context_review:\n  files:\n    program.yaml:\n      warn_days: 12\n",
+        encoding="utf-8",
+    )
+    before = {path: path.read_bytes() for path in program.rglob("*") if path.is_file()}
+    monkeypatch.setattr(config, "PROGRAMS_ROOT", root)
+    monkeypatch.setattr(policy_loader, "FRESHNESS_POLICY_PATH", base_policy)
+    policy_loader._load_freshness_policy_document.cache_clear()
+
+    try:
+        result = CliRunner().invoke(
+            config.app,
+            ["validate", f"--{selector}", "fixture" if selector == "program" else "weekly", "--format", "json"],
+        )
+    finally:
+        policy_loader._load_freshness_policy_document.cache_clear()
+
+    assert result.exit_code == 1, result.output + repr(result.exception)
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "fail"
+    assert payload["context_review_policy_validation"]["status"] == "fail"
+    assert "base freshness policy" in payload["context_review_policy_validation"]["detail"]
+    assert "PRIVATE" not in result.stdout + result.stderr
+    assert {path: path.read_bytes() for path in program.rglob("*") if path.is_file()} == before
+
+
+def test_config_validation_reports_unreadable_context_policy_safely(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "programs"
+    program = _seed(root)
+    policy_path = program / "freshness_policy.yaml"
+    policy_path.write_text("context_review: {}\n", encoding="utf-8")
+    before = {path: path.read_bytes() for path in program.rglob("*") if path.is_file()}
+    monkeypatch.setattr(config, "PROGRAMS_ROOT", root)
+    original_read_text = Path.read_text
+
+    def read_text(self: Path, *args, **kwargs) -> str:
+        if self == policy_path:
+            raise PermissionError("PRIVATE-ACCESS")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    result = CliRunner().invoke(config.app, ["validate", "--program", "fixture", "--format", "json"])
+
+    assert result.exit_code == 1, result.output + repr(result.exception)
+    payload = json.loads(result.stdout)
+    assert payload["context_review_policy_validation"]["status"] == "fail"
+    assert "PRIVATE-ACCESS" not in result.stdout + result.stderr
+    assert {path: path.read_bytes() for path in program.rglob("*") if path.is_file()} == before
+
+
+def test_config_validation_propagates_unexpected_context_policy_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "programs"
+    _seed(root)
+    monkeypatch.setattr(config, "PROGRAMS_ROOT", root)
+
+    def unexpected_error(*, override_path: Path | None = None) -> None:
+        raise RuntimeError("unexpected policy implementation failure")
+
+    monkeypatch.setattr(config, "load_freshness_policy", unexpected_error)
+    result = CliRunner().invoke(config.app, ["validate", "--program", "fixture", "--format", "json"])
+
+    assert isinstance(result.exception, RuntimeError)
+    assert "unexpected policy implementation failure" in str(result.exception)
 
 
 @pytest.mark.parametrize("invalid_reference", [

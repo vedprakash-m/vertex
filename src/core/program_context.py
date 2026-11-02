@@ -333,6 +333,22 @@ class ProgramContext:
         }
 
 
+def summarize_context_limitations(ctx: ProgramContext) -> tuple[str, ...]:
+    return (
+        *ctx.maturity_blockers,
+        *(f"[{violation.code}] {violation.detail}" for violation in ctx.invariant_violations),
+        *(
+            f"{flag.file}{' / ' + flag.entity_id if flag.entity_id else ''}: "
+            f"{'review age unknown' if flag.days_stale is None else str(flag.days_stale) + 'd stale'} "
+            f"({flag.field})"
+            for flag in ctx.staleness_flags
+        ),
+        *(f"{gap.feature} / {gap.lane or 'program'} / {gap.field}: {gap.message}" for gap in ctx.context_gaps),
+        "Context compatibility ladder; canonical maturity semantics remain unreconciled.",
+        "Context trend unknown; comparable context history is not qualified.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Section 4: Factory function
 # ---------------------------------------------------------------------------

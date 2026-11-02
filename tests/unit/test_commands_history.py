@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import csv
 import json
+import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from cli import app
@@ -234,6 +237,102 @@ def test_history_list_tolerates_malformed_archived_manifest(monkeypatch, tmp_pat
 
     assert result.exit_code == 0
     assert "009\t2026-05-05\tconfirmed\tdetailed\t-\t-\t-" in result.stdout
+
+
+@pytest.mark.parametrize("schema", [False, True], ids=["legacy", "schema"])
+@pytest.mark.parametrize("format", ["human", "json", "csv"])
+@pytest.mark.parametrize("mixed", [False, True], ids=["invalid", "mixed"])
+@pytest.mark.parametrize("value", ["SECRET_retained_false", 0, 1, 0.0, None, [], [False], {"SECRET_result": False}])
+def test_history_rejects_nonboolean_retained_gate_values(
+    monkeypatch, tmp_path: Path, schema: bool, format: str, mixed: bool, value: object,
+) -> None:
+    archive_root = tmp_path / "archive"
+    paths = _write_confirmed_issue(archive_root, issue_number=9, markdown_body="# Issue 009\nGamma status\n")
+    payload = json.loads(paths.manifest_path.read_text(encoding="utf-8"))
+    payload["qg_results"] = {"QG-8": value}
+    if mixed:
+        payload["qg_results"]["QG-1"] = False
+    if schema:
+        payload["schema_version"] = "1.0"
+    paths.manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    before = {path: path.read_bytes() for path in archive_root.rglob("*") if path.is_file()}
+    monkeypatch.setattr("src.commands.history.ARCHIVE_ROOT", archive_root)
+    monkeypatch.setattr("cli.PROGRAMS_ROOT", tmp_path / "programs")
+    args = ["--no-catchup", "history", "--edition", EDITION_NAME, "--format", format]
+    monkeypatch.setattr(sys, "argv", ["vertex", *args])
+
+    result = runner.invoke(app, args)
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "Archived quality-gate evidence is invalid. Preserve the archive and inspect the retained manifest before retry." in result.stderr
+    assert str(paths.manifest_path) not in result.stderr
+    assert "SECRET_" not in result.stderr
+    assert before == {path: path.read_bytes() for path in archive_root.rglob("*") if path.is_file()}
+    assert not (tmp_path / "programs").exists()
+
+
+@pytest.mark.parametrize("schema", [False, True], ids=["legacy", "schema"])
+@pytest.mark.parametrize("format", ["human", "json", "csv"])
+@pytest.mark.parametrize("case, gates, expected", [
+    ("missing", None, "-"),
+    ("null", None, "-"),
+    ("empty", {}, "-"),
+    ("true", {"custom-recorded-gate": True}, "pass"),
+    ("false", {"QG-8": False}, "fail:QG-8"),
+    ("mixed", {"QG-1": True, "QG-8": False}, "fail:QG-8"),
+    ("pairs", [["QG-8", False]], "fail:QG-8"),
+    ("scalar", "legacy", "-"),
+])
+def test_history_retained_gate_defaults_and_boolean_controls(
+    monkeypatch, tmp_path: Path, schema: bool, format: str, case: str, gates: object, expected: str,
+) -> None:
+    archive_root = tmp_path / "archive"
+    paths = _write_confirmed_issue(archive_root, issue_number=9, markdown_body="# Issue 009\nGamma status\n")
+    payload = json.loads(paths.manifest_path.read_text(encoding="utf-8"))
+    if case == "missing":
+        del payload["qg_results"]
+    else:
+        payload["qg_results"] = gates
+    if schema:
+        payload["schema_version"] = "1.0"
+    paths.manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    before = {path: path.read_bytes() for path in archive_root.rglob("*") if path.is_file()}
+    monkeypatch.setattr("src.commands.history.ARCHIVE_ROOT", archive_root)
+    monkeypatch.setattr("cli.PROGRAMS_ROOT", tmp_path / "programs")
+    args = ["--no-catchup", "history", "--edition", EDITION_NAME, "--format", format]
+    monkeypatch.setattr(sys, "argv", ["vertex", *args])
+
+    result = runner.invoke(app, args)
+
+    assert result.exit_code == 0
+    if format == "json":
+        assert json.loads(result.stdout)[0]["qg_status"] == expected
+    elif format == "csv":
+        assert next(csv.DictReader(result.stdout.splitlines()))["qg_status"] == expected
+    else:
+        assert result.stdout.strip().split("\t")[5] == expected
+    assert before == {path: path.read_bytes() for path in archive_root.rglob("*") if path.is_file()}
+    assert not (tmp_path / "programs").exists()
+
+
+@pytest.mark.parametrize("payload", ["{malformed", "[]", "null", '"legacy"', '{"manifest_id": "incomplete"}'])
+def test_history_retains_unrecognized_manifest_tolerance(monkeypatch, tmp_path: Path, payload: str) -> None:
+    archive_root = tmp_path / "archive"
+    paths = _write_confirmed_issue(archive_root, issue_number=9, markdown_body="# Issue 009\nGamma status\n")
+    paths.manifest_path.write_text(payload, encoding="utf-8")
+    before = paths.manifest_path.read_bytes()
+    monkeypatch.setattr("src.commands.history.ARCHIVE_ROOT", archive_root)
+    monkeypatch.setattr("cli.PROGRAMS_ROOT", tmp_path / "programs")
+    args = ["--no-catchup", "history", "--edition", EDITION_NAME, "--format", "json"]
+    monkeypatch.setattr(sys, "argv", ["vertex", *args])
+
+    result = runner.invoke(app, args)
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)[0]["qg_status"] == "-"
+    assert paths.manifest_path.read_bytes() == before
+    assert not (tmp_path / "programs").exists()
 
 
 def _write_confirmed_issue(

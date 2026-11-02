@@ -369,6 +369,12 @@ def _load_manifest(entry: ArchiveEntry) -> RunManifest | None:
         payload = {key: value for key, value in payload.items() if key != "schema_version"}
     if not isinstance(payload, dict):
         return None
+    raw_qg = payload.get("qg_results")
+    if isinstance(raw_qg, dict) and any(not isinstance(value, bool) for value in raw_qg.values()):
+        raise typer.BadParameter(
+            "Archived quality-gate evidence is invalid. Preserve the archive "
+            "and inspect the retained manifest before retry."
+        )
     try:
         return RunManifest(
             manifest_id=str(payload["manifest_id"]),

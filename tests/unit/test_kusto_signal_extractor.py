@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+
+import pytest
 
 from src.core.integration_types import KustoHydrationOutput, KustoResultSet
-from src.core.kusto_signal_extractor import KustoSignalExtractor
+from src.core.kusto_signal_extractor import KustoSignalExtractor, kusto_source_event_time
 
 
 def test_kusto_signal_extractor_fans_out_per_workstream() -> None:
@@ -414,3 +416,94 @@ def test_find_waiver_for_query_returns_none_when_wrong_role() -> None:
 def test_find_waiver_for_query_empty_inputs() -> None:
     assert find_waiver_for_query("any", (), (), today=date(2026, 7, 14)) is None
     assert find_waiver_for_query("", (_WAIVER,), (_FakeSliceContract("c", "q"),), today=date(2026, 7, 14)) is None
+
+def test_kusto_source_event_time_uses_supported_aliases_and_maximum() -> None:
+    expected = datetime(2026, 5, 24, 18, 30, tzinfo=timezone.utc)
+
+    actual = kusto_source_event_time(
+        (
+            {"Timestamp": datetime(2026, 5, 24, 10, 0)},
+            {"Date": date(2026, 5, 24)},
+            {"Event_Timestamp": "2026-05-24T11:00:00-07:00"},
+            {"CreateDate": "not-a-date", "ResolvedDate": "2026-05-24T18:30:00Z"},
+            {"Snapshot": "2026-05-24"},
+            {"Timestamp": None, "Date": ""},
+            {"Timestamp": datetime(2026, 5, 24, 18, 0, tzinfo=timezone.utc)},
+        )
+    )
+
+    assert actual == expected
+    assert actual.tzinfo == timezone.utc
+
+
+def test_kusto_source_event_time_returns_none_for_unknown_or_malformed_rows() -> None:
+    assert kusto_source_event_time(({"Revision": "2026-05-24T12:00:00Z"},)) is None
+    assert kusto_source_event_time(({"Timestamp": "not-a-date"},)) is None
+    assert kusto_source_event_time(()) is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None, "", " ", " 2026-05-24 ", "2026-05-24T12:00:00Z",
+        "2026-05-24 12:00:00", "20260524", "2026-W21-7", "2026-05-24",
+        "2026-05-24T12:00:00+05:30", "invalid", 0, True, [], {},
+        date(2026, 5, 24), datetime(2026, 5, 24, 12),
+        datetime(2026, 5, 24, 12, tzinfo=timezone.utc),
+    ],
+)
+def test_kusto_source_event_time_matches_original_legacy_parser(value: object) -> None:
+    from datetime import time
+    from src.commands.gather_pipeline.ado_pipeline_stage import _parse_datetime
+    from src.commands.gather_pipeline.support import parse_date
+
+    expected = _parse_datetime(value)
+    if expected is None:
+        parsed_date = parse_date(value)
+        if parsed_date is not None:
+            expected = datetime.combine(parsed_date, time.min, tzinfo=timezone.utc)
+    assert kusto_source_event_time(({" Timestamp ": value},)) == expected
+
+
+def test_kusto_source_event_time_preserves_legacy_date_subclass_parse_precedence() -> None:
+    class _SourceDate(date):
+        def __str__(self) -> str:
+            return "2026-05-25"
+
+    assert kusto_source_event_time(({"Date": _SourceDate(2026, 5, 24)},)) == datetime(
+        2026, 5, 25, tzinfo=timezone.utc
+    )
+
+    class _UnparseableDate(date):
+        def __str__(self) -> str:
+            return "invalid"
+
+    assert kusto_source_event_time(({"Date": _UnparseableDate(2026, 5, 24)},)) == datetime(
+        2026, 5, 24, tzinfo=timezone.utc
+    )
+
+
+def test_kusto_signal_extractor_emits_source_event_time_only_when_known() -> None:
+    observed_at = datetime(2026, 5, 25, 12, tzinfo=timezone.utc)
+    extracted = KustoSignalExtractor().extract(
+        KustoHydrationOutput(
+            result_sets=(
+                KustoResultSet(
+                    query_id="query-time",
+                    rows=({"Timestamp": "2026-05-24T11:00:00-07:00", "Value": 2},),
+                    observed_at=observed_at,
+                ),
+                KustoResultSet(
+                    query_id="query-unknown-time",
+                    rows=({"Revision": "2026-05-24T12:00:00Z", "Value": 3},),
+                    observed_at=observed_at,
+                ),
+            )
+        ),
+        "demo",
+    )
+
+    assert extracted.signals[0].metadata["event_timestamp"] == "2026-05-24T18:00:00+00:00"
+    assert extracted.signals[0].timestamp == observed_at
+    assert "event_timestamp" not in extracted.signals[1].metadata
+    assert extracted.signals[1].timestamp == observed_at

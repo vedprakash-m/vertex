@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import shutil
 
 import pytest
 
@@ -325,6 +327,95 @@ class TestStagingCreationAndCommit:
         resolved = resolve_latest_full_committed_manifest("demo", programs_root=tmp_path)
         assert resolved is not None
         assert resolved.run_id == "gather-FULL"
+
+    @pytest.mark.parametrize("invalid", ["failed", "foreign", "unsupported"])
+    def test_resolve_latest_full_committed_manifest_rejects_invalid_pointer_candidate(
+        self, tmp_path: Path, invalid: str,
+    ) -> None:
+        manifest = _make_manifest(run_id="gather-INVALID")
+        create_staging_manifest(manifest, programs_root=tmp_path)
+        committed = commit_staging_run(manifest, finished_at=_now(), programs_root=tmp_path)
+        manifest_path = get_committed_run_dir(
+            "demo", committed.run_id, programs_root=tmp_path,
+        ) / "manifest.json"
+        values = {
+            "failed": {"status": GatherRunStatus.FAILED},
+            "foreign": {"program_id": "other"},
+            "unsupported": {"schema_version": "gather-run.unsupported"},
+        }[invalid]
+        candidate = replace(committed, **values)
+        candidate = replace(candidate, manifest_hash=compute_manifest_hash(candidate))
+        gather_run_manifest.write_manifest(manifest_path.parent, candidate)
+        gather_run_manifest._write_pointer(
+            get_latest_full_pointer_path("demo", programs_root=tmp_path),
+            run_id=committed.run_id,
+            manifest_hash=candidate.manifest_hash,
+        )
+
+        with pytest.raises(ValueError, match="program/run/status/schema mismatch"):
+            resolve_latest_full_committed_manifest("demo", programs_root=tmp_path)
+
+    @pytest.mark.parametrize("damage", ["missing_run", "missing_manifest", "corrupt", "invalid_hash"])
+    def test_resolve_latest_full_recovers_when_pointed_manifest_is_unreadable(
+        self, tmp_path: Path, damage: str,
+    ) -> None:
+        full = _make_manifest(run_id="gather-FULL")
+        create_staging_manifest(full, programs_root=tmp_path)
+        full_committed = commit_staging_run(full, finished_at=_now(), programs_root=tmp_path)
+
+        newer = _make_manifest(run_id="gather-NEWER")
+        create_staging_manifest(newer, programs_root=tmp_path)
+        newer_committed = commit_staging_run(
+            newer, finished_at=_now() + timedelta(minutes=5), programs_root=tmp_path,
+        )
+        newer_dir = get_committed_run_dir("demo", newer_committed.run_id, programs_root=tmp_path)
+        manifest_path = newer_dir / "manifest.json"
+        if damage == "missing_run":
+            shutil.rmtree(newer_dir)
+        elif damage == "missing_manifest":
+            manifest_path.unlink()
+        elif damage == "invalid_hash":
+            invalid = replace(newer_committed, manifest_hash="sha256:invalid")
+            gather_run_manifest.write_manifest(newer_dir, invalid)
+            gather_run_manifest._write_pointer(
+                get_latest_full_pointer_path("demo", programs_root=tmp_path),
+                run_id=invalid.run_id,
+                manifest_hash=invalid.manifest_hash,
+            )
+        else:
+            manifest_path.write_text("{not valid json", encoding="utf-8")
+
+        with pytest.raises(ValueError):
+            gather_run_manifest._read_committed_candidate("demo", newer_dir, pointer_selected=True)
+
+        resolved = resolve_latest_full_committed_manifest("demo", programs_root=tmp_path)
+
+        assert resolved is not None
+        assert resolved.run_id == full_committed.run_id
+
+    def test_resolve_latest_full_scan_excludes_hash_valid_failed_manifest(self, tmp_path: Path) -> None:
+        full = _make_manifest(run_id="gather-FULL")
+        create_staging_manifest(full, programs_root=tmp_path)
+        full_committed = commit_staging_run(full, finished_at=_now(), programs_root=tmp_path)
+
+        newer = _make_manifest(run_id="gather-FAILED")
+        create_staging_manifest(newer, programs_root=tmp_path)
+        failed = commit_staging_run(
+            newer, finished_at=_now() + timedelta(minutes=5), programs_root=tmp_path,
+        )
+        failed = replace(failed, status=GatherRunStatus.FAILED, manifest_hash=None)
+        failed = replace(failed, manifest_hash=compute_manifest_hash(failed))
+        gather_run_manifest.write_manifest(
+            get_committed_run_dir("demo", failed.run_id, programs_root=tmp_path), failed,
+        )
+        get_latest_full_pointer_path("demo", programs_root=tmp_path).write_text(
+            "{not valid json", encoding="utf-8",
+        )
+
+        resolved = resolve_latest_full_committed_manifest("demo", programs_root=tmp_path)
+
+        assert resolved is not None
+        assert resolved.run_id == full_committed.run_id
 
     def test_resolve_latest_committed_manifest_returns_none_when_absent(self, tmp_path: Path) -> None:
         assert resolve_latest_committed_manifest("demo", programs_root=tmp_path) is None

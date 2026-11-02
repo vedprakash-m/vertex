@@ -17,6 +17,252 @@ def test_load_risk_register_returns_empty_tuple_when_file_absent(tmp_path: Path)
     assert load_risk_register("acme", programs_root=tmp_path / "programs") == ()
 
 
+def _write_archive_history(programs_root: Path) -> tuple[Path, Path]:
+    import json
+    import yaml
+    from scripts.archive_obsolete_risks import _content_hash
+    from src.core.risk_register_engine import _risk_entry_to_record
+
+    row = _risk_entry_to_record(_risk_entry())
+    archive_dir = programs_root / "acme" / ".archive" / "risk_register" / "20261101T194714Z"
+    archive_dir.mkdir(parents=True)
+    archive_path = archive_dir / "archived_risks.yaml"
+    manifest_path = archive_dir / "rollback_manifest.json"
+    archive_path.write_text(yaml.safe_dump({
+        "schema_version": "1.0", "program_id": "acme", "archived_at": archive_dir.name,
+        "reason": "Synthetic archive", "risks": [row],
+    }), encoding="utf-8")
+    manifest_path.write_text(json.dumps({
+        "schema_version": "1", "program_id": "acme", "created_at": archive_dir.name,
+        "reason": "Synthetic archive", "archived_count": 1,
+        "archive_path": f".archive/risk_register/{archive_dir.name}/archived_risks.yaml",
+        "archived": [{"risk_id": row["id"], "title": row["title"], "kind": row["kind"],
+                      "status": row["status"], "content_hash": _content_hash(row)}],
+    }), encoding="utf-8")
+    return archive_path, manifest_path
+
+
+def test_archive_history_reads_typed_retained_rows_without_creating_stores(tmp_path: Path) -> None:
+    from src.core.risk_register_engine import load_archived_risk_history
+
+    root = tmp_path / "programs"
+    _write_archive_history(root)
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    rows = load_archived_risk_history("acme", programs_root=root)
+    assert len(rows) == 1
+    assert rows[0].record == _risk_entry()
+    assert rows[0].archived_at == "20261101T194714Z"
+    assert rows[0].archive_path.endswith("/archived_risks.yaml")
+    assert load_archived_risk_history("acme", rows[0].record.id, root) == rows
+    assert load_archived_risk_history("acme", "absent", root) == ()
+    assert before == {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+
+def test_absent_archive_and_journal_history_does_not_create_program(tmp_path: Path) -> None:
+    from src.core.risk_register_engine import load_archived_risk_history
+
+    root = tmp_path / "absent" / "programs"
+    assert load_archived_risk_history("acme", programs_root=root) == ()
+    assert load_risk_history("acme", None, programs_root=root) == ()
+    assert not root.exists()
+
+
+@pytest.mark.parametrize("program_id", ["..", "."])
+def test_archive_history_rejects_program_escape(tmp_path: Path, program_id: str) -> None:
+    from src.core.risk_register_engine import load_archived_risk_history
+
+    with pytest.raises(ConfigError, match="program path"):
+        load_archived_risk_history(program_id, programs_root=tmp_path)
+
+
+@pytest.mark.parametrize("target", ["root", "directory", "manifest", "archive"])
+def test_archive_history_rejects_resolved_link_escape(monkeypatch, tmp_path: Path, target: str) -> None:
+    from src.core.risk_register_engine import load_archived_risk_history
+
+    root = tmp_path / "programs"
+    archive, manifest = _write_archive_history(root)
+    escaped = {"root": archive.parent.parent, "directory": archive.parent,
+               "manifest": manifest, "archive": archive}[target]
+    resolve = Path.resolve
+
+    def redirected(path: Path, strict: bool = False) -> Path:
+        return tmp_path / "foreign" if path == escaped else resolve(path, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", redirected)
+    with pytest.raises(ConfigError, match="escapes"):
+        load_archived_risk_history("acme", programs_root=root)
+
+
+def test_archive_history_ignores_unrelated_files_and_directories(tmp_path: Path) -> None:
+    from src.core.risk_register_engine import load_archived_risk_history
+
+    root = tmp_path / "programs"
+    archive, _ = _write_archive_history(root)
+    (archive.parent.parent / "unrelated").mkdir()
+    (archive.parent.parent / "notes.txt").write_text("unrelated", encoding="utf-8")
+    assert len(load_archived_risk_history("acme", programs_root=root)) == 1
+
+
+@pytest.mark.parametrize("source", ["archive", "journal"])
+def test_history_unexpected_parser_runtime_error_propagates(monkeypatch, tmp_path: Path, source: str) -> None:
+    from src.core.risk_register_engine import load_archived_risk_history
+
+    def broken(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("synthetic programming failure")
+
+    if source == "archive":
+        _write_archive_history(tmp_path)
+        monkeypatch.setattr("src.core.risk_register_engine._parse_risk_entry", broken)
+        call = lambda: load_archived_risk_history("acme", programs_root=tmp_path)
+    else:
+        record_risk_update("acme", "risk-1", "open", "closed", "reviewer", "evidence", tmp_path)
+        monkeypatch.setattr("src.core.risk_register_engine.parse_jsonl_line", broken)
+        call = lambda: load_risk_history("acme", None, tmp_path)
+    with pytest.raises(RuntimeError, match="synthetic programming failure"):
+        call()
+
+
+def test_history_resolve_runtime_error_is_configuration_error(monkeypatch, tmp_path: Path) -> None:
+    from src.core.risk_register_engine import load_archived_risk_history
+
+    def loop(path: Path, strict: bool = False) -> Path:
+        raise RuntimeError("Symlink loop")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "resolve", loop)
+        with pytest.raises(ConfigError, match="Symlink loop"):
+            load_archived_risk_history("acme", programs_root=tmp_path)
+
+
+def test_journal_history_read_only_rejects_foreign_program_path(tmp_path: Path) -> None:
+    path = tmp_path / "foreign" / "journal" / "risk_updates.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text('{"risk_id":"risk-1"}\n', encoding="utf-8")
+    with pytest.raises(ConfigError, match="escapes"):
+        load_risk_history("../foreign", None, tmp_path / "programs")
+
+
+@pytest.mark.parametrize("mutation", [
+    "manifest_json", "manifest_mapping", "manifest_version", "manifest_program",
+    "manifest_time", "manifest_reason", "count_bool", "count_mismatch", "summary_list",
+    "summary_mapping", "summary_type", "summary_status", "summary_id", "hash",
+    "absolute_path", "escape_path", "other_sibling", "missing_manifest", "missing_archive",
+    "archive_yaml", "archive_mapping", "archive_version", "archive_program", "archive_time",
+    "archive_reason", "risks_mapping", "row_mapping", "row_program", "row_missing_id",
+    "duplicate_row", "invalid_row",
+])
+def test_archive_history_rejects_invalid_actual_pairs_without_repair(tmp_path: Path, mutation: str) -> None:
+    import json
+    import yaml
+    from scripts.archive_obsolete_risks import _content_hash
+    from src.core.risk_register_engine import load_archived_risk_history
+
+    root = tmp_path / "programs"
+    archive, manifest = _write_archive_history(root)
+    doc = yaml.safe_load(archive.read_text(encoding="utf-8"))
+    meta = json.loads(manifest.read_text(encoding="utf-8"))
+    row = doc["risks"][0]
+    if mutation == "manifest_json":
+        manifest.write_text("{", encoding="utf-8")
+    elif mutation == "archive_yaml":
+        archive.write_text("risks: [", encoding="utf-8")
+    elif mutation == "missing_manifest":
+        manifest.unlink()
+    elif mutation == "missing_archive":
+        archive.unlink()
+    else:
+        if mutation == "manifest_mapping": meta = []
+        elif mutation == "manifest_version": meta["schema_version"] = "2"
+        elif mutation == "manifest_program": meta["program_id"] = "foreign"
+        elif mutation == "manifest_time": meta["created_at"] = None
+        elif mutation == "manifest_reason": meta["reason"] = 1
+        elif mutation == "count_bool": meta["archived_count"] = True
+        elif mutation == "count_mismatch": meta["archived_count"] = 2
+        elif mutation == "summary_list": meta["archived"] = {}
+        elif mutation == "summary_mapping": meta["archived"] = [None]
+        elif mutation == "summary_type": meta["archived"][0]["title"] = 1
+        elif mutation == "summary_status": meta["archived"][0]["status"] = "closed"
+        elif mutation == "summary_id": meta["archived"][0]["risk_id"] = "foreign"
+        elif mutation == "hash": row["description"] += " changed"
+        elif mutation == "absolute_path": meta["archive_path"] = str(archive.resolve())
+        elif mutation == "escape_path": meta["archive_path"] = "..\\foreign\\archived_risks.yaml"
+        elif mutation == "other_sibling": meta["archive_path"] = ".archive/risk_register/other/archived_risks.yaml"
+        elif mutation == "archive_mapping": doc = []
+        elif mutation == "archive_version": doc["schema_version"] = "2.0"
+        elif mutation == "archive_program": doc["program_id"] = "foreign"
+        elif mutation == "archive_time": doc["archived_at"] = "different"
+        elif mutation == "archive_reason": doc["reason"] = "different"
+        elif mutation == "risks_mapping": doc["risks"] = {}
+        elif mutation == "row_mapping": doc["risks"] = [None]
+        elif mutation == "row_program": row["program_id"] = "foreign"
+        elif mutation == "row_missing_id": row.pop("id")
+        elif mutation == "duplicate_row":
+            doc["risks"].append(dict(row))
+            meta["archived"].append(dict(meta["archived"][0]))
+            meta["archived_count"] = 2
+        elif mutation == "invalid_row":
+            row["probability"] = "invalid"
+            meta["archived"][0]["content_hash"] = _content_hash(row)
+        archive.write_text(yaml.safe_dump(doc), encoding="utf-8")
+        manifest.write_text(json.dumps(meta), encoding="utf-8")
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    with pytest.raises(ConfigError):
+        load_archived_risk_history("acme", programs_root=root)
+    assert before == {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+
+def test_archive_history_keeps_same_id_occurrences_in_chronological_order(tmp_path: Path) -> None:
+    import json
+    import shutil
+    import yaml
+    from src.core.risk_register_engine import load_archived_risk_history
+
+    root = tmp_path / "programs"
+    archive, manifest = _write_archive_history(root)
+    earlier = archive.parent.with_name("20261001T194714Z")
+    shutil.copytree(archive.parent, earlier)
+    meta = json.loads(manifest.read_text(encoding="utf-8"))
+    meta["created_at"] = earlier.name
+    meta["archive_path"] = f".archive/risk_register/{earlier.name}/archived_risks.yaml"
+    (earlier / manifest.name).write_text(json.dumps(meta), encoding="utf-8")
+    doc = yaml.safe_load(archive.read_text(encoding="utf-8"))
+    doc["archived_at"] = earlier.name
+    (earlier / archive.name).write_text(yaml.safe_dump(doc), encoding="utf-8")
+    rows = load_archived_risk_history("acme", programs_root=root)
+    assert [entry.archived_at for entry in rows] == [earlier.name, archive.parent.name]
+    assert rows[0].record.id == rows[1].record.id
+
+
+def test_journal_history_all_rows_is_read_only_and_preserves_string_filter(tmp_path: Path) -> None:
+    record_risk_update("acme", "risk-1", "open", "closed", "reviewer", "one", tmp_path)
+    record_risk_update("acme", "risk-2", "open", "mitigated", "reviewer", "two", tmp_path)
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    rows = load_risk_history("acme", None, tmp_path)
+    assert [row["risk_id"] for row in rows] == ["risk-1", "risk-2"]
+    assert load_risk_history("acme", "risk-1", tmp_path) == rows[:1]
+    assert before == {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+
+@pytest.mark.parametrize("bad_line", ["{", "[]"])
+def test_journal_history_all_rows_refuses_corruption_without_quarantine(tmp_path: Path, bad_line: str) -> None:
+    path = tmp_path / "acme" / "journal" / "risk_updates.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text('\n{"risk_id":"risk-1"}\n' + bad_line + "\n", encoding="utf-8")
+    before = {path: path.read_bytes()}
+    with pytest.raises(ConfigError):
+        load_risk_history("acme", None, tmp_path)
+    assert before == {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+
+def test_journal_history_existing_string_filter_keeps_legacy_recovery(tmp_path: Path) -> None:
+    path = tmp_path / "acme" / "journal" / "risk_updates.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text('{"risk_id":"risk-1"}\ninvalid\n', encoding="utf-8")
+    assert load_risk_history("acme", "risk-1", tmp_path) == ({"risk_id": "risk-1"},)
+    assert path.read_text(encoding="utf-8") == '{"risk_id":"risk-1"}\n'
+    assert len(tuple((path.parent / "quarantine").glob("*.jsonl"))) == 1
+
+
 def test_load_risk_register_round_trips_actual_empty_writer(tmp_path: Path) -> None:
     import yaml
 

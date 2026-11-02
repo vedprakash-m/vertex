@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timezone
+import json
 from pathlib import Path
 
 import pytest
@@ -10,6 +12,35 @@ from src.core.fact_lineage_coverage import has_fact_provenance
 from src.core.models_v2 import ActionItem, ActionSourceType, ActionStatus, TrajectoryPoint
 from src.core.operation_trace import load_operation_trace
 from src.core.program_fact_store import load_program_facts, project_action_items
+
+
+def test_append_action_rejects_foreign_program_before_writes(tmp_path: Path) -> None:
+    action = replace(_sample_action(), program_id="other")
+    with pytest.raises(ValueError, match="Action program does not match selected program"):
+        append_action("demo", action, programs_root=tmp_path)
+    assert tuple(tmp_path.iterdir()) == ()
+
+
+@pytest.mark.parametrize("operation", ["load", "log", "status", "associate"])
+def test_foreign_action_history_is_rejected_without_mutation(tmp_path: Path, operation: str) -> None:
+    from src.core.action_tracker import read_action_log, _action_to_record
+
+    action = replace(_sample_action(status=ActionStatus.OPEN), program_id="other")
+    path = tmp_path / "demo" / "journal" / "actions.jsonl"
+    path.parent.mkdir(parents=True)
+    original = (json.dumps(_action_to_record(action)) + "\n").encode()
+    path.write_bytes(original)
+    with pytest.raises(ValueError, match="Action program does not match selected program"):
+        if operation == "load":
+            load_actions("demo", programs_root=tmp_path)
+        elif operation == "log":
+            read_action_log("demo", programs_root=tmp_path)
+        elif operation == "status":
+            update_action_status("demo", action.id, ActionStatus.DONE, "Completed", updated_by="operator", programs_root=tmp_path)
+        else:
+            associate_action_with_work_item("demo", action.id, 2002, programs_root=tmp_path)
+    assert path.read_bytes() == original
+    assert sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*") if p.is_file()) == ["demo/journal/actions.jsonl"]
 
 
 def test_load_actions_returns_empty_tuple_when_file_absent(tmp_path: Path) -> None:
@@ -92,6 +123,19 @@ def test_associate_action_with_work_item_updates_fact_store_projection(tmp_path:
     snapshot = load_program_facts("demo", as_of=datetime.now(timezone.utc), db_root=tmp_path)
 
     assert project_action_items(snapshot)[0].linked_work_item_ids == (1001, 2002)
+
+
+def test_association_preserves_existing_status_updates(tmp_path: Path) -> None:
+    action = _sample_action(status=ActionStatus.OPEN)
+    append_action("demo", action, programs_root=tmp_path)
+    update_action_status("demo", action.id, ActionStatus.DONE, "Owner confirmed completion.", updated_by="owner", programs_root=tmp_path)
+
+    associate_action_with_work_item("demo", action.id, 2002, programs_root=tmp_path)
+
+    loaded = load_actions("demo", programs_root=tmp_path)
+    assert loaded[0].status is ActionStatus.DONE
+    assert loaded[0].resolution_note == "Owner confirmed completion."
+    assert loaded[0].linked_work_item_ids == (1001, 2002)
 
 
 def test_assess_action_staleness_flags_only_overdue_active_actions() -> None:

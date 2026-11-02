@@ -30,17 +30,19 @@ locations are also findings. Metadata/enumeration failures or links abort with
 stderr/exit 2, never a successful partial report. Reports are metadata-only,
 not atomic snapshots, cleanup approval or complete workspace recovery evidence.
 
-Authored metadata is bounded to exact T-1/T-2 root registry entries and unknown
-root entries (whose authorship is not inferred). Recursive mode also lists
-descendants of T-1/T-2 directories as unclassified: the root registry supplies
-no descendant rules. Other tiers and review currency are not assessed by this
-authored view. ``--root-only`` never inspects authored descendants.
+Authored metadata is bounded to exact T-1/T-2 root registry entries, canonical
+T-6 override files and unknown root entries (whose authorship is not inferred).
+Recursive mode also lists descendants of T-1/T-2 directories and noncanonical
+override descendants as unclassified. Other tiers and review currency are not
+assessed by this authored view. ``--root-only`` never inspects authored
+descendants.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
 import stat
 import sys
 from collections.abc import Iterator
@@ -153,11 +155,17 @@ def _dir_size(path: Path, *, authored_entries: list[dict] | None = None) -> tupl
             else:
                 raise ValueError("Inventory encountered an unsupported filesystem entry.")
             if authored_entries is not None:
+                recognized_override = (
+                    path.name == "overrides"
+                    and child.parent == path
+                    and kind == "file"
+                    and re.fullmatch(r"issue_(?:[0-9]{3}|[1-9][0-9]{3,})\.yaml", child.name)
+                )
                 entry: dict = {
                     "path": str(child.relative_to(path.parent)),
                     "kind": kind,
-                    "classification": "unclassified",
-                    "tier": None,
+                    "classification": "recognized" if recognized_override else "unclassified",
+                    "tier": _ROOT_TIER_BY_NAME["overrides"] if recognized_override else None,
                 }
                 if kind == "file":
                     entry["size_bytes"] = metadata.st_size
@@ -180,7 +188,7 @@ def inventory_program(program_id: str, programs_root: Path, *, root_only: bool) 
             "registered_runtime_locations": True,
             "recursive_sizes": not root_only,
             "authored_state": "root-only" if root_only else "recursive-metadata",
-            "authored_registry_tiers": sorted(_AUTHORED_TIERS),
+            "authored_registry_tiers": sorted(_AUTHORED_TIERS | {_ROOT_TIER_BY_NAME["overrides"]}),
             "review_currency": False,
             "content_reads": False,
             "cleanup_authority": False,
@@ -311,7 +319,11 @@ def inventory_program(program_id: str, programs_root: Path, *, root_only: bool) 
             child = program_dir / name
             count, total = _dir_size(
                 child,
-                authored_entries=result["authored_entries"] if name in _AUTHORED_DIR_NAMES else None,
+                authored_entries=(
+                    result["authored_entries"]
+                    if name in _AUTHORED_DIR_NAMES or name == "overrides"
+                    else None
+                ),
             )
             summary.setdefault("subdir_sizes", [])
             result["subdir_sizes"].append(
@@ -378,7 +390,8 @@ def _render_human(report: dict) -> str:
         lines.append(f"    {e['kind']:<5} {e['classification']:<18}{e['name']}{tier}{size}{suffix}")
     lines.append("")
     lines.append(
-        f"  authored metadata (T-1/T-2 roots and unclassified candidates; other tiers not assessed): "
+        "  authored metadata (T-1/T-2 roots, T-6 overrides and unclassified "
+        "candidates; other tiers not assessed): "
         f"{s['authored_recognized_count']} recognized, {s['authored_unclassified_count']} unclassified"
     )
     for entry in report["authored_entries"]:

@@ -130,6 +130,71 @@ def test_actual_numeric_history_tracks_each_authored_identity_field(
     assert retained["history_break_reason"] == state["history_break_reason"]
 
 
+@pytest.mark.parametrize(
+    "unit,rows,error,expected_value",
+    [
+        ("ms", [{"Value": 0}], None, "0"),
+        (None, [{"Value": 0}], None, "0"),
+        ("ms", [], None, None),
+        ("ms", [], "synthetic query failure", None),
+    ],
+)
+def test_actual_gather_kpi_signal_unit_zero_empty_and_failure_controls(
+    unit: str | None,
+    rows: list[dict[str, Any]],
+    error: str | None,
+    expected_value: str | None,
+    tmp_path: Path,
+) -> None:
+    program_dir = tmp_path / "demo"
+    program_dir.mkdir()
+    query = {
+        "id": "rate",
+        "metric_id": "demo.rate",
+        "cluster": "synthetic",
+        "database": "synthetic",
+        "kql": "print Value=0",
+        "section": "Rate",
+        "render_as": "metric_highlight",
+        "confidence": "high",
+        "result_column": "Value",
+        "validated": True,
+        "refresh_on_gather": True,
+    }
+    if unit is not None:
+        query["unit"] = unit
+    (program_dir / "kpis.yaml").write_text(json.dumps({"kpis": [query]}), encoding="utf-8")
+    state: dict[str, dict[str, Any]] = {}
+
+    def execute(_query: KustoQuery) -> list[dict[str, Any]]:
+        if error is not None:
+            raise RuntimeError(error)
+        return rows
+
+    signals = gather._build_kusto_kpi_signals(
+        program=Program(schema_version="2.0", id="demo", name="Synthetic Demo"),
+        program_id="demo",
+        programs_root=tmp_path,
+        as_of=NOW,
+        workstreams=(),
+        executor=execute,
+        query_state_sink=state,
+        previous_query_states={"rate": PREVIOUS},
+    )
+
+    if expected_value is None:
+        assert signals == ()
+        assert state["rate"]["value_last_4"] == [7.0, 8.0]
+        assert state["rate"]["last_cycle_succeeded"] is (error is None)
+    else:
+        assert len(signals) == 1
+        assert signals[0].metadata is not None
+        assert signals[0].metadata["unit"] == unit
+        assert signals[0].metadata["result_value"] == expected_value
+        assert state["rate"]["last_cycle_succeeded"] is True
+    assert state["rate"].get("last_error") == error
+
+
 @pytest.mark.parametrize("legacy", [False, True])
 def test_history_empty_failure_and_first_numeric_adoption(
     legacy: bool, tmp_path: Path,

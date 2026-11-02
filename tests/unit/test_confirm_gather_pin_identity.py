@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import replace
+from datetime import timedelta
 import json
 from pathlib import Path
 from unittest.mock import Mock
@@ -12,10 +13,12 @@ from src.commands import confirm
 import src.commands.confirm_stages.archive_transaction as archive_transaction
 from src.core.exceptions import ConfigError
 from src.core.manifest_writer import hash_jsonable
+import src.core.gather_run_manifest as gather_run_manifest
 from src.core.gather_run_manifest import (
     GatherRunStatus,
     compute_manifest_hash,
     get_committed_run_dir,
+    get_latest_full_pointer_path,
     write_manifest,
 )
 from tests.unit.test_commands_confirm import (
@@ -164,6 +167,62 @@ def test_forced_confirm_rechecks_gather_pin_after_archive_lock(
 
     assert len(entered) == 1
     checkpoints.assert_not_called()
+    for writer in writers:
+        writer.assert_not_called()
+    assert {path: path.read_bytes() for path in archive_root.rglob("*") if path.is_file()} == archive_before
+    assert json.loads(draft_path.read_text(encoding="utf-8")) == draft
+
+
+def test_confirm_does_not_mark_valid_pin_stale_for_newer_failed_full_run(
+    repo_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reports_root, archive_root, _ = _prepare_confirmable_weekly_issue(repo_root, tmp_path)
+    programs_root = tmp_path / "programs"
+    pinned = _commit_gather_run(programs_root)
+    newer = _commit_gather_run(programs_root)
+    assert pinned.run_id != newer.run_id
+    assert pinned.finished_at is not None
+    failed = replace(
+        newer, status=GatherRunStatus.FAILED,
+        finished_at=pinned.finished_at + timedelta(minutes=5), manifest_hash=None,
+    )
+    failed = replace(failed, manifest_hash=compute_manifest_hash(failed))
+    failed_path = write_manifest(
+        get_committed_run_dir("acme", failed.run_id, programs_root=programs_root), failed,
+    )
+    gather_run_manifest._write_pointer(
+        get_latest_full_pointer_path("acme", programs_root=programs_root),
+        run_id=failed.run_id,
+        manifest_hash=failed.manifest_hash,
+    )
+
+    draft_path = (
+        programs_root / "acme" / "publications" / EDITION_NAME / "issue_001" / "issue_001.draft.json"
+    )
+    draft = json.loads(draft_path.read_text(encoding="utf-8"))
+    draft.update(gather_run_id=pinned.run_id, gather_run_hash=pinned.manifest_hash)
+    report_manifest_path = draft_path.with_name("issue_001.manifest.json")
+    report_manifest = json.loads(report_manifest_path.read_text(encoding="utf-8"))
+    capture = report_manifest["metadata"]["run_evidence_snapshot"]
+    for payload in (report_manifest, capture):
+        payload.update(gather_run_id=draft["gather_run_id"], gather_run_hash=draft["gather_run_hash"])
+    capture.pop("sha256")
+    capture["sha256"] = hash_jsonable(capture)
+    draft["run_evidence_snapshot_sha256"] = capture["sha256"]
+    report_manifest_path.write_text(json.dumps(report_manifest), encoding="utf-8")
+    draft_path.write_text(json.dumps(draft), encoding="utf-8")
+    archive_before = {path: path.read_bytes() for path in archive_root.rglob("*") if path.is_file()}
+    writers = [Mock(wraps=getattr(confirm, name)) for name in ("write_confirmed", "write_confirmed_issue")]
+    for name, writer in zip(("write_confirmed", "write_confirmed_issue"), writers, strict=True):
+        monkeypatch.setattr(confirm, name, writer)
+
+    with pytest.raises(ValueError, match="program/run/status/schema mismatch"):
+        confirm.confirm_issue(
+            EDITION_NAME, 1, reports_root=reports_root, archive_root=archive_root,
+            programs_root=programs_root, force=True,
+        )
+
+    assert failed_path.exists()
     for writer in writers:
         writer.assert_not_called()
     assert {path: path.read_bytes() for path in archive_root.rglob("*") if path.is_file()} == archive_before

@@ -145,6 +145,10 @@ def generate_risk_proposal(
 
     _lifecycle(AIRunState.PLANNED)
 
+    if len(request.evidence_refs) != len(request.evidence_texts):
+        _discard(ReleaseTerminal.DISCARDED, "Evidence references and texts must be paired.")
+        return None
+
     request_payload = {
         "candidate_title": request.candidate_title,
         "candidate_description": request.candidate_description,

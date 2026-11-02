@@ -15,7 +15,7 @@ import yaml
 
 from src.core.exceptions import ConfigError
 from src.core.journal import PROGRAMS_ROOT
-from src.core.jsonl_utils import append_jsonl_line, read_jsonl_records
+from src.core.jsonl_utils import append_jsonl_line, parse_jsonl_line, read_jsonl_records
 from src.core.models import RiskLevel, WorkItem
 from src.core.models_v2 import RiskCategory, RiskDerivedLevel, RiskEntry, RiskImpact, RiskKind, RiskProbability, RiskStatus
 
@@ -47,6 +47,126 @@ def get_risk_register_path(program_id: str, programs_root: Path = PROGRAMS_ROOT)
 
 def get_risk_updates_path(program_id: str, programs_root: Path = PROGRAMS_ROOT) -> Path:
     return programs_root / program_id / "journal" / "risk_updates.jsonl"
+
+
+def risk_record_content_hash(record: dict[str, object]) -> str:
+    canonical = json.dumps(record, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class ArchivedRiskHistoryEntry:
+    record: RiskEntry
+    archived_at: str
+    archive_path: str
+    content_hash: str
+
+
+def _resolve_risk_history_path(path: Path) -> Path:
+    try:
+        return path.resolve()
+    except RuntimeError as error:
+        raise ConfigError(f"Invalid risk history path {path}: {error}") from error
+
+
+def load_archived_risk_history(
+    program_id: str,
+    risk_id: str | None = None,
+    programs_root: Path = PROGRAMS_ROOT,
+) -> tuple[ArchivedRiskHistoryEntry, ...]:
+    try:
+        root = _resolve_risk_history_path(programs_root)
+        program = _resolve_risk_history_path(root / program_id)
+        if program == root or not program.is_relative_to(root):
+            raise ValueError("program path escapes selected programs root")
+        archive_root = _resolve_risk_history_path(program / ".archive" / "risk_register")
+        if not archive_root.is_relative_to(program):
+            raise ValueError("archive root escapes selected program")
+        if not archive_root.exists():
+            return ()
+        entries: list[ArchivedRiskHistoryEntry] = []
+        for directory in sorted(archive_root.iterdir()):
+            if not directory.is_dir():
+                continue
+            if not _resolve_risk_history_path(directory).is_relative_to(archive_root):
+                raise ValueError("archive directory escapes selected archive root")
+            manifest = directory / "rollback_manifest.json"
+            archive = directory / "archived_risks.yaml"
+            if not manifest.exists() and not archive.exists():
+                continue
+            if not _resolve_risk_history_path(manifest).is_relative_to(archive_root) or not _resolve_risk_history_path(archive).is_relative_to(archive_root):
+                raise ValueError("archive pair escapes selected archive root")
+            entries.extend(_read_archived_risk_pair(program_id, program, manifest, archive))
+        return tuple(sorted(
+            (entry for entry in entries if risk_id is None or entry.record.id == risk_id),
+            key=lambda entry: (entry.archived_at, entry.archive_path, entry.record.id),
+        ))
+    except (OSError, UnicodeError, KeyError, TypeError, ValueError, yaml.YAMLError) as error:
+        raise ConfigError(f"Invalid risk archive history for '{program_id}': {error}") from error
+
+
+def _read_archived_risk_pair(
+    program_id: str,
+    program: Path,
+    manifest_path: Path,
+    archive_path: Path,
+) -> tuple[ArchivedRiskHistoryEntry, ...]:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != "1":
+        raise ValueError(f"unsupported risk archive manifest in {manifest_path}")
+    for field in ("program_id", "created_at", "reason", "archive_path"):
+        _required_string(manifest.get(field), field_name=field)
+    relative = Path(manifest["archive_path"])
+    if relative.is_absolute() or relative.drive or relative.root or ".." in relative.parts:
+        raise ValueError("archive_path must name the relative writer archive")
+    if _resolve_risk_history_path(program / relative) != _resolve_risk_history_path(archive_path):
+        raise ValueError("archive_path does not name the manifest's sibling archive")
+    if manifest["program_id"] != program_id:
+        raise ValueError("foreign archive manifest program")
+    summaries = manifest.get("archived")
+    count = manifest.get("archived_count")
+    if not isinstance(summaries, list) or not isinstance(count, int) or isinstance(count, bool) or count < 0 or count != len(summaries):
+        raise ValueError("invalid archive manifest count or archived list")
+
+    archive = yaml.safe_load(archive_path.read_text(encoding="utf-8"))
+    if not isinstance(archive, dict) or archive.get("schema_version") != "1.0":
+        raise ValueError(f"unsupported risk archive in {archive_path}")
+    if (archive.get("program_id") != program_id or archive.get("archived_at") != manifest["created_at"]
+            or archive.get("reason") != manifest["reason"]):
+        raise ValueError("archive envelope does not match manifest")
+    rows = archive.get("risks")
+    if not isinstance(rows, list) or len(rows) != count:
+        raise ValueError("invalid archive risks list or count")
+    by_id: dict[str, dict[str, Any]] = {}
+    for summary in summaries:
+        if not isinstance(summary, dict):
+            raise ValueError("archive summary must be a mapping")
+        for field in ("risk_id", "title", "kind", "status", "content_hash"):
+            _required_string(summary.get(field), field_name=field)
+        if not summary["risk_id"].strip() or summary["risk_id"] in by_id:
+            raise ValueError("missing or duplicate archive summary risk id")
+        by_id[summary["risk_id"]] = summary
+    entries: list[ArchivedRiskHistoryEntry] = []
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("archived risk must be a mapping")
+        row_id = _required_string(row.get("id"), field_name="id")
+        if not row_id.strip() or row_id in seen or row_id not in by_id or row.get("program_id") != program_id:
+            raise ValueError("archived risk identity does not match selected manifest")
+        seen.add(row_id)
+        summary = by_id[row_id]
+        if risk_record_content_hash(row) != summary["content_hash"]:
+            raise ValueError(f"archive content hash mismatch for '{row_id}'")
+        entry = _parse_risk_entry(program_id, row)
+        if (entry.id != row_id or entry.title != summary["title"] or entry.kind != summary["kind"]
+                or entry.status.value != summary["status"]):
+            raise ValueError(f"archive summary mismatch for '{row_id}'")
+        entries.append(ArchivedRiskHistoryEntry(
+            record=entry, archived_at=manifest["created_at"],
+            archive_path=manifest["archive_path"], content_hash=summary["content_hash"],
+        ))
+    return tuple(entries)
 
 
 def build_risk_id(
@@ -295,10 +415,28 @@ def record_risk_update(
     append_jsonl_line(path, payload, max_bytes=_RISK_UPDATES_MAX_BYTES)
 
 
-def load_risk_history(program_id: str, risk_id: str, programs_root: Path = PROGRAMS_ROOT) -> tuple[dict[str, Any], ...]:
+def load_risk_history(program_id: str, risk_id: str | None, programs_root: Path = PROGRAMS_ROOT) -> tuple[dict[str, Any], ...]:
     path = get_risk_updates_path(program_id, programs_root)
     if not path.exists():
         return ()
+    if risk_id is None:
+        # The history projection must not invoke the legacy corruption-repair reader.
+        try:
+            root = _resolve_risk_history_path(programs_root)
+            program = _resolve_risk_history_path(root / program_id)
+            if program == root or not program.is_relative_to(root) or not _resolve_risk_history_path(path).is_relative_to(program):
+                raise ValueError("journal path escapes selected program")
+            records: list[dict[str, Any]] = []
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                record = parse_jsonl_line(line)
+                if not isinstance(record, dict):
+                    raise ValueError("risk update must be a mapping")
+                records.append(record)
+            return tuple(records)
+        except (OSError, UnicodeError, TypeError, ValueError) as error:
+            raise ConfigError(f"Invalid risk history in {path}: {error}") from error
     return tuple(record for record in read_jsonl_records(path) if str(record.get("risk_id") or "") == risk_id)
 
 

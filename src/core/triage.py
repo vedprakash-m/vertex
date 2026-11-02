@@ -8,6 +8,7 @@ from typing import Iterable
 from src.core.claim_tracker import ClaimAssessment
 from src.core.coverage_gap import CoverageGap, coverage_gap_confidence_label
 from src.core.context_proposal_review import ContextProposalReviewRow
+from src.core.context_gap_store import RankedGap
 from src.core.dependency_scout import DependencyProposal, dependency_proposal_confidence_label
 from src.core.forecast_engine import ETAForecast
 from src.core.issue_projection import IssueProjection, issue_projection_confidence_label, issue_projection_source_label
@@ -155,6 +156,10 @@ class TriageReport:
     dependency_proposals: tuple[DependencyProposal, ...] = ()
     incident_learnings: tuple[IncidentLearning, ...] = ()
     context_proposals: tuple[ContextProposalReviewRow, ...] = ()
+    context_gaps: tuple[RankedGap, ...] = ()
+    context_gap_diagnostic: str | None = None
+    context_proposal_diagnostic: str | None = None
+    context_evaluated_at: datetime | None = None
     # WI-3.3: Phase-3 signal quality counters (populated when program_facts loaded)
     auto_approved_signal_count: int = 0
     provisional_signal_count: int = 0
@@ -254,6 +259,10 @@ def finalize_triage_report(
     dependency_proposals: tuple[DependencyProposal, ...] = (),
     incident_learnings: tuple[IncidentLearning, ...] = (),
     context_proposals: tuple[ContextProposalReviewRow, ...] = (),
+    context_gaps: tuple[RankedGap, ...] = (),
+    context_gap_diagnostic: str | None = None,
+    context_proposal_diagnostic: str | None = None,
+    context_evaluated_at: datetime | None = None,
     # WI-3.3: Phase-3 signal quality counters
     auto_approved_signal_count: int = 0,
     provisional_signal_count: int = 0,
@@ -292,6 +301,12 @@ def finalize_triage_report(
         needs_attention.append(
             f"{_pluralize(len(context_proposals), 'pending context revision')} (see CONTEXT REVISIONS)"
         )
+    if context_gaps:
+        needs_attention.append(f"{_pluralize(len(context_gaps), 'active context gap')} (see CONTEXT MAINTENANCE)")
+    if context_gap_diagnostic:
+        needs_attention.append(context_gap_diagnostic)
+    if context_proposal_diagnostic:
+        needs_attention.append(context_proposal_diagnostic)
     needs_attention.extend(milestone_attention)
     needs_attention.extend(risk_attention)
     needs_attention.extend(action_attention)
@@ -357,6 +372,10 @@ def finalize_triage_report(
         dependency_proposals=dependency_proposals,
         incident_learnings=incident_learnings,
         context_proposals=context_proposals,
+        context_gaps=context_gaps,
+        context_gap_diagnostic=context_gap_diagnostic,
+        context_proposal_diagnostic=context_proposal_diagnostic,
+        context_evaluated_at=context_evaluated_at,
         auto_approved_signal_count=auto_approved_signal_count,
         provisional_signal_count=provisional_signal_count,
         material_conflict_count=material_conflict_count,
@@ -451,6 +470,29 @@ def render_triage_report(report: TriageReport) -> str:
         "",
         "CONTEXT REVISIONS:",
         *_render_context_proposals(report.context_proposals),
+        "",
+        "CONTEXT MAINTENANCE:",
+        *(
+            (f"  - Evaluated: {report.context_evaluated_at.isoformat()} (not a review renewal)",)
+            if report.context_evaluated_at is not None else ()
+        ),
+        *((
+            f"  - {report.context_gap_diagnostic} | owner=unknown / due=unknown | "
+            f"evidence=_feedback/context_gaps.jsonl | Next: vertex doctor --context --ranked --edition {report.edition_name}",
+        ) if report.context_gap_diagnostic else ()),
+        *((
+            f"  - {report.context_proposal_diagnostic} | owner=unknown / due=unknown | "
+            f"evidence=context_proposals | Next: vertex context proposals --edition {report.edition_name}",
+        ) if report.context_proposal_diagnostic else ()),
+        *tuple(
+            f"  - {gap.feature} | {gap.lane or 'global'}.{gap.field} | {gap.message} | "
+            f"{gap.impact_estimate if gap.impact_estimate not in (None, '', 'None') else 'unknown'} impact / "
+            f"{gap.severity} | {gap.count} observation(s) | "
+            f"first={gap.first_seen.isoformat()} / last={gap.last_seen.isoformat()} | owner=unknown / due=unknown | "
+            f"evidence=_feedback/context_gaps.jsonl | Fix: {gap.fix_hint} | "
+            f"Next: vertex doctor --context --ranked --edition {report.edition_name}"
+            for gap in report.context_gaps
+        ),
         "",
         "MILESTONE HEALTH:",
         *_render_lines(report.milestones),

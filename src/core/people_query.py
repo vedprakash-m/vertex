@@ -68,9 +68,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 from src.core.people_change_journal import STREAM_PEOPLE_CONFLICTS, read_journal_records
 from src.core.people_directory_schema import (
+    PeopleDirectoryLoadResult,
     PersonDirectory,
     PersonProfile,
     Team,
@@ -238,10 +240,11 @@ class StalePersonEntry:
 
 
 def list_stale_people(
-    *, knowledge_root: Path, as_of: datetime | None = None, freshness_days: int = DEFAULT_STALE_FRESHNESS_DAYS
+    *, knowledge_root: Path, as_of: datetime | None = None, freshness_days: int = DEFAULT_STALE_FRESHNESS_DAYS,
+    people_loader: Callable[[Path], PeopleDirectoryLoadResult | None] | None = None,
 ) -> tuple[StalePersonEntry, ...]:
     now = as_of or datetime.now(timezone.utc)
-    people_result = load_people_directory(knowledge_root / "people_directory.yaml")
+    people_result = (people_loader or load_people_directory)(knowledge_root / "people_directory.yaml")
     entries: list[StalePersonEntry] = []
     for person in people_result.people if people_result else ():
         for verification in person.verifications:

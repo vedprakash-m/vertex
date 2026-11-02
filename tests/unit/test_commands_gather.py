@@ -16,6 +16,7 @@ from src.commands import gather
 from src.commands.gather_pipeline.models import GatherArtifacts
 from src.commands.gather_pipeline import hypothesis_stage
 from src.commands.gather_pipeline import ado_pipeline_stage
+from src.commands.gather_pipeline.support import kusto_event_timestamp
 from src.core.discovery_intent import (
     DiscoveryAttempt,
     DiscoveryAttemptOutcome,
@@ -39,6 +40,7 @@ from src.core.incident_journal_store import read_incident_entries
 from src.core.knowledge_store import KnowledgeStore
 from src.core.leakage_detector import LeakageReport
 from src.core.journal import append_review_decision, append_signal, read_review_log, read_signals
+from src.core.kusto_signal_extractor import KustoSignalExtractor
 from src.core.models import Comment, Confidence, Revision, RiskLevel, WorkItem
 from src.core.metric_models import MetricSourceBinding
 from src.core.models_v2 import ADOConfig, AIConfig, ActionItem, ActionSourceType, ActionStatus, ClaimEntry, DecisionEntry, DecisionStatus, DependencyADOQuery, EmailThreadSource, KustoConfig, KustoQuery, M365Config, Milestone, MilestoneStatus, Program, ReviewPolicy, Signal, SignalClass, SignalReviewDecision, Team, TeamsChat, TeamsMeetingSeries, TrajectoryPoint, VitalityAggregate, VitalityScore, WorkIQRetrievalConfig, Workstream, WorkstreamSignalSources
@@ -4077,7 +4079,6 @@ def test_gather_program_uses_uil_kusto_path_when_enabled(monkeypatch, tmp_path: 
                 DiscoveredRef,
                 DiscoveryCompleteness,
                 DiscoveryResult,
-                ExtractionResult,
                 RegistrationBinding,
                 RegistrationStatus,
         )
@@ -4104,7 +4105,7 @@ def test_gather_program_uses_uil_kusto_path_when_enabled(monkeypatch, tmp_path: 
         )
         monkeypatch.setenv("VERTEX_DB_PATH", str(tmp_path / "db"))
         monkeypatch.setenv("VERTEX_UIL_KUSTO", "1")
-        current_time = datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc)
+        current_time = datetime.now(timezone.utc) + timedelta(days=1)
 
         program = Program(
                 schema_version="3.0",
@@ -4174,38 +4175,15 @@ def test_gather_program_uses_uil_kusto_path_when_enabled(monkeypatch, tmp_path: 
         class _HydrationProvider:
                 def __init__(self) -> None:
                         self._query_loader = lambda program_id, programs_root: (query,)
-                        self._executor = lambda rendered_query: [{"Value": 1, "Timestamp": "2026-05-24T11:00:00Z"}]
+                        self.event_row = {"Value": 1, "Timestamp": "2026-05-24T11:00:00Z"}
+                        self._executor = lambda rendered_query: [self.event_row]
 
-        class _SignalExtractor:
-                def extract(self, resources, program_id):
-                        del resources
-                        return ExtractionResult(
-                                channel="kusto",
-                                signals=(
-                                        Signal(
-                                                id="kusto/query-a/demo.slice",
-                                                timestamp=current_time,
-                                                source="kusto",
-                                                program_id=program_id,
-                                                workstream_id="demo.slice",
-                                                entity_refs=("kusto:query-a",),
-                                                text="Kusto query result.",
-                                                raw_ref="kusto/query-a/demo.slice",
-                                                confidence=Confidence.HIGH,
-                                                review_policy=None,
-                                                metadata={"query_id": "query-a"},
-                                        ),
-                                ),
-                                trajectory_points=(),
-                                side_artifacts={},
-                                errors=(),
-                        )
-
+        hydration_provider = _HydrationProvider()
         binding = ChannelBinding(
                 config=ChannelConfig(channel="kusto", enabled=True, discovery_threshold_hours=24, ttl_days=30),
                 discovery_provider=_DiscoveryProvider(),
-                hydration_provider=_HydrationProvider(),
-                signal_extractor=_SignalExtractor(),
+                hydration_provider=hydration_provider,
+                signal_extractor=KustoSignalExtractor(),
                 discovery_config=KustoDiscoveryConfig(programs_root=programs_root),
                 hydration_config=KustoHydrationConfig(programs_root=programs_root),
         )
@@ -4235,13 +4213,55 @@ def test_gather_program_uses_uil_kusto_path_when_enabled(monkeypatch, tmp_path: 
         )
 
         gather_state = load_gather_state("demo", programs_root=programs_root)
+        first_report_inputs = read_signals("demo", programs_root=programs_root)
 
         assert artifacts.discovered_signals == 1
+        assert len(first_report_inputs) == 1
         assert gather_state is not None
         assert gather_state.channels["kusto"]["uil_enabled"] is True
         assert gather_state.channels["kusto"]["uil_registry_size"] == 1
         assert gather_state.query_states["query-a"]["last_cycle_succeeded"] is True
         assert gather_state.query_states["query-a"]["row_count"] == 1
+        assert first_report_inputs[0].metadata["row_count"] == 1
+        assert first_report_inputs[0].metadata["event_timestamp"] == "2026-05-24T11:00:00+00:00"
+
+        hydration_provider.event_row = {"Value": 1, "Timestamp": "2026-05-24T12:00:00Z"}
+        gather.gather_program(
+                "demo",
+                as_of=current_time,
+                programs_root=programs_root,
+                loader=lambda program, workstreams, as_of, **_: ((), 0),
+                freshness_loader=lambda program, workstreams, as_of, **_: ((), 0),
+                include_kusto=True,
+        )
+        second_report_inputs = read_signals("demo", programs_root=programs_root)
+        assert len(second_report_inputs) == 2
+        assert {signal.metadata["event_timestamp"] for signal in second_report_inputs} == {
+                "2026-05-24T11:00:00+00:00",
+                "2026-05-24T12:00:00+00:00",
+        }
+
+        gather.gather_program(
+                "demo",
+                as_of=current_time,
+                programs_root=programs_root,
+                loader=lambda program, workstreams, as_of, **_: ((), 0),
+                freshness_loader=lambda program, workstreams, as_of, **_: ((), 0),
+                include_kusto=True,
+        )
+        replay_report_inputs = read_signals("demo", programs_root=programs_root)
+        assert len(replay_report_inputs) == 2
+
+
+def test_kusto_event_timestamp_legacy_fallback_preserves_unknown_time_behavior() -> None:
+        as_of = datetime(2026, 5, 25, 12, tzinfo=timezone.utc)
+        assert kusto_event_timestamp([{"Revision": "2026-05-24T12:00:00Z"}], as_of=as_of) == datetime(
+                2026, 5, 25, 0, tzinfo=timezone.utc
+        )
+        assert kusto_event_timestamp(
+                [{"Timestamp": datetime(2026, 5, 24, 10, 0)}, {"Date": "2026-05-24"}],
+                as_of=as_of,
+        ) == datetime(2026, 5, 24, 10, 0, tzinfo=timezone.utc)
 
 
 def test_gather_program_falls_back_to_legacy_kusto_when_uil_env_enabled_but_channel_unconfigured(monkeypatch, tmp_path: Path) -> None:

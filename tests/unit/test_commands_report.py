@@ -1,5 +1,6 @@
 from __future__ import annotations
 from dataclasses import asdict, replace
+from email import message_from_bytes
 import json
 import re
 import os
@@ -2744,6 +2745,150 @@ def test_build_risk_register_summary_reports_highest_active_risk() -> None:
     summary = report_module._build_risk_register_summary(risks, stale_risk_ids=("risk-1",))
 
     assert summary == "Risk register: 1 active entry, 1 stale review. Highest active: Deployment telemetry may miss the weekly gate (owner operator, score 9)."
+
+
+def _build_review_date_risk_summary(
+    risks: tuple[RiskEntry, ...],
+    *,
+    as_of: datetime,
+) -> str | None:
+    from src.core.risk_register_engine import assess_risk_staleness
+
+    stale_risk_ids = tuple(
+        risk.id for risk in risks if assess_risk_staleness(risk, as_of.date())
+    )
+    health = report_health_module._build_health_summary(
+        (), None, risks=risks, stale_risk_ids=stale_risk_ids, as_of=as_of,
+    )
+    return health.risk_register_summary
+
+
+def _review_date_summary_risk(
+    risk_id: str,
+    *,
+    identified_date: date,
+    last_reviewed_date: date | None,
+) -> RiskEntry:
+    return RiskEntry(
+        id=risk_id,
+        program_id="acme",
+        title=f"Synthetic risk {risk_id}",
+        description="Synthetic review-date summary fixture.",
+        probability=RiskProbability.LIKELY,
+        impact=RiskImpact.HIGH,
+        category=RiskCategory.TECHNICAL,
+        owner_alias="operator",
+        mitigation_plan=None,
+        mitigation_due_date=None,
+        linked_workstream_ids=(),
+        linked_work_item_ids=(),
+        linked_milestone_ids=(),
+        linked_claim_ids=(),
+        linked_action_ids=(),
+        status=RiskStatus.OPEN,
+        identified_date=identified_date,
+        identified_in_vertex_issue=None,
+        last_reviewed_date=last_reviewed_date,
+        entity_refs=(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("risk", "expected", "not_expected"),
+    [
+        (
+            _review_date_summary_risk(
+                "missing-recent",
+                identified_date=date(2026, 5, 30),
+                last_reviewed_date=None,
+            ),
+            "1 unreviewed.",
+            "reviews current",
+        ),
+        (
+            _review_date_summary_risk(
+                "missing-old",
+                identified_date=date(2026, 4, 30),
+                last_reviewed_date=None,
+            ),
+            "1 stale review; 1 unreviewed (may overlap stale count).",
+            "reviews current",
+        ),
+        (
+            _review_date_summary_risk(
+                "future-review",
+                identified_date=date(2026, 5, 30),
+                last_reviewed_date=date(2026, 6, 1),
+            ),
+            "1 unreviewed.",
+            "reviews current",
+        ),
+        (
+            _review_date_summary_risk(
+                "current-review",
+                identified_date=date(2026, 4, 1),
+                last_reviewed_date=date(2026, 5, 1),
+            ),
+            "reviews current.",
+            "unreviewed",
+        ),
+        (
+            _review_date_summary_risk(
+                "stale-review",
+                identified_date=date(2026, 4, 1),
+                last_reviewed_date=date(2026, 4, 30),
+            ),
+            "1 stale review.",
+            "unreviewed",
+        ),
+    ],
+)
+def test_risk_register_summary_uses_review_labels_without_changing_stale_count(
+    risk: RiskEntry,
+    expected: str,
+    not_expected: str,
+) -> None:
+    summary = _build_review_date_risk_summary(
+        (risk,), as_of=datetime(2026, 5, 31, tzinfo=timezone.utc),
+    )
+
+    assert summary is not None
+    assert expected in summary
+    assert not_expected not in summary
+
+
+def test_risk_register_summary_discloses_mixed_reviews_and_possible_overlap() -> None:
+    risks = (
+        _review_date_summary_risk(
+            "missing-old",
+            identified_date=date(2026, 4, 30),
+            last_reviewed_date=None,
+        ),
+        _review_date_summary_risk(
+            "stale-review",
+            identified_date=date(2026, 4, 1),
+            last_reviewed_date=date(2026, 4, 30),
+        ),
+        _review_date_summary_risk(
+            "current-review",
+            identified_date=date(2026, 4, 1),
+            last_reviewed_date=date(2026, 5, 31),
+        ),
+    )
+
+    summary = _build_review_date_risk_summary(
+        risks, as_of=datetime(2026, 5, 31, tzinfo=timezone.utc),
+    )
+
+    assert summary is not None
+    assert "2 stale reviews; 1 unreviewed (may overlap stale count)." in summary
+    assert "reviews current" not in summary
+
+
+def test_risk_register_summary_keeps_empty_register_absent() -> None:
+    assert _build_review_date_risk_summary(
+        (), as_of=datetime(2026, 5, 31, tzinfo=timezone.utc),
+    ) is None
 
 
 def test_report_render_caller_binds_named_risk_metadata_without_reloading(monkeypatch) -> None:
@@ -6896,6 +7041,18 @@ def test_report_cli_stdout_json(monkeypatch, repo_root: Path, tmp_path: Path) ->
     assert payload["paths"]["eml"].endswith("issue_001.eml")
     assert payload["paths"]["html"].endswith("issue_001.html")
     assert "QG-8" in payload["qg_results"]
+
+    failed_gate_ids = tuple(gate_id for gate_id, passed in payload["qg_results"].items() if not passed)
+    assert failed_gate_ids
+    eml = message_from_bytes(Path(payload["paths"]["eml"]).read_bytes())
+    assert eml["To"] is None and eml["Cc"] is None
+    assert eml["Subject"].startswith("[BLOCKED DRAFT]")
+    text_body = next(part.get_payload(decode=True).decode() for part in eml.walk() if part.get_content_subtype() == "plain")
+    blocking_notice = text_body.splitlines()[0]
+    assert blocking_notice == (
+        "BLOCKED DRAFT — publication is prohibited until quality gates pass: "
+        f"{', '.join(failed_gate_ids)}."
+    )
 
 
 def test_report_cli_stdout_verbose_includes_evidence_packets(monkeypatch, repo_root: Path, tmp_path: Path) -> None:

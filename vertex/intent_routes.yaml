@@ -1718,6 +1718,11 @@ commands:
         - --title
         - --work-item
         - --workstream
+      history:
+        flags: []
+        value_options:
+        - --program
+        - --risk-id
       link:
         flags:
         - --dry-run

@@ -380,7 +380,11 @@ def load_people_directory(path: Path, *, as_of: datetime | None = None) -> Peopl
     if not path.exists():
         return None
     now = as_of or datetime.now(timezone.utc)
-    raw = fast_safe_load(path.read_text(encoding="utf-8")) or {}
+    return parse_people_directory_text(path.read_text(encoding="utf-8"), path=path, as_of=now)
+
+
+def parse_people_directory_text(text: str, *, path: Path, as_of: datetime) -> PeopleDirectoryLoadResult:
+    raw = fast_safe_load(text) or {}
     if not isinstance(raw, dict):
         raise ConfigError(f"Expected mapping at top-level in {path}")
     raw_people = raw.get("people") or []
@@ -390,7 +394,7 @@ def load_people_directory(path: Path, *, as_of: datetime | None = None) -> Peopl
     people: list[PersonDirectory] = []
     diagnostics: list[RegistryDiagnostic] = []
     for raw_person in raw_people:
-        person, person_diagnostics = _person_from_payload(raw_person, path=str(path), as_of=now)
+        person, person_diagnostics = _person_from_payload(raw_person, path=str(path), as_of=as_of)
         people.append(person)
         diagnostics.extend(person_diagnostics)
     return PeopleDirectoryLoadResult(people=tuple(people), diagnostics=tuple(diagnostics))
@@ -405,7 +409,11 @@ class TeamsLoadResult:
 def load_teams(path: Path) -> TeamsLoadResult | None:
     if not path.exists():
         return None
-    raw = fast_safe_load(path.read_text(encoding="utf-8")) or {}
+    return parse_teams_text(path.read_text(encoding="utf-8"), path=path)
+
+
+def parse_teams_text(text: str, *, path: Path) -> TeamsLoadResult:
+    raw = fast_safe_load(text) or {}
     if not isinstance(raw, dict):
         raise ConfigError(f"Expected mapping at top-level in {path}")
     raw_teams = raw.get("teams") or []

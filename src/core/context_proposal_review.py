@@ -8,8 +8,10 @@ reviewer HTML one operator-facing representation of the same review queue.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
+from src.core.context_gap_store import RankedGap, load_context_gaps, rank_context_gaps
 from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.ncfl_proposal_store import conflicting_pending_proposals, load_proposals
 from src.core.ncfl_store_policy import is_ncfl_apply_writable_target_store
@@ -90,4 +92,37 @@ def load_pending_context_proposal_rows(
     return tuple(rows)
 
 
-__all__ = ["ContextProposalReviewRow", "load_pending_context_proposal_rows"]
+@dataclass(frozen=True, slots=True)
+class ContextMaintenanceReview:
+    proposals: tuple[ContextProposalReviewRow, ...]
+    gaps: tuple[RankedGap, ...]
+    gap_diagnostic: str | None
+    evaluated_at: datetime
+    proposal_diagnostic: str | None = None
+
+
+def load_context_maintenance_review(
+    program_id: str, *, programs_root: Path, as_of: datetime,
+) -> ContextMaintenanceReview:
+    proposal_diagnostic = None
+    try:
+        proposals = load_pending_context_proposal_rows(program_id, programs_root=programs_root)
+    except (OSError, ValueError):
+        proposals = ()
+        proposal_diagnostic = "Context proposal history unavailable; inspect and repair it before retrying."
+    diagnostic = None
+    try:
+        gaps = tuple(rank_context_gaps(
+            load_context_gaps(program_id, programs_root=programs_root),
+            programs_root=programs_root,
+        ))
+    except (OSError, ValueError):
+        gaps = ()
+        diagnostic = "Context gap history unavailable; inspect and repair it before retrying."
+    return ContextMaintenanceReview(proposals, gaps, diagnostic, as_of.astimezone(timezone.utc), proposal_diagnostic)
+
+
+__all__ = [
+    "ContextProposalReviewRow", "load_pending_context_proposal_rows",
+    "ContextMaintenanceReview", "load_context_maintenance_review",
+]

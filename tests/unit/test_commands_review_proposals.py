@@ -3,7 +3,9 @@ from tests.support.synthetic_report_source import synthetic_report_root as repo_
 
 from datetime import datetime, timezone
 from pathlib import Path
+import json
 import re
+import sqlite3
 
 import pytest
 from typer.testing import CliRunner
@@ -16,10 +18,13 @@ from src.commands.review_proposals import generate_review_proposals
 from src.core.dependency_graph import DependencyType
 from src.core.dependency_scout import DependencyProposal, save_dependency_proposals
 from src.core.journal import append_signal
-from src.core.section_proposal_store import append_proposal
+from src.core.section_proposal_store import append_proposal, get_proposals_path
 from src.core.section_proposal_store import load_proposals, update_proposal_status
 from src.core.models import Confidence
-from src.core.models_v2 import SectionRevisionStatus, Signal
+from src.core.models_v2 import SectionRevisionStatus, Signal, SignalThreadLink
+from src.core.exceptions import ConfigError
+from src.core.file_stores import FileSignalStore
+from src.core.sqlite_stores import SQLiteSignalStore, get_program_sqlite_store_path
 from tests.unit.test_commands_propose import _empty_work_item_loader
 from tests.unit.test_commands_report import _seed_v2_report_layout
 
@@ -594,6 +599,73 @@ def test_review_proposals_cli_reports_pending_mode_and_section_filter(
     assert "Rendered pending proposals: 1" in result.output
 
 
+
+def test_review_proposals_cli_refuses_malformed_latest_history_without_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    reports_root, archive_root = _seed_v2_report_layout(repo_root, tmp_path)
+    programs_root = reports_root.parent / "programs"
+    proposal_artifacts = generate_section_revision_proposals(
+        edition_name="acme_weekly",
+        dry_run=False,
+        reports_root=reports_root,
+        archive_root=archive_root,
+        programs_root=programs_root,
+        work_item_loader=_empty_work_item_loader,
+    )
+    proposals = load_proposals("acme", proposal_artifacts.issue_number, programs_root=programs_root)
+    update_proposal_status(
+        proposals[0].proposal_id,
+        SectionRevisionStatus.ACCEPTED,
+        accepted_text="Previous acceptance must not be reported.",
+        resolved_at=datetime(2026, 10, 31, 12, 0, tzinfo=timezone.utc),
+        program_id="acme",
+        issue_number=proposal_artifacts.issue_number,
+        programs_root=programs_root,
+    )
+    proposal_path = get_proposals_path("acme", proposal_artifacts.issue_number, programs_root=programs_root)
+    with proposal_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            '{"proposal_id": ' + json.dumps(proposals[0].proposal_id) + ', "status": "pending"}\n'
+        )
+    journal_before = proposal_path.read_bytes()
+    program_tree_before = {
+        path.relative_to(programs_root / "acme"): path.read_bytes()
+        for path in (programs_root / "acme").rglob("*")
+        if path.is_file()
+    }
+    review_html = programs_root / "acme" / "publications" / "acme_weekly" / "review" / "proposals_review.html"
+
+    monkeypatch.setattr("src.commands.review_proposals.REPORTS_ROOT", reports_root)
+    monkeypatch.setattr("src.commands.review_proposals.ARCHIVE_ROOT", archive_root)
+    result = runner.invoke(
+        app,
+        [
+            "review-proposals",
+            "--edition",
+            "acme_weekly",
+            "--issue",
+            str(proposal_artifacts.issue_number),
+            "--resolved-only",
+            "--no-open",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, ValueError)
+    assert "Rendered resolved proposal history entries" not in result.output
+    assert "Previous acceptance must not be reported." not in result.output
+    assert proposal_path.read_bytes() == journal_before
+    assert not review_html.exists()
+    program_tree_after = {
+        path.relative_to(programs_root / "acme"): path.read_bytes()
+        for path in (programs_root / "acme").rglob("*")
+        if path.is_file()
+    }
+    assert program_tree_after == program_tree_before
+
 def test_review_proposals_cli_reports_resolved_history_mode(
     monkeypatch: pytest.MonkeyPatch,
     repo_root: Path,
@@ -635,3 +707,161 @@ def test_review_proposals_cli_reports_resolved_history_mode(
     assert result.exit_code == 0
     assert "Mode: resolved history" in result.output
     assert "Rendered resolved proposal history entries: 1" in result.output
+
+
+def _seed_review_proposals_cli(
+    monkeypatch: pytest.MonkeyPatch,
+    repo_root: Path,
+    tmp_path: Path,
+) -> tuple[Path, Path, Path, int]:
+    reports_root, archive_root = _seed_v2_report_layout(repo_root, tmp_path)
+    programs_root = reports_root.parent / "programs"
+    artifacts = generate_section_revision_proposals(
+        edition_name="acme_weekly",
+        dry_run=False,
+        reports_root=reports_root,
+        archive_root=archive_root,
+        programs_root=programs_root,
+        work_item_loader=_empty_work_item_loader,
+    )
+    monkeypatch.setattr("src.commands.review_proposals.REPORTS_ROOT", reports_root)
+    monkeypatch.setattr("src.commands.review_proposals.ARCHIVE_ROOT", archive_root)
+    return reports_root, archive_root, programs_root, artifacts.issue_number
+
+
+@pytest.mark.parametrize("database_state", ["missing", "corrupt", "uninitialized", "incompatible"])
+def test_review_proposals_cli_fails_before_html_when_sqlite_signal_state_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    repo_root: Path,
+    tmp_path: Path,
+    database_state: str,
+) -> None:
+    _, _, programs_root, issue_number = _seed_review_proposals_cli(monkeypatch, repo_root, tmp_path)
+    database_path = get_program_sqlite_store_path("acme", programs_root=programs_root)
+    if database_state == "corrupt":
+        database_path.parent.mkdir(parents=True, exist_ok=True)
+        database_path.write_bytes(b"not a sqlite database")
+    elif database_state == "uninitialized":
+        database_path.parent.mkdir(parents=True, exist_ok=True)
+        sqlite3.connect(database_path).close()
+    elif database_state == "incompatible":
+        SQLiteSignalStore(programs_root=programs_root).read("acme")
+        with sqlite3.connect(database_path) as connection:
+            connection.execute("DROP TABLE signal_threads")
+    before = database_path.read_bytes() if database_path.exists() else None
+    html_path = programs_root / "acme" / "publications" / "acme_weekly" / "review" / "proposals_review.html"
+    monkeypatch.setattr(
+        review_proposals,
+        "build_signal_store_for_program_id",
+        lambda program_id, *, programs_root: SQLiteSignalStore(programs_root=programs_root),
+    )
+
+    result = runner.invoke(
+        app,
+        ["review-proposals", "--edition", "acme_weekly", "--issue", str(issue_number), "--no-open"],
+    )
+
+    assert result.exit_code == 2
+    assert "signal store is unavailable or incompatible" in result.output.lower()
+    assert "Proposal review generated" not in result.output
+    assert not html_path.exists()
+    assert (database_path.read_bytes() if database_path.exists() else None) == before
+
+
+@pytest.mark.parametrize("database_state", ["empty", "populated"])
+def test_review_proposals_cli_renders_valid_sqlite_signal_state_without_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    repo_root: Path,
+    tmp_path: Path,
+    database_state: str,
+) -> None:
+    _, _, programs_root, issue_number = _seed_review_proposals_cli(monkeypatch, repo_root, tmp_path)
+    store = SQLiteSignalStore(programs_root=programs_root)
+    timestamp = datetime(2026, 10, 31, 12, 0, tzinfo=timezone.utc)
+    if database_state == "empty":
+        assert store.read("acme") == ()
+    else:
+        signal = Signal(
+            id="review-signal",
+            timestamp=timestamp,
+            source="manual",
+            program_id="acme",
+            workstream_id="acme",
+            entity_refs=(),
+            text="Review signal detail.",
+            raw_ref=None,
+            confidence=Confidence.HIGH,
+        )
+        store.append(signal)
+        store.append_thread(
+            "acme",
+            SignalThreadLink(
+                signal_id=signal.id,
+                thread_id="review-thread",
+                linked_at=timestamp,
+                linked_by="reviewer",
+            ),
+        )
+    database_path = get_program_sqlite_store_path("acme", programs_root=programs_root)
+    before = database_path.read_bytes()
+    html_path = programs_root / "acme" / "publications" / "acme_weekly" / "review" / "proposals_review.html"
+    monkeypatch.setattr(
+        review_proposals,
+        "build_signal_store_for_program_id",
+        lambda program_id, *, programs_root: SQLiteSignalStore(programs_root=programs_root),
+    )
+
+    result = runner.invoke(
+        app,
+        ["review-proposals", "--edition", "acme_weekly", "--issue", str(issue_number), "--no-open"],
+    )
+
+    assert result.exit_code == 0
+    assert "Proposal review generated" in result.output
+    assert html_path.exists()
+    assert database_path.read_bytes() == before
+
+
+def test_review_proposals_cli_preserves_file_signal_store_compatibility(
+    monkeypatch: pytest.MonkeyPatch,
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    _, _, programs_root, issue_number = _seed_review_proposals_cli(monkeypatch, repo_root, tmp_path)
+    monkeypatch.setattr(
+        review_proposals,
+        "build_signal_store_for_program_id",
+        lambda program_id, *, programs_root: FileSignalStore(programs_root=programs_root),
+    )
+
+    result = runner.invoke(
+        app,
+        ["review-proposals", "--edition", "acme_weekly", "--issue", str(issue_number), "--no-open"],
+    )
+
+    assert result.exit_code == 0
+    assert "Proposal review generated" in result.output
+    assert not get_program_sqlite_store_path("acme", programs_root=programs_root).exists()
+
+
+def test_review_proposals_cli_preserves_signal_store_factory_config_error(
+    monkeypatch: pytest.MonkeyPatch,
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    _, _, programs_root, issue_number = _seed_review_proposals_cli(monkeypatch, repo_root, tmp_path)
+    html_path = programs_root / "acme" / "publications" / "acme_weekly" / "review" / "proposals_review.html"
+
+    def fail_factory(*_args, **_kwargs):
+        raise ConfigError("Invalid signal-store configuration.")
+
+    monkeypatch.setattr(review_proposals, "build_signal_store_for_program_id", fail_factory)
+
+    result = runner.invoke(
+        app,
+        ["review-proposals", "--edition", "acme_weekly", "--issue", str(issue_number), "--no-open"],
+    )
+
+    assert isinstance(result.exception, ConfigError)
+    assert not html_path.exists()
+    assert not get_program_sqlite_store_path("acme", programs_root=programs_root).exists()

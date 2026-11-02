@@ -68,6 +68,10 @@ def generate_governance_decision_brief(
 
     _lifecycle(AIRunState.PLANNED)
 
+    if len(request.evidence_refs) != len(request.evidence_texts):
+        _discard(ReleaseTerminal.DISCARDED, "Evidence references and texts must be paired.")
+        return None
+
     request_payload = {
         "decision_text": request.decision_text,
         "evidence_texts": list(request.evidence_texts),

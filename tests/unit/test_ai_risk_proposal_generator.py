@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
+import pytest
+
+import src.ai.risk_proposal_generator as risk_generator
 from src.ai.risk_proposal_generator import RiskProposalSemanticValidator, generate_risk_proposal
 from src.core.ai_schema_gateway import SemanticValidator
+from src.core.ledger.event_log import read_events
 from src.core.quality_gates.ai_release_audit import released_terminal_for_run
 from src.core.risk_proposal import RiskProposalRequest
 
@@ -75,6 +80,69 @@ def test_valid_response_is_released(tmp_path: Path) -> None:
     assert proposal.owner_alias == "alex"
     assert proposal.evidence_refs == ("sig-1",)
     assert released_terminal_for_run(proposal.ai_run_id, program_id="samplealpha", programs_root=programs_root).value == "released"
+
+
+@pytest.mark.parametrize(
+    ("evidence_texts", "evidence_refs", "response_ref"),
+    [
+        (("Vendor X reported a delay.",), ("sig-1", "orphan-ref"), "orphan-ref"),
+        (("Vendor X reported a delay.", "orphan text"), ("sig-1",), "sig-1"),
+    ],
+)
+def test_unpaired_evidence_is_discarded_before_policy_cache_or_provider(
+    evidence_texts: tuple[str, ...],
+    evidence_refs: tuple[str, ...],
+    response_ref: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    programs_root = tmp_path / "programs"
+    run_id = "unpaired-risk-run"
+    request = replace(_request(), evidence_texts=evidence_texts, evidence_refs=evidence_refs)
+    response = _valid_response()
+    response["evidence_refs"] = [response_ref]
+    client = _FakeClient(response=response)
+    policy_calls: list[object] = []
+    cache_calls: list[object] = []
+    load_policy = risk_generator.load_ai_feature_policy
+    cached_response = risk_generator._cached_response
+
+    def track_policy(*args: object, **kwargs: object) -> object:
+        policy_calls.append(args)
+        return load_policy(*args, **kwargs)
+
+    def track_cache(*args: object, **kwargs: object) -> object:
+        cache_calls.append(args)
+        return cached_response(*args, **kwargs)
+
+    monkeypatch.setattr(risk_generator, "new_ai_run_id", lambda: run_id)
+    monkeypatch.setattr(risk_generator, "load_ai_feature_policy", track_policy)
+    monkeypatch.setattr(risk_generator, "_cached_response", track_cache)
+
+    assert generate_risk_proposal(request, client=client, programs_root=programs_root) is None
+    assert client.calls == 0
+    assert policy_calls == []
+    assert cache_calls == []
+    events = [event for event in read_events("samplealpha", programs_root=programs_root) if event.payload.get("ai_run_id") == run_id]
+    assert [event.payload["state"] for event in events if event.event_type == "ai.run_lifecycle.v1"] == ["planned"]
+    assert [event.payload["terminal"] for event in events if event.event_type == "ai.release_decision.v1"] == ["discarded"]
+
+
+def test_both_empty_evidence_is_supported(tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    response = _valid_response()
+    response["evidence_refs"] = []
+    client = _FakeClient(response=response)
+
+    proposal = generate_risk_proposal(
+        replace(_request(), evidence_texts=(), evidence_refs=()),
+        client=client,
+        programs_root=programs_root,
+    )
+
+    assert proposal is not None
+    assert proposal.evidence_refs == ()
+    assert client.calls == 1
 
 
 def test_invalid_probability_is_rejected(tmp_path: Path) -> None:

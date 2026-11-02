@@ -12,6 +12,7 @@ import sys
 from types import SimpleNamespace
 
 from typer.testing import CliRunner
+import typer
 import yaml
 
 import cli
@@ -36,6 +37,123 @@ import pytest
 
 runner = CliRunner()
 
+@pytest.mark.parametrize("field", ["now_lines", "watch_lines", "staged_lines", "reference_lines", "program_narrative_lines"])
+@pytest.mark.parametrize("content", ["Progress caused by SECRET-SYNTHETIC-CONTENT", "This week SECRET-SYNTHETIC-CONTENT", "SEM0100 SECRET-SYNTHETIC-CONTENT"])
+def test_render_brief_rejects_banned_content_in_every_section(monkeypatch, tmp_path: Path, field: str, content: str) -> None:
+    from dataclasses import replace
+    from src.commands import brief
+    from src.core.exceptions import ConfigError
+
+    rules = brief._load_brief_editorial_rules("sample", programs_root=tmp_path / "programs")
+    monkeypatch.setattr(brief, "_load_brief_editorial_rules", lambda *args, **kwargs: rules)
+    report = replace(
+        brief.BriefReport("sample", datetime(2026, 5, 21, tzinfo=timezone.utc), (), (), ()),
+        **{field: (content,)},
+    )
+    with pytest.raises(ConfigError, match="editorial") as failure:
+        render_brief(report)
+    assert "SECRET-SYNTHETIC-CONTENT" not in str(failure.value)
+
+
+def test_brief_artifact_rejects_banned_content_before_filesystem_mutation(tmp_path: Path) -> None:
+    from src.commands.brief import BriefReport, write_brief_artifact
+    from src.core.exceptions import ConfigError
+
+    report = BriefReport("sample", datetime(2026, 5, 21, tzinfo=timezone.utc), (), (), ())
+    with pytest.raises(ConfigError, match="editorial"):
+        write_brief_artifact(report, "Progress caused by dependency completion.", programs_root=tmp_path / "programs")
+    assert not tuple(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("surface", ["render", "artifact"])
+def test_brief_editorial_uses_selected_extensions_without_overwriting_artifact(tmp_path: Path, surface: str) -> None:
+    from src.commands.brief import BriefReport, write_brief_artifact
+    from src.core.exceptions import ConfigError
+
+    programs_root = tmp_path / "selected"
+    program_dir = programs_root / "sample"
+    program_dir.mkdir(parents=True)
+    (program_dir / "editorial_rules.yaml").write_text(
+        "schema_version: '1.0'\nstale_warn_days: 14\nstale_block_days: 30\n"
+        "banned_phrases: [restricted-example]\nbanned_openings: []\nverbosity: {}\n",
+        encoding="utf-8",
+    )
+    report = BriefReport("sample", datetime(2026, 5, 21, tzinfo=timezone.utc), ("Clean fact.",), (), ())
+    clean = render_brief(report, programs_root=programs_root)
+    path = write_brief_artifact(report, clean, programs_root=programs_root)
+    before = path.read_bytes()
+    report = BriefReport("sample", report.generated_at, ("restricted-example",), (), ())
+    with pytest.raises(ConfigError, match="editorial"):
+        if surface == "render":
+            render_brief(report, programs_root=programs_root)
+        else:
+            write_brief_artifact(report, "restricted-example", programs_root=programs_root)
+    assert path.read_bytes() == before
+    assert tuple(path.parent.iterdir()) == (path,)
+
+
+def test_brief_cli_rejects_editorial_output_without_echo_or_artifact(monkeypatch, tmp_path: Path) -> None:
+    from src.commands import brief
+
+    programs_root = tmp_path / "programs"
+    monkeypatch.setattr(brief, "PROGRAMS_ROOT", programs_root)
+    monkeypatch.setattr(
+        brief, "build_brief",
+        lambda *args, **kwargs: brief.BriefReport(
+            "sample", datetime(2026, 5, 21, tzinfo=timezone.utc),
+            ("Progress caused by SECRET-SYNTHETIC-CONTENT",), (), (),
+        ),
+    )
+    app = typer.Typer()
+    app.command()(brief.brief_command)
+    result = runner.invoke(app, ["--program", "sample"])
+    assert result.exit_code == 2, result.output
+    assert "editorial" in result.output
+    assert "SECRET-SYNTHETIC-CONTENT" not in result.output
+    assert not tuple(tmp_path.iterdir())
+
+
+def test_brief_cli_does_not_echo_when_artifact_editorial_recheck_refuses(monkeypatch, tmp_path: Path) -> None:
+    from src.commands import brief
+    from src.core.exceptions import ConfigError
+
+    monkeypatch.setattr(brief, "PROGRAMS_ROOT", tmp_path / "programs")
+    monkeypatch.setattr(
+        brief, "build_brief",
+        lambda *args, **kwargs: brief.BriefReport(
+            "sample", datetime(2026, 5, 21, tzinfo=timezone.utc), (), (), (),
+        ),
+    )
+    monkeypatch.setattr(brief, "render_brief", lambda *args, **kwargs: "Not displayed")
+
+    def refuse_artifact(*args, **kwargs):
+        raise ConfigError("Brief output blocked by editorial rules.")
+
+    monkeypatch.setattr(brief, "write_brief_artifact", refuse_artifact)
+    app = typer.Typer()
+    app.command()(brief.brief_command)
+    result = runner.invoke(app, ["--program", "sample"])
+    assert result.exit_code == 2
+    assert "editorial" in result.output and "Not displayed" not in result.output
+    assert not tuple(tmp_path.iterdir())
+
+
+def test_brief_artifact_rejects_invalid_rules_without_creating_output(tmp_path: Path) -> None:
+    from src.commands.brief import BriefReport, write_brief_artifact
+    from src.core.exceptions import ConfigError
+
+    programs_root = tmp_path / "programs"
+    program_dir = programs_root / "sample"
+    program_dir.mkdir(parents=True)
+    rules_path = program_dir / "editorial_rules.yaml"
+    rules_path.write_text("schema_version: invalid\nprivate: SECRET-SYNTHETIC-CONTENT\n", encoding="utf-8")
+    report = BriefReport("sample", datetime(2026, 5, 21, tzinfo=timezone.utc), (), (), ())
+    with pytest.raises(ConfigError, match="editorial") as refusal:
+        write_brief_artifact(report, "Clean fact.", programs_root=programs_root)
+    assert "SECRET-SYNTHETIC-CONTENT" not in str(refusal.value)
+    assert tuple(program_dir.iterdir()) == (rules_path,)
+
+
 @pytest.fixture(autouse=True)
 def _mock_brief_utc_now(monkeypatch) -> None:
     monkeypatch.setattr("src.commands.brief._utc_now", lambda: datetime(2026, 5, 21, 9, 0, tzinfo=timezone.utc))
@@ -50,7 +168,7 @@ def test_build_brief_renders_now_and_watch_sections(tmp_path: Path) -> None:
         programs_root=programs_root,
         as_of=datetime(2026, 5, 21, 9, 0, tzinfo=timezone.utc),
     )
-    rendered = render_brief(report)
+    rendered = render_brief(report, programs_root=programs_root)
 
     assert "Morning Brief - acme" in rendered
     assert "Catchup since 2026-05-20 09:00Z: 2 new signal(s), 4 discovered, 12 item(s) scanned." in rendered
@@ -81,7 +199,7 @@ def test_build_brief_matches_golden_fixture(tmp_path: Path) -> None:
         programs_root=programs_root,
         as_of=datetime(2026, 5, 21, 9, 0, tzinfo=timezone.utc),
     )
-    rendered = render_brief(report)
+    rendered = render_brief(report, programs_root=programs_root)
     fixture_path = Path(__file__).resolve().parents[1] / "golden" / "brief_now_section.txt"
 
     assert rendered == fixture_path.read_text(encoding="utf-8").rstrip("\n")
@@ -123,7 +241,7 @@ def test_build_brief_surfaces_program_narrative_when_synthesis_released(tmp_path
         programs_root=programs_root,
         as_of=datetime(2026, 5, 21, 9, 0, tzinfo=timezone.utc),
     )
-    rendered = render_brief(report)
+    rendered = render_brief(report, programs_root=programs_root)
 
     assert "Program Narrative" in rendered
     assert "- Deployment workstream is the program's critical path this cycle." in rendered
@@ -185,7 +303,7 @@ def test_brief_omits_released_synthesis_with_editorial_violation(
         programs_root=programs_root,
         as_of=datetime(2026, 5, 21, 9, tzinfo=timezone.utc),
     )
-    rendered = render_brief(report)
+    rendered = render_brief(report, programs_root=programs_root)
     diagnostic = next(line for line in report.now_lines if "editorial" in line)
 
     assert report.program_narrative_lines == ()
@@ -268,15 +386,16 @@ def test_brief_withholds_released_synthesis_when_editorial_rules_cannot_load(
         programs_root=programs_root,
         as_of=datetime(2026, 5, 21, 9, tzinfo=timezone.utc),
     )
-    rendered = render_brief(report)
     diagnostic = next(line for line in report.now_lines if "editorial" in line)
 
     assert report.program_narrative_lines == ()
-    assert "Program Narrative" not in rendered
-    assert synthesis.through_line not in rendered
-    assert "Claim c-1" in rendered and "Contradiction WI:123" in rendered
+    assert any("Claim c-1" in line for line in report.now_lines)
+    assert any("Contradiction WI:123" in line for line in report.now_lines)
     assert "synthesis unavailable" not in diagnostic and "retained assessment read failed" not in diagnostic
-    assert private_config_content not in rendered and str(tmp_path) not in rendered
+    from src.core.exceptions import ConfigError
+    with pytest.raises(ConfigError, match="editorial") as refusal:
+        render_brief(report, programs_root=programs_root)
+    assert private_config_content not in str(refusal.value) and str(tmp_path) not in str(refusal.value)
     retained = load_latest_released_program_synthesis("acme", programs_root=programs_root)
     assert retained is not None and retained.ai_run_id == synthesis.ai_run_id
 
@@ -292,7 +411,7 @@ def test_build_brief_omits_program_narrative_section_when_no_synthesis_released(
     )
 
     assert report.program_narrative_lines == ()
-    assert "Program Narrative" not in render_brief(report)
+    assert "Program Narrative" not in render_brief(report, programs_root=programs_root)
 
 
 def test_build_program_narrative_lines_propagates_implementation_failure(monkeypatch, tmp_path: Path) -> None:
@@ -335,7 +454,7 @@ def test_brief_retained_synthesis_failure_is_visible_without_losing_other_eviden
         monkeypatch.setattr(Path, "read_text", fail_read)
 
     report = build_brief("acme", programs_root=programs_root, as_of=datetime(2026, 5, 21, 9, tzinfo=timezone.utc))
-    rendered = render_brief(report)
+    rendered = render_brief(report, programs_root=programs_root)
     diagnostic = next(line for line in report.now_lines if "synthesis unavailable" in line)
     assert "acme" in diagnostic and "ConfigError" in diagnostic
     assert "Inspect" in diagnostic and "retry" in diagnostic
@@ -353,9 +472,9 @@ def test_brief_unreleased_retained_synthesis_keeps_empty_compatibility(tmp_path:
     programs_root = tmp_path / "programs"
     _seed_brief_workspace(programs_root, "acme")
     as_of = datetime(2026, 5, 21, 9, tzinfo=timezone.utc)
-    before = render_brief(build_brief("acme", programs_root=programs_root, as_of=as_of))
+    before = render_brief(build_brief("acme", programs_root=programs_root, as_of=as_of), programs_root=programs_root)
     persist_program_synthesis(_synthesis(program_id="acme"), programs_root=programs_root)
-    assert render_brief(build_brief("acme", programs_root=programs_root, as_of=as_of)) == before
+    assert render_brief(build_brief("acme", programs_root=programs_root, as_of=as_of), programs_root=programs_root) == before
 
 
 def test_build_brief_incident_learning_lines_include_higher_order_class_patterns() -> None:
@@ -455,7 +574,7 @@ def test_build_brief_surfaces_catchup_truncation_note(tmp_path: Path) -> None:
         programs_root=programs_root,
         as_of=datetime(2026, 5, 21, 9, 0, tzinfo=timezone.utc),
     )
-    rendered = render_brief(report)
+    rendered = render_brief(report, programs_root=programs_root)
 
     assert "Catchup truncated after 500 of 650 changed item(s). Run vertex gather for full refresh." in rendered
 
@@ -487,7 +606,7 @@ def test_build_brief_surfaces_authored_engms_reference_docs(monkeypatch, tmp_pat
         programs_root=programs_root,
         as_of=datetime(2026, 5, 21, 9, 0, tzinfo=timezone.utc),
     )
-    rendered = render_brief(report)
+    rendered = render_brief(report, programs_root=programs_root)
 
     assert "Reference Docs" in rendered
     assert "Acme Readiness Spec | https://eng.ms/acme-readiness | Canonical readiness design notes." in rendered
@@ -520,7 +639,7 @@ def test_build_brief_uses_fetched_engms_summary_when_available(monkeypatch, tmp_
         programs_root=programs_root,
         as_of=datetime(2026, 5, 21, 9, 0, tzinfo=timezone.utc),
     )
-    rendered = render_brief(report)
+    rendered = render_brief(report, programs_root=programs_root)
 
     assert "Acme Readiness Spec | https://eng.ms/acme-readiness | Canonical readiness design notes. Fresh operator detail from eng.ms." in rendered
 
@@ -540,7 +659,7 @@ def test_build_brief_surfaces_ai_cost_ceiling_breach(tmp_path: Path) -> None:
         programs_root=programs_root,
         as_of=datetime(2026, 5, 21, 9, 0, tzinfo=timezone.utc),
     )
-    rendered = render_brief(report)
+    rendered = render_brief(report, programs_root=programs_root)
 
     assert "AI cost ceiling exceeded for acme_weekly: $0.600 / $0.50 across 1 AI call(s) (run brief-run-001)." in rendered
 

@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
+import pytest
+
+import src.ai.governance_decision_brief_generator as brief_generator
 from src.ai.governance_decision_brief_generator import generate_governance_decision_brief
 from src.core.governance_decision_brief import GovernanceDecisionRequest
+from src.core.ledger.event_log import read_events
 from src.core.quality_gates.ai_release_audit import released_terminal_for_run
 
 
@@ -85,6 +90,72 @@ def test_valid_response_is_released(tmp_path: Path) -> None:
     assert proposal.options[0].evidence_refs == ("sig-1",)
     assert proposal.options[1].unknowns == ("Whether the vendor will slip again next sprint.",)
     assert released_terminal_for_run(proposal.ai_run_id, program_id="acme", programs_root=programs_root).value == "released"
+
+
+@pytest.mark.parametrize(
+    ("evidence_texts", "evidence_refs", "response_ref"),
+    [
+        (("Vendor confirmed a two-week slip.",), ("sig-1", "orphan-ref"), "orphan-ref"),
+        (("Vendor confirmed a two-week slip.", "orphan text"), ("sig-1",), "sig-1"),
+    ],
+)
+def test_unpaired_evidence_is_discarded_before_policy_cache_or_provider(
+    evidence_texts: tuple[str, ...],
+    evidence_refs: tuple[str, ...],
+    response_ref: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    programs_root = tmp_path / "programs"
+    run_id = "unpaired-brief-run"
+    request = replace(_request(), evidence_texts=evidence_texts, evidence_refs=evidence_refs)
+    response = _valid_response()
+    response["evidence_refs"] = [response_ref]
+    response["options"][0]["evidence_refs"] = [response_ref]
+    client = _FakeClient(response=response)
+    policy_calls: list[object] = []
+    cache_calls: list[object] = []
+    load_policy = brief_generator.load_ai_feature_policy
+    cached_response = brief_generator._cached_response
+
+    def track_policy(*args: object, **kwargs: object) -> object:
+        policy_calls.append(args)
+        return load_policy(*args, **kwargs)
+
+    def track_cache(*args: object, **kwargs: object) -> object:
+        cache_calls.append(args)
+        return cached_response(*args, **kwargs)
+
+    monkeypatch.setattr(brief_generator, "new_ai_run_id", lambda: run_id)
+    monkeypatch.setattr(brief_generator, "load_ai_feature_policy", track_policy)
+    monkeypatch.setattr(brief_generator, "_cached_response", track_cache)
+
+    assert generate_governance_decision_brief(request, client=client, programs_root=programs_root) is None
+    assert client.calls == 0
+    assert policy_calls == []
+    assert cache_calls == []
+    events = [event for event in read_events("acme", programs_root=programs_root) if event.payload.get("ai_run_id") == run_id]
+    assert [event.payload["state"] for event in events if event.event_type == "ai.run_lifecycle.v1"] == ["planned"]
+    assert [event.payload["terminal"] for event in events if event.event_type == "ai.release_decision.v1"] == ["discarded"]
+
+
+def test_both_empty_evidence_is_supported(tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    response = _valid_response()
+    response["evidence_refs"] = []
+    response["options"][0]["evidence_refs"] = []
+    response["options"][0]["unknowns"] = ["Evidence was not supplied."]
+    client = _FakeClient(response=response)
+
+    proposal = generate_governance_decision_brief(
+        replace(_request(), evidence_texts=(), evidence_refs=()),
+        client=client,
+        programs_root=programs_root,
+    )
+
+    assert proposal is not None
+    assert proposal.evidence_refs == ()
+    assert client.calls == 1
 
 
 def test_single_option_is_rejected(tmp_path: Path) -> None:

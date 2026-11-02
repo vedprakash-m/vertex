@@ -64,6 +64,15 @@ def test_installed_manual_diff_rejects_corrupt_reply_baseline_without_effects(
 
 def test_installed_bound_reply_manual_diff_preserves_pending_origin_and_stale_guard(tmp_path: Path) -> None:
     from cli import app
+    from dataclasses import replace
+    from src.core.context_gap_reply import (
+        ContextGapReplyError, apply_context_gap_answer,
+        approve_context_gap_answer, assemble_context_gap_answer_proposal,
+    )
+    from src.core.context_gap_reply_import import parse_reply_eml
+    from src.core.context_gap_store import load_context_gaps, rank_context_gaps
+    from src.core.context_proposal_review import load_pending_context_proposal_rows
+    from src.core.ncfl_apply import apply_proposal
     from tests.unit.test_context_gap_reply_import import _bound_intake_workspace
 
     programs, arguments, packet = _bound_intake_workspace(tmp_path)
@@ -76,6 +85,19 @@ def test_installed_bound_reply_manual_diff_preserves_pending_origin_and_stale_gu
     assert intake.exit_code == 0, intake.output + repr(intake.exception)
     proposal, = load_proposals("sample", programs_root=programs)
     assert proposal.status == "pending" and not proposal.decision_history and not proposal.batch_eligible
+    assert proposal.current_value_hash == packet.current_value_hash
+    row, = load_pending_context_proposal_rows("sample", programs_root=programs)
+    assert row.current_value_hash == packet.current_value_hash
+    assert "manual-diff" in row.next_command and "unverified" in row.evidence
+    gap, = rank_context_gaps(load_context_gaps("sample", programs_root=programs))
+    parsed = parse_reply_eml(arguments["source"])
+    current_shape = assemble_context_gap_answer_proposal(
+        parsed, gap=gap, solicitation_id=packet.id, proposal_id="current-shape",
+    )
+    assert current_shape.target is None
+    legacy = approve_context_gap_answer(assemble_context_gap_answer_proposal(
+        parsed, gap=replace(gap, field="why"), solicitation_id=packet.id, proposal_id="legacy-shape",
+    ))
     command = [
         "context", "manual-diff", "--edition", "sample_weekly", "--issue", "1",
         "--proposal-id", proposal.proposal_id, "--programs-root", str(programs),
@@ -85,6 +107,11 @@ def test_installed_bound_reply_manual_diff_preserves_pending_origin_and_stale_gu
     assert rendered.exit_code == 0, rendered.output + repr(rendered.exception)
     assert "unverified" in rendered.output and "packet-time" in rendered.output
     assert "+    why:" in rendered.output
+    with pytest.raises(ContextGapReplyError, match="manual-diff-only"):
+        apply_context_gap_answer(legacy, programs_root=programs)
+    assert apply_proposal(
+        replace(proposal, status="accepted"), actor="synthetic-attestation", programs_root=programs,
+    ).action == "skipped_not_writable"
     assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
     registry = programs / "sample" / "workstream_registry.yaml"
     registry.write_text("workstreams:\n- id: deployment\n  deep_context: {why: Changed}\n")
@@ -93,6 +120,8 @@ def test_installed_bound_reply_manual_diff_preserves_pending_origin_and_stale_gu
     assert stale.exit_code == 2, stale.output + repr(stale.exception)
     assert "stale" in stale.output
     assert "--- " not in stale.output and "+++ " not in stale.output
+    with pytest.raises(ContextGapReplyError, match="manual-diff-only"):
+        apply_context_gap_answer(legacy, programs_root=programs)
     assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
     assert load_proposals("sample", programs_root=programs) == (proposal,)
 

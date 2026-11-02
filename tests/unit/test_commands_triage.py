@@ -43,6 +43,103 @@ from tests.unit.test_config_loader import _write_demo_v2_layout
 runner = CliRunner()
 
 
+def test_triage_active_context_gap_projection_and_corrupt_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import Mock
+    import src.core.context_proposal_review as projection
+
+    reports, archive, root = _seed_v2_triage_layout(tmp_path, tmp_path)
+    program_path = root / "acme" / "program.yaml"
+    program = yaml.safe_load(program_path.read_text(encoding="utf-8"))
+    program["vitality"] = {"enabled": False}
+    program_path.write_text(yaml.safe_dump(program), encoding="utf-8")
+    path = root / "acme" / "_feedback" / "context_gaps.jsonl"
+    path.parent.mkdir()
+    path.write_text(
+        '{"ts":"2026-10-01T00:00:00Z","feature":"synthetic","program":"acme","lane":"acme",'
+        '"field":"purpose","severity":"quality_degraded","message":"Purpose missing","impact_estimate":"high"}\n',
+        encoding="utf-8",
+    )
+    now = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    before = path.read_bytes()
+    artifacts = triage.generate_triage_report(
+        "acme_weekly", issue_number=1, as_of=now, reports_root=reports, archive_root=archive,
+        work_item_loader=lambda *args: ((), 0), vitality_loader=lambda *args: ((), 0),
+    )
+    payload = json.loads(triage.render_triage_output(artifacts, format="json"))
+    assert len(payload["context_gaps"]) == 1 and payload["context_gap_diagnostic"] is None
+    assert payload["context_gaps"][0]["owner"] is None and payload["context_gaps"][0]["due_at"] is None
+    assert payload["context_evaluated_at"] == now.isoformat()
+    assert "Purpose missing" in triage.render_triage_report(artifacts.report)
+    assert "observation" in triage.render_triage_report(artifacts.report)
+    assert "context_gap" in triage.render_triage_output(artifacts, format="csv")
+    assert path.read_bytes() == before
+    load = Mock(wraps=projection.load_context_gaps)
+    monkeypatch.setattr(projection, "load_context_gaps", load)
+    monkeypatch.setattr(triage.report_command_helpers, "_load_live_work_items", lambda *args: ((), 0))
+    result = runner.invoke(app, ["triage", "--edition", "acme_weekly", "--format", "json"])
+    assert result.exit_code in {0, 1, 2}, repr(result.exception)
+    command_payload = json.loads(result.stdout)
+    assert command_payload["context_gaps"][0]["message"] == payload["context_gaps"][0]["message"]
+    load.assert_called_once_with("acme", programs_root=root)
+    assert path.read_bytes() == before
+    path.write_text("{private_canary:invalid", encoding="utf-8")
+    artifacts = triage.generate_triage_report(
+        "acme_weekly", issue_number=1, as_of=now, reports_root=reports, archive_root=archive,
+        work_item_loader=lambda *args: ((), 0), vitality_loader=lambda *args: ((), 0),
+    )
+    payload = json.loads(triage.render_triage_output(artifacts, format="json"))
+    assert payload["context_gaps"] == [] and "unavailable" in payload["context_gap_diagnostic"].lower()
+    assert "private_canary" not in triage.render_triage_output(artifacts, format="csv")
+
+
+def test_triage_corrupt_proposals_unknown_impact_and_csv_metadata(tmp_path: Path) -> None:
+    import csv
+    from io import StringIO
+
+    reports, archive, root = _seed_v2_triage_layout(tmp_path, tmp_path)
+    program_path = root / "acme" / "program.yaml"
+    program = yaml.safe_load(program_path.read_text(encoding="utf-8"))
+    program["vitality"] = {"enabled": False}
+    program_path.write_text(yaml.safe_dump(program), encoding="utf-8")
+    proposals = root / "acme" / "context_proposals"
+    proposals.mkdir()
+    (proposals / "issue_001.proposals.json").write_text("{private_canary: invalid", encoding="utf-8")
+    feedback = root / "acme" / "_feedback"
+    feedback.mkdir()
+    path = feedback / "context_gaps.jsonl"
+    path.write_text(
+        '{"ts":"2026-10-01T00:00:00Z","feature":"synthetic","program":"acme","lane":null,'
+        '"field":"purpose","severity":"quality_degraded","message":"Purpose missing","impact_estimate":null}\n',
+        encoding="utf-8",
+    )
+    now = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    for corrupt_gap in (False, True):
+        if corrupt_gap:
+            path.write_text("{private_canary: invalid", encoding="utf-8")
+        artifacts = triage.generate_triage_report(
+            "acme_weekly", issue_number=1, as_of=now, reports_root=reports, archive_root=archive,
+            work_item_loader=lambda *args: ((), 0), vitality_loader=lambda *args: ((), 0),
+        )
+        payload = json.loads(triage.render_triage_output(artifacts, format="json"))
+        assert "proposal" in payload["context_proposal_diagnostic"].lower()
+        human = triage.render_triage_report(artifacts.report)
+        assert "Context proposal" in human and "private_canary" not in human
+        rows = list(csv.DictReader(StringIO(triage.render_triage_output(artifacts, format="csv"))))
+        for kind in ("context_proposal_diagnostic", "context_gap_diagnostic" if corrupt_gap else "context_gap"):
+            row = next(row for row in rows if row["entry_type"] == kind)
+            detail = json.loads(row["detail"])
+            assert detail["evaluated_at"] == now.isoformat()
+            assert detail["owner"] is None and detail["due_at"] is None
+            assert detail["next_command"] == (
+                "vertex context proposals --edition acme_weekly" if kind == "context_proposal_diagnostic"
+                else "vertex doctor --context --ranked --edition acme_weekly"
+            )
+            assert detail["evidence"] == ("context_proposals" if kind == "context_proposal_diagnostic" else "_feedback/context_gaps.jsonl")
+        if not corrupt_gap:
+            assert payload["context_gaps"][0]["impact_estimate"] is None
+            assert "unknown impact" in human and "None impact" not in human
+
+
 @pytest.fixture(autouse=True)
 def _isolate_triage_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(triage, "PROGRAMS_ROOT", tmp_path / "programs")

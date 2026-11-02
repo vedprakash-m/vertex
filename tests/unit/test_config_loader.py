@@ -11,6 +11,7 @@ import yaml
 from src.core.config_loader import discover_report_editions, load_bundle_with_mode, load_editorial_rules, load_program_context, load_report_bundle, load_report_config
 from src.core.config_loader import load_review_config
 from src.core.edition_resolver import resolve_edition
+from src.core.exceptions import ConfigError
 
 
 def _write_demo_v2_layout(
@@ -160,6 +161,74 @@ queries:
 
 
 class ConfigLoaderTests(unittest.TestCase):
+    def test_program_editorial_rules_use_defaults_when_optional_file_is_missing(self) -> None:
+        from src.core.config_loader import load_program_editorial_rules
+
+        with TemporaryDirectory() as temp_dir:
+            rules = load_program_editorial_rules("demo", programs_root=Path(temp_dir) / "programs")
+
+        self.assertEqual(rules.schema_version, "1.0")
+        self.assertEqual(rules.stale_warn_days, 14)
+        self.assertEqual(rules.stale_block_days, 30)
+        self.assertEqual(rules.banned_phrases, ())
+        self.assertEqual(rules.banned_openings, ())
+
+    def test_program_editorial_rules_load_selected_program_rules(self) -> None:
+        from src.core.config_loader import load_program_editorial_rules
+
+        with TemporaryDirectory() as temp_dir:
+            programs_root = Path(temp_dir) / "selected"
+            program_dir = programs_root / "demo"
+            program_dir.mkdir(parents=True)
+            (program_dir / "editorial_rules.yaml").write_text(
+                "schema_version: '1.0'\nstale_warn_days: 14\nstale_block_days: 30\n"
+                "banned_phrases: [selectedsyntheticphrase]\nbanned_openings: []\nverbosity: {}\n",
+                encoding="utf-8",
+            )
+            (programs_root / "other").mkdir()
+            (programs_root / "other" / "editorial_rules.yaml").write_text(
+                "schema_version: '1.0'\nstale_warn_days: 14\nstale_block_days: 30\n"
+                "banned_phrases: [otherphrase]\nbanned_openings: []\nverbosity: {}\n",
+                encoding="utf-8",
+            )
+
+            rules = load_program_editorial_rules("demo", programs_root=programs_root)
+
+        self.assertEqual(rules.banned_phrases, ("selectedsyntheticphrase",))
+
+    def test_program_editorial_rules_fail_safely_for_invalid_present_file(self) -> None:
+        from src.core.config_loader import load_program_editorial_rules
+
+        with TemporaryDirectory() as temp_dir:
+            programs_root = Path(temp_dir) / "programs"
+            program_dir = programs_root / "demo"
+            program_dir.mkdir(parents=True)
+            rules_path = program_dir / "editorial_rules.yaml"
+            rules_path.write_text(
+                "schema_version: invalid\nprivate: SECRET-SYNTHETIC-CONTENT\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ConfigError) as failure:
+                load_program_editorial_rules("demo", programs_root=programs_root)
+
+        self.assertNotIn("SECRET-SYNTHETIC-CONTENT", str(failure.exception))
+        self.assertNotIn(str(rules_path), str(failure.exception))
+
+    def test_program_editorial_rules_fail_safely_when_presence_check_is_unreadable(self) -> None:
+        from src.core.config_loader import load_program_editorial_rules
+
+        with TemporaryDirectory() as temp_dir:
+            programs_root = Path(temp_dir) / "programs"
+            program_dir = programs_root / "demo"
+            program_dir.mkdir(parents=True)
+
+            with patch.object(Path, "lstat", side_effect=PermissionError("SECRET-SYNTHETIC-CONTENT")):
+                with self.assertRaises(ConfigError) as failure:
+                    load_program_editorial_rules("demo", programs_root=programs_root)
+
+        self.assertNotIn("SECRET-SYNTHETIC-CONTENT", str(failure.exception))
+
     def test_load_editorial_rules_parses_edition_specific_verbosity_limits(self) -> None:
         with TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "editorial_rules.yaml"

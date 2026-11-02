@@ -8,6 +8,7 @@ from html import escape
 from io import StringIO
 import json
 from pathlib import Path
+import sqlite3
 from typing import Literal
 
 import typer
@@ -33,7 +34,7 @@ from src.core.scorecard_trends import ScorecardTrend, load_scorecard_trends
 from src.core.signal_ranking import signal_source_family
 from src.core.snapshot_store import read_snapshot
 from src.core.store_factory import build_signal_store_for_program_id
-from src.core.program_context import InvariantSeverity, load_program_context
+from src.core.program_context import InvariantSeverity, load_program_context, summarize_context_limitations
 from src.core.program_fact_store import (
     load_program_facts,
     project_action_items,
@@ -192,10 +193,13 @@ class FleetProgramSummary:
     latest_capability_reviewed_on: date | None
     capabilities: tuple[ProgramCapabilityStatus, ...]
     lifecycle_state: Literal["active", "onboarding"] = "active"
-    context_maturity_level: int = 0
-    context_invariant_errors: int = 0
-    context_stale_file_count: int = 0
+    context_maturity_level: int | None = None
+    context_invariant_errors: int | None = None
+    context_stale_file_count: int | None = None
     nudge: FleetNudgeSummary | None = None
+    context_evaluated_at: datetime | None = None
+    context_limitations: tuple[str, ...] = ()
+    context_unavailable_reason: str | None = None
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -230,6 +234,9 @@ class FleetProgramSummary:
             "context_maturity_level": self.context_maturity_level,
             "context_invariant_errors": self.context_invariant_errors,
             "context_stale_file_count": self.context_stale_file_count,
+            "context_evaluated_at": self.context_evaluated_at.isoformat() if self.context_evaluated_at is not None else None,
+            "context_limitations": list(self.context_limitations),
+            "context_unavailable_reason": self.context_unavailable_reason,
             "nudge": self.nudge.to_payload() if self.nudge is not None else None,
         }
 
@@ -336,7 +343,7 @@ def render_fleet_report(report: FleetReport) -> str:
                 f"  Dependency health: {_render_dependency_health_summary(program.dependency_health)}",
                 f"  Trend: {program.trend}{_detail_suffix(program.trend_detail)}",
                 f"  Staleness: {program.staleness_reason}",
-                f"  Context health: L{program.context_maturity_level} | {program.context_invariant_errors} invariant error(s) | {program.context_stale_file_count} stale file(s)",
+                f"  {_format_context_diagnostic(program)}",
             )
         )
         if program.ai_safety_summary:
@@ -395,7 +402,7 @@ def render_fleet_markdown(report: FleetReport) -> str:
                 f"- Dependency highlight: {program.dependency_health.highlight or 'None'}",
                 f"- Trend: {program.trend}{_detail_suffix(program.trend_detail)}",
                 f"- Staleness: {program.staleness_reason}",
-                f"- Context health: L{program.context_maturity_level} | {program.context_invariant_errors} invariant error(s) | {program.context_stale_file_count} stale file(s)",
+                f"- {_format_context_diagnostic(program)}",
             )
         )
         if program.ai_safety_summary:
@@ -473,6 +480,9 @@ def render_fleet_csv(report: FleetReport) -> str:
             "context_maturity_level",
             "context_invariant_errors",
             "context_stale_file_count",
+            "context_evaluated_at",
+            "context_limitations",
+            "context_unavailable_reason",
         )
     )
     for program in report.programs:
@@ -516,6 +526,9 @@ def render_fleet_csv(report: FleetReport) -> str:
                 program.context_maturity_level,
                 program.context_invariant_errors,
                 program.context_stale_file_count,
+                program.context_evaluated_at.isoformat() if program.context_evaluated_at is not None else "",
+                json.dumps(list(program.context_limitations)),
+                program.context_unavailable_reason or "",
             )
         )
     return buffer.getvalue()
@@ -555,7 +568,7 @@ def render_fleet_html(report: FleetReport) -> str:
             "<tr>"
             f"<td>{escape(program.program_name)}</td>"
             f"<td>{escape(program.primary_edition)}</td>"
-            f"<td>{escape(program.lifecycle_state)}</td>"
+            f"<td>{escape(program.lifecycle_state)}<p>{escape(_format_context_diagnostic(program))}</p></td>"
             f"<td>{escape(program.capability_summary or 'None')}</td>"
             f"<td>{escape(program.capability_review_summary or 'unknown')}</td>"
             f"<td>{escape(program.capability_verification_summary or 'none pending')}</td>"
@@ -585,6 +598,21 @@ def render_fleet_html(report: FleetReport) -> str:
         "<html><head><meta charset=\"utf-8\"><title>Fleet Summary</title></head>"
         f"<body><h1>Fleet Summary</h1><p>Generated: {escape(report.generated_at.isoformat())}</p>{body}</body></html>"
     )
+
+
+def _format_context_diagnostic(program: FleetProgramSummary) -> str:
+    if program.context_maturity_level is None:
+        return program.context_unavailable_reason or "Context unavailable; no evaluation recorded."
+    summary = (
+        f"Context health: L{program.context_maturity_level} | "
+        f"{program.context_invariant_errors if program.context_invariant_errors is not None else 'unknown'} invariant error(s) | "
+        f"{program.context_stale_file_count if program.context_stale_file_count is not None else 'unknown'} stale or unreviewed entry(s)"
+    )
+    if program.context_evaluated_at is not None:
+        summary += f" | Evaluated at {program.context_evaluated_at.isoformat()}"
+    if program.context_limitations:
+        summary += " | " + " ".join(program.context_limitations)
+    return summary
 
 
 def _build_program_summary(
@@ -683,15 +711,23 @@ def _build_program_summary(
         lifecycle_state = "active"
 
     # §17.4: Context health columns
+    _ctx_evaluated_at = None
+    _ctx_limitations: tuple[str, ...] = ()
+    _ctx_unavailable_reason = None
     try:
         _pc = load_program_context(program_id, programs_root=programs_root, raise_on_error=False)
+    except (ConfigError, OSError, ValueError, sqlite3.OperationalError, sqlite3.DataError):
+        _pc = None
+        _ctx_maturity = None
+        _ctx_errors = None
+        _ctx_stale = None
+        _ctx_unavailable_reason = "Context unavailable; compilation could not be completed."
+    if _pc is not None:
         _ctx_maturity = _pc.maturity_level.value
         _ctx_errors = sum(1 for v in _pc.invariant_violations if v.severity == InvariantSeverity.ERROR)
         _ctx_stale = len(_pc.staleness_flags)
-    except Exception:
-        _ctx_maturity = 0
-        _ctx_errors = 0
-        _ctx_stale = 0
+        _ctx_evaluated_at = _pc.loaded_at
+        _ctx_limitations = summarize_context_limitations(_pc)
 
     return FleetProgramSummary(
         program_id=program_id,
@@ -725,6 +761,9 @@ def _build_program_summary(
         context_maturity_level=_ctx_maturity,
         context_invariant_errors=_ctx_errors,
         context_stale_file_count=_ctx_stale,
+        context_evaluated_at=_ctx_evaluated_at,
+        context_limitations=_ctx_limitations,
+        context_unavailable_reason=_ctx_unavailable_reason,
         nudge=_build_fleet_nudge_summary(program_id, programs_root=programs_root),
     )
 

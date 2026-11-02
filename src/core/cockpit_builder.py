@@ -35,7 +35,7 @@ from src.core.cockpit_models import (
     finalize_cockpit_snapshot,
     select_cockpit_exceptions,
 )
-from src.core.context_proposal_review import load_pending_context_proposal_rows
+from src.core.context_proposal_review import load_context_maintenance_review
 from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.exceptions import ConfigError
 from src.core.fact_lineage_coverage import compute_lineage_coverage
@@ -109,7 +109,7 @@ def build_cockpit_snapshot(
     findings.extend(trust_findings)
     findings.extend(
         _build_context_proposal_findings(
-            program_id, programs_root=programs_root, observed_at=generated_at
+            program_id, programs_root=programs_root, observed_at=generated_at, edition_id=edition_id,
         )
     )
 
@@ -160,16 +160,11 @@ def build_cockpit_snapshot(
 
 
 def _build_context_proposal_findings(
-    program_id: str, *, programs_root: Path, observed_at: datetime
+    program_id: str, *, programs_root: Path, observed_at: datetime, edition_id: str | None = None,
 ) -> list[CockpitFinding]:
     """Expose pending NCFL revisions without treating them as applied state."""
-    try:
-        rows = load_pending_context_proposal_rows(program_id, programs_root=programs_root)
-    except Exception:
-        # The cockpit remains a best-effort read-only projection if an optional
-        # proposal artifact is concurrently replaced or damaged.
-        return []
-    return [
+    review = load_context_maintenance_review(program_id, programs_root=programs_root, as_of=observed_at)
+    findings = [
         CockpitFinding(
             finding_id=f"trust.context_proposal.{row.proposal_id}",
             area="trust",
@@ -185,8 +180,41 @@ def _build_context_proposal_findings(
             evidence_refs=(row.evidence,),
             observed_at=observed_at,
         )
-        for row in rows
+        for row in review.proposals
     ]
+    next_command = f"vertex doctor --context --ranked --edition {edition_id}" if edition_id else None
+    if review.proposal_diagnostic:
+        findings.append(CockpitFinding(
+            finding_id="trust.context_proposals.unavailable", area="trust", status="warn",
+            summary=review.proposal_diagnostic,
+            detail=f"Evaluated: {review.evaluated_at.isoformat()}; owner=unknown / due=unknown; no review renewal.",
+            owner=None, next_command=f"vertex context proposals --edition {edition_id}" if edition_id else None,
+            evidence_refs=("context_proposals",), observed_at=observed_at,
+        ))
+    if review.gap_diagnostic:
+        findings.append(CockpitFinding(
+            finding_id="trust.context_gaps.unavailable", area="trust", status="warn",
+            summary=review.gap_diagnostic,
+            detail=f"Evaluated: {review.evaluated_at.isoformat()}; owner=unknown / due=unknown; no review renewal.",
+            owner=None, next_command=next_command, evidence_refs=("_feedback/context_gaps.jsonl",),
+            observed_at=observed_at,
+        ))
+    for gap in review.gaps:
+        findings.append(CockpitFinding(
+            finding_id=f"trust.context_gap.{gap.feature}:{gap.lane or ''}:{gap.field}",
+            area="trust", status="warn", summary=f"Active context gap: {gap.message}",
+            detail=(
+                f"{gap.program}:{gap.lane or 'global'}:{gap.field}; feature={gap.feature}; "
+                f"{gap.impact_estimate if gap.impact_estimate not in (None, '', 'None') else 'unknown'} impact / "
+                f"{gap.severity}; {gap.count} observation(s); "
+                f"first={gap.first_seen.isoformat()} / last={gap.last_seen.isoformat()}; "
+                f"evaluated={review.evaluated_at.isoformat()} (not a review renewal); owner=unknown / due=unknown; "
+                f"Fix: {gap.fix_hint}"
+            ),
+            owner=None, next_command=next_command, evidence_refs=("_feedback/context_gaps.jsonl",),
+            observed_at=observed_at,
+        ))
+    return findings
 
 
 def _build_economics_summary(
@@ -721,8 +749,23 @@ def _build_trust_summary(
     findings: list[CockpitFinding] = []
     try:
         state = load_earned_autonomy_state(program_id, programs_root=programs_root)
-    except Exception:
-        state = None
+    except ConfigError as error:
+        findings.append(CockpitFinding(
+            finding_id="trust.autonomy_ladder.read_failed",
+            area="trust",
+            status="blocked",
+            summary="Earned-autonomy state unavailable; current trust was not evaluated.",
+            detail=(
+                f"earned_autonomy_state.yaml for program {program_id} could not be loaded "
+                f"({type(error).__name__}). Inspect file access and persisted fields before retrying; "
+                "no evaluation or repair was performed."
+            ),
+            owner=None,
+            next_command=f"vertex cockpit explain --program {program_id} --finding trust.autonomy_ladder.read_failed",
+            evidence_refs=(),
+            observed_at=observed_at,
+        ))
+        return TrustCockpitSummary(classes=()), findings
     proposal_classes = state.proposal_classes if state else {}
 
     rows: list[ProposalClassTrustSummary] = []

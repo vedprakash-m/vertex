@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -30,8 +31,8 @@ from src.core.knowledge_store import (
     find_unknown_team_program_references,
     get_shared_knowledge_root,
 )
-from src.core.people_entity_schema import ENTITIES_SCHEMA_VERSION, check_dir11_compliance, is_legacy_schema_0_entities_document, load_entities_document
-from src.core.people_directory_schema import PersonStatus, load_people_directory, load_teams
+from src.core.people_entity_schema import ENTITIES_SCHEMA_VERSION, check_dir11_compliance, is_legacy_schema_0_entities_document, load_entities_document, load_shared_entities_document
+from src.core.people_directory_schema import PeopleDirectoryLoadResult, TeamsLoadResult, PersonStatus, load_people_directory, load_teams, parse_people_directory_text, parse_teams_text
 from src.core.profile_encryption import inspect_people_profiles_file
 from src.core.people_registry_privacy_policy import encryption_rank, load_people_registry_privacy_policy
 from src.core.people_membership_schema import read_all_memberships
@@ -64,6 +65,40 @@ _KB_REFERENCE_EXCLUDED_FILENAMES = frozenset({"trusted_baseline.yaml"})
 _KB_PROGRAM_REFERENCE_EXCLUDED_KEYS = frozenset({"people", "author_defaults", "distribution_defaults"})
 
 
+def _load_revalidated_people(
+    path: Path, cache: dict[Path, tuple[str, PeopleDirectoryLoadResult]],
+) -> PeopleDirectoryLoadResult | None:
+    if not path.exists():
+        cache.pop(path, None)
+        return None
+    now = datetime.now(timezone.utc)
+    text = path.read_text(encoding="utf-8")
+    cached = cache.get(path)
+    if cached is not None and cached[0] == text:
+        return deepcopy(cached[1])
+    cache.pop(path, None)
+    result = parse_people_directory_text(text, path=path, as_of=now)
+    if not any(item.code == "legacy_email_field" for item in result.diagnostics):
+        cache[path] = (text, deepcopy(result))
+    return result
+
+
+def _load_revalidated_teams(
+    path: Path, cache: dict[Path, tuple[str, TeamsLoadResult]],
+) -> TeamsLoadResult | None:
+    if not path.exists():
+        cache.pop(path, None)
+        return None
+    text = path.read_text(encoding="utf-8")
+    cached = cache.get(path)
+    if cached is not None and cached[0] == text:
+        return deepcopy(cached[1])
+    cache.pop(path, None)
+    result = parse_teams_text(text, path=path)
+    cache[path] = (text, deepcopy(result))
+    return result
+
+
 def run_kb_doctor(
     *,
     editions_root: Path,
@@ -72,6 +107,14 @@ def run_kb_doctor(
     ado_client_factory: Callable[..., ADOClient] = ADOClient,
 ) -> DoctorReport:
     checks: list[DoctorCheck] = []
+    people_cache: dict[Path, tuple[str, PeopleDirectoryLoadResult]] = {}
+    teams_cache: dict[Path, tuple[str, TeamsLoadResult]] = {}
+
+    def shared_people_loader(path: Path) -> PeopleDirectoryLoadResult | None:
+        return _load_revalidated_people(path, people_cache)
+
+    def shared_teams_loader(path: Path) -> TeamsLoadResult | None:
+        return _load_revalidated_teams(path, teams_cache)
     program_dirs = tuple(
         path for path in sorted(programs_root.iterdir(), key=lambda item: item.name.lower())
         if path.is_dir() and (path / "program.yaml").exists()
@@ -92,6 +135,7 @@ def run_kb_doctor(
         # redundant-reparse cost PPL-W3.5's own scale benchmark measured as
         # the dominant full-doctor bottleneck at real program counts.
         kb_document_cache: dict[Path, dict] = {}
+        compiled_knowledge_cache: dict[tuple[Path, ...], KnowledgeStore] = {}
         # specs/people.md PPL-W3.5c: `document_cache` alone still left
         # `_validate_program_documents`'s temp-dir dump/reparse of the
         # SAME cached-but-deepcopied shared documents running once per
@@ -107,6 +151,7 @@ def run_kb_doctor(
                     knowledge = validate_program_kb(
                         program_dir.name, programs_root=programs_root,
                         document_cache=kb_document_cache, shared_knowledge_cache=shared_knowledge_cache,
+                        compiled_knowledge_cache=compiled_knowledge_cache,
                     )
                     knowledge_by_program[program_dir.name] = knowledge
                     total_people += len(knowledge.people_directory)
@@ -151,14 +196,19 @@ def run_kb_doctor(
     checks.append(registry_transaction_recovery_check(programs_root=programs_root))
     checks.append(registry_manifest_integrity_check(programs_root=programs_root))
     checks.append(entities_dir11_check(known_program_ids=known_program_ids, programs_root=programs_root))
-    checks.append(registry_dir05_shadow_check(known_program_ids=known_program_ids, programs_root=programs_root))
+    checks.append(registry_dir05_shadow_check(
+        known_program_ids=known_program_ids, programs_root=programs_root,
+        people_loader=shared_people_loader, teams_loader=shared_teams_loader,
+    ))
     checks.append(registry_legacy_reference_check(programs_root=programs_root))
     # Loaded ONCE and shared across DIR-01/02/06 -- see _SharedRegistrySnapshot's
     # own docstring for the redundant-reparse regression this closes (PPL-W3.5).
-    shared_registry_snapshot = _load_shared_registry_snapshot(programs_root)
+    shared_registry_snapshot = _load_shared_registry_snapshot(
+        programs_root, people_loader=shared_people_loader, teams_loader=shared_teams_loader,
+    )
     checks.append(registry_dir01_duplicate_identifiers_check(snapshot=shared_registry_snapshot))
     checks.append(registry_dir02_unresolved_references_check(snapshot=shared_registry_snapshot))
-    checks.append(registry_dir03_stale_fields_check(programs_root=programs_root))
+    checks.append(registry_dir03_stale_fields_check(programs_root=programs_root, people_loader=shared_people_loader))
     checks.append(registry_people_enrichment_check(known_program_ids=known_program_ids, programs_root=programs_root))
     checks.append(registry_dir06_hierarchy_cycles_check(snapshot=shared_registry_snapshot))
     checks.append(registry_dir07_journal_integrity_check(programs_root=programs_root))
@@ -931,7 +981,11 @@ def entities_dir11_check(*, known_program_ids: tuple[str, ...], programs_root: P
     return DoctorCheck("Entities DIR-11", "ok", f"{checked_program_count} program(s) checked against org-scope entities.yaml; no DIR-11 violations.")
 
 
-def registry_dir05_shadow_check(*, known_program_ids: tuple[str, ...], programs_root: Path) -> DoctorCheck:
+def registry_dir05_shadow_check(
+    *, known_program_ids: tuple[str, ...], programs_root: Path,
+    people_loader: Callable[[Path], PeopleDirectoryLoadResult | None] | None = None,
+    teams_loader: Callable[[Path], TeamsLoadResult | None] | None = None,
+) -> DoctorCheck:
     """specs/people.md §8.3 DIR-05A/05B: a program-local
     `people_directory.yaml`/`teams.yaml` is entirely SHADOWED (never read
     by any runtime path -- §5's "once a shared file exists, the
@@ -950,8 +1004,8 @@ def registry_dir05_shadow_check(*, known_program_ids: tuple[str, ...], programs_
     if not shared_people_path.exists() and not shared_teams_path.exists():
         return DoctorCheck("Registry DIR-05", "ok", "No shared people_directory.yaml/teams.yaml yet; nothing to check.", code="DIR-05A")
 
-    shared_people_result = load_people_directory(shared_people_path) if shared_people_path.exists() else None
-    shared_teams_result = load_teams(shared_teams_path) if shared_teams_path.exists() else None
+    shared_people_result = (people_loader or load_people_directory)(shared_people_path) if shared_people_path.exists() else None
+    shared_teams_result = (teams_loader or load_teams)(shared_teams_path) if shared_teams_path.exists() else None
     shared_people = shared_people_result.people if shared_people_result else ()
     shared_teams = shared_teams_result.teams if shared_teams_result else ()
 
@@ -1132,19 +1186,20 @@ class _SharedRegistrySnapshot:
     redirects: tuple = ()
 
 
-def _load_shared_registry_snapshot(programs_root: Path) -> _SharedRegistrySnapshot:
+def _load_shared_registry_snapshot(
+    programs_root: Path, *,
+    people_loader: Callable[[Path], PeopleDirectoryLoadResult | None] | None = None,
+    teams_loader: Callable[[Path], TeamsLoadResult | None] | None = None,
+) -> _SharedRegistrySnapshot:
     knowledge_root = get_shared_knowledge_root(programs_root)
     entities_path = knowledge_root / "entities.yaml"
     entities_path_exists = entities_path.exists()
-    has_schema2_entities = entities_path_exists and not is_legacy_schema_0_entities_document(entities_path)
-    entities: tuple = ()
-    redirects: tuple = ()
-    if has_schema2_entities:
-        document = load_entities_document(entities_path)
-        entities = document.entities if document is not None else ()
-        redirects = document.redirects if document is not None else ()
-    people_result = load_people_directory(knowledge_root / "people_directory.yaml")
-    teams_result = load_teams(knowledge_root / "teams.yaml")
+    document = load_shared_entities_document(entities_path)
+    has_schema2_entities = document is not None
+    entities = document.entities if document is not None else ()
+    redirects = document.redirects if document is not None else ()
+    people_result = (people_loader or load_people_directory)(knowledge_root / "people_directory.yaml")
+    teams_result = (teams_loader or load_teams)(knowledge_root / "teams.yaml")
     memberships = read_all_memberships(knowledge_root)
     return _SharedRegistrySnapshot(
         entities_path_exists=entities_path_exists,
@@ -1189,13 +1244,16 @@ def registry_dir02_unresolved_references_check(*, snapshot: _SharedRegistrySnaps
     )
 
 
-def registry_dir03_stale_fields_check(*, programs_root: Path) -> DoctorCheck:
+def registry_dir03_stale_fields_check(
+    *, programs_root: Path,
+    people_loader: Callable[[Path], PeopleDirectoryLoadResult | None] | None = None,
+) -> DoctorCheck:
     """specs/people.md §8.3 DIR-03: required field/membership older than its
     freshness SLA. Real, governed threshold as of specs/bklg.md BL-E3
     (2026-07-26): `freshness_policy.yaml`'s `people_registry.stale_after_days`,
     read via `DEFAULT_STALE_FRESHNESS_DAYS`."""
     knowledge_root = get_shared_knowledge_root(programs_root)
-    stale = list_stale_people(knowledge_root=knowledge_root)
+    stale = list_stale_people(knowledge_root=knowledge_root, people_loader=people_loader)
     if not stale:
         return DoctorCheck(
             "Registry DIR-03", "ok",

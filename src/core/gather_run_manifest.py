@@ -754,6 +754,10 @@ def _scan_newest_hash_valid_committed(program_id: str, *, programs_root: Path = 
     return max(candidates, key=lambda m: (m.finished_at or m.started_at))
 
 
+class _RecoverableCommittedCandidateError(ValueError):
+    pass
+
+
 def _read_committed_candidate(
     program_id: str, run_dir: Path, *, pointer_selected: bool = False,
 ) -> GatherRunManifest | None:
@@ -765,7 +769,9 @@ def _read_committed_candidate(
             return None
         candidate = _manifest_from_payload(payload)
     except (OSError, KeyError, ValueError, TypeError, AttributeError) as exc:
-        raise ValueError(f"Invalid committed gather evidence at {run_dir}: unreadable manifest.") from exc
+        raise _RecoverableCommittedCandidateError(
+            f"Invalid committed gather evidence at {run_dir}: unreadable manifest."
+        ) from exc
     if (
         candidate.program_id != program_id
         or candidate.run_id != run_dir.name
@@ -774,7 +780,9 @@ def _read_committed_candidate(
     ):
         raise ValueError(f"Invalid committed gather evidence at {run_dir}: program/run/status/schema mismatch.")
     if not candidate.manifest_hash or compute_manifest_hash(candidate) != candidate.manifest_hash:
-        raise ValueError(f"Invalid committed gather evidence at {run_dir}: hash verification failed.")
+        raise _RecoverableCommittedCandidateError(
+            f"Invalid committed gather evidence at {run_dir}: hash verification failed."
+        )
     return candidate
 
 
@@ -807,15 +815,16 @@ def resolve_latest_full_committed_manifest(
     if pointer is not None:
         run_id, manifest_hash = pointer
         run_dir = get_committed_run_dir(program_id, run_id, programs_root=programs_root)
-        try:
-            candidate = read_manifest(run_dir)
-        except (OSError, json.JSONDecodeError, KeyError, ValueError):
-            candidate = None
+        candidate = None
+        if run_dir.exists():
+            try:
+                candidate = _read_committed_candidate(program_id, run_dir, pointer_selected=True)
+            except _RecoverableCommittedCandidateError:
+                pass
         if (
             candidate is not None
             and candidate.manifest_hash == manifest_hash
             and candidate.required_scope_status is RequiredScopeStatus.FULL
-            and compute_manifest_hash(candidate) == candidate.manifest_hash
         ):
             return candidate
     committed_root = get_committed_root(program_id, programs_root=programs_root)
@@ -826,14 +835,10 @@ def resolve_latest_full_committed_manifest(
         if not run_dir.is_dir():
             continue
         try:
-            candidate = read_manifest(run_dir)
-        except (OSError, json.JSONDecodeError, KeyError, ValueError):
+            candidate = _read_committed_candidate(program_id, run_dir)
+        except ValueError:
             continue
-        if (
-            candidate.manifest_hash
-            and candidate.required_scope_status is RequiredScopeStatus.FULL
-            and compute_manifest_hash(candidate) == candidate.manifest_hash
-        ):
+        if candidate is not None and candidate.required_scope_status is RequiredScopeStatus.FULL:
             candidates.append(candidate)
     if not candidates:
         return None

@@ -136,3 +136,147 @@ def test_reply_review_projection_exposes_unverified_origin_and_intake_baseline(t
     assert "unverified" in row.evidence
     assert "intake-time" in row.evidence
     assert "manual-diff" in row.next_command
+
+
+def test_maintenance_projection_reads_once_preserves_history_and_revision_api(tmp_path: Path, monkeypatch) -> None:
+    import src.core.context_proposal_review as review
+    from src.core.context_gap_store import ContextGapRecord
+    from unittest.mock import Mock
+
+    now = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    observed = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    gap = ContextGapRecord(observed, "doctor --context", "contoso", "delivery", "deep_context.why",
+                           "quality_degraded", "Purpose missing", "high")
+    load = Mock(return_value=[gap, gap])
+    monkeypatch.setattr(review, "load_context_gaps", load, raising=False)
+    root = tmp_path / "programs"
+    registry = root / "contoso" / "workstream_registry.yaml"
+    registry.parent.mkdir(parents=True)
+    registry.write_text("workstreams:\n  - id: delivery\n    deep_context:\n      why: ''\n", encoding="utf-8")
+    before = registry.read_bytes()
+    projection = review.load_context_maintenance_review("contoso", programs_root=root, as_of=now)
+    load.assert_called_once_with("contoso", programs_root=root)
+    assert projection.evaluated_at == now
+    assert projection.proposals == load_pending_context_proposal_rows("contoso", programs_root=root)
+    assert projection.gap_diagnostic is None
+    assert len(projection.gaps) == 1
+    assert projection.gaps[0].count == 2
+    assert projection.gaps[0].first_seen == observed
+    assert registry.read_bytes() == before
+    registry.write_text("workstreams:\n  - id: delivery\n    deep_context:\n      why: repaired\n", encoding="utf-8")
+    assert review.load_context_maintenance_review("contoso", programs_root=root, as_of=now).gaps == ()
+    registry.write_bytes(before)
+    assert len(review.load_context_maintenance_review("contoso", programs_root=root, as_of=now).gaps) == 1
+
+
+def test_maintenance_projection_corrupt_history_is_safe_and_keeps_proposals(tmp_path: Path) -> None:
+    import src.core.context_proposal_review as review
+
+    proposal = _proposal("pending", issue_number=8, target_store="workstream_registry", conflict_key="registry")
+    stage_extracted_proposals("contoso", 8, (proposal,), programs_root=tmp_path)
+    path = tmp_path / "contoso" / "_feedback" / "context_gaps.jsonl"
+    path.parent.mkdir()
+    path.write_text("{private_canary: invalid\n", encoding="utf-8")
+    before = path.read_bytes()
+    projection = review.load_context_maintenance_review(
+        "contoso", programs_root=tmp_path, as_of=datetime(2026, 11, 1, tzinfo=timezone.utc),
+    )
+    assert projection.gaps == ()
+    assert projection.gap_diagnostic is not None and "unavailable" in projection.gap_diagnostic.lower()
+    assert "private_canary" not in projection.gap_diagnostic and str(path) not in projection.gap_diagnostic
+    assert len(projection.proposals) == 1
+    assert path.read_bytes() == before
+
+
+def test_reviewer_projects_active_gap_without_candidate_and_corrupt_diagnostic(tmp_path: Path) -> None:
+    path = tmp_path / "contoso" / "_feedback" / "context_gaps.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        '{"ts":"2026-10-01T00:00:00Z","feature":"synthetic","program":"contoso","lane":"delivery",'
+        '"field":"purpose","severity":"quality_degraded","message":"Purpose missing","impact_estimate":"high"}\n',
+        encoding="utf-8",
+    )
+    now = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    rows = _build_context_revision_rows("contoso", programs_root=tmp_path, as_of=now)
+    assert len(rows) == 1
+    assert "Purpose missing" in rows[0].summary
+    assert "unknown" in rows[0].summary and "observation" in rows[0].summary
+    assert "2026-10-01" in rows[0].summary and "2026-11-01" in rows[0].summary
+    path.write_text("{private_canary:invalid", encoding="utf-8")
+    rows = _build_context_revision_rows("contoso", programs_root=tmp_path, as_of=now)
+    assert len(rows) == 1 and "unavailable" in rows[0].summary.lower()
+    assert "private_canary" not in rows[0].summary
+
+
+def test_maintenance_unreadable_history_and_selected_root_controls(tmp_path: Path, monkeypatch) -> None:
+    import src.core.context_proposal_review as review
+    from unittest.mock import Mock
+    from datetime import timedelta
+
+    now = datetime(2026, 11, 1, tzinfo=timezone(timedelta(hours=2)))
+    root = tmp_path / "selected"
+    other = tmp_path / "other" / "contoso" / "_feedback"
+    other.mkdir(parents=True)
+    (other / "context_gaps.jsonl").write_text("{invalid", encoding="utf-8")
+    projection = review.load_context_maintenance_review("contoso", programs_root=root, as_of=now)
+    assert projection.gaps == () and projection.gap_diagnostic is None
+    assert projection.evaluated_at == now.astimezone(timezone.utc)
+    load = Mock(side_effect=OSError("private_canary"))
+    monkeypatch.setattr(review, "load_context_gaps", load)
+    projection = review.load_context_maintenance_review("contoso", programs_root=root, as_of=now)
+    assert "unavailable" in projection.gap_diagnostic and "private_canary" not in projection.gap_diagnostic
+    rows = _build_context_revision_rows("contoso", programs_root=root, as_of=now, edition_name="contoso_weekly")
+    assert len(rows) == 1 and "--edition contoso_weekly" in rows[0].summary
+
+
+def test_corrupt_proposal_read_keeps_valid_gaps_and_distinct_diagnostic(tmp_path: Path) -> None:
+    import pytest
+    from src.core.context_proposal_review import load_context_maintenance_review
+
+    proposals = tmp_path / "contoso" / "context_proposals"
+    proposals.mkdir(parents=True)
+    queue = proposals / "issue_001.proposals.json"
+    queue.write_text("{private_canary: invalid", encoding="utf-8")
+    feedback = tmp_path / "contoso" / "_feedback"
+    feedback.mkdir()
+    (feedback / "context_gaps.jsonl").write_text(
+        '{"ts":"2026-10-01T00:00:00Z","feature":"synthetic","program":"contoso","lane":null,'
+        '"field":"purpose","severity":"quality_degraded","message":"Purpose missing","impact_estimate":null}\n',
+        encoding="utf-8",
+    )
+    now = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    with pytest.raises(ValueError):
+        load_pending_context_proposal_rows("contoso", programs_root=tmp_path)
+    projection = load_context_maintenance_review("contoso", programs_root=tmp_path, as_of=now)
+    assert projection.proposals == () and projection.gap_diagnostic is None
+    assert projection.proposal_diagnostic is not None and "proposal" in projection.proposal_diagnostic.lower()
+    assert "private_canary" not in projection.proposal_diagnostic
+    assert len(projection.gaps) == 1
+    rows = _build_context_revision_rows("contoso", programs_root=tmp_path, as_of=now)
+    assert len(rows) == 2
+    assert any("proposal" in row.title.lower() and "unavailable" in row.title.lower() for row in rows)
+    assert any("unknown impact" in row.summary for row in rows)
+    assert not any("None impact" in row.summary for row in rows)
+    queue.unlink()
+    queue.mkdir()
+    projection = load_context_maintenance_review("contoso", programs_root=tmp_path, as_of=now)
+    assert projection.proposal_diagnostic is not None and len(projection.gaps) == 1
+
+
+def test_unexpected_projection_errors_are_not_empty_consumer_success(tmp_path: Path, monkeypatch) -> None:
+    import pytest
+    from src.core.cockpit_builder import _build_context_proposal_findings
+    from src.commands import review_full
+    import src.core.context_proposal_review as projection
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("synthetic implementation failure")
+
+    now = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    for loader in ("load_pending_context_proposal_rows", "load_context_gaps"):
+        with monkeypatch.context() as patch:
+            patch.setattr(projection, loader, fail)
+            with pytest.raises(RuntimeError):
+                _build_context_proposal_findings("contoso", programs_root=tmp_path, observed_at=now)
+            with pytest.raises(RuntimeError):
+                review_full._build_context_revision_rows("contoso", programs_root=tmp_path, as_of=now)

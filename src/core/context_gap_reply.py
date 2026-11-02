@@ -1,21 +1,15 @@
 """ADF-W3.7 remainder (specs/arch-data-fix.md Section 11.4, "reply
-re-ingestion"): turning a stakeholder's reply into a staged, human-applied
-config-write proposal.
+re-ingestion"): turning a stakeholder's reply into a staged, manually
+reviewed context proposal.
 
-Per the live decisions with the user (Decisions 3 and 3b, 2026-07-13): a
-reply is never auto-applied to `workstream_registry.yaml`. It is parsed
-into a ``ContextGapAnswerProposal`` -- staged, reviewable, editable -- and
-only ``apply_context_gap_answer`` (fired on explicit approval) writes it
-back, mirroring every other proposal type built this session
-(`RiskProposal`/`MeetingAction`/`TopThreeCandidateProposal`/...). The write
-itself is a full ``yaml.safe_load``/``yaml.safe_dump`` round-trip with a
-``.bak`` backup, matching `workstream_documents.py::save_workstreams_document`'s
-existing precedent for its own file (Decision 3b: no comments exist in the
-real registry file, so the round-trip costs only the BOM/exact formatting,
-not authored content).
+The legacy ``ContextGapAnswerProposal`` remains staged, reviewable and
+editable, but its in-memory approval does not authorize registry writes.
+``apply_context_gap_answer`` refuses application under the existing
+manual-diff-only policy. Current reply intake stages pending NCFL proposals
+for ``vertex context manual-diff``; it grants no authored-write authority.
 
-Auto-apply is further narrowed to the subset of context gaps with an
-unambiguous, safe write target: a workstream's `deep_context.why`/`.what`/
+Legacy target resolution is narrowed to the subset of context gaps with an
+unambiguous field target: a workstream's `deep_context.why`/`.what`/
 `.how` field (`context_gap_store.py::_make_fix_hint`'s own naming). Every
 other gap type (owner email, KPI validation, generic "review X" gaps) is
 still parsed and staged for visibility, but ``resolve_apply_target``
@@ -28,15 +22,10 @@ not guess at.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-import os
 from pathlib import Path
-import shutil
 from typing import Literal
 
-import yaml
-
 from src.core.context_gap_store import RankedGap
-from src.core.workstream_registry import registry_path_for_program
 
 ContextGapAnswerStatus = Literal["staged", "approved", "rejected"]
 
@@ -57,7 +46,7 @@ class ParsedReply:
 
 @dataclass(frozen=True, slots=True)
 class ConfigWriteTarget:
-    """The one supported auto-apply shape: a workstream's deep_context
+    """The legacy proposal target shape: a workstream's deep_context
     sub-field in workstream_registry.yaml."""
 
     workstream_id: str
@@ -124,19 +113,7 @@ def reject_context_gap_answer(proposal: ContextGapAnswerProposal, *, reason: str
 
 
 def apply_context_gap_answer(proposal: ContextGapAnswerProposal, *, programs_root: Path) -> None:
-    """Only fires on an approved, auto-applicable proposal.
-
-    Per the live decision with the user (Decision 3b, 2026-07-13): a full
-    ``yaml.safe_load``/``yaml.safe_dump`` round-trip, matching the exact
-    safety pattern `workstream_documents.py::save_workstreams_document`
-    already uses for its own file (`.bak` backup, atomic temp-then-replace)
-    -- applied here to `workstream_registry.yaml` for the first time, since
-    no writer existed for it before now (only readers:
-    `workstream_registry.py::load_authored_workstream_registry`/
-    `load_workstream_registry`). `programs/samplealpha/workstream_registry.yaml`
-    (the real, largest instance) has zero comment lines, so the round-trip's
-    only real cosmetic cost is the file's leading BOM and exact formatting,
-    not any authored content."""
+    """Refuse legacy registry writes; in-memory approval grants no authority."""
     if proposal.status != "approved":
         raise ContextGapReplyError(
             f"ContextGapAnswerProposal {proposal.id!r} has status={proposal.status!r}, not 'approved' -- "
@@ -147,37 +124,10 @@ def apply_context_gap_answer(proposal: ContextGapAnswerProposal, *, programs_roo
             f"ContextGapAnswerProposal {proposal.id!r} has no auto-apply target -- this gap type "
             "requires a manual config edit; there is no safe generic write path for it."
         )
-    path = registry_path_for_program(proposal.program_id, programs_root=programs_root)
-    if not path.exists():
-        raise ContextGapReplyError(f"{path} does not exist -- cannot apply.")
-    with path.open("r", encoding="utf-8") as handle:
-        document = yaml.safe_load(handle) or {}
-    if not isinstance(document, dict):
-        raise ContextGapReplyError(f"Expected mapping at top-level in {path} -- cannot apply.")
-    workstreams = document.get("workstreams")
-    if not isinstance(workstreams, list):
-        raise ContextGapReplyError(f"{path} has no 'workstreams' list -- cannot apply.")
-
-    updated = False
-    for entry in workstreams:
-        if not isinstance(entry, dict) or entry.get("id") != proposal.target.workstream_id:
-            continue
-        deep_context = entry.setdefault("deep_context", {})
-        if not isinstance(deep_context, dict):
-            raise ContextGapReplyError(
-                f"workstream {proposal.target.workstream_id!r} has a non-mapping 'deep_context' in {path} -- cannot apply."
-            )
-        deep_context[proposal.target.field] = proposal.proposed_value
-        updated = True
-        break
-    if not updated:
-        raise ContextGapReplyError(f"workstream {proposal.target.workstream_id!r} not found in {path} -- cannot apply.")
-
-    if path.exists():
-        shutil.copy2(path, path.with_suffix(f"{path.suffix}.bak"))
-    temp_path = path.with_suffix(f"{path.suffix}.tmp")
-    temp_path.write_text(yaml.safe_dump(document, sort_keys=False, allow_unicode=False), encoding="utf-8")
-    os.replace(temp_path, path)
+    raise ContextGapReplyError(
+        "workstream_registry is manual-diff-only -- legacy proposal approval does not authorize writes; "
+        "use vertex context manual-diff for a pending NCFL reply proposal."
+    )
 
 
 __all__ = [

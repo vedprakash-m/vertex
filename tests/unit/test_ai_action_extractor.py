@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -8,8 +9,10 @@ from src.ai.ai_mode import AIMode, set_ai_mode
 from src.ai.client import AIClientError
 from src.ai.llm_trace import AITraceContext
 from src.ai.action_extractor import PROMPT_VERSION, ActionExtractor, ActionExtractorError
+from src.core.action_extractor_basic import extract_actions_from_signals
 from src.core.models import Confidence
 from src.core.models_v2 import AIConfig, ActionSourceType, ActionStatus, Program, Signal
+from src.core.policy_loader import load_ai_feature_policy
 
 
 class _FakeAIClient:
@@ -742,6 +745,125 @@ def test_action_extractor_from_program_surfaces_vertex_ai_alias_in_missing_env_e
                 ai=AIConfig(enabled=True, budget_usd_per_run=0.25),
             )
         )
+
+
+@pytest.mark.parametrize("bad", [
+    "Action: Check release | owner=!!! | due=2026-05-15 | refs=WI:1001",
+    "Action: Check release | owner=alex | due=2026-05-15 | refs=invalid",
+])
+def test_action_extractor_preserves_valid_markers_on_malformed_fallback(bad: str) -> None:
+    marker = "Action: Confirm checkpoint | owner=priya | due=2026-05-14 | refs=WI:1001"
+    signal = Signal(
+        id="mixed-marker", timestamp=datetime(2026, 5, 10, tzinfo=timezone.utc),
+        source="meeting/transcript", program_id="acme", workstream_id="deployment",
+        entity_refs=("WI:1001",), text=marker + "\n" + bad + "\nNeed to publish the checklist.",
+        raw_ref=None, confidence=Confidence.MEDIUM, metadata={"sender_alias": "alex"},
+    )
+    client = _FakeAIClient({"actions": []})
+    actions = ActionExtractor(client=client).extract_actions(program_id="acme", signals=(signal,))
+    original = ActionExtractor(client=client).extract_actions(
+        program_id="acme", signals=(replace(signal, text=marker),),
+    )[0]
+    assert actions[0] == original
+    assert any(action.text == "Need to publish the checklist." for action in actions)
+    assert all(marker not in action.text for action in actions)
+    assert client.calls == 0
+
+
+def test_action_extractor_malformed_fallback_frontier_retains_metadata_and_dedupes(monkeypatch) -> None:
+    policy = replace(load_ai_feature_policy("action_extractor"), tier0_confidence_threshold=1.0)
+    monkeypatch.setattr("src.ai.action_extractor.load_ai_feature_policy", lambda feature: policy)
+    marker = "Action: Confirm checkpoint | owner=priya | due=2026-05-14 | refs=WI:1001"
+    bad = "Action:"
+    signal = Signal(
+        id="mixed-frontier", timestamp=datetime(2026, 5, 10, tzinfo=timezone.utc),
+        source="meeting/transcript", program_id="acme", workstream_id="deployment",
+        entity_refs=("WI:1001",), text="  " + marker + "\r\n" + marker + "\r\n" + bad + "\r\nPlease publish checklist.",
+        raw_ref=None, confidence=Confidence.MEDIUM, metadata={"sender_alias": "alex"},
+    )
+    client = _FakeAIClient({"actions": [
+        {"text": "Confirm checkpoint", "owner_alias": "priya", "due_date": "2026-05-14", "linked_work_item_ids": [1001]},
+        {"text": "Publish checklist", "owner_alias": None, "due_date": None, "linked_work_item_ids": []},
+    ]})
+    actions = ActionExtractor(client=client).extract_actions(program_id="acme", signals=(signal,))
+    assert [action.text for action in actions] == ["Confirm checkpoint", "Confirm checkpoint", "Publish checklist"]
+    assert actions[-1].source_signal_id == signal.id
+    assert actions[-1].owner_alias == "alex"
+    assert actions[-1].linked_work_item_ids == (1001,)
+    assert client.calls == 1
+    assert client.last_user is not None
+    assert marker not in client.last_user
+    assert "Action:\r\nPlease publish checklist." in client.last_user
+
+
+def test_action_extractor_malformed_fallback_keeps_frontier_errors(monkeypatch) -> None:
+    policy = replace(load_ai_feature_policy("action_extractor"), tier0_confidence_threshold=1.0)
+    monkeypatch.setattr("src.ai.action_extractor.load_ai_feature_policy", lambda feature: policy)
+    signal = Signal(
+        id="mixed-error", timestamp=datetime(2026, 5, 10, tzinfo=timezone.utc),
+        source="meeting/transcript", program_id="acme", workstream_id=None,
+        entity_refs=(), text="Action: Confirm checkpoint | owner=priya\nAction:",
+        raw_ref=None, confidence=Confidence.MEDIUM,
+    )
+    with pytest.raises(ActionExtractorError, match="must include an actions list"):
+        ActionExtractor(client=_FakeAIClient({})).extract_actions(program_id="acme", signals=(signal,))
+
+
+def test_action_extractor_malformed_only_keeps_existing_heuristic_result() -> None:
+    text = "Action: Check release | owner=!!! | refs=invalid"
+    signal = Signal(
+        id="malformed-only", timestamp=datetime(2026, 5, 10, tzinfo=timezone.utc),
+        source="meeting/transcript", program_id="acme", workstream_id=None,
+        entity_refs=(), text=text, raw_ref=None, confidence=Confidence.MEDIUM,
+    )
+    client = _FakeAIClient({"actions": []})
+    actions = ActionExtractor(client=client).extract_actions(program_id="acme", signals=(signal,))
+    expected = extract_actions_from_signals((signal,), "acme")
+    assert [(action.id, action.text) for action in actions] == [(action.id, action.text) for action in expected]
+    assert client.calls == 0
+
+
+def test_action_extractor_malformed_date_keeps_existing_fallback_error() -> None:
+    signal = Signal(
+        id="mixed-date", timestamp=datetime(2026, 5, 10, tzinfo=timezone.utc),
+        source="meeting/transcript", program_id="acme", workstream_id=None,
+        entity_refs=(), text="Action: Confirm checkpoint | owner=priya\nAction: Check release | due=2026-13-01",
+        raw_ref=None, confidence=Confidence.MEDIUM,
+    )
+    with pytest.raises(ValueError, match="month must be in"):
+        ActionExtractor(client=_FakeAIClient({})).extract_actions(program_id="acme", signals=(signal,))
+
+
+def test_action_extractor_valid_only_keeps_nonmarker_short_circuit_and_duplicates() -> None:
+    marker = "Action: Confirm checkpoint | owner=priya"
+    signal = Signal(
+        id="valid-only", timestamp=datetime(2026, 5, 10, tzinfo=timezone.utc),
+        source="meeting/transcript", program_id="acme", workstream_id=None,
+        entity_refs=(), text=marker + "\n" + marker + "\nNeed to publish checklist.",
+        raw_ref=None, confidence=Confidence.MEDIUM,
+    )
+    client = _FakeAIClient({"actions": []})
+    actions = ActionExtractor(client=client).extract_actions(program_id="acme", signals=(signal,))
+    assert [action.text for action in actions] == ["Confirm checkpoint", "Confirm checkpoint"]
+    assert actions[0].id == actions[1].id
+    assert client.calls == 0
+
+
+def test_action_extractor_malformed_fallback_preserves_marker_order_across_signals() -> None:
+    signal = Signal(
+        id="mixed-first", timestamp=datetime(2026, 5, 10, tzinfo=timezone.utc),
+        source="meeting/transcript", program_id="acme", workstream_id=None,
+        entity_refs=(), text="Action:\nAction: First checkpoint | owner=priya",
+        raw_ref=None, confidence=Confidence.MEDIUM,
+    )
+    second = replace(signal, id="mixed-second", text="\nAction: Second checkpoint | owner=alex\nNeed to publish checklist.")
+    client = _FakeAIClient({"actions": []})
+    actions = ActionExtractor(client=client).extract_actions(program_id="acme", signals=(signal, second))
+    assert [action.text for action in actions] == [
+        "First checkpoint", "Second checkpoint", "Action:", "Need to publish checklist.",
+    ]
+    assert [action.source_signal_id for action in actions] == [signal.id, second.id, signal.id, second.id]
+    assert client.calls == 0
 
 
 def test_action_extractor_from_program_does_not_require_env_when_invocation_ai_disabled(monkeypatch) -> None:

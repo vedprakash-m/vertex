@@ -634,6 +634,7 @@ _INV9_BAN_LIST_CALLERS = frozenset(
         "src/commands/confirm.py",
         "src/commands/propose.py",
         "src/commands/apply_proposals.py",
+        "src/core/owner_pack.py",
     }
 )
 

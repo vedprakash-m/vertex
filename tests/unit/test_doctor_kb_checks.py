@@ -1,10 +1,302 @@
 from __future__ import annotations
 from pathlib import Path
+from unittest.mock import patch
 
+import pytest
+import yaml
+
+from src.core.exceptions import ConfigError
 from src.commands.doctor_checks.models import DoctorCheck
 from src.commands.doctor_checks.kb_checks import knowledge_predicate_registry_check, run_kb_doctor
 from src.core.people_registry_identity import bootstrap_registry_identity
 from src.core.people_registry_lease import acquire_registry_lease
+
+
+def test_doctor_compiles_shared_people_once_and_new_run_observes_edits(tmp_path: Path) -> None:
+    from src.core import kb_updates
+
+    root = tmp_path / "programs"
+    shared = tmp_path / "knowledge"
+    shared.mkdir()
+    people = shared / "people_directory.yaml"
+    people.write_text("schema_version: '1.0'\npeople: [{alias: alice}]\n", encoding="utf-8")
+    for name in ("a", "b", "c"):
+        program = root / name
+        program.mkdir(parents=True)
+        (program / "program.yaml").write_text(f"schema_version: '3.0'\nid: {name}\nname: {name}\n", encoding="utf-8")
+    parse = kb_updates.parse_knowledge_documents
+    compiled_people: list[int] = []
+
+    def observed(documents: dict, **kwargs: object) -> object:
+        if "people_directory.yaml" in documents:
+            compiled_people.append(len(documents["people_directory.yaml"].get("people", [])))
+        return parse(documents, **kwargs)
+
+    with patch.object(kb_updates, "parse_knowledge_documents", side_effect=observed):
+        first = run_kb_doctor(editions_root=tmp_path / "editions", programs_root=root)
+        people.write_text("schema_version: '1.0'\npeople: [{alias: alice}, {alias: bob}]\n", encoding="utf-8")
+        second = run_kb_doctor(editions_root=tmp_path / "editions", programs_root=root)
+    assert compiled_people == [1, 2]
+    assert "3 people" in next(check.detail for check in first.checks if check.label == "Knowledge")
+    assert "6 people" in next(check.detail for check in second.checks if check.label == "Knowledge")
+
+
+def test_doctor_decodes_shared_people_twice_including_untouched_bridge(tmp_path: Path) -> None:
+    from src.core import people_directory_schema as schema
+
+    root = tmp_path / "programs"
+    shared = tmp_path / "knowledge"
+    shared.mkdir()
+    (shared / "people_directory.yaml").write_text(
+        "schema_version: '2.0'\npeople: [{entity_id: 'person:a', alias: alice}]\n", encoding="utf-8",
+    )
+    for name in ("a", "b", "c"):
+        program = root / name
+        program.mkdir(parents=True)
+        (program / "program.yaml").write_text(f"schema_version: '3.0'\nid: {name}\nname: {name}\n", encoding="utf-8")
+    with patch.object(schema, "fast_safe_load", wraps=schema.fast_safe_load) as parsed:
+        run_kb_doctor(editions_root=tmp_path / "editions", programs_root=root)
+    assert parsed.call_count == 2
+
+
+@pytest.mark.parametrize("kind", ["people", "teams"])
+def test_revalidated_read_captured_input_edits_errors_missing_and_isolation(tmp_path: Path, kind: str) -> None:
+    from src.commands.doctor_checks import kb_checks
+
+    path = tmp_path / f"{kind}.yaml"
+    cache: dict = {}
+    loader = kb_checks._load_revalidated_people if kind == "people" else kb_checks._load_revalidated_teams
+    public = kb_checks.load_people_directory if kind == "people" else kb_checks.load_teams
+    text = ("people: [{entity_id: 'person:a', alias: a, display_name: &x {nested: [one]}, title: *x}]\n"
+            if kind == "people" else "teams: [{entity_id: 'team:t', id: t, kind: org_team, parent_team_id: {nested: [one]}}]\n")
+    assert loader(path, cache) is None
+    path.write_text(text, encoding="utf-8")
+    first = loader(path, cache)
+    second = loader(path, cache)
+    assert first == second == public(path)
+    assert first is not second
+    first_value = first.people[0].display_name if kind == "people" else first.teams[0].parent_team_id
+    first_value["nested"].append("changed")
+    second_value = second.people[0].display_name if kind == "people" else second.teams[0].parent_team_id
+    assert second_value == {"nested": ["one"]}
+    if kind == "people":
+        assert second.people[0].display_name is second.people[0].title
+    assert loader(path, cache) == second
+    invalid = f"{kind}: wrong\n"
+    path.write_text(invalid, encoding="utf-8")
+    with pytest.raises(ConfigError) as expected:
+        public(path)
+    with pytest.raises(ConfigError) as actual:
+        loader(path, cache)
+    assert str(actual.value) == str(expected.value)
+    assert cache == {}
+    path.write_text(text, encoding="utf-8")
+    assert loader(path, cache) == second
+    path.unlink()
+    assert loader(path, cache) is None and cache == {}
+    path.write_text(text, encoding="utf-8")
+    parser_name = "parse_people_directory_text" if kind == "people" else "parse_teams_text"
+    parser = getattr(kb_checks, parser_name)
+
+    def edit_after_capture(text: str, **kwargs: object) -> object:
+        path.write_text(invalid, encoding="utf-8")
+        return parser(text, **kwargs)
+
+    with patch.object(kb_checks, parser_name, side_effect=edit_after_capture):
+        assert loader(path, cache) == second
+    with pytest.raises(ConfigError):
+        loader(path, cache)
+
+
+def test_revalidated_people_legacy_clock_bypass_and_cyclic_mutable_isolation(tmp_path: Path) -> None:
+    from datetime import datetime, timedelta, timezone
+    from src.commands.doctor_checks import kb_checks
+
+    path = tmp_path / "people.yaml"
+    cache: dict = {}
+    path.write_text("people: [{entity_id: 'person:a', alias: a}]\n", encoding="utf-8")
+    kb_checks._load_revalidated_people(path, cache)
+    assert cache
+    path.write_text("people: [{entity_id: 'person:a', alias: a, email: a@example.test}]\n", encoding="utf-8")
+    now = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    times = iter((now, now + timedelta(days=1)))
+
+    class Clock:
+        @staticmethod
+        def now(tz: object) -> datetime:
+            return next(times)
+
+    with patch.object(kb_checks, "datetime", Clock):
+        first = kb_checks._load_revalidated_people(path, cache)
+        second = kb_checks._load_revalidated_people(path, cache)
+    assert cache == {}
+    assert first.people[0].contacts[0].verified_at == now
+    assert second.people[0].contacts[0].verified_at == now + timedelta(days=1)
+    path.write_text("people: [{alias: a, display_name: &x {self: *x}}]\n", encoding="utf-8")
+    first = kb_checks._load_revalidated_people(path, cache)
+    first.people[0].display_name["changed"] = True
+    second = kb_checks._load_revalidated_people(path, cache)
+    assert second.people[0].display_name["self"] is second.people[0].display_name
+    assert "changed" not in second.people[0].display_name
+
+
+def test_doctor_stale_observes_intervening_invalid_edit_and_local_shadow_error_order(tmp_path: Path) -> None:
+    from src.commands.doctor_checks import kb_checks
+
+    root = tmp_path / "programs"
+    program = root / "fixture"
+    program.mkdir(parents=True)
+    (program / "program.yaml").write_text("schema_version: '3.0'\nid: fixture\nname: Fixture\n", encoding="utf-8")
+    shared = tmp_path / "knowledge"
+    shared.mkdir()
+    path = shared / "people_directory.yaml"
+    path.write_text("people: [{entity_id: 'person:a', alias: a}]\n", encoding="utf-8")
+    stale = kb_checks.registry_dir03_stale_fields_check
+
+    def edited_stale(**kwargs: object) -> object:
+        path.write_text("people: wrong\n", encoding="utf-8")
+        return stale(**kwargs)
+
+    with patch.object(kb_checks, "registry_dir03_stale_fields_check", side_effect=edited_stale):
+        with pytest.raises(ConfigError, match="'people' must be a list"):
+            run_kb_doctor(editions_root=tmp_path / "editions", programs_root=root)
+    path.write_text("people: [{entity_id: 'person:a', alias: a}]\n", encoding="utf-8")
+    local = program / "knowledge"
+    local.mkdir()
+    (local / "people_directory.yaml").write_text("people: wrong\n", encoding="utf-8")
+    with patch.object(kb_checks, "_load_shared_registry_snapshot", side_effect=AssertionError("eager snapshot")):
+        with pytest.raises(ConfigError, match="'people' must be a list"):
+            run_kb_doctor(editions_root=tmp_path / "editions", programs_root=root)
+
+
+@pytest.mark.parametrize("kind", ["people", "teams"])
+def test_revalidated_read_valid_replacement_utf8_and_io_error_parity(tmp_path: Path, kind: str) -> None:
+    from src.commands.doctor_checks import kb_checks
+
+    path = tmp_path / f"{kind}.yaml"
+    cache: dict = {}
+    loader = kb_checks._load_revalidated_people if kind == "people" else kb_checks._load_revalidated_teams
+    public = kb_checks.load_people_directory if kind == "people" else kb_checks.load_teams
+    first_text = "people: [{alias: first}]\n" if kind == "people" else "teams: [{id: first}]\n"
+    second_text = first_text.replace("first", "second")
+    path.write_text(first_text, encoding="utf-8")
+    first = loader(path, cache)
+    path.write_text(second_text, encoding="utf-8")
+    second = loader(path, cache)
+    assert first != second and second == public(path)
+    assert cache[path][0] == second_text
+    assert len(cache) == 1
+    path.write_bytes(b"\xff")
+    with pytest.raises(UnicodeDecodeError) as expected:
+        public(path)
+    with pytest.raises(UnicodeDecodeError) as actual:
+        loader(path, cache)
+    assert str(actual.value) == str(expected.value)
+    with patch.object(Path, "read_text", side_effect=OSError("unreadable")):
+        with pytest.raises(OSError, match="unreadable"):
+            public(path)
+        with pytest.raises(OSError, match="unreadable"):
+            loader(path, cache)
+    path.write_text(second_text, encoding="utf-8")
+    assert loader(path, cache) == second
+
+
+def test_doctor_typed_reuse_is_invocation_local_and_stale_observes_valid_edit(tmp_path: Path) -> None:
+    from src.commands.doctor_checks import kb_checks
+    from src.core import people_directory_schema as schema
+
+    root = tmp_path / "programs"
+    program = root / "fixture"
+    program.mkdir(parents=True)
+    (program / "program.yaml").write_text("schema_version: '3.0'\nid: fixture\nname: Fixture\n", encoding="utf-8")
+    shared = tmp_path / "knowledge"
+    shared.mkdir()
+    path = shared / "people_directory.yaml"
+    path.write_text("schema_version: '2.0'\npeople: [{entity_id: 'person:a', alias: a}]\n", encoding="utf-8")
+    with patch.object(schema, "fast_safe_load", wraps=schema.fast_safe_load) as parsed:
+        run_kb_doctor(editions_root=tmp_path / "editions", programs_root=root)
+        assert parsed.call_count == 2
+        parsed.reset_mock()
+        path.write_text("schema_version: '2.0'\npeople: [{entity_id: 'person:b', alias: b}]\n", encoding="utf-8")
+        run_kb_doctor(editions_root=tmp_path / "editions", programs_root=root)
+        assert parsed.call_count == 2
+    stale = kb_checks.registry_dir03_stale_fields_check
+    observed: list[str] = []
+
+    def edited_stale(*, programs_root: Path, people_loader: object) -> object:
+        path.write_text("schema_version: '2.0'\npeople: [{entity_id: 'person:c', alias: c}]\n", encoding="utf-8")
+        observed.append(people_loader(path).people[0].alias)
+        return stale(programs_root=programs_root, people_loader=people_loader)
+
+    with patch.object(kb_checks, "registry_dir03_stale_fields_check", side_effect=edited_stale):
+        run_kb_doctor(editions_root=tmp_path / "editions", programs_root=root)
+    assert observed == ["c"]
+
+
+def test_shared_registry_snapshot_decodes_entities_once(tmp_path: Path) -> None:
+    from src.commands.doctor_checks.kb_checks import _load_shared_registry_snapshot
+    from src.core import people_entity_schema
+
+    path = tmp_path / "knowledge" / "entities.yaml"
+    path.parent.mkdir()
+    path.write_text("schema_version: '2.0'\nentities: []\nredirects: []\n", encoding="utf-8")
+    with patch.object(people_entity_schema, "fast_safe_load", wraps=people_entity_schema.fast_safe_load) as parsed:
+        snapshot = _load_shared_registry_snapshot(tmp_path / "programs")
+    assert snapshot.entities_path_exists and snapshot.has_schema2_entities
+    assert snapshot.entities == () and snapshot.redirects == ()
+    assert parsed.call_count == 1
+
+
+@pytest.mark.parametrize("text, expected", [
+    (None, (False, False)),
+    ("entities: []\n", (True, False)),
+    ("schema_version: '2.0'\nentities: []\n", (True, True)),
+])
+def test_shared_registry_snapshot_absent_and_legacy_compatibility(tmp_path: Path, text: str | None, expected: tuple) -> None:
+    from src.commands.doctor_checks.kb_checks import _load_shared_registry_snapshot
+
+    if text is not None:
+        path = tmp_path / "knowledge" / "entities.yaml"
+        path.parent.mkdir()
+        path.write_text(text, encoding="utf-8")
+    snapshot = _load_shared_registry_snapshot(tmp_path / "programs")
+    assert (snapshot.entities_path_exists, snapshot.has_schema2_entities) == expected
+
+
+@pytest.mark.parametrize("text, error", [
+    ("schema_version: '9.0'\nentities: []\n", ConfigError),
+    ("- item\n", ConfigError),
+    ("entities: [\n", yaml.YAMLError),
+])
+def test_shared_registry_snapshot_rejects_invalid_entities(tmp_path: Path, text: str, error: type) -> None:
+    from src.commands.doctor_checks.kb_checks import _load_shared_registry_snapshot
+    path = tmp_path / "knowledge" / "entities.yaml"
+    path.parent.mkdir()
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(error):
+        _load_shared_registry_snapshot(tmp_path / "programs")
+
+
+def test_shared_registry_snapshot_retains_parsed_entities_during_replacement(tmp_path: Path) -> None:
+    from src.commands.doctor_checks.kb_checks import _load_shared_registry_snapshot
+    from src.core import people_entity_schema
+
+    path = tmp_path / "knowledge" / "entities.yaml"
+    path.parent.mkdir()
+    path.write_text("schema_version: '2.0'\nentities: []\n", encoding="utf-8")
+    parse = people_entity_schema.fast_safe_load
+
+    def replacing_parse(text: str) -> dict:
+        raw = parse(text)
+        replacement = path.with_suffix(".replacement")
+        replacement.write_text("entities: []\n", encoding="utf-8")
+        replacement.replace(path)
+        return raw
+
+    with patch.object(people_entity_schema, "fast_safe_load", side_effect=replacing_parse) as parsed:
+        snapshot = _load_shared_registry_snapshot(tmp_path / "programs")
+    assert snapshot.has_schema2_entities and parsed.call_count == 1
+    assert not _load_shared_registry_snapshot(tmp_path / "programs").has_schema2_entities
 
 
 def test_run_kb_doctor_fails_when_programs_and_editions_are_missing(tmp_path: Path) -> None:

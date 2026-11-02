@@ -8,7 +8,7 @@ import pytest
 
 from src.core.models import Confidence
 from src.core.models_v2 import SectionEvidenceBrief, SectionRevisionProposal, SectionRevisionStatus
-from src.core.section_proposal_store import append_proposal, build_section_revision_proposal_id, get_proposals_path, load_hint_proposals, load_proposals, supersede_pending_proposals, update_proposal_status
+from src.core.section_proposal_store import HintProposal, append_hint_proposal, append_proposal, build_section_revision_proposal_id, get_proposals_path, load_hint_proposals, load_proposals, supersede_pending_proposals, update_proposal_status
 
 
 def test_load_proposals_returns_latest_version_per_id(tmp_path: Path) -> None:
@@ -187,6 +187,71 @@ def test_load_proposals_keeps_legacy_records_without_optional_fields(tmp_path: P
     assert proposals[0].ai_model_used is None
     assert proposals[0].ai_cost_usd is None
 
+
+
+@pytest.mark.parametrize(
+    ("malformed_record", "expected_exception"),
+    [
+        ({"proposal_id": "proposal-1", "status": "pending"}, ValueError),
+        (
+            {
+                "evidence_brief": {
+                    "section_id": "ws_nova",
+                    "ado_delta_summary": "1 risk changed, 1 ETA updated.",
+                    "new_items": [101],
+                    "closed_items": [],
+                    "risk_changed_items": [101],
+                    "eta_changed_items": [102],
+                    "top_signals": ["sig-1", "sig-2"],
+                    "kpi_summary": "Deploy P50 4.2 hrs; Fleet Healthy 99.1%.",
+                    "stale_claims": ["claim-1"],
+                    "vitality_summary": "2 items scanned; 1 stale.",
+                    "confidence": "high",
+                },
+                "status": "pending",
+            },
+            TypeError,
+        ),
+    ],
+)
+def test_load_proposals_rejects_malformed_latest_discriminated_records(
+    tmp_path: Path, malformed_record: dict[str, object], expected_exception: type[Exception]
+) -> None:
+    programs_root = tmp_path / "programs"
+    proposal = _proposal(
+        "proposal-1",
+        generated_at=datetime(2026, 5, 17, 10, 0, tzinfo=timezone.utc),
+        status=SectionRevisionStatus.ACCEPTED,
+    )
+    append_proposal(proposal, "acme", 78, programs_root=programs_root)
+    proposals_path = get_proposals_path("acme", 78, programs_root=programs_root)
+    with proposals_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(malformed_record) + "\n")
+
+    with pytest.raises(expected_exception):
+        load_proposals("acme", 78, programs_root=programs_root)
+
+
+def test_load_mixed_section_and_hint_records_keeps_each_reader_compatible(tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    proposal = _proposal(
+        "proposal-section",
+        generated_at=datetime(2026, 5, 17, 10, 0, tzinfo=timezone.utc),
+    )
+    hint = HintProposal(
+        hint_id="hint-1",
+        edition="acme_weekly",
+        issue_number=78,
+        workstream_id="acme",
+        hint_kind="narrative",
+        suggested_sentence="Focus on the latest risk movement.",
+        status="pending",
+    )
+    append_proposal(proposal, "acme", 78, programs_root=programs_root)
+    append_hint_proposal(hint, "acme", 78, programs_root=programs_root)
+
+    assert load_proposals("acme", 78, programs_root=programs_root) == (proposal,)
+    assert load_hint_proposals("acme", 78, programs_root=programs_root) == (hint,)
 
 def test_load_proposals_rejects_numeric_string_new_items(tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"

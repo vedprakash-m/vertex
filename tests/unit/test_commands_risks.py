@@ -24,6 +24,88 @@ from src.core.risk_register_engine import assess_risk_staleness, load_risk_histo
 runner = CliRunner()
 
 
+@pytest.mark.parametrize("archive,journal", [(True, False), (False, True), (True, True)])
+@pytest.mark.parametrize("filtered", [False, True])
+def test_risks_history_cli_retained_sources_read_only(monkeypatch, tmp_path: Path, archive: bool, journal: bool, filtered: bool) -> None:
+    from scripts.archive_obsolete_risks import execute_archive
+    from src.core.risk_register_engine import record_risk_update
+
+    root = tmp_path / "programs"
+    monkeypatch.setattr("src.commands.risks.PROGRAMS_ROOT", root)
+    if archive:
+        _seed_risk_register(root)
+        entries = load_risk_register("demo", root)
+        save_risk_register("demo", (replace(entries[0], kind="candidate", status=RiskStatus.CLOSED,
+                                          source_signal_ids=("synthetic-evidence",),
+                                          entity_refs=("WI:123",), linked_work_item_ids=(123,)),), root)
+        execute_archive("demo", programs_root=root)
+    if journal:
+        record_risk_update("demo", "risk-demo-1", "open", "closed", "synthetic-reviewer", "Closure evidence", root)
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    args = ["risks", "history", "--program", "demo"]
+    if filtered:
+        args.extend(["--risk-id", "risk-demo-1"])
+    result = runner.invoke(app, args)
+    assert result.exit_code == 0, result.output
+    assert "risk-demo-1" in result.output
+    assert ("ARCHIVE OCCURRENCES" in result.output) == archive
+    assert ("STATUS UPDATES" in result.output) == journal
+    if archive:
+        assert "synthetic-evidence" in result.output
+        assert "archived_risks.yaml" in result.output
+        assert "SHA256" in result.output
+        assert "Entity refs: WI:123 | Work items: 123" in result.output
+    if journal:
+        assert "synthetic-reviewer" in result.output
+        assert "Closure evidence" in result.output
+    assert before == {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+
+@pytest.mark.parametrize("filtered", [False, True])
+def test_risks_history_cli_empty_is_noncreating(monkeypatch, tmp_path: Path, filtered: bool) -> None:
+    root = tmp_path / "absent" / "programs"
+    monkeypatch.setattr("src.commands.risks.PROGRAMS_ROOT", root)
+    args = ["risks", "history", "--program", "demo"]
+    if filtered:
+        args.extend(["--risk-id", "missing"])
+    result = runner.invoke(app, args)
+    assert result.exit_code == (2 if filtered else 0)
+    assert ("not found" if filtered else "No risk history") in result.output
+    assert not root.exists()
+
+
+def test_risks_history_cli_errors_before_success_without_journal_repair(monkeypatch, tmp_path: Path) -> None:
+    root = tmp_path / "programs"
+    monkeypatch.setattr("src.commands.risks.PROGRAMS_ROOT", root)
+    path = root / "demo" / "journal" / "risk_updates.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text('{"risk_id":"risk-demo-1"}\ninvalid\n', encoding="utf-8")
+    before = {path: path.read_bytes()}
+    result = runner.invoke(app, ["risks", "history", "--program", "demo", "--risk-id", "risk-demo-1"])
+    assert result.exit_code != 0
+    assert "Invalid risk history" in result.output
+    assert "STATUS UPDATES" not in result.output
+    assert before == {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+
+def test_risks_history_cli_archive_failure_precedes_journal_display(monkeypatch, tmp_path: Path) -> None:
+    from src.core.risk_register_engine import record_risk_update
+
+    root = tmp_path / "programs"
+    monkeypatch.setattr("src.commands.risks.PROGRAMS_ROOT", root)
+    record_risk_update("demo", "risk-demo-1", "open", "closed", "reviewer", "evidence", root)
+    directory = root / "demo" / ".archive" / "risk_register" / "20261101T194714Z"
+    directory.mkdir(parents=True)
+    (directory / "rollback_manifest.json").write_text("{}", encoding="utf-8")
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    result = runner.invoke(app, ["risks", "history", "--program", "demo"])
+    assert result.exit_code != 0
+    assert "Invalid risk archive history" in result.output
+    assert "STATUS UPDATES" not in result.output
+    assert "ARCHIVE OCCURRENCES" not in result.output
+    assert before == {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+
 def test_risks_add_and_list_cli(monkeypatch, tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     monkeypatch.setattr("src.commands.risks.PROGRAMS_ROOT", programs_root)

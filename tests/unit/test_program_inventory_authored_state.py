@@ -70,10 +70,118 @@ def test_recognized_authored_entries_come_from_registry_not_content(tmp_path: Pa
         assert entries[Path(entry.name)]["classification"] == "recognized"
         assert entries[Path(entry.name)]["tier"] == entry.tier
         assert entries[Path(entry.name)]["kind"] == entry.kind
-    assert report["scope"]["authored_registry_tiers"] == ["T-1", "T-2"]
+    assert report["scope"]["authored_registry_tiers"] == ["T-1", "T-2", "T-6"]
     assert report["scope"]["review_currency"] is False
     assert report["summary"]["authored_recognized_count"] == len(expected)
     assert report["summary"]["authored_unclassified_count"] == 0
+    assert report["summary"]["clean"] is True
+
+
+def test_canonical_operator_override_is_included_without_dirtying_inventory(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    program = _program(tmp_path)
+    overrides = program / "overrides"
+    overrides.mkdir()
+    override = overrides / "issue_999.yaml"
+    override.write_bytes(b"synthetic override")
+
+    assert program_inventory.main([
+        "--program", "fixture", "--programs-root", str(tmp_path), "--format", "json",
+    ]) == 0
+    report = json.loads(capsys.readouterr().out)
+
+    assert _entries(report)[Path("overrides") / "issue_999.yaml"] == {
+        "path": str(Path("overrides") / "issue_999.yaml"),
+        "kind": "file",
+        "classification": "recognized",
+        "tier": "T-6",
+        "size_bytes": len(b"synthetic override"),
+    }
+    assert report["scope"]["authored_registry_tiers"] == ["T-1", "T-2", "T-6"]
+    assert report["summary"]["authored_recognized_count"] == 4
+    assert report["summary"]["authored_unclassified_count"] == 0
+    assert report["summary"]["clean"] is True
+    assert "T-6 overrides" in program_inventory._render_human(report)
+
+
+def test_override_filename_matches_minimum_width_issue_number_format(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    program = _program(tmp_path)
+    overrides = program / "overrides"
+    overrides.mkdir()
+    issue_number = 1000
+    canonical_name = f"issue_{issue_number:03d}.yaml"
+    (overrides / canonical_name).write_bytes(b"synthetic override")
+    (overrides / "issue_0001.yaml").write_bytes(b"synthetic noncanonical")
+
+    assert program_inventory.main([
+        "--program", "fixture", "--programs-root", str(tmp_path), "--format", "json",
+    ]) == 1
+    report = json.loads(capsys.readouterr().out)
+    entries = _entries(report)
+
+    assert entries[Path("overrides") / canonical_name]["classification"] == "recognized"
+    assert entries[Path("overrides") / canonical_name]["tier"] == "T-6"
+    assert entries[Path("overrides") / "issue_0001.yaml"]["classification"] == "unclassified"
+    assert report["summary"]["authored_unclassified_count"] == 1
+
+
+def test_noncanonical_override_names_and_subdirectories_remain_unclassified(
+    tmp_path: Path,
+) -> None:
+    program = _program(tmp_path)
+    overrides = program / "overrides"
+    (overrides / "nested").mkdir(parents=True)
+    (overrides / "issue_1000.yaml").mkdir()
+    for relative in (
+        Path("custom.yaml"),
+        Path("issue_12.yaml"),
+        Path("issue_notes.yaml"),
+        Path("nested") / "issue_123.yaml",
+    ):
+        (overrides / relative).write_bytes(b"synthetic unknown")
+
+    report = program_inventory.inventory_program("fixture", tmp_path, root_only=False)
+    entries = _entries(report)
+
+    for relative in (
+        Path("overrides") / "custom.yaml",
+        Path("overrides") / "issue_12.yaml",
+        Path("overrides") / "issue_notes.yaml",
+        Path("overrides") / "issue_1000.yaml",
+        Path("overrides") / "nested",
+        Path("overrides") / "nested" / "issue_123.yaml",
+    ):
+        assert entries[relative]["classification"] == "unclassified"
+        assert entries[relative]["tier"] is None
+    assert report["summary"]["authored_unclassified_count"] == 6
+    assert report["summary"]["clean"] is False
+
+
+def test_root_only_does_not_inspect_operator_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    program = _program(tmp_path)
+    overrides = program / "overrides"
+    overrides.mkdir()
+    (overrides / "issue_999.yaml").write_bytes(b"preserve")
+    original = program_inventory._scan
+    scanned = []
+
+    def scan(path: Path):
+        scanned.append(path)
+        if path != program:
+            pytest.fail("Root-only must not enumerate authored descendants.")
+        return original(path)
+
+    monkeypatch.setattr(program_inventory, "_scan", scan)
+    report = program_inventory.inventory_program("fixture", tmp_path, root_only=True)
+
+    assert scanned == [program]
+    assert report["scope"]["authored_state"] == "root-only"
+    assert Path("overrides") / "issue_999.yaml" not in _entries(report)
     assert report["summary"]["clean"] is True
 
 
@@ -138,13 +246,16 @@ def test_root_only_discloses_uninspected_descendants_without_enumerating(
     assert "review currency not assessed" in human
 
 
+@pytest.mark.parametrize("directory", ["knowledge", "overrides"])
 @pytest.mark.parametrize("failure", ["stat", "enumeration", "late-enumeration", "disappeared"])
 def test_authored_access_failures_never_emit_partial_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str], failure: str,
+    capsys: pytest.CaptureFixture[str], failure: str, directory: str,
 ) -> None:
     program = _program(tmp_path)
-    target = program / "knowledge" / "new_authored.yaml"
+    authored_dir = program / directory
+    authored_dir.mkdir(exist_ok=True)
+    target = authored_dir / "new_authored.yaml"
     target.write_bytes(b"preserve")
     original_stat = Path.stat
     original_scan = program_inventory._scan
@@ -192,12 +303,15 @@ def test_wrong_kind_authored_registry_entry_is_not_recognized(tmp_path: Path, en
     assert report["summary"]["clean"] is False
 
 
+@pytest.mark.parametrize("directory", ["knowledge", "overrides"])
 @pytest.mark.parametrize("entry_type", ["symlink", "reparse", "special"])
 def test_authored_descendant_links_reparse_and_special_entries_abort(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry_type: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry_type: str, directory: str,
 ) -> None:
     program = _program(tmp_path)
-    target = program / "knowledge" / "new_authored.yaml"
+    authored_dir = program / directory
+    authored_dir.mkdir(exist_ok=True)
+    target = authored_dir / "new_authored.yaml"
     target.write_bytes(b"preserve")
     original = Path.stat
 
@@ -241,6 +355,8 @@ def test_collection_audit_forbids_content_hashes_databases_providers_and_writes(
 ) -> None:
     program = _program(tmp_path)
     (program / "knowledge" / "unknown.md").write_bytes(b"synthetic authored metadata")
+    (program / "overrides").mkdir()
+    (program / "overrides" / "issue_999.yaml").write_bytes(b"synthetic override")
     active = False
 
     def forbidden(*_args: object, **_kwargs: object):

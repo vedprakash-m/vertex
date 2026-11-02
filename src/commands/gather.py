@@ -3129,7 +3129,7 @@ def _build_kusto_kpi_signal(
             "row_count": len(rows),
             "label": query.label,
             "result_column": query.result_column,
-            "result_value": result_value,
+            "result_value": result_value, "unit": query.unit,
             "result_json": json.dumps(first_row, default=str, sort_keys=True),
         },
     )

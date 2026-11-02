@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
+import pytest
+
+import src.ai.dependency_blast_radius_generator as blast_radius_generator
 from src.ai.dependency_blast_radius_generator import (
     POLICY_VERSION,
     generate_dependency_blast_radius_proposal,
@@ -12,6 +16,7 @@ from src.ai.dependency_blast_radius_generator import (
 )
 from src.ai.structured_feature_runner import RunnerContext
 from src.core.dependency_blast_radius import DependencyBlastRadiusRequest
+from src.core.ledger.event_log import read_events
 from src.core.quality_gates.ai_release_audit import released_terminal_for_run
 
 
@@ -78,6 +83,69 @@ def test_valid_response_is_released(tmp_path: Path) -> None:
     assert "cascading" in proposal.blast_radius_narrative
     assert proposal.evidence_refs == ("sig-1",)
     assert released_terminal_for_run(proposal.ai_run_id, program_id="acme", programs_root=programs_root).value == "released"
+
+
+@pytest.mark.parametrize(
+    ("evidence_texts", "evidence_refs", "response_ref"),
+    [
+        (("Vendor confirmed the API contract review date.",), ("sig-1", "orphan-ref"), "orphan-ref"),
+        (("Vendor confirmed the API contract review date.", "orphan text"), ("sig-1",), "sig-1"),
+    ],
+)
+def test_unpaired_evidence_is_discarded_before_policy_cache_or_provider(
+    evidence_texts: tuple[str, ...],
+    evidence_refs: tuple[str, ...],
+    response_ref: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    programs_root = tmp_path / "programs"
+    run_id = "unpaired-dependency-run"
+    request = replace(_request(), evidence_texts=evidence_texts, evidence_refs=evidence_refs)
+    response = _valid_response()
+    response["evidence_refs"] = [response_ref]
+    client = _FakeClient(response=response)
+    policy_calls: list[object] = []
+    cache_calls: list[object] = []
+    load_policy = blast_radius_generator.load_ai_feature_policy
+    cached_response = blast_radius_generator._cached_response
+
+    def track_policy(*args: object, **kwargs: object) -> object:
+        policy_calls.append(args)
+        return load_policy(*args, **kwargs)
+
+    def track_cache(*args: object, **kwargs: object) -> object:
+        cache_calls.append(args)
+        return cached_response(*args, **kwargs)
+
+    monkeypatch.setattr(blast_radius_generator, "new_ai_run_id", lambda: run_id)
+    monkeypatch.setattr(blast_radius_generator, "load_ai_feature_policy", track_policy)
+    monkeypatch.setattr(blast_radius_generator, "_cached_response", track_cache)
+
+    assert generate_dependency_blast_radius_proposal(request, client=client, programs_root=programs_root) is None
+    assert client.calls == 0
+    assert policy_calls == []
+    assert cache_calls == []
+    events = [event for event in read_events("acme", programs_root=programs_root) if event.payload.get("ai_run_id") == run_id]
+    assert [event.payload["state"] for event in events if event.event_type == "ai.run_lifecycle.v1"] == ["planned"]
+    assert [event.payload["terminal"] for event in events if event.event_type == "ai.release_decision.v1"] == ["discarded"]
+
+
+def test_both_empty_evidence_is_supported(tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    response = _valid_response()
+    response["evidence_refs"] = []
+    client = _FakeClient(response=response)
+
+    proposal = generate_dependency_blast_radius_proposal(
+        replace(_request(), evidence_texts=(), evidence_refs=()),
+        client=client,
+        programs_root=programs_root,
+    )
+
+    assert proposal is not None
+    assert proposal.evidence_refs == ()
+    assert client.calls == 1
 
 
 def test_empty_next_proving_event_is_rejected(tmp_path: Path) -> None:

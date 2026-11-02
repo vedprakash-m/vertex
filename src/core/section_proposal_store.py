@@ -70,7 +70,7 @@ def load_proposals(
 
     latest_by_id: dict[str, SectionRevisionProposal] = {}
     for record in _read_jsonl(path):
-        if "proposal_id" in record and "evidence_brief" in record:
+        if "proposal_id" in record or "evidence_brief" in record:
             proposal = _proposal_from_record(record)
             latest_by_id[proposal.proposal_id] = proposal
 

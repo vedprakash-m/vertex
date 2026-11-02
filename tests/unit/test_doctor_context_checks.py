@@ -1,13 +1,349 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
+import json
 from pathlib import Path
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
 
 from src.commands.doctor_checks import context_checks
 from src.core.program_context import InvariantSeverity
+
+
+def _diagnostic_workspace(tmp_path: Path) -> Path:
+    from tests.unit.test_program_context import _reviewed_program, _write_yaml
+
+    root = _reviewed_program(tmp_path)
+    program_dir = root / "test_prog"
+    _write_yaml(program_dir / "scorecards.yaml", {
+        "schema_version": "1.0", "scorecards": [], "last_reviewed_date": date.today().isoformat(),
+    })
+    _write_yaml(program_dir / "editions" / "test_weekly.yaml", {
+        "schema_version": "2.0", "id": "test_weekly", "program_id": "test_prog",
+        "name": "Test Weekly", "type": "detailed", "altitude": "newsletter", "cadence": "weekly",
+    })
+    _write_yaml(program_dir / "editorial_rules.yaml", {
+        "schema_version": "1.0", "voice_contract": {
+            "applies_to_editions": ["test_weekly"],
+        }, "last_reviewed_date": date.today().isoformat(),
+    })
+    return root
+
+
+def _diagnostic_doctor_cli(monkeypatch, tmp_path: Path, root: Path, format: str):
+    from cli import app
+    from src.commands import doctor
+    from typer.testing import CliRunner
+
+    for name, path in {
+        "PROGRAMS_ROOT": root, "EDITIONS_ROOT": root / "test_prog" / "editions",
+        "REPORTS_ROOT": tmp_path / "reports", "ARCHIVE_ROOT": tmp_path / "archive",
+        "REPO_ROOT": tmp_path,
+    }.items():
+        monkeypatch.setattr(doctor, name, path)
+    return CliRunner().invoke(app, [
+        "--no-catchup", "doctor", "--context", "--edition", "test_weekly", "--format", format,
+    ])
+
+
+@pytest.mark.parametrize("format", ["human", "json", "csv"])
+def test_context_diagnostic_evaluation_does_not_add_a_warning(monkeypatch, tmp_path: Path, format: str) -> None:
+    root = _diagnostic_workspace(tmp_path)
+    report = context_checks.run_context_doctor(
+        edition_name="test_weekly", programs_root=root, editions_root=root / "test_prog" / "editions",
+    )
+    evaluation = next(check for check in report.checks if check.label == "Context evaluation")
+    baseline_checks = tuple(check for check in report.checks if check.label != "Context evaluation")
+    from src.commands.doctor_checks.models import DoctorReport
+
+    baseline = DoctorReport(report.edition, baseline_checks)
+    assert report.warnings == baseline.warnings
+    assert report.failures == baseline.failures
+    assert report.overall == baseline.overall
+    assert evaluation.status == "ok"
+    result = _diagnostic_doctor_cli(monkeypatch, tmp_path, root, format)
+    assert result.exit_code == (1 if baseline.failures else 0)
+    if format == "json":
+        payload = json.loads(result.output)
+        assert payload["warnings"] == baseline.warnings
+        assert payload["failures"] == baseline.failures
+        assert payload["overall"] == baseline.overall
+    elif format == "human":
+        assert "OK   Context evaluation" in result.output
+    else:
+        import csv
+
+        rows = list(csv.DictReader(result.output.splitlines()))
+        row = next(row for row in rows if row["label"] == "Context evaluation")
+        assert row["status"] == "ok"
+        assert int(row["warnings"]) == baseline.warnings
+
+
+@pytest.mark.parametrize("format", ["human", "json", "csv"])
+def test_context_diagnostic_actual_cli_keeps_evaluation_and_limitations(
+    monkeypatch, tmp_path: Path, format: str,
+) -> None:
+    from src.core.program_context import load_program_context
+
+    root = _diagnostic_workspace(tmp_path)
+    path = root / "test_prog" / "program.yaml"
+    path.write_text(path.read_text(encoding="utf-8").replace(
+        f"last_reviewed_date: '{date.today().isoformat()}'", "last_reviewed_date: not-a-date",
+    ), encoding="utf-8")
+    compiled = []
+
+    def load(*args, **kwargs):
+        ctx = load_program_context(*args, **kwargs)
+        compiled.append(ctx)
+        return ctx
+
+    monkeypatch.setattr(context_checks, "load_program_context", load)
+    result = _diagnostic_doctor_cli(monkeypatch, tmp_path, root, format)
+
+    assert result.exit_code == 0, (result.output, result.exception)
+    ctx, = compiled
+    assert any(flag.days_stale is None for flag in ctx.staleness_flags)
+    assert ctx.loaded_at.isoformat() in result.output
+    assert "compatibility ladder" in result.output
+    assert "Context trend unknown" in result.output
+    assert "unknown" in result.output
+    if format == "json":
+        payload = json.loads(result.output)
+        check = next(item for item in payload["checks"] if item["label"] == "Maturity level")
+        metadata = check["metadata"]
+        assert metadata["context_evaluated_at"] == ctx.loaded_at.isoformat()
+        assert metadata["context_maturity_level"] == ctx.maturity_level.value
+        assert metadata["context_invariant_errors"] == ctx.total_invariant_errors
+        assert metadata["context_stale_file_count"] == len(ctx.staleness_flags)
+        assert all(blocker in metadata["context_limitations"] for blocker in ctx.maturity_blockers)
+
+
+@pytest.mark.parametrize("format", ["human", "json", "csv"])
+def test_context_diagnostic_actual_cli_refuses_read_failure_safely(
+    monkeypatch, tmp_path: Path, format: str,
+) -> None:
+    root = _diagnostic_workspace(tmp_path)
+    (root / "test_prog" / "editorial_rules.yaml").write_text("[private-invalid-value]\n", encoding="utf-8")
+
+    result = _diagnostic_doctor_cli(monkeypatch, tmp_path, root, format)
+
+    assert result.exit_code == 1, (result.output, result.exception)
+    assert "Context unavailable" in result.output
+    assert "private-invalid-value" not in result.output
+    assert str(root) not in result.output
+    if format == "json":
+        check, = json.loads(result.output)["checks"]
+        metadata = check["metadata"]
+        assert metadata["context_maturity_level"] is None
+        assert metadata["context_invariant_errors"] is None
+        assert metadata["context_stale_file_count"] is None
+        assert metadata["context_evaluated_at"] is None
+
+
+@pytest.mark.parametrize("error_type", [
+    OSError, ValueError, sqlite3.OperationalError, sqlite3.DataError,
+])
+def test_context_diagnostic_expected_load_failure_is_unavailable(
+    monkeypatch, tmp_path: Path, error_type,
+) -> None:
+    root = _diagnostic_workspace(tmp_path)
+
+    def fail(*args, **kwargs):
+        raise error_type("private error payload")
+
+    monkeypatch.setattr(context_checks, "load_program_context", fail)
+    report = context_checks.run_context_doctor(
+        edition_name=None, programs_root=root, editions_root=root / "test_prog" / "editions",
+    )
+    check, = report.checks
+    assert check.status == "fail"
+    assert "Context unavailable" in check.detail
+    assert "private error payload" not in check.detail
+    assert check.metadata["context_evaluated_at"] is None
+
+
+@pytest.mark.parametrize("error_type", [
+    RuntimeError, TypeError, AttributeError, KeyError, sqlite3.ProgrammingError, sqlite3.DatabaseError,
+])
+def test_context_diagnostic_unexpected_load_failure_propagates(
+    monkeypatch, tmp_path: Path, error_type,
+) -> None:
+    root = _diagnostic_workspace(tmp_path)
+
+    def fail(*args, **kwargs):
+        raise error_type("unexpected")
+
+    monkeypatch.setattr(context_checks, "load_program_context", fail)
+    with pytest.raises(error_type):
+        context_checks.run_context_doctor(
+            edition_name=None, programs_root=root, editions_root=root / "test_prog" / "editions",
+        )
+
+
+@pytest.mark.parametrize("level", [0, 4])
+def test_context_diagnostic_measured_zero_is_not_unavailable(monkeypatch, tmp_path: Path, level: int) -> None:
+    from src.core.program_context import load_program_context
+    from tests.unit.test_program_context import _write_yaml
+
+    root = _diagnostic_workspace(tmp_path)
+    if level == 0:
+        for filename in ("workstreams.yaml", "workstream_registry.yaml"):
+            _write_yaml(root / "test_prog" / filename, {
+                "schema_version": "1.0", "workstreams": [], "last_reviewed_date": date.today().isoformat(),
+            })
+    ctx = load_program_context("test_prog", programs_root=root, raise_on_error=False)
+    assert ctx.maturity_level.value == level
+    monkeypatch.setattr(context_checks, "load_program_context", lambda *args, **kwargs: ctx)
+    report = context_checks.run_context_doctor(
+        edition_name=None, programs_root=root, editions_root=root / "test_prog" / "editions",
+    )
+    check = next(check for check in report.checks if check.label == "Maturity level")
+    assert check.metadata["context_maturity_level"] == level
+    assert check.metadata["context_invariant_errors"] == 0
+    assert check.metadata["context_stale_file_count"] == 0
+    assert check.metadata["context_evaluated_at"] == ctx.loaded_at.isoformat()
+
+
+def test_context_diagnostic_material_gap_and_projection_failure(monkeypatch, tmp_path: Path) -> None:
+    from dataclasses import replace
+    from src.core.program_context import ContextGapInfo, load_program_context
+
+    root = _diagnostic_workspace(tmp_path)
+    ctx = load_program_context("test_prog", programs_root=root, raise_on_error=False)
+    ctx = replace(ctx, context_gaps=(
+        ContextGapInfo("report", None, "purpose", "quality_degraded", "high", "Purpose missing"),
+        ContextGapInfo("gather", "ws1", "owner", "quality_degraded", "medium", "Owner missing"),
+    ))
+    monkeypatch.setattr(context_checks, "load_program_context", lambda *args, **kwargs: ctx)
+    report = context_checks.run_context_doctor(
+        edition_name=None, programs_root=root, editions_root=root / "test_prog" / "editions",
+    )
+    check = next(check for check in report.checks if check.label == "Maturity level")
+    assert "report / program / purpose: Purpose missing" in check.metadata["context_limitations"]
+    assert "gather / ws1 / owner: Owner missing" in check.metadata["context_limitations"]
+    from src.core.program_context import summarize_context_limitations
+
+    assert check.metadata["context_limitations"] == list(summarize_context_limitations(ctx))
+    monkeypatch.setattr(context_checks, "load_program_context", lambda *args, **kwargs: object())
+    with pytest.raises(AttributeError):
+        context_checks.run_context_doctor(
+            edition_name=None, programs_root=root, editions_root=root / "test_prog" / "editions",
+        )
+
+
+def test_summarize_context_limitations_preserves_exact_order_without_mutation(tmp_path: Path) -> None:
+    from dataclasses import replace
+    from src.core.program_context import (
+        ContextGapInfo, InvariantViolation, StalenessFlag, load_program_context, summarize_context_limitations,
+    )
+
+    root = _diagnostic_workspace(tmp_path)
+    ctx = load_program_context("test_prog", programs_root=root, raise_on_error=False)
+    ctx = replace(
+        ctx, maturity_blockers=("First blocker", "Second blocker"),
+        invariant_violations=(
+            InvariantViolation("WS-01", InvariantSeverity.ERROR, "workstreams.yaml", None, "Owner absent"),
+        ),
+        staleness_flags=(
+            StalenessFlag("program.yaml", None, "reviewed_at", None, None, 7, 14, "warn"),
+            StalenessFlag("registry.yaml", "ws1", "reviewed_at", date(2026, 1, 1), 12, 7, 14, "warn"),
+        ),
+        context_gaps=(
+            ContextGapInfo("report", None, "purpose", "quality_degraded", "high", "Purpose missing"),
+            ContextGapInfo("gather", "ws1", "owner", "quality_degraded", "medium", "Owner missing"),
+        ),
+    )
+    before = repr(ctx)
+    expected = (
+        "First blocker",
+        "Second blocker",
+        "[WS-01] Owner absent",
+        "program.yaml: review age unknown (reviewed_at)",
+        "registry.yaml / ws1: 12d stale (reviewed_at)",
+        "report / program / purpose: Purpose missing",
+        "gather / ws1 / owner: Owner missing",
+        "Context compatibility ladder; canonical maturity semantics remain unreconciled.",
+        "Context trend unknown; comparable context history is not qualified.",
+    )
+    assert summarize_context_limitations(ctx) == expected
+    assert summarize_context_limitations(ctx) == expected
+    assert repr(ctx) == before
+
+
+@pytest.mark.parametrize("content,repaired,expected", [
+    ("{broken retained observation\n", False, None),
+    ("mixed-before", False, None),
+    ("mixed-after", True, None),
+    (None, False, "No context gaps recorded yet."),
+    ("", False, "No context gaps recorded yet."),
+    ("\n \n", False, "No context gaps recorded yet."),
+    ("valid", False, "1 unique gaps across 1 total observations"),
+    ("valid", True, "No active context gaps; historical observations retained."),
+])
+def test_actual_ranked_cli_preserves_gap_read_integrity(
+    monkeypatch, tmp_path: Path, content: str | None, repaired: bool, expected: str | None,
+) -> None:
+    from cli import app
+    from src.commands import doctor
+    from typer.testing import CliRunner
+
+    programs = tmp_path / "programs"
+    program = programs / "sample"
+    program.mkdir(parents=True)
+    (program / "program.yaml").write_text("schema_version: 1\n", encoding="utf-8")
+    value = "{why: Purpose, what: Scope}" if repaired else "{}"
+    (program / "workstream_registry.yaml").write_text(
+        f"workstreams:\n- id: lane\n  deep_context: {value}\n", encoding="utf-8",
+    )
+    valid = json.dumps({
+        "ts": "2026-10-26T12:00:00Z", "feature": "doctor --context", "program": "sample",
+        "lane": "lane", "field": "deep_context.why", "severity": "quality_degraded",
+        "message": "Missing purpose", "impact_estimate": "high",
+    }) + "\n"
+    if content == "valid":
+        content = valid
+    elif content == "mixed-before":
+        content = "{broken retained observation\n" + valid
+    elif content == "mixed-after":
+        content = valid + "{broken retained blocker\n"
+    if content is not None:
+        (program / "_feedback").mkdir()
+        (program / "_feedback" / "context_gaps.jsonl").write_text(content, encoding="utf-8")
+    monkeypatch.setattr(doctor, "PROGRAMS_ROOT", programs)
+    monkeypatch.setattr(doctor, "EDITIONS_ROOT", tmp_path / "editions")
+    before = {str(path.relative_to(tmp_path)): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    result = CliRunner().invoke(app, ["--no-catchup", "doctor", "--context", "--ranked"])
+    assert {str(path.relative_to(tmp_path)): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+    if expected is None:
+        assert result.exit_code == 2, (result.output, result.exception)
+        assert "Context gap history is invalid JSON; repair it before retrying." in result.output
+        assert "No context gaps" not in result.output
+        assert "No active context gaps" not in result.output
+        assert "broken retained" not in result.output
+        assert str(program) not in result.output
+    else:
+        assert result.exit_code == 0, (result.output, result.exception)
+        assert expected in result.output
+
+
+@pytest.mark.parametrize("error", [ValueError("timestamp"), KeyError("field"), OSError("read")])
+def test_ranked_gap_syntax_diagnostic_does_not_translate_other_failures(
+    monkeypatch, tmp_path: Path, error: Exception, capsys,
+) -> None:
+    monkeypatch.setattr(context_checks, "_resolve_context_program_id", lambda **kwargs: "sample")
+
+    def fail_read(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(context_checks, "load_context_gaps", fail_read)
+    with pytest.raises(type(error)) as raised:
+        context_checks.run_ranked_gaps(
+            edition_name=None, programs_root=tmp_path, editions_root=tmp_path,
+        )
+    assert raised.value is error
+    assert not capsys.readouterr().out
 
 
 def test_run_context_doctor_fails_when_programs_are_missing(tmp_path: Path) -> None:
@@ -30,6 +366,8 @@ def test_run_context_doctor_emits_fix_hints_and_coverage(monkeypatch, tmp_path: 
     (program_dir / "kpis.yaml").write_text("kpis: []\n", encoding="utf-8")
 
     ctx = SimpleNamespace(
+        loaded_at=datetime(2026, 11, 1, tzinfo=timezone.utc),
+        context_gaps=(),
         maturity_level=SimpleNamespace(value=1),
         maturity_blockers=("Need better data",),
         invariant_violations=(
@@ -105,6 +443,8 @@ def test_context_doctor_displays_unknown_review_age(monkeypatch, tmp_path: Path,
     program_dir.mkdir(parents=True)
     (program_dir / "program.yaml").write_text("schema_version: 1\n", encoding="utf-8")
     ctx = SimpleNamespace(
+        loaded_at=datetime(2026, 11, 1, tzinfo=timezone.utc),
+        context_gaps=(),
         maturity_level=SimpleNamespace(value=2),
         maturity_blockers=("Review metadata unknown",),
         invariant_violations=(),
@@ -259,6 +599,8 @@ def test_run_context_doctor_surfaces_pending_ncfl_proposals(monkeypatch, tmp_pat
     (program_dir / "kpis.yaml").write_text("kpis: []\n", encoding="utf-8")
 
     ctx = SimpleNamespace(
+        loaded_at=datetime(2026, 11, 1, tzinfo=timezone.utc),
+        context_gaps=(),
         maturity_level=SimpleNamespace(value=2),
         maturity_blockers=(),
         invariant_violations=(),
@@ -304,6 +646,8 @@ def test_run_context_doctor_flags_stale_pending_ncfl_proposals(monkeypatch, tmp_
     (program_dir / "kpis.yaml").write_text("kpis: []\n", encoding="utf-8")
 
     ctx = SimpleNamespace(
+        loaded_at=datetime(2026, 11, 1, tzinfo=timezone.utc),
+        context_gaps=(),
         maturity_level=SimpleNamespace(value=2),
         maturity_blockers=(),
         invariant_violations=(),

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from typer.testing import CliRunner
 import yaml
+import pytest
 
 import cli
 from src.ai.ai_mode import AIMode, set_ai_mode
@@ -17,6 +18,46 @@ from src.m365.transcript_reader import TranscriptRecord
 
 
 runner = CliRunner()
+
+
+@pytest.mark.parametrize("peer", [
+    "Action: Check release | owner=!!! | due=2026-05-15 | refs=WI:101",
+    "Action: Check release | owner=alex | due=2026-05-15 | refs=invalid",
+])
+def test_meeting_close_real_marker_reacquisition_preserves_identity(tmp_path: Path, monkeypatch, peer: str) -> None:
+    repo_root = _seed_repo(tmp_path)
+    programs_root = repo_root / "programs"
+    path = programs_root / "acme" / "program.yaml"
+    program = yaml.safe_load(path.read_text(encoding="utf-8"))
+    program["ai"] = {"enabled": True}
+    path.write_text(yaml.safe_dump(program), encoding="utf-8")
+    monkeypatch.setattr(meeting_close_command, "PROGRAMS_ROOT", programs_root)
+    monkeypatch.setattr(cli.sys, "argv", ["vertex", "--no-ai"])
+    monkeypatch.setattr(meeting_close_command, "_build_ado_client", lambda program: _StubADOClient())
+    marker = "Action: Confirm checkpoint | owner=priya | due=2026-05-14 | refs=WI:101"
+    contents = [marker]
+    monkeypatch.setattr(
+        meeting_close_command, "_build_transcript_reader",
+        lambda: _StubTranscriptReader(TranscriptRecord(
+            meeting_id="mixed-marker", title="Synthetic", captured_at="2026-05-21T12:00:00+00:00",
+            web_url=None, content=contents[0],
+        )),
+    )
+    argv = ["meeting-close", "--program", "acme", "--transcript", "mixed-marker", "--promote-actions", "--format", "json"]
+    try:
+        first = runner.invoke(cli.app, argv)
+        assert first.exit_code == 0, first.exception
+        first_payload = json.loads(first.stdout)
+        contents[0] = marker + "\n" + peer + "\nNeed to publish checklist."
+        second = runner.invoke(cli.app, argv)
+        assert second.exit_code == 0, second.exception
+        second_payload = json.loads(second.stdout)
+    finally:
+        set_ai_mode(AIMode.ACTIVE)
+    assert first_payload["queued_action_count"] == 1
+    assert second_payload["skipped_action_count"] == 1
+    assert second_payload["mappings"][0]["action"] == first_payload["mappings"][0]["action"]
+    assert any(mapping["action"]["text"] == "Need to publish checklist." for mapping in second_payload["mappings"])
 
 
 def test_meeting_close_renders_packet_and_writes_local_artifacts(tmp_path: Path, monkeypatch) -> None:

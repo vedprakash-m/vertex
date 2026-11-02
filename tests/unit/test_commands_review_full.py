@@ -48,6 +48,80 @@ runner = CliRunner()
 EDITION_NAME = "acme_weekly"
 
 
+def test_actual_reviewer_html_context_gap_and_unavailable_projection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import Mock
+    import src.core.context_proposal_review as projection
+
+    reports, archive = _seed_v2_report_layout(tmp_path, tmp_path)
+    root = tmp_path / "programs"
+    now = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    generate_report_draft(
+        edition_name=EDITION_NAME, reports_root=reports, archive_root=archive, programs_root=root,
+        as_of=now, work_item_loader=lambda bundle, timestamp: (_sample_items(timestamp), 0), open_browser=False,
+    )
+    path = root / "acme" / "_feedback" / "context_gaps.jsonl"
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(
+        '{"ts":"2026-10-01T00:00:00Z","feature":"synthetic","program":"acme","lane":"acme",'
+        '"field":"purpose","severity":"quality_degraded","message":"Purpose missing <unsafe>","impact_estimate":"high"}\n',
+        encoding="utf-8",
+    )
+    before = path.read_bytes()
+    load = Mock(wraps=projection.load_context_gaps)
+    monkeypatch.setattr(projection, "load_context_gaps", load)
+    artifacts = generate_review_full(edition_name=EDITION_NAME)
+    html = artifacts.html_path.read_text(encoding="utf-8")
+    assert "Context Maintenance" in html and "Active context gap" in html
+    assert "Purpose missing &lt;unsafe&gt;" in html and "Purpose missing <unsafe>" not in html
+    assert "owner=unknown / due=unknown" in html and "observation(s)" in html
+    assert "2026-10-01" in html and "2026-11-01" in html
+    assert f"doctor --context --ranked --edition {EDITION_NAME}" in html
+    load.assert_called_once_with("acme", programs_root=root)
+    assert path.read_bytes() == before
+    path.write_text("{private_canary: invalid", encoding="utf-8")
+    load.reset_mock()
+    artifacts = generate_review_full(edition_name=EDITION_NAME)
+    html = artifacts.html_path.read_text(encoding="utf-8")
+    assert "Context gap history unavailable" in html and "private_canary" not in html
+    load.assert_called_once_with("acme", programs_root=root)
+
+
+def test_actual_reviewer_html_corrupt_proposals_preserve_valid_unknown_impact_gap(tmp_path: Path) -> None:
+    reports, archive = _seed_v2_report_layout(tmp_path, tmp_path)
+    root = tmp_path / "programs"
+    now = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    generate_report_draft(
+        edition_name=EDITION_NAME, reports_root=reports, archive_root=archive, programs_root=root,
+        as_of=now, work_item_loader=lambda bundle, timestamp: (_sample_items(timestamp), 0), open_browser=False,
+    )
+    proposals = root / "acme" / "context_proposals"
+    proposals.mkdir(exist_ok=True)
+    queue = proposals / "issue_001.proposals.json"
+    queue.write_text("{private_canary: invalid", encoding="utf-8")
+    feedback = root / "acme" / "_feedback"
+    feedback.mkdir(exist_ok=True)
+    gap = feedback / "context_gaps.jsonl"
+    gap.write_text(
+        '{"ts":"2026-10-01T00:00:00Z","feature":"synthetic","program":"acme","lane":null,'
+        '"field":"purpose","severity":"quality_degraded","message":"Purpose missing","impact_estimate":null}\n',
+        encoding="utf-8",
+    )
+    before = (queue.read_bytes(), gap.read_bytes())
+    for corrupt_gap in (False, True):
+        if corrupt_gap:
+            gap.write_text("{private_canary: invalid", encoding="utf-8")
+        artifacts = generate_review_full(edition_name=EDITION_NAME)
+        html = artifacts.html_path.read_text(encoding="utf-8")
+        assert "Context proposal history unavailable" in html and "private_canary" not in html
+        assert "Evidence: context_proposals" in html and "owner=unknown / due=unknown" in html
+        assert "2026-11-01" in html
+        if corrupt_gap:
+            assert "Context gap history unavailable" in html and "Evidence: _feedback/context_gaps.jsonl" in html
+        else:
+            assert "Active context gap" in html and "unknown impact" in html and "None impact" not in html
+            assert before == (queue.read_bytes(), gap.read_bytes())
+
+
 @pytest.fixture(autouse=True)
 def _isolate_review_full_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(review_full_module, "PROGRAMS_ROOT", tmp_path / "programs")

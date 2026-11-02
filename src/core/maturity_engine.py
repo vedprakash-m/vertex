@@ -19,6 +19,7 @@ from src.core.analytics_store import (
     load_autonomy_audit_records,
 )
 from src.core.edition_resolver import PROGRAMS_ROOT
+from src.core.exceptions import ConfigError
 
 
 _EARNED_AUTONOMY_FILENAME = "earned_autonomy_state.yaml"
@@ -100,22 +101,47 @@ def load_earned_autonomy_state(
     programs_root: Path = PROGRAMS_ROOT,
 ) -> EarnedAutonomyState | None:
     path = get_earned_autonomy_state_path(program_id, programs_root=programs_root)
-    if not path.exists():
-        return None
-    raw: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    promoted_raw = raw.get("promoted_at")
-    demoted_raw = raw.get("demoted_at")
-    evaluated_raw = raw.get("last_evaluated_at")
-    return EarnedAutonomyState(
-        program_id=program_id,
-        earned_tier=int(raw.get("earned_tier", 0)),
-        maturity_score=float(raw.get("maturity_score", 0.0)),
-        last_evaluated_at=_parse_datetime(evaluated_raw) if evaluated_raw else datetime.now(timezone.utc),
-        promoted_at=_parse_datetime(promoted_raw) if promoted_raw else None,
-        demoted_at=_parse_datetime(demoted_raw) if demoted_raw else None,
-        schema_version=str(raw.get("schema_version", _SCHEMA_VERSION)),
-        proposal_classes=_parse_proposal_classes(raw.get("proposal_classes")),
-    )
+    try:
+        try:
+            path.stat()
+        except FileNotFoundError:
+            return None
+        content = path.read_text(encoding="utf-8")
+        try:
+            raw = yaml.safe_load(content) or {}
+        except ValueError as error:
+            raise ConfigError(
+                f"earned_autonomy_state.yaml for program {program_id} could not be decoded "
+                "(ValueError); inspect its YAML fields before retrying."
+            ) from error
+    except (OSError, UnicodeError, yaml.YAMLError) as error:
+        raise ConfigError(
+            f"earned_autonomy_state.yaml for program {program_id} could not be read "
+            f"({type(error).__name__}); inspect file access and contents before retrying."
+        ) from error
+    try:
+        if not isinstance(raw, Mapping):
+            raise TypeError("Expected earned-state mapping")
+        promoted_raw = raw.get("promoted_at")
+        demoted_raw = raw.get("demoted_at")
+        evaluated_raw = raw.get("last_evaluated_at")
+        if any(value and not isinstance(value, str) for value in (promoted_raw, demoted_raw, evaluated_raw)):
+            raise TypeError("Expected timestamp string")
+        return EarnedAutonomyState(
+            program_id=program_id,
+            earned_tier=int(raw.get("earned_tier", 0)),
+            maturity_score=float(raw.get("maturity_score", 0.0)),
+            last_evaluated_at=_parse_datetime(evaluated_raw) if evaluated_raw else datetime.now(timezone.utc),
+            promoted_at=_parse_datetime(promoted_raw) if promoted_raw else None,
+            demoted_at=_parse_datetime(demoted_raw) if demoted_raw else None,
+            schema_version=str(raw.get("schema_version", _SCHEMA_VERSION)),
+            proposal_classes=_parse_proposal_classes(raw.get("proposal_classes")),
+        )
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ConfigError(
+            f"earned_autonomy_state.yaml for program {program_id} contains invalid state "
+            f"({type(error).__name__}); inspect its fields before retrying."
+        ) from error
 
 
 def _parse_proposal_classes(raw: Any) -> dict[str, ProposalClassAutonomyState]:
@@ -124,10 +150,16 @@ def _parse_proposal_classes(raw: Any) -> dict[str, ProposalClassAutonomyState]:
     parsed: dict[str, ProposalClassAutonomyState] = {}
     for proposal_class, entry in dict(raw).items():
         entry = entry or {}
+        if not isinstance(entry, Mapping):
+            raise TypeError("Expected proposal-class mapping")
         counters_raw = entry.get("counters") or {}
+        if not isinstance(counters_raw, Mapping):
+            raise TypeError("Expected counters mapping")
         promoted_raw = entry.get("promoted_at")
         demoted_raw = entry.get("demoted_at")
         window_raw = entry.get("evidence_window_start")
+        if any(value and not isinstance(value, str) for value in (promoted_raw, demoted_raw, window_raw)):
+            raise TypeError("Expected timestamp string")
         parsed[str(proposal_class)] = ProposalClassAutonomyState(
             level=str(entry.get("level", "l0")),
             promoted_at=_parse_datetime(promoted_raw) if promoted_raw else None,

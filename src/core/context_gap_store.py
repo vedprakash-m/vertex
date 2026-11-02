@@ -175,10 +175,7 @@ def load_context_gaps(
             line = line.strip()
             if not line:
                 continue
-            try:
-                d = parse_jsonl_line(line)
-            except json.JSONDecodeError:
-                continue
+            d = parse_jsonl_line(line)
             rec = ContextGapRecord.from_json(d)
             if since is not None and rec.ts <= since:
                 continue

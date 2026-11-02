@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
+import pytest
+import yaml
+
+from src.core.exceptions import ConfigError
 from src.core.people_directory_schema import Team, TeamKind, write_teams
 from src.core.people_entity_schema import (
     ENTITIES_SCHEMA_VERSION,
@@ -209,3 +214,61 @@ def test_rebuild_cache_preloaded_none_defaults_still_load_from_disk(tmp_path: Pa
 
     assert cache_db_path(tmp_path).exists()
     assert lookup_alias_in_cache(tmp_path, "alice") == (("person:alice", "person"),)
+
+
+def test_cache_load_decodes_entities_once_when_cold_or_stale_and_never_when_warm(tmp_path: Path) -> None:
+    from src.core import people_entity_schema
+
+    _seed_entities(tmp_path)
+    with patch.object(people_entity_schema, "fast_safe_load", wraps=people_entity_schema.fast_safe_load) as parsed:
+        first = ensure_cache_fresh(tmp_path, as_of=_NOW)
+        assert parsed.call_count == 1
+        parsed.reset_mock()
+        assert ensure_cache_fresh(tmp_path) == first
+        assert parsed.call_count == 0
+        path = tmp_path / "entities.yaml"
+        path.write_text(path.read_text(encoding="utf-8") + "\n# changed\n", encoding="utf-8")
+        assert read_cache_status(tmp_path).reason == "stale_source"
+        changed = ensure_cache_fresh(tmp_path)
+        assert parsed.call_count == 1
+        assert changed.source_hashes != first.source_hashes
+    assert lookup_alias_in_cache(tmp_path, "alice") == (("person:alice", "person"),)
+
+
+@pytest.mark.parametrize("text, error", [
+    ("entities: []\n", None),
+    ("schema_version: '9.0'\nentities: []\n", ConfigError),
+    ("- item\n", ConfigError),
+    ("entities: [\n", yaml.YAMLError),
+])
+def test_cache_shared_entities_legacy_and_invalid_compatibility(tmp_path: Path, text: str, error: type | None) -> None:
+    (tmp_path / "entities.yaml").write_text(text, encoding="utf-8")
+    if error is None:
+        ensure_cache_fresh(tmp_path, as_of=_NOW)
+        assert lookup_alias_in_cache(tmp_path, "alice") == ()
+    else:
+        with pytest.raises(error):
+            ensure_cache_fresh(tmp_path, as_of=_NOW)
+        assert not cache_db_path(tmp_path).exists()
+
+
+def test_cache_source_replacement_keeps_manifest_stale_until_next_rebuild(tmp_path: Path) -> None:
+    from src.core import people_entity_schema
+
+    _seed_entities(tmp_path)
+    parse = people_entity_schema.fast_safe_load
+    path = tmp_path / "entities.yaml"
+
+    def replacing_parse(text: str) -> dict:
+        raw = parse(text)
+        write_entities_document(path, EntitiesDocument(schema_version=ENTITIES_SCHEMA_VERSION, entities=()))
+        return raw
+
+    with patch.object(people_entity_schema, "fast_safe_load", side_effect=replacing_parse) as parsed:
+        ensure_cache_fresh(tmp_path, as_of=_NOW)
+    assert parsed.call_count == 1
+    assert lookup_alias_in_cache(tmp_path, "alice") == (("person:alice", "person"),)
+    assert read_cache_status(tmp_path).reason == "stale_source"
+    ensure_cache_fresh(tmp_path)
+    assert lookup_alias_in_cache(tmp_path, "alice") == ()
+    assert read_cache_status(tmp_path).valid

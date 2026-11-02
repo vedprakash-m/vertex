@@ -33,6 +33,81 @@ def _write_teams_yaml(path: Path, teams: list[dict]) -> None:
     path.write_text(yaml.safe_dump({"schema_version": "2.0", "teams": teams}), encoding="utf-8")
 
 
+def test_captured_people_and_teams_match_public_loader_and_ignore_later_edit(tmp_path: Path) -> None:
+    from datetime import datetime, timezone
+    from src.core import people_directory_schema as schema
+
+    now = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    path = tmp_path / "people_directory.yaml"
+    text = "people: [{entity_id: 'person:a', alias: alice, email: alice@example.test}]\n"
+    path.write_text(text, encoding="utf-8")
+    expected = schema.load_people_directory(path, as_of=now)
+    path.write_text("people: [{entity_id: 'person:b', alias: bob}]\n", encoding="utf-8")
+    assert schema.parse_people_directory_text(text, path=path, as_of=now) == expected
+    teams = tmp_path / "teams.yaml"
+    team_text = "teams: [{entity_id: 'team:t', id: t, name: T, kind: org_team}]\n"
+    teams.write_text(team_text, encoding="utf-8")
+    assert schema.parse_teams_text(team_text, path=teams) == schema.load_teams(teams)
+
+
+def test_captured_loader_error_and_empty_parity(tmp_path: Path) -> None:
+    from datetime import datetime, timezone
+    import pytest
+    from src.core import people_directory_schema as schema
+
+    now = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    for kind, texts in (
+        ("people", ("", "[]", "people: wrong", "people: [wrong]", "people: [", "people: [{status: invalid}]",
+                    "people: [{contacts: [{kind: invalid}]}]", "people: [{departed_at: invalid}]")),
+        ("teams", ("", "[]", "teams: wrong", "teams: [wrong]", "teams: [", "teams: [{kind: invalid}]")),
+    ):
+        path = tmp_path / f"{kind}.yaml"
+        for text in texts:
+            path.write_text(text, encoding="utf-8")
+            public = (lambda: schema.load_people_directory(path, as_of=now)) if kind == "people" else (lambda: schema.load_teams(path))
+            captured = (lambda: schema.parse_people_directory_text(text, path=path, as_of=now)) if kind == "people" else (lambda: schema.parse_teams_text(text, path=path))
+            try:
+                expected = public()
+            except Exception as error:
+                with pytest.raises(type(error)) as actual:
+                    captured()
+                assert str(actual.value) == str(error)
+            else:
+                assert captured() == expected
+
+
+def test_public_loaders_preserve_missing_utf8_and_clock_before_read(tmp_path: Path) -> None:
+    from datetime import datetime, timezone
+    from unittest.mock import patch
+    import pytest
+    from src.core import people_directory_schema as schema
+
+    path = tmp_path / "people.yaml"
+    assert schema.load_people_directory(path) is None
+    assert schema.load_teams(path) is None
+    path.write_bytes(b"\xff")
+    with pytest.raises(UnicodeDecodeError):
+        schema.load_people_directory(path)
+    with pytest.raises(UnicodeDecodeError):
+        schema.load_teams(path)
+    events: list[str] = []
+
+    class Clock:
+        @staticmethod
+        def now(tz: object) -> datetime:
+            events.append("clock")
+            return datetime(2026, 11, 1, tzinfo=timezone.utc)
+
+    def read_text(path: Path, *, encoding: str) -> str:
+        assert encoding == "utf-8"
+        events.append("read")
+        return "people: []\n"
+
+    with patch.object(schema, "datetime", Clock), patch.object(Path, "read_text", read_text):
+        assert schema.load_people_directory(path).people == ()
+    assert events == ["clock", "read"]
+
+
 def test_load_people_directory_reads_the_real_example_fixture() -> None:
     path = Path(__file__).resolve().parents[2] / "knowledge" / "people_directory.example.yaml"
 

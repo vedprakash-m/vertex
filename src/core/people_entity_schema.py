@@ -301,6 +301,19 @@ def load_entities_document(path: Path) -> EntitiesDocument | None:
     if not path.exists():
         return None
     raw = fast_safe_load(path.read_text(encoding="utf-8")) or {}
+    return _entities_document_from_payload(raw, path=path)
+
+
+def load_shared_entities_document(path: Path) -> EntitiesDocument | None:
+    if not path.exists():
+        return None
+    raw = fast_safe_load(path.read_text(encoding="utf-8")) or {}
+    if isinstance(raw, dict) and "schema_version" not in raw:
+        return None
+    return _entities_document_from_payload(raw, path=path)
+
+
+def _entities_document_from_payload(raw: object, *, path: Path) -> EntitiesDocument:
     if not isinstance(raw, dict):
         raise ConfigError(f"Expected mapping at top-level in {path}")
     schema_version = str(raw.get("schema_version") or "")

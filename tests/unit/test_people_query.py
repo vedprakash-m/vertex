@@ -43,6 +43,49 @@ from src.core.people_query import (
 _NOW = datetime(2026, 7, 16, 12, 0, 0, tzinfo=timezone.utc)
 
 
+def test_stale_loader_callback_captures_query_clock_before_loader_clock(tmp_path: Path) -> None:
+    from unittest.mock import patch
+    from src.core import people_query
+    from src.core.people_directory_schema import load_people_directory
+
+    path = tmp_path / "people_directory.yaml"
+    path.write_text("people: [{alias: alice, email: alice@example.test}]\n", encoding="utf-8")
+    events: list[str] = []
+
+    class Clock:
+        @staticmethod
+        def now(tz: object) -> datetime:
+            events.append("query-clock")
+            return _NOW
+
+    def loader(path: Path) -> object:
+        events.append("loader-clock")
+        return load_people_directory(path, as_of=_NOW + timedelta(days=1))
+
+    with patch.object(people_query, "datetime", Clock):
+        assert list_stale_people(knowledge_root=tmp_path, people_loader=loader) == ()
+    assert events == ["query-clock", "loader-clock"]
+
+
+def test_stale_loader_callback_matches_fresh_results_ties_and_missing(tmp_path: Path) -> None:
+    from src.core.people_directory_schema import load_people_directory
+
+    assert list_stale_people(knowledge_root=tmp_path, as_of=_NOW, people_loader=load_people_directory) == ()
+    people = tuple(PersonDirectory(
+        entity_id=f"person:{name}", alias=name, display_name=name,
+        verifications=(FieldVerification(
+            field_name="title", source="test", source_ref=None, observed_at=_NOW,
+            verified_at=_NOW - timedelta(days=91), recorded_at=_NOW, verified_by_principal="test",
+        ),),
+    ) for name in ("first", "second"))
+    write_people_directory(tmp_path / "people_directory.yaml", people)
+    expected = list_stale_people(knowledge_root=tmp_path, as_of=_NOW)
+    actual = list_stale_people(knowledge_root=tmp_path, as_of=_NOW, people_loader=load_people_directory)
+    assert actual == expected
+    assert [entry.alias for entry in actual] == ["first", "second"]
+    assert list_stale_people(knowledge_root=tmp_path, as_of=_NOW, freshness_days=91, people_loader=load_people_directory) == ()
+
+
 def _alias(value: str, *, as_of: datetime = _NOW) -> EntityAlias:
     return EntityAlias(
         value=value, kind="alias", status=AliasStatus.ACTIVE, valid_from=None, valid_until=None,
