@@ -340,6 +340,12 @@ The author is the single person who owns the editorial output. They use Vertex 1
 | Diagnose program context health | `vertex doctor --context` validates all 20 Plane 1 program files, reports invariant violations (WS-01…KB-03), staleness flags, and context maturity level (L0–L4); `--fix-hints` appends per-invariant remediation guidance |
 | Review and apply section revision proposals without editing every file by hand | `vertex propose`, `vertex review-proposals`, `vertex apply-proposals` |
 
+Valid exact-marker commitments keep their identity when a malformed peer triggers existing fallback extraction, so reacquiring that unchanged commitment does not queue a new identity. Malformed markers and nonmarker content remain eligible for the existing fallback; this does not change approval or effect authority (RELO-W4.5a).
+
+`vertex risks history --program <prog> [--risk-id <id>]` exposes retained archive occurrences and status-update events without restoring archived risks into current judgment. Archive provenance is validated before display; reading does not approve, close, reopen or renew review (RELO-W4.3a).
+
+`milestones assess` exposes attributable accepted commitment-date revisions separately from publication-based target history. This does not infer an approved baseline, forecast, actual completion or exit evidence, and does not change slip/health scoring (RELO-W4.10a).
+
 ### 4.2 Secondary: DRI (Section Reviewer)
 
 DRIs review their workstream section in Teams format. They do not use the CLI.
@@ -1029,6 +1035,8 @@ The `PROVIDER_REGISTRY` in `channel_wiring.py` maps channel names to their provi
 - **📊 ADO Vitality:** Items updated this week, owners with stale items, freshness average
 - **🟢 Ready:** Completed narratives, set overrides, passing quality gates
 - **Draft readiness score:** Percentage with breakdown
+
+**Maintained-context attention (RELO-W4.11x):** Triage, cockpit and reviewer surfaces project existing active context-gap observations alongside pending context revisions. The shared projection uses the selected program root and an explicit evaluation time; it introduces no approval database or additional history writes. Gaps remain distinct from proposals, with unknown owner/due information explicit. Supported structural repairs leave active attention under existing ranking rules; evaluation, drafts and replies do not renew review or establish authenticated resolution. Unreadable gap history is visibly unavailable, not healthy/empty. Context limitations do not change business-health scoring.
 
 ### 9.4a Next-Step Guidance (`vertex next`)
 
@@ -2094,6 +2102,8 @@ These are properties that must hold at all times. Violations are bugs.
 **Program Fact Store invariants (INV-SG):** the signal-fidelity / fact-layer subsystem carries its own invariant family (INV-SG-1…13), enforced by `tests/contracts/test_signal_invariants.py`. The actively enforced set: INV-SG-1 (a fact promoted with no entity ref is rejected; program-level facts bind a `PROGRAM:` sentinel), INV-SG-3 (the Program Fact layer carries no `src.ai`/`src.m365` imports — Zone A placement), INV-SG-9 (program-scoped identity — no `issue_number`/`edition_id` as a primary key), INV-SG-10 (per-module fact-read allow-list — migrated current-state reads route through `load_program_facts()`), INV-SG-11 (a lower-precedence write contradicting a higher-precedence accepted fact is queued as a Proposed Revision, never a silent overwrite), INV-SG-12 (snapshot-pin drift detection), and INV-SG-13 (bitemporal append-only with real `as_of` time-travel). INV-SG-2/4/5/6/7/8 are forward-declared placeholders tied to gated phases (extraction depth, source-health enforcement breadth, AI drafting, learning loops) and activate when their owning feature lands.
 
 **Context health invariants (INV-C):** `src/core/program_context.py` enforces 21 cross-file invariants across the 20 Plane 1 program files (workstream coverage, milestone completeness, role ownership, ADO binding, KB coverage, etc.), categorized into codes WS-01…KB-03. Violations are classified as `error` (L0–L2 impact) or `warning` (L3 impact). Context maturity level L4 = zero errors and zero critical warnings. Enforced programmatically at `load_program_context()` call time; surfaced by `vertex doctor --context` and projected into the fleet health report.
+
+**Diagnostic compatibility boundary (RELO-W0.30c):** Doctor and fleet expose the current compiler's evaluation time and material context limitations. Failed evaluation is unavailable, not a measured L0 with zero errors; legitimate evaluated L0 and zero counts remain distinct. The current staged capability ladder is not reconciled with the canonical health meanings above, so diagnostic surfaces disclose that compatibility limitation rather than certify canonical health or a comparable context trend. This projection does not alter thresholds, source availability, review validity, business health or autonomy.
 
 **Feature binding invariant:** No feature script may contain a hardcoded Microsoft email, `date(20XX,…)` constructor, ADO area path literal, or stub WI ID (9xxxxx range) that appears verbatim in a program file. Sole exception: the program file path itself. Enforced by `tests/contracts/test_feature_binding.py`.
 
