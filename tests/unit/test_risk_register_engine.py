@@ -58,12 +58,13 @@ def test_archive_history_reads_typed_retained_rows_without_creating_stores(tmp_p
     assert before == {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
 
 
-def test_absent_archive_and_journal_history_does_not_create_program(tmp_path: Path) -> None:
+@pytest.mark.parametrize("risk_id", [None, "risk-1"])
+def test_absent_archive_and_journal_history_does_not_create_program(tmp_path: Path, risk_id: str | None) -> None:
     from src.core.risk_register_engine import load_archived_risk_history
 
     root = tmp_path / "absent" / "programs"
     assert load_archived_risk_history("acme", programs_root=root) == ()
-    assert load_risk_history("acme", None, programs_root=root) == ()
+    assert load_risk_history("acme", risk_id, programs_root=root) == ()
     assert not root.exists()
 
 
@@ -140,6 +141,13 @@ def test_journal_history_read_only_rejects_foreign_program_path(tmp_path: Path) 
     path.write_text('{"risk_id":"risk-1"}\n', encoding="utf-8")
     with pytest.raises(ConfigError, match="escapes"):
         load_risk_history("../foreign", None, tmp_path / "programs")
+
+
+@pytest.mark.parametrize("program_id", ["../foreign", ".", ".."])
+def test_journal_history_read_only_rejects_missing_journal_escape(monkeypatch, tmp_path: Path, program_id: str) -> None:
+    monkeypatch.setattr(Path, "exists", lambda path: False)
+    with pytest.raises(ConfigError, match="escapes"):
+        load_risk_history(program_id, None, tmp_path / "programs")
 
 
 @pytest.mark.parametrize("mutation", [

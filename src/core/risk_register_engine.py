@@ -417,8 +417,6 @@ def record_risk_update(
 
 def load_risk_history(program_id: str, risk_id: str | None, programs_root: Path = PROGRAMS_ROOT) -> tuple[dict[str, Any], ...]:
     path = get_risk_updates_path(program_id, programs_root)
-    if not path.exists():
-        return ()
     if risk_id is None:
         # The history projection must not invoke the legacy corruption-repair reader.
         try:
@@ -426,6 +424,8 @@ def load_risk_history(program_id: str, risk_id: str | None, programs_root: Path 
             program = _resolve_risk_history_path(root / program_id)
             if program == root or not program.is_relative_to(root) or not _resolve_risk_history_path(path).is_relative_to(program):
                 raise ValueError("journal path escapes selected program")
+            if not path.exists():
+                return ()
             records: list[dict[str, Any]] = []
             for line in path.read_text(encoding="utf-8").splitlines():
                 if not line.strip():
@@ -437,6 +437,8 @@ def load_risk_history(program_id: str, risk_id: str | None, programs_root: Path 
             return tuple(records)
         except (OSError, UnicodeError, TypeError, ValueError) as error:
             raise ConfigError(f"Invalid risk history in {path}: {error}") from error
+    if not path.exists():
+        return ()
     return tuple(record for record in read_jsonl_records(path) if str(record.get("risk_id") or "") == risk_id)
 
 
