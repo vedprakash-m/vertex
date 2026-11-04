@@ -1169,7 +1169,18 @@ def _render_hypothesis_show_text(
         for observation in observations:
             lines.append(
                 "- "
-                + f"{observation.measurement_period_end.isoformat()} | value={observation.value_num} | quality={observation.quality_state.value}"
+                + f"{observation.measurement_period_end.isoformat()} | value={observation.value_num} | "
+                + f"quality={observation.quality_state.value} | unit={observation.observed_unit or 'unknown'} | "
+                + f"definition={observation.definition_fingerprint or 'unknown'} | "
+                + "comparability="
+                + (
+                    "certified"
+                    if observation.observed_unit
+                    and observation.definition_fingerprint
+                    and observation.source_binding_id
+                    and observation.binding_version is not None
+                    else "unknown"
+                )
             )
     else:
         lines.append("recent_observations: none")
@@ -1279,4 +1290,15 @@ def _serialize_metric_observation(observation: MetricObservation) -> dict[str, o
         "sample_count": observation.sample_count,
         "quality_state": observation.quality_state.value,
         "source_binding_id": observation.source_binding_id,
+        "binding_version": observation.binding_version,
+        "observed_unit": observation.observed_unit,
+        "definition_fingerprint": observation.definition_fingerprint,
+        "comparability": (
+            "certified"
+            if observation.observed_unit
+            and observation.definition_fingerprint
+            and observation.source_binding_id
+            and observation.binding_version is not None
+            else "unknown"
+        ),
     }

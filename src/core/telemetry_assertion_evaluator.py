@@ -189,6 +189,14 @@ def _get_trend_analysis_error(
         return "trend assertion requires at least 2 numeric observations"
     first = projected_points[0]
     latest = projected_points[-1]
+    units = {observation.observed_unit for observation in projected_points}
+    fingerprints = {observation.definition_fingerprint for observation in projected_points}
+    if None in units or None in fingerprints or len(units) != 1 or len(fingerprints) != 1:
+        return "trend observations have unknown or mixed unit/definition lineage"
+    binding_ids = {observation.source_binding_id for observation in projected_points}
+    binding_versions = {observation.binding_version for observation in projected_points}
+    if None in binding_ids or None in binding_versions or len(binding_ids) != 1 or len(binding_versions) != 1:
+        return "trend observations have unknown or mixed source binding lineage"
     span_seconds = (latest.observed_at - first.observed_at).total_seconds()
     if span_seconds <= 0:
         return "trend assertion requires observations with increasing timestamps"

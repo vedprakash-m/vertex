@@ -419,3 +419,139 @@ def test_arbitrary_unknown_data_is_not_declared_reviewed_or_authored(tmp_path: P
     }
     assert report["scope"]["review_currency"] is False
     assert report["summary"]["clean"] is False
+
+
+def test_review_rule_coverage_joins_inventory_without_inheriting_rules(tmp_path: Path) -> None:
+    program = _program(tmp_path)
+    (program / "review.yaml").write_bytes(b"synthetic config")
+    (program / "unknown.yaml").write_bytes(b"synthetic unknown")
+    (program / "knowledge" / "nested").mkdir()
+    (program / "knowledge" / "nested" / "program.yaml").write_bytes(b"synthetic descendant")
+    (program / "overrides").mkdir()
+    (program / "overrides" / "issue_999.yaml").write_bytes(b"synthetic override")
+
+    report = program_inventory.inventory_program("fixture", tmp_path, root_only=False)
+
+    coverage = report["review_rule_coverage"]
+    rows = {Path(row["path"]): row for row in coverage["entries"]}
+    assert list(rows) == list(_entries(report))
+    assert rows[Path("program.yaml")]["rule_references"] == ["context_review.files.program.yaml"]
+    assert rows[Path("decisions.yaml")]["rule_references"] == ["context_review.entries.decisions.yaml"]
+    assert rows[Path("program.yaml")]["disposition"] == "existing_rule"
+    assert rows[Path("review.yaml")]["disposition"] == "unassessed"
+    assert rows[Path("unknown.yaml")]["disposition"] == "unclassified"
+    assert rows[Path("overrides") / "issue_999.yaml"]["disposition"] == "unassessed"
+    for path in (Path("knowledge"), Path("knowledge") / "nested"):
+        assert rows[path]["disposition"] == "container"
+        assert rows[path]["rule_references"] == []
+    descendant = rows[Path("knowledge") / "nested" / "program.yaml"]
+    assert descendant["disposition"] == "unclassified"
+    assert descendant["rule_references"] == []
+    assert coverage["totals"] == {
+        "entries": 8, "files": 6, "containers": 2, "other_entries": 0,
+        "existing_rule": 2, "unassessed": 2, "unclassified": 2,
+    }
+    assert all(row["review_state"] == "not_evaluated" for row in rows.values())
+    assert coverage["rule_basis"] == "compatibility_defaults_only"
+    assert coverage["policy_overrides_assessed"] is False
+    assert coverage["unassessed_scopes"] == [
+        "shared_knowledge", "entities_and_fields", "bindings_and_audiences", "people_validity",
+    ]
+    assert all(set(row) == {
+        "path", "kind", "classification", "disposition", "rule_references", "review_state",
+    } for row in rows.values())
+    assert coverage["totals"]["entries"] == sum(
+        coverage["totals"][key] for key in ("containers", "existing_rule", "unassessed", "unclassified")
+    )
+
+
+def test_review_rule_coverage_tracks_new_taxonomy_declarations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import importlib
+
+    from src.core import program_paths
+
+    program = _program(tmp_path)
+    (program / "future_authored.yaml").write_bytes(b"synthetic future schema")
+    try:
+        with monkeypatch.context() as declarations:
+            declarations.setattr(program_paths, "ROOT_ENTRIES", (
+                *program_paths.ROOT_ENTRIES, program_paths.RootEntry("future_authored.yaml", "T-1", "file"),
+            ))
+            importlib.reload(program_inventory)
+            report = program_inventory.inventory_program("fixture", tmp_path, root_only=False)
+    finally:
+        importlib.reload(program_inventory)
+
+    row = next(row for row in report["review_rule_coverage"]["entries"] if row["path"] == "future_authored.yaml")
+    assert row["classification"] == "recognized"
+    assert row["disposition"] == "unassessed"
+    assert row["rule_references"] == []
+    assert report["summary"]["clean"] is True
+
+
+@pytest.mark.parametrize("root_only", [False, True])
+def test_review_rule_coverage_cli_is_deterministic_and_explicit_about_scope(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], root_only: bool,
+) -> None:
+    program = _program(tmp_path)
+    (program / "workstreams.yaml").write_bytes(b"not YAML; no date may be inferred")
+    (program / "knowledge" / "program.yaml").write_bytes(b"synthetic descendant")
+    args = ["--program", "fixture", "--programs-root", str(tmp_path)]
+    if root_only:
+        args.append("--root-only")
+
+    expected_exit = 0 if root_only else 1
+    assert program_inventory.main([*args, "--format", "json"]) == expected_exit
+    first = capsys.readouterr()
+    assert first.err == ""
+    assert program_inventory.main([*args, "--format", "json"]) == expected_exit
+    assert capsys.readouterr().out == first.out
+    report = json.loads(first.out)
+    coverage = report["review_rule_coverage"]
+    rows = {row["path"]: row for row in coverage["entries"]}
+    assert rows["workstreams.yaml"]["rule_references"] == [
+        "context_review.files.workstreams.yaml", "context_review.entries.workstreams.yaml",
+    ]
+    assert ("authored_descendants" in coverage["unassessed_scopes"]) is root_only
+    assert (str(Path("knowledge") / "program.yaml") in rows) is (not root_only)
+    assert report["program_dir"] == str(program)
+    assert program_inventory.main(args) == expected_exit
+    human = capsys.readouterr()
+    assert human.err == ""
+    for label in (
+        "review-rule coverage", "compatibility defaults only", "policy overrides not assessed",
+        "review currency not assessed", "shared_knowledge", "entities_and_fields",
+        "bindings_and_audiences", "people_validity",
+        "existing_rule=3", "container", "context_review.entries.workstreams.yaml",
+    ):
+        assert label in human.out
+    assert "complete coverage" not in human.out
+
+
+@pytest.mark.parametrize("root_only", [True, False])
+def test_review_rule_coverage_never_enumerates_shared_or_other_program_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_only: bool,
+) -> None:
+    root = tmp_path / "programs"
+    root.mkdir()
+    program = _program(root)
+    sibling = root / "other"
+    sibling.mkdir()
+    (sibling / "unknown.yaml").write_bytes(b"synthetic other program")
+    shared = tmp_path / "knowledge"
+    shared.mkdir()
+    (shared / "people_directory.yaml").write_bytes(b"synthetic shared knowledge")
+    scan = program_inventory._scan
+
+    def selected_only(path: Path):
+        assert path.is_relative_to(program)
+        yield from scan(path)
+
+    monkeypatch.setattr(program_inventory, "_scan", selected_only)
+    report = program_inventory.inventory_program("fixture", root, root_only=root_only)
+    coverage = report["review_rule_coverage"]
+    assert {row["path"] for row in coverage["entries"]} == {"program.yaml", "decisions.yaml", "knowledge"}
+    assert "shared_knowledge" in coverage["unassessed_scopes"]
+    assert report["program_dir"] == str(program)

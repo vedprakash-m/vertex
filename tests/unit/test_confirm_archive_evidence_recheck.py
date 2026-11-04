@@ -10,11 +10,14 @@ import src.commands.confirm_stages.archive_transaction as archive_transaction
 from src.core.draft_artifact_store import load_draft_state
 from src.core.edition_resolver import get_program_output_dir
 from src.core.exceptions import ConfigError
+from src.core.fact_sor_state import save_fact_sor_state
+from src.core import fact_sor_state
 from src.core.milestone_engine import assess_milestone_health, save_milestones
 from src.core.models import RiskLevel
 from src.core.models_v2 import Milestone, MilestoneStatus, TrajectoryPoint
 from src.core.program_fact_store import ProgramFactInput, ProgramFactStore
 from src.core.quality_gates.fact_drift import evaluate_program_fact_drift_from_draft
+from src.core.quality_gates import fact_drift
 from src.core.store_factory import build_trajectory_store_for_program_id
 from src.core.stages.milestone_stage import MilestoneStage
 from src.core.trajectory import get_trajectory_path
@@ -24,6 +27,188 @@ from tests.unit.test_commands_confirm import (
     test_confirm_issue_archives_outputs_and_resets_active_state as _exercise_actual_confirm,
 )
 from tests.unit.test_commands_report import repo_root as repo_root
+
+
+def test_source_selector_drift_blocks_before_fact_store_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    programs_root = tmp_path / "programs"
+    save_fact_sor_state(
+        "synthetic", mode="legacy", recorded_at=datetime(2026, 5, 5, tzinfo=timezone.utc),
+        programs_root=programs_root,
+    )
+    monkeypatch.setattr(
+        fact_drift, "ProgramFactStore",
+        lambda *_args, **_kwargs: pytest.fail("Selector drift must block before fact-store access."),
+    )
+
+    report = evaluate_program_fact_drift_from_draft(
+        draft_state={
+            "program_fact_snapshot": {"snapshot_id": "pfs_synthetic", "program_id": "synthetic"},
+        },
+        program_id="synthetic",
+        programs_root=programs_root,
+        effective_family_modes=(("judgment", "primary"), ("workitem.state", "legacy")),
+    )
+
+    assert len(report.failing_results) == 1
+    assert report.failing_results[0].gate_id == "QG-SG-20"
+    assert report.failing_results[0].forceable is False
+    assert "selectors changed" in report.failing_results[0].message
+
+
+def test_lookback_retains_its_separate_unbound_selector_scope(tmp_path: Path) -> None:
+    report = evaluate_program_fact_drift_from_draft(
+        draft_state={"edition_type": "lookback"},
+        program_id="synthetic",
+        programs_root=tmp_path / "programs",
+        effective_family_modes=(),
+    )
+    assert report.failing_results == ()
+
+
+@pytest.mark.parametrize("modes", [
+    (),
+    (("judgment", "legacy"),),
+    (("judgment", "invalid"), ("workitem.state", "legacy")),
+    (("workitem.state", "legacy"), ("judgment", "legacy")),
+    (("judgment", "legacy"), ("judgment", "legacy"), ("workitem.state", "legacy")),
+])
+def test_invalid_source_selector_identity_refuses_without_force(
+    tmp_path: Path, modes: tuple[tuple[str, str], ...],
+) -> None:
+    report = evaluate_program_fact_drift_from_draft(
+        draft_state={}, program_id="synthetic", programs_root=tmp_path / "programs",
+        effective_family_modes=modes,
+    )
+    assert len(report.failing_results) == 1
+    assert report.failing_results[0].forceable is False
+
+
+@pytest.mark.parametrize("error", [ConfigError("synthetic invalid policy"), OSError("synthetic unreadable policy")])
+def test_unavailable_source_selectors_fail_visibly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception,
+) -> None:
+    monkeypatch.setattr(fact_sor_state, "load_fact_sor_state", Mock(side_effect=error))
+    report = evaluate_program_fact_drift_from_draft(
+        draft_state={}, program_id="synthetic", programs_root=tmp_path / "programs",
+        effective_family_modes=(("judgment", "legacy"), ("workitem.state", "legacy")),
+    )
+    assert report.failing_results[0].forceable is False
+    assert "selectors are unavailable" in report.failing_results[0].message
+
+
+def test_captured_source_selectors_require_program_identity(tmp_path: Path) -> None:
+    report = evaluate_program_fact_drift_from_draft(
+        draft_state={}, program_id=None, programs_root=tmp_path / "programs",
+        effective_family_modes=(("judgment", "legacy"), ("workitem.state", "legacy")),
+    )
+    assert report.failing_results[0].forceable is False
+    assert "selectors are missing or invalid" in report.failing_results[0].message
+
+
+def test_source_selector_comparison_uses_effective_family_override(
+    tmp_path: Path,
+) -> None:
+    programs_root = tmp_path / "programs"
+    modes = (("judgment", "primary"), ("workitem.state", "legacy"))
+    save_fact_sor_state(
+        "synthetic", mode="legacy", family_modes={"judgment": "primary"},
+        recorded_at=datetime(2026, 5, 5, tzinfo=timezone.utc), recorded_by="first",
+        programs_root=programs_root,
+    )
+    unchanged = evaluate_program_fact_drift_from_draft(
+        draft_state={}, program_id="synthetic", programs_root=programs_root,
+        effective_family_modes=modes,
+    )
+    assert unchanged.failing_results == ()
+
+    save_fact_sor_state(
+        "synthetic", mode="legacy", family_modes={"judgment": "primary"},
+        recorded_at=datetime(2026, 5, 6, tzinfo=timezone.utc), recorded_by="different-author",
+        programs_root=programs_root,
+    )
+    cosmetic_change = evaluate_program_fact_drift_from_draft(
+        draft_state={}, program_id="synthetic", programs_root=programs_root,
+        effective_family_modes=modes,
+    )
+    assert cosmetic_change.failing_results == ()
+
+    save_fact_sor_state(
+        "synthetic", mode="legacy", family_modes={"judgment": "shadow"},
+        recorded_at=datetime(2026, 5, 7, tzinfo=timezone.utc), recorded_by="second",
+        programs_root=programs_root,
+    )
+    changed = evaluate_program_fact_drift_from_draft(
+        draft_state={}, program_id="synthetic", programs_root=programs_root,
+        effective_family_modes=modes,
+    )
+    assert changed.failing_results[0].gate_id == "QG-SG-20"
+    assert "selectors changed" in changed.failing_results[0].message
+
+
+def test_actual_confirm_refuses_source_selector_drift_before_archive_transaction(
+    repo_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    programs_root = tmp_path / "programs"
+    original_loader = confirm_module._load_confirm_draft_manifest
+    lock = archive_transaction.ArchiveLock
+    lock_entries = []
+    checkpoints = Mock(wraps=archive_transaction.create_checkpoint_snapshot)
+    monkeypatch.setattr(archive_transaction, "create_checkpoint_snapshot", checkpoints)
+
+    def load_then_change_selector(*args, **kwargs):
+        manifest = original_loader(*args, **kwargs)
+        save_fact_sor_state(
+            "acme", mode="primary", recorded_at=datetime(2026, 5, 6, tzinfo=timezone.utc),
+            programs_root=programs_root,
+        )
+        return manifest
+
+    @contextmanager
+    def track_archive_lock(path: Path):
+        lock_entries.append(path)
+        with lock(path):
+            yield
+
+    monkeypatch.setattr(confirm_module, "_load_confirm_draft_manifest", load_then_change_selector)
+    monkeypatch.setattr(archive_transaction, "ArchiveLock", track_archive_lock)
+    with pytest.raises(AssertionError, match="selectors changed"):
+        _exercise_actual_confirm(repo_root, tmp_path, monkeypatch)
+
+    assert lock_entries == []
+    checkpoints.assert_not_called()
+    assert not (tmp_path / "archive" / "acme_weekly" / "index.json").exists()
+
+
+def test_actual_confirm_rechecks_source_selectors_under_archive_lock(
+    repo_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    programs_root = tmp_path / "programs"
+    archive_root = tmp_path / "archive"
+    original_lock = archive_transaction.ArchiveLock
+    checkpoints = Mock(wraps=archive_transaction.create_checkpoint_snapshot)
+    monkeypatch.setattr(archive_transaction, "create_checkpoint_snapshot", checkpoints)
+    entered = []
+
+    @contextmanager
+    def change_selector_after_lock(path: Path):
+        with original_lock(path):
+            entered.append(path)
+            save_fact_sor_state(
+                "acme", mode="primary", recorded_at=datetime(2026, 5, 6, tzinfo=timezone.utc),
+                programs_root=programs_root,
+            )
+            yield
+
+    monkeypatch.setattr(archive_transaction, "ArchiveLock", change_selector_after_lock)
+    with pytest.raises(ConfigError, match="selectors changed"):
+        _exercise_actual_confirm(repo_root, tmp_path, monkeypatch)
+
+    assert len(entered) == 1
+    checkpoints.assert_not_called()
+    assert not (archive_root / "acme_weekly" / "index.json").exists()
+    assert not tuple((archive_root / "acme_weekly" / "snapshots").glob("*.snapshot.json"))
 
 
 @pytest.mark.parametrize("change", ["addition", "replacement", "content", "missing_pin"])

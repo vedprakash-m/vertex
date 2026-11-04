@@ -11,7 +11,7 @@ from pathlib import Path
 import re
 import sqlite3
 
-from src.core._db import open_program_db
+from src.core._db import ensure_table_columns as _ensure_table_columns, open_program_db
 from src.core.digest_cache import compute_digest_sha256, serialize_digest_model
 from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.hypothesis_models import (
@@ -932,8 +932,9 @@ class RealityStore:
                         observation_id, program_id, metric_id, dimensions_json, measurement_period_start,
                         measurement_period_end, observed_at, value_num, value_text, sample_count,
                         quality_state, source_binding_id, binding_version, ingestion_run_id,
-                        corrected_at, corrected_reason, inserted_at, is_pinned, pinned_at, pin_reason
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        corrected_at, corrected_reason, inserted_at, is_pinned, pinned_at, pin_reason,
+                        observed_unit, definition_fingerprint
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         observation.observation_id,
@@ -956,6 +957,8 @@ class RealityStore:
                         int(observation.is_pinned),
                         _encode_datetime(observation.pinned_at),
                         observation.pin_reason,
+                        observation.observed_unit,
+                        observation.definition_fingerprint,
                     ),
                 )
                 return observation.observation_id
@@ -974,6 +977,8 @@ class RealityStore:
                     sample_count = ?,
                     quality_state = ?,
                     binding_version = ?,
+                    observed_unit = ?,
+                    definition_fingerprint = ?,
                     ingestion_run_id = ?,
                     corrected_at = ?,
                     corrected_reason = ?
@@ -986,6 +991,8 @@ class RealityStore:
                     observation.sample_count,
                     MetricQualityState.LATE_CORRECTED.value,
                     observation.binding_version,
+                    observation.observed_unit,
+                    observation.definition_fingerprint,
                     observation.ingestion_run_id,
                     _encode_datetime(corrected_at),
                     corrected_reason,
@@ -1075,6 +1082,8 @@ class RealityStore:
                     value_text = ?,
                     sample_count = ?,
                     quality_state = ?,
+                    observed_unit = ?,
+                    definition_fingerprint = ?,
                     corrected_at = NULL,
                     corrected_reason = NULL,
                     inserted_at = ?,
@@ -1094,6 +1103,8 @@ class RealityStore:
                     observation.value_text,
                     observation.sample_count,
                     MetricQualityState.MANUAL.value,
+                    observation.observed_unit,
+                    observation.definition_fingerprint,
                     _encode_datetime(observation.inserted_at),
                     observation_id,
                     self._program_id,
@@ -1611,6 +1622,8 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             is_pinned INTEGER NOT NULL DEFAULT 0,
             pinned_at TEXT,
             pin_reason TEXT,
+            observed_unit TEXT,
+            definition_fingerprint TEXT,
             FOREIGN KEY (source_binding_id) REFERENCES reality_metric_source_bindings(binding_id),
             FOREIGN KEY (ingestion_run_id) REFERENCES reality_ingestion_runs(id)
         );
@@ -1885,6 +1898,8 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             "is_pinned": "INTEGER NOT NULL DEFAULT 0",
             "pinned_at": "TEXT",
             "pin_reason": "TEXT",
+            "observed_unit": "TEXT",
+            "definition_fingerprint": "TEXT",
         },
     )
     _ensure_table_columns(
@@ -1923,21 +1938,6 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             "captured_window": "TEXT",
         },
     )
-
-
-def _ensure_table_columns(
-    connection: sqlite3.Connection,
-    table_name: str,
-    columns: dict[str, str],
-) -> None:
-    existing_columns = {
-        str(row["name"])
-        for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
-    }
-    for column_name, definition in columns.items():
-        if column_name in existing_columns:
-            continue
-        connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
 
 
 def _metric_source_binding_from_row(row: sqlite3.Row) -> MetricSourceBinding:
@@ -2123,6 +2123,8 @@ def _metric_observation_from_row(row: sqlite3.Row) -> MetricObservation:
         is_pinned=bool(row["is_pinned"]),
         pinned_at=_parse_datetime(row["pinned_at"]),
         pin_reason=_optional_string(row["pin_reason"]),
+        observed_unit=row["observed_unit"],
+        definition_fingerprint=row["definition_fingerprint"],
     )
 
 

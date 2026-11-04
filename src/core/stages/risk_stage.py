@@ -5,9 +5,13 @@ from pathlib import Path
 from typing import TypedDict
 
 from src.core.pipeline import StageContext
+from src.core.fact_sor_state import resolve_family_sor_mode
 from src.core.program_fact_store import load_program_facts, project_risk_entries
 from src.core.risk_register_engine import assess_risk_staleness
-from src.core.stages.sor_gated_load import report_reality_scope, retained_report_fact_snapshot, sor_gated_family_load
+from src.core.stages.sor_gated_load import (
+    record_report_family_selector, report_reality_scope, report_reality_scope_matches,
+    retained_report_fact_snapshot, sor_gated_family_load,
+)
 
 _ALLOW_LEGACY_RISK_ROLLBACK_ENV = "VERTEX_REPORT_ALLOW_LEGACY_RISK_ROLLBACK"
 
@@ -28,18 +32,25 @@ class RiskStage:
         if ctx.resolved_v2 is None or ctx.programs_root is None or ctx.data_as_of is None:
             return replace(ctx, risks=(), risk_assessments=None, risk_lineage=None, stale_risk_ids=(), risk_warnings=())
 
+        programs_root = ctx.programs_root
+        data_as_of = ctx.data_as_of
         program_id = ctx.resolved_v2.paths.program_id
         fact_snapshot = retained_report_fact_snapshot(ctx, program_id)
         scope = report_reality_scope(ctx, program_id, fact_snapshot)
+        reuse_reality = report_reality_scope_matches(ctx, scope)
+        if not reuse_reality:
+            ctx = replace(ctx, report_reality=None)
+        sor_mode = resolve_family_sor_mode(program_id, "judgment", programs_root=programs_root)
+        ctx = record_report_family_selector(ctx, scope, "judgment", sor_mode)
         risks, risk_assessments, warnings, lineage = sor_gated_family_load(
             program_id=program_id,
             # judgment, not "risk" -- risk/decision/assumption all share
             # this one authority family (fix-data-flow.md v1.5 / PS-15/16).
             family="judgment",
-            programs_root=ctx.programs_root,
+            programs_root=programs_root,
             reality_accessor=lambda reality: reality.risks(),
             legacy_loader=lambda: _load_current_risks(
-                program_id, programs_root=ctx.programs_root,
+                program_id, programs_root=programs_root,
                 **({"archive_root": ctx.archive_root} if ctx.archive_root is not None else {}),
             ),
             allow_legacy_rollback_env=_ALLOW_LEGACY_RISK_ROLLBACK_ENV,
@@ -49,17 +60,18 @@ class RiskStage:
                 if ctx.stage_support is not None
                 else None
             ),
-            as_of=ctx.data_as_of,
+            as_of=data_as_of,
             edition_name=ctx.edition_name,
             archive_root=ctx.archive_root,
             fact_snapshot=fact_snapshot,
-            reality=ctx.report_reality if scope is not None and scope == ctx.report_reality_scope else None,
+            reality=ctx.report_reality if reuse_reality else None,
+            sor_mode=sor_mode,
         )
 
         stale_risk_ids = tuple(
             risk.id
             for risk in risks
-            if assess_risk_staleness(risk, ctx.data_as_of.date())
+            if assess_risk_staleness(risk, data_as_of.date())
         )
         return replace(
             ctx,

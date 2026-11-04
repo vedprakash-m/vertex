@@ -134,6 +134,105 @@ def test_reversed_window_cannot_replace_history_or_stop_independent_query(tmp_pa
     assert rows[1] == ("other-count", "success", 1, None)
 
 
+def test_persisted_projection_certifies_exact_authored_unit_and_semantic_definition(
+    dimensional_kpi_case,
+) -> None:
+    store, query, signal, _, now = dimensional_kpi_case
+    definition = MetricDefinition(
+        id="demo.latency",
+        title="Latency",
+        unit="ms",
+        aggregation=MetricAggregation.LAST,
+        dimension_columns=("Region",),
+        policy_version=7,
+    )
+    query = replace(query, unit="ms")
+    observation, = kpi_projection_stage.project_kpi_signals_to_observations(
+        "demo",
+        queries=(query,),
+        as_of=now,
+        kpi_signals=(signal,),
+        query_states={},
+        store=store,
+        metric_definitions={definition.id: definition},
+    )
+
+    persisted, = store.list_metric_observations("demo.latency")
+
+    assert observation.observed_unit == "ms"
+    assert observation.definition_fingerprint is not None
+    assert persisted.observed_unit == "ms"
+    assert persisted.definition_fingerprint == observation.definition_fingerprint
+    assert observation.definition_fingerprint.startswith("sha256:")
+
+
+def test_semantic_definition_fingerprint_tracks_only_selected_semantic_fields() -> None:
+    definition = MetricDefinition(
+        id="demo.latency",
+        title="Latency",
+        unit="ms",
+        aggregation=MetricAggregation.LAST,
+        dimension_columns=("Region", "Cluster"),
+        higher_is_better=False,
+        policy_version=7,
+    )
+    fingerprint = kpi_projection_stage.metric_definition_fingerprint
+
+    original = fingerprint(definition)
+    reordered = fingerprint(replace(
+        definition,
+        title="Renamed",
+        policy_version=99,
+        dimension_columns=("Cluster", "Region"),
+    ))
+
+    assert original == reordered
+    assert fingerprint(replace(definition, aggregation=MetricAggregation.AVG)) != original
+    assert fingerprint(replace(definition, unit="s")) != original
+    assert fingerprint(replace(definition, dimension_columns=("Region",))) != original
+    assert fingerprint(replace(definition, higher_is_better=True)) != original
+
+
+def test_projection_without_explicit_unit_or_known_definition_is_unverified(
+    dimensional_kpi_case,
+) -> None:
+    store, query, signal, _, now = dimensional_kpi_case
+    unbound, = kpi_projection_stage.project_kpi_signals_to_observations(
+        "demo",
+        queries=(query,),
+        as_of=now,
+        kpi_signals=(signal,),
+        query_states={},
+        store=store,
+        metric_definitions={"demo.latency": MetricDefinition(
+            id="demo.latency",
+            title="Latency",
+            unit="ms",
+            aggregation=MetricAggregation.LAST,
+            dimension_columns=("Region",),
+        )},
+    )
+    binding = store.get_metric_source_binding("latency")
+    assert binding is not None
+    store.upsert_metric_source_binding(replace(
+        binding,
+        binding_id="unknown",
+        metric_id="demo.unknown",
+    ))
+    unknown, = kpi_projection_stage.project_kpi_signals_to_observations(
+        "demo",
+        queries=(replace(query, id="unknown", unit="ms", metric_id="demo.unknown"),),
+        as_of=now,
+        kpi_signals=(replace(signal, metadata={**signal.metadata, "query_id": "unknown"}),),
+        query_states={},
+        store=store,
+        metric_definitions={},
+    )
+
+    assert (unbound.observed_unit, unbound.definition_fingerprint) == (None, None)
+    assert (unknown.observed_unit, unknown.definition_fingerprint) == (None, None)
+
+
 @pytest.fixture
 def dimensional_kpi_case(tmp_path: Path):
     from src.commands import gather

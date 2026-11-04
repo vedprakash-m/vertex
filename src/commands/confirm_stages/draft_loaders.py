@@ -43,6 +43,33 @@ class ConfirmDraftManifest:
     milestone_trajectory_snapshot: Any
     run_evidence_snapshot: RunEvidenceSnapshot | None = None
 
+    def validate_scope(self, edition_name: str, issue_number: int, programs_root: Path) -> None:
+        if (
+            self.edition_name != edition_name
+            or self.issue_number != issue_number
+            or self.programs_root != programs_root.absolute()
+        ):
+            raise typer.BadParameter(
+                "Captured draft manifest scope does not match this confirmation. "
+                "Preserve the existing artifacts and capture evidence from the selected workspace, edition and issue."
+            )
+
+    def require_bound_capture(self, program_id: str | None, draft_state: Mapping[str, Any]) -> None:
+        if (
+            program_id is not None
+            and draft_state.get("edition_type") != "lookback"
+            and (
+                self.run_evidence_snapshot is None
+                or self.run_evidence_snapshot.schema_version != "run-evidence-capture.v2"
+                or {family for family, _ in self.run_evidence_snapshot.effective_family_modes}
+                != {"judgment", "workitem.state"}
+            )
+        ):
+            raise ConfigError(
+                "This program-backed draft has no source-selector-bound capture. "
+                "Preserve the existing artifacts, re-run `vertex report --dry-run` and review before confirming."
+            )
+
 
 def load_confirm_draft_manifest(
     edition_name: str, issue_number: int, *, draft_state: Mapping[str, Any], programs_root: Path = PROGRAMS_ROOT,
@@ -59,6 +86,20 @@ def load_confirm_draft_manifest(
         capture = load_run_evidence_snapshot(payload or {}, draft_state)
     except ConfigError as error:
         raise typer.BadParameter(str(error)) from error
+    if (
+        draft_state.get("program_fact_snapshot") is not None
+        and draft_state.get("edition_type") != "lookback"
+        and (
+            capture is None
+            or capture.schema_version != "run-evidence-capture.v2"
+            or {family for family, _ in capture.effective_family_modes}
+            != {"judgment", "workitem.state"}
+        )
+    ):
+        raise typer.BadParameter(
+            "This program-backed draft has no source-selector-bound capture. "
+            "Preserve the existing artifacts, re-run `vertex report --dry-run` and review before confirming."
+        )
     return ConfirmDraftManifest(
         edition_name=edition_name,
         issue_number=issue_number,

@@ -11,6 +11,7 @@ from typer import BadParameter
 
 from src.commands import confirm
 from src.commands.confirm_stages import draft_loaders
+from src.core.exceptions import ConfigError
 from src.core.manifest_writer import hash_jsonable
 from src.core.overrides_store import OverridesDocument
 from tests.unit.test_run_evidence_contracts import _capture, _wire
@@ -78,6 +79,42 @@ def test_capture_preserves_optional_legacy_metadata(tmp_path: Path, metadata: ob
     assert captured.draft_readiness is None
     assert captured.milestone_assessments is None
     assert captured.milestone_trajectory_snapshot is None
+
+
+@pytest.mark.parametrize("capture_version", ["absent", "v1", "v2-unbound"])
+def test_program_backed_confirmation_rejects_unbound_historical_capture_without_writes(
+    tmp_path: Path, capture_version: str,
+) -> None:
+    root = tmp_path / "programs"
+    draft = {
+        "program_fact_snapshot": {"snapshot_id": "pfs_legacy", "program_id": "fixture"},
+    }
+    if capture_version == "absent":
+        payload = {"manifest_id": "legacy", "metadata": {}}
+    else:
+        capture = _capture()
+        payload, draft = _wire(capture)
+        payload = json.loads(json.dumps(payload, default=lambda value: value.isoformat()))
+        raw = payload["metadata"]["run_evidence_snapshot"]
+        if capture_version == "v1":
+            raw.pop("effective_family_modes")
+            raw["schema_version"] = "run-evidence-capture.v1"
+        else:
+            raw["effective_family_modes"] = []
+        raw.pop("sha256")
+        raw["sha256"] = hash_jsonable(raw)
+        draft["run_evidence_snapshot_sha256"] = raw["sha256"]
+    payload["manifest_id"] = "legacy"
+    path = _manifest(root, payload)
+    original = path.read_bytes()
+
+    with pytest.raises(BadParameter, match="source-selector-bound"):
+        draft_loaders.load_confirm_draft_manifest(
+            "fixture", 7, draft_state=draft, programs_root=root,
+        )
+
+    assert path.read_bytes() == original
+    assert tuple(path.parent.iterdir()) == (path,)
 
 
 def test_capture_projects_milestone_assessment_scope_and_trajectory_snapshot(tmp_path: Path) -> None:
@@ -197,6 +234,30 @@ def test_direct_artifact_construction_uses_capture_without_rereading(
         )
 
 
+def test_direct_program_artifact_construction_rejects_absent_capture_before_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "programs"
+    _manifest(root, {"manifest_id": "id"})
+    captured = draft_loaders.load_confirm_draft_manifest("fixture", 7, draft_state={}, programs_root=root)
+    monkeypatch.setattr(confirm, "validate_report_workspace", lambda **_kwargs: None)
+    monkeypatch.setattr(confirm, "resolve_edition", lambda *_args, **_kwargs: SimpleNamespace(
+        program=SimpleNamespace(id="fixture"),
+    ))
+    monkeypatch.setattr(
+        confirm, "load_trusted_baseline_issue",
+        lambda *_args, **_kwargs: pytest.fail("Unbound capture must fail before archive/history reads."),
+    )
+
+    with pytest.raises(ConfigError, match="source-selector-bound"):
+        confirm._build_confirm_artifacts(
+            "fixture", 7, SimpleNamespace(),
+            OverridesDocument(issue_number=7, top_3_now=(), scorecards=()),
+            {}, tmp_path / "reports", tmp_path / "archive",
+            programs_root=root, draft_manifest=captured,
+        )
+
+
 def test_standalone_artifacts_forward_selected_root_to_scorecard_history_and_review(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -206,6 +267,14 @@ def test_standalone_artifacts_forward_selected_root_to_scorecard_history_and_rev
     archive_root = workspace / "archive"
     manifest_path = _manifest(programs_root, {"manifest_id": "id"})
     draft_manifest = draft_loaders.load_confirm_draft_manifest("fixture", 7, draft_state={}, programs_root=programs_root)
+    capture = replace(
+        _capture(), effective_family_modes=(("judgment", "legacy"), ("workitem.state", "legacy")),
+    )
+    capture_content = asdict(capture)
+    capture_content.pop("sha256")
+    draft_manifest = replace(
+        draft_manifest, run_evidence_snapshot=replace(capture, sha256=hash_jsonable(capture_content)),
+    )
     resolved = SimpleNamespace(
         program=SimpleNamespace(id="fixture", maturity_level=0),
         workstreams=(),

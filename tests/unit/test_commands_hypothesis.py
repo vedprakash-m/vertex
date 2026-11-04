@@ -10,7 +10,7 @@ from cli import app
 from src.core.assumption_tracker import save_assumptions
 from src.core.hypothesis_models import ChallengeKind, ChallengeSeverity, ChallengeState, Hypothesis, HypothesisKind, HypothesisStatus, RealityChallenge, TelemetryAssertion, AssertionOperator
 from src.core.hypothesis_models import CompositeAssertion, CompositeAssertionOperator
-from src.core.metric_models import MetricAggregation, MetricObservation, ObservationWindow
+from src.core.metric_models import MetricAggregation, MetricObservation, MetricSourceBinding, ObservationWindow
 from src.core.models_v2 import Assumption, AssumptionStatus
 from src.core.reality_store import RealityStore
 from src.core.source_models import SourceKind
@@ -731,6 +731,12 @@ def test_hypothesis_challenge_command_creates_manual_alert_challenge(tmp_path: P
 def test_hypothesis_show_command_returns_lifecycle_assertion_and_recent_observations(tmp_path: Path) -> None:
     store = RealityStore("acme", db_root=tmp_path / "db")
     store.initialize()
+    store.upsert_metric_source_binding(MetricSourceBinding(
+        binding_id="binding-001",
+        metric_id="acme.cluster_count",
+        program_id="acme",
+        source_kind="kusto",
+    ))
     store.upsert_telemetry_assertion(
         TelemetryAssertion(
             id="assertion-001",
@@ -790,6 +796,10 @@ def test_hypothesis_show_command_returns_lifecycle_assertion_and_recent_observat
             value_num=148.0,
             value_text=None,
             sample_count=1,
+            observed_unit="count",
+            definition_fingerprint="sha256:cluster-count-v1",
+            source_binding_id="binding-001",
+            binding_version=1,
         )
     )
     store.write_metric_observation(
@@ -804,6 +814,8 @@ def test_hypothesis_show_command_returns_lifecycle_assertion_and_recent_observat
             value_num=152.0,
             value_text=None,
             sample_count=1,
+            observed_unit=None,
+            definition_fingerprint=None,
         )
     )
     store.upsert_challenge(
@@ -847,7 +859,23 @@ def test_hypothesis_show_command_returns_lifecycle_assertion_and_recent_observat
     assert payload["latest_challenge"]["id"] == "challenge-001"
     assert [item["id"] for item in payload["lifecycle"]] == ["hyp-000", "hyp-001"]
     assert [item["observation_id"] for item in payload["recent_observations"]] == ["observation-002", "observation-001"]
+    assert payload["recent_observations"][0]["comparability"] == "unknown"
+    assert payload["recent_observations"][1]["observed_unit"] == "count"
+    assert payload["recent_observations"][1]["definition_fingerprint"] == "sha256:cluster-count-v1"
+    assert payload["recent_observations"][1]["comparability"] == "certified"
     assert payload["annotations"] == []
+
+    text_result = runner.invoke(
+        app,
+        [
+            "hypothesis", "show", "--program", "acme", "--id", "H-001",
+            "--format", "human", "--db-root", str(tmp_path / "db"),
+        ],
+    )
+    assert text_result.exit_code == 0
+    assert "unit=unknown" in text_result.stdout
+    assert "comparability=unknown" in text_result.stdout
+    assert "comparability=certified" in text_result.stdout
 
 
 def test_hypothesis_annotation_commands_add_list_archive_without_changing_hypothesis_state(tmp_path: Path) -> None:

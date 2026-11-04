@@ -17,6 +17,7 @@ from src.commands.gather_pipeline.support import (
     parse_date,
 )
 from src.core.exceptions import QueryError
+from src.core.manifest_writer import hash_jsonable
 from src.core.m365_payload_support import optional_string as _optional_string
 from src.core.metric_binding_validator import coerce_metric_value
 from src.core.metric_models import MetricDefinition, MetricObservation, MetricQualityState, MetricSourceBinding
@@ -27,6 +28,17 @@ from src.core.source_models import IngestionRun, SourceKind
 
 RefreshKpiQueryLoader = Callable[..., tuple[KustoQuery, ...]]
 KpiQueryDeduper = Callable[[tuple[KustoQuery, ...]], tuple[KustoQuery, ...]]
+
+
+def metric_definition_fingerprint(definition: MetricDefinition) -> str:
+    return hash_jsonable({
+        "schema": "vertex.metric-definition-semantic.v1",
+        "metric_id": definition.id,
+        "unit": definition.unit,
+        "aggregation": definition.aggregation.value,
+        "dimension_columns": sorted(definition.dimension_columns),
+        "higher_is_better": definition.higher_is_better,
+    })
 
 
 def project_refresh_kpi_signals_to_observations(
@@ -248,6 +260,11 @@ def build_metric_observation_from_kpi_signal(
             f"KPI query {query.id} unit does not match its metric definition; "
             "skipping MetricObservation projection."
         )
+    observed_unit = None
+    definition_fingerprint = None
+    if metric_definition is not None and query.unit is not None:
+        observed_unit = query.unit
+        definition_fingerprint = metric_definition_fingerprint(metric_definition)
     dimensions_json = json.dumps(dimensions, sort_keys=True, separators=(",", ":"))
     identity = f"{program_id}|{query.id}|{binding.binding_id}|{measurement_period_end.isoformat()}"
     if dimensions:
@@ -268,6 +285,8 @@ def build_metric_observation_from_kpi_signal(
         source_binding_id=binding.binding_id,
         binding_version=binding.binding_version,
         ingestion_run_id=ingestion_run_id,
+        observed_unit=observed_unit,
+        definition_fingerprint=definition_fingerprint,
     )
 
 

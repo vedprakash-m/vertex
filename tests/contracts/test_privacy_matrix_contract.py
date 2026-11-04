@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import subprocess
 
 import pytest
 import typer
@@ -35,6 +36,40 @@ from src.core.privacy_matrix import (
 
 
 # ----- Spec ↔ code sync -----
+
+@pytest.mark.parametrize(
+    ("path", "ignored"),
+    [
+        ("incoming/message.eml", True),
+        ("incoming/meeting.ics", True),
+        ("incoming/source.docx", True),
+        ("incoming/source.pdf", True),
+        ("incoming/message.msg", True),
+        ("incoming/identity.pfx", True),
+        ("incoming/identity.p12", True),
+        (".env", True),
+        (".archive/specs/completed.md", True),
+        (".env.example", False),
+        ("tests/data/synthetic.json", False),
+        ("scripts/reusable_tool.py", False),
+    ],
+)
+def test_publication_ignore_rules_exclude_raw_source_exports(
+    tmp_path: Path, path: str, ignored: bool,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    (tmp_path / ".gitignore").write_bytes((repo_root / ".gitignore").read_bytes())
+    subprocess.run(
+        ["git", "-c", "init.defaultBranch=main", "init", "--quiet", str(tmp_path)],
+        check=True, capture_output=True, text=True,
+    )
+    result = subprocess.run(
+        ["git", "check-ignore", "--no-index", "--quiet", "--", path],
+        cwd=tmp_path, capture_output=True, text=True,
+    )
+    assert result.returncode in (0, 1), result.stderr
+    assert (result.returncode == 0) is ignored
+
 
 # The 25 known sidecar paths in the markdown matrix (Section 3 of
 # `governance/privacy-matrix.md`). If you add a sidecar to either, you must

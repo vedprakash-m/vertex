@@ -248,7 +248,7 @@ def _metric_observation_to_brief(obs: MetricObservation, *, as_of: datetime) -> 
     if obs.value_text is not None:
         value_summary = obs.value_text
     elif obs.value_num is not None:
-        value_summary = f"{obs.value_num:g}"
+        value_summary = f"{obs.value_num:g}" + (f" {obs.observed_unit}" if obs.observed_unit else "")
     else:
         value_summary = "n/a"
     observed_utc = _ensure_utc(obs.observed_at)
@@ -260,6 +260,8 @@ def _metric_observation_to_brief(obs: MetricObservation, *, as_of: datetime) -> 
         value_summary=value_summary,
         freshness_label=freshness_label,
         quality_state=obs.quality_state.value,
+        unit=obs.observed_unit,
+        definition_fingerprint=obs.definition_fingerprint,
     )
 
 

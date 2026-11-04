@@ -35,7 +35,10 @@ def _capture(*, ids=(2, 1), queries=(), facts=()):
         "manifest", 7, "fixture", clock, clock, {}, report, "", "", 0, 0, 0.0, {}, {}, None,
         gather_run_id="gather", gather_run_hash="gather-hash",
     )
-    return build_run_evidence_snapshot(pin, snapshot, gather, manifest, report)
+    return build_run_evidence_snapshot(
+        pin, snapshot, gather, manifest, report,
+        effective_family_modes=(("judgment", "primary"), ("workitem.state", "shadow")),
+    )
 
 
 def _wire(capture):
@@ -54,8 +57,10 @@ def _wire(capture):
 
 def test_minimal_capture_round_trip_and_integrity():
     capture = _capture()
-    assert sum(len(fields(model)) for model in (SourceScopeContract, EvidenceBinding, RunEvidenceSnapshot)) == 21
+    assert sum(len(fields(model)) for model in (SourceScopeContract, EvidenceBinding, RunEvidenceSnapshot)) == 22
     assert capture.capture_state == "unqualified_capture"
+    assert capture.schema_version == "run-evidence-capture.v2"
+    assert capture.effective_family_modes == (("judgment", "primary"), ("workitem.state", "shadow"))
     assert capture.fetched_item_ids == (1, 2)
     payload, draft = _wire(capture)
     assert load_run_evidence_snapshot(payload, draft) == capture
@@ -119,12 +124,45 @@ def test_absent_capture_is_legacy_but_one_sided_reference_is_not():
         load_run_evidence_snapshot({"metadata": ["invalid"]}, {})
 
 
+def test_v1_capture_remains_readable_without_selector_identity():
+    capture = _capture()
+    payload, draft = _wire(capture)
+    raw = payload["metadata"]["run_evidence_snapshot"]
+    raw.pop("effective_family_modes")
+    raw["schema_version"] = "run-evidence-capture.v1"
+    raw.pop("sha256")
+    raw["sha256"] = hash_jsonable(raw)
+    draft["run_evidence_snapshot_sha256"] = raw["sha256"]
+    loaded = load_run_evidence_snapshot(payload, draft)
+    assert loaded is not None
+    assert loaded.schema_version == "run-evidence-capture.v1"
+    assert loaded.effective_family_modes == ()
+
+
+def test_v2_capture_without_observed_selectors_remains_readable_unbound():
+    payload, draft = _wire(_capture())
+    raw = payload["metadata"]["run_evidence_snapshot"]
+    raw["effective_family_modes"] = []
+    raw.pop("sha256")
+    raw["sha256"] = hash_jsonable(raw)
+    draft["run_evidence_snapshot_sha256"] = raw["sha256"]
+
+    loaded = load_run_evidence_snapshot(payload, draft)
+
+    assert loaded is not None
+    assert loaded.schema_version == "run-evidence-capture.v2"
+    assert loaded.effective_family_modes == ()
+
+
 def test_builder_rejects_missing_or_foreign_retained_facts():
     clock = datetime(2026, 5, 5, tzinfo=timezone.utc)
     pin = SimpleNamespace(program_id="fixture")
     for snapshot in (None, SimpleNamespace(program_id="other", as_of=clock)):
         with pytest.raises(ConfigError):
-            build_run_evidence_snapshot(cast(Any, pin), cast(Any, snapshot), None, cast(Any, None), cast(Any, None))
+            build_run_evidence_snapshot(
+                cast(Any, pin), cast(Any, snapshot), None, cast(Any, None), cast(Any, None),
+                effective_family_modes=(),
+            )
 
 
 def test_capture_requires_exact_wire_fields():

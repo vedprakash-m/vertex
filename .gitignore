@@ -42,6 +42,8 @@ build/
 *.pat
 *.pem
 *.key
+*.pfx
+*.p12
 credentials*.json
 
 # Editor
@@ -182,7 +184,12 @@ tests/contracts/test_workstream_kusto_registry.py
 .git.old/
 
 # Local debug / scratch output sometimes left in workspace root
+# Raw communications and document exports are private source material.
 *.eml
+*.msg
+*.ics
+*.docx
+*.pdf
 *.tmp
 *.bak
 *.orig

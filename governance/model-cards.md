@@ -21,6 +21,8 @@ and any known limitations. A card is required for every entry in
 
 ## 2. How to file a model card
 
+This is a synthetic example, not a deployed resource or operational certification.
+
 ```yaml
 # vertex/policies/model_cards/<feature_name>.yaml
 schema_version: "1"
@@ -28,7 +30,7 @@ feature_name: blurb_generator
 deployment:
   model_id: gpt-4o
   deployment_id: gpt-4o
-  azure_openai_base: https://vertex-aoai-eastus.openai.azure.com
+  azure_openai_base: https://example.openai.azure.com
   model_version: 2024-05-13        # upstream checkpoint version
   pinned_at: 2026-06-09T00:00:00Z
   deprecation_review_at: 2026-09-09T00:00:00Z

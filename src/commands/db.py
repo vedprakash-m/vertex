@@ -767,7 +767,10 @@ def _plan_observation_compaction(
         """,
         (program, MetricQualityState.PARTIAL.value),
     ).fetchall()
-    existing_rollups: dict[tuple[str, str, str | None, str], sqlite3.Row] = {}
+    existing_rollups: dict[
+        tuple[str, str, str | None, int | None, str, str | None, str | None],
+        sqlite3.Row,
+    ] = {}
     for row in partial_rows:
         key = _observation_rollup_key(row)
         existing_rollups.setdefault(key, row)
@@ -781,7 +784,10 @@ def _plan_observation_compaction(
         (program, MetricQualityState.PARTIAL.value),
     ).fetchall()
 
-    grouped: dict[tuple[str, str, str | None, str], list[sqlite3.Row]] = {}
+    grouped: dict[
+        tuple[str, str, str | None, int | None, str, str | None, str | None],
+        list[sqlite3.Row],
+    ] = {}
     rows_skipped_referenced = 0
     unknown_metric_ids: set[str] = set()
     for row in rows:
@@ -826,6 +832,8 @@ def _plan_observation_compaction(
                     "quality_state": MetricQualityState.PARTIAL.value,
                     "source_binding_id": latest_row["source_binding_id"],
                     "binding_version": latest_row["binding_version"],
+                    "observed_unit": latest_row["observed_unit"],
+                    "definition_fingerprint": latest_row["definition_fingerprint"],
                 }
             )
             continue
@@ -844,6 +852,8 @@ def _plan_observation_compaction(
                 "value_text": representative_row["value_text"],
                 "sample_count": existing_count + compacted_count,
                 "binding_version": representative_row["binding_version"],
+                "observed_unit": representative_row["observed_unit"],
+                "definition_fingerprint": representative_row["definition_fingerprint"],
             }
         )
 
@@ -881,6 +891,8 @@ def _apply_observation_compaction(
                 sample_count = ?,
                 quality_state = ?,
                 binding_version = ?,
+                observed_unit = ?,
+                definition_fingerprint = ?,
                 ingestion_run_id = NULL,
                 corrected_at = NULL,
                 corrected_reason = NULL
@@ -895,6 +907,8 @@ def _apply_observation_compaction(
                 update["sample_count"],
                 MetricQualityState.PARTIAL.value,
                 update["binding_version"],
+                update["observed_unit"],
+                update["definition_fingerprint"],
                 update["observation_id"],
             ),
         )
@@ -906,8 +920,8 @@ def _apply_observation_compaction(
                 observation_id, program_id, metric_id, dimensions_json, measurement_period_start,
                 measurement_period_end, observed_at, value_num, value_text, sample_count,
                 quality_state, source_binding_id, binding_version, ingestion_run_id, corrected_at,
-                corrected_reason, inserted_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?)
+                corrected_reason, inserted_at, observed_unit, definition_fingerprint
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?)
             """,
             (
                 insertion["observation_id"],
@@ -924,6 +938,8 @@ def _apply_observation_compaction(
                 insertion["source_binding_id"],
                 insertion["binding_version"],
                 inserted_at.isoformat(),
+                insertion["observed_unit"],
+                insertion["definition_fingerprint"],
             ),
         )
 
@@ -954,12 +970,17 @@ def _load_referenced_observation_ids(
     return referenced_ids
 
 
-def _observation_rollup_key(row: sqlite3.Row) -> tuple[str, str, str | None, str]:
+def _observation_rollup_key(
+    row: sqlite3.Row,
+) -> tuple[str, str, str | None, int | None, str, str | None, str | None]:
     return (
         str(row["metric_id"]),
         str(row["dimensions_json"]),
         _optional_string(row["source_binding_id"]),
+        int(row["binding_version"]) if row["binding_version"] is not None else None,
         str(row["measurement_period_end"])[:7],
+        row["observed_unit"],
+        row["definition_fingerprint"],
     )
 
 

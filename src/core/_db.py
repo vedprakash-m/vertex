@@ -10,6 +10,21 @@ from typing import Literal
 from src.core.fs_utils import _is_network_filesystem_path
 
 
+def ensure_table_columns(
+    connection: sqlite3.Connection,
+    table_name: str,
+    columns: dict[str, str],
+) -> None:
+    existing_columns = {
+        str(row["name"])
+        for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    }
+    for column_name, definition in columns.items():
+        if column_name in existing_columns:
+            continue
+        connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
+
+
 @dataclass(slots=True)
 class SQLiteUnitOfWork:
     connection: sqlite3.Connection

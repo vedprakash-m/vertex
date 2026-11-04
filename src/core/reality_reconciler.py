@@ -421,6 +421,23 @@ def reconcile_reality(
             existing_challenge = None
 
         result = evaluate_assertion(assertion, observations, as_of, binding_health)
+        if _is_unknown_trend_lineage_result(result):
+            evaluations.append(
+                AssertionEvaluation(
+                    id=str(uuid.uuid4()),
+                    program_id=store.program_id,
+                    hypothesis_id=hypothesis.id,
+                    assertion_id=assertion.id,
+                    observation_id=latest_observation.observation_id if latest_observation else None,
+                    evaluated_at=as_of,
+                    violated=False,
+                    value_num=result.observed_value,
+                    expected_value=result.expected_value,
+                    quality_state=latest_observation.quality_state if latest_observation else None,
+                    note=result.rationale,
+                )
+            )
+            continue
         if not result.violated:
             evaluations.append(
                 AssertionEvaluation(
@@ -771,6 +788,8 @@ def _reconcile_composite_assertion_hypothesis(
         )
     )
 
+    if any(_is_unknown_trend_lineage_result(result) for result in child_results):
+        return
     existing_challenge = existing_challenges.get(_challenge_key(hypothesis.id, None, composite.id))
     if not combined_result.violated:
         if existing_challenge is not None:
@@ -862,6 +881,19 @@ def _combine_composite_results(
     *,
     as_of: datetime,
 ) -> EvaluationResult:
+    unknown_lineage = next(
+        (result for result in child_results if _is_unknown_trend_lineage_result(result)),
+        None,
+    )
+    if unknown_lineage is not None:
+        return EvaluationResult(
+            status="insufficient_data",
+            violated=False,
+            delta_magnitude=None,
+            observed_value=unknown_lineage.observed_value,
+            expected_value=unknown_lineage.expected_value,
+            rationale=f"Composite {composite.operator.value.upper()} has unknown metric lineage: {unknown_lineage.rationale}",
+        )
     if composite.operator.value == "and":
         if any(result.violated for result in child_results):
             violated_children = [result for result in child_results if result.violated]
@@ -895,6 +927,13 @@ def _combine_composite_results(
     if any(result.status == "degraded_source" for result in child_results):
         return EvaluationResult("degraded_source", False, None, None, None, "Composite OR degraded by child source state")
     return EvaluationResult("insufficient_data", False, None, None, None, "Composite OR has insufficient child data")
+
+
+def _is_unknown_trend_lineage_result(result: EvaluationResult) -> bool:
+    return (
+        result.status == "insufficient_data"
+        and result.rationale.startswith("trend observations have unknown or mixed ")
+    )
 
 
 def _derive_composite_severity(child_results: list[EvaluationResult]) -> ChallengeSeverity:

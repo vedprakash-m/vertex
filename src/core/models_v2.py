@@ -1060,6 +1060,8 @@ class MetricEvidenceBrief:
     freshness_label: str    # e.g., "fresh", "1 day stale"
     quality_state: str      # MetricQualityState.value
     linked_claim_id: str | None = None
+    unit: str | None = None
+    definition_fingerprint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

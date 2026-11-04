@@ -742,7 +742,21 @@ def _serialize_metric_observation(observation: MetricObservation) -> dict[str, o
         "corrected_reason": observation.corrected_reason,
         "inserted_at": observation.inserted_at.isoformat(),
         "is_corrected": observation.corrected_at is not None,
+        "observed_unit": observation.observed_unit,
+        "definition_fingerprint": observation.definition_fingerprint,
+        "comparability": _metric_observation_comparability(observation),
     }
+
+
+def _metric_observation_comparability(observation: MetricObservation) -> str:
+    if (
+        observation.observed_unit
+        and observation.definition_fingerprint
+        and observation.source_binding_id
+        and observation.binding_version is not None
+    ):
+        return "certified"
+    return "unknown"
 
 
 def _render_metric_history(program_id: str, metric_id: str, observations: tuple[MetricObservation, ...]) -> str:
@@ -764,6 +778,9 @@ def _render_metric_history(program_id: str, metric_id: str, observations: tuple[
                     f"value={value}",
                     f"quality={observation.quality_state.value}{corrected_marker}",
                     f"binding={binding}",
+                    f"unit={observation.observed_unit or 'unknown'}",
+                    f"definition={observation.definition_fingerprint or 'unknown'}",
+                    f"comparability={_metric_observation_comparability(observation)}",
                 )
             )
         )

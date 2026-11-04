@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from pathlib import Path
+import sqlite3
 
 import pytest
+import typer
+
+from src.commands.metric import _render_metric_history, _serialize_metric_observation, metric_history_command
 
 from src.core import _db
 from src.core.hypothesis_models import (
@@ -69,6 +74,146 @@ def test_connect_reality_db_rolls_back_failed_transaction_and_recovers(tmp_path:
         rows = connection.execute("SELECT migration_id FROM schema_versions").fetchall()
 
     assert rows == []
+
+
+@pytest.mark.parametrize(("original_unit", "corrected_unit"), [("ms", "s"), (" ms ", " s ")])
+def test_observation_correction_updates_lineage_and_duplicate_keeps_existing_lineage(
+    tmp_path: Path, original_unit: str, corrected_unit: str,
+) -> None:
+    store = RealityStore("demo", db_root=tmp_path / "db")
+    store.initialize()
+    store.upsert_metric_source_binding(MetricSourceBinding(
+        binding_id="binding-001",
+        metric_id="demo.latency",
+        program_id="demo",
+        source_kind="kusto",
+    ))
+    observed_at = datetime(2026, 10, 25, tzinfo=timezone.utc)
+    original = MetricObservation(
+        observation_id="obs-001",
+        program_id="demo",
+        metric_id="demo.latency",
+        dimensions_json="{}",
+        measurement_period_start=observed_at,
+        measurement_period_end=observed_at,
+        observed_at=observed_at,
+        value_num=5000.0,
+        value_text=None,
+        sample_count=1,
+        source_binding_id="binding-001",
+        binding_version=1,
+        observed_unit=original_unit,
+        definition_fingerprint="sha256:latency-v1",
+    )
+    store.write_metric_observation(original)
+    corrected = replace(
+        original,
+        observation_id="obs-correction",
+        observed_at=observed_at.replace(hour=1),
+        value_num=5.0,
+        observed_unit=corrected_unit,
+        definition_fingerprint="sha256:latency-v2",
+    )
+    store.write_metric_observation(corrected, corrected_reason="synthetic correction")
+    duplicate = replace(
+        corrected,
+        observation_id="obs-duplicate",
+        observed_unit="ms",
+        definition_fingerprint="sha256:latency-v1",
+    )
+    store.write_metric_observation(duplicate)
+
+    observation, = store.list_metric_observations("demo.latency")
+
+    assert observation.value_num == 5.0
+    assert observation.observed_unit == corrected_unit
+    assert observation.definition_fingerprint == "sha256:latency-v2"
+
+
+def test_metric_history_labels_certified_and_unknown_lineage() -> None:
+    observed_at = datetime(2026, 10, 25, tzinfo=timezone.utc)
+    certified = MetricObservation(
+        observation_id="obs-certified",
+        program_id="demo",
+        metric_id="demo.latency",
+        dimensions_json="{}",
+        measurement_period_start=observed_at,
+        measurement_period_end=observed_at,
+        observed_at=observed_at,
+        value_num=5.0,
+        value_text=None,
+        sample_count=1,
+        source_binding_id="binding-001",
+        binding_version=1,
+        observed_unit="ms",
+        definition_fingerprint="sha256:latency-v1",
+    )
+    legacy = replace(
+        certified,
+        observation_id="obs-legacy",
+        observed_unit=None,
+        definition_fingerprint=None,
+    )
+
+    serialized = _serialize_metric_observation(certified)
+    text = _render_metric_history("demo", "demo.latency", (certified, legacy))
+
+    assert serialized["observed_unit"] == "ms"
+    assert serialized["definition_fingerprint"] == "sha256:latency-v1"
+    assert serialized["comparability"] == "certified"
+    assert "unit=ms" in text
+    assert "comparability=unknown" in text
+
+
+def test_read_only_metric_history_does_not_upgrade_old_observation_schema(tmp_path: Path) -> None:
+    db_root = tmp_path / "db"
+    store = RealityStore("demo", db_root=db_root)
+    store.initialize()
+    observed_at = datetime(2026, 10, 25, tzinfo=timezone.utc)
+    store.write_metric_observation(MetricObservation(
+        observation_id="obs-legacy",
+        program_id="demo",
+        metric_id="demo.latency",
+        dimensions_json="{}",
+        measurement_period_start=observed_at,
+        measurement_period_end=observed_at,
+        observed_at=observed_at,
+        value_num=5.0,
+        value_text=None,
+        sample_count=1,
+    ))
+    with sqlite3.connect(store.db_path) as connection:
+        connection.execute("ALTER TABLE reality_metric_observations DROP COLUMN observed_unit")
+        connection.execute("ALTER TABLE reality_metric_observations DROP COLUMN definition_fingerprint")
+        before = tuple(row[1] for row in connection.execute(
+            "PRAGMA table_info(reality_metric_observations)"
+        ).fetchall())
+
+    with pytest.raises(typer.BadParameter, match="Metric history is unavailable"):
+        metric_history_command(
+            metric="demo.latency",
+            program="demo",
+            format="json",
+            db_root=db_root,
+        )
+
+    with sqlite3.connect(store.db_path) as connection:
+        after = tuple(row[1] for row in connection.execute(
+            "PRAGMA table_info(reality_metric_observations)"
+        ).fetchall())
+    assert before == after
+    assert "observed_unit" not in after
+    assert "definition_fingerprint" not in after
+
+    store.initialize()
+    with sqlite3.connect(store.db_path) as connection:
+        upgraded = tuple(row[1] for row in connection.execute(
+            "PRAGMA table_info(reality_metric_observations)"
+        ).fetchall())
+    assert "observed_unit" in upgraded
+    assert "definition_fingerprint" in upgraded
+    legacy, = store.list_metric_observations("demo.latency")
+    assert (legacy.observed_unit, legacy.definition_fingerprint) == (None, None)
 
 
 def test_get_program_reality_db_path_with_no_config_resolves_to_vertex_db_convention(

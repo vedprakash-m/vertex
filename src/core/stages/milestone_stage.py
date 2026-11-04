@@ -12,7 +12,9 @@ from src.core.milestone_engine import assess_milestone_health, build_critical_pa
 from src.core.models_v2 import Dependency, LegacyDependency, Milestone
 from src.core.pipeline import StageContext, capture_milestone_trajectory_snapshot
 from src.core.program_fact_store import ProgramFactSnapshot, load_program_facts, project_dependencies, project_milestones
-from src.core.stages.sor_gated_load import report_reality_scope, retained_report_fact_snapshot
+from src.core.stages.sor_gated_load import (
+    record_report_family_selector, report_reality_scope, retained_report_fact_snapshot,
+)
 from src.core.store_factory import build_trajectory_store_for_program_id
 
 _ALLOW_LEGACY_MILESTONE_ROLLBACK_ENV = "VERTEX_REPORT_ALLOW_LEGACY_MILESTONE_ROLLBACK"
@@ -39,12 +41,13 @@ class MilestoneStage:
         program_id = ctx.resolved_v2.paths.program_id
         fact_snapshot = retained_report_fact_snapshot(ctx, program_id)
         scope = report_reality_scope(ctx, program_id, fact_snapshot)
-        ctx = replace(ctx, report_reality=None, report_reality_scope=None)
+        ctx = replace(ctx, report_reality=None)
         retained_reality: list[Any] = []
 
         # S-8a: read through ProgramReality when the milestone authority family is non-legacy.
         # This must honor per-family flips even when the program default remains legacy.
         sor_mode = resolve_family_sor_mode(program_id, "workitem.state", programs_root=programs_root)
+        ctx = record_report_family_selector(ctx, scope, "workitem.state", sor_mode)
         if sor_mode != "legacy":
             milestones, dependencies, warnings, lineage = _load_milestones_via_reality(
                 program_id,
@@ -61,7 +64,7 @@ class MilestoneStage:
                 on_loaded=retained_reality.append if scope is not None else None,
             )
             if retained_reality:
-                ctx = replace(ctx, report_reality=retained_reality[0], report_reality_scope=scope)
+                ctx = replace(ctx, report_reality=retained_reality[0])
         else:
             archive_options = {"archive_root": ctx.archive_root} if ctx.archive_root is not None else {}
             try:

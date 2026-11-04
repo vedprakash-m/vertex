@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -436,6 +437,40 @@ def test_reconcile_reality_opens_threshold_challenge_for_composite_and_hypothesi
     assert challenge.severity is ChallengeSeverity.ALERT
     assert hypothesis is not None
     assert hypothesis.status is HypothesisStatus.CHALLENGED
+
+    assertion = store.get_telemetry_assertion("assertion-001")
+    assert assertion is not None
+    store.upsert_telemetry_assertion(replace(assertion, operator=AssertionOperator.FORECAST_GTE))
+    store.write_metric_observation(
+        MetricObservation(
+            observation_id="obs-000",
+            program_id="acme",
+            metric_id="acme.cluster_count",
+            dimensions_json="{}",
+            measurement_period_start=datetime(2026, 5, 20, 8, 0, tzinfo=timezone.utc),
+            measurement_period_end=datetime(2026, 5, 20, 9, 0, tzinfo=timezone.utc),
+            observed_at=datetime(2026, 5, 20, 9, 0, tzinfo=timezone.utc),
+            value_num=90.0,
+            value_text=None,
+            sample_count=1,
+            quality_state=MetricQualityState.OK,
+            source_binding_id="binding-001",
+            binding_version=1,
+        )
+    )
+
+    reconcile_reality(
+        store=store,
+        as_of=datetime(2026, 5, 20, 11, 5, tzinfo=timezone.utc),
+        l1_observations_written=1,
+    )
+
+    retained_challenge = store.get_latest_challenge_for_composite_assertion("hyp-composite-001", "composite-001")
+    latest_evaluation = store.list_assertion_evaluations(composite_assertion_ids=("composite-001",))[-1]
+    assert retained_challenge is not None
+    assert retained_challenge.current_state is ChallengeState.OPEN
+    assert latest_evaluation.violated is False
+    assert "unknown metric lineage" in (latest_evaluation.note or "")
 
 
 def test_reconcile_reality_opens_data_loss_challenge_for_unvalidated_binding(tmp_path: Path) -> None:
@@ -1275,6 +1310,82 @@ def test_reconcile_reality_resolves_delivery_date_challenge_when_item_closes(tmp
     assert resolved is not None
     assert resolved.challenge_kind == ChallengeKind.DELIVERY_DATE
     assert resolved.current_state == ChallengeState.RESOLVED
+
+
+def test_unknown_trend_lineage_does_not_resolve_existing_challenge(tmp_path: Path) -> None:
+    store = RealityStore("acme", db_root=tmp_path / "db")
+    store.initialize()
+    _seed_threshold_monitoring_fixture(store)
+    observed_at = datetime(2026, 5, 20, 10, 0, tzinfo=timezone.utc)
+    store.write_metric_observation(MetricObservation(
+        observation_id="obs-initial",
+        program_id="acme",
+        metric_id="acme.cluster_count",
+        dimensions_json="{}",
+        measurement_period_start=observed_at,
+        measurement_period_end=observed_at,
+        observed_at=observed_at,
+        value_num=100.0,
+        value_text=None,
+        sample_count=1,
+        source_binding_id="binding-001",
+        binding_version=1,
+        observed_unit="ms",
+        definition_fingerprint="sha256:latency-ms",
+    ))
+    first = reconcile_reality(
+        store=store,
+        as_of=datetime(2026, 5, 20, 10, 5, tzinfo=timezone.utc),
+        l1_observations_written=1,
+    )
+    challenge, = store.list_open_challenges()
+    assertion, = store.list_active_telemetry_assertions()
+    store.upsert_telemetry_assertion(replace(
+        assertion,
+        operator=AssertionOperator.FORECAST_LTE,
+        threshold=0.0,
+        window=ObservationWindow(
+            days=7,
+            aggregation=MetricAggregation.LAST,
+            minimum_observations=2,
+        ),
+    ))
+    for observation_id, observed_at, value, unit, fingerprint in (
+        ("obs-5000ms", datetime(2026, 5, 20, 10, 30, tzinfo=timezone.utc), 5000.0, "ms", "sha256:latency-ms"),
+        ("obs-5s", datetime(2026, 5, 20, 11, 0, tzinfo=timezone.utc), 5.0, "s", "sha256:latency-s"),
+    ):
+        store.write_metric_observation(MetricObservation(
+            observation_id=observation_id,
+            program_id="acme",
+            metric_id="acme.cluster_count",
+            dimensions_json="{}",
+            measurement_period_start=observed_at,
+            measurement_period_end=observed_at,
+            observed_at=observed_at,
+            value_num=value,
+            value_text=None,
+            sample_count=1,
+            quality_state=MetricQualityState.OK,
+            source_binding_id="binding-001",
+            binding_version=1,
+            observed_unit=unit,
+            definition_fingerprint=fingerprint,
+        ))
+
+    second = reconcile_reality(
+        store=store,
+        as_of=datetime(2026, 5, 20, 11, 5, tzinfo=timezone.utc),
+        l1_observations_written=2,
+    )
+
+    retained = store.get_challenge(challenge.id)
+    latest_evaluation = store.list_assertion_evaluations()[-1]
+    assert first.challenges_opened == 1
+    assert second.challenges_opened == 0
+    assert retained is not None
+    assert retained.current_state == ChallengeState.OPEN
+    assert latest_evaluation.violated is False
+    assert "unknown or mixed" in (latest_evaluation.note or "")
 
 
 def _seed_threshold_breach_fixture(store: RealityStore) -> None:

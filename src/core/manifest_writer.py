@@ -104,6 +104,7 @@ _hash_jsonable = hash_jsonable
 def build_run_evidence_snapshot(
     pin: FactSnapshotPin | None, snapshot: ProgramFactSnapshot | None,
     gather: GatherRunManifest | None, manifest: RunManifest, report_snapshot: Snapshot,
+    *, effective_family_modes: tuple[tuple[str, str], ...],
 ) -> RunEvidenceSnapshot:
     if pin is None or snapshot is None or pin.program_id != snapshot.program_id:
         raise ConfigError("Run evidence retained fact capture is missing or inconsistent.")
@@ -129,6 +130,7 @@ def build_run_evidence_snapshot(
         ), key=lambda row: row.fact_revision_id)),
         fetched_item_ids=tuple(sorted(item.id for item in report_snapshot.items)),
         report_snapshot_hash=manifest.snapshot_hash, config_hash=manifest.config_hash, sha256="",
+        effective_family_modes=tuple(sorted(effective_family_modes)),
     )
     capture = replace(capture, sha256=hash_jsonable(_capture_content(capture)))
     return _decode_run_capture(_to_jsonable(capture))
@@ -137,6 +139,8 @@ def build_run_evidence_snapshot(
 def _capture_content(capture: RunEvidenceSnapshot) -> dict[str, Any]:
     payload = asdict(capture)
     payload.pop("sha256")
+    if capture.schema_version == "run-evidence-capture.v1":
+        payload.pop("effective_family_modes")
     return payload
 
 
@@ -150,8 +154,15 @@ def _capture_clock(value: Any) -> datetime:
 def _decode_run_capture(value: Any) -> RunEvidenceSnapshot:
     try:
         payload = dict(value)
-        if set(payload) != {field.name for field in fields(RunEvidenceSnapshot)}:
+        schema_version = payload.get("schema_version")
+        expected_fields = {field.name for field in fields(RunEvidenceSnapshot)}
+        actual_fields = set(payload)
+        if schema_version == "run-evidence-capture.v1":
+            expected_fields.remove("effective_family_modes")
+        if actual_fields != expected_fields:
             raise ValueError("Invalid capture fields")
+        if schema_version == "run-evidence-capture.v1":
+            payload["effective_family_modes"] = ()
         payload["as_of"] = _capture_clock(payload["as_of"])
         payload["valid_at"] = _capture_clock(payload["valid_at"])
         payload["source_scopes"] = tuple(SourceScopeContract(**row) for row in payload["source_scopes"])
@@ -160,6 +171,9 @@ def _decode_run_capture(value: Any) -> RunEvidenceSnapshot:
             for row in payload["binding_declarations"]
         )
         payload["fetched_item_ids"] = tuple(payload["fetched_item_ids"])
+        payload["effective_family_modes"] = tuple(
+            tuple(row) for row in payload["effective_family_modes"]
+        )
         payload["limitations"] = tuple(payload["limitations"])
         capture = RunEvidenceSnapshot(**payload)
         texts = (
@@ -169,6 +183,7 @@ def _decode_run_capture(value: Any) -> RunEvidenceSnapshot:
         )
         scopes = tuple((row.query_id, row.scope_id) for row in capture.source_scopes)
         revisions = tuple(row.fact_revision_id for row in capture.binding_declarations)
+        family_modes = capture.effective_family_modes
         if (
             any(not isinstance(text, str) or not text.strip() for text in texts)
             or not isinstance(capture.fact_content_sha256, str)
@@ -181,7 +196,24 @@ def _decode_run_capture(value: Any) -> RunEvidenceSnapshot:
             or (capture.gather_run_id is None) != (capture.gather_run_hash is None)
             or any(value is not None and (not isinstance(value, str) or not value.strip())
                    for value in (capture.gather_run_id, capture.gather_run_hash))
-            or capture.schema_version != "run-evidence-capture.v1"
+            or capture.schema_version not in {"run-evidence-capture.v1", "run-evidence-capture.v2"}
+            or (
+                capture.schema_version == "run-evidence-capture.v1"
+                and family_modes
+            )
+            or (
+                capture.schema_version == "run-evidence-capture.v2"
+                and family_modes
+                and (
+                    any(
+                        len(row) != 2 or not all(isinstance(value, str) for value in row)
+                        or row[0] not in {"judgment", "workitem.state"}
+                        or row[1] not in {"legacy", "shadow", "primary"}
+                        for row in family_modes
+                    )
+                    or family_modes != tuple(sorted(set(family_modes)))
+                )
+            )
             or capture.capture_state != "unqualified_capture"
             or capture.limitations != RunEvidenceSnapshot.__dataclass_fields__["limitations"].default
             or capture.sha256 != hash_jsonable(_capture_content(capture))

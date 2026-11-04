@@ -9,6 +9,7 @@ from typer import BadParameter
 import src.commands.confirm as confirm_module
 import src.commands.confirm_stages.archive_transaction as archive_transaction
 from src.core.exceptions import ConfigError
+from src.core.manifest_writer import hash_jsonable
 from src.core.program_fact_store import ProgramFactStore
 from src.core.edition_resolver import get_program_output_dir
 from tests.unit.test_commands_confirm import (
@@ -30,14 +31,17 @@ def test_forced_confirm_rejects_foreign_fact_pin_scope(
         draft = load_draft(*args, **kwargs)
         path = get_program_output_dir(args[0], programs_root=kwargs["programs_root"]) / f"issue_{args[1]:03d}" / f"issue_{args[1]:03d}.manifest.json"
         manifest = json.loads(path.read_text(encoding="utf-8"))
-        manifest["metadata"].pop("run_evidence_snapshot")
-        path.write_text(json.dumps(manifest), encoding="utf-8")
-        draft.pop("run_evidence_snapshot_sha256")
         metadata = {"edition_name": "acme_weekly", "issue_number": 1}
         metadata[scope] = "foreign_edition" if scope == "edition_name" else 2
         pin = ProgramFactStore("acme").pin_snapshot(metadata=metadata)
+        capture = manifest["metadata"]["run_evidence_snapshot"]
+        capture["fact_snapshot_id"] = pin.snapshot_id
+        capture.pop("sha256")
+        capture["sha256"] = hash_jsonable(capture)
+        path.write_text(json.dumps(manifest), encoding="utf-8")
         return {
             **draft,
+            "run_evidence_snapshot_sha256": capture["sha256"],
             "program_fact_snapshot": {
                 **draft["program_fact_snapshot"],
                 "snapshot_id": pin.snapshot_id,
@@ -75,7 +79,7 @@ def test_confirm_rechecks_fact_scope_after_archive_lock(
     assert not tuple((tmp_path / "archive").rglob("*.snapshot.json"))
 
 
-def test_confirm_preserves_unscoped_legacy_pin_compatibility(
+def test_confirm_requires_regeneration_for_unbound_legacy_pin(
     repo_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     load_draft = confirm_module._load_draft_state
@@ -97,7 +101,9 @@ def test_confirm_preserves_unscoped_legacy_pin_compatibility(
         }
 
     monkeypatch.setattr(confirm_module, "_load_draft_state", legacy_pin)
-    _exercise_actual_confirm(repo_root, tmp_path, monkeypatch)
+    with pytest.raises(BadParameter, match="source-selector-bound"):
+        _exercise_actual_confirm(repo_root, tmp_path, monkeypatch)
+    assert not (tmp_path / "archive" / "acme_weekly" / "index.json").exists()
 
 
 def test_modern_capture_mismatch_refuses_before_artifacts_without_writes(

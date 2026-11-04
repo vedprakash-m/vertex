@@ -62,6 +62,38 @@ def resolve_family_sor_mode(
     return state.family_modes.get(family, state.mode)
 
 
+def family_sor_modes_match(
+    program_id: str,
+    expected: tuple[tuple[str, str], ...],
+    *,
+    programs_root: Path | None = None,
+) -> bool | None:
+    if (
+        not isinstance(expected, tuple)
+        or any(
+            not isinstance(row, tuple) or len(row) != 2
+            or not isinstance(row[0], str) or not isinstance(row[1], str)
+            or row[0] not in {"judgment", "workitem.state"}
+            or row[1] not in _VALID_MODES
+            for row in expected
+        )
+        or {family for family, _ in expected} != {"judgment", "workitem.state"}
+        or expected != tuple(sorted(set(expected)))
+    ):
+        return False
+    try:
+        state = load_fact_sor_state(
+            program_id, **({"programs_root": programs_root} if programs_root is not None else {}),
+        )
+    except (ConfigError, OSError):
+        return None
+    default_mode = state.mode if state is not None else "legacy"
+    family_modes = state.family_modes if state is not None else {}
+    return expected == tuple(sorted(
+        (family, family_modes.get(family, default_mode)) for family, _ in expected
+    ))
+
+
 def load_fact_sor_state(program_id: str, *, programs_root: Path = PROGRAMS_ROOT) -> FactSorState | None:
     path = get_fact_sor_state_path(program_id, programs_root=programs_root)
     if not path.exists():

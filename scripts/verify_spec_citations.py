@@ -64,7 +64,7 @@ CITATIONS: tuple[Citation, ...] = (
     Citation(
         claim="Track B.5 (closed 2026-07-08): risk_stage.py now routes through sor_gated_family_load(family=\"judgment\", ...) instead of a hand-written inline branch",
         path="src/core/stages/risk_stage.py",
-        line=38,
+        line=50,
         must_contain='family="judgment"',
     ),
     Citation(

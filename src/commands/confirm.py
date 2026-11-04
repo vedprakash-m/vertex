@@ -726,6 +726,10 @@ def confirm_issue(
             milestone_assessments=draft_manifest.milestone_assessments,
             milestone_trajectory_snapshot=draft_manifest.milestone_trajectory_snapshot,
             programs_root=programs_root,
+            effective_family_modes=(
+                draft_manifest.run_evidence_snapshot.effective_family_modes
+                if draft_manifest.run_evidence_snapshot is not None else None
+            ),
         )
         evidence_failures = tuple(result.message for result in fact_drift.failing_results)
         if program_id is not None:
@@ -1021,21 +1025,14 @@ def _build_confirm_artifacts(
     validate_report_workspace(programs_root=programs_root, reports_root=reports_root, archive_root=archive_root)
     if draft_manifest is None:
         draft_manifest = _load_confirm_draft_manifest(edition_name, issue_number, draft_state=draft_state, programs_root=programs_root)
-    if (
-        draft_manifest.edition_name != edition_name
-        or draft_manifest.issue_number != issue_number
-        or draft_manifest.programs_root != programs_root.absolute()
-    ):
-        raise typer.BadParameter(
-            "Captured draft manifest scope does not match this confirmation. "
-            "Preserve the existing artifacts and capture evidence from the selected workspace, edition and issue."
-        )
+    draft_manifest.validate_scope(edition_name, issue_number, programs_root)
     editions_root = programs_root.parent / "editions"
     resolved_v2 = resolve_edition(
         edition_name,
         programs_root=programs_root,
     )
     program_id = resolved_v2.program.id if resolved_v2 is not None else None
+    draft_manifest.require_bound_capture(program_id, draft_state)
     artifact_root_kwargs = {"programs_root": programs_root} if program_id is not None else {}
     resolved_workstreams = resolved_v2.workstreams if resolved_v2 is not None else ()
     resolved_scorecards = resolved_v2.scorecards if resolved_v2 is not None else ()
@@ -1627,6 +1624,10 @@ def _build_confirm_artifacts(
         milestone_assessments=draft_manifest.milestone_assessments,
         milestone_trajectory_snapshot=draft_manifest.milestone_trajectory_snapshot,
         programs_root=programs_root,
+        effective_family_modes=(
+            draft_manifest.run_evidence_snapshot.effective_family_modes
+            if draft_manifest.run_evidence_snapshot is not None else None
+        ),
     )
     qg_report = combine_gate_reports(qg_report, qg_program_fact_drift)
     if program_id is not None:

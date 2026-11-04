@@ -120,3 +120,5 @@ class MetricObservation:
     is_pinned: bool = False
     pinned_at: datetime | None = None
     pin_reason: str | None = None
+    observed_unit: str | None = None
+    definition_fingerprint: str | None = None

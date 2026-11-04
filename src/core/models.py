@@ -465,7 +465,8 @@ class RunEvidenceSnapshot:
     report_snapshot_hash: str
     config_hash: str
     sha256: str
-    schema_version: str = "run-evidence-capture.v1"
+    effective_family_modes: tuple[tuple[str, str], ...] = ()
+    schema_version: str = "run-evidence-capture.v2"
     capture_state: str = "unqualified_capture"
     limitations: tuple[str, ...] = (
         "source_scope_unknown_legacy", "binding_unevaluated", "gather_fetch_join_unknown",

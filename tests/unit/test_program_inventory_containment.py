@@ -285,3 +285,71 @@ def test_recursive_directory_changed_to_a_file_is_not_a_zero_size(tmp_path: Path
     path.write_bytes(b"preserve")
     with pytest.raises(ValueError, match="remain directories"):
         program_inventory._dir_size(path)
+
+
+@pytest.mark.parametrize("root_only", [True, False])
+def test_missing_program_has_empty_unassessed_review_coverage(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], root_only: bool,
+) -> None:
+    args = ["--program", "absent", "--programs-root", str(tmp_path / "missing")]
+    if root_only:
+        args.append("--root-only")
+
+    assert program_inventory.main([*args, "--format", "json"]) == 1
+    coverage = json.loads(capsys.readouterr().out)["review_rule_coverage"]
+    assert coverage["entries"] == []
+    assert all(value == 0 for value in coverage["totals"].values())
+    assert coverage["policy_overrides_assessed"] is False
+    assert "shared_knowledge" in coverage["unassessed_scopes"]
+    assert program_inventory.main(args) == 1
+    human = capsys.readouterr()
+    assert "review-rule coverage" in human.out
+    assert "review currency not assessed" in human.out
+
+
+def test_wrong_kind_and_unknown_special_entries_do_not_gain_review_rules(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    program = tmp_path / "fixture"
+    program.mkdir()
+    (program / "program.yaml").mkdir()
+    special = program / "opaque"
+    special.write_bytes(b"synthetic special")
+    original = Path.stat
+
+    def stat_path(self: Path, *, follow_symlinks: bool = True):
+        value = original(self, follow_symlinks=follow_symlinks)
+        if self == special:
+            return SimpleNamespace(st_mode=stat.S_IFIFO, st_file_attributes=0, st_size=value.st_size)
+        return value
+
+    monkeypatch.setattr(Path, "stat", stat_path)
+    report = program_inventory.inventory_program("fixture", tmp_path, root_only=True)
+    coverage = report["review_rule_coverage"]
+    rows = {row["path"]: row for row in coverage["entries"]}
+    assert rows["program.yaml"]["disposition"] == "container"
+    assert rows["program.yaml"]["classification"] == "unclassified"
+    assert rows["opaque"]["disposition"] == "unclassified"
+    assert all(row["rule_references"] == [] for row in rows.values())
+    assert coverage["totals"] == {
+        "entries": 2, "files": 0, "containers": 1, "other_entries": 1,
+        "existing_rule": 0, "unassessed": 0, "unclassified": 1,
+    }
+
+
+def test_review_rule_coverage_does_not_read_or_validate_private_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    program = _program(tmp_path)
+    (program / "freshness_policy.yaml").write_bytes(b"invalid [ synthetic YAML")
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("Review-rule inventory must not read content or private policy.")
+
+    monkeypatch.setattr(Path, "read_text", forbidden)
+    monkeypatch.setattr(Path, "read_bytes", forbidden)
+    report = program_inventory.inventory_program("fixture", tmp_path, root_only=True)
+    rows = {row["path"]: row for row in report["review_rule_coverage"]["entries"]}
+    assert rows["freshness_policy.yaml"]["disposition"] == "unclassified"
+    assert rows["program.yaml"]["rule_references"] == ["context_review.files.program.yaml"]
+    assert report["review_rule_coverage"]["policy_overrides_assessed"] is False

@@ -8,7 +8,6 @@ from src.core.archive_store import find_archive_index_inconsistencies
 from src.core.ban_list_validator import find_ban_list_violations, find_structural_rule_violations
 from src.core.continuation_contract import build_continuation_contract
 from src.core.edition_resolver import get_program_output_dir
-from src.core.fact_sor_state import resolve_family_sor_mode
 from src.core.hygiene_engine import evaluate_hygiene
 from src.core.manifest_writer import build_run_manifest
 from src.core.models import ReportData, RunManifest
@@ -21,6 +20,7 @@ from src.core.signal_review import signal_is_approved_for_evidence
 from src.core.scope_resolver import ScopeResolver
 from src.core.section_proposal_store import load_stale_claim_ids
 from src.core.store_factory import build_signal_store_for_program_id
+from src.core.stages.sor_gated_load import report_family_selectors
 from src.core.trusted_baseline_store import load_trusted_baseline
 from src.core.verbosity_enforcer import enforce_verbosity
 from src.core.voice_validator import find_voice_violations
@@ -486,26 +486,18 @@ def _build_family_read_paths_metadata(ctx: StageContext) -> dict[str, str]:
     kind of manual code-reading exercise PS-11/PS-14's own verification
     needed this session.
     """
-    if ctx.resolved_v2 is None or ctx.programs_root is None:
-        return {}
-    program_id = ctx.resolved_v2.paths.program_id
-    # Family -> its real authority family (source_authority.yaml's family_map;
-    # see docs/contributing/migrate-fact-family.md -- never the invented,
-    # human-readable fact-type name).
+    selector_modes = dict(report_family_selectors(ctx))
     family_to_authority = {
         "milestone": "workitem.state",
         "dependency": "workitem.state",
         "risk": "judgment",
         "assumption": "judgment",
     }
-    read_paths: dict[str, str] = {}
-    for family, authority_family in family_to_authority.items():
-        try:
-            mode = resolve_family_sor_mode(program_id, authority_family, programs_root=ctx.programs_root)
-        except Exception:  # noqa: BLE001 -- manifest metadata must never block a render
-            continue
-        read_paths[family] = "legacy" if mode == "legacy" else "reality"
-    return read_paths
+    return {
+        family: "legacy" if selector_modes[authority_family] == "legacy" else "reality"
+        for family, authority_family in family_to_authority.items()
+        if authority_family in selector_modes
+    }
 
 
 def _build_ai_safety_metadata(ctx: StageContext) -> dict[str, Any]:

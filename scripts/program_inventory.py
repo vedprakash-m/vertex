@@ -36,6 +36,10 @@ Recursive mode also lists descendants of T-1/T-2 directories and noncanonical
 override descendants as unclassified. Other tiers and review currency are not
 assessed by this authored view. ``--root-only`` never inspects authored
 descendants.
+
+Review-rule coverage joins those entries to existing compatibility rule
+references only. It does not read policy overrides or review dates; shared,
+entity/field and other unenumerated scope remains explicitly unassessed.
 """
 from __future__ import annotations
 
@@ -53,6 +57,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.core.workspace_paths import PROGRAMS_ROOT, is_bare_identifier  # noqa: E402
+from src.core.freshness_engine import parse_context_review_policy  # noqa: E402
 from src.core.program_paths import (  # noqa: E402
     ROOT_ENTRIES,
     ROOT_ENTRY_NAMES,
@@ -173,6 +178,50 @@ def _dir_size(path: Path, *, authored_entries: list[dict] | None = None) -> tupl
     return count, total
 
 
+def _review_rule_coverage(authored_entries: list[dict], *, root_only: bool) -> dict:
+    policy = parse_context_review_policy()
+    rules = {
+        group: dict(targets)
+        for group, targets in (("files", policy.files), ("entries", policy.entries))
+    }
+    rows = []
+    totals = dict.fromkeys(
+        ("entries", "files", "containers", "other_entries", "existing_rule", "unassessed", "unclassified"), 0,
+    )
+    for entry in authored_entries:
+        references = [
+            f"context_review.{group}.{entry['path']}"
+            for group, targets in rules.items()
+            if entry["kind"] == "file" and entry["classification"] == "recognized" and entry["path"] in targets
+        ]
+        if entry["kind"] == "dir":
+            disposition = "container"
+        elif entry["classification"] == "unclassified":
+            disposition = "unclassified"
+        elif references:
+            disposition = "existing_rule"
+        else:
+            disposition = "unassessed"
+        rows.append({
+            "path": entry["path"], "kind": entry["kind"], "classification": entry["classification"],
+            "disposition": disposition, "rule_references": references, "review_state": "not_evaluated",
+        })
+        totals["entries"] += 1
+        totals[{"file": "files", "dir": "containers"}.get(entry["kind"], "other_entries")] += 1
+        if disposition != "container":
+            totals[disposition] += 1
+    unassessed_scopes = ["shared_knowledge", "entities_and_fields", "bindings_and_audiences", "people_validity"]
+    if root_only:
+        unassessed_scopes.append("authored_descendants")
+    return {
+        "rule_basis": "compatibility_defaults_only",
+        "policy_overrides_assessed": False,
+        "unassessed_scopes": unassessed_scopes,
+        "entries": rows,
+        "totals": totals,
+    }
+
+
 def inventory_program(program_id: str, programs_root: Path, *, root_only: bool) -> dict:
     if not is_bare_identifier(program_id):
         raise ValueError("Inventory requires one bare program identifier.")
@@ -197,6 +246,7 @@ def inventory_program(program_id: str, programs_root: Path, *, root_only: bool) 
         "root_entries": [],
         "runtime_artifacts": [],
         "authored_entries": [],
+        "review_rule_coverage": _review_rule_coverage([], root_only=root_only),
         "subdir_sizes": [],
         "summary": {},
     }
@@ -331,6 +381,7 @@ def inventory_program(program_id: str, programs_root: Path, *, root_only: bool) 
             )
 
     result["authored_entries"].sort(key=lambda entry: entry["path"])
+    result["review_rule_coverage"] = _review_rule_coverage(result["authored_entries"], root_only=root_only)
     summary["authored_recognized_count"] = sum(
         entry["classification"] == "recognized" for entry in result["authored_entries"]
     )
@@ -354,6 +405,19 @@ def _render_human(report: dict) -> str:
         else "T-1/T-2 authored descendants inspected, not inherited-recognized"
     )
     lines.append(f"  scope: {authored_scope}; review currency not assessed")
+    coverage = report["review_rule_coverage"]
+    lines.append(
+        "  review-rule coverage (compatibility defaults only; policy overrides not assessed; "
+        "review currency not assessed): "
+        + ", ".join(f"{key}={value}" for key, value in coverage["totals"].items())
+    )
+    lines.append("  unassessed review scope: " + ", ".join(coverage["unassessed_scopes"]))
+    for entry in coverage["entries"]:
+        references = ", ".join(entry["rule_references"]) or "no rule assessed"
+        lines.append(
+            f"    {entry['kind']:<5} {entry['disposition']:<14}{entry['path']}: "
+            f"{references}; review not evaluated"
+        )
     if not report["program_dir_exists"]:
         return "\n".join(lines)
     lines.append("")

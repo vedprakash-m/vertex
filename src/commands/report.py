@@ -292,6 +292,7 @@ from src.core.stages.render_stage import RenderStage
 from src.core.gather_run_manifest import resolve_latest_committed_manifest
 from src.core.stages.resolution_stage import ResolutionStage
 from src.core.stages.validation_stage import ValidationStage
+from src.core.stages.sor_gated_load import report_family_selectors
 from src.core.trajectory_analyzer import analyze_trajectories
 from src.core.triage import ReadinessAssessment, StaleNarrativeFinding, detect_stale_narratives
 from src.core.teams_renderer import TeamsRenderer
@@ -1297,6 +1298,7 @@ class _OutputStage:
         capture = build_run_evidence_snapshot(
             ctx.fact_snapshot_pin, ctx.fact_snapshot, ctx.gather_run_manifest,
             validation_state.manifest, render_state.snapshot,
+            effective_family_modes=report_family_selectors(ctx),
         ) if ctx.resolved_v2 is not None else None
         if capture is not None:
             validation_state = replace(validation_state, manifest=replace(

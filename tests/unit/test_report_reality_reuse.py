@@ -13,7 +13,7 @@ from src.core.models_v2 import Milestone, MilestoneAssessment, MilestoneStatus
 from src.core.pipeline import StageContext
 from src.core.program_fact_store import ProgramFactInput, ProgramFactSnapshot, ProgramFactStore
 from src.core.program_reality import ProgramReality
-from src.core.stages import action_stage, milestone_stage, risk_stage, sor_gated_load
+from src.core.stages import action_stage, milestone_stage, risk_stage, sor_gated_load, validation_stage
 from tests.unit.test_config_loader import _write_demo_v2_layout
 
 
@@ -40,6 +40,7 @@ def report_context(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     family_mode = lambda _, family, **__: mode["families"].get(family, mode["default"])
     monkeypatch.setattr(sor_gated_load, "resolve_family_sor_mode", family_mode)
     monkeypatch.setattr(milestone_stage, "resolve_family_sor_mode", family_mode)
+    monkeypatch.setattr(risk_stage, "resolve_family_sor_mode", family_mode)
     monkeypatch.setattr(risk_stage, "assess_risk_staleness", lambda *_: True)
     monkeypatch.setattr(risk_stage, "_load_current_risks", Mock(return_value=(risk,)))
     monkeypatch.setattr(milestone_stage, "_load_current_milestones", Mock(return_value=()))
@@ -298,9 +299,37 @@ def test_retrying_failed_milestone_does_not_leave_previous_retained_reality(
     loader.side_effect = [ConfigError("retry failed"), reality]
     retried = milestone_stage.MilestoneStage().execute(replace(retained, milestone_assessments=None))
     assert retried.report_reality is None
-    assert retried.report_reality_scope is None
+    assert sor_gated_load.report_family_selectors(retried) == (("workitem.state", "primary"),)
     risk_stage.RiskStage().execute(retried)
     assert loader.call_count == 3
+
+
+def test_actual_stage_selectors_follow_family_overrides(report_context) -> None:
+    ctx, _, _, mode = report_context
+    mode["default"] = "legacy"
+    mode["families"] = {"workitem.state": "shadow", "judgment": "primary"}
+    result = risk_stage.RiskStage().execute(milestone_stage.MilestoneStage().execute(ctx))
+    assert sor_gated_load.report_family_selectors(result) == (
+        ("judgment", "primary"), ("workitem.state", "shadow"),
+    )
+    mode["families"]["judgment"] = "legacy"
+    assert validation_stage._build_family_read_paths_metadata(result) == {
+        "milestone": "reality", "dependency": "reality",
+        "risk": "reality", "assumption": "reality",
+    }
+
+
+def test_repeated_family_selector_disagreement_fails(report_context) -> None:
+    ctx, _, _, _ = report_context
+    scope = sor_gated_load.report_reality_scope(ctx, "synthetic", ctx.fact_snapshot)
+    selected = sor_gated_load.record_report_family_selector(ctx, scope, "judgment", "legacy")
+    with pytest.raises(ConfigError, match="selector changed"):
+        sor_gated_load.record_report_family_selector(selected, scope, "judgment", "primary")
+
+
+def test_unselected_report_has_no_observed_selector_identity(report_context) -> None:
+    ctx, _, _, _ = report_context
+    assert sor_gated_load.report_family_selectors(ctx) == ()
 
 
 @pytest.mark.parametrize("missing", [False, True])
@@ -356,6 +385,9 @@ def test_real_program_reality_loader_reduces_two_calls_to_one(
     loader.reset_mock()
     reused = risk_stage.RiskStage().execute(milestone_stage.MilestoneStage().execute(ctx))
     assert loader.call_count == 1
+    assert sor_gated_load.report_family_selectors(reused) == (
+        ("judgment", "primary"), ("workitem.state", "primary"),
+    )
     for field in ("milestones", "milestone_assessments", "milestone_lineage", "milestone_warnings",
                   "risks", "risk_assessments", "risk_lineage", "risk_warnings"):
         assert getattr(reused, field) == getattr(baseline, field)

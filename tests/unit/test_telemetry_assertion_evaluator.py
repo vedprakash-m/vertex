@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
 from src.core.hypothesis_models import AssertionOperator, TelemetryAssertion
 from src.core.metric_models import MetricAggregation, MetricObservation, MetricQualityState, ObservationWindow
 from src.core.source_models import MetricBindingHealth
@@ -262,6 +264,10 @@ def test_evaluate_assertion_forecast_gte_violates_when_projection_falls_below_th
             value_text=None,
             sample_count=1,
             quality_state=MetricQualityState.OK,
+            observed_unit="count",
+            definition_fingerprint="sha256:metric-v1",
+            source_binding_id="binding-001",
+            binding_version=1,
         ),
         MetricObservation(
             observation_id="obs-002",
@@ -275,6 +281,10 @@ def test_evaluate_assertion_forecast_gte_violates_when_projection_falls_below_th
             value_text=None,
             sample_count=1,
             quality_state=MetricQualityState.OK,
+            observed_unit="count",
+            definition_fingerprint="sha256:metric-v1",
+            source_binding_id="binding-001",
+            binding_version=1,
         ),
     )
 
@@ -310,6 +320,10 @@ def test_evaluate_assertion_forecast_lte_passes_when_projection_stays_below_thre
             value_text=None,
             sample_count=1,
             quality_state=MetricQualityState.OK,
+            observed_unit="count",
+            definition_fingerprint="sha256:error-rate-v1",
+            source_binding_id="binding-001",
+            binding_version=1,
         ),
         MetricObservation(
             observation_id="obs-002",
@@ -323,6 +337,10 @@ def test_evaluate_assertion_forecast_lte_passes_when_projection_stays_below_thre
             value_text=None,
             sample_count=1,
             quality_state=MetricQualityState.OK,
+            observed_unit="count",
+            definition_fingerprint="sha256:error-rate-v1",
+            source_binding_id="binding-001",
+            binding_version=1,
         ),
     )
 
@@ -332,6 +350,129 @@ def test_evaluate_assertion_forecast_lte_passes_when_projection_stays_below_thre
     assert result.violated is False
     assert result.observed_value is not None
     assert result.observed_value <= 8.0
+
+
+@pytest.mark.parametrize(
+    "older_unit,older_fingerprint,newer_unit,newer_fingerprint",
+    [
+        ("ms", "sha256:latency-v1", "s", "sha256:latency-v2"),
+        (None, None, "ms", "sha256:latency-v1"),
+        ("ms", "sha256:latency-v1", "ms", "sha256:latency-v2"),
+        ("ms", "sha256:latency-v1", "ms", "sha256:latency-v1"),
+    ],
+)
+def test_trend_assertion_requires_exact_certified_lineage(
+    older_unit, older_fingerprint, newer_unit, newer_fingerprint,
+) -> None:
+    assertion = TelemetryAssertion(
+        id="assertion-latency",
+        program_id="demo",
+        metric_id="demo.latency",
+        window=ObservationWindow(days=7, aggregation=MetricAggregation.LAST, minimum_observations=2),
+        operator=AssertionOperator.FORECAST_LTE,
+        threshold=100.0,
+    )
+    observations = (
+        MetricObservation(
+            observation_id="obs-old",
+            program_id="demo",
+            metric_id="demo.latency",
+            dimensions_json="{}",
+            measurement_period_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            measurement_period_end=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            observed_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            value_num=5000.0,
+            value_text=None,
+            sample_count=1,
+            observed_unit=older_unit,
+            definition_fingerprint=older_fingerprint,
+            source_binding_id="binding-001",
+            binding_version=1,
+        ),
+        MetricObservation(
+            observation_id="obs-new",
+            program_id="demo",
+            metric_id="demo.latency",
+            dimensions_json="{}",
+            measurement_period_start=datetime(2026, 5, 2, tzinfo=timezone.utc),
+            measurement_period_end=datetime(2026, 5, 2, tzinfo=timezone.utc),
+            observed_at=datetime(2026, 5, 2, tzinfo=timezone.utc),
+            value_num=5.0,
+            value_text=None,
+            sample_count=1,
+            observed_unit=newer_unit,
+            definition_fingerprint=newer_fingerprint,
+            source_binding_id="binding-001",
+            binding_version=1,
+        ),
+    )
+
+    result = evaluate_assertion(assertion, observations, datetime(2026, 5, 2, tzinfo=timezone.utc), None)
+
+    if older_unit == newer_unit and older_fingerprint == newer_fingerprint == "sha256:latency-v1":
+        assert result.status == "passed"
+        assert result.rationale.startswith("Projected value")
+    else:
+        assert result.status == "insufficient_data"
+        assert result.violated is False
+        assert "unknown or mixed" in result.rationale
+
+
+@pytest.mark.parametrize(
+    "new_binding_id,new_binding_version",
+    [("binding-002", 1), ("binding-001", 2)],
+)
+def test_trend_assertion_requires_same_source_binding_version(
+    new_binding_id: str,
+    new_binding_version: int,
+) -> None:
+    assertion = TelemetryAssertion(
+        id="assertion-count",
+        program_id="demo",
+        metric_id="demo.count",
+        window=ObservationWindow(days=1, aggregation=MetricAggregation.LAST, minimum_observations=2),
+        operator=AssertionOperator.FORECAST_GTE,
+        threshold=1.0,
+    )
+    observations = (
+        MetricObservation(
+            observation_id="obs-old",
+            program_id="demo",
+            metric_id="demo.count",
+            dimensions_json="{}",
+            measurement_period_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            measurement_period_end=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            observed_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            value_num=1.0,
+            value_text=None,
+            sample_count=1,
+            observed_unit="count",
+            definition_fingerprint="sha256:count-v1",
+            source_binding_id="binding-001",
+            binding_version=1,
+        ),
+        MetricObservation(
+            observation_id="obs-new",
+            program_id="demo",
+            metric_id="demo.count",
+            dimensions_json="{}",
+            measurement_period_start=datetime(2026, 5, 2, tzinfo=timezone.utc),
+            measurement_period_end=datetime(2026, 5, 2, tzinfo=timezone.utc),
+            observed_at=datetime(2026, 5, 2, tzinfo=timezone.utc),
+            value_num=2.0,
+            value_text=None,
+            sample_count=1,
+            observed_unit="count",
+            definition_fingerprint="sha256:count-v1",
+            source_binding_id=new_binding_id,
+            binding_version=new_binding_version,
+        ),
+    )
+
+    result = evaluate_assertion(assertion, observations, datetime(2026, 5, 2, tzinfo=timezone.utc), None)
+
+    assert result.status == "insufficient_data"
+    assert "source binding lineage" in result.rationale
 
 
 def test_evaluate_assertion_forecast_requires_two_numeric_observations() -> None:
@@ -366,6 +507,49 @@ def test_evaluate_assertion_forecast_requires_two_numeric_observations() -> None
     assert result.rationale == "trend assertion requires at least 2 numeric observations"
 
 
+def test_legacy_mixed_scale_history_is_unknown_instead_of_forecasted() -> None:
+    assertion = TelemetryAssertion(
+        id="assertion-latency",
+        program_id="demo",
+        metric_id="demo.latency",
+        window=ObservationWindow(days=7, aggregation=MetricAggregation.LAST, minimum_observations=2),
+        operator=AssertionOperator.FORECAST_LTE,
+        threshold=0.0,
+    )
+    observations = (
+        MetricObservation(
+            observation_id="obs-old",
+            program_id="demo",
+            metric_id="demo.latency",
+            dimensions_json="{}",
+            measurement_period_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            measurement_period_end=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            observed_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            value_num=5000.0,
+            value_text=None,
+            sample_count=1,
+        ),
+        MetricObservation(
+            observation_id="obs-new",
+            program_id="demo",
+            metric_id="demo.latency",
+            dimensions_json="{}",
+            measurement_period_start=datetime(2026, 5, 2, tzinfo=timezone.utc),
+            measurement_period_end=datetime(2026, 5, 2, tzinfo=timezone.utc),
+            observed_at=datetime(2026, 5, 2, tzinfo=timezone.utc),
+            value_num=5.0,
+            value_text=None,
+            sample_count=1,
+        ),
+    )
+
+    result = evaluate_assertion(assertion, observations, datetime(2026, 5, 2, tzinfo=timezone.utc), None)
+
+    assert result.status == "insufficient_data"
+    assert result.violated is False
+    assert "unknown or mixed" in result.rationale
+
+
 def test_evaluate_assertion_burn_rate_gte_violates_when_burndown_is_too_slow() -> None:
     assertion = TelemetryAssertion(
         id="assertion-001",
@@ -388,6 +572,10 @@ def test_evaluate_assertion_burn_rate_gte_violates_when_burndown_is_too_slow() -
             value_text=None,
             sample_count=1,
             quality_state=MetricQualityState.OK,
+            observed_unit="count",
+            definition_fingerprint="sha256:backlog-v1",
+            source_binding_id="binding-001",
+            binding_version=1,
         ),
         MetricObservation(
             observation_id="obs-002",
@@ -401,6 +589,10 @@ def test_evaluate_assertion_burn_rate_gte_violates_when_burndown_is_too_slow() -
             value_text=None,
             sample_count=1,
             quality_state=MetricQualityState.OK,
+            observed_unit="count",
+            definition_fingerprint="sha256:backlog-v1",
+            source_binding_id="binding-001",
+            binding_version=1,
         ),
     )
 
@@ -436,6 +628,10 @@ def test_evaluate_assertion_burn_rate_lte_passes_when_burndown_stays_under_cap()
             value_text=None,
             sample_count=1,
             quality_state=MetricQualityState.OK,
+            observed_unit="count",
+            definition_fingerprint="sha256:backlog-v1",
+            source_binding_id="binding-001",
+            binding_version=1,
         ),
         MetricObservation(
             observation_id="obs-002",
@@ -449,6 +645,10 @@ def test_evaluate_assertion_burn_rate_lte_passes_when_burndown_stays_under_cap()
             value_text=None,
             sample_count=1,
             quality_state=MetricQualityState.OK,
+            observed_unit="count",
+            definition_fingerprint="sha256:backlog-v1",
+            source_binding_id="binding-001",
+            binding_version=1,
         ),
     )
 

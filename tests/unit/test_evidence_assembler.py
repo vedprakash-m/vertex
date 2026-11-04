@@ -2,10 +2,22 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
-from src.core.evidence_assembler import assemble_section_evidence_brief
+from src.core.evidence_assembler import assemble_section_evidence_brief, build_workstream_evidence_packet
+from src.core.external_dependency import ExternalDependency
+from src.core.metric_models import MetricObservation
 from src.core.models import Comment, Confidence, EditionType, Revision, RiskLevel, Snapshot, SnapshotItem, WorkItem
-from src.core.models_v2 import ClaimEntry, PersonDirectory, Signal, VitalityScore
+from src.core.models_v2 import (
+    ClaimEntry,
+    DecisionEntry,
+    DecisionStatus,
+    PersonDirectory,
+    SectionEvidenceBrief,
+    Signal,
+    VitalityScore,
+    WorkstreamEvidencePacket,
+)
 from src.core.view_models import KpiTile
+from src.core.chronicle import ProgramEvent
 
 
 def test_assemble_section_evidence_brief_for_workstream_includes_deltas_signals_kpis_and_stale_claims() -> None:
@@ -322,17 +334,6 @@ def _work_item(
 # FR-SG-19: build_workstream_evidence_packet
 # ---------------------------------------------------------------------------
 
-from src.core.evidence_assembler import build_workstream_evidence_packet
-from src.core.models_v2 import (
-    DecisionEntry,
-    DecisionStatus,
-    SectionEvidenceBrief,
-    WorkstreamEvidencePacket,
-)
-from src.core.external_dependency import ExternalDependency
-from src.core.chronicle import ProgramEvent
-
-
 def _minimal_section_brief(section_id: str = "ws_nova") -> SectionEvidenceBrief:
     return SectionEvidenceBrief(
         section_id=section_id,
@@ -498,3 +499,40 @@ def test_build_workstream_evidence_packet_deps_scoped_by_gate() -> None:
     )
     assert any(d.dep_id == "dep-1" for d in packet.open_dependencies)
     assert all(d.dep_id != "dep-2" for d in packet.open_dependencies)
+
+
+def test_section_metric_brief_preserves_observed_unit_and_definition_lineage() -> None:
+    as_of = datetime(2026, 10, 25, tzinfo=timezone.utc)
+    observation = MetricObservation(
+        observation_id="obs-001",
+        program_id="demo",
+        metric_id="demo.latency",
+        dimensions_json="{}",
+        measurement_period_start=as_of,
+        measurement_period_end=as_of,
+        observed_at=as_of,
+        value_num=5.0,
+        value_text=None,
+        sample_count=1,
+        observed_unit="ms",
+        definition_fingerprint="sha256:latency-v1",
+    )
+
+    brief = assemble_section_evidence_brief(
+        "latency",
+        "demo",
+        current_items=(),
+        previous_snapshot=None,
+        journal_signals=(),
+        vitality_scores=(),
+        kpi_tiles=(),
+        claims=(),
+        issue_number=1,
+        as_of=as_of,
+        metric_observations=(observation,),
+    )
+
+    metric, = brief.metric_observations
+    assert metric.value_summary == "5 ms"
+    assert metric.unit == "ms"
+    assert metric.definition_fingerprint == "sha256:latency-v1"

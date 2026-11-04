@@ -33,6 +33,7 @@ helper is the mandatory implementation of.
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from typing import Any, Callable, Iterable, TYPE_CHECKING
 
 from src.core.exceptions import ConfigError
@@ -41,6 +42,9 @@ from src.core.program_fact_store import ProgramFactSnapshot, resolve_fact_sor_mo
 
 if TYPE_CHECKING:
     from src.core.pipeline import StageContext
+
+
+_REPORT_SCOPE_MARKER = "report-scope.v2"
 
 
 def retained_report_fact_snapshot(ctx: StageContext, program_id: str) -> ProgramFactSnapshot | None:
@@ -75,6 +79,44 @@ def report_reality_scope(
     )
 
 
+def record_report_family_selector(
+    ctx: StageContext, scope: tuple[Any, ...] | None, family: str, mode: str,
+) -> StageContext:
+    current = ctx.report_reality_scope
+    if isinstance(current, tuple) and len(current) == 3 and current[0] == _REPORT_SCOPE_MARKER:
+        current_scope = current[1]
+        selectors = dict(current[2])
+    else:
+        current_scope = current
+        selectors = {}
+    if current_scope != scope:
+        selectors = {}
+    if family in selectors and selectors[family] != mode:
+        raise ConfigError("Report source selector changed during assessment.")
+    selectors[family] = mode
+    return replace(
+        ctx,
+        report_reality_scope=(
+            _REPORT_SCOPE_MARKER, scope, tuple(sorted(selectors.items())),
+        ),
+    )
+
+
+def report_family_selectors(ctx: StageContext) -> tuple[tuple[str, str], ...]:
+    current = ctx.report_reality_scope
+    if not isinstance(current, tuple) or len(current) != 3 or current[0] != _REPORT_SCOPE_MARKER:
+        return ()
+    return current[2]
+
+
+def report_reality_scope_matches(ctx: StageContext, scope: tuple[Any, ...] | None) -> bool:
+    current = ctx.report_reality_scope
+    return (
+        scope is not None and isinstance(current, tuple) and len(current) == 3
+        and current[0] == _REPORT_SCOPE_MARKER and current[1] == scope
+    )
+
+
 def sor_gated_family_load(
     *,
     program_id: str,
@@ -90,6 +132,7 @@ def sor_gated_family_load(
     archive_root: Any = None,
     fact_snapshot: ProgramFactSnapshot | None = None,
     reality: Any = None,
+    sor_mode: str | None = None,
 ) -> tuple[tuple[Any, ...], tuple[Any, ...] | None, tuple[str, ...], dict[str, dict[str, str | None]] | None]:
     """Load one fact family through the SoR-gated overlay pattern.
 
@@ -131,8 +174,8 @@ def sor_gated_family_load(
     ``(records, assessments, warnings, lineage)`` — ``assessments``/``lineage``
     are ``None`` in legacy mode (no ``FactAssessment`` wrapper exists there).
     """
-    sor_mode = resolve_family_sor_mode(program_id, family, programs_root=programs_root)
-    if sor_mode == "legacy":
+    selected_mode = sor_mode or resolve_family_sor_mode(program_id, family, programs_root=programs_root)
+    if selected_mode == "legacy":
         try:
             records = legacy_loader()
         except ConfigError as exc:

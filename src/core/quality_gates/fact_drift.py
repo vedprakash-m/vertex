@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from src.core.exceptions import ConfigError
+from src.core.fact_sor_state import family_sor_modes_match
 from src.core.manifest_writer import hash_jsonable
 from src.core.pipeline import capture_milestone_trajectory_snapshot
 from src.core.program_fact_store import ProgramFactStore
@@ -79,7 +80,15 @@ def evaluate_program_fact_drift_from_draft(
     milestone_assessments: Any = _UNSET,
     milestone_trajectory_snapshot: Any = _UNSET,
     programs_root: Path | None = None,
+    effective_family_modes: tuple[tuple[str, str], ...] | None = None,
 ) -> QualityGateReport:
+    selector_report = _evaluate_family_selector_drift(
+        program_id=program_id,
+        captured=effective_family_modes if draft_state.get("edition_type") != "lookback" else None,
+        programs_root=programs_root,
+    )
+    if selector_report.failing_results:
+        return selector_report
     fact_report = _evaluate_program_fact_pin_drift_from_draft(
         draft_state=draft_state,
         program_id=program_id,
@@ -97,6 +106,26 @@ def evaluate_program_fact_drift_from_draft(
         programs_root=programs_root,
     )
     return QualityGateReport(results=(*fact_report.results, *trajectory_result))
+
+
+def _evaluate_family_selector_drift(
+    *,
+    program_id: str | None,
+    captured: tuple[tuple[str, str], ...] | None,
+    programs_root: Path | None,
+) -> QualityGateReport:
+    if captured is None:
+        return QualityGateReport(results=())
+    if not isinstance(program_id, str) or not program_id.strip():
+        return QualityGateReport(results=_milestone_trajectory_failure("Captured assessment source selectors are missing or invalid."))
+    matches = family_sor_modes_match(program_id, captured, programs_root=programs_root)
+    if matches is not True:
+        message = (
+            "Current assessment source selectors are unavailable."
+            if matches is None else "Assessment source selectors changed or are invalid."
+        )
+        return QualityGateReport(results=_milestone_trajectory_failure(message))
+    return QualityGateReport(results=())
 
 
 def _evaluate_program_fact_pin_drift_from_draft(

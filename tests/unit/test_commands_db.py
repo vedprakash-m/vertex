@@ -8,9 +8,9 @@ import sqlite3
 from typer.testing import CliRunner
 
 from cli import app
-from src.commands.db import _SCHEMA_MIGRATIONS
+from src.commands.db import _SCHEMA_MIGRATIONS, _plan_observation_compaction
 from src.core.hypothesis_models import AssertionEvaluation, AssertionOperator, ChallengeKind, ChallengeSeverity, Hypothesis, HypothesisKind, HypothesisStatus, RealityChallenge, TelemetryAssertion
-from src.core.metric_models import MetricAggregation, MetricDefinition, MetricObservation, MetricQualityState, ObservationWindow
+from src.core.metric_models import MetricAggregation, MetricDefinition, MetricObservation, MetricQualityState, MetricSourceBinding, ObservationWindow
 from src.core.reality_store import RealityStore
 
 
@@ -507,6 +507,68 @@ def test_maybe_run_scheduled_compaction_skips_recent_sentinel(monkeypatch, tmp_p
 
     assert payload is None
     assert calls == []
+
+
+def test_observation_compaction_separates_unit_and_definition_lineage(tmp_path: Path) -> None:
+    store = RealityStore("acme", db_root=tmp_path / "db")
+    store.initialize()
+    store.upsert_metric_source_binding(MetricSourceBinding(
+        binding_id="binding-001",
+        metric_id="acme.latency",
+        program_id="acme",
+        source_kind="kusto",
+    ))
+    for observation_id, value, unit, fingerprint, binding_version, day in (
+        ("obs-ms", 5000.0, "ms", "sha256:latency-ms", 1, 5),
+        ("obs-s", 5.0, "s", "sha256:latency-s", 1, 6),
+        ("obs-ms-v2", 5100.0, "ms", "sha256:latency-ms", 2, 7),
+        ("obs-padded-unit", 5200.0, " ms ", "sha256:latency-ms", 1, 8),
+    ):
+        observed_at = datetime(2024, 3, day, tzinfo=timezone.utc)
+        store.write_metric_observation(MetricObservation(
+            observation_id=observation_id,
+            program_id="acme",
+            metric_id="acme.latency",
+            dimensions_json="{}",
+            measurement_period_start=observed_at,
+            measurement_period_end=observed_at,
+            observed_at=observed_at,
+            value_num=value,
+            value_text=None,
+            sample_count=1,
+            source_binding_id="binding-001",
+            binding_version=binding_version,
+            observed_unit=unit,
+            definition_fingerprint=fingerprint,
+        ))
+
+    with sqlite3.connect(store.db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        plan = _plan_observation_compaction(
+            connection,
+            "acme",
+            as_of=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            metric_definitions={"acme.latency": MetricDefinition(
+                id="acme.latency",
+                title="Latency",
+                unit="ms",
+                aggregation=MetricAggregation.LAST,
+                retention_days=30,
+            )},
+            excluded_evaluation_ids=set(),
+        )
+
+    insertions = plan["insertions"]
+    assert len(insertions) == 4
+    assert {
+        (item["observed_unit"], item["definition_fingerprint"], item["binding_version"])
+        for item in insertions
+    } == {
+        ("ms", "sha256:latency-ms", 1),
+        ("s", "sha256:latency-s", 1),
+        ("ms", "sha256:latency-ms", 2),
+        (" ms ", "sha256:latency-ms", 1),
+    }
 
 
 def _seed_db_compaction_fixture(store: RealityStore) -> str:
