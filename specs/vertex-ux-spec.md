@@ -1037,6 +1037,8 @@ Selected-root context-gap ranking hides doctor `deep_context.why/what` missing-f
 
 **Context Maintenance attention (RELO-W4.11x):** Triage human/JSON/CSV, cockpit findings/JSON and reviewer HTML expose active gaps even before a candidate exists, separately labeled from pending revisions. Show selected scope, observation/evaluation time, observation count, unknown impact/owner/due and next safe action. CSV gap/unavailable rows retain evaluation and safe-guidance metadata. Preserve existing proposal IDs, conflicts, exact revision evidence and origin-unverified manual-diff guidance. Proposal/gap-read failures display separately labeled fixed unavailable diagnostics, not an empty-success message; a proposal failure does not suppress valid gaps. Executable edition-specific guidance is offered only when the caller knows the edition; no guessed edition, automatic solicitation/apply or business-health color change.
 
+**Authored review-rule coverage (RELO-W4.11y):** Inventory human/JSON output distinguishes an existing compatibility review rule from unassessed/unclassified authored files. State that containers and unenumerated shared/entity/field scope do not establish reviewed-document coverage. Preserve deterministic metadata-only reporting and existing error/exit behavior; do not display unknown review currency as current or healthy.
+
 Exit code for `--context`: 0 = L4, 2 = L2–L3 (warnings/gaps), 3 = L0–L1 (errors).
 
 ### 12.6.1 Confidence-Preserving CLI Rows
@@ -1044,6 +1046,10 @@ Exit code for `--context`: 0 = L4, 2 = L2–L3 (warnings/gaps), 3 = L0–L1 (err
 Risk-list JSON, CSV and human output label active open/escalated entries `unreviewed` when the authored review date is absent or future, never `current` merely because identification is recent. Valid reviews retain the existing 30-day inclusive current threshold and stale label thereafter; inactive labels remain compatible. This limitation does not change business severity, fact confidence, review dates or approval authority (RELO-W0.30a).
 
 `admin metric history` reads initialized storage without unrelated startup maintenance or database/schema initialization. Missing or invalid storage reports unavailable, not an empty successful history or automatic repair; valid empty history remains successful. Existing output and DB-root selection remain compatible, without claiming override/workspace coherence (RELO-W3.5p).
+
+Metric and hypothesis histories label observed units, semantic-definition revisions and unknown lineage. Missing or mismatched lineage visibly breaks trend comparability; it is insufficient data, not a converted value, continuous slope or evidence that a challenge recovered (RELO-W3.5r).
+
+Ordinary program-backed confirmation refuses source-selector drift and v1/absent captures with regenerate-and-review guidance, including when force is requested. Historical reads remain available; their availability is not confirmation eligibility. Rechecking under the archive lock preserves the same refusal if selectors change after the initial check (RELO-W2.8u).
 
 Human CLI surfaces that consume confidence-bearing Zone A records must preserve that confidence inline rather than flattening the row to source/status text only.
 

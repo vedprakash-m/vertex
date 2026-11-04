@@ -1038,6 +1038,8 @@ The `PROVIDER_REGISTRY` in `channel_wiring.py` maps channel names to their provi
 
 **Maintained-context attention (RELO-W4.11x):** Triage, cockpit and reviewer surfaces project existing active context-gap observations alongside pending context revisions. The shared projection uses the selected program root and an explicit evaluation time; it introduces no approval database or additional history writes. Gaps remain distinct from proposals, with unknown owner/due information explicit. Supported structural repairs leave active attention under existing ranking rules; evaluation, drafts and replies do not renew review or establish authenticated resolution. Unreadable gap history is visibly unavailable, not healthy/empty. Context limitations do not change business-health scoring.
 
+**Authored review coverage (RELO-W4.11y):** Read-only inventory makes discovered authored files without an existing review rule visible as unassessed or unclassified. Containers are not reviewed documents, and shared/entity/field domains that were not enumerated remain explicitly unassessed. This metadata-only scope does not parse content, certify review currency, infer complete context coverage or change freshness/publish policy.
+
 ### 9.4a Next-Step Guidance (`vertex next`)
 
 **Purpose:** Provide a bounded, ranked "what should I do next?" operator surface over the active issue instead of requiring the PM to inspect multiple commands manually.
