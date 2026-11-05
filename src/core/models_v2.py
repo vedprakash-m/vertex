@@ -809,6 +809,7 @@ class Program:
     min_channel_completeness_pct: int = 80
     backfill_max_days: int = 14
     gather: GatherActivationConfig = field(default_factory=GatherActivationConfig)
+    knowledge_scopes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

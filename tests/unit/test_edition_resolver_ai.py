@@ -9,6 +9,7 @@ from src.core.edition_resolver import (
     _parse_edition_config,
     _parse_gather_activation_config,
     _parse_m365,
+    _parse_program,
     load_program,
 )
 from src.core.exceptions import ConfigError
@@ -68,22 +69,27 @@ def test_parse_gather_activation_config_requires_explicit_enforce() -> None:
     assert enforce.requires_committed_gather_run is True
 
 
-def test_committed_gather_run_reader_activation_is_config_driven(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_parse_program_preserves_legacy_nested_knowledge_scopes() -> None:
+    program = _parse_program(
+        {"id": "acme", "name": "Acme", "program": {"knowledge_scopes": [" org ", "domain:shared"]}},
+        Path("programs/acme/program.yaml"),
+    )
+
+    assert program.knowledge_scopes == ("org", "domain:shared")
+
+
+def test_committed_gather_run_reader_activation_uses_loaded_config() -> None:
     program = Program(
         schema_version="3.0",
         id="acme",
         name="Acme",
         gather=GatherActivationConfig(run_manifest_mode="enforce"),
     )
-    monkeypatch.setattr("src.core.edition_resolver.load_program", lambda *_args, **_kwargs: program)
-
     assert _resolve_committed_gather_run_requirement(
-        "acme", programs_root=Path("programs"), override=None
+        program, override=None
     ) is True
     assert _resolve_committed_gather_run_requirement(
-        "acme", programs_root=Path("programs"), override=False
+        program, override=False
     ) is False
 
 

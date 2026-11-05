@@ -333,23 +333,25 @@ def get_committed_root(program_id: str, *, programs_root: Path = PROGRAMS_ROOT) 
     return get_gather_runs_dir(program_id, programs_root=programs_root) / COMMITTED_SUBDIR
 
 
-def get_verified_committed_run_ids(
+def get_verified_committed_run_state(
     program_id: str,
     *,
     programs_root: Path = PROGRAMS_ROOT,
-) -> frozenset[str]:
-    """Return only committed run IDs whose manifests still pass hash verification.
+) -> tuple[frozenset[str], datetime | None]:
+    """Return verified committed run IDs and the legacy cutoff from one scan.
 
     Read paths use this rather than trusting a directory name or status field:
     a partially written, corrupt, or tampered manifest must never make
-    gather-stamped signals or facts visible.  Invalid entries are ignored so a
-    bad historical artifact cannot take down a program reader.
+    gather-stamped signals or facts visible. Invalid entries are ignored so a
+    bad historical artifact cannot take down a program reader. The cutoff is
+    the earliest valid value, preserving conservative grandfathering.
     """
     committed_root = get_committed_root(program_id, programs_root=programs_root)
     if not committed_root.exists():
-        return frozenset()
+        return frozenset(), None
 
     run_ids: set[str] = set()
+    cutoffs: list[datetime] = []
     for run_dir in committed_root.iterdir():
         if not run_dir.is_dir():
             continue
@@ -363,7 +365,18 @@ def get_verified_committed_run_ids(
             and compute_manifest_hash(manifest) == manifest.manifest_hash
         ):
             run_ids.add(manifest.run_id)
-    return frozenset(run_ids)
+            if manifest.legacy_cutoff_at is not None:
+                cutoffs.append(manifest.legacy_cutoff_at)
+    return frozenset(run_ids), min(cutoffs) if cutoffs else None
+
+
+def get_verified_committed_run_ids(
+    program_id: str,
+    *,
+    programs_root: Path = PROGRAMS_ROOT,
+) -> frozenset[str]:
+    """Return only committed run IDs whose manifests still pass hash verification."""
+    return get_verified_committed_run_state(program_id, programs_root=programs_root)[0]
 
 
 def get_legacy_cutoff_at(
@@ -381,27 +394,7 @@ def get_legacy_cutoff_at(
     exists; if more than one is somehow present, the earliest cutoff is used
     so grandfathering stays maximally conservative.
     """
-    committed_root = get_committed_root(program_id, programs_root=programs_root)
-    if not committed_root.exists():
-        return None
-
-    cutoffs: list[datetime] = []
-    for run_dir in committed_root.iterdir():
-        if not run_dir.is_dir():
-            continue
-        try:
-            manifest = read_manifest(run_dir)
-        except (OSError, json.JSONDecodeError, KeyError, ValueError):
-            continue
-        if manifest.legacy_cutoff_at is None:
-            continue
-        if (
-            manifest.status is GatherRunStatus.COMMITTED
-            and manifest.manifest_hash
-            and compute_manifest_hash(manifest) == manifest.manifest_hash
-        ):
-            cutoffs.append(manifest.legacy_cutoff_at)
-    return min(cutoffs) if cutoffs else None
+    return get_verified_committed_run_state(program_id, programs_root=programs_root)[1]
 
 
 def create_legacy_cutoff_manifest(

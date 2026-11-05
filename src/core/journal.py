@@ -165,10 +165,13 @@ def read_signals(
     committed_run_ids: set[str] | None = None
     legacy_cutoff_at: datetime | None = None
     if require_committed_gather_run:
-        from src.core.gather_run_manifest import get_legacy_cutoff_at, get_verified_committed_run_ids
+        from src.core.gather_run_manifest import get_verified_committed_run_state
 
-        committed_run_ids = set(get_verified_committed_run_ids(program_id, programs_root=programs_root))
-        legacy_cutoff_at = get_legacy_cutoff_at(program_id, programs_root=programs_root)
+        run_ids, legacy_cutoff_at = get_verified_committed_run_state(
+            program_id,
+            programs_root=programs_root,
+        )
+        committed_run_ids = set(run_ids)
 
     signals: list[Signal] = []
     for path in _iter_weekly_journal_paths(program_id, programs_root):

@@ -163,7 +163,7 @@ def test_admin_db_migrate_command_rejects_legacy_schema_tables(tmp_path: Path) -
     assert payload["schema_issues"] == ["legacy tables present: reality_incidents"]
 
 
-def test_admin_db_backup_command_writes_backup_copy(tmp_path: Path) -> None:
+def test_admin_db_backup_command_writes_backup_copy(monkeypatch, tmp_path: Path) -> None:
     db_root = tmp_path / "db"
     backup_root = tmp_path / "backup"
     store = RealityStore("acme", db_root=db_root)
@@ -173,6 +173,7 @@ def test_admin_db_backup_command_writes_backup_copy(tmp_path: Path) -> None:
         "vertex-test",
         applied_at=datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc),
     )
+    monkeypatch.setattr("src.commands.db._get_destination_encryption_status", lambda _path: True)
 
     result = runner.invoke(
         app,

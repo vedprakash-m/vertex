@@ -9,9 +9,11 @@ from typing import Any
 
 from src.core.jsonl_utils import append_jsonl_line, read_jsonl_records, validate_jsonl_row
 from src.core.knowledge.predicate_registry import validate_predicate_value
+from src.core.knowledge_store import get_shared_knowledge_root
 from src.core.ledger.event_log import ConfidenceTier
 from src.core.ledger.source_refs import SourceRef, source_document_key, source_ref_from_dict, source_ref_to_dict
 from src.core.workspace_paths import PROGRAMS_ROOT
+from src.core.workspace_lease import cooperative_capture_fence
 
 
 SKIP_EXPIRY_DAYS = 90
@@ -119,28 +121,28 @@ def get_triaged_path(*, programs_root: Path = PROGRAMS_ROOT) -> Path:
 
 
 def append_candidate(candidate: KnowledgeCandidate, *, programs_root: Path = PROGRAMS_ROOT) -> None:
-    validate_predicate_value(candidate.proposed_claim.predicate, candidate.proposed_claim.value)
-    append_jsonl_line(
-        get_pending_path(programs_root=programs_root),
-        json.dumps(_candidate_to_record(candidate), sort_keys=True) + "\n",
-        max_bytes=PENDING_MAX_BYTES,
-    )
-    from src.core.knowledge_index import upsert_candidate_vault_refs
-    from src.core.knowledge_store import get_shared_knowledge_root
+    with cooperative_capture_fence(get_shared_knowledge_root(programs_root)):
+        validate_predicate_value(candidate.proposed_claim.predicate, candidate.proposed_claim.value)
+        append_jsonl_line(
+            get_pending_path(programs_root=programs_root),
+            json.dumps(_candidate_to_record(candidate), sort_keys=True) + "\n",
+            max_bytes=PENDING_MAX_BYTES,
+        )
+        from src.core.knowledge_index import upsert_candidate_vault_refs
 
-    upsert_candidate_vault_refs(candidate, knowledge_root=get_shared_knowledge_root(programs_root))
+        upsert_candidate_vault_refs(candidate, knowledge_root=get_shared_knowledge_root(programs_root))
 
 
 def append_triage_decision(decision: KnowledgeCandidateDecisionRecord, *, programs_root: Path = PROGRAMS_ROOT) -> None:
-    append_jsonl_line(
-        get_triaged_path(programs_root=programs_root),
-        json.dumps(_decision_to_record(decision), sort_keys=True) + "\n",
-        max_bytes=TRIAGED_MAX_BYTES,
-    )
-    from src.core.knowledge_index import apply_candidate_decision_to_index
-    from src.core.knowledge_store import get_shared_knowledge_root
+    with cooperative_capture_fence(get_shared_knowledge_root(programs_root)):
+        append_jsonl_line(
+            get_triaged_path(programs_root=programs_root),
+            json.dumps(_decision_to_record(decision), sort_keys=True) + "\n",
+            max_bytes=TRIAGED_MAX_BYTES,
+        )
+        from src.core.knowledge_index import apply_candidate_decision_to_index
 
-    apply_candidate_decision_to_index(decision, knowledge_root=get_shared_knowledge_root(programs_root))
+        apply_candidate_decision_to_index(decision, knowledge_root=get_shared_knowledge_root(programs_root))
 
 
 def load_pending_candidates(*, programs_root: Path = PROGRAMS_ROOT) -> tuple[KnowledgeCandidate, ...]:

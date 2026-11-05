@@ -15,6 +15,7 @@ from src.core.exceptions import ConfigError
 from src.core.knowledge_store import get_shared_knowledge_root
 from src.core.yaml_utils import load_yaml_mapping
 from src.core.workspace_paths import PROGRAMS_ROOT
+from src.core.workspace_lease import cooperative_capture_fence
 
 
 
@@ -90,45 +91,46 @@ def ingest_knowledge_source(
     programs_root: Path = PROGRAMS_ROOT,
     ingested_at: datetime | None = None,
 ) -> KnowledgeVaultEntry:
-    if not source_path.exists() or not source_path.is_file():
-        raise ConfigError(f"Knowledge source file not found: {source_path}")
+    with cooperative_capture_fence(get_shared_knowledge_root(programs_root)):
+        if not source_path.exists() or not source_path.is_file():
+            raise ConfigError(f"Knowledge source file not found: {source_path}")
 
-    knowledge_root = get_shared_knowledge_root(programs_root)
-    content_hash = _hash_file(source_path)
-    hash_value = _hash_suffix(content_hash)
-    bucket = hash_value[:2]
-    vault_root = knowledge_root / "vault" / bucket
-    vault_root.mkdir(parents=True, exist_ok=True)
-    content_path = vault_root / hash_value
-    metadata_path = vault_root / f"{hash_value}.meta.json"
-    if not content_path.exists():
-        content_path.write_bytes(source_path.read_bytes())
+        knowledge_root = get_shared_knowledge_root(programs_root)
+        content_hash = _hash_file(source_path)
+        hash_value = _hash_suffix(content_hash)
+        bucket = hash_value[:2]
+        vault_root = knowledge_root / "vault" / bucket
+        vault_root.mkdir(parents=True, exist_ok=True)
+        content_path = vault_root / hash_value
+        metadata_path = vault_root / f"{hash_value}.meta.json"
+        if not content_path.exists():
+            content_path.write_bytes(source_path.read_bytes())
 
-    resolved_ingested_at = _ensure_utc(ingested_at or datetime.now(timezone.utc))
-    content_type = mimetypes.guess_type(source_path.name)[0] or "application/octet-stream"
-    metadata = {
-        "vault_hash": content_hash,
-        "content_type": content_type,
-        "original_filename": source_path.name,
-        "origin_path": str(source_path),
-        "ingested_at": resolved_ingested_at.isoformat(),
-        "size_bytes": source_path.stat().st_size,
-    }
-    metadata_path.write_text(yaml.safe_dump(metadata, sort_keys=False, allow_unicode=False), encoding="utf-8")
+        resolved_ingested_at = _ensure_utc(ingested_at or datetime.now(timezone.utc))
+        content_type = mimetypes.guess_type(source_path.name)[0] or "application/octet-stream"
+        metadata = {
+            "vault_hash": content_hash,
+            "content_type": content_type,
+            "original_filename": source_path.name,
+            "origin_path": str(source_path),
+            "ingested_at": resolved_ingested_at.isoformat(),
+            "size_bytes": source_path.stat().st_size,
+        }
+        metadata_path.write_text(yaml.safe_dump(metadata, sort_keys=False, allow_unicode=False), encoding="utf-8")
 
-    entry = KnowledgeVaultEntry(
-        scope=scope,
-        vault_hash=content_hash,
-        content_path=content_path,
-        metadata_path=metadata_path,
-        content_type=content_type,
-        original_filename=source_path.name,
-        origin_path=str(source_path),
-        ingested_at=resolved_ingested_at,
-        size_bytes=source_path.stat().st_size,
-    )
-    _record_scope_source(entry, knowledge_root=knowledge_root)
-    return entry
+        entry = KnowledgeVaultEntry(
+            scope=scope,
+            vault_hash=content_hash,
+            content_path=content_path,
+            metadata_path=metadata_path,
+            content_type=content_type,
+            original_filename=source_path.name,
+            origin_path=str(source_path),
+            ingested_at=resolved_ingested_at,
+            size_bytes=source_path.stat().st_size,
+        )
+        _record_scope_source(entry, knowledge_root=knowledge_root)
+        return entry
 
 
 def load_scope_sources(scope: str, *, programs_root: Path = PROGRAMS_ROOT) -> tuple[KnowledgeSourceRecord, ...]:
@@ -228,16 +230,17 @@ def vault_content_matches_metadata(content_path: Path, metadata_path: Path) -> b
 
 
 def delete_vault_entry(vault_hash: str, *, programs_root: Path = PROGRAMS_ROOT) -> KnowledgeVaultEntry:
-    entry = load_vault_entry(vault_hash, programs_root=programs_root)
-    if entry.content_path.exists():
-        entry.content_path.unlink()
-    if entry.metadata_path.exists():
-        entry.metadata_path.unlink()
-    _remove_scope_sources(vault_hash, knowledge_root=get_shared_knowledge_root(programs_root))
-    for parent in (entry.metadata_path.parent, entry.content_path.parent):
-        if parent.exists() and not any(parent.iterdir()):
-            os.rmdir(parent)
-    return entry
+    with cooperative_capture_fence(get_shared_knowledge_root(programs_root)):
+        entry = load_vault_entry(vault_hash, programs_root=programs_root)
+        if entry.content_path.exists():
+            entry.content_path.unlink()
+        if entry.metadata_path.exists():
+            entry.metadata_path.unlink()
+        _remove_scope_sources(vault_hash, knowledge_root=get_shared_knowledge_root(programs_root))
+        for parent in (entry.metadata_path.parent, entry.content_path.parent):
+            if parent.exists() and not any(parent.iterdir()):
+                os.rmdir(parent)
+        return entry
 
 
 def source_registry_paths_for_vault_hash(vault_hash: str, *, programs_root: Path = PROGRAMS_ROOT) -> tuple[Path, ...]:
@@ -283,16 +286,17 @@ def write_shared_vault_verify_status(
     programs_root: Path = PROGRAMS_ROOT,
     program_id: str | None = None,
 ) -> SharedKnowledgeVaultVerifyStatus:
-    status = SharedKnowledgeVaultVerifyStatus(
-        verified_at=_ensure_utc(verified_at),
-        ok=ok,
-        issue_records=tuple(dict(record) for record in issue_records),
-        program_id=program_id,
-    )
-    status_path = _shared_vault_verify_status_path(programs_root=programs_root)
-    status_path.parent.mkdir(parents=True, exist_ok=True)
-    status_path.write_text(json.dumps(status.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
-    return status
+    with cooperative_capture_fence(get_shared_knowledge_root(programs_root)):
+        status = SharedKnowledgeVaultVerifyStatus(
+            verified_at=_ensure_utc(verified_at),
+            ok=ok,
+            issue_records=tuple(dict(record) for record in issue_records),
+            program_id=program_id,
+        )
+        status_path = _shared_vault_verify_status_path(programs_root=programs_root)
+        status_path.parent.mkdir(parents=True, exist_ok=True)
+        status_path.write_text(json.dumps(status.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
+        return status
 
 
 def _record_scope_source(entry: KnowledgeVaultEntry, *, knowledge_root: Path) -> None:

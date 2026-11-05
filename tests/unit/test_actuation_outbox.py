@@ -47,7 +47,10 @@ def test_existing_key_rejects_changed_identity(tmp_path: Path, changed: str) -> 
     assert load_entry(db, first.outbox_id) == before
 
 
-@pytest.mark.parametrize("status", ["uncertain_remote_state", "completed", "active", "missing_expiry", "same_owner"])
+@pytest.mark.parametrize("status", [
+    "uncertain_remote_state", "completed", "failed_terminal", "compensation_required",
+    "dead_letter", "manually_resolved", "succeeded", "audited", "active", "missing_expiry", "same_owner",
+])
 def test_nonclassifiable_dispatch_does_not_acquire_or_drain(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str,
 ) -> None:
@@ -65,7 +68,10 @@ def test_nonclassifiable_dispatch_does_not_acquire_or_drain(
     leased = store.lease_next(db, ACTUATION_DISPATCH_DOMAIN, owner="old", ttl_seconds=300 if status == "active" else 0)
     assert leased is not None
     store.mark_dispatched(db, "key", owner="old", fencing_token=leased.lease_fencing_token)
-    if status in {"uncertain_remote_state", "completed"}:
+    if status in {
+        "uncertain_remote_state", "completed", "failed_terminal", "compensation_required",
+        "dead_letter", "manually_resolved", "succeeded", "audited",
+    }:
         with open_program_db_with_retry(db, durability="strict") as connection:
             connection.execute("UPDATE outbox SET status = ?", (status,))
     if status == "missing_expiry":
@@ -97,6 +103,43 @@ def test_nonclassifiable_dispatch_does_not_acquire_or_drain(
                 )
         assert store.load_entry(db, "key") == before
         assert read_lease_state("fixture", mutation_domain=ACTUATION_DISPATCH_DOMAIN, programs_root=root) == workspace
+
+
+@pytest.mark.parametrize("status", [
+        "missing", "failed_terminal", "compensation_required", "dead_letter", "manually_resolved",
+        "succeeded", "audited",
+])
+def test_invalid_requested_intent_cannot_dispatch_pending_backlog(tmp_path: Path, status: str) -> None:
+        from src.core._db import open_program_db_with_retry
+        from src.core.ledger import durable_outbox_store as store
+        from src.core.workspace_lease import read_lease_state
+
+        root = tmp_path / "programs"
+        db = outbox_db_path("fixture", programs_root=root)
+        backlog = store.enqueue(
+            db, "backlog", domain=ACTUATION_DISPATCH_DOMAIN, correlation_id="backlog", payload_json="{}",
+        )
+        if status != "missing":
+            store.enqueue(db, "requested", domain=ACTUATION_DISPATCH_DOMAIN, correlation_id="requested", payload_json="{}")
+            with open_program_db_with_retry(db, durability="strict") as connection:
+                connection.execute("UPDATE outbox SET status = ? WHERE outbox_id = 'requested'", (status,))
+        requested = store.load_entry(db, "requested")
+        calls: list[str] = []
+
+        def dispatch(entry) -> DispatchResult:
+            calls.append(entry.outbox_id)
+            return DispatchResult(succeeded=True, remote_id=42)
+
+        with pytest.raises(store.OutboxError):
+            dispatch_leased_create_task(
+                program_id="fixture", idempotency_key="requested", owner="worker",
+                dispatch_fn=dispatch, programs_root=root,
+            )
+
+        assert calls == []
+        assert store.load_entry(db, "backlog") == backlog
+        assert store.load_entry(db, "requested") == requested
+        assert read_lease_state("fixture", mutation_domain=ACTUATION_DISPATCH_DOMAIN, programs_root=root) is None
 
 
 @pytest.mark.parametrize("identity", ["missing", "domain", "correlation_id"])

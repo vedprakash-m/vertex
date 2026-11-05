@@ -297,6 +297,51 @@ def test_transition_with_stale_fencing_token_raises(tmp_path: Path) -> None:
         mark_dispatched(db_path, "op-1", owner="worker-1", fencing_token=leased.lease_fencing_token)
 
 
+@pytest.mark.parametrize("status", [
+    "uncertain_remote_state", "failed_terminal", "compensation_required",
+    "dead_letter", "manually_resolved", "completed",
+])
+@pytest.mark.parametrize("transition", [
+    "mark_dispatched", "mark_succeeded", "mark_audited", "mark_completed",
+    "mark_failed_retryable", "mark_failed_terminal", "mark_uncertain_remote_state",
+    "mark_compensation_required", "mark_dead_letter",
+])
+def test_automatic_transition_cannot_overwrite_terminal(
+    tmp_path: Path, status: str, transition: str,
+) -> None:
+    from src.core.ledger import durable_outbox_store as store
+
+    db_path = _db(tmp_path)
+    enqueue(db_path, "op-1", domain="ado_actuation", correlation_id="intent-1", payload_json='{"title":"keep"}')
+    leased = lease_next(db_path, "ado_actuation", owner="worker-1")
+    assert leased is not None
+    with open_program_db_with_retry(db_path, durability="strict") as connection:
+        connection.execute(
+            "UPDATE outbox SET status = ?, remote_request_hash = 'request', "
+            "remote_response_hash = 'response', failure_reason = 'retained' WHERE outbox_id = 'op-1'",
+            (status,),
+        )
+    before = load_entry(db_path, "op-1")
+    kwargs = {"reason": "overwrite"} if transition in {
+        "mark_failed_retryable", "mark_failed_terminal", "mark_uncertain_remote_state",
+        "mark_compensation_required", "mark_dead_letter",
+    } else {}
+    if transition == "mark_failed_retryable":
+        kwargs["next_attempt_at"] = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+    with pytest.raises(LeaseNoLongerCurrent):
+        getattr(store, transition)(
+            db_path, "op-1", owner="superseded", fencing_token=leased.lease_fencing_token, **kwargs,
+        )
+    with pytest.raises(OutboxError, match="terminal"):
+        getattr(store, transition)(
+            db_path, "op-1", owner="worker-1", fencing_token=leased.lease_fencing_token, **kwargs,
+        )
+
+    assert load_entry(db_path, "op-1") == before
+    assert lease_next(db_path, "ado_actuation", owner="worker-2") is None
+
+
 def test_failed_retryable_is_re_leasable_once_due(tmp_path: Path) -> None:
     db_path = _db(tmp_path)
     enqueue(db_path, "op-1", domain="ado_actuation", correlation_id="intent-1", payload_json="{}")

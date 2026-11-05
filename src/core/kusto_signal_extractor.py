@@ -68,7 +68,7 @@ class KustoSignalExtractor:
                     continue
                 signals.extend(_build_signals(result_set, program_id, text=text, confidence=Confidence.MEDIUM, waiver=waiver))
                 continue
-            text = _semantic_or_generic_text(result_set, waiver=waiver)
+            text = format_kusto_result_text(result_set, waiver=waiver)
             signals.extend(_build_signals(result_set, program_id, text=text, confidence=Confidence.HIGH, waiver=waiver))
         return ExtractionResult(channel="kusto", signals=tuple(signals), trajectory_points=(), side_artifacts={}, errors=())
 
@@ -89,7 +89,7 @@ def _empty_result_text(result_set: KustoResultSet) -> str | None:
     the query/data-gap-vs-invalid-schema split for non-empty results -- are
     handled elsewhere: execution errors become IntegrationErrors before a
     KustoResultSet even exists, and "invalid schema" is a non-empty-rows
-    case handled by ``_semantic_or_generic_text``).
+    case handled by ``format_kusto_result_text``).
 
     Returns None for "expected quiet" (nothing to surface); a message for
     "query/data gap" (rows were expected but none came back).
@@ -108,7 +108,7 @@ def _empty_result_text(result_set: KustoResultSet) -> str | None:
     )
 
 
-def _semantic_or_generic_text(result_set: KustoResultSet, *, waiver: object | None = None) -> str:
+def format_kusto_result_text(result_set: KustoResultSet, *, waiver: object | None = None) -> str:
     if result_set.metric_id is None:
         return f"Kusto query {result_set.query_id}: {len(result_set.rows)} row(s) observed."
 

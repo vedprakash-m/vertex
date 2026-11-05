@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from datetime import timedelta
 
 import pytest
 
 from src.core.circuit_breaker import CircuitBreaker, CircuitBreakerState
-from src.m365.agency_bridge import AgencyBridge
+from src.m365.agency_bridge import AgencyBridge, AgencyCapabilities
+from src.m365.graph_mail_client import GraphMailClient
 
 
 def _completed_process(*command: str, returncode: int = 0, stdout: str = "") -> subprocess.CompletedProcess[str]:
@@ -139,3 +141,61 @@ def test_ask_workiq_contract_closes_breaker_after_successful_probe(tmp_path) -> 
 
     assert bridge.ask_workiq("status?") == {"response": "ok"}
     assert breaker.success_calls == [True]
+
+
+def test_workiq_cli_contract_feeds_inner_response_to_real_mail_consumer() -> None:
+    email = {
+        "id": "mail-1",
+        "subject": "Synthetic status",
+        "receivedDateTime": "2026-11-04T12:00:00Z",
+        "webUrl": "https://outlook.office.com/mail/mail-1",
+        "bodyPreview": "First line.\n\nSecond line.",
+    }
+    bridge = AgencyBridge(
+        runner=lambda command, **kwargs: _completed_process(
+            *command,
+            stdout=json.dumps({
+                "isError": False,
+                "response": json.dumps({"emails": [email], "next_cursor": "cursor-2"}),
+                "references": [],
+            }),
+        )
+    )
+    bridge._capabilities_cache = AgencyCapabilities(has_workiq_cli=True)
+    bridge._resolve_workiq_executable = lambda: "workiq"  # type: ignore[method-assign]
+
+    page = GraphMailClient(bridge).search_emails(query="synthetic", timeout_seconds=17)
+
+    assert page.next_cursor == "cursor-2"
+    assert len(page.records) == 1
+    assert page.records[0].source_id == "mail-1"
+    assert page.records[0].received_at == email["receivedDateTime"]
+    assert page.records[0].preview == email["bodyPreview"]
+
+
+@pytest.mark.parametrize(
+    "stdout, expected",
+    [
+        ('{"isError":false,"response":"answer"}', CircuitBreakerState.CLOSED),
+        ('{"isError":true,"response":"provider failed"}', CircuitBreakerState.OPEN),
+        ('{"isError":false,"response":""}', CircuitBreakerState.OPEN),
+        ("not JSON", CircuitBreakerState.OPEN),
+    ],
+)
+def test_workiq_cli_contract_records_only_valid_envelopes_as_breaker_success(tmp_path, stdout, expected) -> None:
+    breaker = CircuitBreaker(
+        state_path=tmp_path / "breaker.json",
+        failure_threshold=1,
+        recovery_timeout=timedelta(hours=4),
+    )
+    bridge = AgencyBridge(
+        runner=lambda command, **kwargs: _completed_process(*command, stdout=stdout),
+        workiq_breaker=breaker,
+    )
+    bridge._capabilities_cache = AgencyCapabilities(has_workiq_cli=True)
+    bridge._resolve_workiq_executable = lambda: "workiq"  # type: ignore[method-assign]
+
+    result = bridge.ask_workiq("synthetic")
+
+    assert (result is not None) == (expected == CircuitBreakerState.CLOSED)
+    assert breaker.get_state().state == expected

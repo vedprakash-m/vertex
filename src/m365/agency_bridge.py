@@ -241,29 +241,44 @@ class AgencyBridge:
                 log.warning("WorkIQ query failed: %s", result.error)
             elif result.returncode != 0:
                 details = self._normalize_workiq_cli_output(result.stderr) or self._normalize_workiq_cli_output(result.stdout)
-                if details:
-                    self._last_mcp_error = details
-                    log.warning(
-                        "WorkIQ query failed via %s with exit code %s: %s",
-                        result.executable,
-                        result.returncode,
-                        details,
-                    )
+                self._last_mcp_error = details or f"WorkIQ CLI exited with code {result.returncode}."
+                log.warning(
+                    "WorkIQ query failed via %s with exit code %s: %s",
+                    result.executable,
+                    result.returncode,
+                    self._last_mcp_error,
+                )
             else:
-                response = self._normalize_workiq_cli_output(result.stdout)
-                if response is None:
-                    stderr_text = self._normalize_workiq_cli_output(result.stderr)
-                    if stderr_text:
-                        self._last_mcp_error = stderr_text
-                        log.warning("WorkIQ query returned no response via %s: %s", result.executable, stderr_text)
-                elif self._looks_like_eula_prompt(response):
-                    self._last_mcp_error = "WorkIQ CLI requires EULA acceptance (`workiq accept-eula`)."
-                    log.warning("WorkIQ CLI requires EULA acceptance before use.")
+                if not result.stdout.strip():
+                    self._last_mcp_error = (
+                        self._normalize_workiq_cli_output(result.stderr) or "WorkIQ CLI returned no response."
+                    )
                 else:
-                    payload = {"response": response}
-                    if self._workiq_breaker is not None:
-                        self._workiq_breaker.record_success(is_probe=breaker_probe)
-                    return payload
+                    try:
+                        decoded = json.loads(result.stdout)
+                    except json.JSONDecodeError:
+                        if self._looks_like_eula_prompt(result.stdout):
+                            self._last_mcp_error = "WorkIQ CLI requires EULA acceptance (`workiq accept-eula`)."
+                        else:
+                            self._last_mcp_error = "WorkIQ CLI returned invalid JSON."
+                    else:
+                        if isinstance(decoded, dict) and decoded.get("isError") is True:
+                            self._last_mcp_error = "WorkIQ CLI returned a provider error."
+                        elif (
+                            not isinstance(decoded, dict)
+                            or decoded.get("isError") is not False
+                            or not isinstance(decoded.get("response"), str)
+                            or not decoded["response"].strip()
+                        ):
+                            self._last_mcp_error = "WorkIQ CLI returned an invalid response envelope."
+                        elif self._looks_like_eula_prompt(decoded["response"]):
+                            self._last_mcp_error = "WorkIQ CLI requires EULA acceptance (`workiq accept-eula`)."
+                        else:
+                            self._last_mcp_error = None
+                            if self._workiq_breaker is not None:
+                                self._workiq_breaker.record_success(is_probe=breaker_probe)
+                            return decoded
+                log.warning("WorkIQ query failed: %s", self._last_mcp_error)
 
         if self._workiq_breaker is not None:
             self._workiq_breaker.record_failure(error=self._last_mcp_error, is_probe=breaker_probe)
@@ -276,7 +291,10 @@ class AgencyBridge:
         try:
             executable = self._resolve_workiq_executable()
             resolved_timeout = self.WORKIQ_TIMEOUT if timeout_seconds is None or timeout_seconds <= 0 else timeout_seconds
-            result = self._run([executable, "ask", "--question", question], timeout=resolved_timeout)
+            result = self._run(
+                [executable, "ask", "--question", question, "--json", "--no-streaming"],
+                timeout=resolved_timeout,
+            )
             return WorkIQCommandResult(
                 executable=executable,
                 returncode=result.returncode,

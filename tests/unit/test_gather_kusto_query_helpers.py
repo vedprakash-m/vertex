@@ -83,6 +83,42 @@ def test_build_kusto_signal_shares_across_all_configured_workstreams() -> None:
     assert signals[0].workstream_ids == ("acme", "contoso")
 
 
+@pytest.mark.parametrize("value,unit,target,comparison,expected", [
+    (0, "%", 0, ">=", "demo.p50 = 0% against SLO >=0%: OK."),
+    (4.2, "s", 4, "<=", "demo.p50 = 4.2s against SLO <=4s: BREACH."),
+    ("4.2%", "%", 5, "<", "demo.p50 = 4.2% against SLO <5%: OK."),
+    ("1,000", None, None, None, "demo.p50 = 1000."),
+    (4.2, "s", None, None, "demo.p50 = 4.2s."),
+    (4.2, None, 4, None, "demo.p50 = 4.2."),
+    (4.2, None, None, ">", "demo.p50 = 4.2."),
+])
+def test_bound_metric_signal_uses_declared_semantics_not_row_preview(
+    value: int | float | str, unit: str | None, target: float | None,
+    comparison: str | None, expected: str,
+) -> None:
+    query = replace(
+        _kusto_query(), metric_id="demo.p50", unit=unit,
+        slo_target=target, comparison=comparison,
+    )
+    as_of = datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc)
+    rows = [{"Unrelated": "not metric prose", "Other": 99, "Third": 88, "P50": value}]
+    signal = kusto_query_helpers.build_kusto_signal(query=query, rows=rows, program_id="acme", as_of=as_of)
+    control = kusto_query_helpers.build_kusto_signal(
+        query=query, rows=[{"P50": value}], program_id="acme", as_of=as_of,
+    )
+
+    assert signal is not None
+    assert control is not None
+    assert signal.text == expected
+    assert signal.id == control.id
+    assert signal.timestamp == control.timestamp
+    assert signal.raw_ref == control.raw_ref
+    assert signal.confidence == control.confidence
+    assert signal.entity_refs == control.entity_refs
+    assert signal.workstream_ids == ("acme",)
+    assert signal.metadata == control.metadata
+
+
 def test_record_kusto_query_state_preserves_last_success_on_error() -> None:
     query_state_sink: dict[str, dict[str, object]] = {}
 

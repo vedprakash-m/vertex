@@ -108,6 +108,13 @@ def build_run_evidence_snapshot(
 ) -> RunEvidenceSnapshot:
     if pin is None or snapshot is None or pin.program_id != snapshot.program_id:
         raise ConfigError("Run evidence retained fact capture is missing or inconsistent.")
+    from src.core.program_fact_store import fact_snapshot_content_sha256
+
+    if (
+        pin.membership_version != 2 or pin.pinned_revision_count != len(snapshot.facts)
+        or pin.content_sha256 != fact_snapshot_content_sha256(snapshot.facts)
+    ):
+        raise ConfigError("Run evidence retained fact content does not match its pin.")
     if (
         (gather.run_id if gather else None, gather.manifest_hash if gather else None)
         != (manifest.gather_run_id, manifest.gather_run_hash)

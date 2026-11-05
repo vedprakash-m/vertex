@@ -619,6 +619,12 @@ def test_real_loader_comparison_admission_and_boundaries(
     config = KustoHydrationConfig(programs_root=tmp_path)
     result = provider.hydrate((registration,), NOW, "demo", config)
     signals = KustoSignalExtractor().extract(result.resources, "demo").signals
+    queries = load_kpi_queries("demo", programs_root=tmp_path)
+    direct_state: dict[str, dict[str, Any]] = {}
+    direct_signals = kusto_query_helpers.build_kusto_signals(
+        queries=queries, program_id="demo", as_of=NOW, executor=lambda _: rows,
+        query_state_sink=direct_state, previous_query_states={"rate": PREVIOUS},
+    )
     state: dict[str, dict[str, Any]] = {}
     uil_loader_stage.record_uil_kusto_query_states(
         "demo", binding=SimpleNamespace(hydration_provider=provider, hydration_config=config),
@@ -634,6 +640,9 @@ def test_real_loader_comparison_admission_and_boundaries(
         assert result.hydrated_ref_ids == ()
         assert result.failed_ref_ids == (("rate", "kusto_query"),)
         assert signals == ()
+        assert direct_signals == ()
+        assert direct_state["rate"]["last_cycle_succeeded"] is False
+        assert direct_state["rate"]["last_error"] == result.errors[0].message
         assert state["rate"]["last_cycle_succeeded"] is False
         assert state["rate"]["is_degraded"] is True
         assert state["rate"]["last_succeeded_at"] == datetime(2026, 10, 24, tzinfo=timezone.utc)
@@ -651,6 +660,8 @@ def test_real_loader_comparison_admission_and_boundaries(
             else:
                 verdict = "BREACH" if breach else "OK"
                 assert signals[0].text == f"demo.rate = {value:g}% against SLO {comparison}{target:g}%: {verdict}."
+            assert direct_signals[0].text == signals[0].text
+            assert direct_state["rate"]["last_cycle_succeeded"] is True
         elif not rows:
             assert "query or data gap" in signals[0].text
         else:

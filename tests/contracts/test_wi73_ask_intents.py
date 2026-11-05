@@ -231,3 +231,28 @@ def test_citation_only_fallback_never_infers() -> None:
     assert "budget" in output  # question echoed
     # reality.attention was called (not skipped silently)
     reality.attention.assert_called_once()
+
+
+def test_citation_only_fallback_surfaces_degraded_domains() -> None:
+    from src.core.program_reality import RealityDomainFreshness
+
+    reality = _make_reality()
+    reality.attention.return_value = ()
+    reality.freshness.return_value = (
+        RealityDomainFreshness(
+            domain="milestones",
+            fact_count=0,
+            stale_count=0,
+            latest_recorded_at=None,
+            sor_mode="legacy",
+            status="invalid",
+            diagnostic="Milestone records could not be loaded from milestones.yaml.",
+            next_action="Correct or restore milestones.yaml, then rerun the assessment.",
+        ),
+    )
+
+    output = citation_only_fallback("show status", reality)
+
+    assert "Degraded domains:" in output
+    assert "milestones: Milestone records could not be loaded" in output
+    assert "Correct or restore milestones.yaml" in output

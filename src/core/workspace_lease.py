@@ -24,18 +24,56 @@ work (ADF-W1.10).
 """
 from __future__ import annotations
 
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import os
 from pathlib import Path
 from sqlite3 import Connection
-from threading import Event, RLock, Thread, current_thread
-from typing import Callable
+from threading import Event, RLock, Thread, current_thread, local
+from typing import Callable, Iterator
+
+import portalocker
 
 from src.core._db import open_program_db_with_retry as open_program_db
+from src.core.exceptions import ConfigError
 from src.core.workspace_paths import PROGRAMS_ROOT
 
 _DB_FILENAME = "workspace_lease.sqlite3"
 _DEFAULT_TTL_SECONDS = 300
+_capture_state = local()
+
+
+@contextmanager
+def cooperative_capture_fence(*resources: Path) -> Iterator[None]:
+    """Exclude cooperating access for these resources until the scope exits."""
+    try:
+        paths = tuple(sorted({path.resolve() for path in resources}, key=lambda path: os.path.normcase(str(path))))
+    except OSError as error:
+        raise ConfigError("Capture fence unavailable. Cannot resolve the requested resources.") from error
+    held = _capture_state.resources if getattr(_capture_state, "pid", None) == os.getpid() else frozenset()
+    if held:
+        if not set(paths).issubset(held):
+            raise ConfigError("Capture fence cannot expand its resource set inside an active scope.")
+        yield
+        return
+    with ExitStack() as stack:
+        try:
+            for path in paths:
+                lock_path = path.with_name(path.name + ".capture.lock")
+                lock_path.parent.mkdir(parents=True, exist_ok=True)
+                stack.enter_context(portalocker.Lock(
+                    lock_path, mode="a", timeout=5,
+                    flags=portalocker.LOCK_EX | portalocker.LOCK_NB,
+                ))
+        except (portalocker.exceptions.LockException, OSError) as error:
+            raise ConfigError("Capture fence unavailable. Retry after the competing operation finishes.") from error
+        _capture_state.pid = os.getpid()
+        _capture_state.resources = frozenset(paths)
+        try:
+            yield
+        finally:
+            _capture_state.resources = held
 
 # A gather may legitimately include several bounded remote-source calls. Keep
 # the lease alive well before the default five-minute TTL, while still leaving

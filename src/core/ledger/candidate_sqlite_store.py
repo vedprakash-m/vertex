@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Generator
 
 from src.core._db import open_program_db
+from src.core.workspace_lease import cooperative_capture_fence
 
 log = logging.getLogger(__name__)
 
@@ -120,7 +121,7 @@ def _open_db(db_path: Path) -> Generator[sqlite3.Connection, None, None]:
     ``durability="balanced"`` (the default) preserves the prior
     ``synchronous=NORMAL`` on local paths.
     """
-    with open_program_db(db_path, busy_timeout_ms=10_000) as conn:
+    with cooperative_capture_fence(db_path.parent.parent), open_program_db(db_path, busy_timeout_ms=10_000) as conn:
         yield conn
 
 
@@ -400,4 +401,3 @@ def outbox_list_dead_letters(db_dir: Path, *, program_id: str | None = None) -> 
                 (OUTBOX_STATUS_DEAD_LETTER,),
             ).fetchall()
     return [dict(r) for r in rows]
-

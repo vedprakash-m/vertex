@@ -33,9 +33,10 @@ from src.core.models_v2 import REV_PROFILE_SEARCH_HYDRATE, RevRetrievalProfile
 from src.core.rev.entity_types import EntityType
 from src.core.rev.governor import BudgetLimits
 from src.core.rev.pipeline import RevPipelineDeps, run_rev_cycle
+from src.core.rev.ports import EnumeratedCandidate, HydratedContent
 from src.core.rev.prompt_shields import LocalOnlyPromptShields
 from src.core.rev.query_planner import RetrievalIntent
-from src.core.rev.result import RateLimited
+from src.core.rev.result import Incomplete, RateLimited, Success
 from src.m365.rev.eml_enumerator import EmlEnumerator
 from src.m365.rev.eml_hydrator import EmlHydrator
 
@@ -384,6 +385,99 @@ class TestHighVolumeBatchedDrain:
                 eml_inbox / f"msg{i:03d}.eml",
                 _SIMPLE_EML.replace("<test-001@example.com>", f"<test-{i:03d}@example.com>"),
             )
+
+    @pytest.mark.parametrize("reason,category", [
+        ("provider_partial", "provider_limited"),
+        ("", "provider_limited"),
+        ("page_cut", "truncated_by_budget"),
+    ])
+    @pytest.mark.parametrize("mode", ["empty", "salvaged", "quiet"])
+    def test_incomplete_enumeration_is_never_complete(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        reason: str, category: str, mode: str,
+    ) -> None:
+        eml_inbox = tmp_path / "rev_inbox"
+        eml_inbox.mkdir()
+        if mode != "empty":
+            self._write_n_emls(eml_inbox, 1)
+        deps = _build_deps(eml_inbox)
+        enumerate_original = deps.enumerator.enumerate
+
+        def enumerate_partial(
+            intent: RetrievalIntent, *, correlation_id: str,
+        ) -> Incomplete[tuple[EnumeratedCandidate, ...]]:
+            batch = enumerate_original(intent, correlation_id=correlation_id)
+            assert isinstance(batch, Success)
+            candidates = batch.value
+            if mode == "quiet":
+                candidates = tuple(replace(candidate, relevance_score=0.0) for candidate in candidates)
+            return Incomplete(candidates, reason=reason)
+
+        monkeypatch.setattr(deps.enumerator, "enumerate", enumerate_partial)
+        flip_calls: list[object] = []
+        monkeypatch.setattr(
+            "src.core.rev.pipeline._run_family_flip_gates",
+            lambda *args: flip_calls.append(args) or {},
+        )
+        report = _run_cycle(deps=deps, programs_root=tmp_path)
+        assert report.stop_category == category
+        assert report.stop_reason == (reason or "incomplete")
+        assert report.processed_successfully == (1 if mode == "salvaged" else 0)
+        assert report.explicitly_skipped == (1 if mode == "quiet" else 0)
+        assert flip_calls == []
+        last = json.loads((tmp_path / "prog-local" / "_rev" / "last_cycle.json").read_text(encoding="utf-8"))
+        history = (tmp_path / "prog-local" / "_rev" / "cycle_history.jsonl").read_text(encoding="utf-8")
+        for record in (last, json.loads(history.splitlines()[-1])):
+            assert record["stop_category"] == category
+        assert report.to_dict()["stop_reason"] == (reason or "incomplete")
+
+    def test_incomplete_hydration_retains_provider_limitation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        eml_inbox = tmp_path / "rev_inbox"
+        eml_inbox.mkdir()
+        self._write_n_emls(eml_inbox, 1)
+        deps = _build_deps(eml_inbox)
+        hydrate_original = deps.hydrator.hydrate
+
+        def hydrate_partial(
+            candidate: EnumeratedCandidate, *, correlation_id: str,
+        ) -> Incomplete[HydratedContent]:
+            hydrated = hydrate_original(candidate, correlation_id=correlation_id)
+            assert isinstance(hydrated, Success)
+            return Incomplete(hydrated.value, reason="provider_partial")
+
+        monkeypatch.setattr(deps.hydrator, "hydrate", hydrate_partial)
+        report = _run_cycle(deps=deps, programs_root=tmp_path)
+        assert report.stop_category == "provider_limited"
+        assert report.stop_reason == "provider_partial"
+        assert report.hydrated == report.processed_successfully == report.candidates_staged == 0
+        assert report.explicitly_skipped == 1
+        assert len(list(deps.enumerator.claimed_dir().glob("*.eml"))) == 1
+
+    def test_complete_quiet_lane_retains_existing_outcome(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        eml_inbox = tmp_path / "rev_inbox"
+        eml_inbox.mkdir()
+        self._write_n_emls(eml_inbox, 1)
+        deps = _build_deps(eml_inbox)
+        enumerate_original = deps.enumerator.enumerate
+
+        def enumerate_quiet(
+            intent: RetrievalIntent, *, correlation_id: str,
+        ) -> Success[tuple[EnumeratedCandidate, ...]]:
+            batch = enumerate_original(intent, correlation_id=correlation_id)
+            assert isinstance(batch, Success)
+            return Success(tuple(replace(candidate, relevance_score=0.0) for candidate in batch.value))
+
+        monkeypatch.setattr(deps.enumerator, "enumerate", enumerate_quiet)
+        report = _run_cycle(deps=deps, programs_root=tmp_path)
+        assert report.stop_category == "complete"
+        assert report.stop_reason.startswith("quiet_lane:all_below_threshold")
+        assert report.breached_budget == "quiet_lane"
+        assert report.explicitly_skipped == 1
+        assert report.processed_successfully == 0
 
     def test_truncated_batch_is_processed_this_cycle_not_discarded(self, tmp_path: Path) -> None:
         eml_inbox = tmp_path / "rev_inbox"

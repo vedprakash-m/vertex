@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -289,6 +290,118 @@ def _dependency_event(event_type: str, day: int, payload: dict[str, str]) -> Eve
     )
 
 
+def _projection_event(event_type: str, day: int, payload: dict[str, Any]) -> EventEnvelope:
+    timestamp = datetime(2026, 1, day, tzinfo=timezone.utc)
+    return build_event_envelope(
+        program_id="acme",
+        event_type=event_type,
+        occurred_at=timestamp,
+        recorded_at=timestamp,
+        temporal_confidence=TemporalConfidence.EXACT,
+        confidence=ConfidenceTier.SOURCE_AUTHORITATIVE,
+        actor="import",
+        payload=payload,
+        source_ref=_deck_ref(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("base_specs", "delta_specs"),
+    [
+        pytest.param(
+            (("risk.raised.v1", {"risk_id": "risk:r1", "title": "Risk", "severity": "high"}),),
+            (("risk.status_changed.v1", {"risk_id": "risk:r1", "new_status": "blocked"}),),
+            id="risk",
+        ),
+        pytest.param(
+            (("milestone.created.v1", {"milestone_id": "milestone:m1", "name": "Gate", "target_date": "2026-03-01"}),),
+            (("milestone.date_revised.v1", {"milestone_id": "milestone:m1", "new_target_date": "2026-04-01"}),),
+            id="milestone",
+        ),
+        pytest.param(
+            (("deliverable.created.v1", {"deliverable_id": "deliverable:d1", "name": "Brief"}),),
+            (("deliverable.status_changed.v1", {"deliverable_id": "deliverable:d1", "new_status": "done"}),),
+            id="deliverable",
+        ),
+        pytest.param(
+            (("sku_generation.added.v1", {"sku_generation_id": "sku_generation:g1", "name": "Gen 1"}),),
+            (("sku_generation.added.v1", {"sku_generation_id": "sku_generation:g2", "name": "Gen 2"}),),
+            id="sku-generation",
+        ),
+        pytest.param(
+            (("decision.made.v1", {"decision_id": "decision:d1", "title": "Ship", "decision_text": "Ship", "decided_by": ["operator"]}),),
+            (("decision.revised.v1", {"decision_id": "decision:d1", "revision_text": "Ship after review", "reason": "Review"}),),
+            id="decision",
+        ),
+        pytest.param(
+            (("assumption.stated.v1", {"assumption_id": "assumption:a1", "statement": "Capacity holds"}),),
+            (("assumption.validated.v1", {"assumption_id": "assumption:a1", "evidence": "Load test passed"}),),
+            id="assumption",
+        ),
+        pytest.param(
+            (("dependency.declared.v1", {"dependency_id": "dependency:d1", "from_entity": "milestone:m1", "to_entity": "milestone:m2"}),),
+            (("dependency.status_changed.v1", {"dependency_id": "dependency:d1", "new_status": "blocked"}),),
+            id="dependency",
+        ),
+        pytest.param(
+            (("commitment.made.v1", {"commitment_id": "commitment:c1", "text": "Ship", "owner_person_id": "person:p1", "due_date": "2026-03-01"}),),
+            (("commitment.fulfilled.v1", {"commitment_id": "commitment:c1", "fulfilled_on": "2026-02-01"}),),
+            id="commitment",
+        ),
+        pytest.param(
+            (("kpi.defined.v1", {"kpi_id": "kpi:k1", "name": "Deployments"}),),
+            (("kpi.decommissioned.v1", {"kpi_id": "kpi:k1", "reason": "Retired"}),),
+            id="kpi-lifecycle",
+        ),
+        pytest.param(
+            (("kpi.defined.v1", {"kpi_id": "kpi:k1", "name": "Deployments"}),),
+            (("metric.observed.v1", {"kpi_id": "kpi:k1", "value": 12, "unit": "count", "window_end": "2026-01-02T00:00:00+00:00", "dimensions": {"ring": "prod"}}),),
+            id="kpi-observation",
+        ),
+        pytest.param(
+            (("incident.opened.v1", {"incident_id": "incident:i1", "severity": "sev2", "title": "Outage"}),),
+            (("incident.resolved.v1", {"incident_id": "incident:i1", "resolved_on": "2026-01-02"}),),
+            id="incident",
+        ),
+        pytest.param(
+            (("knowledge.article_added.v1", {"article_id": "article:a1", "title": "Runbook", "location": "vault://a1"}),),
+            (("knowledge.article_revised.v1", {"article_id": "article:a1", "revision_summary": "Updated", "location": "vault://a1-v2"}),),
+            id="knowledge-article",
+        ),
+        pytest.param(
+            (("playbook.created.v1", {"playbook_id": "playbook:p1", "title": "Escalation", "location": "vault://p1"}),),
+            (("playbook.created.v1", {"playbook_id": "playbook:p2", "title": "Recovery", "location": "vault://p2"}),),
+            id="playbook",
+        ),
+        pytest.param(
+            (("artifact.published.v1", {"artifact_id": "artifact:a1", "artifact_kind": "newsletter", "title": "Issue 1", "location": "archive://issue1"}),),
+            (("artifact.published.v1", {"artifact_id": "artifact:a2", "artifact_kind": "newsletter", "title": "Issue 2", "location": "archive://issue2"}),),
+            id="published-artifact",
+        ),
+    ],
+)
+def test_incremental_entity_families_match_full_projection(
+    tmp_path: Path,
+    base_specs: tuple[tuple[str, dict[str, Any]], ...],
+    delta_specs: tuple[tuple[str, dict[str, Any]], ...],
+) -> None:
+    base_events = tuple(_projection_event(event_type, 1, payload) for event_type, payload in base_specs)
+    events = (*base_events, *(
+        _projection_event(event_type, 2, payload)
+        for event_type, payload in delta_specs
+    ))
+    incremental_path = tmp_path / "incremental.sqlite3"
+    full_path = tmp_path / "full.sqlite3"
+
+    project_events_incremental_to_sqlite("acme", base_events, projection_path=incremental_path)
+    result = project_events_incremental_to_sqlite("acme", events, projection_path=incremental_path)
+    project_events_to_sqlite("acme", events, projection_path=full_path)
+
+    assert result.event_watermark == events[-1].event_id
+    assert result.event_count == len(events)
+    assert canonical_projection_dump(incremental_path) == canonical_projection_dump(full_path)
+
+
 @pytest.mark.parametrize("change", ["source", "target", "status"])
 @pytest.mark.parametrize("shared_endpoints", [False, True])
 def test_dependency_incremental_full_canonical_parity(
@@ -378,7 +491,7 @@ def test_old_projector_rebuilds_stale_dependency_links_without_new_events(
     for path in (incremental_path, full_path):
         project_events_to_sqlite("acme", events, projection_path=path, programs_root=programs_root)
     with program_views.connect_projection_db(incremental_path) as connection:
-        connection.execute("UPDATE projection_meta SET projector_version = '2'")
+        connection.execute("UPDATE projection_meta SET projector_version = '3'")
         connection.execute(
             "INSERT INTO entity_links (from_entity, link_kind, to_entity, event_id) VALUES (?, ?, ?, ?)",
             ("milestone:a", "depends_on", "milestone:b", initial.event_id),
@@ -392,4 +505,4 @@ def test_old_projector_rebuilds_stale_dependency_links_without_new_events(
     rebuild.assert_called_once()
     assert result.event_watermark == replacement.event_id
     assert canonical_projection_dump(incremental_path) == canonical_projection_dump(full_path)
-    assert canonical_projection_dump(incremental_path)["projection_meta"][0]["projector_version"] == "3"
+    assert canonical_projection_dump(incremental_path)["projection_meta"][0]["projector_version"] == "4"

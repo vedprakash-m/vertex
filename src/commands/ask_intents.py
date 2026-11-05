@@ -452,6 +452,15 @@ def citation_only_fallback(question: str, reality: ProgramReality) -> str:
         if stale_domains:
             lines.append(f"Stale domains: {', '.join(stale_domains)}")
             lines.append("")
+        unavailable_domains = [f for f in freshness if f.status != "available"]
+        if unavailable_domains:
+            lines.append("Degraded domains:")
+            for domain in unavailable_domains:
+                details = domain.diagnostic or domain.status
+                if domain.next_action:
+                    details = f"{details} {domain.next_action}"
+                lines.append(f"  {domain.domain}: {details}")
+            lines.append("")
 
     lines.append(
         "To get a synthesized answer, use `vertex ask <question> --program <id>` "

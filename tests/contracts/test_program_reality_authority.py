@@ -731,14 +731,10 @@ def test_load_surfaces_latest_confirmed_archive_stale_claim_citations(
     monkeypatch.setattr("src.core.program_reality.load_triage_decisions", lambda *_args, **_kwargs: ())
     monkeypatch.setattr("src.core.program_reality.read_events", lambda *_args, **_kwargs: ())
     monkeypatch.setattr("src.core.program_reality.load_program_knowledge_scopes", lambda *_args, **_kwargs: ())
-    monkeypatch.setattr("src.core.program_reality.load_program_knowledge_claims", lambda *_args, **_kwargs: ())
-    monkeypatch.setattr(
-        "src.core.program_reality.summarize_knowledge_status",
-        lambda **_kwargs: SimpleNamespace(vault=SimpleNamespace(hash_mismatch_count=0)),
-    )
+    monkeypatch.setattr("src.core.program_reality.load_scoped_claim_revisions", lambda *_args, **_kwargs: ())
     monkeypatch.setattr(
         "src.core.program_reality.summarize_knowledge_vault_integrity",
-        lambda **_kwargs: SimpleNamespace(issue_records=lambda: []),
+        lambda **_kwargs: SimpleNamespace(issue_records=lambda: [], hash_mismatch_count=0),
     )
     monkeypatch.setattr("src.core.program_reality.project_events_to_memory", lambda *_args, **_kwargs: {})
     monkeypatch.setattr("src.core.program_reality.load_entity_event_ids", lambda *_args, **_kwargs: {})

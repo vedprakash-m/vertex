@@ -10,9 +10,14 @@ creating a second one.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 
+import pytest
+
+from src.core.actuation_outbox import create_task_idempotency_key, enqueue_create_task_intent, outbox_db_path
 from src.core.ado_client import ADOClient
 from src.core.ado_proposal import (
     ADOUpdateEntry,
@@ -21,8 +26,10 @@ from src.core.ado_proposal import (
     read_proposal_manifest_from_handle,
     write_proposal_manifest_to_handle,
 )
-from src.core.exceptions import QueryError
+from src.core.exceptions import AuthError, QueryError
+from src.core.integration_types import PaginationOutcome
 from src.core.ledger.event_log import read_events
+from src.core.ledger.durable_outbox_store import load_entry
 from src.m365.ado_writer import ADOWriter
 
 
@@ -225,6 +232,182 @@ def test_never_attempted_entry_skips_search_and_creates_normally(tmp_path: Path)
     assert backend.create_call_count == 1
     # No WIQL read call was made (the read session recorded zero calls).
     assert len(client._session.calls) == 0
+
+
+@pytest.mark.parametrize("retained_uncertainty", [False, True])
+@pytest.mark.parametrize("failure", [
+    "empty", "title_only", "multiple_markers", "marker_prefix", "wrong_title",
+    "query_error", "auth_error", "capped", "missing_outcome", "wrong_count",
+    "duplicate_outcome", "invalid_outcome", "invalid_count", "invalid_pages", "zero_pages", "invalid_truncation",
+    "batch_error", "empty_batch", "foreign_batch", "duplicate_batch", "invalid_fields", "missing_fields",
+    "invalid_tags", "invalid_title",
+])
+def test_unproven_create_recovery_cannot_adopt_or_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str, retained_uncertainty: bool,
+) -> None:
+    programs_root = tmp_path / "programs"
+    proposal, manifest_path = _proposal(programs_root)
+    backend = _FakeADOBackend()
+    if retained_uncertainty:
+        write_proposal_manifest_to_handle_at_path(manifest_path, proposal)
+        first = ADOWriter(_fake_client(backend, lose_first_response=True), programs_root=programs_root)
+        first_artifacts = first.apply_manifest(manifest_path, applied_at=datetime(2026, 7, 2, tzinfo=timezone.utc))
+        assert first_artifacts.failed_count == 1
+        backend.work_items.clear()
+    else:
+        proposal = replace(proposal, entries=(
+            replace(proposal.entries[0], attempted_at=datetime(2026, 7, 2, tzinfo=timezone.utc)),
+        ))
+        write_proposal_manifest_to_handle_at_path(manifest_path, proposal)
+
+    marker = "vertex-intent-fixed-intent-abc123"
+    if failure != "empty":
+        fields = {"System.Title": "Wrong title" if failure == "wrong_title" else "Follow up on rollout risk"}
+        if failure != "title_only":
+            fields["System.Tags"] = marker + ("-different" if failure == "marker_prefix" else "")
+        backend.work_items[7001] = {"id": 7001, "fields": fields}
+        if failure == "multiple_markers":
+            backend.work_items[7002] = {"id": 7002, "fields": dict(fields)}
+    client = _fake_client(backend, lose_first_response=False)
+    if failure in {"query_error", "auth_error"}:
+        def fail_query(*args, **kwargs):
+            raise (AuthError if failure == "auth_error" else QueryError)(
+                "synthetic-private-provider-detail " + "x" * 1000,
+            )
+        monkeypatch.setattr(client, "execute_wiql", fail_query)
+    elif failure in {
+        "capped", "missing_outcome", "wrong_count", "duplicate_outcome", "invalid_outcome",
+        "invalid_count", "invalid_pages", "zero_pages", "invalid_truncation",
+    }:
+        def incomplete_query(wiql, *, on_pagination=None):
+            if on_pagination is not None and failure != "missing_outcome":
+                outcome = PaginationOutcome(
+                    total_fetched=True if failure == "invalid_count" else 2 if failure == "wrong_count" else 1,
+                    page_count=True if failure == "invalid_pages" else 0 if failure == "zero_pages" else 1,
+                    is_truncated=0 if failure == "invalid_truncation" else failure == "capped",
+                )
+                on_pagination(None if failure == "invalid_outcome" else outcome)
+                if failure == "duplicate_outcome":
+                    on_pagination(outcome)
+            return [7001]
+        monkeypatch.setattr(client, "execute_wiql", incomplete_query)
+    if failure in {
+        "batch_error", "empty_batch", "foreign_batch", "duplicate_batch", "invalid_fields",
+        "missing_fields", "invalid_tags", "invalid_title",
+    }:
+        def invalid_batch(ids, *, fields):
+            if failure == "batch_error":
+                raise QueryError("synthetic readback unavailable")
+            row = {"id": 7002 if failure == "foreign_batch" else 7001,
+                   "fields": dict(backend.work_items[7001]["fields"])}
+            if failure == "invalid_fields":
+                row["fields"] = ["not a field mapping"]
+            elif failure == "missing_fields":
+                row.pop("fields")
+            elif failure == "invalid_tags":
+                row["fields"]["System.Tags"] = None
+            elif failure == "invalid_title":
+                row["fields"]["System.Title"] = None
+            return [] if failure == "empty_batch" else [row, row] if failure == "duplicate_batch" else [row]
+        monkeypatch.setattr(client, "query_work_items_batch", invalid_batch)
+    key = create_task_idempotency_key(
+        program_id=proposal.program_id, org=client.organization, project=client.project,
+        operation_intent_id="fixed-intent-abc123",
+    )
+    db = outbox_db_path(proposal.program_id, programs_root=programs_root)
+    before_outbox = load_entry(db, key) if db.exists() else None
+    before_calls = backend.create_call_count
+    before_events = tuple(read_events(proposal.program_id, programs_root=programs_root))
+
+    artifacts = ADOWriter(client, programs_root=programs_root).apply_manifest(
+        manifest_path, applied_at=datetime(2026, 7, 2, 0, 5, tzinfo=timezone.utc),
+    )
+
+    assert artifacts.applied_count == 0
+    assert artifacts.failed_count == 1
+    reason = artifacts.proposal.entries[0].status_reason or ""
+    assert "reconcil" in reason.lower()
+    assert "synthetic-private-provider-detail" not in reason
+    assert len(reason) < 200
+    assert client._mutation_session.calls == []
+    assert backend.create_call_count == before_calls
+    assert (load_entry(db, key) if db.exists() else None) == before_outbox
+    assert tuple(read_events(proposal.program_id, programs_root=programs_root)) == before_events
+    with manifest_path.open(encoding="utf-8") as handle:
+        persisted, _ = read_proposal_manifest_from_handle(handle)
+    assert persisted.entries[0].entry_status == "failed"
+
+
+@pytest.mark.parametrize("area_path", [None, "Project\\Rollout"])
+def test_create_recovery_requires_exact_tag_but_preserves_normalized_title(
+    tmp_path: Path, area_path: str | None,
+) -> None:
+    programs_root = tmp_path / "programs"
+    proposal, manifest_path = _proposal(programs_root)
+    task = json.loads(proposal.entries[0].proposed_value)
+    if area_path is None:
+        task.pop("area_path", None)
+    else:
+        task["area_path"] = area_path
+    proposal = replace(proposal, entries=(
+        replace(proposal.entries[0], proposed_value=json.dumps(task), attempted_at=datetime(2026, 7, 2, tzinfo=timezone.utc)),
+    ))
+    write_proposal_manifest_to_handle_at_path(manifest_path, proposal)
+    backend = _FakeADOBackend()
+    backend.work_items[7001] = {"id": 7001, "fields": {
+        "System.Title": "  FOLLOW UP  on rollout risk  ",
+        "System.Tags": "other; vertex-intent-fixed-intent-abc123; another",
+    }}
+    client = _fake_client(backend, lose_first_response=False)
+
+    artifacts = ADOWriter(client, programs_root=programs_root).apply_manifest(
+        manifest_path, applied_at=datetime(2026, 7, 2, 0, 5, tzinfo=timezone.utc),
+    )
+
+    assert artifacts.applied_count == 1
+    assert artifacts.proposal.entries[0].work_item_id == 7001
+    assert backend.create_call_count == 0
+    assert client._mutation_session.calls == []
+
+
+@pytest.mark.parametrize("invalid", ["foreign_org", "foreign_project", "missing_org", "missing_project", "nonobject"])
+def test_create_backlog_cannot_use_another_client_destination(tmp_path: Path, invalid: str) -> None:
+    programs_root = tmp_path / "programs"
+    proposal, manifest_path = _proposal(programs_root)
+    write_proposal_manifest_to_handle_at_path(manifest_path, proposal)
+    backend = _FakeADOBackend()
+    client = _fake_client(backend, lose_first_response=False)
+    fields = {
+        "org": "previous-org" if invalid == "foreign_org" else client.organization,
+        "project": "Previous" if invalid == "foreign_project" else client.project,
+        "operation_intent_id": "retained-intent",
+        "title": "Retained destination only",
+    }
+    key = create_task_idempotency_key(
+        program_id=proposal.program_id, org=fields["org"], project=fields["project"],
+        operation_intent_id="retained-intent",
+    )
+    if invalid.startswith("missing_"):
+        fields.pop(invalid.removeprefix("missing_"))
+    enqueue_create_task_intent(
+        program_id=proposal.program_id, idempotency_key=key,
+        operation_intent_id="retained-intent", proposal_id="retained-proposal",
+        payload_json="[]" if invalid == "nonobject" else json.dumps(fields), programs_root=programs_root,
+    )
+
+    artifacts = ADOWriter(client, programs_root=programs_root).apply_manifest(
+        manifest_path, applied_at=datetime(2026, 7, 2, tzinfo=timezone.utc),
+    )
+
+    assert artifacts.applied_count == 1
+    assert backend.create_call_count == 1
+    assert [item["fields"]["System.Title"] for item in backend.work_items.values()] == ["Follow up on rollout risk"]
+    assert len(client._mutation_session.calls) == 1
+    assert client._mutation_session.calls[0]["url"] == client._rest_base_url + "workitems/$Task?api-version=7.1"
+    retained = load_entry(outbox_db_path(proposal.program_id, programs_root=programs_root), key)
+    assert retained is not None
+    assert retained.status == "failed_terminal"
+    assert "destination" in (retained.failure_reason or "")
 
 
 def write_proposal_manifest_to_handle_at_path(path: Path, proposal: ADOUpdateProposal) -> None:

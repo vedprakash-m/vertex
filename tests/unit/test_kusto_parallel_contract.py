@@ -107,24 +107,33 @@ def test_parallel_execution_isolates_a_timed_out_query_from_the_others(tmp_path:
     query_ids = ["query-fast-1", "query-hangs", "query-fast-2"]
     queries = tuple(_query(q) for q in query_ids)
     registrations = tuple(_registration(q) for q in query_ids)
+    release = threading.Event()
+    finished = threading.Event()
 
     def _executor(rendered_query: str) -> list[dict[str, object]]:
         if rendered_query.id == "query-hangs":
-            time.sleep(3600)
-            return [{"should": "never get here"}]
+            try:
+                release.wait(timeout=30)
+                return [{"should": "never get here"}]
+            finally:
+                finished.set()
         return [{"ok": True}]
 
     provider = KustoHydrationProvider(executor=_executor, query_loader=lambda program_id, programs_root: queries)
     config = KustoHydrationConfig(programs_root=tmp_path, max_concurrency=3, per_query_timeout_seconds=1)
 
-    started = time.monotonic()
-    result = provider.hydrate(registrations, _NOW, "demo", config)
-    elapsed = time.monotonic() - started
+    try:
+        started = time.monotonic()
+        result = provider.hydrate(registrations, _NOW, "demo", config)
+        elapsed = time.monotonic() - started
 
-    assert elapsed < 10.0  # bounded by the 1s per-query budget, not the 3600s hang
-    assert [rs.query_id for rs in result.resources.result_sets] == ["query-fast-1", "query-fast-2"]
-    assert result.failed_ref_ids == (("query-hangs", "kusto_query"),)
-    assert "budget" in result.errors[0].message.lower()
+        assert elapsed < 10.0  # bounded by the 1s per-query budget, not the synthetic hang
+        assert [rs.query_id for rs in result.resources.result_sets] == ["query-fast-1", "query-fast-2"]
+        assert result.failed_ref_ids == (("query-hangs", "kusto_query"),)
+        assert "budget" in result.errors[0].message.lower()
+    finally:
+        release.set()
+    assert finished.wait(timeout=5)
 
 
 def test_max_concurrency_bounds_simultaneous_executor_threads(tmp_path: Path) -> None:

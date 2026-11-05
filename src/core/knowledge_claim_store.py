@@ -19,6 +19,7 @@ from src.core.ledger.source_refs import OperatorAssertionRef, SourceRef, source_
 from src.core.ledger.ulid import new_ulid
 from src.core.yaml_utils import load_yaml_mapping
 from src.core.workspace_paths import PROGRAMS_ROOT
+from src.core.workspace_lease import cooperative_capture_fence
 
 
 
@@ -345,33 +346,34 @@ def append_claim_revision(
     knowledge_root: Path,
     recorded_at: datetime | None = None,
 ) -> KnowledgeClaimRevision:
-    validate_predicate_value(predicate, value)
-    validate_typed_source_ref(source_ref)
-    normalized_recorded_at = _ensure_utc(recorded_at or datetime.now(timezone.utc))
-    normalized_valid_from = _ensure_utc(valid_from)
-    normalized_valid_until = _ensure_utc(valid_until) if valid_until is not None else None
-    natural_key = natural_key_for_claim(scope=scope, subject=subject, predicate=predicate)
-    supersedes = latest_claim_for_natural_key(natural_key, scope=scope, knowledge_root=knowledge_root)
-    revision = KnowledgeClaimRevision(
-        claim_id=new_ulid(normalized_recorded_at),
-        scope=scope,
-        subject=subject,
-        predicate=predicate,
-        value=value,
-        valid_from=normalized_valid_from,
-        valid_until=normalized_valid_until,
-        recorded_at=normalized_recorded_at,
-        confidence=confidence,
-        source_ref=source_ref,
-        supersedes=supersedes.claim_id if supersedes is not None else None,
-        natural_key=natural_key,
-    )
-    target_path = _resolve_claim_write_path(get_claims_dir_for_scope(scope, knowledge_root=knowledge_root), normalized_recorded_at, max_bytes=CLAIMS_MAX_BYTES)
-    append_jsonl_line(target_path, canonical_json(revision.to_dict()) + "\n")
-    from src.core.knowledge_index import upsert_claim_vault_refs
+    with cooperative_capture_fence(knowledge_root):
+        validate_predicate_value(predicate, value)
+        validate_typed_source_ref(source_ref)
+        normalized_recorded_at = _ensure_utc(recorded_at or datetime.now(timezone.utc))
+        normalized_valid_from = _ensure_utc(valid_from)
+        normalized_valid_until = _ensure_utc(valid_until) if valid_until is not None else None
+        natural_key = natural_key_for_claim(scope=scope, subject=subject, predicate=predicate)
+        supersedes = latest_claim_for_natural_key(natural_key, scope=scope, knowledge_root=knowledge_root)
+        revision = KnowledgeClaimRevision(
+            claim_id=new_ulid(normalized_recorded_at),
+            scope=scope,
+            subject=subject,
+            predicate=predicate,
+            value=value,
+            valid_from=normalized_valid_from,
+            valid_until=normalized_valid_until,
+            recorded_at=normalized_recorded_at,
+            confidence=confidence,
+            source_ref=source_ref,
+            supersedes=supersedes.claim_id if supersedes is not None else None,
+            natural_key=natural_key,
+        )
+        target_path = _resolve_claim_write_path(get_claims_dir_for_scope(scope, knowledge_root=knowledge_root), normalized_recorded_at, max_bytes=CLAIMS_MAX_BYTES)
+        append_jsonl_line(target_path, canonical_json(revision.to_dict()) + "\n")
+        from src.core.knowledge_index import upsert_claim_vault_refs
 
-    upsert_claim_vault_refs(revision, knowledge_root=knowledge_root)
-    return revision
+        upsert_claim_vault_refs(revision, knowledge_root=knowledge_root)
+        return revision
 
 
 def latest_claim_for_natural_key(
@@ -450,42 +452,43 @@ def redact_claim_revision(
     reason: str,
     redacted_at: datetime | None = None,
 ) -> KnowledgeClaimRedactionRecord:
-    existing = find_claim_redaction_by_id(claim_id, knowledge_root=knowledge_root)
-    if existing is not None:
-        return existing
-    located = _locate_claim_revision_row(claim_id, knowledge_root=knowledge_root)
-    if located is None:
-        raise ValueError(f"Unknown claim id: {claim_id}")
-    path, line_index, payload = located
-    normalized_redacted_at = _ensure_utc(redacted_at or datetime.now(timezone.utc))
-    rewritten = dict(payload)
-    rewritten["value"] = None
-    rewritten["source_ref"] = source_ref_to_dict(
-        OperatorAssertionRef(
-            asserted_by=actor,
-            asserted_at=normalized_redacted_at,
-            context=f"redacted: {reason}",
+    with cooperative_capture_fence(knowledge_root):
+        existing = find_claim_redaction_by_id(claim_id, knowledge_root=knowledge_root)
+        if existing is not None:
+            return existing
+        located = _locate_claim_revision_row(claim_id, knowledge_root=knowledge_root)
+        if located is None:
+            raise ValueError(f"Unknown claim id: {claim_id}")
+        path, line_index, payload = located
+        normalized_redacted_at = _ensure_utc(redacted_at or datetime.now(timezone.utc))
+        rewritten = dict(payload)
+        rewritten["value"] = None
+        rewritten["source_ref"] = source_ref_to_dict(
+            OperatorAssertionRef(
+                asserted_by=actor,
+                asserted_at=normalized_redacted_at,
+                context=f"redacted: {reason}",
+            )
         )
-    )
-    rewritten["redacted"] = True
-    rewritten["redacted_at"] = normalized_redacted_at.isoformat()
-    rewritten["redaction_reason"] = reason
-    _rewrite_jsonl_line(path, line_index=line_index, replacement=canonical_json(rewritten))
-    record = KnowledgeClaimRedactionRecord(
-        claim_id=claim_id,
-        scope=_required_str(payload, "scope"),
-        redacted_at=normalized_redacted_at,
-        actor=actor,
-        reason=reason,
-        original_claim_hash=_claim_payload_hash(payload),
-    )
-    redactions_path = _claim_redactions_path(knowledge_root)
-    redactions_path.parent.mkdir(parents=True, exist_ok=True)
-    append_jsonl_line(redactions_path, canonical_json(record.to_dict()) + "\n")
-    from src.core.knowledge_index import remove_claim_vault_refs
+        rewritten["redacted"] = True
+        rewritten["redacted_at"] = normalized_redacted_at.isoformat()
+        rewritten["redaction_reason"] = reason
+        _rewrite_jsonl_line(path, line_index=line_index, replacement=canonical_json(rewritten))
+        record = KnowledgeClaimRedactionRecord(
+            claim_id=claim_id,
+            scope=_required_str(payload, "scope"),
+            redacted_at=normalized_redacted_at,
+            actor=actor,
+            reason=reason,
+            original_claim_hash=_claim_payload_hash(payload),
+        )
+        redactions_path = _claim_redactions_path(knowledge_root)
+        redactions_path.parent.mkdir(parents=True, exist_ok=True)
+        append_jsonl_line(redactions_path, canonical_json(record.to_dict()) + "\n")
+        from src.core.knowledge_index import remove_claim_vault_refs
 
-    remove_claim_vault_refs(claim_id, knowledge_root=knowledge_root)
-    return record
+        remove_claim_vault_refs(claim_id, knowledge_root=knowledge_root)
+        return record
 
 
 def summarize_knowledge_status(*, knowledge_root: Path) -> KnowledgeStatusSummary:

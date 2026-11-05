@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 import yaml
 
@@ -17,6 +18,18 @@ from src.m365.agency_bridge import AgencyCapabilities
 
 
 runner = CliRunner()
+
+
+@pytest.fixture
+def _offline_agency(monkeypatch) -> None:
+    class _AvailableAgencyBridge:
+        def probe(self) -> AgencyCapabilities:
+            return AgencyCapabilities(
+                available=True, has_workiq=True,
+                server_tools={"workiq": ("ask_work_iq",)},
+            )
+
+    monkeypatch.setattr("src.commands.registry.AgencyBridge", _AvailableAgencyBridge)
 
 
 def test_registry_list_supports_human_json_and_csv(monkeypatch, tmp_path: Path) -> None:
@@ -375,6 +388,7 @@ def test_registry_set_id_reassigns_placeholder_uil_registration(monkeypatch, tmp
     assert [event.action for event in events] == ["set_ref_id"]
 
 
+@pytest.mark.usefixtures("_offline_agency")
 def test_registry_discover_ids_reports_candidates(monkeypatch, tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     captured: dict[str, tuple[str, ...]] = {}
@@ -434,6 +448,7 @@ def test_registry_discover_ids_reports_candidates(monkeypatch, tmp_path: Path) -
     assert captured["owner_aliases"] == ("operator@example.com",)
 
 
+@pytest.mark.usefixtures("_offline_agency")
 def test_registry_discover_ids_applies_unique_exact_matches(monkeypatch, tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     ensure_m365_registry_bootstrap(
@@ -478,6 +493,7 @@ def test_registry_discover_ids_applies_unique_exact_matches(monkeypatch, tmp_pat
     assert chat_artifact.thread_id == "19:thread-id@thread.v2"
 
 
+@pytest.mark.usefixtures("_offline_agency")
 def test_registry_discover_ids_supports_json_output(monkeypatch, tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     ensure_m365_registry_bootstrap(
@@ -966,6 +982,7 @@ def test_discover_thread_id_candidates_uses_topic_queries_for_channel_matches(mo
     )
 
 
+@pytest.mark.usefixtures("_offline_agency")
 def test_registry_discover_ids_routes_email_threads_to_email_discovery(monkeypatch, tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     upsert_m365_registry_artifacts(
@@ -1020,6 +1037,7 @@ def test_registry_discover_ids_routes_email_threads_to_email_discovery(monkeypat
     assert "mail-thread-123" in result.stdout
 
 
+@pytest.mark.usefixtures("_offline_agency")
 def test_registry_discover_ids_apply_reassigns_email_uil_registration(monkeypatch, tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     program_dir = programs_root / "acme"
@@ -1083,6 +1101,7 @@ def test_registry_discover_ids_apply_reassigns_email_uil_registration(monkeypatc
     assert [event.action for event in events] == ["set_ref_id"]
 
 
+@pytest.mark.usefixtures("_offline_agency")
 def test_registry_discover_ids_does_not_apply_non_exact_candidates(monkeypatch, tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     ensure_m365_registry_bootstrap(

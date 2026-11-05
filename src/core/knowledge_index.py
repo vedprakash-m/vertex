@@ -9,6 +9,7 @@ from typing import Iterator
 from src.core._db import open_program_db
 from src.core.knowledge_candidate_store import KnowledgeCandidate, KnowledgeCandidateDecisionRecord, load_pending_candidates, load_triage_decisions
 from src.core.knowledge_claim_store import KnowledgeClaimRevision, load_all_claim_revisions
+from src.core.workspace_lease import cooperative_capture_fence
 
 
 SCHEMA_VERSION = "1"
@@ -22,7 +23,7 @@ def get_knowledge_index_path(*, knowledge_root: Path) -> Path:
 @contextmanager
 def connect_knowledge_index(*, knowledge_root: Path) -> Iterator[sqlite3.Connection]:
     path = get_knowledge_index_path(knowledge_root=knowledge_root)
-    with open_program_db(path, durability="strict") as connection:
+    with cooperative_capture_fence(knowledge_root), open_program_db(path, durability="strict") as connection:
         _ensure_schema(connection)
         yield connection
 

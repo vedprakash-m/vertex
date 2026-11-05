@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 
 import pytest
@@ -154,17 +155,23 @@ def test_probe_parses_structured_inventory_and_discovers_server_tools() -> None:
 
 
 def test_ask_workiq_returns_parsed_json() -> None:
+    payload = {
+        "isError": False,
+        "response": '  {"emails":[]}\n\nVerbatim answer.  \n',
+        "conversationId": "conversation-1",
+        "references": [{"url": "https://example.test/thread/1"}],
+    }
     bridge = AgencyBridge(
         runner=lambda command, **kwargs: _completed_process(
             *command,
-            stdout="  request-id: abc\n  request-id: def\nGrounded WorkIQ answer\n",
+            stdout=json.dumps(payload),
         )
     )
     bridge._resolve_workiq_executable = lambda: "workiq"  # type: ignore[method-assign]
 
     result = bridge.ask_workiq("find Acme Weekly threads")
 
-    assert result == {"response": "Grounded WorkIQ answer"}
+    assert result == payload
 
 
 def test_ask_workiq_prefers_mcp_tool_when_available() -> None:
@@ -186,15 +193,15 @@ def test_ask_workiq_invokes_direct_workiq_cli() -> None:
     def _runner(command, **kwargs):
         captured["command"] = command
         captured["kwargs"] = kwargs
-        return _completed_process(*command, stdout="WorkIQ answer")
+        return _completed_process(*command, stdout='{"isError":false,"response":"WorkIQ answer"}')
 
     bridge = AgencyBridge(runner=_runner)
     bridge._resolve_workiq_executable = lambda: "workiq"  # type: ignore[method-assign]
 
     result = bridge.ask_workiq("find Acme Weekly threads")
 
-    assert result == {"response": "WorkIQ answer"}
-    assert captured["command"] == ["workiq", "ask", "--question", "find Acme Weekly threads"]
+    assert result == {"isError": False, "response": "WorkIQ answer"}
+    assert captured["command"] == ["workiq", "ask", "--question", "find Acme Weekly threads", "--json", "--no-streaming"]
     assert captured["kwargs"] == {
         "capture_output": True,
         "text": True,
@@ -211,14 +218,14 @@ def test_ask_workiq_accepts_timeout_override() -> None:
     def _runner(command, **kwargs):
         captured["command"] = command
         captured["kwargs"] = kwargs
-        return _completed_process(*command, stdout="WorkIQ answer")
+        return _completed_process(*command, stdout='{"isError":false,"response":"WorkIQ answer"}')
 
     bridge = AgencyBridge(runner=_runner)
     bridge._resolve_workiq_executable = lambda: "workiq"  # type: ignore[method-assign]
 
     result = bridge.ask_workiq("find Acme Weekly threads", timeout_seconds=17)
 
-    assert result == {"response": "WorkIQ answer"}
+    assert result == {"isError": False, "response": "WorkIQ answer"}
     assert captured["kwargs"] == {
         "capture_output": True,
         "text": True,
@@ -264,6 +271,25 @@ def test_ask_workiq_returns_none_on_nonzero_exit() -> None:
     assert result is None
 
 
+@pytest.mark.parametrize("stdout", ["", '{"isError":false,"response":"answer"}'])
+def test_ask_workiq_reports_unsuccessful_cli_exit_without_caching(stdout: str, caplog) -> None:
+    calls: list[list[str]] = []
+
+    def _runner(command, **kwargs):
+        calls.append(command)
+        return _completed_process(*command, returncode=1, stdout=stdout)
+
+    bridge = AgencyBridge(runner=_runner)
+    bridge._capabilities_cache = AgencyCapabilities(has_workiq_cli=True)
+    bridge._resolve_workiq_executable = lambda: "workiq"  # type: ignore[method-assign]
+
+    assert bridge.ask_workiq("same question") is None
+    assert bridge.ask_workiq("same question") is None
+    assert len(calls) == 2
+    assert bridge.last_mcp_error()
+    assert caplog.records
+
+
 def test_ask_workiq_returns_none_on_eula_prompt() -> None:
     bridge = AgencyBridge(
         runner=lambda command, **kwargs: _completed_process(
@@ -279,6 +305,72 @@ def test_ask_workiq_returns_none_on_eula_prompt() -> None:
     result = bridge.ask_workiq("find Acme Weekly threads")
 
     assert result is None
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        "",
+        "   ",
+        "WorkIQ answer",
+        'request-id: abc\n{"isError":false,"response":"answer"}',
+        '\x1b[32m{"isError":false,"response":"answer"}\x1b[0m',
+        '{"isError":false,"response":"hard\nwrapped"}',
+        "null",
+        "[]",
+        '"answer"',
+        "false",
+        '{"response":"answer"}',
+        '{"isError":0,"response":"answer"}',
+        '{"isError":"false","response":"answer"}',
+        '{"isError":true,"response":"provider failed"}',
+        '{"isError":false}',
+        '{"isError":false,"response":null}',
+        '{"isError":false,"response":42}',
+        '{"isError":false,"response":{}}',
+        '{"isError":false,"response":""}',
+        '{"isError":false,"response":"  \\n  "}',
+        '{"isError":false,"response":"End User License Agreement: workiq accept-eula"}',
+    ],
+)
+def test_ask_workiq_rejects_invalid_cli_envelopes_without_caching(stdout: str, caplog) -> None:
+    calls: list[list[str]] = []
+
+    def _runner(command, **kwargs):
+        calls.append(command)
+        return _completed_process(*command, stdout=stdout)
+
+    bridge = AgencyBridge(runner=_runner)
+    bridge._capabilities_cache = AgencyCapabilities(has_workiq_cli=True)
+    bridge._resolve_workiq_executable = lambda: "workiq"  # type: ignore[method-assign]
+
+    assert bridge.ask_workiq("same question") is None
+    assert bridge.ask_workiq("same question") is None
+    assert len(calls) == 2
+    assert bridge.last_mcp_error()
+    assert caplog.records
+    assert "provider failed" not in caplog.text
+
+
+def test_ask_workiq_retries_cli_provider_failure_and_caches_recovered_envelope() -> None:
+    payload = {"isError": False, "response": '{"emails":[]}', "references": []}
+    responses = iter(
+        [
+            '{"isError":true,"response":"provider failed"}',
+            json.dumps(payload),
+        ]
+    )
+    bridge = AgencyBridge(
+        runner=lambda command, **kwargs: _completed_process(*command, stdout=next(responses))
+    )
+    bridge._capabilities_cache = AgencyCapabilities(has_workiq_cli=True)
+    bridge._resolve_workiq_executable = lambda: "workiq"  # type: ignore[method-assign]
+
+    assert bridge.ask_workiq("same question") is None
+    assert bridge.last_mcp_error()
+    assert bridge.ask_workiq("same question") == payload
+    assert bridge.last_mcp_error() is None
+    assert bridge.ask_workiq("same question") == payload
 
 
 def test_normalize_workiq_cli_output_strips_request_ids() -> None:

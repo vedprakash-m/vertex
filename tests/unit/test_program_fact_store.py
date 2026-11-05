@@ -1844,6 +1844,105 @@ def test_load_program_facts_fact_type_filter_projects_milestone_shims(monkeypatc
     assert project_action_items(snapshot) == ()
 
 
+def test_load_program_facts_reports_malformed_milestones_without_dropping_other_facts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    programs_root = _programs_root(tmp_path)
+    program_dir = programs_root / "acme"
+    program_dir.mkdir(parents=True, exist_ok=True)
+    (program_dir / "milestones.yaml").write_text(
+        "schema_version: '2.0'\nmilestones: []\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("VERTEX_FACT_SOR", "legacy")
+    unrelated = ProgramFactStore("acme", db_root=tmp_path / "database")
+    unrelated.append_fact(
+        ProgramFactInput("test.fact", ("test:1",), {"value": "retained"}),
+        recorded_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+
+    snapshot = load_program_facts(
+        "acme",
+        db_root=tmp_path / "database",
+        programs_root=programs_root,
+    )
+
+    assert any(fact.fact_type == "test.fact" for fact in snapshot.facts)
+    assert len(snapshot.source_diagnostics) == 1
+    diagnostic = snapshot.source_diagnostics[0]
+    assert diagnostic.source == "milestones.yaml"
+    assert diagnostic.status == "invalid"
+    assert "milestones.yaml" in diagnostic.message
+    assert diagnostic.next_action
+    with pytest.raises(ConfigError, match="Unsupported milestones schema_version"):
+        load_program_facts(
+            "acme",
+            db_root=tmp_path / "database",
+            programs_root=programs_root,
+            fact_types=("milestone.entry",),
+        )
+
+    monkeypatch.setenv("VERTEX_DB_PATH", str(tmp_path / "database"))
+    from src.core.program_reality import ProgramReality
+
+    reality = ProgramReality.load(
+        "acme",
+        programs_root=programs_root,
+        archive_root=tmp_path / "archive",
+        require_committed_gather_run=False,
+    )
+    milestone_freshness = next(item for item in reality.freshness() if item.domain == "milestones")
+    assert milestone_freshness.status == "invalid"
+    assert milestone_freshness.diagnostic == diagnostic.message
+    assert milestone_freshness.next_action == diagnostic.next_action
+    assert reality.to_dict()["source_diagnostics"] == [
+        {
+            "source": diagnostic.source,
+            "status": diagnostic.status,
+            "message": diagnostic.message,
+            "next_action": diagnostic.next_action,
+        }
+    ]
+
+
+def test_load_program_facts_allows_absent_milestones_in_full_load(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    programs_root = _programs_root(tmp_path)
+    monkeypatch.setenv("VERTEX_FACT_SOR", "legacy")
+
+    snapshot = load_program_facts(
+        "acme",
+        db_root=tmp_path / "database",
+        programs_root=programs_root,
+    )
+
+    assert project_milestones(snapshot) == ()
+    assert snapshot.source_diagnostics == ()
+
+
+def test_load_program_facts_reports_unavailable_milestones_without_blocking(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    programs_root = _programs_root(tmp_path)
+    monkeypatch.setenv("VERTEX_FACT_SOR", "legacy")
+
+    def _unavailable(*args, **kwargs):
+        raise OSError("synthetic read denial")
+
+    monkeypatch.setattr("src.core.program_fact_store.load_milestones", _unavailable)
+
+    snapshot = load_program_facts(
+        "acme",
+        db_root=tmp_path / "database",
+        programs_root=programs_root,
+    )
+
+    assert snapshot.source_diagnostics[0].source == "milestones.yaml"
+    assert snapshot.source_diagnostics[0].status == "unavailable"
+    assert "synthetic" not in snapshot.source_diagnostics[0].message
+
+
 def test_load_program_facts_fact_type_filter_projects_workstream_shims(monkeypatch, tmp_path: Path) -> None:
     programs_root = _programs_root(tmp_path)
     program_dir = programs_root / "acme"

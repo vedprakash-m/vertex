@@ -21,7 +21,7 @@ from src.core.workspace_paths import PROGRAMS_ROOT
 PROJECTION_SCHEMA_VERSION = "1"
 # Bumped when projection logic changes (independent of schema_version).
 # Incremental logic forces a full rebuild when the stored projector_version differs.
-_PROJECTOR_VERSION = "3"
+_PROJECTOR_VERSION = "4"
 # Maximum events in a delta before we skip the incremental short-circuit and
 # do a full rebuild.  Keeps the incremental path bounded and predictable.
 _MAX_INCREMENTAL_DELTA = 50
@@ -1568,12 +1568,16 @@ def _entity_id_from_event(event: EventEnvelope) -> str | None:
         return event.payload.get("milestone_id")
     if event.event_type.startswith("deliverable."):
         return event.payload.get("deliverable_id")
+    if event.event_type.startswith("sku_generation."):
+        return event.payload.get("sku_generation_id")
     if event.event_type.startswith("decision."):
         return event.payload.get("decision_id")
     if event.event_type.startswith("assumption."):
         return event.payload.get("assumption_id")
     if event.event_type.startswith("dependency."):
         return event.payload.get("dependency_id")
+    if event.event_type.startswith(("kpi.", "metric.")):
+        return event.payload.get("kpi_id")
     if event.event_type.startswith("workstream."):
         return event.payload.get("workstream_id")
     if event.event_type.startswith("commitment."):
@@ -1582,6 +1586,10 @@ def _entity_id_from_event(event: EventEnvelope) -> str | None:
         return event.payload.get("incident_id")
     if event.event_type.startswith("knowledge.article"):
         return event.payload.get("article_id")
+    if event.event_type.startswith("playbook."):
+        return event.payload.get("playbook_id")
+    if event.event_type.startswith("artifact."):
+        return event.payload.get("artifact_id")
     return None
 
 

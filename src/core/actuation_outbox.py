@@ -157,19 +157,22 @@ def dispatch_leased_create_task(
     """
     db_path = outbox_db_path(program_id, programs_root=programs_root)
     observed = load_entry(db_path, idempotency_key)
-    if observed is not None:
-        if observed.domain != ACTUATION_DISPATCH_DOMAIN or observed.correlation_id != idempotency_key:
-            raise OutboxError("Existing outbox key has different domain or correlation")
-        if observed.status == "uncertain_remote_state":
-            return ActuationDispatchOutcome(entry=observed, remote_id=None, status="uncertain_remote_state")
-        if observed.status == "completed":
-            raise OutboxError("Completed outbox row cannot be dispatched again")
-        if observed.status == "dispatched" and (
-            observed.lease_expires_at is None
-            or observed.lease_expires_at > datetime.now(timezone.utc)
-            or observed.lease_owner == owner
-        ):
-            raise OutboxError("Dispatched outbox row requires an expired recorded lease and a different owner")
+    if observed is None:
+        raise OutboxError("Requested outbox row does not exist")
+    if observed.domain != ACTUATION_DISPATCH_DOMAIN or observed.correlation_id != idempotency_key:
+        raise OutboxError("Existing outbox key has different domain or correlation")
+    if observed.status == "uncertain_remote_state":
+        return ActuationDispatchOutcome(entry=observed, remote_id=None, status="uncertain_remote_state")
+    if observed.status == "completed":
+        raise OutboxError("Completed outbox row cannot be dispatched again")
+    if observed.status not in {"pending", "failed_retryable", "leased", "dispatched"}:
+        raise OutboxError(f"Requested outbox row is not dispatchable ({observed.status!r})")
+    if observed.status == "dispatched" and (
+        observed.lease_expires_at is None
+        or observed.lease_expires_at > datetime.now(timezone.utc)
+        or observed.lease_owner == owner
+    ):
+        raise OutboxError("Dispatched outbox row requires an expired recorded lease and a different owner")
     lease_handle = acquire_lease(
         program_id,
         owner,
@@ -178,7 +181,7 @@ def dispatch_leased_create_task(
         programs_root=programs_root,
     )
     try:
-        if observed is not None and observed.status == "dispatched":
+        if observed.status == "dispatched":
             classified = classify_expired_dispatched(
                 db_path, observed, workspace_lease=lease_handle, programs_root=programs_root,
             )
@@ -227,6 +230,8 @@ def _drive_one(
     try:
         payload_fields = json.loads(leased.payload_json)
     except Exception:
+        payload_fields = {}
+    if not isinstance(payload_fields, dict):
         payload_fields = {}
     operation_intent_id = str(payload_fields.get("operation_intent_id") or leased.correlation_id)
     org = str(payload_fields.get("org") or "")

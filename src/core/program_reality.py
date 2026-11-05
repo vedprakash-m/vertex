@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import Any, Literal, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from src.core.entity_registry import EntityRegistry
@@ -27,10 +27,12 @@ if TYPE_CHECKING:
 
 from src.core.truth_levels import TruthLevel
 from src.core.exceptions import ConfigError
+from src.core.fact_sor_state import get_fact_sor_state_path
 from src.core.archive_store import find_latest_confirmed_entry, read_archive_index
 from src.core.people_legacy_affiliation import LegacyAffiliationEdge
-from src.core.knowledge_claim_store import KnowledgeContext, load_program_knowledge_claims, load_program_knowledge_scopes, resolve_knowledge_context, summarize_knowledge_status
+from src.core.knowledge_claim_store import KnowledgeContext, load_scoped_claim_revisions, load_program_knowledge_scopes, resolve_knowledge_context
 from src.core.knowledge.vault_integrity import summarize_knowledge_vault_integrity
+from src.core.knowledge_store import get_shared_knowledge_root
 from src.core.ledger.candidate_store import CandidateDecisionRecord, load_triage_decisions
 from src.core.ledger.event_index import load_entity_event_ids, load_indexed_events
 from src.core.ledger.event_log import ConfidenceTier, EventEnvelope, read_events
@@ -43,6 +45,8 @@ from src.core.program_fact_store import (
     FactLineage,
     ProgramFactRevision,
     ProgramFactSnapshot,
+    ProgramFactStore,
+    _resolve_fact_db_root,
     is_fact_stale,
     load_program_facts,
     project_action_items,
@@ -54,6 +58,7 @@ from src.core.program_fact_store import (
     project_risk_entries,
     project_workstreams,
 )
+from src.core.workspace_lease import cooperative_capture_fence
 from src.core.models_v2 import (
     ActionItem,
     Assumption,
@@ -61,6 +66,7 @@ from src.core.models_v2 import (
     DecisionEntry,
     Dependency,
     Milestone,
+    Program,
     RiskEntry,
     Workstream,
 )
@@ -127,6 +133,9 @@ class RealityDomainFreshness:
     stale_count: int
     latest_recorded_at: datetime | None
     sor_mode: str
+    status: Literal["available", "invalid", "unavailable"] = "available"
+    diagnostic: str | None = None
+    next_action: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -672,18 +681,13 @@ def _check_decision_outcome_drift(
 # ---------------------------------------------------------------------------
 
 def _resolve_committed_gather_run_requirement(
-    program_id: str,
+    configured_program: Program | None,
     *,
-    programs_root: Path,
     override: bool | None,
 ) -> bool:
     """Resolve D-24 reader activation while preserving an explicit override."""
     if override is not None:
         return override
-
-    from src.core.edition_resolver import load_program
-
-    configured_program = load_program(program_id, programs_root=programs_root)
     return bool(configured_program and configured_program.gather.requires_committed_gather_run)
 
 
@@ -792,366 +796,379 @@ class ProgramReality:
                 Other reality inputs remain live; this is not whole-reality replay.
             assessment_as_of: Assessment clock only; does not select historical facts.
         """
-        if fact_snapshot is not None and fact_snapshot.program_id != program_id:
-            raise ConfigError("Fact snapshot program does not match ProgramReality.")
-        resolved_as_of = assessment_as_of or as_of or datetime.now(timezone.utc)
-
-        # Resolve SoR mode (single point, per rule 3)
-        from src.core.program_fact_store import resolve_fact_sor_mode
-        sor_mode = resolve_fact_sor_mode(
-            program_id=program_id,
-            programs_root=programs_root,
-        )
-
-        # S-5a: load full FactSorState for per-family mode resolution
-        from src.core.fact_sor_state import load_fact_sor_state as _load_sor_state
-        _sor_state = _load_sor_state(program_id, programs_root=programs_root)
-        _family_sor_modes: dict[str, str] = dict(_sor_state.family_modes) if _sor_state else {}
-
-        # D-24: an explicit config can activate committed-run readers without
-        # changing every caller. Passing True/False remains a one-call override
-        # for canaries and rollback tests.
-        require_committed_gather_run = _resolve_committed_gather_run_requirement(
-            program_id,
-            programs_root=programs_root,
-            override=require_committed_gather_run,
-        )
-
-        # Load the fact snapshot (single I/O point) — pass sor_state for S-5a per-family shim filtering
-        if (
-            fact_snapshot is not None
-            and sor_mode == "primary"
-            and all(mode == "primary" for mode in _family_sor_modes.values())
+        store = ProgramFactStore(program_id, db_root=_resolve_fact_db_root(programs_root))
+        with cooperative_capture_fence(
+            store.db_path, programs_root / program_id / "ledger", get_shared_knowledge_root(programs_root),
+            get_fact_sor_state_path(program_id, programs_root=programs_root),
         ):
-            snapshot = fact_snapshot
-        else:
-            snapshot = load_program_facts(
-                program_id,
-                as_of=as_of,
-                programs_root=programs_root,
-                archive_root=archive_root,
-                sor_state=_sor_state,
-                require_committed_gather_run=require_committed_gather_run,
-            )
+            if fact_snapshot is not None and fact_snapshot.program_id != program_id:
+                raise ConfigError("Fact snapshot program does not match ProgramReality.")
+            resolved_as_of = assessment_as_of or as_of or datetime.now(timezone.utc)
 
-        # Project domain views from snapshot
-        action_items = project_action_items(snapshot)
-        risk_entries = project_risk_entries(snapshot)
-        decision_entries = project_decision_entries(snapshot)
-        dependencies = project_dependencies(snapshot)
-        milestones = project_milestones(snapshot)
-        assumptions = project_assumptions(snapshot)
-        workstreams = project_workstreams(snapshot)
-        claim_entries = project_claim_entries(snapshot)
-        # S-2a: load commitment entries alongside other families so truth threading and lineage apply
-        from src.core.commitment_store import project_commitment_entries as _project_commitment_entries
-        commitment_entries = _project_commitment_entries(snapshot)
+            configured_program: Program | None = None
+            if require_committed_gather_run is None:
+                from src.core.edition_resolver import load_program
 
-        # Build FactAssessment tuples for each family
-        # Build a fact_id → fact lookup for efficient joining
-        fact_by_type_and_ref: dict[tuple[str, str], ProgramFactRevision] = {}
-        for fact in snapshot.facts:
-            for ref in fact.entity_refs:
-                fact_by_type_and_ref[(fact.fact_type, ref)] = fact
-                # REV bridge appenders key entity_refs with a family prefix
-                # (e.g. "MILESTONE:milestone:abc", "RISK:risk:abc") that the
-                # projected record's bare `id` field does not carry (it is
-                # just the payload id). Index the unprefixed suffix too so
-                # _find_fact_for_record can join bridge-appended facts to
-                # their records and attach fact_id/lineage (S-3). setdefault
-                # avoids clobbering an existing exact-match entry.
-                if ":" in ref:
-                    fact_by_type_and_ref.setdefault((fact.fact_type, ref.split(":", 1)[1]), fact)
+                configured_program = load_program(program_id, programs_root=programs_root)
 
-        # Build the trust context once for the whole facade load (WI-3.0 / GAP-5).
-        # Lazy import avoids a module-level circular dependency; the try/except
-        # gracefully degrades to the Phase-1 static stub if the truth model is
-        # unavailable (e.g. empty snapshot in unit tests).
-        _truth_ctx: TruthContext | None = None
-        try:
-            from src.core.truth_model import build_trust_context_from_snapshot
-            _truth_ctx = build_trust_context_from_snapshot(snapshot)
-        except Exception:
-            pass
-
-        # Build disputed-key and provisional-signal indexes once for the whole load (GAP-5).
-        # disputed_natural_keys: natural keys referenced by unresolved fact.conflict facts.
-        # provisional_signal_ids: fact_ids of signal.observation facts pending review.
-        _disputed_natural_keys: frozenset[str] = frozenset(
-            nk
-            for fact in snapshot.facts
-            if fact.fact_type == "fact.conflict" and not fact.payload.get("resolved", False)
-            if (nk := fact.payload.get("target_natural_key"))
-        )
-        _provisional_signal_ids: frozenset[str] = frozenset(
-            fact.fact_id
-            for fact in snapshot.facts
-            if fact.fact_type == "signal.observation"
-            and str(getattr(fact, "review_state", "") or "") not in ("accepted", "rejected")
-            and fact.fact_id
-        )
-
-        actions = tuple(
-            _to_assessment_action(
-                item,
-                fact=_find_fact_for_record(fact_by_type_and_ref, fact_type="action.item", record=item),
-                as_of=resolved_as_of,
-                truth_ctx=_truth_ctx,
-                disputed_natural_keys=_disputed_natural_keys,
-                provisional_signal_ids=_provisional_signal_ids,
-            )
-            for item in action_items
-        )
-        risks = tuple(
-            _to_assessment_risk(
-                entry,
-                fact=_find_fact_for_record(fact_by_type_and_ref, fact_type="risk.entry", record=entry),
-                as_of=resolved_as_of,
-                truth_ctx=_truth_ctx,
-                disputed_natural_keys=_disputed_natural_keys,
-                provisional_signal_ids=_provisional_signal_ids,
-            )
-            for entry in risk_entries
-        )
-        decisions = tuple(
-            _to_assessment_decision(
-                entry,
-                fact=_find_fact_for_record(fact_by_type_and_ref, fact_type="decision.entry", record=entry),
-                as_of=resolved_as_of,
-                truth_ctx=_truth_ctx,
-                disputed_natural_keys=_disputed_natural_keys,
-                provisional_signal_ids=_provisional_signal_ids,
-            )
-            for entry in decision_entries
-        )
-        deps = tuple(
-            _to_assessment_dependency(
-                dep,
-                fact=_find_fact_for_record(fact_by_type_and_ref, fact_type="dependency.link", record=dep),
-                as_of=resolved_as_of,
-                truth_ctx=_truth_ctx,
-                disputed_natural_keys=_disputed_natural_keys,
-                provisional_signal_ids=_provisional_signal_ids,
-            )
-            for dep in dependencies
-        )
-        mstones = tuple(
-            _to_assessment_milestone(
-                m,
-                fact=_find_fact_for_record(fact_by_type_and_ref, fact_type="milestone.entry", record=m),
-                as_of=resolved_as_of,
-                truth_ctx=_truth_ctx,
-                disputed_natural_keys=_disputed_natural_keys,
-                provisional_signal_ids=_provisional_signal_ids,
-            )
-            for m in milestones
-        )
-        assum = tuple(
-            _to_assessment_assumption(
-                a,
-                fact=_find_fact_for_record(fact_by_type_and_ref, fact_type="assumption.entry", record=a),
-                as_of=resolved_as_of,
-                truth_ctx=_truth_ctx,
-                disputed_natural_keys=_disputed_natural_keys,
-                provisional_signal_ids=_provisional_signal_ids,
-            )
-            for a in assumptions
-        )
-        wstreams = tuple(
-            _to_assessment_workstream(
-                ws,
-                fact=_find_fact_for_record(fact_by_type_and_ref, fact_type="workstream.entry", record=ws),
-                as_of=resolved_as_of,
-                truth_ctx=_truth_ctx,
-                disputed_natural_keys=_disputed_natural_keys,
-                provisional_signal_ids=_provisional_signal_ids,
-            )
-            for ws in workstreams
-        )
-        claims = tuple(
-            _to_assessment_claim(
-                c,
-                fact=_find_fact_for_record(fact_by_type_and_ref, fact_type="claim.entry", record=c),
-                as_of=resolved_as_of,
-                truth_ctx=_truth_ctx,
-                disputed_natural_keys=_disputed_natural_keys,
-                provisional_signal_ids=_provisional_signal_ids,
-            )
-            for c in claim_entries
-        )
-        # S-2a: wire commitment truth threading (review_state → TruthLevel, lineage attached)
-        commitments_assessed = tuple(
-            _to_assessment_commitment(
-                entry,
-                fact=_find_fact_for_record(fact_by_type_and_ref, fact_type="commitment.entry", record=entry),
-                as_of=resolved_as_of,
-                truth_ctx=_truth_ctx,
-                disputed_natural_keys=_disputed_natural_keys,
-                provisional_signal_ids=_provisional_signal_ids,
-            )
-            for entry in commitment_entries
-        )
-
-        # Build _entity_fact_index (WI-2.5: canonical entity_id keying)
-        # Join domain objects to their snapshot facts via entity_refs, then
-        # optionally resolve to canonical IDs through the EntityRegistry.
-        all_assessments: list[FactAssessment] = [
-            *actions, *risks, *decisions, *deps, *mstones, *assum, *wstreams, *claims
-        ]
-
-        # AG-6 (activation.md v1.26/v1.28): resolve approval_event_id for
-        # REV-bridge-appended facts. The fact bridge fires synchronously while
-        # persisting the *resulting* domain event (e.g. milestone.completed.v1),
-        # before the separate discovery.candidate_approved.v1 audit event exists
-        # — so build_bridge_fact_input can never know the approval event id at
-        # write time. Close the loop here, at read time: every triage decision
-        # already links resulting_event_id -> approval_event_id
-        # (CandidateDecisionRecord, written by `ledger triage approve`), and
-        # every bridge-appended fact carries lineage.domain_event_id == the
-        # resulting event's id. Join the two so the reverse-lookup citation can
-        # resolve "source EML + approval event", not just the source EML.
-        # Covers commitments_assessed too — it is assembled separately (S-2a)
-        # and is not part of all_assessments.
-        if any(
-            a.lineage is not None and a.lineage.approval_event_id is None and a.lineage.domain_event_id
-            for a in (*all_assessments, *commitments_assessed)
-        ):
-            try:
-                _decisions_for_lineage = load_triage_decisions(program_id, programs_root=programs_root)
-                _resulting_to_approval: dict[str, str] = {
-                    d.resulting_event_id: d.approval_event_id
-                    for d in _decisions_for_lineage
-                    if d.resulting_event_id and d.approval_event_id
-                }
-                if _resulting_to_approval:
-                    def _patch_approval_event_id(_a: FactAssessment) -> FactAssessment:
-                        if (
-                            _a.lineage is not None
-                            and _a.lineage.approval_event_id is None
-                            and _a.lineage.domain_event_id
-                            and _a.lineage.domain_event_id in _resulting_to_approval
-                        ):
-                            return replace(
-                                _a,
-                                lineage=replace(
-                                    _a.lineage,
-                                    approval_event_id=_resulting_to_approval[_a.lineage.domain_event_id],
-                                ),
-                            )
-                        return _a
-
-                    enriched = {id(_a): _patch_approval_event_id(_a) for _a in all_assessments}
-                    actions = tuple(enriched[id(_a)] for _a in actions)
-                    risks = tuple(enriched[id(_a)] for _a in risks)
-                    decisions = tuple(enriched[id(_a)] for _a in decisions)
-                    deps = tuple(enriched[id(_a)] for _a in deps)
-                    mstones = tuple(enriched[id(_a)] for _a in mstones)
-                    assum = tuple(enriched[id(_a)] for _a in assum)
-                    wstreams = tuple(enriched[id(_a)] for _a in wstreams)
-                    claims = tuple(enriched[id(_a)] for _a in claims)
-                    all_assessments = list(enriched.values())
-                    commitments_assessed = tuple(_patch_approval_event_id(_a) for _a in commitments_assessed)
-            except Exception:
-                # Never let a lineage-enrichment failure break ProgramReality.load()
-                # (AG-12 graceful-degradation parity) — worst case, approval_event_id
-                # stays unresolved and the citation still reverse-resolves via
-                # source_document_key alone.
-                pass
-                # stays unresolved and the citation still reverse-resolves via
-                # source_document_key alone.
-                pass
-
-        # Index assessments by their record's ID so snapshot facts can join to them
-        _assessment_by_record_id: dict[str, FactAssessment] = {}
-        for _a in all_assessments:
-            _rec_id = getattr(_a.record, "id", None)
-            if _rec_id:
-                _assessment_by_record_id[str(_rec_id)] = _a
-        entity_fact_index: dict[str, list[FactAssessment]] = {}
-        for _fact in snapshot.facts:
-            if not _fact.fact_id:
-                continue
-            for _ref in _fact.entity_refs:
-                _assessment = _assessment_by_record_id.get(_ref)
-                if _assessment is None:
-                    continue
-                # WI-2.5: resolve entity_ref to canonical ID when registry available.
-                # ADF-W2.6: resolve_with_binding() so an ambiguous near-tied fuzzy
-                # match falls back to fact_id keying below, instead of silently
-                # joining the fact under whichever candidate scored marginally higher.
-                _key: str | None = None
-                if entity_registry is not None:
-                    _resolved = entity_registry.resolve_with_binding(_ref).resolved_entity
-                    if _resolved is not None:
-                        _key = _resolved.entity_id
-                # Fallback: key by fact_id
-                if _key is None:
-                    _key = _fact.fact_id
-                entity_fact_index.setdefault(_key, []).append(_assessment)
-
-        ledger_triage_decisions = load_triage_decisions(program_id, programs_root=programs_root)
-        ledger_event_log = read_events(program_id, programs_root=programs_root)
-        knowledge_scope_chain = load_program_knowledge_scopes(program_id, programs_root=programs_root)
-        knowledge_claim_revisions = load_program_knowledge_claims(program_id, programs_root=programs_root)
-        knowledge_status = summarize_knowledge_status(knowledge_root=programs_root / "knowledge")
-        knowledge_vault_integrity = summarize_knowledge_vault_integrity(programs_root=programs_root)
-        ledger_projection = project_events_to_memory(
-            program_id,
-            ledger_event_log,
-            triage_decisions=ledger_triage_decisions,
-        )
-        ledger_orphaned_by = collapse_orphan_links(ledger_projection.get("event_orphan_links", []))
-        ledger_shadowed_by = collapse_shadow_links(ledger_projection.get("event_shadow_links", []))
-
-        return cls(
-            program_id=program_id,
-            snapshot=snapshot,
-            sor_mode=sor_mode,
-            as_of=resolved_as_of,
-            _entity_fact_index=entity_fact_index,
-            _actions=actions,
-            _risks=risks,
-            _decisions=decisions,
-            _dependencies=deps,
-            _milestones=mstones,
-            _assumptions=assum,
-            _workstreams=wstreams,
-            _claims=claims,
-            _commitments=commitments_assessed,
-            _family_sor_modes=_family_sor_modes,
-            _ledger_gaps=_load_ledger_gaps(ledger_event_log, ledger_triage_decisions),
-            _ledger_expiring_locks=_load_expiring_ledger_field_locks(ledger_projection.get("field_locks", []), as_of=resolved_as_of),
-            _ledger_shadow_reviews=_load_ledger_shadow_reviews(ledger_projection.get("event_shadow_links", []), ledger_event_log),
-            _ledger_stale_operator_assertions=_load_stale_operator_assertion_reviews(
-                ledger_projection.get("event_shadow_links", []),
-                ledger_event_log,
-                as_of=resolved_as_of,
-            ),
-            _ledger_temporal_reviews=_load_temporal_confidence_reviews(
-                ledger_projection.get("event_shadow_links", []),
-                ledger_event_log,
-            ),
-            _archived_knowledge_claim_freshness=_load_latest_archived_claim_freshness(
-                edition_name,
-                archive_root=archive_root,
-                programs_root=programs_root,
-            ),
-            _knowledge_claim_freshness=_load_latest_live_claim_freshness(program_id, programs_root=programs_root),
-            _knowledge_vault_integrity_issues=tuple(knowledge_vault_integrity.issue_records()),
-            _knowledge_vault_hash_mismatch_count=knowledge_status.vault.hash_mismatch_count,
-            _ledger_events=_load_ledger_timeline_entries(
-                ledger_event_log,
+            # Resolve SoR mode (single point, per rule 3)
+            from src.core.program_fact_store import resolve_fact_sor_mode
+            sor_mode = resolve_fact_sor_mode(
                 program_id=program_id,
                 programs_root=programs_root,
-                orphaned_by=ledger_orphaned_by,
-                shadowed_by=ledger_shadowed_by,
-            ),
-            _ledger_entity_event_ids=load_entity_event_ids(program_id, programs_root=programs_root),
-            _ledger_event_log=ledger_event_log,
-            _ledger_triage_decisions=ledger_triage_decisions,
-            _knowledge_scope_chain=knowledge_scope_chain,
-            _knowledge_claim_revisions=knowledge_claim_revisions,
-        )
+            )
+
+            # S-5a: load full FactSorState for per-family mode resolution
+            from src.core.fact_sor_state import load_fact_sor_state as _load_sor_state
+            _sor_state = _load_sor_state(program_id, programs_root=programs_root)
+            _family_sor_modes: dict[str, str] = dict(_sor_state.family_modes) if _sor_state else {}
+
+            # D-24: an explicit config can activate committed-run readers without
+            # changing every caller. Passing True/False remains a one-call override
+            # for canaries and rollback tests.
+            require_committed_gather_run = _resolve_committed_gather_run_requirement(
+                configured_program,
+                override=require_committed_gather_run,
+            )
+
+            # Load the fact snapshot (single I/O point) — pass sor_state for S-5a per-family shim filtering
+            if (
+                fact_snapshot is not None
+                and sor_mode == "primary"
+                and all(mode == "primary" for mode in _family_sor_modes.values())
+            ):
+                snapshot = fact_snapshot
+            else:
+                snapshot = load_program_facts(
+                    program_id,
+                    as_of=as_of,
+                    programs_root=programs_root,
+                    archive_root=archive_root,
+                    sor_state=_sor_state,
+                    require_committed_gather_run=require_committed_gather_run,
+                )
+
+            # Project domain views from snapshot
+            action_items = project_action_items(snapshot)
+            risk_entries = project_risk_entries(snapshot)
+            decision_entries = project_decision_entries(snapshot)
+            dependencies = project_dependencies(snapshot)
+            milestones = project_milestones(snapshot)
+            assumptions = project_assumptions(snapshot)
+            workstreams = project_workstreams(snapshot)
+            claim_entries = project_claim_entries(snapshot)
+            # S-2a: load commitment entries alongside other families so truth threading and lineage apply
+            from src.core.commitment_store import project_commitment_entries as _project_commitment_entries
+            commitment_entries = _project_commitment_entries(snapshot)
+
+            # Build FactAssessment tuples for each family
+            # Build a fact_id → fact lookup for efficient joining
+            fact_by_type_and_ref: dict[tuple[str, str], ProgramFactRevision] = {}
+            for fact in snapshot.facts:
+                for ref in fact.entity_refs:
+                    fact_by_type_and_ref[(fact.fact_type, ref)] = fact
+                    # REV bridge appenders key entity_refs with a family prefix
+                    # (e.g. "MILESTONE:milestone:abc", "RISK:risk:abc") that the
+                    # projected record's bare `id` field does not carry (it is
+                    # just the payload id). Index the unprefixed suffix too so
+                    # _find_fact_for_record can join bridge-appended facts to
+                    # their records and attach fact_id/lineage (S-3). setdefault
+                    # avoids clobbering an existing exact-match entry.
+                    if ":" in ref:
+                        fact_by_type_and_ref.setdefault((fact.fact_type, ref.split(":", 1)[1]), fact)
+
+            # Build the trust context once for the whole facade load (WI-3.0 / GAP-5).
+            # Lazy import avoids a module-level circular dependency; the try/except
+            # gracefully degrades to the Phase-1 static stub if the truth model is
+            # unavailable (e.g. empty snapshot in unit tests).
+            _truth_ctx: TruthContext | None = None
+            try:
+                from src.core.truth_model import build_trust_context_from_snapshot
+                _truth_ctx = build_trust_context_from_snapshot(snapshot)
+            except Exception:
+                pass
+
+            # Build disputed-key and provisional-signal indexes once for the whole load (GAP-5).
+            # disputed_natural_keys: natural keys referenced by unresolved fact.conflict facts.
+            # provisional_signal_ids: fact_ids of signal.observation facts pending review.
+            _disputed_natural_keys: frozenset[str] = frozenset(
+                nk
+                for fact in snapshot.facts
+                if fact.fact_type == "fact.conflict" and not fact.payload.get("resolved", False)
+                if (nk := fact.payload.get("target_natural_key"))
+            )
+            _provisional_signal_ids: frozenset[str] = frozenset(
+                fact.fact_id
+                for fact in snapshot.facts
+                if fact.fact_type == "signal.observation"
+                and str(getattr(fact, "review_state", "") or "") not in ("accepted", "rejected")
+                and fact.fact_id
+            )
+
+            actions = tuple(
+                _to_assessment_action(
+                    item,
+                    fact=_find_fact_for_record(fact_by_type_and_ref, fact_type="action.item", record=item),
+                    as_of=resolved_as_of,
+                    truth_ctx=_truth_ctx,
+                    disputed_natural_keys=_disputed_natural_keys,
+                    provisional_signal_ids=_provisional_signal_ids,
+                )
+                for item in action_items
+            )
+            risks = tuple(
+                _to_assessment_risk(
+                    entry,
+                    fact=_find_fact_for_record(fact_by_type_and_ref, fact_type="risk.entry", record=entry),
+                    as_of=resolved_as_of,
+                    truth_ctx=_truth_ctx,
+                    disputed_natural_keys=_disputed_natural_keys,
+                    provisional_signal_ids=_provisional_signal_ids,
+                )
+                for entry in risk_entries
+            )
+            decisions = tuple(
+                _to_assessment_decision(
+                    entry,
+                    fact=_find_fact_for_record(fact_by_type_and_ref, fact_type="decision.entry", record=entry),
+                    as_of=resolved_as_of,
+                    truth_ctx=_truth_ctx,
+                    disputed_natural_keys=_disputed_natural_keys,
+                    provisional_signal_ids=_provisional_signal_ids,
+                )
+                for entry in decision_entries
+            )
+            deps = tuple(
+                _to_assessment_dependency(
+                    dep,
+                    fact=_find_fact_for_record(fact_by_type_and_ref, fact_type="dependency.link", record=dep),
+                    as_of=resolved_as_of,
+                    truth_ctx=_truth_ctx,
+                    disputed_natural_keys=_disputed_natural_keys,
+                    provisional_signal_ids=_provisional_signal_ids,
+                )
+                for dep in dependencies
+            )
+            mstones = tuple(
+                _to_assessment_milestone(
+                    m,
+                    fact=_find_fact_for_record(fact_by_type_and_ref, fact_type="milestone.entry", record=m),
+                    as_of=resolved_as_of,
+                    truth_ctx=_truth_ctx,
+                    disputed_natural_keys=_disputed_natural_keys,
+                    provisional_signal_ids=_provisional_signal_ids,
+                )
+                for m in milestones
+            )
+            assum = tuple(
+                _to_assessment_assumption(
+                    a,
+                    fact=_find_fact_for_record(fact_by_type_and_ref, fact_type="assumption.entry", record=a),
+                    as_of=resolved_as_of,
+                    truth_ctx=_truth_ctx,
+                    disputed_natural_keys=_disputed_natural_keys,
+                    provisional_signal_ids=_provisional_signal_ids,
+                )
+                for a in assumptions
+            )
+            wstreams = tuple(
+                _to_assessment_workstream(
+                    ws,
+                    fact=_find_fact_for_record(fact_by_type_and_ref, fact_type="workstream.entry", record=ws),
+                    as_of=resolved_as_of,
+                    truth_ctx=_truth_ctx,
+                    disputed_natural_keys=_disputed_natural_keys,
+                    provisional_signal_ids=_provisional_signal_ids,
+                )
+                for ws in workstreams
+            )
+            claims = tuple(
+                _to_assessment_claim(
+                    c,
+                    fact=_find_fact_for_record(fact_by_type_and_ref, fact_type="claim.entry", record=c),
+                    as_of=resolved_as_of,
+                    truth_ctx=_truth_ctx,
+                    disputed_natural_keys=_disputed_natural_keys,
+                    provisional_signal_ids=_provisional_signal_ids,
+                )
+                for c in claim_entries
+            )
+            # S-2a: wire commitment truth threading (review_state → TruthLevel, lineage attached)
+            commitments_assessed = tuple(
+                _to_assessment_commitment(
+                    entry,
+                    fact=_find_fact_for_record(fact_by_type_and_ref, fact_type="commitment.entry", record=entry),
+                    as_of=resolved_as_of,
+                    truth_ctx=_truth_ctx,
+                    disputed_natural_keys=_disputed_natural_keys,
+                    provisional_signal_ids=_provisional_signal_ids,
+                )
+                for entry in commitment_entries
+            )
+
+            # Build _entity_fact_index (WI-2.5: canonical entity_id keying)
+            # Join domain objects to their snapshot facts via entity_refs, then
+            # optionally resolve to canonical IDs through the EntityRegistry.
+            all_assessments: list[FactAssessment] = [
+                *actions, *risks, *decisions, *deps, *mstones, *assum, *wstreams, *claims
+            ]
+
+            # AG-6 (activation.md v1.26/v1.28): resolve approval_event_id for
+            # REV-bridge-appended facts. The fact bridge fires synchronously while
+            # persisting the *resulting* domain event (e.g. milestone.completed.v1),
+            # before the separate discovery.candidate_approved.v1 audit event exists
+            # — so build_bridge_fact_input can never know the approval event id at
+            # write time. Close the loop here, at read time: every triage decision
+            # already links resulting_event_id -> approval_event_id
+            # (CandidateDecisionRecord, written by `ledger triage approve`), and
+            # every bridge-appended fact carries lineage.domain_event_id == the
+            # resulting event's id. Join the two so the reverse-lookup citation can
+            # resolve "source EML + approval event", not just the source EML.
+            # Covers commitments_assessed too — it is assembled separately (S-2a)
+            # and is not part of all_assessments.
+            if any(
+                a.lineage is not None and a.lineage.approval_event_id is None and a.lineage.domain_event_id
+                for a in (*all_assessments, *commitments_assessed)
+            ):
+                try:
+                    _decisions_for_lineage = load_triage_decisions(program_id, programs_root=programs_root)
+                    _resulting_to_approval: dict[str, str] = {
+                        d.resulting_event_id: d.approval_event_id
+                        for d in _decisions_for_lineage
+                        if d.resulting_event_id and d.approval_event_id
+                    }
+                    if _resulting_to_approval:
+                        def _patch_approval_event_id(_a: FactAssessment) -> FactAssessment:
+                            if (
+                                _a.lineage is not None
+                                and _a.lineage.approval_event_id is None
+                                and _a.lineage.domain_event_id
+                                and _a.lineage.domain_event_id in _resulting_to_approval
+                            ):
+                                return replace(
+                                    _a,
+                                    lineage=replace(
+                                        _a.lineage,
+                                        approval_event_id=_resulting_to_approval[_a.lineage.domain_event_id],
+                                    ),
+                                )
+                            return _a
+
+                        enriched = {id(_a): _patch_approval_event_id(_a) for _a in all_assessments}
+                        actions = tuple(enriched[id(_a)] for _a in actions)
+                        risks = tuple(enriched[id(_a)] for _a in risks)
+                        decisions = tuple(enriched[id(_a)] for _a in decisions)
+                        deps = tuple(enriched[id(_a)] for _a in deps)
+                        mstones = tuple(enriched[id(_a)] for _a in mstones)
+                        assum = tuple(enriched[id(_a)] for _a in assum)
+                        wstreams = tuple(enriched[id(_a)] for _a in wstreams)
+                        claims = tuple(enriched[id(_a)] for _a in claims)
+                        all_assessments = list(enriched.values())
+                        commitments_assessed = tuple(_patch_approval_event_id(_a) for _a in commitments_assessed)
+                except Exception:
+                    # Never let a lineage-enrichment failure break ProgramReality.load()
+                    # (AG-12 graceful-degradation parity) — worst case, approval_event_id
+                    # stays unresolved and the citation still reverse-resolves via
+                    # source_document_key alone.
+                    pass
+                    # stays unresolved and the citation still reverse-resolves via
+                    # source_document_key alone.
+                    pass
+
+            # Index assessments by their record's ID so snapshot facts can join to them
+            _assessment_by_record_id: dict[str, FactAssessment] = {}
+            for _a in all_assessments:
+                _rec_id = getattr(_a.record, "id", None)
+                if _rec_id:
+                    _assessment_by_record_id[str(_rec_id)] = _a
+            entity_fact_index: dict[str, list[FactAssessment]] = {}
+            for _fact in snapshot.facts:
+                if not _fact.fact_id:
+                    continue
+                for _ref in _fact.entity_refs:
+                    _assessment = _assessment_by_record_id.get(_ref)
+                    if _assessment is None:
+                        continue
+                    # WI-2.5: resolve entity_ref to canonical ID when registry available.
+                    # ADF-W2.6: resolve_with_binding() so an ambiguous near-tied fuzzy
+                    # match falls back to fact_id keying below, instead of silently
+                    # joining the fact under whichever candidate scored marginally higher.
+                    _key: str | None = None
+                    if entity_registry is not None:
+                        _resolved = entity_registry.resolve_with_binding(_ref).resolved_entity
+                        if _resolved is not None:
+                            _key = _resolved.entity_id
+                    # Fallback: key by fact_id
+                    if _key is None:
+                        _key = _fact.fact_id
+                    entity_fact_index.setdefault(_key, []).append(_assessment)
+
+            ledger_triage_decisions = load_triage_decisions(program_id, programs_root=programs_root)
+            ledger_event_log = read_events(program_id, programs_root=programs_root)
+            knowledge_scope_chain = (
+                (f"program:{program_id}", *configured_program.knowledge_scopes)
+                if configured_program is not None
+                else load_program_knowledge_scopes(program_id, programs_root=programs_root)
+            )
+            knowledge_claim_revisions = load_scoped_claim_revisions(knowledge_scope_chain, knowledge_root=get_shared_knowledge_root(programs_root))
+            knowledge_vault_integrity = summarize_knowledge_vault_integrity(programs_root=programs_root)
+            ledger_projection = project_events_to_memory(
+                program_id,
+                ledger_event_log,
+                triage_decisions=ledger_triage_decisions,
+            )
+            ledger_orphaned_by = collapse_orphan_links(ledger_projection.get("event_orphan_links", []))
+            ledger_shadowed_by = collapse_shadow_links(ledger_projection.get("event_shadow_links", []))
+
+            return cls(
+                program_id=program_id,
+                snapshot=snapshot,
+                sor_mode=sor_mode,
+                as_of=resolved_as_of,
+                _entity_fact_index=entity_fact_index,
+                _actions=actions,
+                _risks=risks,
+                _decisions=decisions,
+                _dependencies=deps,
+                _milestones=mstones,
+                _assumptions=assum,
+                _workstreams=wstreams,
+                _claims=claims,
+                _commitments=commitments_assessed,
+                _family_sor_modes=_family_sor_modes,
+                _ledger_gaps=_load_ledger_gaps(ledger_event_log, ledger_triage_decisions),
+                _ledger_expiring_locks=_load_expiring_ledger_field_locks(ledger_projection.get("field_locks", []), as_of=resolved_as_of),
+                _ledger_shadow_reviews=_load_ledger_shadow_reviews(ledger_projection.get("event_shadow_links", []), ledger_event_log),
+                _ledger_stale_operator_assertions=_load_stale_operator_assertion_reviews(
+                    ledger_projection.get("event_shadow_links", []),
+                    ledger_event_log,
+                    as_of=resolved_as_of,
+                ),
+                _ledger_temporal_reviews=_load_temporal_confidence_reviews(
+                    ledger_projection.get("event_shadow_links", []),
+                    ledger_event_log,
+                ),
+                _archived_knowledge_claim_freshness=_load_latest_archived_claim_freshness(
+                    edition_name,
+                    archive_root=archive_root,
+                    programs_root=programs_root,
+                ),
+                _knowledge_claim_freshness=_load_latest_live_claim_freshness(program_id, programs_root=programs_root),
+                _knowledge_vault_integrity_issues=tuple(knowledge_vault_integrity.issue_records()),
+                _knowledge_vault_hash_mismatch_count=knowledge_vault_integrity.hash_mismatch_count,
+                _ledger_events=_load_ledger_timeline_entries(
+                    ledger_event_log,
+                    program_id=program_id,
+                    programs_root=programs_root,
+                    orphaned_by=ledger_orphaned_by,
+                    shadowed_by=ledger_shadowed_by,
+                ),
+                _ledger_entity_event_ids=load_entity_event_ids(program_id, programs_root=programs_root),
+                _ledger_event_log=ledger_event_log,
+                _ledger_triage_decisions=ledger_triage_decisions,
+                _knowledge_scope_chain=knowledge_scope_chain,
+                _knowledge_claim_revisions=knowledge_claim_revisions,
+            )
 
     # -------------------------------------------------------------------------
     # Domain accessors
@@ -1752,6 +1769,15 @@ class ProgramReality:
             "as_of": self._as_of.isoformat(),
             "sor_mode": self._sor_mode,
             "max_classification": max_classification,
+            "source_diagnostics": [
+                {
+                    "source": diagnostic.source,
+                    "status": diagnostic.status,
+                    "message": diagnostic.message,
+                    "next_action": diagnostic.next_action,
+                }
+                for diagnostic in self._snapshot.source_diagnostics
+            ],
             "domains": {
                 "actions": [_assessment_to_dict(a) for a in self.__actions],
                 "risks": [_assessment_to_dict(a) for a in self.__risks],
@@ -1818,6 +1844,11 @@ class ProgramReality:
         for domain, assessments in domain_map.items():
             stale_count = sum(1 for a in assessments if a.stale)
             latest: datetime | None = None
+            source_diagnostic = next(
+                (diagnostic for diagnostic in self._snapshot.source_diagnostics
+                 if diagnostic.source == f"{domain}.yaml"),
+                None,
+            )
             # For legacy mode, we can't easily get recorded_at from domain objects;
             # this is improved in Phase 3 when we have fact-store reads.
             result.append(RealityDomainFreshness(
@@ -1826,6 +1857,9 @@ class ProgramReality:
                 stale_count=stale_count,
                 latest_recorded_at=latest,
                 sor_mode=self._sor_mode,
+                status=source_diagnostic.status if source_diagnostic else "available",
+                diagnostic=source_diagnostic.message if source_diagnostic else None,
+                next_action=source_diagnostic.next_action if source_diagnostic else None,
             ))
         return tuple(result)
 

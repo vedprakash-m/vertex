@@ -6,7 +6,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Iterator
@@ -245,27 +245,36 @@ class ADOWriter:
             # persisted (attempted_at set). A never-attempted entry has
             # nothing to reconcile against, so skip the extra WIQL round trip.
             if entry.attempted_at is not None:
-                existing_id = self._search_existing_create(
-                    operation_intent_id=operation_intent_id,
-                    area_path=area_path,
-                    title=title,
-                    attempted_at=entry.attempted_at,
-                )
-                if existing_id is not None:
-                    self._emit_duplicate_prevented(
-                        proposal,
+                try:
+                    existing_id = self._search_existing_create(
                         operation_intent_id=operation_intent_id,
-                        existing_remote_id=existing_id,
-                        detection="preflight_search",
+                        area_path=area_path,
+                        title=title,
                     )
+                except (AuthError, QueryError) as error:
                     return replace(
                         entry,
-                        entry_status="applied",
-                        work_item_id=existing_id,
-                        remote_rev=1,
+                        entry_status="failed",
                         operation_intent_id=operation_intent_id,
-                        status_reason="adopted existing work item via search-before-create (ADF-W1.2)",
+                        status_reason=(
+                            f"ADO task creation requires reconciliation ({type(error).__name__}): "
+                            "intent-marker lookup or readback could not be verified."
+                        ),
                     )
+                self._emit_duplicate_prevented(
+                    proposal,
+                    operation_intent_id=operation_intent_id,
+                    existing_remote_id=existing_id,
+                    detection="preflight_search",
+                )
+                return replace(
+                    entry,
+                    entry_status="applied",
+                    work_item_id=existing_id,
+                    remote_rev=1,
+                    operation_intent_id=operation_intent_id,
+                    status_reason="adopted existing work item via search-before-create (ADF-W1.2)",
+                )
 
             # ADF-W1.2: persist attempted_at + operation_intent_id BEFORE
             # dispatch. If the process dies or the response is lost after
@@ -774,6 +783,12 @@ class ADOWriter:
             fields = json.loads(outbox_entry.payload_json)
         except Exception as error:
             return DispatchResult(succeeded=False, failure_reason=f"corrupt outbox payload: {error}")
+        if (
+            not isinstance(fields, dict)
+            or fields.get("org") != self._client.organization
+            or fields.get("project") != self._client.project
+        ):
+            return DispatchResult(succeeded=False, failure_reason="outbox payload has missing or mismatched ADO destination")
         patch = _build_create_task_patch(fields)
         try:
             response = self._request_json(
@@ -795,53 +810,42 @@ class ADOWriter:
         operation_intent_id: str,
         area_path: str | None,
         title: str,
-        attempted_at: datetime,
-    ) -> int | None:
-        """ADF-W1.2 (Appendix B.8): search-before-create/retry.
-
-        Primary: WIQL tag search for the exact ``vertex-intent-<id>`` marker.
-        Fallback: normalized-title equality within the last 14 days in the
-        same area path. Returns the existing work item id on a hit, else
-        ``None``. Read-only; never raises (a search failure falls through to
-        a normal create attempt rather than blocking the entry).
-        """
+    ) -> int:
+        """Require complete unique marker lookup and matching tag/title readback."""
         tag = f"vertex-intent-{operation_intent_id}"
         tag_wiql = f"SELECT [System.Id] FROM WorkItems WHERE [System.Tags] CONTAINS '{_escape_wiql_literal(tag)}'"
         if area_path:
             tag_wiql += f" AND [System.AreaPath] UNDER '{_escape_wiql_literal(area_path)}'"
-        try:
-            tag_hits = self._client.execute_wiql(tag_wiql)
-        except QueryError:
-            tag_hits = []
-        if tag_hits:
-            return tag_hits[0]
-
-        if not area_path or not title:
-            return None
-
-        cutoff = attempted_at - timedelta(days=14)
-        fallback_wiql = (
-            f"SELECT [System.Id] FROM WorkItems WHERE [System.AreaPath] UNDER '{_escape_wiql_literal(area_path)}' "
-            f"AND [System.CreatedDate] >= '{cutoff.date().isoformat()}'"
-        )
-        try:
-            candidate_ids = self._client.execute_wiql(fallback_wiql)
-        except QueryError:
-            return None
-        if not candidate_ids:
-            return None
-        try:
-            rows = self._client.query_work_items_batch(candidate_ids, fields=("System.Title",))
-        except QueryError:
-            return None
-        normalized_target = _normalize_title(title)
-        for row in rows:
-            row_title = str((row.get("fields") or {}).get("System.Title", ""))
-            if _normalize_title(row_title) == normalized_target:
-                row_id = row.get("id")
-                if isinstance(row_id, int):
-                    return row_id
-        return None
+        outcomes: list[PaginationOutcome] = []
+        tag_hits = self._client.execute_wiql(tag_wiql, on_pagination=outcomes.append)
+        if (
+            len(outcomes) != 1
+            or not isinstance(outcomes[0], PaginationOutcome)
+            or type(outcomes[0].total_fetched) is not int
+            or outcomes[0].total_fetched != len(tag_hits)
+            or type(outcomes[0].page_count) is not int
+            or outcomes[0].page_count < 1
+            or outcomes[0].is_truncated is not False
+        ):
+            raise QueryError("create marker lookup completeness is unproven")
+        if len(tag_hits) != 1:
+            raise QueryError("create marker lookup did not return exactly one candidate")
+        rows = self._client.query_work_items_batch(tag_hits, fields=("System.Title", "System.Tags"))
+        if len(rows) != 1 or rows[0].get("id") != tag_hits[0]:
+            raise QueryError("create marker readback did not return the unique candidate")
+        fields = rows[0].get("fields")
+        if not isinstance(fields, dict):
+            raise QueryError("create marker readback did not return a field mapping")
+        tags = fields.get("System.Tags")
+        row_title = fields.get("System.Title")
+        if (
+            not isinstance(tags, str)
+            or tag not in _parse_tags(tags)
+            or not isinstance(row_title, str)
+            or _normalize_title(row_title) != _normalize_title(title)
+        ):
+            raise QueryError("create marker readback does not match the retained marker and title")
+        return tag_hits[0]
 
     def _emit_duplicate_prevented(
         self,

@@ -31,4 +31,15 @@ def test_reality_passes_its_selected_archive_to_actual_fact_loader(
         tmp_path / "archive" if explicit_archive else None
     )
     assert boundary.call_args.kwargs["programs_root"] == tmp_path / "programs"
-    assert not list(tmp_path.iterdir())
+    database = program_fact_store.ProgramFactStore(
+        "fixture", db_root=program_fact_store._resolve_fact_db_root(tmp_path / "programs"),
+    ).db_path
+    expected = {
+        database.with_name(database.name + ".capture.lock"),
+        tmp_path / "programs" / "fixture" / "ledger.capture.lock",
+        tmp_path / "knowledge.capture.lock",
+        tmp_path / "programs" / "fixture" / "fact_store_sor.yaml.capture.lock",
+    }
+    files = {path for path in tmp_path.rglob("*") if path.is_file()}
+    assert files == expected
+    assert all(path.read_bytes() == b"" for path in files)

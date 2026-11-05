@@ -194,7 +194,7 @@ class KustoHydrationProvider:
                     slo_target=query.slo_target,
                     comparison=query.comparison,
                     observed_value=observed_value,
-                    is_breach=_compute_is_breach(observed_value, query.slo_target, query.comparison),
+                    is_breach=compute_kusto_slo_breach(observed_value, query.slo_target, query.comparison),
                     row_count=len(normalized_rows),
                 )
             )
@@ -333,7 +333,7 @@ def _extract_observed_value(
     return coerce_metric_value(rows[0].get(result_column))
 
 
-def _compute_is_breach(observed_value: float | None, slo_target: float | None, comparison: str | None) -> bool | None:
+def compute_kusto_slo_breach(observed_value: float | None, slo_target: float | None, comparison: str | None) -> bool | None:
     """Section 8.5.1/8.5.2: None when there is no SLO configured or no
     observed value to judge (an unconfigured query stays silent, not
     falsely "OK"); True/False only when a real verdict can be reached."""

@@ -470,6 +470,16 @@ def test_watch_cli_passes_daily_cadence(monkeypatch) -> None:
     assert observed["sources"] == ()
 
 
+@pytest.fixture
+def _offline_agency(monkeypatch) -> None:
+    class _UnavailableAgencyBridge:
+        def probe(self) -> AgencyCapabilities:
+            return AgencyCapabilities(available=False)
+
+    monkeypatch.setattr(watch, "AgencyBridge", _UnavailableAgencyBridge)
+
+
+@pytest.mark.usefixtures("_offline_agency")
 def test_watch_program_defaults_intraday_sources_to_ado_and_icm_when_icm_ready(monkeypatch, tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     program = Program(
@@ -530,6 +540,7 @@ def test_watch_program_defaults_intraday_sources_to_ado_and_icm_when_icm_ready(m
     assert observed["sources"] == (watch.WatchSource.ADO, watch.WatchSource.ICM)
 
 
+@pytest.mark.usefixtures("_offline_agency")
 def test_watch_program_defaults_intraday_sources_to_ado_only_when_icm_not_ready(monkeypatch, tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     program = Program(

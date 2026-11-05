@@ -8,6 +8,7 @@ import yaml
 
 from src.core.exceptions import ConfigError
 from src.core.workspace_paths import PROGRAMS_ROOT
+from src.core.workspace_lease import cooperative_capture_fence
 
 
 
@@ -170,11 +171,12 @@ def save_fact_sor_state(
         document["family_modes"] = dict(normalized_fm)
 
     path = get_fact_sor_state_path(program_id, programs_root=programs_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        yaml.safe_dump(document, sort_keys=False, allow_unicode=False),
-        encoding="utf-8",
-    )
+    with cooperative_capture_fence(path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            yaml.safe_dump(document, sort_keys=False, allow_unicode=False),
+            encoding="utf-8",
+        )
     return state
 
 

@@ -29,6 +29,7 @@ from src.core.gather_run_manifest import (
     get_legacy_cutoff_at,
     get_quarantine_run_dir,
     get_staging_run_dir,
+    get_verified_committed_run_state,
     get_verified_committed_run_ids,
     hash_ado_items,
     hash_query_results,
@@ -785,3 +786,26 @@ class TestLegacyCutoffManifest:
         manifest = create_legacy_cutoff_manifest("demo", legacy_cutoff_at=datetime(2026, 1, 1, tzinfo=timezone.utc), programs_root=tmp_path)
 
         assert manifest.run_id in get_verified_committed_run_ids("demo", programs_root=tmp_path)
+
+    def test_verified_committed_run_state_reads_ids_and_cutoff_in_one_directory_scan(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cutoff = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        manifest = create_legacy_cutoff_manifest("demo", legacy_cutoff_at=cutoff, programs_root=tmp_path)
+        committed_root = get_committed_root("demo", programs_root=tmp_path)
+        original_iterdir = Path.iterdir
+        scans = 0
+
+        def _tracked_iterdir(path: Path):
+            nonlocal scans
+            if path == committed_root:
+                scans += 1
+            return original_iterdir(path)
+
+        monkeypatch.setattr(Path, "iterdir", _tracked_iterdir)
+
+        run_ids, selected_cutoff = get_verified_committed_run_state("demo", programs_root=tmp_path)
+
+        assert run_ids == frozenset({manifest.run_id})
+        assert selected_cutoff == cutoff
+        assert scans == 1

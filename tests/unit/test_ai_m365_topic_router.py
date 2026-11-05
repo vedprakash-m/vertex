@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from src.ai import ai_mode
 from src.ai.ai_mode import AIMode, set_ai_mode
 from src.ai.client import AIClientError
 from src.ai.m365_topic_router import PROMPT_VERSION, M365TopicRouter
@@ -12,6 +13,11 @@ from src.core.keyword_topic_router import M365RoutingDecision
 from src.core.ledger.event_log import read_events
 from src.core.m365_router_interface import M365ReassignCorrection
 from src.core.models_v2 import AIConfig, ADOConfig, Program, Workstream, WorkstreamSignalSources
+
+
+@pytest.fixture(autouse=True)
+def _active_invocation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ai_mode, "_CURRENT_MODE", AIMode.ACTIVE)
 
 
 class _FakeAIClient:

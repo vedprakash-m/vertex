@@ -140,9 +140,9 @@ CITATIONS: tuple[Citation, ...] = (
         must_contain="_MAX_INCREMENTAL_DELTA",
     ),
     Citation(
-        claim="PS-1: all 8 ProgramReality family assessment accessors exist (1160-1182; risk accessor sampled here)",
+        claim="PS-1: all 8 ProgramReality family assessment accessors exist (1167-1189; risk accessor sampled here)",
         path="src/core/program_reality.py",
-        line=1163,
+        line=1177,
         must_contain="def risks",
     ),
     Citation(

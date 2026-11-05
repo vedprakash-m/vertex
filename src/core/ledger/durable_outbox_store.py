@@ -284,13 +284,15 @@ def _transition(
     with open_program_db(db_path, durability="strict") as connection:
         connection.execute("BEGIN IMMEDIATE")
         row = connection.execute(
-            "SELECT lease_owner, lease_fencing_token FROM outbox WHERE outbox_id = ?", (outbox_id,)
+            "SELECT lease_owner, lease_fencing_token, status FROM outbox WHERE outbox_id = ?", (outbox_id,)
         ).fetchone()
         if row is None:
             raise OutboxError(f"unknown outbox row {outbox_id!r}")
-        current_owner, current_token = row
+        current_owner, current_token, current_status = row
         if current_owner != owner or int(current_token) != fencing_token:
             raise LeaseNoLongerCurrent(outbox_id)
+        if current_status in _TRUE_TERMINALS:
+            raise OutboxError(f"outbox row {outbox_id!r} is terminal ({current_status!r}); automatic transition refused")
         connection.execute(f"UPDATE outbox SET {set_clause} WHERE outbox_id = ?", (*values, outbox_id))
     entry = load_entry(db_path, outbox_id)
     assert entry is not None

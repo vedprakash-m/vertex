@@ -12,7 +12,7 @@ from pathlib import Path
 import random
 import sqlite3
 import time
-from typing import Any, Iterator, TypedDict
+from typing import Any, Iterator, Literal, TypedDict
 from uuid import uuid4
 
 from src.core._db import open_program_db
@@ -67,6 +67,7 @@ from src.core.trusted_baseline_store import TrustedBaselineHistoryEntry, load_tr
 from src.core.workstream_association_store import WorkstreamAssociationRecord, read_workstream_association_records
 from src.core.workstream_documents import _parse_workstreams
 from src.core.workspace_paths import PROGRAMS_ROOT
+from src.core.workspace_lease import cooperative_capture_fence
 
 
 _LOG = logging.getLogger(__name__)
@@ -379,6 +380,14 @@ class ProgramFactWriteResult:
 
 
 @dataclass(frozen=True, slots=True)
+class FactSourceDiagnostic:
+    source: str
+    status: Literal["invalid", "unavailable"]
+    message: str
+    next_action: str
+
+
+@dataclass(frozen=True, slots=True)
 class ProgramFactSnapshot:
     program_id: str
     as_of: datetime
@@ -389,6 +398,7 @@ class ProgramFactSnapshot:
     # and always being populated is what makes the bitemporal query a real,
     # queryable axis rather than merely stored-but-inert columns.
     valid_at: datetime | None = None
+    source_diagnostics: tuple[FactSourceDiagnostic, ...] = ()
 
 
 class ProgramFactEnvelope(TypedDict, total=False):
@@ -531,9 +541,9 @@ def load_program_facts(
         as_of=as_of, valid_at=valid_at,
     )
     if require_committed_gather_run:
-        from src.core.gather_run_manifest import get_legacy_cutoff_at, get_verified_committed_run_ids
+        from src.core.gather_run_manifest import get_verified_committed_run_state
 
-        committed_run_ids = get_verified_committed_run_ids(
+        committed_run_ids, legacy_cutoff_at = get_verified_committed_run_state(
             program_id,
             programs_root=programs_root or PROGRAMS_ROOT,
         )
@@ -542,11 +552,6 @@ def load_program_facts(
         # `create_legacy_cutoff_manifest`. Before that, `legacy_cutoff_at` is
         # None and every unstamped fact stays visible (unchanged prior
         # behavior) — this is the bootstrap/cutover migration itself.
-        legacy_cutoff_at = get_legacy_cutoff_at(
-            program_id,
-            programs_root=programs_root or PROGRAMS_ROOT,
-        )
-
         def _visible(fact: ProgramFactRevision) -> bool:
             if fact.gather_run_id is not None:
                 return fact.gather_run_id in committed_run_ids
@@ -573,6 +578,7 @@ def load_program_facts(
             family for family, fmode in sor_state.family_modes.items() if fmode == "primary"
         )
 
+    source_diagnostics: list[FactSourceDiagnostic] = []
     shim_facts = _load_current_state_shim_facts(
         program_id,
         recorded_at=snapshot.as_of,
@@ -580,9 +586,10 @@ def load_program_facts(
         programs_root=programs_root,
         editions_root=editions_root,
         archive_root=archive_root,
+        source_diagnostics=source_diagnostics,
     )
     if not shim_facts:
-        return snapshot
+        return replace(snapshot, source_diagnostics=tuple(source_diagnostics)) if source_diagnostics else snapshot
 
     merged_facts = {fact.natural_key: fact for fact in snapshot.facts}
     for fact in shim_facts:
@@ -597,6 +604,7 @@ def load_program_facts(
         as_of=snapshot.as_of,
         facts=tuple(sorted(merged_facts.values(), key=lambda fact: (fact.fact_type, fact.natural_key))),
         valid_at=snapshot.valid_at,
+        source_diagnostics=tuple(source_diagnostics),
     )
 
 
@@ -610,6 +618,7 @@ def build_legacy_program_fact_snapshot(
     archive_root: Path | None = None,
 ) -> ProgramFactSnapshot:
     snapshot_at = recorded_at or datetime.now(timezone.utc)
+    source_diagnostics: list[FactSourceDiagnostic] = []
     shim_facts = _load_current_state_shim_facts(
         program_id,
         recorded_at=snapshot_at,
@@ -617,12 +626,14 @@ def build_legacy_program_fact_snapshot(
         programs_root=programs_root,
         editions_root=editions_root,
         archive_root=archive_root,
+        source_diagnostics=source_diagnostics,
     )
     return ProgramFactSnapshot(
         program_id=program_id,
         as_of=snapshot_at,
         facts=shim_facts,
         valid_at=snapshot_at,
+        source_diagnostics=tuple(source_diagnostics),
     )
 
 
@@ -1448,7 +1459,7 @@ class ProgramFactStore:
             pinned_revision_count=len(snapshot.facts),
             metadata=dict(metadata or {}),
             membership_version=2,
-            content_sha256=_snapshot_content_sha256(snapshot.facts),
+            content_sha256=fact_snapshot_content_sha256(snapshot.facts),
         )
         with self._connect() as connection:
             connection.execute(
@@ -1532,7 +1543,7 @@ class ProgramFactStore:
                     raise ValueError("invalid member identity or time")
                 facts.append(replace(self._row_to_revision(row), superseded_at=superseded_at))
             revisions = tuple(facts)
-            if _snapshot_content_sha256(revisions) != digest:
+            if fact_snapshot_content_sha256(revisions) != digest:
                 raise ValueError("content changed")
         except (KeyError, TypeError, ValueError) as exc:
             raise ConfigError("Invalid or non-reconstructible fact snapshot capture.") from exc
@@ -1595,7 +1606,7 @@ class ProgramFactStore:
             if (
                 pin.membership_version == 2
                 and pinned_ids == current_ids
-                and pin.content_sha256 != _snapshot_content_sha256(current)
+                and pin.content_sha256 != fact_snapshot_content_sha256(current)
             ):
                 raise ConfigError("Fact snapshot content changed. Regenerate and review the draft.")
             added = tuple(fact for fact in current if fact.revision_id not in pinned_ids)
@@ -1851,6 +1862,12 @@ class ProgramFactStore:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
+        with cooperative_capture_fence(self._db_path):
+            with self._connect_unfenced() as connection:
+                yield connection
+
+    @contextmanager
+    def _connect_unfenced(self) -> Iterator[sqlite3.Connection]:
         connection = self._open_connection_with_retry()
         try:
             yield connection
@@ -2092,7 +2109,7 @@ class ProgramFactStore:
 
 
 
-def _snapshot_content_sha256(facts: tuple[ProgramFactRevision, ...]) -> str:
+def fact_snapshot_content_sha256(facts: tuple[ProgramFactRevision, ...]) -> str:
     payload = json.dumps(
         [asdict(fact) for fact in sorted(facts, key=lambda fact: fact.revision_id)],
         sort_keys=True,
@@ -2161,6 +2178,7 @@ def _load_current_state_shim_facts(
     programs_root: Path | None,
     editions_root: Path | None,
     archive_root: Path | None,
+    source_diagnostics: list[FactSourceDiagnostic],
 ) -> tuple[ProgramFactRevision, ...]:
     requested_fact_types = {
         fact_type.strip().lower()
@@ -2257,18 +2275,22 @@ def _load_current_state_shim_facts(
             else ()
         ),
     ]
-    # milestone.entry: propagate ConfigError in targeted-load mode so callers
-    # (e.g. MilestoneStage) can detect and surface a warning; soft-fail in
-    # full-load mode (fact_types=None) so ProgramReality.load() stays healthy
-    # even when milestones.yaml is absent or malformed.
+    # A missing milestones.yaml is an empty source; malformed present input
+    # must remain distinguishable from that successful empty result.
     if "milestone.entry" in requested_fact_types:
         try:
             shim_facts.extend(
                 _build_milestone_entry_facts(program_id, recorded_at=recorded_at, programs_root=programs_root)
             )
-        except ConfigError:
+        except (ConfigError, OSError) as exc:
             if fact_types is not None:
                 raise
+            source_diagnostics.append(FactSourceDiagnostic(
+                source="milestones.yaml",
+                status="invalid" if isinstance(exc, ConfigError) else "unavailable",
+                message="Milestone records could not be loaded from milestones.yaml.",
+                next_action="Correct or restore milestones.yaml, then rerun the assessment.",
+            ))
     return tuple(sorted(shim_facts, key=lambda fact: (fact.fact_type, fact.natural_key)))
 
 

@@ -1,4 +1,4 @@
-from dataclasses import FrozenInstanceError, asdict, fields
+from dataclasses import FrozenInstanceError, asdict, fields, replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, cast
@@ -14,12 +14,30 @@ from src.core.manifest_writer import (
 )
 from src.core.gather_run_manifest import GatherRunManifest, GatherRunStatus, QueryResultEntry, RequiredScopeStatus
 from src.core.models import EditionType, EvidenceBinding, RiskLevel, RunEvidenceSnapshot, Snapshot, SnapshotItem, SourceScopeContract
-from src.core.program_fact_store import FactSnapshotPin, ProgramFactRevision, ProgramFactSnapshot
+from src.core.program_fact_store import (
+    FactLifecycleState, FactPrecedence, FactReviewState,
+    FactSnapshotPin, ProgramFactRevision, ProgramFactSnapshot, fact_snapshot_content_sha256,
+)
 
 
-def _capture(*, ids=(2, 1), queries=(), facts=()):
+def _fact(revision_id="revision", entity_refs=("PROGRAM:fixture",)):
+    return ProgramFactRevision(
+        revision_id=revision_id, fact_id=f"fact-{revision_id}", program_id="fixture",
+        natural_key=revision_id, fact_type="judgment", scope="program",
+        entity_refs=entity_refs, payload={"state": "accepted"}, source_signal_ids=(),
+        confidence="high", precedence=FactPrecedence.ACTIVE_PM_JUDGMENT,
+        review_state=FactReviewState.ACCEPTED, lifecycle_state=FactLifecycleState.ACTIVE,
+        valid_from=None, valid_until=None, recorded_at=datetime(2026, 5, 5, tzinfo=timezone.utc),
+        superseded_at=None, projection_history=(), proposed_against_revision_id=None,
+        created_by="test",
+    )
+
+
+def _capture_inputs(*, ids=(2, 1), queries=(), facts=()):
     clock = datetime(2026, 5, 5, tzinfo=timezone.utc)
-    pin = FactSnapshotPin("pfs_original", "fixture", clock, None, len(facts), {}, 2, "a" * 64)
+    pin = FactSnapshotPin(
+        "pfs_original", "fixture", clock, None, len(facts), {}, 2, fact_snapshot_content_sha256(facts),
+    )
     snapshot = ProgramFactSnapshot("fixture", clock, cast(tuple[ProgramFactRevision, ...], facts), clock)
     report = Snapshot(7, clock, clock, EditionType.DETAILED, tuple(
         SnapshotItem(item_id, "Task", "Synthetic", "Active", None, "Area", None, RiskLevel.LOW, [])
@@ -35,8 +53,12 @@ def _capture(*, ids=(2, 1), queries=(), facts=()):
         "manifest", 7, "fixture", clock, clock, {}, report, "", "", 0, 0, 0.0, {}, {}, None,
         gather_run_id="gather", gather_run_hash="gather-hash",
     )
+    return pin, snapshot, gather, manifest, report
+
+
+def _capture(**kwargs):
     return build_run_evidence_snapshot(
-        pin, snapshot, gather, manifest, report,
+        *_capture_inputs(**kwargs),
         effective_family_modes=(("judgment", "primary"), ("workitem.state", "shadow")),
     )
 
@@ -100,7 +122,7 @@ def test_capture_reference_and_alias_mismatch_fails(location, field, value):
 
 def test_declarations_are_not_observed_membership_or_evaluated_bindings():
     query = SimpleNamespace(query_id="q", scope_id="s", wiql_hash="query", membership_ids=("999",))
-    fact = SimpleNamespace(revision_id="revision", entity_refs=("PROGRAM:fixture",))
+    fact = _fact()
     first = _capture(queries=(query,), facts=(fact,))
     second = _capture(ids=(3,), queries=(SimpleNamespace(
         query_id="q", scope_id="s", wiql_hash="query", membership_ids=(),
@@ -110,7 +132,42 @@ def test_declarations_are_not_observed_membership_or_evaluated_bindings():
     assert first.binding_declarations == (EvidenceBinding("revision", ("PROGRAM:fixture",)),)
     assert "binding_unevaluated" in first.limitations
     assert not hasattr(first.binding_declarations[0], "accepted")
-    assert _capture(facts=(SimpleNamespace(revision_id="empty", entity_refs=()),)).binding_declarations[0].entity_refs == ()
+    assert _capture(facts=(_fact("empty", ()),)).binding_declarations[0].entity_refs == ()
+
+
+@pytest.mark.parametrize("field,value", [
+    ("content_sha256", None), ("content_sha256", "a" * 64),
+    ("pinned_revision_count", 1), ("membership_version", None), ("membership_version", 1),
+])
+def test_builder_rejects_mismatched_pin_content_contract(field, value):
+    pin, snapshot, gather, manifest, report = _capture_inputs()
+    pin = replace(pin, **{field: value})
+    with pytest.raises(ConfigError):
+        build_run_evidence_snapshot(pin, snapshot, gather, manifest, report, effective_family_modes=())
+
+
+@pytest.mark.parametrize("field,value", [
+    ("payload", {"state": "changed"}),
+    ("entity_refs", ("PROGRAM:other",)),
+    ("revision_id", "substituted"),
+])
+def test_builder_rejects_same_count_substituted_fact_content(field, value):
+    pin, snapshot, gather, manifest, report = _capture_inputs(facts=(_fact(),))
+    snapshot = replace(snapshot, facts=(replace(snapshot.facts[0], **{field: value}),))
+    with pytest.raises(ConfigError, match="retained fact"):
+        build_run_evidence_snapshot(pin, snapshot, gather, manifest, report, effective_family_modes=())
+
+
+def test_builder_rejects_in_place_retained_payload_mutation():
+    pin, snapshot, gather, manifest, report = _capture_inputs(facts=(_fact(),))
+    snapshot.facts[0].payload["state"] = "changed"
+    with pytest.raises(ConfigError, match="retained fact"):
+        build_run_evidence_snapshot(pin, snapshot, gather, manifest, report, effective_family_modes=())
+
+
+def test_retained_content_hash_preserves_order_independent_capture():
+    first, second = _fact("first"), _fact("second")
+    assert _capture(facts=(first, second)) == _capture(facts=(second, first))
 
 
 def test_absent_capture_is_legacy_but_one_sided_reference_is_not():

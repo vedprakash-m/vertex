@@ -530,6 +530,12 @@ def _parse_edition_config(raw_edition: dict[str, Any], path: Path) -> EditionCon
 
 
 def _parse_program(raw_program: dict[str, Any], path: Path) -> Program:
+    program_data = raw_program.get("program", raw_program)
+    raw_knowledge_scopes = (
+        program_data.get("knowledge_scopes", [])
+        if isinstance(program_data, dict)
+        else []
+    )
     return Program(
         schema_version=str(raw_program.get("schema_version", "2.0")),
         id=_required_string(raw_program.get("id"), path, "id"),
@@ -558,6 +564,9 @@ def _parse_program(raw_program: dict[str, Any], path: Path) -> Program:
         min_channel_completeness_pct=_parse_min_channel_completeness_pct(raw_program, path),
         backfill_max_days=_parse_backfill_max_days(raw_program, path),
         gather=_parse_gather_activation_config(raw_program.get("gather"), path),
+        knowledge_scopes=tuple(
+            str(scope).strip() for scope in raw_knowledge_scopes if str(scope).strip()
+        ),
     )
 
 

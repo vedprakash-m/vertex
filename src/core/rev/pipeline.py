@@ -285,9 +285,10 @@ def run_rev_cycle(
         remaining_scores = tuple(c.relevance_score for c in sorted_candidates[idx:])
         quiet_decision = governor.check_quiet_lane(remaining_scores)
         if not quiet_decision.continue_run and quiet_decision.reason.startswith("quiet_lane:all_below"):
-            stop_reason = quiet_decision.reason
-            stop_category = quiet_decision.category
-            breached = quiet_decision.breached_budget
+            if stop_category == "complete":
+                stop_reason = quiet_decision.reason
+                stop_category = quiet_decision.category
+                breached = quiet_decision.breached_budget
             counts["explicitly_skipped"] += len(sorted_candidates) - idx
             break
         gov = governor.record_search(intent.entity_type.value)

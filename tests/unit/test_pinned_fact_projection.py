@@ -71,7 +71,7 @@ def test_future_and_post_capture_supersessions_preserve_original_digest(store) -
     loaded = store.load_pinned_snapshot(pin.snapshot_id)
     assert loaded.facts == (replace(first, superseded_at=future), second)
     assert pin.membership_version == 2
-    assert program_fact_store._snapshot_content_sha256(loaded.facts) == pin.content_sha256
+    assert program_fact_store.fact_snapshot_content_sha256(loaded.facts) == pin.content_sha256
 
 
 def test_distinct_transaction_and_valid_clocks_are_captured_from_hashed_snapshot(store) -> None:

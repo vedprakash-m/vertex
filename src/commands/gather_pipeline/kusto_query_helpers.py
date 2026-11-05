@@ -15,8 +15,11 @@ from src.commands.gather_pipeline.support import (
     roll_query_value_history,
 )
 from src.commands.gather_workiq_helpers import _truncate_signal_text
+from src.core.integration_types import KustoResultSet
+from src.core.kusto_hydration import compute_kusto_slo_breach
 from src.core.kusto_ref_utils import extract_kusto_entity_refs as _extract_kusto_entity_refs
 from src.core.kusto_query_loader import query_history_contract_identity
+from src.core.kusto_signal_extractor import format_kusto_result_text
 from src.core.metric_binding_validator import coerce_metric_value, kusto_metric_result_error
 from src.core.models_v2 import KustoQuery, Signal
 from src.core.signal_ref_utils import merge_entity_refs
@@ -193,7 +196,7 @@ def build_kusto_signal(
         workstream_id=workstream_id,
         workstream_ids=query.workstream_ids,
         entity_refs=entity_refs,
-        text=summarize_kusto_rows(query, rows),
+        text=summarize_kusto_rows(query, rows, as_of=as_of),
         raw_ref=raw_ref,
         confidence=confidence_from_string(query.confidence),
         metadata={
@@ -207,7 +210,21 @@ def build_kusto_signal(
     )
 
 
-def summarize_kusto_rows(query: KustoQuery, rows: list[dict[str, Any]]) -> str:
+def summarize_kusto_rows(query: KustoQuery, rows: list[dict[str, Any]], *, as_of: datetime) -> str:
+    if query.metric_id is not None:
+        observed_value = extract_kusto_query_numeric_value(query, rows)
+        return format_kusto_result_text(KustoResultSet(
+            query_id=query.id,
+            rows=tuple(rows),
+            observed_at=as_of,
+            metric_id=query.metric_id,
+            result_column=query.result_column,
+            unit=query.unit,
+            slo_target=query.slo_target,
+            comparison=query.comparison,
+            observed_value=observed_value,
+            is_breach=compute_kusto_slo_breach(observed_value, query.slo_target, query.comparison),
+        ))
     first_row = rows[0]
     preview_parts: list[str] = []
     for key, value in first_row.items():

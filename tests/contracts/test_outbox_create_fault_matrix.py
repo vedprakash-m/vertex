@@ -278,6 +278,37 @@ def test_item5_receipt_ledger_write_failure_does_not_block_completion(tmp_path: 
     assert not [event for event in events if event.event_type == "actuation.receipt_recorded.v1"]
 
 
+@pytest.mark.parametrize("terminal", ["uncertain_remote_state", "failed_terminal"])
+def test_late_dispatch_success_cannot_replace_durable_terminal(tmp_path: Path, terminal: str) -> None:
+    from src.core.ledger import durable_outbox_store as store
+
+    programs_root = tmp_path / "programs"
+    key = _enqueue(programs_root)
+    db = outbox_db_path(_PROGRAM_ID, programs_root=programs_root)
+    retained: list[store.OutboxEntry] = []
+
+    def dispatch(entry) -> DispatchResult:
+        transition = store.mark_uncertain_remote_state if terminal == "uncertain_remote_state" else store.mark_failed_terminal
+        retained.append(transition(
+            db, key, owner=entry.lease_owner, fencing_token=entry.lease_fencing_token,
+            reason="durable terminal precedes late callback",
+        ))
+        return DispatchResult(succeeded=True, remote_id=9005, remote_response_hash="late-response")
+
+    with pytest.raises(store.OutboxError, match="terminal"):
+        dispatch_leased_create_task(
+            program_id=_PROGRAM_ID, idempotency_key=key, owner="worker-a",
+            dispatch_fn=dispatch, programs_root=programs_root,
+        )
+
+    assert len(retained) == 1
+    assert load_entry(db, key) == retained[0]
+    assert store.lease_next(db, ACTUATION_DISPATCH_DOMAIN, owner="worker-b") is None
+    receipts = [event for event in read_events(_PROGRAM_ID, programs_root=programs_root)
+                if event.event_type == "actuation.receipt_recorded.v1"]
+    assert not any(event.payload["receipt_state"] == "succeeded" for event in receipts)
+
+
 def test_workspace_lease_contention_propagates_to_caller(tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     key = _enqueue(programs_root)

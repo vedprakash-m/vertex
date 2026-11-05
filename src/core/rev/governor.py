@@ -193,8 +193,8 @@ class Governor:
         ``provider_limited`` stop. A 403 (``Forbidden``) stops with
         ``provider_limited`` and visible degrade (no retry). ``Unsupported`` is
         reported but does not stop the *run* (only that capability is skipped).
-        ``Incomplete`` → ``truncated_by_budget`` if the reason is a budget stop,
-        else continues.
+        ``Incomplete`` retains its budget/provider-limited category. Enumeration
+        may process its salvaged batch without declaring a complete cycle.
         """
         category = outcome_category(result)
         if isinstance(result, RateLimited):
@@ -205,9 +205,10 @@ class Governor:
             # capability unsupported for this entity — skip it, don't stop the run
             return self._ok()
         if isinstance(result, Incomplete):
-            if category == "truncated_by_budget":
-                return GovernorDecision(continue_run=False, reason=getattr(result, "reason", "incomplete"), category="truncated_by_budget", breached_budget="incomplete")
-            return self._ok()
+            return GovernorDecision(
+                continue_run=False, reason=result.reason or "incomplete", category=category,
+                breached_budget="incomplete" if category == "truncated_by_budget" else "",
+            )
         return self._ok()
 
     def _ok(self) -> GovernorDecision:

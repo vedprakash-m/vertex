@@ -17,6 +17,7 @@ from src.core.ledger.event_types import validate_event_payload
 from src.core.ledger.source_refs import SourceRef, source_document_key, source_ref_from_dict, source_ref_to_dict, validate_typed_source_ref
 from src.core.ledger.ulid import new_ulid
 from src.core.workspace_paths import PROGRAMS_ROOT
+from src.core.workspace_lease import cooperative_capture_fence
 
 
 DEFAULT_MAX_BYTES = 10 * 1024 * 1024
@@ -289,6 +290,20 @@ def write_event(
     max_bytes: int = DEFAULT_MAX_BYTES,
     grounded_in_validator: Callable[[str], bool] | None = None,
 ) -> EventWriteResult:
+    with cooperative_capture_fence(get_event_logs_dir(envelope.program_id, programs_root=programs_root).parent):
+        return _write_event(
+            envelope, programs_root=programs_root, max_bytes=max_bytes,
+            grounded_in_validator=grounded_in_validator,
+        )
+
+
+def _write_event(
+    envelope: EventEnvelope,
+    *,
+    programs_root: Path,
+    max_bytes: int,
+    grounded_in_validator: Callable[[str], bool] | None,
+) -> EventWriteResult:
     validate_event_payload(envelope.event_type, envelope.payload)
     _validate_grounded_in_claim_refs(envelope.payload, grounded_in_validator=grounded_in_validator)
 
@@ -366,6 +381,21 @@ def write_events_atomic(
     if len(program_ids) != 1:
         raise ValueError("write_events_atomic requires envelopes from a single program.")
     program_id = next(iter(program_ids))
+    with cooperative_capture_fence(get_event_logs_dir(program_id, programs_root=programs_root).parent):
+        return _write_events_atomic(
+            envelopes, program_id=program_id, programs_root=programs_root,
+            max_bytes=max_bytes, grounded_in_validator=grounded_in_validator,
+        )
+
+
+def _write_events_atomic(
+    envelopes: tuple[EventEnvelope, ...],
+    *,
+    program_id: str,
+    programs_root: Path,
+    max_bytes: int,
+    grounded_in_validator: Callable[[str], bool] | None,
+) -> EventBatchWriteResult:
 
     events_dir = get_event_logs_dir(program_id, programs_root=programs_root)
     tail = _read_tail(events_dir)
@@ -460,6 +490,15 @@ def read_events(
     program_id: str, *, programs_root: Path = PROGRAMS_ROOT, repair_corruption: bool = True,
 ) -> tuple[EventEnvelope, ...]:
     """Read envelopes; disable legacy repair to fail without changing damaged files."""
+    if not repair_corruption:
+        return _read_events(program_id, programs_root=programs_root, repair_corruption=False)
+    with cooperative_capture_fence(get_event_logs_dir(program_id, programs_root=programs_root).parent):
+        return _read_events(program_id, programs_root=programs_root, repair_corruption=repair_corruption)
+
+
+def _read_events(
+    program_id: str, *, programs_root: Path, repair_corruption: bool,
+) -> tuple[EventEnvelope, ...]:
     events_dir = get_event_logs_dir(program_id, programs_root=programs_root)
     if not events_dir.exists():
         return ()

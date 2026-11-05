@@ -10,6 +10,7 @@ from src.core._db import open_program_db
 from src.core.ledger.event_types import get_event_schema
 from src.core.ledger.source_refs import SourceRef, source_document_key
 from src.core.workspace_paths import PROGRAMS_ROOT
+from src.core.workspace_lease import cooperative_capture_fence
 
 
 SCHEMA_VERSION = "1"
@@ -53,7 +54,7 @@ def connect_event_index(program_id: str, *, programs_root: Path = PROGRAMS_ROOT)
     paths).
     """
     path = get_event_index_path(program_id, programs_root=programs_root)
-    with open_program_db(path, durability="strict") as connection:
+    with cooperative_capture_fence(path.parent), open_program_db(path, durability="strict") as connection:
         _ensure_schema(connection)
         yield connection
 

@@ -845,6 +845,22 @@ class TestGovernor:
         d = gov.decide_for_port_result(Unsupported(entity_type="chatMessage", reason="phase2"))
         assert d.continue_run is True
 
+    @pytest.mark.parametrize("reason,category,breach", [
+        ("budget_stop", "truncated_by_budget", "incomplete"),
+        ("page_cut:continuation", "truncated_by_budget", "incomplete"),
+        ("item_over_ceiling", "truncated_by_budget", "incomplete"),
+        ("provider_partial", "provider_limited", ""),
+        ("", "provider_limited", ""),
+    ])
+    def test_incomplete_retains_category_and_explicit_reason(
+        self, reason: str, category: str, breach: str,
+    ) -> None:
+        decision = Governor(BudgetLimits()).decide_for_port_result(Incomplete((), reason=reason))
+        assert decision.continue_run is False
+        assert decision.category == category
+        assert decision.reason == (reason or "incomplete")
+        assert decision.breached_budget == breach
+
 
 # ===========================================================================
 # Result union (§5.3/§5.10)
