@@ -52,13 +52,15 @@
       "proj_workstream": [],
       "projection_meta": [
         {
+          "acknowledged_gaps_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
           "as_of": "2021-12-31T00:00:00+00:00",
           "coverage_earliest": "2021-06-01T00:00:00+00:00",
           "coverage_latest": "2021-06-01T00:00:00+00:00",
+          "event_input_digest": "8a318643c2e397ad474c37d25a01a4c6b6ff649a8196abedca95f673ed386957",
           "event_watermark": "01KEJK7S00PD2FTBGTMJ6NYCY3",
           "knowledge_as_of": "2026-12-31T00:00:00+00:00",
-          "projector_version": "4",
-          "schema_version": "1"
+          "projector_version": "5",
+          "schema_version": "2"
         }
       ]
     }
@@ -116,13 +118,15 @@
       "proj_workstream": [],
       "projection_meta": [
         {
+          "acknowledged_gaps_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
           "as_of": "2021-12-31T00:00:00+00:00",
           "coverage_earliest": "2021-06-01T00:00:00+00:00",
           "coverage_latest": "2021-06-01T00:00:00+00:00",
+          "event_input_digest": "51ad7b9f495cc76d6437751127e08dd9036f8481ae0d154c87a9cacaa9a72f94",
           "event_watermark": "01JKS4WE00ME4ER37QHZAF5TYY",
           "knowledge_as_of": "2025-12-31T00:00:00+00:00",
-          "projector_version": "4",
-          "schema_version": "1"
+          "projector_version": "5",
+          "schema_version": "2"
         }
       ]
     }
@@ -239,13 +243,15 @@
       "proj_workstream": [],
       "projection_meta": [
         {
+          "acknowledged_gaps_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
           "as_of": "2025-03-31T00:00:00+00:00",
           "coverage_earliest": "2021-06-01T00:00:00+00:00",
           "coverage_latest": "2025-03-20T00:00:00+00:00",
+          "event_input_digest": "def206849973abe256db67e7bbb4214dddeeb4e0237bfb8f22ed8d664b6d23dd",
           "event_watermark": "01KEJK7S00PD2FTBGTMJ6NYCY5",
           "knowledge_as_of": "2025-03-31T00:00:00+00:00",
-          "projector_version": "4",
-          "schema_version": "1"
+          "projector_version": "5",
+          "schema_version": "2"
         }
       ]
     }

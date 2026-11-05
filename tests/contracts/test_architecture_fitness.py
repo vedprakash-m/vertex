@@ -39,7 +39,8 @@ LINE_BUDGETS = {
     # run_telemetry.jsonl sidecar is populated by gather runs.
     # WS-3 / v1.14 (2026-06-10): +21 for _emit_credential_expired_banner helper
     # + CredentialExpired import + 3 banner call sites (WorkIQ/Kusto/IcM).
-    "src/commands/gather.py": 5441,  # +2 (2026-07-25): BL-F2 D-19 real fan-out fix -- _build_kusto_kpi_signal now populates Signal.workstream_ids from the full configured query.workstream_ids set, not just a single scalar picked only when exactly one existed; +3 (2026-07-25): BL-F2 M365 re-routing now explicitly replaces Signal.workstream_ids too, not just workstream_id -- +11 (2026-07-15): ADF-W1.4 remainder -- overall WorkIQ phase (all query plans combined) bounded by program.m365.retrieval.max_wall_clock_seconds, threaded into _build_workiq_signals
+    # +1 (2026-11-05): forward declared result limits to the shared Kusto client.
+    "src/commands/gather.py": 5442,  # +2 (2026-07-25): BL-F2 D-19 real fan-out fix -- _build_kusto_kpi_signal now populates Signal.workstream_ids from the full configured query.workstream_ids set, not just a single scalar picked only when exactly one existed; +3 (2026-07-25): BL-F2 M365 re-routing now explicitly replaces Signal.workstream_ids too, not just workstream_id -- +11 (2026-07-15): ADF-W1.4 remainder -- overall WorkIQ phase (all query plans combined) bounded by program.m365.retrieval.max_wall_clock_seconds, threaded into _build_workiq_signals
     # +36 (2026-07-21, synthetic gather lifecycle contract D-19/AG-2.12): completeness-oracle
     # reconciliation -- resolve_oracle_result import/application at the
     # QueryResultEntry construction site, source_export_counts param on
@@ -97,7 +98,8 @@ LINE_BUDGETS = {
     # run now ticks the people-registry enrichment reminder cadence (maybe_alert_enrichment_due,
     # kind="report_run") right next to the existing record_adoption() call -- never calls
     # WorkIQ itself (INV-ADF-2 is unaffected; only a between-runs alert row is written).
-    "src/commands/report.py": 1573,
+    # +10 (2026-11-05): retain the observe-only program verdict and its bound inputs.
+    "src/commands/report.py": 1583,
     "src/core/reality_store.py": 2339,  # +6 (2026-07-13): ADF root-cause fix for the PS-14 split-brain -- _resolve_reality_db_root now defaults to programs_root.parent/"vertex-db" instead of ~/.vertex
     "src/core/channel_registry_store.py": 1976,  # +79: discovery registration persistence helpers already present on branch (2026-06-02)
 }

@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
 import json
+import hashlib
 import os
 from pathlib import Path
 from typing import Any
@@ -23,10 +24,64 @@ from typing import Any
 import portalocker
 
 from src.core.edition_resolver import PROGRAMS_ROOT
+from src.core.config_loader import load_review_config
+from src.core.exceptions import ConfigError
 from src.core.ncfl_models import ContextUpdateProposal, DecisionRecord
 
 
 CONFLICT_INDEX_FILENAME = "_conflict_index.json"
+
+
+def reply_origin_source_error(proposal: ContextUpdateProposal, *, programs_root: Path) -> str | None:
+    if (
+        proposal.source_type != "context_gap_reply" or proposal.target_store != "workstream_registry"
+        or proposal.target_field not in {"deep_context.why", "deep_context.what", "deep_context.how"}
+    ):
+        return "Origin verification requires a supported context reply."
+    digest = proposal.source_sha256
+    if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+        return "Origin verification requires a typed intake source hash; legacy replies remain unverified."
+    source = Path(proposal.source_artifact).resolve()
+    if source.suffix.lower() != ".eml":
+        return "Origin verification requires the original local EML artifact."
+    root = programs_root.resolve()
+    program = (programs_root / proposal.program_id).resolve()
+    if not program.is_relative_to(root) or source.is_relative_to(root) and not source.is_relative_to(program):
+        return "Origin source belongs to another program."
+    try:
+        if hashlib.sha256(source.read_bytes()).hexdigest() != digest:
+            return "Origin source changed after intake."
+    except OSError:
+        return "Origin source unavailable; restore the exact intake artifact."
+    return None
+
+
+def reply_origin_verification_error(proposal: ContextUpdateProposal, *, programs_root: Path) -> str | None:
+    verification = proposal.verified_reply_origin
+    if verification is None:
+        return "Origin verification missing or stale; verify the exact reply before acceptance."
+    source_error = reply_origin_source_error(proposal, programs_root=programs_root)
+    if source_error is not None:
+        return source_error
+    path = programs_root / proposal.program_id / "review.yaml"
+    if not path.resolve().is_relative_to((programs_root / proposal.program_id).resolve()):
+        return "Origin verifier authorization leaves the selected program."
+    try:
+        settings = load_review_config(path)
+    except (OSError, ConfigError):
+        return "Origin verifier authorization unavailable; repair review.yaml before retrying."
+    if verification.principal not in settings.reply_origin_verifier_principals:
+        return "Origin verifier authorization revoked or absent."
+    return None
+
+
+def reply_origin_label(proposal: ContextUpdateProposal, *, programs_root: Path) -> str:
+    error = reply_origin_verification_error(proposal, programs_root=programs_root)
+    verification = proposal.verified_reply_origin
+    if error is not None:
+        return f"origin unverified: {error} Not change approval."
+    assert verification is not None
+    return f"origin verified by {verification.principal}; not change approval, apply or review renewal"
 
 
 @contextmanager
@@ -205,7 +260,19 @@ def update_proposal_status(
     rationale: str | None = None,
     programs_root: Path = PROGRAMS_ROOT,
 ) -> ContextUpdateProposal:
-    load_proposals(program_id, programs_root=programs_root)
+    proposals = load_proposals(program_id, programs_root=programs_root)
+    if new_status == "accepted":
+        for proposal in proposals:
+            if (
+                proposal.proposal_id == proposal_id
+                and (issue_number is None or proposal.issue_number == issue_number)
+                and proposal.source_type == "context_gap_reply"
+            ):
+                if proposal.program_id != program_id:
+                    raise ValueError("Reply proposal belongs to a foreign program.")
+                error = reply_origin_verification_error(proposal, programs_root=programs_root)
+                if error is not None:
+                    raise ValueError(error)
     with _queue_lock(program_id, programs_root):
         return _update_proposal_status(
             program_id, proposal_id=proposal_id, new_status=new_status, actor=actor,
@@ -242,6 +309,10 @@ def _update_proposal_status(
         raise ValueError(f"Proposal {proposal_id!r} belongs to a foreign program.")
     if new_status == "dismissed" and proposal.status != "pending":
         raise ValueError(f"Proposal {proposal_id!r} is not pending and cannot be dismissed.")
+    if new_status == "accepted" and proposal.source_type == "context_gap_reply":
+        error = reply_origin_verification_error(proposal, programs_root=programs_root)
+        if error is not None:
+            raise ValueError(error)
 
     updated = replace(
         proposal,

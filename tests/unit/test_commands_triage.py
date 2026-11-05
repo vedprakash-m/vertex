@@ -76,8 +76,17 @@ def test_triage_active_context_gap_projection_and_corrupt_history(tmp_path: Path
     load = Mock(wraps=projection.load_context_gaps)
     monkeypatch.setattr(projection, "load_context_gaps", load)
     monkeypatch.setattr(triage.report_command_helpers, "_load_live_work_items", lambda *args: ((), 0))
+    generate = triage.generate_triage_report
+    monkeypatch.setattr(triage, "PROGRAMS_ROOT", root)
+    monkeypatch.setattr(triage, "REPORTS_ROOT", reports)
+    monkeypatch.setattr(triage, "ARCHIVE_ROOT", archive)
+    monkeypatch.setattr(
+        triage,
+        "generate_triage_report",
+        partial(generate, reports_root=reports, archive_root=archive),
+    )
     result = runner.invoke(app, ["triage", "--edition", "acme_weekly", "--format", "json"])
-    assert result.exit_code in {0, 1, 2}, repr(result.exception)
+    assert result.exit_code in {0, 1, 2, 3}, repr(result.exception)
     command_payload = json.loads(result.stdout)
     assert command_payload["context_gaps"][0]["message"] == payload["context_gaps"][0]["message"]
     load.assert_called_once_with("acme", programs_root=root)

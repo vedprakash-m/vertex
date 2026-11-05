@@ -12,6 +12,51 @@ from src.core.ncfl_proposal_store import load_proposals
 from tests.unit.test_context_gap_reply_import import _intake_workspace
 
 
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_installed_reply_origin_verification_stays_separate_from_approval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dry_run: bool,
+) -> None:
+    from cli import app
+    from tests.unit.test_context_gap_reply_import import _origin_workspace
+
+    programs, _, _, proposal = _origin_workspace(tmp_path, monkeypatch)
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    result = CliRunner().invoke(app, [
+        "context", "verify-reply-origin", "--edition", "sample_weekly", "--issue", "1",
+        "--proposal-id", proposal.proposal_id, "--reason", "Origin checked.",
+        "--programs-root", str(programs), *(["--dry-run"] if dry_run else []),
+    ])
+    assert result.exit_code == 0, result.output + repr(result.exception)
+    assert "not change approval" in result.output
+    retained, = load_proposals("sample", programs_root=programs)
+    assert retained.status == "pending" and not retained.batch_eligible
+    assert bool(retained.verified_reply_origin) is not dry_run
+    if dry_run:
+        assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+    else:
+        assert all(p.read_bytes() == value for p, value in before.items()
+                   if p.parent.name != "context_proposals")
+
+
+def test_installed_reply_origin_refusal_leaves_all_files_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cli import app
+    from tests.unit.test_context_gap_reply_import import _origin_workspace
+
+    programs, _, _, proposal = _origin_workspace(tmp_path, monkeypatch)
+    (programs / "sample" / "review.yaml").write_text("reply_origin_verifier_principals: []\n")
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    result = CliRunner().invoke(app, [
+        "context", "verify-reply-origin", "--edition", "sample_weekly", "--issue", "1",
+        "--proposal-id", proposal.proposal_id, "--reason", "Origin checked.",
+        "--programs-root", str(programs),
+    ])
+    assert result.exit_code == 2 and "not an authorized" in result.output
+    assert "origin verified" not in result.output
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+
 @pytest.mark.parametrize("corruption", [
     "missing", "null", "empty", "legacy-current", "wrong-prefix", "uppercase",
     "short", "nonhex", "trailing-newline", "boolean", "number", "list",

@@ -208,24 +208,41 @@ def test_hydration_keeps_missing_blank_and_unsupported_assessment_unknown(
 @pytest.mark.parametrize(
     ("state", "tags", "risk_assessment", "expected"),
     [
-        ("Closed", "", "Off Track", RiskLevel.LOW),
-        ("Blocked", "", "On Track", RiskLevel.HIGH),
-        ("Active", "Blocked", "On Track", RiskLevel.HIGH),
-        ("Active", "Blocker", "On Track", RiskLevel.HIGH),
-        ("Active", "High Risk", "On Track", RiskLevel.HIGH),
-        ("Active", "Risk", "Off Track", RiskLevel.MEDIUM),
-        ("Active", "At Risk", "Off Track", RiskLevel.MEDIUM),
+        ("Closed", "", "Off Track", RiskLevel.DONE),
+        ("Done", "", None, RiskLevel.DONE),
+        ("Resolved", "", None, RiskLevel.DONE),
+        ("Completed", "", None, RiskLevel.DONE),
+        ("Removed", "", None, RiskLevel.DONE),
+        ("Blocked", "", "On Track", RiskLevel.LOW),
+        ("Active", "Blocked", "On Track", RiskLevel.LOW),
+        ("Active", "Blocker", "On Track", RiskLevel.LOW),
+        ("Active", "High Risk", "On Track", RiskLevel.LOW),
+        ("Active", "Risk", "Off Track", RiskLevel.HIGH),
+        ("Active", "At Risk", "Off Track", RiskLevel.HIGH),
+        ("Active", "Blocked", None, RiskLevel.HIGH),
+        ("Active", "Blocker", "Pending", RiskLevel.HIGH),
+        ("Active", "High Risk", "", RiskLevel.HIGH),
+        ("Active", "Risk", None, RiskLevel.MEDIUM),
+        ("Active", "At Risk", "Pending", RiskLevel.MEDIUM),
+        ("Active", "", "Pending", RiskLevel.UNKNOWN),
+        ("Active", "Blocked", " on_track ", RiskLevel.LOW),
     ],
 )
-def test_hydration_state_and_tag_precedence_over_explicit_assessment(
+def test_ado_consumers_share_authored_assessment_and_fallback_precedence(
     state: str,
     tags: str,
-    risk_assessment: str,
+    risk_assessment: str | None,
     expected: RiskLevel,
 ) -> None:
     item = _hydrated_item(state=state, tags=tags, risk_assessment=risk_assessment)
+    row = _risk_row(risk_assessment=risk_assessment, state=state, tags=tags)
+    report_item = _work_item_from_sources(
+        {"id": 990001}, row, datetime(2026, 10, 29, tzinfo=timezone.utc),
+    )
 
     assert item.risk_level is expected
+    assert report_item.risk_level is expected
+    assert infer_ado_risk_level(item.state, item.tags, item.risk_assessment) is expected
 
 
 @pytest.mark.parametrize("with_known", [False, True])

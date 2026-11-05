@@ -12,6 +12,7 @@ from jsonschema import Draft202012Validator, FormatChecker
 
 from src.core.chapter_contract_loader import ChapterContract, load_chapter_contract, load_chapter_contract_for_edition
 from src.core.exceptions import ConfigError, PersonaSchemaError
+from src.core.kusto_result_limits import KustoResultLimits, parse_kusto_result_limits
 from src.core.models import EditionType
 from src.core.persona_models import (
     PersonaCheck,
@@ -115,6 +116,7 @@ class ReviewerSettings:
 class ReviewSettings:
     reviewers: tuple[ReviewerSettings, ...]
     required: bool
+    reply_origin_verifier_principals: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +153,8 @@ class KustoQuerySettings:
     chart_blocks_publish: bool = False
     fallback_on_empty_rows: bool = False
     fallback_kql: str | None = None  # FR-SG-31: secondary KQL if primary returns zero rows or query error
+    result_limits: KustoResultLimits | None = None
+    expected_cardinality: str = "zero_ok"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1190,6 +1194,10 @@ def load_review_config(path: Path) -> ReviewSettings:
     return ReviewSettings(
         reviewers=tuple(reviewers),
         required=bool(raw_review.get("required", False)),
+        reply_origin_verifier_principals=_parse_string_tuple(
+            raw_review.get("reply_origin_verifier_principals"),
+            field_name="reply_origin_verifier_principals", path=path,
+        ),
     )
 
 
@@ -1517,6 +1525,8 @@ def _parse_report_config(raw_config: dict[str, Any]) -> ReportConfig:
                     kusto_section_validates_slice=bool(query.get("kusto_section_validates_slice", False)),
                     caveats=tuple(query.get("caveats", [])),
                     reference_url=query.get("reference_url"),
+                    result_limits=parse_kusto_result_limits(query.get("result_limits")),
+                    expected_cardinality=str(query.get("expected_cardinality", "zero_ok")),
                 )
                 for query in kusto.get("queries", [])
             ),

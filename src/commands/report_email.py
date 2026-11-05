@@ -14,7 +14,7 @@ def _build_email_subject(
     health: HealthSummary,
     subject_signal: str,
 ) -> str:
-    state_label = "HEALTHY" if health.high_count == 0 and health.medium_count == 0 else risk_label(health.overall_risk).upper()
+    state_label = "HEALTHY" if health.health_state == "HEALTHY" else risk_label(health.overall_risk).upper()
     trajectory_label = health.trajectory.upper()
     prefix = title
     if len(prefix) > 42:
@@ -33,7 +33,12 @@ def _build_email_preheader(
         "degrading": "worsening",
         "stable": "stable",
     }[health.trajectory]
-    lead = bluf or (top_items[0].text if top_items else "No new leadership decisions this week.")
+    lead = bluf or (top_items[0].text if top_items else (
+        health.leadership_ask if health.needs_input_count or not health.total_count
+        else "No new leadership decisions this week."
+    ))
+    if health.risk_load_incomplete:
+        return f"{health.high_count} High risks; assessment coverage needs input. {lead}"[:150].rstrip()
     preheader = (
         f"{health.high_count} High risks, Risk Load {health.risk_load:.1f} {direction_phrase}. {lead}"
     )

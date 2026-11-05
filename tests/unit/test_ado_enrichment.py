@@ -13,7 +13,7 @@ def test_infer_ado_risk_level_uses_risk_assessment_mapping() -> None:
     assert infer_ado_risk_level("Active", [], "On Track") is RiskLevel.LOW
     assert infer_ado_risk_level("Active", [], "At Risk") is RiskLevel.MEDIUM
     assert infer_ado_risk_level("Active", [], "Off Track") is RiskLevel.HIGH
-    assert infer_ado_risk_level("Blocked", [], "On Track") is RiskLevel.HIGH
+    assert infer_ado_risk_level("Blocked", [], "On Track") is RiskLevel.LOW
 
 
 @pytest.mark.parametrize("assessment", [None, "", "   ", "\t\n"])
@@ -24,7 +24,7 @@ def test_missing_risk_final_fallback_is_unknown(assessment: str | None) -> None:
 @pytest.mark.parametrize(
     ("state", "tags", "assessment", "expected"),
     [
-        ("Active", [], "Unrecognized assessment", RiskLevel.LOW),
+        ("Active", [], "Unrecognized assessment", RiskLevel.UNKNOWN),
         ("Active", [], " on_track ", RiskLevel.LOW),
         ("Active", [], "At Risk", RiskLevel.MEDIUM),
         ("Active", [], "Off Track", RiskLevel.HIGH),
@@ -32,19 +32,38 @@ def test_missing_risk_final_fallback_is_unknown(assessment: str | None) -> None:
         ("Done", [], None, RiskLevel.DONE),
         ("Resolved", [], None, RiskLevel.DONE),
         ("Completed", [], None, RiskLevel.DONE),
-        ("Blocked", [], "On Track", RiskLevel.HIGH),
+        ("Blocked", [], "On Track", RiskLevel.LOW),
         ("Active", ["Blocked"], None, RiskLevel.HIGH),
         ("Off Track", [], None, RiskLevel.HIGH),
         ("At Risk", [], None, RiskLevel.MEDIUM),
     ],
 )
-def test_risk_fallback_preserves_existing_branches(
+def test_shared_risk_assessment_and_fallback_precedence(
     state: str, tags: list[str], assessment: str | None, expected: RiskLevel,
 ) -> None:
     assert infer_ado_risk_level(state, tags, assessment) is expected
 
 
-@pytest.mark.parametrize("assessment", [None, "", "   "])
+@pytest.mark.parametrize(
+    ("state", "tags", "assessment", "expected"),
+    [
+        ("Removed", [], "Off Track", RiskLevel.DONE),
+        ("Active", ["BLOCKER"], None, RiskLevel.HIGH),
+        ("Active", ["high risk"], "Pending", RiskLevel.HIGH),
+        ("Active", ["risk"], None, RiskLevel.MEDIUM),
+        ("Active", ["AT RISK"], "Pending", RiskLevel.MEDIUM),
+        ("Active", ["blocked"], "on_track", RiskLevel.LOW),
+        ("Off Track", [], "At Risk", RiskLevel.MEDIUM),
+        ("Active", ["risk"], "Off Track", RiskLevel.HIGH),
+    ],
+)
+def test_shared_risk_policy_handles_all_hydration_fallbacks(
+    state: str, tags: list[str], assessment: str | None, expected: RiskLevel,
+) -> None:
+    assert infer_ado_risk_level(state, tags, assessment) is expected
+
+
+@pytest.mark.parametrize("assessment", [None, "", "   ", "Pending"])
 def test_missing_risk_propagates_to_children_and_history(assessment: str | None) -> None:
     child, = build_child_work_items([{
         "id": 901,
@@ -66,6 +85,35 @@ def test_missing_risk_propagates_to_children_and_history(assessment: str | None)
     }], {901: item})[901]
     assert point.risk_level is RiskLevel.UNKNOWN
     assert serialize_trajectory_points((point,))[0]["risk_level"] == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("state", "tags", "assessment", "expected"),
+    [
+        ("Active", "Blocked", "On Track", RiskLevel.LOW),
+        ("Active", "Risk", "Off Track", RiskLevel.HIGH),
+        ("Active", "Blocker", "Pending", RiskLevel.HIGH),
+        ("Removed", "", "Off Track", RiskLevel.DONE),
+    ],
+)
+def test_child_and_history_share_risk_precedence(
+    state: str, tags: str, assessment: str, expected: RiskLevel,
+) -> None:
+    child, = build_child_work_items([{
+        "id": 901,
+        "fields": {"System.WorkItemType": "Task", "System.State": state,
+                   "System.Tags": tags, "Custom.RiskAssessment": assessment},
+    }])
+    item = WorkItem(
+        id=901, type="Feature", title="Synthetic", state=state,
+        assigned_to=None, assigned_to_email=None, area_path="", iteration_path="",
+        target_date=None, risk_level=RiskLevel.UNKNOWN, tags=tags.split(";"), custom_fields={},
+    )
+    point, = build_analytics_history([{
+        "WorkItemId": 901, "DateValue": "2026-11-04", "State": state,
+        "TagNames": tags, "Custom_RiskAssessment": assessment,
+    }], {901: item})[901]
+    assert child.risk_level is expected and point.risk_level is expected
 
 
 def test_extract_child_ids_and_build_child_work_items() -> None:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 # Adapted from Artha scripts/kusto_runner.py
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import timedelta
 import logging
@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 from src.adapters.microsoft.kusto_runtime import load_kusto_sdk_types
 from src.core.exceptions import AuthError, QueryError
+from src.core.kusto_result_limits import KustoResultLimits, admit_kusto_rows
 from src.core.models_v2 import KustoQuery
 
 log = logging.getLogger(__name__)
@@ -46,6 +47,7 @@ class KustoClient:
         timeout: int = TIMEOUT_SECONDS,
         max_retries: int = MAX_RETRIES,
         no_safety: bool = False,
+        result_limits: KustoResultLimits | None = None,
     ) -> list[dict[str, Any]]:
         rows, _schema = self.execute_with_schema(
             cluster,
@@ -54,6 +56,7 @@ class KustoClient:
             timeout=timeout,
             max_retries=max_retries,
             no_safety=no_safety,
+            result_limits=result_limits,
         )
         return rows
 
@@ -65,15 +68,24 @@ class KustoClient:
         timeout: int = TIMEOUT_SECONDS,
         max_retries: int = MAX_RETRIES,
         no_safety: bool = False,
+        result_limits: KustoResultLimits | None = None,
     ) -> tuple[list[dict[str, Any]], tuple[KustoColumn, ...]]:
         client = self._get_or_create_client(cluster)
         request_properties = self._build_request_properties(timeout, no_safety=no_safety)
+        if result_limits is not None:
+            request_properties.set_option("truncationmaxrecords", result_limits.max_rows)
+            request_properties.set_option("truncationmaxsize", result_limits.max_bytes)
         last_error: Exception | None = None
 
         for attempt in range(max_retries):
             try:
                 response = client.execute(database, kql, properties=request_properties)
-                return self._rows_from_response(response), self._schema_from_response(response)
+                errors = getattr(response, "errors_count", 0)
+                if type(errors) is not int or errors != 0:
+                    raise QueryError("Kusto query completion contains errors or invalid completion metadata; partial results refused.")
+                return self._rows_from_response(response, result_limits=result_limits), self._schema_from_response(response)
+            except QueryError:
+                raise
             except Exception as error:  # pragma: no cover - exercised through tests with fakes
                 last_error = error
                 if self._is_auth_failure(error):
@@ -114,13 +126,22 @@ class KustoClient:
     def _get_sdk_types(self) -> tuple[Any, Any, Any, Any]:
         return load_kusto_sdk_types()
 
-    def _rows_from_response(self, response: Any) -> list[dict[str, Any]]:
-        rows: list[dict[str, Any]] = []
-        for table in getattr(response, "primary_results", []) or []:
-            columns = [getattr(column, "column_name", str(column)) for column in getattr(table, "columns", [])]
-            for row in table:
-                rows.append(_row_to_dict(columns, row))
-        return rows
+    def _rows_from_response(
+        self, response: Any, *, result_limits: KustoResultLimits | None = None,
+    ) -> list[dict[str, Any]]:
+        tables = getattr(response, "primary_results", []) or []
+        if result_limits is not None and not tables:
+            raise QueryError("Kusto result has no projected table schema.")
+
+        def converted_rows() -> Iterator[dict[str, Any]]:
+            for table in tables:
+                columns = [getattr(column, "column_name", str(column)) for column in getattr(table, "columns", [])]
+                if result_limits is not None and tuple(columns) != result_limits.projected_columns:
+                    raise QueryError("Kusto result schema does not match the declared projected columns.")
+                for row in table:
+                    yield _row_to_dict(columns, row)
+
+        return admit_kusto_rows(converted_rows(), result_limits)
 
     def _schema_from_response(self, response: Any) -> tuple[KustoColumn, ...]:
         for table in getattr(response, "primary_results", []) or []:
@@ -143,6 +164,8 @@ class KustoClient:
 
 
 def build_live_kusto_query_executor() -> Callable[[KustoQuery], list[dict[str, Any]]]:
+    from src.core.metric_binding_validator import kusto_scalar_cardinality_error
+
     client = KustoClient()
 
     def execute(query: KustoQuery) -> list[dict[str, Any]]:
@@ -150,7 +173,16 @@ def build_live_kusto_query_executor() -> Callable[[KustoQuery], list[dict[str, A
         per_query_timeout = getattr(query, "timeout_seconds", None)
         if per_query_timeout is not None:
             kwargs["timeout"] = per_query_timeout
-        return client.execute(query.cluster, query.database, query.kql, **kwargs)
+        if query.result_limits is not None:
+            kwargs["result_limits"] = query.result_limits
+        rows = client.execute(query.cluster, query.database, query.kql, **kwargs)
+        error = kusto_scalar_cardinality_error(
+            query.id, getattr(query, "expected_cardinality", "zero_ok"), len(rows),
+            metric_id=getattr(query, "metric_id", None),
+        )
+        if error is not None:
+            raise QueryError(error)
+        return rows
 
     return execute
 

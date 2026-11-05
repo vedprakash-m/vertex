@@ -38,11 +38,11 @@ _ALLOWED_FIELDS = {"area_path", "tag", "title", "type", "state", "assigned_to", 
 _ALLOWED_OPERATORS = {"contains", "eq", "ne"}
 _SAVED_QUERY_IDS_FIELD = "saved_query_ids"
 _RISK_PRIORITY = {
-    RiskLevel.HIGH: 4,
-    RiskLevel.MEDIUM: 3,
+    RiskLevel.HIGH: 5,
+    RiskLevel.MEDIUM: 4,
+    RiskLevel.UNKNOWN: 3,
     RiskLevel.LOW: 2,
     RiskLevel.DONE: 1,
-    RiskLevel.UNKNOWN: 0,
 }
 
 

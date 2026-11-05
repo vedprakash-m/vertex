@@ -106,6 +106,55 @@ def test_mutation_post_not_retried_on_500() -> None:
     assert len(session.calls) == 1
 
 
+@pytest.mark.parametrize("method", ["POST", "PATCH"])
+@pytest.mark.parametrize("status", [101, 301, 302, 307, 308, 408, 500, 502, 503, 504])
+def test_ambiguous_mutation_response_is_typed_and_never_redirected(method, status) -> None:
+    session = _CountingSession([_FakeResponse(status)])
+    writer = ADOWriter(_FakeADOClientForWriter(session))
+    with pytest.raises(QueryError) as caught:
+        writer._request_json(method, "https://example.invalid/write", json_body={})
+    assert type(caught.value).__name__ == "MutationOutcomeUnknown"
+    assert "mock upstream error" not in str(caught.value)
+    assert "reconcil" in str(caught.value).lower()
+    assert len(session.calls) == 1
+    assert session.calls[0]["allow_redirects"] is False
+
+
+@pytest.mark.parametrize("body", [None, [], "payload", 1, True])
+def test_nonobject_success_body_is_unknown_not_returned(body) -> None:
+    response = _FakeResponse(200)
+    response._body = body
+    session = _CountingSession([response])
+    with pytest.raises(QueryError) as caught:
+        ADOWriter(_FakeADOClientForWriter(session))._request_json("POST", "https://example.invalid/write")
+    assert type(caught.value).__name__ == "MutationOutcomeUnknown"
+    assert len(session.calls) == 1
+
+
+def test_invalid_success_json_is_unknown_without_raw_payload(monkeypatch) -> None:
+    response = _FakeResponse(200)
+
+    def malformed():
+        raise ValueError("private-response-detail")
+
+    monkeypatch.setattr(response, "json", malformed)
+    session = _CountingSession([response])
+    with pytest.raises(QueryError) as caught:
+        ADOWriter(_FakeADOClientForWriter(session))._request_json("POST", "https://example.invalid/write")
+    assert type(caught.value).__name__ == "MutationOutcomeUnknown"
+    assert "private-response-detail" not in str(caught.value)
+    assert len(session.calls) == 1
+
+
+@pytest.mark.parametrize("status", [200, 201, 202, 204])
+def test_valid_mutation_response_preserves_json_and_suppresses_redirects(status) -> None:
+    response = _FakeResponse(status, body={"id": 42, "rev": 7})
+    session = _CountingSession([response])
+    result = ADOWriter(_FakeADOClientForWriter(session))._request_json("POST", "https://example.invalid/write")
+    assert result == {"id": 42, "rev": 7}
+    assert len(session.calls) == 1 and session.calls[0]["allow_redirects"] is False
+
+
 def test_429_sleeps_once_via_retry_after_then_raises_without_retry(monkeypatch) -> None:
     sleep_calls: list[float] = []
     monkeypatch.setattr("src.m365.ado_writer.time.sleep", lambda seconds: sleep_calls.append(seconds))

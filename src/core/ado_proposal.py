@@ -52,6 +52,7 @@ class ADOUpdateEntry:
     # Both default None so pre-ADF-W1.2 manifests upcast cleanly.
     operation_intent_id: str | None = None
     attempted_at: datetime | None = None
+    outbox_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -502,6 +503,7 @@ def proposal_to_document(
                 "remote_rev": entry.remote_rev,
                 "operation_intent_id": entry.operation_intent_id,
                 "attempted_at": entry.attempted_at.isoformat() if entry.attempted_at is not None else None,
+                "outbox_id": entry.outbox_id,
             }
             for entry in proposal.entries
         ],
@@ -509,6 +511,10 @@ def proposal_to_document(
 
 
 def proposal_from_document(document: Mapping[str, Any]) -> ADOUpdateProposal:
+    for entry in document.get("entries") or ():
+        if isinstance(entry, Mapping) and entry.get("outbox_id") is not None:
+            if not isinstance(entry["outbox_id"], str) or not entry["outbox_id"].strip():
+                raise ValueError("Create outbox reference must be a nonempty string when supplied.")
     entries = tuple(
         ADOUpdateEntry(
             work_item_id=int(entry["work_item_id"]),
@@ -523,6 +529,7 @@ def proposal_from_document(document: Mapping[str, Any]) -> ADOUpdateProposal:
             remote_rev=_coerce_int(entry.get("remote_rev")),
             operation_intent_id=_optional_string(entry.get("operation_intent_id")),
             attempted_at=_parse_optional_timestamp(entry.get("attempted_at")),
+            outbox_id=entry.get("outbox_id"),
         )
         for entry in document.get("entries") or ()
         if isinstance(entry, Mapping)

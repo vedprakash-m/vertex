@@ -21,7 +21,9 @@ from typing import Optional, TYPE_CHECKING
 import typer
 
 if TYPE_CHECKING:
+    from src.core.actuation_engine import ActuationPolicy
     from src.core.integration_protocol import ActuationResult
+    from src.core.program_reality import ActuationProposal
 
 app = typer.Typer(help="Governed actuation — review proposals and execute approved ones.")
 
@@ -54,7 +56,11 @@ def actuate_review(
         typer.echo(f"[actuate review] ERROR: could not load reality for {program!r}: {exc}", err=True)
         raise typer.Exit(code=1)
 
-    policy = load_actuation_policy(program, programs_root=resolved_programs_root)
+    try:
+        policy = load_actuation_policy(program, programs_root=resolved_programs_root)
+    except ValueError:
+        typer.echo("[actuate review] BLOCKED: invalid actuation policy; correct it before review.", err=True)
+        raise typer.Exit(code=2)
 
     if not policy.enabled:
         typer.echo(
@@ -67,7 +73,12 @@ def actuate_review(
     proposals = derive_proposals(reality, policy)
 
     # Also include persisted action.proposal facts (human-approved ones not yet executed)
-    persisted = reality.pending_actuations()
+    from src.core.exceptions import ConfigError
+    try:
+        persisted = reality.pending_actuations()
+    except ConfigError:
+        typer.echo("[actuate review] BLOCKED: invalid retained actuation proposal; correct it before review.", err=True)
+        raise typer.Exit(code=2)
 
     if not proposals and not persisted:
         typer.echo(f"[actuate review] No pending proposals for {program!r}.")
@@ -110,7 +121,8 @@ def actuate_execute(
     live execution. Run with --dry-run first.
     """
     from src.core.program_reality import ProgramReality
-    from src.core.actuation_engine import load_actuation_policy
+    from src.core.actuation_engine import actuation_execution_block_reason, load_actuation_policy
+    from src.core.exceptions import ConfigError
 
     resolved_programs_root = programs_root or _get_programs_root()
 
@@ -120,10 +132,18 @@ def actuate_execute(
         typer.echo(f"[actuate execute] ERROR: could not load reality for {program!r}: {exc}", err=True)
         raise typer.Exit(code=1)
 
-    policy = load_actuation_policy(program, programs_root=resolved_programs_root)
+    try:
+        policy = load_actuation_policy(program, programs_root=resolved_programs_root)
+    except ValueError:
+        typer.echo("[actuate execute] BLOCKED: invalid actuation policy; correct it before review.", err=True)
+        raise typer.Exit(code=2)
 
     # Find the proposal
-    all_pending = reality.pending_actuations()
+    try:
+        all_pending = reality.pending_actuations()
+    except ConfigError:
+        typer.echo("[actuate execute] BLOCKED: invalid retained actuation proposal; correct it before review.", err=True)
+        raise typer.Exit(code=2)
     proposal = next((p for p in all_pending if p.proposal_id == proposal_id), None)
 
     if proposal is None:
@@ -134,22 +154,9 @@ def actuate_execute(
         )
         raise typer.Exit(code=1)
 
-    # INV-12: human-approval absolute gate
-    if not proposal.approved:
-        typer.echo(
-            f"[actuate execute] INV-12 BLOCKED: proposal {proposal_id!r} is not approved.\n"
-            "  Human approval is required before execution.",
-            err=True,
-        )
-        raise typer.Exit(code=2)
-
-    # Check gap_reason — blocked proposals cannot be executed
-    if proposal.gap_reason:
-        typer.echo(
-            f"[actuate execute] BLOCKED: proposal {proposal_id!r} has gap_reason={proposal.gap_reason!r}.\n"
-            "  Resolve the blocking condition before executing.",
-            err=True,
-        )
+    block_reason = actuation_execution_block_reason(proposal, policy)
+    if block_reason:
+        typer.echo(f"[actuate execute] BLOCKED: {block_reason}", err=True)
         raise typer.Exit(code=2)
 
     typer.echo(
@@ -181,7 +188,9 @@ def actuate_execute(
         raise typer.Exit(code=3)
 
 
-def _dispatch_execution(proposal: object, reality: object, policy: object) -> "ActuationResult":
+def _dispatch_execution(
+    proposal: "ActuationProposal", reality: object, policy: "ActuationPolicy",
+) -> "ActuationResult":
     """Route proposal to the appropriate adapter and execute.
 
     WI-7.2: AdoAdapter dispatches state_transition, comment, and
@@ -193,12 +202,6 @@ def _dispatch_execution(proposal: object, reality: object, policy: object) -> "A
 
     from src.core.integration_protocol import ActuationResult
 
-    adapter_name = getattr(proposal, "adapter", "")
-    operation = getattr(proposal, "operation", "")
-    payload = dict(getattr(proposal, "payload", {}))
-    payload["entity_ref"] = getattr(proposal, "entity_ref", "")
-    payload["rule_id"] = getattr(proposal, "rule_id", "")
-
     if os.environ.get("VERTEX_ALLOW_DIRECT_ACTUATION", "").strip().lower() not in {"1", "true", "yes"}:
         return ActuationResult(
             success=False,
@@ -208,6 +211,17 @@ def _dispatch_execution(proposal: object, reality: object, policy: object) -> "A
                 "to inspect the effect; live writes must use the durable outbox."
             ),
         )
+
+    from src.core.actuation_engine import actuation_execution_block_reason
+    block_reason = actuation_execution_block_reason(proposal, policy)
+    if block_reason:
+        return ActuationResult(success=False, error_message=block_reason)
+
+    adapter_name = proposal.adapter
+    operation = proposal.operation
+    payload = dict(proposal.payload)
+    payload["entity_ref"] = proposal.entity_ref
+    payload["rule_id"] = proposal.rule_id
 
     if adapter_name == "ado":
         from src.core.ado_actuation_adapter import AdoActuationAdapter

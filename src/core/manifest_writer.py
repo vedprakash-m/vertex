@@ -140,6 +140,10 @@ def build_run_evidence_snapshot(
         effective_family_modes=tuple(sorted(effective_family_modes)),
     )
     capture = replace(capture, sha256=hash_jsonable(_capture_content(capture)))
+    return validate_run_evidence_snapshot(capture)
+
+
+def validate_run_evidence_snapshot(capture: RunEvidenceSnapshot) -> RunEvidenceSnapshot:
     return _decode_run_capture(_to_jsonable(capture))
 
 

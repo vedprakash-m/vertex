@@ -47,6 +47,44 @@ def test_existing_key_rejects_changed_identity(tmp_path: Path, changed: str) -> 
     assert load_entry(db, first.outbox_id) == before
 
 
+@pytest.mark.parametrize("changed_status", ["dispatched", "succeeded", "audited", "failed_retryable"])
+def test_dispatch_refuses_state_changed_after_leasing_before_callback(tmp_path, monkeypatch, changed_status) -> None:
+    import src.core.actuation_outbox as service
+    from src.core._db import open_program_db_with_retry
+    from src.core.ledger import durable_outbox_store as store
+    from src.core.workspace_lease import read_lease_state
+
+    root = tmp_path / "programs"
+    enqueue_create_task_intent(
+        program_id="fixture", idempotency_key="key", operation_intent_id="intent",
+        proposal_id="proposal", payload_json="{}", programs_root=root,
+    )
+    db = outbox_db_path("fixture", programs_root=root)
+    actual_lease_next = service.lease_next
+    changed = []
+
+    def change_after_lease(*args, **kwargs):
+        leased = actual_lease_next(*args, **kwargs)
+        assert leased is not None
+        with open_program_db_with_retry(db, durability="strict") as connection:
+            connection.execute(
+                "UPDATE outbox SET status = ?, remote_response_hash = 'retained' WHERE outbox_id = 'key'",
+                (changed_status,),
+            )
+        changed.append(store.load_entry(db, "key"))
+        return leased
+
+    monkeypatch.setattr(service, "lease_next", change_after_lease)
+    with pytest.raises(store.OutboxError, match="transition"):
+        service.dispatch_leased_create_task(
+            program_id="fixture", idempotency_key="key", owner="worker",
+            dispatch_fn=lambda entry: pytest.fail("Changed state must refuse before callback"),
+            programs_root=root,
+        )
+    assert store.load_entry(db, "key") == changed[0]
+    assert read_lease_state("fixture", mutation_domain=ACTUATION_DISPATCH_DOMAIN, programs_root=root) is None
+
+
 @pytest.mark.parametrize("status", [
     "uncertain_remote_state", "completed", "failed_terminal", "compensation_required",
     "dead_letter", "manually_resolved", "succeeded", "audited", "active", "missing_expiry", "same_owner",

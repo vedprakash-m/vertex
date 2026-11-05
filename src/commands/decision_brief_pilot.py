@@ -32,7 +32,10 @@ from src.ai.decision_brief_advisor import (
 )
 from src.ai.deployment_fallback import FallbackAIClient, resolve_ai_deployments_for_feature
 from src.ai.provider import LLMProvider
-from src.commands.decision_brief import load_pending_decision_brief
+from src.commands.decision_brief import (
+    _preflight_decision_brief_workspace, _resolve_decision_brief_workspace,
+    load_pending_decision_brief,
+)
 from src.core.blind_ab_comparison import (
     ComparisonChoice,
     read_comparisons,
@@ -40,10 +43,9 @@ from src.core.blind_ab_comparison import (
     record_comparison,
     summarize_comparisons,
 )
-from src.core.config_loader import REPORTS_ROOT
 from src.core.decision_brief_engine import DecisionItem
-from src.core.edition_resolver import PROGRAMS_ROOT, load_program
-from src.core.snapshot_store import ARCHIVE_ROOT
+from src.core.exceptions import ConfigError
+from src.core.edition_resolver import load_program
 
 app = typer.Typer(
     help="ADF-W2.9 P5: blind A/B comparison of decision-brief-advisor's "
@@ -73,9 +75,9 @@ def run_context_gateway_comparison(
     issue_number: int | None = None,
     seed: int | None = None,
     deployment_override: str | None = None,
-    reports_root: Path = REPORTS_ROOT,
-    archive_root: Path = ARCHIVE_ROOT,
-    programs_root: Path = PROGRAMS_ROOT,
+    reports_root: Path | None = None,
+    archive_root: Path | None = None,
+    programs_root: Path | None = None,
     client_factory: Callable[..., LLMProvider] | None = None,
     prompt_fn: Callable[[str], str] = typer.prompt,
     echo_fn: Callable[[str], None] = typer.echo,
@@ -90,13 +92,18 @@ def run_context_gateway_comparison(
             "AI execution is disabled (--no-ai / AIMode.DISABLED); the comparison harness needs a live client for both paths."
         )
 
+    resolved_programs_root, _, _ = _resolve_decision_brief_workspace(
+        programs_root, reports_root, archive_root,
+    )
     brief, program_id = load_pending_decision_brief(
         edition_name=edition_name,
         issue_number=issue_number,
         reports_root=reports_root,
         archive_root=archive_root,
+        programs_root=programs_root,
     )
 
+    programs_root = resolved_programs_root
     program = load_program(program_id, programs_root=programs_root)
     if program is None or program.ai is None or not program.ai.enabled:
         raise ContextGatewayPilotError(f"Program {program_id!r} does not have AI enabled in program.yaml.")
@@ -199,9 +206,10 @@ def compare_command(
     ContextCompiler/AISchemaGateway-wired pilot path for every pending item,
     one comparison at a time. Never affects ``decision-brief``'s own
     ``--ai`` output."""
+    _preflight_decision_brief_workspace()
     try:
         result = run_context_gateway_comparison(edition_name=edition, issue_number=issue, seed=seed, deployment_override=deployment)
-    except ContextGatewayPilotError as error:
+    except (ConfigError, typer.BadParameter, ContextGatewayPilotError) as error:
         typer.echo(str(error))
         raise typer.Exit(code=2)
     typer.echo(
@@ -217,7 +225,9 @@ def summary_command(
 ) -> None:
     """Report the cumulative blind-comparison tally recorded so far for
     ``decision_brief_advisor``'s context-gateway pilot."""
-    records = read_comparisons(program, surface=_SURFACE)
+    _preflight_decision_brief_workspace()
+    programs_root, _, _ = _resolve_decision_brief_workspace()
+    records = read_comparisons(program, surface=_SURFACE, programs_root=programs_root)
     summary = summarize_comparisons(records, surface=_SURFACE)
     typer.echo(f"decision_brief_advisor context-gateway pilot: {summary.total} comparison(s) recorded.")
     if summary.total:

@@ -25,6 +25,90 @@ from src.core.ledger.durable_outbox_store import (
 from src.core._db import open_program_db_with_retry
 
 
+def test_receipt_lookup_is_read_only_for_missing_and_legacy_database(tmp_path) -> None:
+    from src.core.ledger import durable_outbox_store as store
+
+    missing = tmp_path / "missing" / "outbox.db"
+    assert store.load_success_receipt(missing, "key") is None
+    assert not missing.parent.exists()
+    db = tmp_path / "outbox.db"
+    enqueue(db, "key", domain="test", correlation_id="intent", payload_json="{}")
+    original = load_entry(db, "key")
+    assert store.load_success_receipt(db, "key") is None
+    assert load_entry(db, "key") == original
+    with open_program_db_with_retry(db, read_only=True) as connection:
+        assert connection.execute("SELECT 1 FROM sqlite_master WHERE name='outbox_success_receipts'").fetchone() is None
+
+
+@pytest.mark.parametrize("fault", ["insert", "update", "update_new_table", "duplicate"])
+def test_success_and_receipt_roll_back_together_on_sqlite_fault(tmp_path, fault) -> None:
+    import sqlite3
+    from src.core.ledger import durable_outbox_store as store
+
+    db = tmp_path / "outbox.db"
+    enqueue(db, "key", domain="test", correlation_id="intent", payload_json="{}")
+    leased = lease_next(db, "test", owner="worker")
+    before = mark_dispatched(db, "key", owner="worker", fencing_token=leased.lease_fencing_token, remote_request_hash="request")
+    with open_program_db_with_retry(db) as connection:
+        if fault != "update_new_table":
+            connection.execute(store._SUCCESS_RECEIPTS_SQL)
+        if fault == "duplicate":
+            connection.execute("INSERT INTO outbox_success_receipts VALUES ('key', 'original')")
+        else:
+            table = "outbox_success_receipts" if fault == "insert" else "outbox"
+            verb = "INSERT" if fault == "insert" else "UPDATE"
+            connection.execute(
+                f"CREATE TRIGGER receipt_fault BEFORE {verb} ON {table} BEGIN SELECT RAISE(ABORT, 'receipt fault'); END",
+            )
+    with pytest.raises(sqlite3.IntegrityError):
+        mark_succeeded(
+            db, "key", owner="worker", fencing_token=leased.lease_fencing_token,
+            remote_response_hash="response", success_receipt_json='{"remote_id":42}',
+        )
+    assert load_entry(db, "key") == before
+    assert store.load_success_receipt(db, "key") == ("original" if fault == "duplicate" else None)
+    if fault == "update_new_table":
+        with open_program_db_with_retry(db, read_only=True) as connection:
+            assert connection.execute("SELECT 1 FROM sqlite_master WHERE name='outbox_success_receipts'").fetchone() is None
+
+
+def test_success_receipt_is_append_once_and_retained_through_completion(tmp_path) -> None:
+    from src.core.ledger import durable_outbox_store as store
+
+    db = tmp_path / "outbox.db"
+    enqueue(db, "key", domain="test", correlation_id="intent", payload_json="{}")
+    leased = lease_next(db, "test", owner="worker")
+    mark_dispatched(db, "key", owner="worker", fencing_token=leased.lease_fencing_token)
+    mark_succeeded(db, "key", owner="worker", fencing_token=leased.lease_fencing_token, success_receipt_json='{"remote_id":42}')
+    assert store.load_success_receipt(db, "absent") is None
+    mark_audited(db, "key", owner="worker", fencing_token=leased.lease_fencing_token)
+    complete = mark_completed(db, "key", owner="worker", fencing_token=leased.lease_fencing_token)
+    with pytest.raises(OutboxError):
+        mark_succeeded(db, "key", owner="worker", fencing_token=leased.lease_fencing_token, success_receipt_json="replacement")
+    assert load_entry(db, "key") == complete
+    assert store.load_success_receipt(db, "key") == '{"remote_id":42}'
+
+
+@pytest.mark.parametrize("invalid", ["missing", "owner", "token", "leased"])
+def test_success_receipt_respects_existing_admission_before_creation(tmp_path, invalid) -> None:
+    from src.core.ledger import durable_outbox_store as store
+
+    db = tmp_path / "outbox.db"
+    enqueue(db, "key", domain="test", correlation_id="intent", payload_json="{}")
+    leased = lease_next(db, "test", owner="worker")
+    if invalid != "leased":
+        mark_dispatched(db, "key", owner="worker", fencing_token=leased.lease_fencing_token)
+    before = load_entry(db, "key")
+    with pytest.raises((OutboxError, LeaseNoLongerCurrent)):
+        mark_succeeded(
+            db, "absent" if invalid == "missing" else "key",
+            owner="stale" if invalid == "owner" else "worker",
+            fencing_token=leased.lease_fencing_token + (invalid == "token"), success_receipt_json="receipt",
+        )
+    assert load_entry(db, "key") == before
+    assert store.load_success_receipt(db, "key") is None
+
+
 def _expired_dispatch_fixture(tmp_path: Path):
     from src.core.workspace_lease import ACTUATION_DISPATCH_DOMAIN, acquire_lease
 
@@ -262,6 +346,96 @@ def test_stale_lease_is_reclaimed_by_another_worker(tmp_path: Path) -> None:
     assert reclaimed is not None
     assert reclaimed.lease_owner == "worker-2"
     assert reclaimed.lease_fencing_token == 2
+
+
+_TRANSITION_PREDECESSORS = {
+    "mark_dispatched": {"leased"},
+    "mark_succeeded": {"dispatched"},
+    "mark_audited": {"succeeded"},
+    "mark_completed": {"audited"},
+    "mark_failed_retryable": {"leased"},
+    "mark_failed_terminal": {"leased", "dispatched"},
+    "mark_uncertain_remote_state": {"dispatched"},
+    "mark_compensation_required": {"succeeded", "audited"},
+    "mark_dead_letter": {"leased", "failed_retryable"},
+}
+
+
+@pytest.mark.parametrize("prior", [
+    "pending", "leased", "dispatched", "succeeded", "audited", "failed_retryable", "unknown",
+])
+@pytest.mark.parametrize("transition", list(_TRANSITION_PREDECESSORS))
+def test_actuation_transition_predecessor_matrix_preserves_refused_rows(tmp_path, prior, transition) -> None:
+    from src.core.ledger import durable_outbox_store as store
+    from src.core.workspace_lease import ACTUATION_DISPATCH_DOMAIN
+
+    db = _db(tmp_path)
+    store.enqueue(db, "matrix", domain=ACTUATION_DISPATCH_DOMAIN, correlation_id="intent", payload_json='{"keep":true}')
+    leased = store.lease_next(db, ACTUATION_DISPATCH_DOMAIN, owner="worker")
+    assert leased is not None
+    with open_program_db_with_retry(db, durability="strict") as connection:
+        connection.execute(
+            "UPDATE outbox SET status = ?, remote_request_hash = 'request', "
+            "remote_response_hash = 'response', failure_reason = 'keep', "
+            "next_attempt_at = ? WHERE outbox_id = 'matrix'",
+            (prior, "2099-01-01T00:00:00Z"),
+        )
+    before = store.load_entry(db, "matrix")
+    kwargs = {}
+    if transition in {
+        "mark_failed_retryable", "mark_failed_terminal", "mark_uncertain_remote_state",
+        "mark_compensation_required", "mark_dead_letter",
+    }:
+        kwargs["reason"] = "new"
+    if transition == "mark_failed_retryable":
+        kwargs["next_attempt_at"] = datetime.now(timezone.utc)
+
+    with pytest.raises(LeaseNoLongerCurrent):
+        getattr(store, transition)(db, "matrix", owner="other", fencing_token=leased.lease_fencing_token, **kwargs)
+    assert store.load_entry(db, "matrix") == before
+    if prior in _TRANSITION_PREDECESSORS[transition]:
+        result = getattr(store, transition)(
+            db, "matrix", owner="worker", fencing_token=leased.lease_fencing_token, **kwargs,
+        )
+        assert result.status == transition.removeprefix("mark_")
+        assert result.payload_json == before.payload_json
+        assert result.attempt_count == before.attempt_count
+        assert result.lease_expires_at == before.lease_expires_at
+    else:
+        with pytest.raises(OutboxError, match="transition"):
+            getattr(store, transition)(
+                db, "matrix", owner="worker", fencing_token=leased.lease_fencing_token, **kwargs,
+            )
+        assert store.load_entry(db, "matrix") == before
+
+
+@pytest.mark.parametrize("transition", ["mark_dispatched", "mark_succeeded", "mark_audited", "mark_failed_retryable"])
+def test_nonterminal_transition_cannot_repeat_itself(tmp_path, transition) -> None:
+    from src.core.ledger import durable_outbox_store as store
+
+    db = _db(tmp_path)
+    store.enqueue(db, "repeat", domain="generic", correlation_id="intent", payload_json="{}")
+    leased = store.lease_next(db, "generic", owner="worker")
+    assert leased is not None
+    if transition in {"mark_succeeded", "mark_audited"}:
+        store.mark_dispatched(db, "repeat", owner="worker", fencing_token=leased.lease_fencing_token)
+    if transition == "mark_audited":
+        store.mark_succeeded(db, "repeat", owner="worker", fencing_token=leased.lease_fencing_token)
+    kwargs = {"reason": "retry", "next_attempt_at": datetime.now(timezone.utc)} if transition == "mark_failed_retryable" else {}
+    first = getattr(store, transition)(db, "repeat", owner="worker", fencing_token=leased.lease_fencing_token, **kwargs)
+    with pytest.raises(OutboxError, match="transition"):
+        getattr(store, transition)(db, "repeat", owner="worker", fencing_token=leased.lease_fencing_token, **kwargs)
+    assert store.load_entry(db, "repeat") == first
+
+
+def test_local_delivery_retains_leased_completion(tmp_path) -> None:
+    db = _db(tmp_path)
+    enqueue(db, "local", domain="registry-program", correlation_id="transaction", payload_json="{}")
+    leased = lease_next(db, "registry-program", owner="worker")
+    assert leased is not None
+    completed = mark_completed(db, "local", owner="worker", fencing_token=leased.lease_fencing_token)
+    assert completed.status == "completed"
+    assert lease_next(db, "registry-program", owner="worker") is None
 
 
 def test_happy_path_lifecycle(tmp_path: Path) -> None:

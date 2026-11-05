@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from itertools import product
 
 import pytest
 
@@ -194,6 +195,32 @@ def test_build_scorecard_aggregates_signals_and_carries_prior_risk() -> None:
     assert packet.derived_risk == RiskLevel.HIGH
     assert packet.author_risk is None
     assert packet.item_links[0].endswith("/1")
+
+
+@pytest.mark.parametrize(
+    "levels",
+    [(), (RiskLevel.UNKNOWN,), (RiskLevel.LOW,), (RiskLevel.DONE,)]
+    + list(product((RiskLevel.HIGH, RiskLevel.MEDIUM, RiskLevel.UNKNOWN, RiskLevel.LOW, RiskLevel.DONE), repeat=2))
+    + [(RiskLevel.LOW, RiskLevel.DONE, RiskLevel.UNKNOWN),
+       (RiskLevel.UNKNOWN, RiskLevel.MEDIUM, RiskLevel.HIGH)],
+)
+def test_scorecard_aggregation_preserves_unassessed_peers(levels: tuple[RiskLevel, ...]) -> None:
+    items = tuple(
+        _build_work_item(index + 1, item_type="Feature", area_path="One\\Deployment", tags=[], risk_level=level)
+        for index, level in enumerate(levels)
+    )
+    packets = build_scorecard(items, (ScorecardDimensionSettings(name="Synthetic", description="", ado_filter=""),), None)
+    packet = packets[0]
+    expected = next(
+        (level for level in (RiskLevel.HIGH, RiskLevel.MEDIUM, RiskLevel.UNKNOWN, RiskLevel.LOW, RiskLevel.DONE)
+         if level in levels),
+        RiskLevel.UNKNOWN,
+    )
+    assert packet.derived_risk == expected
+    assert packet.total_items == len(levels)
+    assert packet.item_ids == tuple(item.id for item in items)
+    assert sum(packet.items_by_risk.values()) == len(levels)
+    assert packet.items_by_risk.get("unknown", 0) == levels.count(RiskLevel.UNKNOWN)
 
 
 @pytest.mark.parametrize(

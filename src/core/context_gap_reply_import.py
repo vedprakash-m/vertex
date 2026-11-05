@@ -15,6 +15,7 @@ machinery. This module is a small, standalone stdlib `email` parser.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from email import message_from_bytes
 from email.message import Message
 from email.utils import parseaddr
@@ -31,8 +32,17 @@ from src.core.edition_resolver import PROGRAMS_ROOT, get_nudge_paths
 from src.core.context_gap_store import ContextGapRecord, _gap_path, rank_context_gaps
 from src.core.jsonl_utils import parse_jsonl_line
 from src.core.manual_registry_diff import read_registry_baseline
-from src.core.ncfl_models import ContextUpdateProposal, EXTRACTION_METHOD_CONFIDENCE, NCFL_EXTRACTOR_VERSION
-from src.core.ncfl_proposal_store import insert_proposal, load_proposals
+from src.core.config_loader import load_review_config
+from src.core.exceptions import ConfigError
+from src.core.ncfl_models import (
+    ContextUpdateProposal, DecisionRecord, EXTRACTION_METHOD_CONFIDENCE, NCFL_EXTRACTOR_VERSION,
+    ReplyOriginVerification,
+)
+from src.core.ncfl_proposal_store import (
+    _queue_lock, _save_proposals, insert_proposal, load_proposals,
+    reply_origin_source_error, reply_origin_verification_error,
+)
+from src.core.operator_identity import capture_operator_identity
 from src.core.rev.normalizer import normalize_html_to_text
 from src.core.workspace_paths import is_bare_identifier
 
@@ -168,6 +178,7 @@ def import_context_gap_reply(
             proposal_id=proposal_id, program_id=program_id, edition_id=edition_id, issue_number=issue_number,
             source_type="context_gap_reply", extracted_at=datetime.now(timezone.utc),
             extractor_version=NCFL_EXTRACTOR_VERSION, source_artifact=str(source), source_field="body",
+            source_sha256=sha256(raw).hexdigest(),
             extraction_method="field_update_email", target_store="workstream_registry",
             target_key=gap.lane, target_field=target_field, source_value=answer,
             current_value=current, current_value_hash=baseline,
@@ -182,6 +193,87 @@ def import_context_gap_reply(
         if isinstance(error, ContextGapReplyImportError):
             raise
         raise ContextGapReplyImportError(f"Reply intake unavailable ({type(error).__name__}).") from error
+
+
+def verify_context_reply_origin(
+    *, program_id: str, issue_number: int, proposal_id: str, actor: str, reason: str,
+    programs_root: Path, dry_run: bool = False,
+) -> ContextUpdateProposal:
+    """Record revision-bound origin verification, never change approval."""
+    if not is_bare_identifier(program_id) or issue_number < 1 or not reason.strip():
+        raise ContextGapReplyImportError("Select a program, positive issue and nonempty origin-verification reason.")
+    program = (programs_root / program_id).resolve()
+    if not program.is_relative_to(programs_root.resolve()):
+        raise ContextGapReplyImportError("Program path leaves the selected root.")
+
+    def prepare(expected_digest: str | None = None) -> tuple[ContextUpdateProposal, tuple[ContextUpdateProposal, ...]]:
+        queue = program / "context_proposals"
+        for path in (*queue.glob("issue_*.proposals.json"), queue / "_queue.lock", queue / "_conflict_index.json"):
+            _require_program_path(path, program)
+        proposals = load_proposals(program_id, programs_root=programs_root)
+        if any(proposal.program_id != program_id for proposal in proposals):
+            raise ContextGapReplyImportError("Proposal queue contains a foreign program.")
+        selected = [p for p in proposals if p.proposal_id == proposal_id and p.issue_number == issue_number]
+        if len(selected) != 1 or selected[0].status != "pending":
+            raise ContextGapReplyImportError("Select one pending reply in the chosen program and issue.")
+        proposal = selected[0]
+        digest = proposal.approval_payload_digest()
+        if expected_digest is not None and digest != expected_digest or any(
+            record.origin_verification is not None and record.origin_verification.proposal_digest != digest
+            for record in proposal.decision_history
+        ):
+            raise ContextGapReplyImportError("Reply payload changed; origin verification cannot renew it.")
+        source_error = reply_origin_source_error(proposal, programs_root=programs_root)
+        if source_error is not None:
+            raise ContextGapReplyImportError(source_error)
+        _, current_hash = read_registry_baseline(
+            program_id, proposal.target_key, proposal.target_field, programs_root=programs_root,
+        )
+        if current_hash != proposal.current_value_hash:
+            raise ContextGapReplyImportError("Reply target changed; origin verification cannot renew its baseline.")
+        policy = program / "review.yaml"
+        _require_program_path(policy, program)
+        settings = load_review_config(policy)
+        identity = capture_operator_identity(actor, require_os_principal=True)
+        if identity.principal not in settings.reply_origin_verifier_principals:
+            raise ContextGapReplyImportError("OS principal is not an authorized reply-origin verifier in review.yaml.")
+        if proposal.verified_reply_origin is not None and reply_origin_verification_error(
+            proposal, programs_root=programs_root,
+        ) is None:
+            return proposal, proposals
+        assert identity.principal is not None and identity.machine is not None and identity.session is not None
+        assert proposal.source_sha256 is not None
+        verification = ReplyOriginVerification(
+            identity.principal, identity.machine, identity.session, proposal.source_sha256, digest, reason.strip(),
+        )
+        return replace(proposal, decision_history=proposal.decision_history + (
+            DecisionRecord(
+                datetime.now(timezone.utc), identity.principal, "pending", "pending", reason.strip(),
+                origin_verification=verification,
+            ),
+        )), proposals
+
+    try:
+        preview, proposals = prepare()
+        if dry_run or preview in proposals:
+            return preview
+        with _queue_lock(program_id, programs_root):
+            verified, proposals = prepare(preview.approval_payload_digest())
+            if verified not in proposals:
+                _save_proposals(
+                    program_id, issue_number,
+                    tuple(verified if p.proposal_id == proposal_id else p
+                          for p in proposals if p.issue_number == issue_number),
+                    programs_root=programs_root,
+                )
+            return verified
+    except (OSError, ValueError, KeyError, TypeError, ConfigError, yaml.YAMLError) as error:
+        if isinstance(error, ContextGapReplyImportError):
+            raise
+        raise ContextGapReplyImportError(
+            f"Origin verification unavailable ({type(error).__name__}); "
+            "check review.yaml, the original source and proposal queue before retrying. No approval recorded.",
+        ) from error
 
 
 def replies_dir(program_id: str, *, programs_root: Path = PROGRAMS_ROOT) -> Path:
@@ -287,5 +379,6 @@ def _isolate_new_content(body_text: str) -> str:
 
 __all__ = [
     "ContextGapReplyImportError", "import_context_gap_reply",
+    "verify_context_reply_origin",
     "list_pending_replies", "parse_reply_eml", "replies_dir",
 ]

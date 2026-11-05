@@ -5,6 +5,7 @@ from __future__ import annotations
 from email.message import EmailMessage
 from pathlib import Path
 import json
+from hashlib import sha256
 from datetime import datetime, timezone
 from dataclasses import replace
 
@@ -12,6 +13,400 @@ import pytest
 
 from src.core.context_gap_reply_import import list_pending_replies, parse_reply_eml, replies_dir
 from src.core.eml_writer import write_eml_atomic
+
+
+def _origin_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from src.core.context_gap_reply_import import import_context_gap_reply
+
+    programs, arguments, packet = _bound_intake_workspace(tmp_path)
+    monkeypatch.setattr("src.core.operator_identity._os_principal", lambda: "synthetic-reviewer")
+    monkeypatch.setattr("src.core.operator_identity.platform.node", lambda: "synthetic-host")
+    monkeypatch.delenv("VERTEX_OPERATOR_PRINCIPAL", raising=False)
+    monkeypatch.delenv("VERTEX_OPERATOR_MACHINE", raising=False)
+    (programs / "sample" / "review.yaml").write_text(
+        "reply_origin_verifier_principals: [synthetic-reviewer]\n", encoding="utf-8",
+    )
+    proposal = import_context_gap_reply(**arguments)
+    return programs, arguments, packet, proposal
+
+
+def test_reply_origin_verification_is_revision_bound_pending_and_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.core.context_gap_reply_import import verify_context_reply_origin
+    from src.core.ncfl_proposal_store import load_proposals, update_proposal_status
+    from src.core.context_proposal_review import load_pending_context_proposal_rows
+    from src.core.manual_registry_diff import render_workstream_registry_manual_diff
+
+    programs, arguments, _, proposal = _origin_workspace(tmp_path, monkeypatch)
+    assert proposal.source_sha256 == sha256(arguments["source"].read_bytes()).hexdigest()
+    options = dict(
+        program_id="sample", issue_number=1, proposal_id=proposal.proposal_id,
+        actor="display-label", reason="Origin checked against the original conversation.",
+        programs_root=programs,
+    )
+    verified = verify_context_reply_origin(**options)
+    retained, = load_proposals("sample", programs_root=programs)
+    assert retained == verified
+    assert verified.status == "pending" and not verified.batch_eligible
+    assert verified.applied_at is None
+    assert verified.current_value_hash == proposal.current_value_hash
+    assert verified.approval_payload_digest() == proposal.approval_payload_digest()
+    assert verified.verified_reply_origin is not None
+    assert verified.verified_reply_origin.principal == "synthetic-reviewer"
+    assert verified.verified_reply_origin.proposal_digest == proposal.approval_payload_digest()
+    assert verified.decision_history[-1].from_status == verified.decision_history[-1].to_status == "pending"
+    assert verify_context_reply_origin(**options) == verified
+    row, = load_pending_context_proposal_rows("sample", programs_root=programs)
+    assert "origin verified by synthetic-reviewer" in row.evidence
+    assert "not change approval" in row.evidence
+    assert "origin verified by synthetic-reviewer" in render_workstream_registry_manual_diff(
+        verified, programs_root=programs,
+    ).text
+    accepted = update_proposal_status(
+        "sample", proposal_id=proposal.proposal_id, issue_number=1, new_status="accepted",
+        actor="separate-approver", programs_root=programs,
+    )
+    assert accepted.acceptance_binding_error() is None
+    assert len(accepted.decision_history) == 2
+
+
+@pytest.mark.parametrize("problem", [
+    "unauthorized", "missing-policy", "malformed-policy", "empty-reason",
+    "source-drift", "legacy-hash", "foreign-program", "stale-target", "spoofed-principal",
+    "spoofed-host", "missing-principal", "missing-host", "wrong-issue",
+    "foreign-queue", "program-escape", "unsupported-kind", "missing-source", "foreign-source", "non-eml",
+])
+def test_reply_origin_invalid_inputs_do_not_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, problem: str,
+) -> None:
+    from src.core.context_gap_reply_import import ContextGapReplyImportError, verify_context_reply_origin
+    from src.core.ncfl_proposal_store import get_proposals_path
+
+    programs, arguments, _, proposal = _origin_workspace(tmp_path, monkeypatch)
+    policy = programs / "sample" / "review.yaml"
+    reason = "Origin checked against the original conversation."
+    program_id = "sample"
+    issue_number = 1
+    if problem == "unauthorized":
+        policy.write_text("reply_origin_verifier_principals: [different-reviewer]\n")
+    elif problem == "missing-policy":
+        policy.unlink()
+    elif problem == "malformed-policy":
+        policy.write_text("reply_origin_verifier_principals: true\n")
+    elif problem == "empty-reason":
+        reason = " "
+    elif problem == "source-drift":
+        arguments["source"].write_bytes(arguments["source"].read_bytes() + b"\nchanged")
+    elif problem == "legacy-hash":
+        path = get_proposals_path("sample", 1, programs_root=programs)
+        raw = json.loads(path.read_text())
+        raw[0].pop("source_sha256")
+        path.write_text(json.dumps(raw))
+    elif problem == "foreign-program":
+        program_id = "other"
+    elif problem == "stale-target":
+        (programs / "sample" / "workstream_registry.yaml").write_text(
+            "workstreams:\n- id: deployment\n  deep_context: {why: Changed}\n",
+        )
+    elif problem == "spoofed-principal":
+        monkeypatch.setenv("VERTEX_OPERATOR_PRINCIPAL", "different-reviewer")
+        policy.write_text("reply_origin_verifier_principals: [different-reviewer]\n")
+    elif problem == "spoofed-host":
+        monkeypatch.setenv("VERTEX_OPERATOR_MACHINE", "different-host")
+    elif problem == "missing-principal":
+        monkeypatch.setattr("src.core.operator_identity._os_principal", lambda: "")
+    elif problem == "missing-host":
+        monkeypatch.setattr("src.core.operator_identity.platform.node", lambda: "")
+    elif problem == "wrong-issue":
+        issue_number = 2
+    elif problem == "program-escape":
+        original = Path.resolve
+        selected = programs / "sample"
+        monkeypatch.setattr(Path, "resolve", lambda path, *args, **kwargs: (
+            tmp_path / "outside" if path == selected else original(path, *args, **kwargs)
+        ))
+    elif problem == "missing-source":
+        arguments["source"].unlink()
+    elif problem in {"foreign-queue", "unsupported-kind", "foreign-source", "non-eml"}:
+        path = get_proposals_path("sample", 1, programs_root=programs)
+        raw = json.loads(path.read_text())
+        if problem == "foreign-queue":
+            raw[0]["program_id"] = "other"
+        elif problem == "unsupported-kind":
+            raw[0]["source_type"] = "field_update_email"
+        else:
+            source = (programs / "other" / "reply.eml"
+                      if problem == "foreign-source" else tmp_path / "reply.txt")
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_bytes(arguments["source"].read_bytes())
+            raw[0]["source_artifact"] = str(source)
+        path.write_text(json.dumps(raw))
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    with pytest.raises(ContextGapReplyImportError):
+        verify_context_reply_origin(
+            program_id=program_id, issue_number=issue_number, proposal_id=proposal.proposal_id,
+            actor="synthetic-reviewer", reason=reason, programs_root=programs,
+        )
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+
+@pytest.mark.parametrize("problem", [
+    "unverified", "changed-payload", "revoked", "source-drift", "policy-escape",
+    "policy-missing", "policy-malformed",
+])
+def test_reply_acceptance_requires_current_origin_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, problem: str,
+) -> None:
+    from src.core.context_gap_reply_import import verify_context_reply_origin
+    from src.core.ncfl_proposal_store import get_proposals_path, update_proposal_status
+
+    programs, arguments, _, proposal = _origin_workspace(tmp_path, monkeypatch)
+    if problem != "unverified":
+        verify_context_reply_origin(
+            program_id="sample", issue_number=1, proposal_id=proposal.proposal_id,
+            actor="operator", reason="Origin checked.", programs_root=programs,
+        )
+    if problem == "changed-payload":
+        path = get_proposals_path("sample", 1, programs_root=programs)
+        payload = json.loads(path.read_text())
+        payload[0]["source_value"] = "Changed proposed answer."
+        path.write_text(json.dumps(payload))
+    elif problem == "revoked":
+        (programs / "sample" / "review.yaml").write_text("reply_origin_verifier_principals: []\n")
+    elif problem == "source-drift":
+        arguments["source"].write_bytes(arguments["source"].read_bytes() + b"\nchanged")
+    elif problem == "policy-escape":
+        original = Path.resolve
+        policy = programs / "sample" / "review.yaml"
+        monkeypatch.setattr(Path, "resolve", lambda path, *args, **kwargs: (
+            tmp_path / "outside.yaml" if path == policy else original(path, *args, **kwargs)
+        ))
+    elif problem == "policy-missing":
+        (programs / "sample" / "review.yaml").unlink()
+    elif problem == "policy-malformed":
+        (programs / "sample" / "review.yaml").write_text("reply_origin_verifier_principals: true\n")
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    with pytest.raises(ValueError, match="origin|Origin"):
+        update_proposal_status(
+            "sample", proposal_id=proposal.proposal_id, issue_number=1,
+            new_status="accepted", actor="separate-approver", programs_root=programs,
+        )
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+
+def test_reply_origin_dry_run_preserves_queue_context_and_gap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.core.context_gap_reply_import import verify_context_reply_origin
+    programs, _, _, proposal = _origin_workspace(tmp_path, monkeypatch)
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    preview = verify_context_reply_origin(
+        program_id="sample", issue_number=1, proposal_id=proposal.proposal_id,
+        actor="operator", reason="Origin checked.", programs_root=programs, dry_run=True,
+    )
+    assert preview.verified_reply_origin is not None and preview.status == "pending"
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+
+def test_origin_record_serialization_preserves_legacy_approval_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.core.ncfl_models import ContextUpdateProposal
+    from src.core.context_gap_reply_import import verify_context_reply_origin
+
+    programs, _, _, proposal = _origin_workspace(tmp_path, monkeypatch)
+    legacy = proposal.to_json()
+    legacy.pop("source_sha256")
+    restored = ContextUpdateProposal.from_json(legacy)
+    assert restored.to_json() == legacy
+    assert restored.approval_payload_digest() == sha256(
+        json.dumps({key: value for key, value in legacy.items() if key not in {
+            "status", "superseded_by", "decision_history", "rationale",
+            "applied_at", "applied_by", "dismissed_at", "dismissed_by",
+        }}, sort_keys=True).encode("utf-8"),
+    ).hexdigest()
+    verified = verify_context_reply_origin(
+        program_id="sample", issue_number=1, proposal_id=proposal.proposal_id,
+        actor="operator", reason="Origin checked.", programs_root=programs,
+    )
+    assert ContextUpdateProposal.from_json(verified.to_json()) == verified
+    assert verified.approval_payload_digest() == proposal.approval_payload_digest()
+
+
+def test_origin_verification_cannot_renew_a_changed_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.core.context_gap_reply_import import ContextGapReplyImportError, verify_context_reply_origin
+    from src.core.ncfl_proposal_store import get_proposals_path
+
+    programs, _, _, proposal = _origin_workspace(tmp_path, monkeypatch)
+    options = dict(
+        program_id="sample", issue_number=1, proposal_id=proposal.proposal_id,
+        actor="operator", reason="Origin checked.", programs_root=programs,
+    )
+    verify_context_reply_origin(**options)
+    path = get_proposals_path("sample", 1, programs_root=programs)
+    payload = json.loads(path.read_text())
+    payload[0]["source_value"] = "Changed proposed answer."
+    path.write_text(json.dumps(payload))
+    before = path.read_bytes()
+    with pytest.raises(ContextGapReplyImportError, match="payload changed"):
+        verify_context_reply_origin(**options)
+    assert path.read_bytes() == before
+
+
+def test_revoked_verifier_is_not_presented_as_current_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.core.context_gap_reply_import import verify_context_reply_origin
+    from src.core.context_proposal_review import load_pending_context_proposal_rows
+    from src.core.manual_registry_diff import render_workstream_registry_manual_diff
+
+    programs, _, _, proposal = _origin_workspace(tmp_path, monkeypatch)
+    verified = verify_context_reply_origin(
+        program_id="sample", issue_number=1, proposal_id=proposal.proposal_id,
+        actor="operator", reason="Origin checked.", programs_root=programs,
+    )
+    (programs / "sample" / "review.yaml").write_text("reply_origin_verifier_principals: []\n")
+    row, = load_pending_context_proposal_rows("sample", programs_root=programs)
+    assert "origin unverified" in row.evidence and "revoked" in row.evidence
+    assert "origin unverified" in render_workstream_registry_manual_diff(verified, programs_root=programs).text
+
+
+@pytest.mark.parametrize("outcome", ["verified", "unavailable", "native-failure"])
+def test_strict_identity_uses_native_security_context_not_username_environment(
+    monkeypatch: pytest.MonkeyPatch, outcome: str,
+) -> None:
+    import ctypes
+    from unittest.mock import Mock
+    from src.core import operator_identity
+
+    def get_name(format_code, buffer, size):
+        assert format_code == 2
+        if buffer is None:
+            size._obj.value = 0 if outcome == "unavailable" else 64
+            return False
+        buffer.value = "SYNTHETIC\\native-reviewer"
+        return outcome != "native-failure"
+
+    monkeypatch.setattr(operator_identity.sys, "platform", "win32")
+    monkeypatch.setattr(ctypes, "WinDLL", Mock(return_value=Mock(GetUserNameExW=Mock(side_effect=get_name))), raising=False)
+    monkeypatch.setenv("USERNAME", "different-reviewer")
+    monkeypatch.setenv("USER", "different-reviewer")
+    monkeypatch.delenv("VERTEX_OPERATOR_PRINCIPAL", raising=False)
+    monkeypatch.delenv("VERTEX_OPERATOR_MACHINE", raising=False)
+    if outcome != "verified":
+        with pytest.raises(OSError, match="OS principal"):
+            operator_identity.capture_operator_identity("actor-label", require_os_principal=True)
+    else:
+        identity = operator_identity.capture_operator_identity("actor-label", require_os_principal=True)
+        assert identity.actor == "actor-label" and identity.principal == "SYNTHETIC\\native-reviewer"
+
+
+def test_origin_verification_rechecks_payload_under_existing_queue_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from contextlib import contextmanager
+    from src.core import context_gap_reply_import
+    from src.core.ncfl_proposal_store import get_proposals_path
+
+    programs, _, _, proposal = _origin_workspace(tmp_path, monkeypatch)
+    path = get_proposals_path("sample", 1, programs_root=programs)
+    changed = None
+
+    @contextmanager
+    def competing_write(*args):
+        nonlocal changed
+        raw = json.loads(path.read_text())
+        raw[0]["source_value"] = "Concurrent different proposal."
+        changed = json.dumps(raw).encode("utf-8")
+        path.write_bytes(changed)
+        yield
+
+    monkeypatch.setattr(context_gap_reply_import, "_queue_lock", competing_write)
+    with pytest.raises(context_gap_reply_import.ContextGapReplyImportError, match="payload changed"):
+        context_gap_reply_import.verify_context_reply_origin(
+            program_id="sample", issue_number=1, proposal_id=proposal.proposal_id,
+            actor="operator", reason="Origin checked.", programs_root=programs,
+        )
+    assert path.read_bytes() == changed
+
+
+def test_origin_acceptance_rechecks_revocation_under_existing_queue_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from contextlib import contextmanager
+    from src.core import ncfl_proposal_store
+    from src.core.context_gap_reply_import import verify_context_reply_origin
+
+    programs, _, _, proposal = _origin_workspace(tmp_path, monkeypatch)
+    verify_context_reply_origin(
+        program_id="sample", issue_number=1, proposal_id=proposal.proposal_id,
+        actor="operator", reason="Origin checked.", programs_root=programs,
+    )
+    queue = ncfl_proposal_store.get_proposals_path("sample", 1, programs_root=programs)
+    before = queue.read_bytes()
+
+    @contextmanager
+    def revoke(*args):
+        (programs / "sample" / "review.yaml").write_text("reply_origin_verifier_principals: []\n")
+        yield
+
+    monkeypatch.setattr(ncfl_proposal_store, "_queue_lock", revoke)
+    with pytest.raises(ValueError, match="revoked"):
+        ncfl_proposal_store.update_proposal_status(
+            "sample", issue_number=1, proposal_id=proposal.proposal_id, new_status="accepted",
+            actor="separate-approver", programs_root=programs,
+        )
+    assert queue.read_bytes() == before
+
+
+def test_reply_acceptance_refuses_foreign_embedded_program(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.core.ncfl_proposal_store import get_proposals_path, update_proposal_status
+
+    programs, _, _, proposal = _origin_workspace(tmp_path, monkeypatch)
+    path = get_proposals_path("sample", 1, programs_root=programs)
+    raw = json.loads(path.read_text())
+    raw[0]["program_id"] = "other"
+    path.write_text(json.dumps(raw))
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="foreign program"):
+        update_proposal_status(
+            "sample", issue_number=1, proposal_id=proposal.proposal_id, new_status="accepted",
+            actor="approver", programs_root=programs,
+        )
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("value", ["", None, False, [], {}])
+def test_origin_attestation_values_are_not_coerced(value) -> None:
+    from src.core.ncfl_models import ReplyOriginVerification
+
+    payload = dict(
+        principal="synthetic-reviewer", machine="synthetic-host", session="synthetic-session",
+        source_sha256="1" * 64, proposal_digest="2" * 64, reason=value,
+    )
+    with pytest.raises(ValueError, match="Invalid reply origin verification"):
+        ReplyOriginVerification.from_json(payload)
+
+
+def test_posix_origin_identity_uses_effective_uid(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+    from types import SimpleNamespace
+    from src.core import operator_identity
+
+    def lookup(uid):
+        assert uid == 12345
+        return SimpleNamespace(pw_name="synthetic-effective-user")
+
+    monkeypatch.setattr(operator_identity.sys, "platform", "linux")
+    monkeypatch.setattr(operator_identity.os, "geteuid", lambda: 12345, raising=False)
+    monkeypatch.setitem(sys.modules, "pwd", SimpleNamespace(getpwuid=lookup))
+    monkeypatch.setenv("USER", "different-reviewer")
+    assert operator_identity._os_principal() == "synthetic-effective-user"
 
 
 @pytest.mark.parametrize("change", ["stale", "tampered", "fingerprint", "valid"])

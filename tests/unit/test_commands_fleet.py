@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 from dataclasses import replace
+from itertools import product
 import json
 import shutil
 import sqlite3
@@ -23,7 +24,7 @@ from src.core.exceptions import ConfigError
 from src.core.gather_state_store import write_gather_state
 from src.core.issue_projection import IssueProjection
 from src.core.journal import append_review_decision, append_signal
-from src.core.models import Confidence
+from src.core.models import Confidence, RiskLevel
 from src.core.models_v2 import ActionItem, ActionSourceType, ActionStatus, ClaimEntry, DecisionAsk, Dependency, DependencyStatus, DependencyType, IntegrationError, RiskCategory, RiskEntry, RiskImpact, RiskProbability, RiskStatus, Signal, SignalReviewDecision
 from src.core.risk_register_engine import save_risk_register
 from src.core.sqlite_stores import SQLiteSignalStore
@@ -31,6 +32,114 @@ from src.core.sqlite_stores import SQLiteSignalStore
 
 runner = CliRunner()
 FROZEN_NOW = datetime(2026, 5, 10, 18, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize(("prior", "current"), list(product(
+    [None, RiskLevel.UNKNOWN, RiskLevel.DONE, RiskLevel.LOW, RiskLevel.MEDIUM, RiskLevel.HIGH, RiskLevel.BLOCKED],
+    [RiskLevel.UNKNOWN, RiskLevel.DONE, RiskLevel.LOW, RiskLevel.MEDIUM, RiskLevel.HIGH, RiskLevel.BLOCKED],
+)))
+def test_fleet_aggregate_trend_requires_known_assessments(prior, current):
+    ranks = {RiskLevel.DONE: 1, RiskLevel.LOW: 2, RiskLevel.MEDIUM: 3, RiskLevel.HIGH: 4, RiskLevel.BLOCKED: 5}
+    expected = (
+        "unknown" if prior is None or RiskLevel.UNKNOWN in {prior, current} else
+        "improving" if ranks[current] < ranks[prior] else
+        "worsening" if ranks[current] > ranks[prior] else "stable"
+    )
+    assert fleet_module._aggregate_trend(current=current, prior=prior) == expected
+
+
+@pytest.mark.parametrize(
+    ("current", "prior", "risk", "trend", "incomplete"),
+    [
+        (["low", "unknown"], ["high"], "unknown", "unknown", True),
+        (["done", "unknown"], ["low"], "unknown", "unknown", True),
+        (["medium", "unknown"], ["high"], "medium", "unknown", True),
+        (["high", "unknown"], ["medium"], "high", "unknown", True),
+        (["blocked", "unknown"], ["high"], "blocked", "unknown", True),
+        (["low"], ["high", "unknown"], "low", "unknown", True),
+        (["high"], ["medium", "unknown"], "high", "unknown", True),
+        (["low", ""], ["high"], "unknown", "unknown", True),
+        (["done", None], ["low"], "unknown", "unknown", True),
+        (["low"], ["high", ""], "low", "unknown", True),
+        ([], ["high"], "unknown", "unknown", True),
+        (["high"], [], "high", "unknown", False),
+        (["low"], ["high"], "low", "improving", False),
+        (["high"], ["medium"], "high", "worsening", False),
+        (["blocked"], ["high"], "blocked", "worsening", False),
+        (["medium"], ["medium"], "medium", "stable", False),
+    ],
+)
+def test_fleet_rollup_preserves_assessment_gaps_in_all_formats(
+    tmp_path: Path, current, prior, risk, trend, incomplete,
+) -> None:
+    root = tmp_path / "programs"
+    entries = [
+        {"issue_number": issue, "scorecard_name": "Synthetic", "dimension": f"Lane-{index}", "risk": value}
+        for issue, values in ((1, prior), (2, current)) for index, value in enumerate(values)
+    ]
+    for entry in entries:
+        if entry["risk"] is None:
+            del entry["risk"]
+    _write_program(
+        root / "synthetic", name="Synthetic", current_phase="Test",
+        archive_payloads={"synthetic_weekly": {
+            "latest_issue": 2, "generated_at": "2026-05-08T18:00:00+00:00",
+            "scorecards": entries, "top_items": (),
+        }}, dependencies_text=None,
+    )
+    report = build_fleet_report(programs_root=root, as_of=FROZEN_NOW)
+    program, = report.programs
+    assert program.overall_risk.value == risk
+    assert program.trend == trend
+    assert ("Assessment coverage incomplete" in (program.trend_detail or "")) is incomplete
+    historical = tuple(entry for entry in entries if entry["issue_number"] == 1)
+    expected_prior = (
+        None if not prior else max(
+            (RiskLevel.from_string(value or "") for value in prior),
+            key={RiskLevel.BLOCKED: 6, RiskLevel.HIGH: 5, RiskLevel.MEDIUM: 4,
+                 RiskLevel.UNKNOWN: 3, RiskLevel.LOW: 2, RiskLevel.DONE: 1}.__getitem__,
+        )
+    )
+    assert fleet_module._overall_risk_for_issue(historical, 1) == expected_prior
+    for format in ("human", "json", "csv", "md", "html"):
+        output = _context_diagnostic_output(report, format)
+        if incomplete:
+            assert "Assessment coverage incomplete" in output
+        if format == "json":
+            row, = json.loads(output)["programs"]
+            assert row["overall_risk"] == risk
+            assert row["trend"] == trend
+        elif format == "csv":
+            row, = csv.DictReader(output.splitlines())
+            assert row["overall_risk"] == risk
+            assert row["trend"] == trend
+        else:
+            assert risk.upper() in output
+            assert trend in output.lower()
+
+
+def test_fleet_cli_preserves_incomplete_coverage_in_all_formats(monkeypatch, tmp_path: Path) -> None:
+    root = _seed_fleet_workspace(tmp_path)
+    path = root / "acme" / "archive" / "acme_weekly" / "scorecards.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["entries"][-1]["risk"] = "unknown"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(fleet_module, "PROGRAMS_ROOT", root)
+    for format in ("human", "json", "csv", "md", "html"):
+        result = runner.invoke(app, ["fleet", "--programs", "acme", "--format", format])
+        assert result.exit_code == 0, result.stdout
+        assert "Assessment coverage incomplete" in result.stdout
+        if format == "json":
+            program, = json.loads(result.stdout)["programs"]
+            assert program["overall_risk"] == "high"
+            assert program["trend"] == "unknown"
+        elif format == "csv":
+            program, = csv.DictReader(result.stdout.splitlines())
+            assert program["overall_risk"] == "high"
+            assert program["trend"] == "unknown"
+        else:
+            assert "HIGH" in result.stdout
+            assert "unknown" in result.stdout.lower()
 
 
 def _context_diagnostic_fleet_workspace(tmp_path: Path) -> Path:
@@ -92,7 +201,7 @@ def test_fleet_context_diagnostic_preserves_evaluation_and_material_limits(
     assert "deep_context.why" in output
     assert all(blocker in program.context_limitations for blocker in ctx.maturity_blockers)
     assert program.overall_risk.value == "unknown"
-    assert program.trend == "stable"
+    assert program.trend == "unknown"
     if format == "html":
         assert "Context" in output.split("<td>onboarding", 1)[1].split("</td>", 1)[0]
 
@@ -115,7 +224,7 @@ def test_fleet_context_diagnostic_failed_read_is_null_not_zero(
     assert "private-invalid-value" not in output
     assert str(root) not in output
     assert program.overall_risk.value == "unknown"
-    assert program.trend == "stable"
+    assert program.trend == "unknown"
     if format == "csv":
         row, = csv.DictReader(output.splitlines())
         assert row["context_maturity_level"] == ""
@@ -285,7 +394,7 @@ def test_fleet_context_diagnostic_keeps_existing_source_recency_blocker(tmp_path
     assert program.context_maturity_level == 2
     assert any("workiq_latest" in limitation and "8d stale" in limitation for limitation in program.context_limitations)
     assert program.overall_risk.value == "unknown"
-    assert program.trend == "stable"
+    assert program.trend == "unknown"
 
 
 def test_format_fleet_issue_detail_includes_confidence() -> None:

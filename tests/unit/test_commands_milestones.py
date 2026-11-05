@@ -24,6 +24,51 @@ from src.core.program_fact_store import ProgramFactInput, ProgramFactSnapshot, P
 runner = CliRunner()
 
 
+@pytest.mark.parametrize("format", ("human", "json", "csv"))
+@pytest.mark.parametrize("linked_ids", ((), (901,)))
+def test_unobserved_future_milestone_agrees_across_cli_report_doctor(
+    monkeypatch, tmp_path: Path, format: str, linked_ids: tuple[int, ...],
+) -> None:
+    from src.commands.doctor_checks import milestone_health_checks
+    from src.commands.report_health import _build_milestone_health_summary
+    from src.core.milestone_engine import assess_milestone_health
+
+    programs_root = tmp_path / "programs"
+    as_of = datetime(2026, 5, 10, 12, tzinfo=timezone.utc)
+    milestone = Milestone(
+        id="no-evidence", program_id="demo", name="Future unobserved",
+        target_date=date(2026, 12, 1), owner_alias="demo", status=MilestoneStatus.ON_TRACK,
+        exit_criteria=("Verified completion",), linked_workstream_ids=("core",),
+        linked_work_item_ids=linked_ids,
+    )
+    save_milestones("demo", (milestone,), programs_root=programs_root)
+    monkeypatch.setattr(milestones_module, "PROGRAMS_ROOT", programs_root)
+    monkeypatch.setattr(milestones_module, "_load_program_context", _fake_program_loader)
+    monkeypatch.setattr(milestones_module, "_load_live_items", lambda *args: ((), 0))
+    monkeypatch.setattr(milestone_health_checks, "load_latest_confirmed_snapshot_items", lambda *args, **kwargs: ((), as_of))
+    assessment = assess_milestone_health(milestone, (), {}, as_of)
+    assert assessment.computed_health == MilestoneStatus.UNKNOWN
+    assert _build_milestone_health_summary((milestone,), (assessment,)) == "Milestones: 1 unknown."
+    warning = milestone_health_checks.build_milestone_health_warning(
+        edition_name="demo_weekly", program_id="demo", milestones=(milestone,),
+        programs_root=programs_root, archive_root=tmp_path / "archive",
+    )
+    assert warning is not None
+    assert "1 unknown milestone" in warning
+    assert assessment.reasoning in warning
+    result = runner.invoke(app, [
+        "milestones", "assess", "--program", "demo", "--as-of", "2026-05-10", "--format", format,
+    ])
+    assert result.exit_code == 0, result.output
+    assert "unknown" in result.output.lower()
+    if format == "json":
+        row = json.loads(result.stdout)["rows"][0]
+        assert row["computed_health"] == assessment.computed_health.value
+        assert row["reasoning"] == assessment.reasoning
+        assert row["confidence"] == assessment.confidence.value
+        assert row["completion_date"] is None
+
+
 @pytest.mark.parametrize("with_archive", (False, True))
 def test_assess_additive_commitment_revisions_preserve_existing_outputs(monkeypatch, tmp_path: Path, with_archive: bool) -> None:
     programs_root = tmp_path / "programs"

@@ -13,7 +13,7 @@ from pathlib import Path
 
 from src.core.context_gap_store import RankedGap, load_context_gaps, rank_context_gaps
 from src.core.edition_resolver import PROGRAMS_ROOT
-from src.core.ncfl_proposal_store import conflicting_pending_proposals, load_proposals
+from src.core.ncfl_proposal_store import conflicting_pending_proposals, load_proposals, reply_origin_label
 from src.core.ncfl_store_policy import is_ncfl_apply_writable_target_store
 
 
@@ -82,6 +82,7 @@ def load_pending_context_proposal_rows(
                     f"{proposal.source_artifact}:{proposal.source_field}"
                     + (
                         f" | {proposal.extraction_method_rationale}"
+                        f" | {reply_origin_label(proposal, programs_root=programs_root)}"
                         if proposal.source_type == "context_gap_reply" else ""
                     )
                 ),

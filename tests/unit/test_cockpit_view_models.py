@@ -433,7 +433,7 @@ def test_primary_cockpit_risk_summary_uses_real_program_reality_not_mirror(
     assert reality_risks["risk-diverged"].probability != mirror_risks["risk-diverged"].probability
     assert cockpit_builder.compute_risk_score(reality_risks["risk-diverged"]) == 6
     assert cockpit_builder.compute_risk_score(reality_risks["risk-threshold"]) == 9
-    assert cockpit_builder._HIGH_RISK_SCORE_THRESHOLD == 9
+    assert cockpit_builder.HIGH_RISK_SCORE_THRESHOLD == 9
 
     actual_loader = ProgramReality.load
     loader_calls: list[tuple[str, dict[str, object]]] = []

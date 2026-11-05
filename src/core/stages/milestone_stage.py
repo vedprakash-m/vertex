@@ -235,8 +235,8 @@ def _emit_coverage_gap_findings(program_id: str, assessments: tuple[Any, ...], *
                 field="linked_work_item_ids",
                 severity="quality_degraded",
                 message=(
-                    f"Milestone {assessment.milestone_id} is past target with zero linked work items; "
-                    f"computed_health={assessment.computed_health.value} (never on_track, ADF-W1.7)."
+                    f"Milestone {assessment.milestone_id} has incomplete linked-item evidence; "
+                    f"computed_health={assessment.computed_health.value}. {assessment.reasoning}"
                 ),
                 impact_estimate="high",
                 programs_root=programs_root,

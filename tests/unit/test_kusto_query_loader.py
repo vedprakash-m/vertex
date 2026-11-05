@@ -12,6 +12,70 @@ from src.core.kusto_query_loader import kpi_queries_for_workstream, load_kpi_que
 from src.core.models_v2 import KustoQuery
 
 
+@pytest.mark.parametrize("source", ["kpi", "golden", "inline"])
+@pytest.mark.parametrize("valid", [False, True])
+def test_declared_result_limits_survive_query_loading(source: str, valid: bool, tmp_path: Path) -> None:
+    from src.core.edition_resolver import _parse_kusto
+    from src.core.kusto_query_loader import _apply_gather_query_state
+
+    limits = {"projected_columns": ["Value"], "max_rows": 2, "max_bytes": 100}
+    entry = {
+        "id": "synthetic", "cluster": "synthetic", "database": "synthetic", "kql": "synthetic",
+        "result_limits": limits if valid else {**limits, "max_rows": True},
+        "expected_cardinality": "scalar_required",
+    }
+
+    def load():
+        if source == "inline":
+            return _parse_kusto({"enabled": True, "queries": [entry]}).queries
+        program_dir = tmp_path / "synthetic"
+        (program_dir / "knowledge").mkdir(parents=True)
+        path = program_dir / "kpis.yaml" if source == "kpi" else program_dir / "knowledge" / "golden_queries.yaml"
+        path.write_text(json.dumps({"kpis" if source == "kpi" else "queries": [entry]}), encoding="utf-8")
+        return load_kpi_queries("synthetic", programs_root=tmp_path)
+
+    if not valid:
+        with pytest.raises(ConfigError, match="result_limits"):
+            load()
+    else:
+        query = load()[0]
+        assert query.expected_cardinality == "scalar_required"
+        assert query.result_limits.projected_columns == ("Value",)
+        assert query.result_limits.max_rows == 2
+        assert query.result_limits.max_bytes == 100
+        assert _apply_gather_query_state(query, {"last_cycle_succeeded": False}).result_limits == query.result_limits
+
+
+def test_changed_limits_invalidate_history_without_changing_legacy_identity() -> None:
+    from dataclasses import replace
+    import hashlib
+
+    from src.core.kusto_query_loader import _apply_gather_query_state, query_history_contract_identity
+    from src.core.kusto_result_limits import KustoResultLimits
+
+    query = KustoQuery(
+        id="synthetic", cluster="synthetic", database="synthetic", kql="synthetic", section="Synthetic",
+        render_as="table", confidence="high",
+    )
+    legacy = (query.unit, query.engine, query.cluster, query.database, query.kql, query.wiql, query.result_column, query.metric_id)
+    assert query_history_contract_identity(query) == hashlib.sha256(
+        json.dumps(legacy, ensure_ascii=True).encode("utf-8"),
+    ).hexdigest()
+    limited = replace(query, result_limits=KustoResultLimits(("Value",), 2, 100))
+    old_identity = query_history_contract_identity(limited)
+    for changed in [
+        query, replace(limited, result_limits=KustoResultLimits(("Value",), 1, 100)),
+        replace(limited, result_limits=KustoResultLimits(("Value",), 2, 99)),
+        replace(limited, result_limits=KustoResultLimits(("Other",), 2, 100)),
+        replace(limited, expected_cardinality="scalar_required"),
+    ]:
+        assert query_history_contract_identity(changed) != old_identity
+        loaded = _apply_gather_query_state(changed, {
+            "history_contract_identity": old_identity, "last_succeeded_at": "2026-11-05T00:00:00+00:00",
+        })
+        assert loaded.validated_at is None
+
+
 @pytest.mark.parametrize("identity", ["matching", "different", "missing"])
 @pytest.mark.parametrize("explicit", [False, True])
 def test_overlay_requires_success_identity_for_validation_time(

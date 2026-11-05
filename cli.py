@@ -105,7 +105,7 @@ from src.commands.override import _preflight_override_workspace, override_comman
 from src.commands.prep import _preflight_prep_workspace, prep_command
 from src.commands.privacy import privacy_app
 from src.commands.observability import observability_app, alerts_app
-from src.commands.decision_brief import decision_brief_command
+from src.commands.decision_brief import _preflight_decision_brief_workspace, decision_brief_command
 from src.commands.decision_brief_pilot import app as decision_brief_pilot_app
 from src.commands.program_synthesizer_pilot import app as program_synthesizer_pilot_app
 from src.commands.propose import propose_command
@@ -158,7 +158,9 @@ class VertexRootGroup(TyperGroup):
     ) -> tuple[str | None, click.Command | None, list[str]]:
         try:
             resolved = super().resolve_command(ctx, args)
-            if resolved[0] == "context" and resolved[2] and resolved[2][0] in {"import-reply", "solicit", "extract"}:
+            if resolved[0] == "context" and resolved[2] and resolved[2][0] in {
+                "import-reply", "solicit", "extract", "verify-reply-origin",
+            }:
                 ctx.meta["offline_context_command"] = True
             elif resolved[0] == "admin" and resolved[2][:2] == ["metric", "history"]:
                 ctx.meta["offline_metric_history_command"] = True
@@ -239,6 +241,8 @@ def main(
             _preflight_edit_workspace()
         elif ctx.invoked_subcommand == "override":
             _preflight_override_workspace()
+        elif ctx.invoked_subcommand in {"decision-brief", "decision-brief-pilot"}:
+            _preflight_decision_brief_workspace()
         elif ctx.invoked_subcommand == "config" or (
             ctx.invoked_subcommand == "context" and ctx.meta.get("offline_context_command") is True
         ) or (

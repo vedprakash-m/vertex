@@ -87,6 +87,8 @@ def _resolve_leadership_ask(
     severe_ack_required: bool,
     is_dry_run: bool,
     all_green: bool,
+    needs_input_count: int = 0,
+    no_dimensions: bool = False,
 ) -> str:
     if overrides_document.leadership_ask is not None and overrides_document.leadership_ask.strip():
         return f"Leadership ask: {_normalize_leadership_ask(overrides_document.leadership_ask)}"
@@ -94,6 +96,10 @@ def _resolve_leadership_ask(
         first_item = top_items[0]
         ask_text = _normalize_leadership_ask(first_item.text)
         return f"Leadership ask: {ask_text}"
+    if needs_input_count:
+        return f"Leadership ask: Assess {needs_input_count} dimension{'s' if needs_input_count != 1 else ''} before making health decisions."
+    if no_dimensions:
+        return "Leadership ask: Provide dimension assessments before making health decisions."
     if all_green:
         return "Leadership ask: None — maintain current execution cadence."
     if severe_ack_required and is_dry_run:
@@ -158,7 +164,8 @@ def _build_health_summary(
         RiskLevel.LOW: sum(1 for dimension in dimension_risks if dimension.risk == RiskLevel.LOW),
         RiskLevel.DONE: sum(1 for dimension in dimension_risks if dimension.risk == RiskLevel.DONE),
     }
-    total_count = sum(counts.values())
+    total_count = len(dimension_risks)
+    needs_input_count = total_count - sum(counts.values())
     prior_counts: dict[str, int] | None = None
     delta_direction: Literal["improved", "degraded", "unchanged"] = "unchanged"
     risk_load = _compute_risk_load(dimension_risks)
@@ -170,17 +177,24 @@ def _build_health_summary(
             "low": sum(1 for dimension in previous_snapshot.scorecards if dimension.risk == RiskLevel.LOW),
             "done": sum(1 for dimension in previous_snapshot.scorecards if dimension.risk == RiskLevel.DONE),
         }
+        prior_counts["needs_input"] = len(previous_snapshot.scorecards) - sum(prior_counts.values())
         current_score = counts[RiskLevel.HIGH] * 3 + counts[RiskLevel.MEDIUM] * 2 + counts[RiskLevel.LOW]
         prior_score = prior_counts["high"] * 3 + prior_counts["medium"] * 2 + prior_counts["low"]
-        if current_score < prior_score:
+        if not total_count or needs_input_count or prior_counts["needs_input"] or not previous_snapshot.scorecards:
+            prior_risk_load = None
+        elif current_score < prior_score:
             delta_direction = "improved"
         elif current_score > prior_score:
             delta_direction = "degraded"
+    if not total_count or needs_input_count:
+        prior_risk_load = None
     overall_risk = RiskLevel.UNKNOWN
     if counts[RiskLevel.HIGH]:
         overall_risk = RiskLevel.HIGH
     elif counts[RiskLevel.MEDIUM]:
         overall_risk = RiskLevel.MEDIUM
+    elif needs_input_count:
+        overall_risk = RiskLevel.UNKNOWN
     elif counts[RiskLevel.LOW]:
         overall_risk = RiskLevel.LOW
     elif counts[RiskLevel.DONE] and counts[RiskLevel.DONE] == total_count:
@@ -202,6 +216,8 @@ def _build_health_summary(
         severe_ack_required=severe_ack_required,
         is_dry_run=is_dry_run,
         all_green=all_green,
+        needs_input_count=needs_input_count,
+        no_dimensions=total_count == 0,
     )
     risk_bar_width = int(round((max(0.0, min(risk_load / 3.0, 1.0))) * 80))
     resolved_risks = risks
@@ -362,7 +378,7 @@ def _build_milestone_health_summary(
         return None
 
     count_parts: list[str] = []
-    for status in (MilestoneStatus.MISSED, MilestoneStatus.AT_RISK, MilestoneStatus.ON_TRACK, MilestoneStatus.COMPLETED, MilestoneStatus.DEFERRED):
+    for status in (MilestoneStatus.MISSED, MilestoneStatus.AT_RISK, MilestoneStatus.ON_TRACK, MilestoneStatus.COMPLETED, MilestoneStatus.DEFERRED, MilestoneStatus.UNKNOWN):
         count = sum(1 for assessment in ordered_assessments if assessment.computed_health == status)
         if count == 0:
             continue

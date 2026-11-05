@@ -23,7 +23,11 @@
   </tr>
   {% endfor %}
   {% else %}
-  {% if health.health_reason and 'New High' in health.health_reason %}
+  {% if health.needs_input_count or not health.total_count %}
+  {% set fallback_bg = '#FEF3C7' %}
+  {% set fallback_fg = '#92400E' %}
+  {% set fallback_text = health.leadership_ask %}
+  {% elif health.health_reason and 'New High' in health.health_reason %}
   {% set fallback_bg = '#FEE2E2' %}
   {% set fallback_fg = '#B91C1C' %}
   {% set fallback_text = health.high_count ~ ' new items at High — author review recommended.' %}

@@ -28,6 +28,50 @@ _PRIOR_AT = datetime(2040, 5, 1, 12, tzinfo=timezone.utc)
 _CURRENT_AT = datetime(2040, 5, 8, 12, tzinfo=timezone.utc)
 
 
+@pytest.mark.parametrize(("prior", "current"), list(product([None, *_RANK], _RANK)))
+def test_report_vector_does_not_compare_missing_assessments(prior: RiskLevel | None, current: RiskLevel) -> None:
+    from src.core.jinja_filters import risk_label
+    from src.core.scorecard_engine import build_scorecard
+
+    dimension = ScorecardDimensionSettings(name="Synthetic", description=None, ado_filter="")
+    packet = build_scorecard(items=(), dimensions=(dimension,), prev_confirmed=None)[0]
+    label = assemble_stage._derive_vector_label(current, prior, packet)
+    if prior is None or RiskLevel.UNKNOWN in {prior, current}:
+        assert label == risk_label(current)
+    elif current == RiskLevel.HIGH and prior != RiskLevel.HIGH:
+        assert label == "New High"
+    elif _RANK[current] > _RANK[prior]:
+        assert label == f"{risk_label(current)} (up)"
+    elif _RANK[current] < _RANK[prior]:
+        assert label == f"{risk_label(current)} (down)"
+    else:
+        assert label == risk_label(current)
+
+
+@pytest.mark.parametrize("prior", [None, RiskLevel.UNKNOWN, RiskLevel.HIGH])
+def test_report_vector_counts_high_observations_in_issues_not_weeks(prior: RiskLevel | None) -> None:
+    from src.core.scorecard_engine import build_scorecard
+
+    dimension = ScorecardDimensionSettings(name="Synthetic", description=None, ado_filter="")
+    packet = build_scorecard(items=(), dimensions=(dimension,), prev_confirmed=None)[0]
+    packet = replace(packet, streak_count=4)
+    assert assemble_stage._derive_vector_label(RiskLevel.HIGH, prior, packet) == "High 4 issues"
+
+
+@pytest.mark.parametrize("prior", [None, RiskLevel.UNKNOWN])
+@pytest.mark.parametrize("current", [RiskLevel.MEDIUM, RiskLevel.HIGH])
+def test_report_vector_missing_comparison_preserves_stale_diagnostic(
+    prior: RiskLevel | None, current: RiskLevel,
+) -> None:
+    from src.core.jinja_filters import risk_label
+    from src.core.scorecard_engine import build_scorecard
+
+    dimension = ScorecardDimensionSettings(name="Synthetic", description=None, ado_filter="")
+    packet = build_scorecard(items=(), dimensions=(dimension,), prev_confirmed=None)[0]
+    packet = replace(packet, stale_count=1)
+    assert assemble_stage._derive_vector_label(current, prior, packet) == f"{risk_label(current)} (stale)"
+
+
 @pytest.mark.parametrize(("prior", "current"), list(product(_RANK, repeat=2)))
 def test_report_comparison_uses_two_real_dated_samples(prior: RiskLevel, current: RiskLevel) -> None:
     sparkline, label = assemble_stage._derive_risk_sparkline(

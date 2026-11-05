@@ -17,6 +17,18 @@ def test_load_risk_register_returns_empty_tuple_when_file_absent(tmp_path: Path)
     assert load_risk_register("acme", programs_root=tmp_path / "programs") == ()
 
 
+@pytest.mark.parametrize("kind", ["strategic", "candidate", "hygiene"])
+def test_saved_risk_kind_survives_fact_projection(tmp_path: Path, kind: str) -> None:
+    root = tmp_path / "programs"
+    risk = replace(_risk_entry(), kind=kind)
+    save_risk_register("acme", (risk,), programs_root=root)
+    assert load_risk_register("acme", programs_root=root)[0].kind == kind
+    projected, = project_risk_entries(load_program_facts(
+        "acme", programs_root=root, fact_types=("risk.entry",),
+    ))
+    assert projected.kind == kind
+
+
 def _write_archive_history(programs_root: Path) -> tuple[Path, Path]:
     import json
     import yaml

@@ -49,6 +49,160 @@ def _enqueue(programs_root: Path, *, operation_intent_id: str = "intent-1") -> s
     return key
 
 
+def test_revision_fields_preserve_legacy_positional_results(tmp_path) -> None:
+    from src.core.actuation_outbox import ActuationDispatchOutcome
+
+    programs_root = tmp_path / "programs"
+    key = _enqueue(programs_root)
+    result = DispatchResult(True, 42, "response", False, None)
+    assert result.remote_rev is None
+    entry = load_entry(outbox_db_path(_PROGRAM_ID, programs_root=programs_root), key)
+    assert ActuationDispatchOutcome(entry, 42, "completed").remote_rev is None
+
+
+@pytest.mark.parametrize("revision", [None, 1, 7, True, False, 0, -1, "7", 1.5])
+def test_dispatch_revision_evidence_survives_or_refuses(tmp_path, monkeypatch, revision) -> None:
+    import json
+    from src.core.ledger.durable_outbox_store import load_success_receipt
+
+    programs_root = tmp_path / "programs"
+    key = _enqueue(programs_root)
+    result = DispatchResult(succeeded=True, remote_id=42, remote_rev=revision)
+    monkeypatch.setattr("src.core.ledger.event_log.write_event",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("secondary ledger")))
+    outcome = dispatch_leased_create_task(
+        program_id=_PROGRAM_ID, idempotency_key=key, owner="worker",
+        dispatch_fn=lambda entry: result, programs_root=programs_root,
+    )
+    db = outbox_db_path(_PROGRAM_ID, programs_root=programs_root)
+    if revision is None or (type(revision) is int and revision > 0):
+        assert outcome.status == "completed"
+        assert getattr(outcome, "remote_rev", "unavailable") == revision
+        assert json.loads(load_success_receipt(db, key))["remote_rev"] == revision
+    else:
+        assert outcome.status == "uncertain_remote_state"
+        assert load_success_receipt(db, key) is None
+        assert "revision" in outcome.entry.failure_reason.lower()
+        assert lease_next(db, ACTUATION_DISPATCH_DOMAIN, owner="retry") is None
+
+
+@pytest.mark.parametrize("remote_id", [None, True, False, 0, -1, "42", 1.5])
+def test_success_without_valid_remote_id_is_uncertain_and_never_retried(tmp_path, remote_id) -> None:
+    programs_root = tmp_path / "programs"
+    key = _enqueue(programs_root)
+    calls = []
+
+    def dispatch(entry):
+        calls.append(entry.outbox_id)
+        return DispatchResult(succeeded=True, remote_id=remote_id)
+
+    outcome = dispatch_leased_create_task(
+        program_id=_PROGRAM_ID, idempotency_key=key, owner="worker",
+        dispatch_fn=dispatch, programs_root=programs_root,
+    )
+    assert outcome.status == "uncertain_remote_state"
+    assert outcome.remote_id is None
+    assert "remote" in outcome.entry.failure_reason.lower()
+    assert lease_next(outbox_db_path(_PROGRAM_ID, programs_root=programs_root), ACTUATION_DISPATCH_DOMAIN, owner="retry") is None
+    assert calls == [key]
+    assert len(read_alerts(_PROGRAM_ID, programs_root=programs_root)) == 1
+
+
+def test_completed_create_keeps_authoritative_receipt_when_secondary_ledger_fails(tmp_path, monkeypatch) -> None:
+    import hashlib
+    import json
+    from src.core.ledger import durable_outbox_store as store
+
+    programs_root = tmp_path / "programs"
+    key = _enqueue(programs_root)
+    db = outbox_db_path(_PROGRAM_ID, programs_root=programs_root)
+    original = load_entry(db, key)
+    monkeypatch.setattr(
+        "src.core.ledger.event_log.write_event",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("secondary ledger failure")),
+    )
+    result = dispatch_leased_create_task(
+        program_id=_PROGRAM_ID, idempotency_key=key, owner="worker",
+        dispatch_fn=lambda entry: DispatchResult(succeeded=True, remote_id=42, remote_response_hash="response"),
+        programs_root=programs_root,
+    )
+    assert result.status == "completed"
+    raw = getattr(store, "load_success_receipt", lambda *args: None)(db, key)
+    assert raw is not None, "Completed create must retain its receipt independently of the secondary ledger"
+    receipt = json.loads(raw)
+    assert receipt["schema_version"] == "1"
+    assert receipt["remote_id"] == result.remote_id == 42
+    assert receipt["outbox_id"] == key and receipt["program_id"] == _PROGRAM_ID
+    assert receipt["operation"] == "create_task.v1" and receipt["operation_intent_id"] == "intent-1"
+    assert receipt["org"] == _ORG and receipt["project"] == _PROJECT
+    assert receipt["payload_sha256"] == hashlib.sha256(original.payload_json.encode("utf-8")).hexdigest()
+    assert receipt["remote_response_hash"] == "response"
+    assert receipt["attempt_count"] == result.entry.attempt_count
+    assert receipt["fencing_token"] == result.entry.lease_fencing_token
+    assert receipt["acknowledged_at"]
+    assert not [event for event in read_events(_PROGRAM_ID, programs_root=programs_root)
+                if event.event_type == "actuation.receipt_recorded.v1"]
+    assert getattr(store, "load_success_receipt")(db, key) == raw
+
+
+@pytest.mark.parametrize("fault", ["insert", "update"])
+def test_receipt_storage_failure_after_provider_acknowledgement_never_completes_or_retries(tmp_path, fault) -> None:
+    import sqlite3
+    from src.core._db import open_program_db_with_retry
+    from src.core.ledger import durable_outbox_store as store
+    from src.core.workspace_lease import acquire_lease, release_lease
+
+    programs_root = tmp_path / "programs"
+    key = _enqueue(programs_root)
+    db = outbox_db_path(_PROGRAM_ID, programs_root=programs_root)
+    with open_program_db_with_retry(db) as connection:
+        connection.execute(store._SUCCESS_RECEIPTS_SQL)
+        if fault == "insert":
+            connection.execute("CREATE TRIGGER receipt_fault BEFORE INSERT ON outbox_success_receipts BEGIN SELECT RAISE(ABORT, 'receipt fault'); END")
+        else:
+            connection.execute("CREATE TRIGGER receipt_fault BEFORE UPDATE ON outbox WHEN NEW.status='succeeded' BEGIN SELECT RAISE(ABORT, 'receipt fault'); END")
+    calls = []
+
+    def dispatch(entry):
+        calls.append(entry.outbox_id)
+        return DispatchResult(succeeded=True, remote_id=42)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        dispatch_leased_create_task(
+            program_id=_PROGRAM_ID, idempotency_key=key, owner="worker",
+            dispatch_fn=dispatch, programs_root=programs_root,
+        )
+    retained = load_entry(db, key)
+    assert retained.status == "dispatched" and retained.attempt_count == 1
+    assert store.load_success_receipt(db, key) is None
+    with pytest.raises(store.OutboxError):
+        dispatch_leased_create_task(
+            program_id=_PROGRAM_ID, idempotency_key=key, owner="retry",
+            dispatch_fn=dispatch, programs_root=programs_root,
+        )
+    assert calls == [key] and load_entry(db, key) == retained
+    lease = acquire_lease(_PROGRAM_ID, "next", mutation_domain=ACTUATION_DISPATCH_DOMAIN, programs_root=programs_root)
+    release_lease(lease, programs_root=programs_root)
+
+
+@pytest.mark.parametrize("loaded", [None, "changed"])
+def test_create_refuses_completion_when_retained_receipt_readback_changes(tmp_path, monkeypatch, loaded) -> None:
+    from src.core.ledger import durable_outbox_store as store
+
+    programs_root = tmp_path / "programs"
+    key = _enqueue(programs_root)
+    db = outbox_db_path(_PROGRAM_ID, programs_root=programs_root)
+    monkeypatch.setattr("src.core.actuation_outbox.load_success_receipt", lambda *args: loaded)
+    with pytest.raises(store.OutboxError, match="receipt"):
+        dispatch_leased_create_task(
+            program_id=_PROGRAM_ID, idempotency_key=key, owner="worker",
+            dispatch_fn=lambda entry: DispatchResult(succeeded=True, remote_id=42),
+            programs_root=programs_root,
+        )
+    assert load_entry(db, key).status == "succeeded"
+    assert store.load_success_receipt(db, key) is not None
+
+
 def test_item1_crash_after_enqueue_before_lease_is_idempotent(tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     key = _enqueue(programs_root)

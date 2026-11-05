@@ -2749,6 +2749,7 @@ NCFL context proposal extraction and review.
 | Command | Description |
 |---|---|
 | `import-reply` | Stage an unverified reply for manual review, never approval or apply. |
+| `verify-reply-origin` | Attest reply origin as an authorized OS principal; not change approval. |
 | `solicit` | Prepare a pending context request; never approve, send or resolve. |
 | `extract` |  |
 | `proposals` |  |
@@ -2774,6 +2775,23 @@ Stage an unverified reply for manual review, never approval or apply.
 | --gap-fingerprint TEXT | text | Yes |  | Exact program:feature:lane:field gap. |
 | --solicitation-id TEXT | text | Yes |  | Existing solicitation identifier. |
 | --dry-run | boolean | No | False | Preview only; do not stage. |
+
+#### `vertex context verify-reply-origin`
+
+**Usage:** `vertex context verify-reply-origin [OPTIONS]`
+
+Attest reply origin as an authorized OS principal; not change approval.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --edition TEXT | text | Yes |  | Edition name. |
+| --issue INTEGER RANGE | integer range | Yes |  | Issue containing the pending reply. |
+| --proposal-id TEXT | text | Yes |  | Exact pending reply proposal. |
+| --reason TEXT | text | Yes |  | How the operator independently checked origin. |
+| --actor TEXT | text | No | operator | Display label, never verifier authorization. |
+| --dry-run | boolean | No | False | Preview verification; write nothing. |
 
 #### `vertex context solicit`
 

@@ -150,7 +150,7 @@ def test_kusto_client_retries_on_throttle() -> None:
             call_count += 1
             if call_count < 3:
                 raise RuntimeError("429: Too Many Requests — throttled")
-            return MagicMock(primary_results=[])
+            return MagicMock(primary_results=[], errors_count=0)
 
     def _fake_sdk_types() -> tuple[Any, Any, Any, Any]:
         return (MagicMock, MagicMock, MagicMock, MagicMock)

@@ -637,6 +637,15 @@ commands:
         - --edition
         - --issue
         - --knowledge-doc
+      verify-reply-origin:
+        flags:
+        - --dry-run
+        value_options:
+        - --actor
+        - --edition
+        - --issue
+        - --proposal-id
+        - --reason
   decision-brief:
     callback:
       flags:

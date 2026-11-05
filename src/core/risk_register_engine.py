@@ -39,6 +39,7 @@ _PROBABILITY_ORDINAL = {
     RiskProbability.VERY_LIKELY: 4,
 }
 _ACTIVE_RISK_STATUSES = {RiskStatus.OPEN, RiskStatus.ESCALATED}
+HIGH_RISK_SCORE_THRESHOLD = 9
 
 
 def get_risk_register_path(program_id: str, programs_root: Path = PROGRAMS_ROOT) -> Path:
@@ -342,6 +343,7 @@ def _risk_fact_payload(entry: RiskEntry) -> dict[str, object]:
         "last_reviewed_date": entry.last_reviewed_date.isoformat() if entry.last_reviewed_date is not None else None,
         "entity_refs": list(entry.entity_refs),
         "source_signal_ids": list(entry.source_signal_ids),
+        "kind": entry.kind,
     }
 
 

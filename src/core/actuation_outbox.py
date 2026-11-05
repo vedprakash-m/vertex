@@ -26,8 +26,9 @@ proposal entry.
 """
 from __future__ import annotations
 
+import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -41,6 +42,7 @@ from src.core.ledger.durable_outbox_store import (
     enqueue,
     lease_next,
     load_entry,
+    load_success_receipt,
     mark_audited,
     mark_completed,
     mark_dispatched,
@@ -83,6 +85,7 @@ class DispatchResult:
     remote_response_hash: str | None = None
     uncertain: bool = False
     failure_reason: str | None = None
+    remote_rev: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +93,7 @@ class ActuationDispatchOutcome:
     entry: OutboxEntry
     remote_id: int | None
     status: str  # "completed" | "uncertain_remote_state" | "failed_terminal"
+    remote_rev: int | None = None
 
 
 def enqueue_create_task_intent(
@@ -239,9 +243,9 @@ def _drive_one(
 
     dispatched = mark_dispatched(db_path, leased.outbox_id, owner=owner, fencing_token=fencing)
 
-    # Fault-injection item 3 ("after dispatch before response"): a 401/429/4xx
-    # is a DEFINITE outcome (the provider responded; dispatch_fn already
-    # turns those into DispatchResult(succeeded=False)). Anything that
+    # Fault-injection item 3 ("after dispatch before response"): definite
+    # rejections become failed results; 408/5xx/redirect or malformed-response
+    # uncertainty is classified by dispatch_fn. Anything that
     # escapes dispatch_fn as an exception -- timeout, connection reset,
     # unexpected error -- means we cannot tell whether the provider received
     # and processed the request, so it must go to uncertain_remote_state
@@ -272,6 +276,19 @@ def _drive_one(
         )
         return ActuationDispatchOutcome(entry=entry, remote_id=None, status="uncertain_remote_state")
 
+    if result.succeeded and not result.uncertain and (type(result.remote_id) is not int or result.remote_id <= 0):
+        result = replace(
+            result, succeeded=False, uncertain=True, remote_id=None,
+            failure_reason="Provider success lacks a valid remote work-item ID; manual reconciliation required.",
+        )
+    if result.succeeded and not result.uncertain and result.remote_rev is not None and (
+        type(result.remote_rev) is not int or result.remote_rev <= 0
+    ):
+        result = replace(
+            result, succeeded=False, uncertain=True,
+            failure_reason="Provider success contains an invalid remote revision; manual reconciliation required.",
+        )
+
     if result.uncertain:
         reason = result.failure_reason or "dispatch outcome uncertain"
         entry = mark_uncertain_remote_state(
@@ -300,25 +317,44 @@ def _drive_one(
         )
         return ActuationDispatchOutcome(entry=entry, remote_id=None, status="failed_terminal")
 
-    succeeded_entry = mark_succeeded(
+    receipt_json = json.dumps({
+        "schema_version": "1",
+        "program_id": program_id,
+        "outbox_id": leased.outbox_id,
+        "operation": "create_task.v1",
+        "operation_intent_id": payload_fields.get("operation_intent_id"),
+        "proposal_id": payload_fields.get("proposal_id"),
+        "org": payload_fields.get("org"),
+        "project": payload_fields.get("project"),
+        "payload_sha256": hashlib.sha256(leased.payload_json.encode("utf-8")).hexdigest(),
+        "remote_id": result.remote_id,
+        "remote_rev": result.remote_rev,
+        "remote_response_hash": result.remote_response_hash,
+        "acknowledged_at": datetime.now(timezone.utc).isoformat(),
+        "attempt_count": dispatched.attempt_count,
+        "fencing_token": fencing,
+    }, sort_keys=True, separators=(",", ":"))
+    mark_succeeded(
         db_path, leased.outbox_id, owner=owner, fencing_token=fencing,
-        remote_response_hash=result.remote_response_hash,
+        remote_response_hash=result.remote_response_hash, success_receipt_json=receipt_json,
     )
-    # Fault-injection item 5 ("after response before receipt commit"): the
-    # ledger receipt event is best-effort, mirroring ado_writer's existing
-    # _emit_duplicate_prevented precedent -- the outbox row's own
-    # succeeded/completed transition (already durably committed above, in
-    # SQLite) is the source of truth for "did we dispatch"; a failed local
-    # ledger append must never leave a successfully-dispatched row stuck.
+    # The acknowledgement receipt and success are atomic; the secondary
+    # ledger projection remains best effort.
     _emit_receipt_recorded_best_effort(
         program_id=program_id, operation_intent_id=operation_intent_id, receipt_state="succeeded",
         remote_id=result.remote_id, org=org, project=project,
         provider_summary={"remote_id": str(result.remote_id)}, programs_root=programs_root,
     )
-    del succeeded_entry
+    retained_receipt = load_success_receipt(db_path, leased.outbox_id)
+    if retained_receipt != receipt_json:
+        raise OutboxError("Create success receipt is missing or changed; manual reconciliation required")
     mark_audited(db_path, leased.outbox_id, owner=owner, fencing_token=fencing)
     completed_entry = mark_completed(db_path, leased.outbox_id, owner=owner, fencing_token=fencing)
-    return ActuationDispatchOutcome(entry=completed_entry, remote_id=result.remote_id, status="completed")
+    receipt = json.loads(retained_receipt)
+    return ActuationDispatchOutcome(
+        entry=completed_entry, remote_id=receipt["remote_id"], status="completed",
+        remote_rev=receipt["remote_rev"],
+    )
 
 
 def _emit_intent_created_best_effort(

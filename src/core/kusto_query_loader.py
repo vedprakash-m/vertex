@@ -8,6 +8,7 @@ from typing import Any
 from src.core.exceptions import ConfigError, StateError
 from src.core.gather_state_store import load_gather_query_states
 from src.core.knowledge_store import PROGRAMS_ROOT, _optional_slo_target, load_program_knowledge
+from src.core.kusto_result_limits import parse_kusto_result_limits
 from src.core.models_v2 import AttachmentConfig, KustoQuery
 from src.core.yaml_utils import load_yaml_mapping
 
@@ -68,6 +69,7 @@ def load_kpi_queries(
             fallback_on_empty_rows=bool(entry.get("fallback_on_empty_rows", False)),
             chapter=_optional_str(entry.get("chapter")),
             timeout_seconds=int(entry["timeout_seconds"]) if entry.get("timeout_seconds") is not None else None,
+            result_limits=parse_kusto_result_limits(entry.get("result_limits")),
         )
         for entry in document.get("kpis", [])
         if isinstance(entry, dict)
@@ -131,8 +133,12 @@ def _load_gather_query_state(program_id: str, *, programs_root: Path) -> dict[st
 
 
 def query_history_contract_identity(query: KustoQuery) -> str:
-    payload = (query.unit, query.engine, query.cluster, query.database,
-               query.kql, query.wiql, query.result_column, query.metric_id)
+    payload: tuple[object, ...] = (query.unit, query.engine, query.cluster, query.database,
+                                 query.kql, query.wiql, query.result_column, query.metric_id)
+    if query.result_limits is not None:
+        payload += (query.result_limits.projected_columns, query.result_limits.max_rows, query.result_limits.max_bytes)
+    if query.expected_cardinality != "zero_ok":
+        payload += (("expected_cardinality", query.expected_cardinality),)
     return hashlib.sha256(json.dumps(payload, ensure_ascii=True).encode("utf-8")).hexdigest()
 
 
@@ -183,6 +189,7 @@ def _apply_gather_query_state(query: KustoQuery, state: dict[str, Any] | None) -
         fallback_on_empty_rows=query.fallback_on_empty_rows,
         chapter=query.chapter,
         timeout_seconds=query.timeout_seconds,
+        result_limits=query.result_limits,
     )
 
 

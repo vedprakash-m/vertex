@@ -178,7 +178,7 @@ class FleetProgramSummary:
     risk_register: FleetRiskRegisterSummary
     dependency_health: FleetDependencyHealthSummary
     active_issue_summaries: tuple[FleetIssueSummary, ...]
-    trend: Literal["improving", "stable", "worsening"]
+    trend: Literal["improving", "stable", "worsening", "unknown"]
     trend_detail: str | None
     stale: bool
     staleness_reason: str
@@ -659,7 +659,7 @@ def _build_program_summary(
     current_dimensions = {
         (str(entry.get("scorecard_name") or "").strip(), str(entry.get("dimension") or "").strip()): RiskLevel.from_string(str(entry.get("risk") or ""))
         for entry in latest_entries
-        if str(entry.get("scorecard_name") or "").strip() and str(entry.get("dimension") or "").strip() and str(entry.get("risk") or "").strip()
+        if str(entry.get("scorecard_name") or "").strip() and str(entry.get("dimension") or "").strip()
     }
     telemetry_summary = build_program_telemetry_summary(
         program_id,
@@ -675,7 +675,7 @@ def _build_program_summary(
     dependency_health = _build_fleet_dependency_health_summary(cross_program_dependencies)
     if latest_confirmed is None:
         overall_risk = RiskLevel.UNKNOWN
-        trend: Literal["improving", "stable", "worsening"] = "stable"
+        trend: Literal["improving", "stable", "worsening", "unknown"] = "unknown"
         trend_detail = None
         stale = False
         staleness_reason = "onboarding — no confirmed issue yet"
@@ -687,8 +687,22 @@ def _build_program_summary(
         trends: dict[tuple[str, str], ScorecardTrend] = load_scorecard_trends(primary_edition, current_dimensions, archive_root=archive_root) if current_dimensions else {}
         prior_issue_number = _previous_issue_number(scorecard_history, latest_confirmed.issue_number)
         prior_overall_risk = _overall_risk_for_issue(scorecard_history, prior_issue_number) if prior_issue_number is not None else None
-        trend = _aggregate_trend(current=overall_risk, prior=prior_overall_risk) if current_dimensions else "stable"
-        trend_detail = _aggregate_trend_detail(trends) if current_dimensions else None
+        current_missing = sum(risk == RiskLevel.UNKNOWN for risk in current_dimensions.values())
+        prior_missing = sum(
+            RiskLevel.from_string(str(entry.get("risk") or "")) == RiskLevel.UNKNOWN
+            for entry in scorecard_history
+            if prior_issue_number is not None and _issue_number(entry.get("issue_number")) == prior_issue_number
+        )
+        if not current_dimensions or current_missing or prior_missing:
+            trend = "unknown"
+            trend_detail = (
+                "Assessment coverage incomplete: "
+                f"{current_missing} current and {prior_missing} prior dimensions need input; "
+                "comparison unavailable."
+            ) if current_dimensions else "Assessment coverage incomplete: no current dimensions; comparison unavailable."
+        else:
+            trend = _aggregate_trend(current=overall_risk, prior=prior_overall_risk)
+            trend_detail = _aggregate_trend_detail(trends)
         stale, staleness_reason = _compute_staleness(
             primary_edition,
             latest_confirmed.generated_at,
@@ -1351,9 +1365,9 @@ def _aggregate_trend(
     *,
     current: RiskLevel,
     prior: RiskLevel | None,
-) -> Literal["improving", "stable", "worsening"]:
-    if prior is None:
-        return "stable"
+) -> Literal["improving", "stable", "worsening", "unknown"]:
+    if prior is None or RiskLevel.UNKNOWN in {current, prior}:
+        return "unknown"
     current_rank = _risk_rank(current)
     prior_rank = _risk_rank(prior)
     if current_rank < prior_rank:
@@ -1439,7 +1453,7 @@ def _overall_risk_for_issue(scorecard_history: tuple[dict[str, object], ...], is
     risks = [
         RiskLevel.from_string(str(entry.get("risk") or ""))
         for entry in scorecard_history
-        if _issue_number(entry.get("issue_number")) == issue_number and str(entry.get("risk") or "").strip()
+        if _issue_number(entry.get("issue_number")) == issue_number
     ]
     if not risks:
         return None
@@ -1456,11 +1470,12 @@ def _issue_number(value: object) -> int | None:
 
 def _risk_rank(level: RiskLevel) -> int:
     return {
-        RiskLevel.UNKNOWN: 0,
+        RiskLevel.UNKNOWN: 3,
         RiskLevel.DONE: 1,
         RiskLevel.LOW: 2,
-        RiskLevel.MEDIUM: 3,
-        RiskLevel.HIGH: 4,
+        RiskLevel.MEDIUM: 4,
+        RiskLevel.HIGH: 5,
+        RiskLevel.BLOCKED: 6,
     }[level]
 
 

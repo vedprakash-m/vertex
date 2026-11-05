@@ -3,22 +3,15 @@
 **Issue {{ edition.issue_number }}**  
 Data as of {{ edition.ado_data_as_of | format_datetime("%b %d %Y, %H:%M UTC") }}
 
-{% if health and health.high_count == 0 and health.medium_count == 0 and health.total_count > 0 %}
-{% set health_state = "HEALTHY" %}
-{% elif health and health.high_count >= 3 %}
-{% set health_state = "CRITICAL" %}
-{% elif health and health.high_count > 0 %}
-{% set health_state = "AT RISK" %}
-{% elif health and health.medium_count > 0 %}
-{% set health_state = "ON TRACK" %}
-{% else %}
-{% set health_state = "NEEDS INPUT" %}
-{% endif %}
+{% set health_state = health.health_state if health else "NEEDS INPUT" %}
 
 {% for section in ordered_sections %}
 {% if section.kind == "health" and health %}
 ## Program Health
 **PROGRAM HEALTH: {{ health_state }}, {{ health.trajectory | upper }}**
+{% if health.needs_input_count %}{{ health.needs_input_count }} dimension{% if health.needs_input_count != 1 %}s{% endif %} need{% if health.needs_input_count == 1 %}s{% endif %} input; health assessment is incomplete.
+{% elif not health.total_count %}No dimension assessments available.
+{% endif %}
 {% if health.bluf %}{{ health.bluf }}
 {% endif %}
 {% if health.risk_register_summary %}{{ health.risk_register_summary }}
@@ -33,8 +26,8 @@ Data as of {{ edition.ado_data_as_of | format_datetime("%b %d %Y, %H:%M UTC") }}
 {% if health.forecast_summary %}{{ health.forecast_summary }}{% if health.forecast_confidence %} ({{ health.forecast_confidence | lower }} confidence){% endif %}
 {% endif %}
 {{ health.leadership_ask }}
-High: {{ health.high_count }}{% if health.prior_counts %} ({% set high_delta = health.high_count - health.prior_counts.high %}{% if high_delta >= 0 %}+{% endif %}{{ high_delta }}){% endif %} | Med: {{ health.medium_count }}{% if health.prior_counts %} ({% set medium_delta = health.medium_count - health.prior_counts.medium %}{% if medium_delta >= 0 %}+{% endif %}{{ medium_delta }}){% endif %} | Low: {{ health.low_count }}{% if health.prior_counts %} ({% set low_delta = health.low_count - health.prior_counts.low %}{% if low_delta >= 0 %}+{% endif %}{{ low_delta }}){% endif %} | Done: {{ health.done_count }}
-Risk Load: {{ '%.1f' | format(health.risk_load) }}{% if health.prior_risk_load is not none %} (was {{ '%.1f' | format(health.prior_risk_load) }}){% endif %}
+High: {{ health.high_count }}{% if health.prior_counts and not health.risk_load_incomplete %} ({% set high_delta = health.high_count - health.prior_counts.high %}{% if high_delta >= 0 %}+{% endif %}{{ high_delta }}){% endif %} | Med: {{ health.medium_count }}{% if health.prior_counts and not health.risk_load_incomplete %} ({% set medium_delta = health.medium_count - health.prior_counts.medium %}{% if medium_delta >= 0 %}+{% endif %}{{ medium_delta }}){% endif %} | Low: {{ health.low_count }}{% if health.prior_counts and not health.risk_load_incomplete %} ({% set low_delta = health.low_count - health.prior_counts.low %}{% if low_delta >= 0 %}+{% endif %}{{ low_delta }}){% endif %} | Done: {{ health.done_count }}
+Risk Load: {{ '%.1f' | format(health.risk_load) }}{% if health.risk_load_incomplete %} (assessment coverage incomplete; comparison unavailable){% elif health.prior_risk_load is not none %} (was {{ '%.1f' | format(health.prior_risk_load) }}){% endif %}
 
 {% elif section.kind == "top_3" %}
 {% set source_items = top_items if top_items else (auto_suggestions if is_dry_run else ()) %}
@@ -44,6 +37,7 @@ Risk Load: {{ '%.1f' | format(health.risk_load) }}{% if health.prior_risk_load i
 {% if source_items %}
 {% for item in source_items %}- **{{ item.label or "DECISION" }}{% if item.suggested %} (Suggested){% endif %}** {{ item.text }}{% if item.owner %} ({{ item.owner }}){% endif %}{% if item.by_date %} by {{ item.by_date | format_date("%b %d") }}{% endif %}{% if item.ado_link %} [ADO]({{ item.ado_link }}){% endif %}
 {% endfor %}
+{% elif health.needs_input_count or not health.total_count %}{{ health.leadership_ask }}
 {% elif health.high_count > 0 %}No new decisions captured; {{ health.high_count }} items remain at High.
 {% else %}No leadership decisions needed this week.
 {% endif %}

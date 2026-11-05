@@ -17,6 +17,7 @@ from __future__ import annotations
 import getpass
 import os
 import platform
+import sys
 import uuid
 from dataclasses import dataclass
 
@@ -69,7 +70,28 @@ class OperatorIdentity:
         }
 
 
-def capture_operator_identity(actor: str) -> OperatorIdentity:
+def _os_principal() -> str:
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        get_name = ctypes.WinDLL("secur32", use_last_error=True).GetUserNameExW
+        get_name.argtypes = [ctypes.c_int, wintypes.LPWSTR, ctypes.POINTER(wintypes.ULONG)]
+        get_name.restype = wintypes.BOOLEAN
+        size = wintypes.ULONG(0)
+        get_name(2, None, ctypes.byref(size))  # NameSamCompatible: domain-qualified OS identity.
+        if not size.value:
+            raise OSError("OS principal unavailable.")
+        buffer = ctypes.create_unicode_buffer(size.value)
+        if not get_name(2, buffer, ctypes.byref(size)):
+            raise OSError("OS principal unavailable.")
+        return buffer.value
+    import pwd
+
+    return pwd.getpwuid(os.geteuid()).pw_name
+
+
+def capture_operator_identity(actor: str, *, require_os_principal: bool = False) -> OperatorIdentity:
     """Capture the current operator's attested identity (§6.15.2).
 
     ``actor`` is the operator-supplied display name. Principal/machine honor
@@ -78,7 +100,20 @@ def capture_operator_identity(actor: str) -> OperatorIdentity:
     to the OS user + host, which the operator cannot set via the ``--actor``
     flag. A headless run (no OS user resolvable) yields ``principal=None`` —
     explicitly thin, never silently synthesized.
+
+    ``require_os_principal`` binds to the native OS security context instead;
+    differing principal/host overrides are refused rather than trusted.
     """
+    if require_os_principal:
+        strict_principal = _os_principal()
+        strict_machine = platform.node()
+        if not strict_principal or not strict_machine:
+            raise ValueError("OS principal and machine are required.")
+        if os.environ.get(_ENV_PRINCIPAL, strict_principal) != strict_principal:
+            raise ValueError("Principal override does not match the OS principal.")
+        if os.environ.get(_ENV_MACHINE, strict_machine) != strict_machine:
+            raise ValueError("Machine override does not match the current host.")
+        return OperatorIdentity(actor or "unknown", strict_principal, strict_machine, _ensure_session_id())
     principal = os.environ.get(_ENV_PRINCIPAL)
     if not principal:
         try:

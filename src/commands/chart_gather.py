@@ -17,6 +17,7 @@ from typing import Any
 
 from src.core.chart_cache_store import (
     ChartCacheEntry,
+    chart_cache_contract_identity,
     evict_stale_caches,
     write_chart_cache,
 )
@@ -24,6 +25,8 @@ from src.core.exceptions import AuthError, QueryError
 from src.core.integration_types import IntegrationError
 from src.core.knowledge_store import load_program_knowledge
 from src.core.kusto_query_loader import load_kpi_queries
+from src.core.kusto_result_limits import admit_kusto_rows
+from src.core.metric_binding_validator import kusto_scalar_cardinality_error
 from src.core.models_v2 import KustoQuery
 
 logger = logging.getLogger(__name__)
@@ -184,12 +187,18 @@ def _gather_single_chart(
     # Check cache freshness first
     if cache_loader is not None:
         try:
-            existing = cache_loader(program_id, query.id)
-            if existing is not None:
+            existing = cache_loader(program_id, query.id, programs_root=programs_root)
+            if (
+                existing is not None
+                and existing.program_id == program_id
+                and existing.query_id == query.id
+                and existing.query_contract_hash == chart_cache_contract_identity(query)
+                and query.result_limits is None
+                and query.expected_cardinality == "zero_ok"
+            ):
                 from src.core.chart_cache_store import chart_cache_age_hours
                 age_h = chart_cache_age_hours(existing, now=now)
-                max_age = _eviction_grace_hours_for_ttl(getattr(query, "chart_cache_ttl_hours", 26))
-                if age_h < max_age:
+                if 0 <= age_h < query.chart_cache_ttl_hours:
                     # Fresh enough — skip live execution
                     return ChartGatherResult(
                         query_id=query.id,
@@ -199,13 +208,16 @@ def _gather_single_chart(
                         cache_hit=True,
                         error=None,
                     )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("gather_chart_data: cache load failed for %s/%s — %s", program_id, query.id, exc)
 
     # Execute live query
     rows: list[dict[str, Any]]
     try:
-        rows = list(executor(query))
+        rows = admit_kusto_rows(executor(query), query.result_limits)
+        cardinality_error = kusto_scalar_cardinality_error(query.id, query.expected_cardinality, len(rows))
+        if cardinality_error is not None:
+            raise QueryError(cardinality_error)
     except (AuthError, QueryError) as exc:
         return ChartGatherResult(
             query_id=query.id,
@@ -243,7 +255,7 @@ def _gather_single_chart(
         config_str = str(sorted(safe_config.items()))
         config_hash = hashlib.md5(config_str.encode()).hexdigest()
 
-        write_chart_cache(
+        cache_path = write_chart_cache(
             program_id=program_id,
             query_id=query.id,
             rows=scrubbed,
@@ -251,7 +263,17 @@ def _gather_single_chart(
             chart_config_hash=config_hash,
             programs_root=programs_root,
             pii_prescrubbed=True,
+            query_contract_hash=chart_cache_contract_identity(query),
         )
+        if cache_path is None:
+            return ChartGatherResult(
+                query_id=query.id,
+                cluster=query.cluster,
+                database=query.database,
+                rows_written=None,
+                cache_hit=False,
+                error="Cache write refused: entry exceeds the chart cache size limit.",
+            )
     except Exception as exc:
         return ChartGatherResult(
             query_id=query.id,

@@ -249,11 +249,12 @@ def generate_program_synthesis_via_context_gateway(
 
     policy = load_ai_feature_policy(_FEATURE)
     compiled_prompt = _compile_synthesis_prompt(request, programs_root=programs_root)
-    # When the compiler rejects the request (e.g. reserved tokens alone
-    # exceed the budget), degrade to the proven ad-hoc prompt rather than
-    # discarding -- the synthesis still has a valid path to completion, and
-    # the comparison harness sees the same fallback the baseline uses.
-    user_prompt = compiled_prompt if compiled_prompt is not None else _build_user_prompt(request)
+    if compiled_prompt is None:
+        return _discard(
+            ReleaseTerminal.DISCARDED,
+            "ContextCompiler rejected the context; review required evidence and the input-token budget before retrying.",
+        )
+    user_prompt = compiled_prompt
     prompt_template = _load_prompt_template()
     cache_key = AIResultCacheKey(
         program_id=program_id,
@@ -331,8 +332,8 @@ def _compile_synthesis_prompt(
     Each ``SynthesisInputItem`` becomes one required ``EvidenceSpan`` (its
     summary), and coverage notes become optional spans (the compiler may drop
     them under quota/token pressure, which is the point -- bounded context).
-    Returns ``None`` when the compiler rejects the request (QG-32), so the
-    caller can degrade to the ad-hoc prompt. Mirrors
+    Returns ``None`` when the compiler rejects the request, so the caller
+    discards it before provider/cache access. Mirrors
     decision_brief_advisor's ``_build_evidence_spans``/``_span`` helpers."""
     required = tuple(
         EvidenceSpan(

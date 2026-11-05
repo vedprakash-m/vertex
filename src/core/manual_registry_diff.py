@@ -11,6 +11,7 @@ from typing import Any
 import yaml
 
 from src.core.ncfl_models import ContextUpdateProposal
+from src.core.ncfl_proposal_store import reply_origin_label
 
 
 class ManualRegistryDiffError(ValueError):
@@ -138,7 +139,8 @@ def render_workstream_registry_manual_diff(
             f"# Target: {path} → workstreams[id={proposal.target_key!r}].{proposal.target_field}",
             f"# Evidence: {proposal.source_artifact}#{proposal.source_field}",
             *(
-                (f"# {proposal.extraction_method_rationale}",)
+                (f"# {proposal.extraction_method_rationale}",
+                 f"# {reply_origin_label(proposal, programs_root=programs_root)}")
                 if proposal.source_type == "context_gap_reply" else ()
             ),
             f"--- {path}",

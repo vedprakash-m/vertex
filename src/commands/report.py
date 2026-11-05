@@ -258,6 +258,7 @@ from src.core.overrides_store import apply_pending_overrides, get_overrides_path
 from src.core.pipeline import StageContext, run_pipeline
 from src.core.program_fact_store import ProgramFactSnapshot, ProgramFactStore
 from src.core.program_reality import ProgramReality
+from src.core.program_verdict import observe_program_verdict
 from src.core.quality_gates import combine_gate_reports, evaluate_continuity_gates, evaluate_phase_1a_gates, evaluate_phase_1b_gates, evaluate_phase_1c_gates
 from src.core.quality_matrix_engine import QualityMatrix, build_quality_matrix, render_quality_matrix_markdown
 from src.core.query_builder import build_odata_filter
@@ -1301,9 +1302,19 @@ class _OutputStage:
             effective_family_modes=report_family_selectors(ctx),
         ) if ctx.resolved_v2 is not None else None
         if capture is not None:
+            verdict_observation = observe_program_verdict(
+                capture, render_state.snapshot, tuple((ctx.eta_forecasts or {}).values()),
+                risks=ctx.risks, risk_assessments=ctx.risk_assessments,
+                risk_warnings=ctx.risk_warnings, stale_risk_ids=ctx.stale_risk_ids,
+                milestones=ctx.milestones, milestone_assessments=ctx.milestone_assessments,
+                milestone_warnings=ctx.milestone_warnings,
+            )
             validation_state = replace(validation_state, manifest=replace(
                 validation_state.manifest,
-                metadata={**validation_state.manifest.metadata, "run_evidence_snapshot": capture},
+                metadata={
+                    **validation_state.manifest.metadata, "run_evidence_snapshot": capture,
+                    "program_verdict_observation": verdict_observation,
+                },
             ))
         diff_summary = None
         if ctx.diff_mode and ctx.previous_dry_run_state is not None and ctx.evidence_by_item is not None:

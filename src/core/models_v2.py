@@ -6,6 +6,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from src.core.kusto_result_limits import KustoResultLimits
 from src.core.hypothesis_models import (
     AssertionEvaluation,
     AssertionOperator,
@@ -219,6 +220,7 @@ class KustoQuery:
     # populated for engine == "ado_odata" entries.
     ado_filter: str | None = None
     ado_select: str | None = None
+    result_limits: KustoResultLimits | None = None
 
     @property
     def is_authoritative_delivery_scope(self) -> bool:
@@ -616,10 +618,8 @@ class MilestoneAssessment:
     confidence: Confidence
     reasoning: str
     completion_date: date | None = None
-    # ADF-W1.7: True when computed_health was forced away from a false-optimism
-    # default (MISSED/UNKNOWN with zero linked work items) rather than derived
-    # from real linked-item evidence. Callers that assemble report output use
-    # this to emit a context-gap coverage finding (src/core/context_gap_store.py).
+    # Non-deferred milestones with no observed or missing required linked items
+    # emit a context-gap finding through report assembly.
     coverage_gap: bool = False
 
 

@@ -72,9 +72,10 @@ def record_kusto_query_state(
         query.id, query.expected_cardinality, rows,
         metric_id=query.metric_id, result_column=query.result_column,
         slo_target=query.slo_target, comparison=query.comparison,
+        result_limits=query.result_limits,
     )
     timestamp = as_of.astimezone(timezone.utc)
-    max_data_timestamp = extract_kusto_max_data_timestamp(rows)
+    max_data_timestamp = extract_kusto_max_data_timestamp(rows) if error is None else None
     numeric_value = extract_kusto_query_numeric_value(query, rows) if error is None else None
     previous = previous_state or {}
     identity = previous.get("history_contract_identity")
@@ -145,6 +146,7 @@ def extract_kusto_query_numeric_value(query: KustoQuery, rows: list[dict[str, An
         query.id, query.expected_cardinality, rows,
         metric_id=query.metric_id, result_column=query.result_column,
         slo_target=query.slo_target, comparison=query.comparison,
+        result_limits=query.result_limits,
     ):
         return None
     value = kusto_kpi_value(query, rows[0])
@@ -169,6 +171,7 @@ def build_kusto_signal(
         query.id, query.expected_cardinality, rows,
         metric_id=query.metric_id, result_column=query.result_column,
         slo_target=query.slo_target, comparison=query.comparison,
+        result_limits=query.result_limits,
     ):
         return None
 

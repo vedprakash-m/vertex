@@ -274,6 +274,8 @@ def assess_milestone_health(
         computed_health = (
             MilestoneStatus.UNKNOWN if milestone.status == MilestoneStatus.COMPLETED else MilestoneStatus.MISSED
         )
+    elif not linked_items:
+        computed_health = MilestoneStatus.UNKNOWN
     elif blocked_criteria or (days_to_target <= 14 and unresolved_items) or slip_count >= 2:
         computed_health = MilestoneStatus.AT_RISK
     else:
@@ -282,7 +284,7 @@ def assess_milestone_health(
     # DEFERRED always takes priority over the no-evidence branch above, so
     # exclude it here too -- an explicitly deferred milestone is a known,
     # intentional state, not a coverage gap.
-    coverage_gap = no_evidence_past_due and computed_health != MilestoneStatus.DEFERRED
+    coverage_gap = (not linked_items or bool(missing_item_ids)) and computed_health != MilestoneStatus.DEFERRED
 
     if computed_health == MilestoneStatus.COMPLETED:
         slip_probability = 0.0
@@ -305,7 +307,7 @@ def assess_milestone_health(
             slip_probability += min(0.25, 0.1 * slip_count)
         slip_probability = min(0.95, round(slip_probability, 2))
 
-    confidence = _resolve_confidence(linked_items, trajectories)
+    confidence = Confidence.NONE if computed_health == MilestoneStatus.UNKNOWN else _resolve_confidence(linked_items, trajectories)
     completion_date = resolve_milestone_completion_date(milestone, items, trajectories, as_of)
     reasoning = _build_reasoning(
         milestone=milestone,
@@ -673,7 +675,7 @@ def _resolve_milestone_completion_outcome(
 ) -> tuple[date | None, bool]:
     item_map = {item.id: item for item in items}
     linked_items = tuple(item_map[item_id] for item_id in milestone.linked_work_item_ids if item_id in item_map)
-    if not linked_items:
+    if not linked_items or len(linked_items) != len(milestone.linked_work_item_ids):
         return None, False
 
     completion_dates: list[date] = []
@@ -741,8 +743,8 @@ def _build_reasoning(
     days_label = f"{days_to_target} days to target" if days_to_target >= 0 else f"{-days_to_target} days past target"
     if computed_health == MilestoneStatus.UNKNOWN:
         return (
-            f"Declared complete but {-days_to_target if days_to_target < 0 else 0} days past target with zero "
-            "linked work items to verify against; no computed evidence either way (ADF-W1.7 coverage gap)."
+            "No observed linked work items to verify milestone progress or completion "
+            f"({days_label}); evidence coverage is unknown."
         )
     if linked_item_count == 0 and computed_health == MilestoneStatus.MISSED:
         return f"Past target with zero linked work items and no declared completion; no evidence of progress ({days_label})."

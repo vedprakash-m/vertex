@@ -12,13 +12,14 @@ from src.ai.ai_mode import AIMode, get_ai_mode
 from src.commands.report_output import _write_output_text
 from src.core.config_loader import REPORTS_ROOT, load_bundle
 from src.core.decision_brief_engine import DecisionBrief, build_decision_brief
-from src.core.edition_resolver import resolve_edition_paths, get_program_output_dir
-from src.core.exceptions import RenderError
+from src.core.edition_resolver import PROGRAMS_ROOT, resolve_edition_paths, get_program_output_dir
+from src.core.exceptions import ConfigError, RenderError
 from src.core.jinja_filters import JINJA_FILTERS, JINJA_GLOBALS
 from src.core.models_v2 import SectionRevisionStatus
 from src.core.section_proposal_store import load_proposals
 from src.core.snapshot_store import ARCHIVE_ROOT
 from src.core.store_factory import build_signal_store_for_program_id
+from src.core.workspace_paths import REPO_ROOT, resolve_report_workspace_roots
 
 
 TEMPLATES_ROOT = Path(__file__).resolve().parents[2] / "templates"
@@ -32,12 +33,38 @@ class DecisionBriefArtifacts:
     ai_enriched: bool
 
 
+def _resolve_decision_brief_workspace(
+    programs_root: Path | None = None,
+    reports_root: Path | None = None,
+    archive_root: Path | None = None,
+) -> tuple[Path, Path, Path]:
+    if programs_root is None:
+        if reports_root is not None:
+            programs_root = reports_root.parent / "programs"
+        elif PROGRAMS_ROOT != REPO_ROOT / "programs":
+            programs_root = PROGRAMS_ROOT
+    if reports_root is None and REPORTS_ROOT != REPO_ROOT / "reports":
+        reports_root = REPORTS_ROOT
+    if archive_root is None and ARCHIVE_ROOT != REPO_ROOT / "archive":
+        archive_root = ARCHIVE_ROOT
+    return resolve_report_workspace_roots(programs_root, reports_root, archive_root)
+
+
+def _preflight_decision_brief_workspace() -> None:
+    try:
+        _resolve_decision_brief_workspace()
+    except ConfigError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=2) from error
+
+
 def decision_brief_command(
     edition: str = typer.Option(..., "--edition", help="Edition name, e.g. acme_weekly."),
     issue: int | None = typer.Option(None, "--issue", help="Issue number. Defaults to the active issue."),
     ai: bool = typer.Option(False, "--ai/--no-ai", help="Run LLM-as-judge to generate recommendations per item."),
     open_browser: bool = typer.Option(True, "--open/--no-open", help="Open the decision brief in the browser."),
 ) -> None:
+    _preflight_decision_brief_workspace()
     try:
         artifacts = generate_decision_brief(
             edition_name=edition,
@@ -45,7 +72,7 @@ def decision_brief_command(
             ai=ai,
             open_browser=open_browser,
         )
-    except typer.BadParameter as error:
+    except (ConfigError, typer.BadParameter) as error:
         typer.echo(str(error))
         raise typer.Exit(code=2)
     typer.echo(f"Decision brief generated for Issue {artifacts.issue_number:03d}.")
@@ -58,8 +85,9 @@ def load_pending_decision_brief(
     *,
     edition_name: str,
     issue_number: int | None,
-    reports_root: Path,
-    archive_root: Path,
+    reports_root: Path | None = None,
+    archive_root: Path | None = None,
+    programs_root: Path | None = None,
 ) -> tuple[DecisionBrief, str]:
     """Shared loading logic for a pending (non-AI-enriched) decision brief
     -- the half of ``generate_decision_brief`` before ``--ai``/rendering
@@ -67,9 +95,12 @@ def load_pending_decision_brief(
     (``src/commands/decision_brief_pilot.py``), which needs the exact same
     brief/program_id but neither renders HTML nor writes any artifact.
     Returns ``(brief, program_id)``."""
+    programs_root, reports_root, archive_root = _resolve_decision_brief_workspace(
+        programs_root, reports_root, archive_root,
+    )
     resolved_paths = resolve_edition_paths(
         edition_name,
-        programs_root=reports_root.parent / "programs",
+        programs_root=programs_root,
     )
     if resolved_paths is None:
         raise typer.BadParameter(f"Unknown edition '{edition_name}'.")
@@ -88,7 +119,7 @@ def load_pending_decision_brief(
     all_proposals = load_proposals(
         resolved_paths.program_id,
         resolved_issue_number,
-        programs_root=reports_root.parent / "programs",
+        programs_root=programs_root,
     )
     pending = tuple(p for p in all_proposals if p.status == SectionRevisionStatus.PENDING)
     if not pending:
@@ -99,7 +130,7 @@ def load_pending_decision_brief(
 
     signal_store = build_signal_store_for_program_id(
         resolved_paths.program_id,
-        programs_root=reports_root.parent / "programs",
+        programs_root=programs_root,
     )
     signal_map = {s.id: s for s in signal_store.read(resolved_paths.program_id)}
 
@@ -124,27 +155,32 @@ def generate_decision_brief(
     open_browser: bool = False,
     create_ai_client: object = None,
 ) -> DecisionBriefArtifacts:
-    resolved_reports_root = reports_root or REPORTS_ROOT
-    resolved_archive_root = archive_root or ARCHIVE_ROOT
+    resolved_programs_root, resolved_reports_root, _ = _resolve_decision_brief_workspace(
+        programs_root, reports_root, archive_root,
+    )
 
     bundle = load_bundle(
         edition_name,
         reports_root=resolved_reports_root,
-        programs_root=resolved_reports_root.parent / "programs",
+        programs_root=resolved_programs_root,
     )
     brief, resolved_program_id = load_pending_decision_brief(
         edition_name=edition_name,
         issue_number=issue_number,
-        reports_root=resolved_reports_root,
-        archive_root=resolved_archive_root,
+        reports_root=reports_root,
+        archive_root=archive_root,
+        programs_root=programs_root,
     )
 
     if ai:
-        brief = _enrich_with_ai(brief=brief, bundle=bundle, program_id=resolved_program_id, create_ai_client=create_ai_client)
+        brief = _enrich_with_ai(
+            brief=brief, bundle=bundle, program_id=resolved_program_id,
+            create_ai_client=create_ai_client, programs_root=resolved_programs_root,
+        )
 
     html = _render_decision_brief_html(brief=brief, edition_name=edition_name)
     target_path = _write_output_text(
-        get_program_output_dir(edition_name, programs_root=resolved_reports_root.parent / 'programs') / "review" / "decision_brief.html",
+        get_program_output_dir(edition_name, programs_root=resolved_programs_root) / "review" / "decision_brief.html",
         html,
     )
     if open_browser:
@@ -163,6 +199,7 @@ def _enrich_with_ai(
     bundle: object,
     program_id: str,
     create_ai_client: object,
+    programs_root: Path = PROGRAMS_ROOT,
 ) -> DecisionBrief:
     if get_ai_mode() == AIMode.DISABLED:
         return brief
@@ -177,7 +214,9 @@ def _enrich_with_ai(
     if client is None:
         return brief
     try:
-        return advise_on_decision_brief(client=client, brief=brief, program_id=program_id)
+        return advise_on_decision_brief(
+            client=client, brief=brief, program_id=program_id, programs_root=programs_root,
+        )
     except Exception:
         return brief
 

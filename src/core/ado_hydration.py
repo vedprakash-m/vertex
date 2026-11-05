@@ -31,7 +31,7 @@ from src.core.integration_types import (
     DiscoveryCompleteness,
     WorkItemRelation,
 )
-from src.core.models import Comment, Revision, RiskLevel, WorkItem
+from src.core.models import Comment, Revision, WorkItem
 from src.core.models_v2 import Program, Workstream
 
 
@@ -462,7 +462,7 @@ def _work_item_from_batch_row(
         area_path=str(fields.get("System.AreaPath") or ""),
         iteration_path=str(fields.get("System.IterationPath") or ""),
         target_date=_parse_date(fields.get("Microsoft.VSTS.Scheduling.TargetDate")),
-        risk_level=_infer_risk_level(state, tags, risk_assessment),
+        risk_level=infer_ado_risk_level(state, tags, risk_assessment),
         tags=tags,
         custom_fields=custom_fields,
         revisions=_parse_revisions(work_item_id, revision_rows),
@@ -610,17 +610,3 @@ def _field_value(value: Any) -> str | None:
     if isinstance(value, dict):
         return _optional_string(value.get("displayName")) or _optional_string(value.get("uniqueName")) or str(value)
     return str(value)
-
-
-def _infer_risk_level(state: str, tags: list[str], risk_assessment: str | None) -> RiskLevel:
-    normalized_state = state.strip().lower()
-    normalized_tags = {tag.strip().lower() for tag in tags}
-    if normalized_state in {"closed", "done", "resolved", "removed"}:
-        return RiskLevel.LOW
-    if {"blocked", "blocker", "high risk"} & normalized_tags:
-        return RiskLevel.HIGH
-    if {"risk", "at risk"} & normalized_tags:
-        return RiskLevel.MEDIUM
-    if risk_assessment in {"On Track", "At Risk", "Off Track"}:
-        return infer_ado_risk_level(state, tags, risk_assessment)
-    return RiskLevel.UNKNOWN

@@ -7,7 +7,7 @@
 </head>
 <body style="margin:0; padding:0; background-color:#F9FAFB; font-family:Segoe UI, -apple-system, Roboto, Helvetica, Arial, sans-serif; color:#111827;">
   <div style="display:none; max-height:0; overflow:hidden; opacity:0; mso-hide:all; color:transparent;">
-    0 High risks, Risk Load 0.0 stable. No new leadership decisions this week.
+    0 High risks; assessment coverage needs input. Leadership ask: Assess 4 dimensions before making health decisions.
   </div>
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; background-color:#F9FAFB; margin:0; padding:0;">
     <tr>
@@ -26,9 +26,9 @@
 <a id="health"></a>
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 16px 0; border:1px solid #E5E7EB; background-color:#FFFFFF;">
   <tr>
-    <td style="padding:16px 20px; background-color:#BFBFBF; color:#000000; border-bottom:1px solid #E5E7EB;">
-      <p style="margin:0 0 6px 0; font-size:12px; line-height:1.4; font-weight:700; letter-spacing:0.05em; text-transform:uppercase;">Program Health: NEEDS INPUT, STABLE</p>
-<p style="margin:0 0 6px 0; font-size:13px; line-height:1.5; color:#000000;">Milestones: 1 at risk, 2 on track. Longest dependency chain: Design, M3 - Code Complete.</p>      <p style="margin:0 0 6px 0; font-size:14px; line-height:1.5; font-weight:700; color:#000000;">Leadership ask: Author confirmation required before publish.</p>
+    <td style="padding:16px 20px; background-color:#BF8F00; color:#000000; border-bottom:1px solid #E5E7EB;">
+      <p style="margin:0 0 6px 0; font-size:12px; line-height:1.4; font-weight:700; letter-spacing:0.05em; text-transform:uppercase;">Program Health: ON TRACK, STABLE</p>
+<p style="margin:0 0 6px 0; font-size:14px; line-height:1.5; color:#000000;">4 dimensions need input; health assessment is incomplete.</p><p style="margin:0 0 6px 0; font-size:13px; line-height:1.5; color:#000000;">Milestones: 3 unknown. Longest dependency chain: Design, M3 - Code Complete.</p>      <p style="margin:0 0 6px 0; font-size:14px; line-height:1.5; font-weight:700; color:#000000;">Leadership ask: Assess 4 dimensions before making health decisions.</p>
       <p style="margin:0; font-size:12px; line-height:1.5; color:#000000;">~1 min read · Narrative Edition</p>
     </td>
   </tr>
@@ -42,7 +42,7 @@
           </td>
           <td style="width:72px; background-color:#BF8F00; border:1px solid #E5E7EB; padding:8px; text-align:center;">
             <p style="margin:0 0 4px 0; font-size:11px; font-weight:700; color:#000000;">Med</p>
-            <p style="margin:0; font-size:18px; font-weight:700; color:#000000;">0</p>
+            <p style="margin:0; font-size:18px; font-weight:700; color:#000000;">4</p>
           </td>
           <td style="width:72px; background-color:#B4E5A2; border:1px solid #E5E7EB; padding:8px; text-align:center;">
             <p style="margin:0 0 4px 0; font-size:11px; font-weight:700; color:#000000;">Low</p>
@@ -53,11 +53,11 @@
             <p style="margin:0; font-size:18px; font-weight:700; color:#000000;">0</p>
           </td>
           <td style="padding:4px 0 4px 8px; vertical-align:middle;">
-            <p style="margin:0 0 6px 0; font-size:12px; line-height:1.4; color:#6B7280;">Risk Load: 0.0</p>
+            <p style="margin:0 0 6px 0; font-size:12px; line-height:1.4; color:#6B7280;">Risk Load: 1.0 (assessment coverage incomplete; comparison unavailable)</p>
             <table width="80" cellpadding="0" cellspacing="0" border="0" role="presentation" style="border:1px solid #D1D5DB; height:6px; margin:0 0 6px 0;">
               <tr>
-                <td width="0" style="background:#047857; font-size:0; line-height:0;">&nbsp;</td>
-                <td width="80" style="background:#F3F4F6; font-size:0; line-height:0;">&nbsp;</td>
+                <td width="27" style="background:#F59E0B; font-size:0; line-height:0;">&nbsp;</td>
+                <td width="53" style="background:#F3F4F6; font-size:0; line-height:0;">&nbsp;</td>
               </tr>
             </table>
             <p style="margin:0; font-size:12px; line-height:1.4; color:#6B7280;">Stable</p>
@@ -128,7 +128,7 @@
 <td style="padding:10px 0 8px 0; font-size:12px; line-height:1.4; font-weight:600; letter-spacing:0.05em; text-transform:uppercase; color:#6B7280;">Executive Summary</td>  </tr>
   <tr>
     <td style="padding:0 0 12px 0; font-size:14px; line-height:1.6; color:#111827;">
-<p style="margin:0 0 10px 0;">acme_weekly tracks 4 in-scope items. 0 dimensions are High and 0 are Medium. Current summary is based on current-state inventory; prior-issue deltas are unavailable.</p>    </td>
+<p style="margin:0 0 10px 0;">acme_weekly tracks 4 in-scope items. 0 dimensions are High and 4 are Medium. Current summary is based on current-state inventory; prior-issue deltas are unavailable.</p>    </td>
   </tr>
 </table>                  </td>
                 </tr>

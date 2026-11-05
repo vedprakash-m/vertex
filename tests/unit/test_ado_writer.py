@@ -62,6 +62,59 @@ def _comment_program() -> Program:
     )
 
 
+@pytest.mark.parametrize("response", [{}, {"id": None}, {"id": True}, {"id": 0}, {"id": -1}, {"id": "42"}, {"id": 1.5}])
+def test_create_callback_invalid_acknowledgement_is_uncertain(tmp_path, monkeypatch, response) -> None:
+    from types import SimpleNamespace
+
+    writer = ADOWriter(SimpleNamespace(organization="fixture", project="One", _rest_base_url="https://example.invalid/"), programs_root=tmp_path)
+    calls = []
+
+    def respond(*args, **kwargs):
+        calls.append((args, kwargs))
+        return response
+
+    monkeypatch.setattr(writer, "_request_json", respond)
+    result = writer._dispatch_create_task_outbox_entry(SimpleNamespace(
+        payload_json=json.dumps({"org": "fixture", "project": "One", "title": "Synthetic", "tags": "marker"}),
+    ))
+    assert result.succeeded is False and result.uncertain is True
+    assert result.remote_id is None and len(calls) == 1
+
+
+def test_create_callback_hashes_actual_success_response(tmp_path, monkeypatch) -> None:
+    import hashlib
+    from types import SimpleNamespace
+
+    response = {"id": 42, "rev": 1, "fields": {"System.Title": "Synthetic"}}
+    writer = ADOWriter(SimpleNamespace(organization="fixture", project="One", _rest_base_url="https://example.invalid/"), programs_root=tmp_path)
+    monkeypatch.setattr(writer, "_request_json", lambda *args, **kwargs: response)
+    result = writer._dispatch_create_task_outbox_entry(SimpleNamespace(
+        payload_json=json.dumps({"org": "fixture", "project": "One", "title": "Synthetic", "tags": "marker"}),
+    ))
+    assert result.succeeded is True and result.uncertain is False and result.remote_id == 42
+    assert result.remote_rev == 1
+    assert result.remote_response_hash == hashlib.sha256(json.dumps(response, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def test_create_callback_query_timeout_is_uncertain_not_definite_failure(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    writer = ADOWriter(SimpleNamespace(organization="fixture", project="One", _rest_base_url="https://example.invalid/"), programs_root=tmp_path)
+    calls = []
+
+    def timeout(*args, **kwargs):
+        calls.append(args)
+        raise QueryTimeoutError("private-timeout-detail")
+
+    monkeypatch.setattr(writer, "_request_json", timeout)
+    result = writer._dispatch_create_task_outbox_entry(SimpleNamespace(
+        payload_json=json.dumps({"org": "fixture", "project": "One", "title": "Synthetic"}),
+    ))
+    assert result.uncertain is True and result.succeeded is False
+    assert "private-timeout-detail" not in result.failure_reason
+    assert len(calls) == 1
+
+
 def _comment_proposal(proposal_id: str, at: datetime, *, entry_status: str = "pending") -> ADOUpdateProposal:
     return ADOUpdateProposal(
         id=proposal_id,

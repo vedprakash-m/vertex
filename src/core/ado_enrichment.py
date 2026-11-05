@@ -72,17 +72,19 @@ def infer_ado_risk_level(
     normalized_state = state.strip().lower()
     normalized_tags = {tag.strip().lower() for tag in tags}
     normalized_risk = normalize_risk_assessment(risk_assessment)
-    if normalized_state in {"closed", "done", "resolved", "completed"}:
+    if normalized_state in {"closed", "done", "resolved", "completed", "removed"}:
         return RiskLevel.DONE
-    if "blocked" in normalized_state or "blocked" in normalized_tags:
-        return RiskLevel.HIGH
     if normalized_risk is not None:
         mapped = _RISK_ASSESSMENT_LEVELS.get(normalized_risk.lower())
         if mapped is not None:
             return mapped
+    if "blocked" in normalized_state or {"blocked", "blocker", "high risk"} & normalized_tags:
+        return RiskLevel.HIGH
+    if {"risk", "at risk"} & normalized_tags:
+        return RiskLevel.MEDIUM
     if normalized_state in {"off track", "at risk"}:
         return RiskLevel.HIGH if normalized_state == "off track" else RiskLevel.MEDIUM
-    return RiskLevel.UNKNOWN if normalized_risk is None else RiskLevel.LOW
+    return RiskLevel.UNKNOWN
 
 
 def extract_child_ids_by_parent(rows: list[dict[str, Any]]) -> dict[int, tuple[int, ...]]:

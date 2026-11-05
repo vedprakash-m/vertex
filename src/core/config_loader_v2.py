@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -298,6 +298,10 @@ def _queries_from_knowledge(knowledge: KnowledgeStore, *, program_id: str) -> li
                 "reference_url": query.reference_url,
             }
         )
+        if query.result_limits is not None:
+            queries[-1]["result_limits"] = asdict(query.result_limits)
+        if query.expected_cardinality != "zero_ok":
+            queries[-1]["expected_cardinality"] = query.expected_cardinality
     return queries
 
 

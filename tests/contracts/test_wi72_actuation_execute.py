@@ -26,8 +26,10 @@ from __future__ import annotations
 import ast
 import importlib
 import tempfile
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -106,6 +108,303 @@ class TestINV12Gate:
         """Proposals with a gap_reason cannot be executed."""
         proposal = _make_proposal(approved=True, gap_reason="missing_area_path")
         assert proposal.gap_reason != ""
+
+
+def _execution_case(case: str, operation: str = "state_transition"):
+    proposal = replace(_make_proposal(), operation=operation)
+    rule = ActuationRule(
+        id=proposal.rule_id, adapter=proposal.adapter, operation=operation,
+        gate="same_system", enabled=True,
+    )
+    policy = replace(_make_policy(), rules=(rule,))
+    if case == "disabled":
+        policy = replace(policy, enabled=False)
+    elif case == "missing-rule":
+        policy = replace(policy, rules=())
+    elif case == "disabled-rule":
+        policy = replace(policy, rules=(replace(rule, enabled=False),))
+    elif case == "duplicate-rule":
+        policy = replace(policy, rules=(rule, rule))
+    elif case == "adapter":
+        policy = replace(policy, rules=(replace(rule, adapter="other"),))
+    elif case == "operation":
+        policy = replace(policy, rules=(replace(rule, operation="other"),))
+    elif case == "stale":
+        proposal = replace(proposal, proposed_at=proposal.proposed_at - timedelta(hours=25))
+    elif case == "shortened-ttl":
+        policy = replace(policy, approval_ttl_hours=1)
+        proposal = replace(proposal, proposed_at=proposal.proposed_at - timedelta(hours=2))
+    elif case == "future":
+        proposal = replace(proposal, proposed_at=proposal.proposed_at + timedelta(hours=1))
+    elif case == "naive":
+        proposal = replace(proposal, proposed_at=proposal.proposed_at.replace(tzinfo=None))
+    elif case == "unapproved":
+        proposal = replace(proposal, approved=False)
+    elif case == "gap":
+        proposal = replace(proposal, gap_reason="missing_area_path")
+    return proposal, policy
+
+
+@pytest.mark.parametrize("operation", ["state_transition", "comment", "work_item_create"])
+@pytest.mark.parametrize("case", [
+    "disabled", "missing-rule", "disabled-rule", "duplicate-rule", "adapter",
+    "operation", "stale", "shortened-ttl", "future", "naive", "unapproved", "gap",
+])
+def test_direct_dispatch_revalidates_current_admission(monkeypatch, case: str, operation: str) -> None:
+    from src.commands.actuate import _dispatch_execution
+    from src.core.integration_protocol import ActuationResult
+
+    proposal, policy = _execution_case(case, operation)
+    calls = []
+    monkeypatch.setenv("VERTEX_ALLOW_DIRECT_ACTUATION", "1")
+    monkeypatch.setattr("src.commands.actuate._resolve_ado_client_fn", lambda reality: calls.append("client"))
+    monkeypatch.setattr(
+        AdoActuationAdapter, "execute",
+        lambda *args, **kwargs: calls.append("execute") or ActuationResult(success=True),
+    )
+    result = _dispatch_execution(proposal, object(), policy)
+    assert result.success is False
+    assert "review" in result.error_message.lower()
+    assert calls == []
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("case", [
+    "disabled", "missing-rule", "disabled-rule", "duplicate-rule", "adapter",
+    "operation", "stale", "shortened-ttl", "future", "naive",
+])
+def test_execute_command_blocks_invalid_admission_before_dispatch(tmp_path, monkeypatch, case, dry_run) -> None:
+    from typer.testing import CliRunner
+    from src.commands.actuate import app
+
+    proposal, policy = _execution_case(case)
+    calls = []
+    monkeypatch.setattr(
+        "src.core.program_reality.ProgramReality.load",
+        lambda *args, **kwargs: SimpleNamespace(pending_actuations=lambda: (proposal,)),
+    )
+    monkeypatch.setattr("src.core.actuation_engine.load_actuation_policy", lambda *args, **kwargs: policy)
+    monkeypatch.setattr("src.commands.actuate._dispatch_execution", lambda *args: calls.append(args))
+    result = CliRunner().invoke(app, [
+        "execute", "--program", "demo", "--proposal-id", proposal.proposal_id,
+        "--programs-root", str(tmp_path), *(["--dry-run"] if dry_run else []),
+    ])
+    assert result.exit_code == 2, result.output
+    assert "review" in result.output.lower()
+    assert calls == [] and list(tmp_path.iterdir()) == []
+
+
+def _retained_actuation_reality(payloads):
+    from src.core.program_fact_store import ProgramFactSnapshot
+    from src.core.program_reality import ProgramReality
+
+    facts = tuple(SimpleNamespace(
+        fact_id=f"fact-{index}", fact_type="action.proposal", payload=payload, entity_refs=("wi:42",),
+    ) for index, payload in enumerate(payloads))
+    return ProgramReality(
+        program_id="demo",
+        snapshot=ProgramFactSnapshot(program_id="demo", as_of=datetime.now(timezone.utc), facts=facts),
+        sor_mode="primary", as_of=datetime.now(timezone.utc),
+        _entity_fact_index={}, _actions=(), _risks=(), _decisions=(),
+        _dependencies=(), _milestones=(), _assumptions=(), _workstreams=(), _claims=(),
+    )
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("approved", "false"), ("approved", "true"), ("approved", 1), ("approved", None),
+    ("proposed_at", None), ("proposed_at", ""), ("proposed_at", "invalid"),
+    ("proposed_at", True), ("approval_ttl_hours", None), ("approval_ttl_hours", True),
+    ("approval_ttl_hours", "24"), ("approval_ttl_hours", 0), ("approval_ttl_hours", -1),
+])
+def test_retained_actuation_rejects_malformed_approval_and_expiry(field, value) -> None:
+    from src.core.exceptions import ConfigError
+
+    payload = {
+        "proposal_id": "retained", "proposed_at": datetime.now(timezone.utc).isoformat(),
+        "approved": True, "approval_ttl_hours": 24,
+    }
+    payload[field] = value
+    before = dict(payload)
+    with pytest.raises(ConfigError, match="actuation proposal"):
+        _retained_actuation_reality((payload,)).pending_actuations()
+    assert payload == before
+
+
+def test_retained_actuation_requires_original_timestamp() -> None:
+    from src.core.exceptions import ConfigError
+
+    with pytest.raises(ConfigError, match="actuation proposal"):
+        _retained_actuation_reality(({"approved": True},)).pending_actuations()
+
+
+@pytest.mark.parametrize("operation", ["state_transition", "comment", "work_item_create"])
+def test_fresh_direct_dispatch_keeps_exact_payload_and_identity(monkeypatch, operation) -> None:
+    from src.commands.actuate import _dispatch_execution
+    from src.core.integration_protocol import ActuationResult
+
+    proposal, policy = _execution_case("fresh", operation)
+    before = dict(proposal.payload)
+    calls = []
+    client_factory = lambda: object()
+    monkeypatch.setenv("VERTEX_ALLOW_DIRECT_ACTUATION", "1")
+    monkeypatch.setattr("src.commands.actuate._resolve_ado_client_fn", lambda reality: client_factory)
+    monkeypatch.setattr(
+        AdoActuationAdapter, "execute",
+        lambda self, op, payload, **kwargs: calls.append((op, payload, kwargs, self._ado_client_fn))
+        or ActuationResult(success=True),
+    )
+    result = _dispatch_execution(proposal, object(), policy)
+    assert result.success is True
+    assert calls == [(operation, {**before, "entity_ref": proposal.entity_ref, "rule_id": proposal.rule_id},
+                      {"dry_run": False}, client_factory)]
+    assert proposal.payload == before
+
+
+@pytest.mark.parametrize("operation", ["state_transition", "comment", "work_item_create"])
+def test_exact_ttl_dry_run_stays_write_free(tmp_path, monkeypatch, operation) -> None:
+    from typer.testing import CliRunner
+    from src.commands.actuate import app
+
+    proposal, policy = _execution_case("fresh", operation)
+    now = proposal.proposed_at
+    proposal = replace(proposal, proposed_at=now - timedelta(hours=policy.approval_ttl_hours))
+
+    class _Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr("src.core.actuation_engine.datetime", _Clock)
+    monkeypatch.setattr(
+        "src.core.program_reality.ProgramReality.load",
+        lambda *args, **kwargs: SimpleNamespace(pending_actuations=lambda: (proposal,)),
+    )
+    monkeypatch.setattr("src.core.actuation_engine.load_actuation_policy", lambda *args, **kwargs: policy)
+    monkeypatch.setattr("src.commands.actuate._dispatch_execution", lambda *args: pytest.fail("dry-run dispatch"))
+    result = CliRunner().invoke(app, [
+        "execute", "--program", "demo", "--proposal-id", proposal.proposal_id,
+        "--programs-root", str(tmp_path), "--dry-run",
+    ])
+    assert result.exit_code == 0, result.output
+    assert "DRY-RUN complete" in result.output and list(tmp_path.iterdir()) == []
+
+
+def test_actual_dispatch_rechecks_expiry_after_command_admission(tmp_path, monkeypatch) -> None:
+    from typer.testing import CliRunner
+    from src.commands.actuate import app
+
+    proposal, policy = _execution_case("fresh")
+    times = iter((proposal.proposed_at, proposal.proposed_at + timedelta(hours=25)))
+
+    class _Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return next(times)
+
+    monkeypatch.setenv("VERTEX_ALLOW_DIRECT_ACTUATION", "1")
+    monkeypatch.setattr("src.core.actuation_engine.datetime", _Clock)
+    monkeypatch.setattr(
+        "src.core.program_reality.ProgramReality.load",
+        lambda *args, **kwargs: SimpleNamespace(pending_actuations=lambda: (proposal,)),
+    )
+    monkeypatch.setattr("src.core.actuation_engine.load_actuation_policy", lambda *args, **kwargs: policy)
+    monkeypatch.setattr("src.commands.actuate._resolve_ado_client_fn", lambda *args: pytest.fail("stale dispatch"))
+    result = CliRunner().invoke(app, [
+        "execute", "--program", "demo", "--proposal-id", proposal.proposal_id,
+        "--programs-root", str(tmp_path),
+    ])
+    assert result.exit_code == 3, result.output
+    assert "stale" in result.output and "SUCCESS" not in result.output
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("command", ["review", "execute"])
+def test_command_surfaces_invalid_retained_approval_without_payload(tmp_path, monkeypatch, command) -> None:
+    from typer.testing import CliRunner
+    from src.commands.actuate import app
+
+    payload = {
+        "approved": "false", "proposed_at": datetime.now(timezone.utc).isoformat(),
+        "private": "must-not-render",
+    }
+    reality = _retained_actuation_reality((payload,))
+    monkeypatch.setattr("src.core.program_reality.ProgramReality.load", lambda *args, **kwargs: reality)
+    monkeypatch.setattr("src.core.actuation_engine.load_actuation_policy", lambda *args, **kwargs: _make_policy())
+    monkeypatch.setattr("src.core.actuation_engine.derive_proposals", lambda *args, **kwargs: ())
+    result = CliRunner().invoke(app, [
+        command, "--program", "demo", "--programs-root", str(tmp_path),
+        *(["--proposal-id", "retained"] if command == "execute" else []),
+    ])
+    assert result.exit_code == 2, result.output
+    assert "invalid retained actuation proposal" in result.output
+    assert "must-not-render" not in result.output and list(tmp_path.iterdir()) == []
+
+
+def test_actual_facade_keeps_legacy_defaults_and_excludes_expiry(monkeypatch) -> None:
+    now = datetime.now(timezone.utc)
+
+    class _Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr("src.core.program_reality.datetime", _Clock)
+    at_edge = {"proposal_id": "edge", "proposed_at": (now - timedelta(hours=24)).isoformat()}
+    expired = {"proposal_id": "expired", "proposed_at": (now - timedelta(hours=25)).isoformat()}
+    naive = {"proposal_id": "naive", "proposed_at": now.replace(tzinfo=None).isoformat(), "approved": True}
+    retained = (at_edge, expired, naive)
+    before = tuple(dict(payload) for payload in retained)
+    result = _retained_actuation_reality(retained).pending_actuations()
+    assert [proposal.proposal_id for proposal in result] == ["edge", "naive"]
+    assert result[0].approved is False and result[1].approved is True
+    assert result[1].proposed_at == now and retained == before
+
+
+@pytest.mark.parametrize("location", ["global", "program", "rule"])
+@pytest.mark.parametrize("value", ["false", "true", "", 0, 1, None, []])
+def test_loaded_policy_refuses_truthy_enablement_coercion(tmp_path, location, value) -> None:
+    import yaml
+    from src.core.actuation_engine import load_actuation_policy
+
+    global_policy = {
+        "policy_schema_version": "1",
+        "actuation": {"enabled": True},
+        "rules": [{"id": "rule", "adapter": "ado", "operation": "comment", "gate": "same_system", "enabled": True}],
+    }
+    programs = tmp_path / "programs"
+    if location == "global":
+        global_policy["actuation"]["enabled"] = value
+    elif location == "rule":
+        global_policy["rules"][0]["enabled"] = value
+    else:
+        per_program = programs / "demo" / "policies"
+        per_program.mkdir(parents=True)
+        (per_program / "actuation_rules.yaml").write_text(yaml.safe_dump({"actuation": {"enabled": value}}))
+    (tmp_path / "actuation_rules.yaml").write_text(yaml.safe_dump(global_policy))
+    with pytest.raises(ValueError, match="boolean"):
+        load_actuation_policy("demo", policies_root=tmp_path, programs_root=programs)
+
+
+@pytest.mark.parametrize("command", ["review", "execute"])
+def test_command_surfaces_invalid_policy_without_raw_details(tmp_path, monkeypatch, command) -> None:
+    from typer.testing import CliRunner
+    from src.commands.actuate import app
+
+    def invalid_policy(*args, **kwargs):
+        raise ValueError("must-not-render")
+
+    monkeypatch.setattr(
+        "src.core.program_reality.ProgramReality.load",
+        lambda *args, **kwargs: SimpleNamespace(pending_actuations=lambda: ()),
+    )
+    monkeypatch.setattr("src.core.actuation_engine.load_actuation_policy", invalid_policy)
+    result = CliRunner().invoke(app, [
+        command, "--program", "demo", "--programs-root", str(tmp_path),
+        *(["--proposal-id", "retained"] if command == "execute" else []),
+    ])
+    assert result.exit_code == 2, result.output
+    assert "invalid actuation policy" in result.output
+    assert "must-not-render" not in result.output and list(tmp_path.iterdir()) == []
 
 
 # ---------------------------------------------------------------------------

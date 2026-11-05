@@ -46,6 +46,10 @@ class QueryTimeoutError(QueryError):
     """Raised when an external query exceeds the configured timeout."""
 
 
+class MutationOutcomeUnknown(QueryError):
+    """Raised when a mutation response cannot establish its remote outcome."""
+
+
 class RenderError(VertexError):
     """Raised when a template cannot be rendered or required render data is missing."""
 

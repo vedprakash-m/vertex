@@ -17,6 +17,7 @@ from src.commands import confirm, propose, report, report_history
 from src.core import workspace_paths
 from src.core.exceptions import ConfigError, QueryError, StateError
 from src.core.models import ArchiveEntry, ArchiveIndex
+from src.core.overrides_store import get_overrides_path
 from src.core.pipeline import StageContext
 from src.core.stages import resolution_stage
 from tests.support.report_test_setup import disable_kusto_in_report_copy, reset_overrides_to_seed_state, stage_v2_report_workspace
@@ -329,6 +330,8 @@ def test_direct_report_api_uses_selected_external_workspace_roots(
 def test_installed_report_command_runs_offline_dry_run_in_external_workspace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from tests.unit.test_commands_report import _sample_items
+
     source_root = build_synthetic_report_source(tmp_path / "synthetic-source")
     workspace = tmp_path / "external"
     reports_root = stage_v2_report_workspace(source_root, workspace)
@@ -352,7 +355,7 @@ def test_installed_report_command_runs_offline_dry_run_in_external_workspace(
         archive_root=archive_root,
         programs_root=programs_root,
         dry_run=True,
-        work_item_loader=lambda _bundle, _timestamp: ((), 0),
+        work_item_loader=lambda _bundle, timestamp: (_sample_items(timestamp)[:1], 0),
         open_browser=False,
     )
     assert seeded.snapshot_path is not None and seeded.snapshot_path.is_file()
@@ -378,6 +381,12 @@ def test_installed_report_command_runs_offline_dry_run_in_external_workspace(
         "acme_weekly", 7, reports_root, programs_root=programs_root,
     )
     (narrative_dir / "exec_summary.md").write_text("Synthetic offline summary.\n", encoding="utf-8")
+    overrides_path = get_overrides_path("acme_weekly", reports_root, issue_number=7)
+    overrides_payload = yaml.safe_load(overrides_path.read_text(encoding="utf-8"))
+    for scorecard in overrides_payload["scorecards"].values():
+        for dimension in scorecard.values():
+            dimension["risk"] = "low"
+    overrides_path.write_text(yaml.safe_dump(overrides_payload, sort_keys=False), encoding="utf-8")
     confirm_result = confirm.confirm_issue(
         "acme_weekly", 7, dry_run=True, reports_root=reports_root,
         archive_root=archive_root, programs_root=programs_root, force=True,

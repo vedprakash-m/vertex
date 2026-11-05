@@ -72,6 +72,30 @@ def import_reply_command(
     typer.echo(proposal.source_value)
 
 
+@app.command("verify-reply-origin")
+def verify_reply_origin_command(
+    edition: str = typer.Option(..., "--edition", help="Edition name."),
+    issue: int = typer.Option(..., "--issue", min=1, help="Issue containing the pending reply."),
+    proposal_id: str = typer.Option(..., "--proposal-id", help="Exact pending reply proposal."),
+    reason: str = typer.Option(..., "--reason", help="How the operator independently checked origin."),
+    actor: str = typer.Option("operator", "--actor", help="Display label, never verifier authorization."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview verification; write nothing."),
+    programs_root: Path = typer.Option(PROGRAMS_ROOT, hidden=True),
+) -> None:
+    """Attest reply origin as an authorized OS principal; not change approval."""
+    from src.core.context_gap_reply_import import ContextGapReplyImportError, verify_context_reply_origin
+
+    program_id = _resolve_program_id(edition, programs_root=programs_root)
+    try:
+        proposal = verify_context_reply_origin(
+            program_id=program_id, issue_number=issue, proposal_id=proposal_id,
+            actor=actor, reason=reason, programs_root=programs_root, dry_run=dry_run,
+        )
+    except ContextGapReplyImportError as error:
+        raise typer.BadParameter(str(error)) from error
+    typer.echo(f"{'Dry run: ' if dry_run else ''}{proposal.proposal_id} | pending | origin verified; not change approval")
+
+
 @app.command("solicit")
 def solicit_command(
     edition: str = typer.Option(..., "--edition", help="Edition name."),

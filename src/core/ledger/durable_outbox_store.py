@@ -28,7 +28,7 @@ from pathlib import Path
 
 from src.core._db import open_program_db_with_retry as open_program_db
 from src.core.unit_of_work import open_unit_of_work
-from src.core.workspace_lease import LeaseHandle, get_workspace_lease_db_path
+from src.core.workspace_lease import ACTUATION_DISPATCH_DOMAIN, LeaseHandle, get_workspace_lease_db_path
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS outbox (
@@ -56,6 +56,23 @@ _TRUE_TERMINALS = frozenset(
     {"uncertain_remote_state", "failed_terminal", "compensation_required", "dead_letter", "manually_resolved", "completed"}
 )
 _RELEASABLE_STATUSES = ("pending", "failed_retryable")
+_SUCCESS_RECEIPTS_SQL = """
+CREATE TABLE IF NOT EXISTS outbox_success_receipts (
+    outbox_id TEXT PRIMARY KEY,
+    receipt_json TEXT NOT NULL
+)
+"""
+_TRANSITION_PREDECESSORS = {
+    "dispatched": frozenset({"leased"}),
+    "succeeded": frozenset({"dispatched"}),
+    "audited": frozenset({"succeeded"}),
+    "completed": frozenset({"audited", "leased"}),
+    "failed_retryable": frozenset({"leased"}),
+    "failed_terminal": frozenset({"leased", "dispatched"}),
+    "uncertain_remote_state": frozenset({"dispatched"}),
+    "compensation_required": frozenset({"succeeded", "audited"}),
+    "dead_letter": frozenset({"leased", "failed_retryable"}),
+}
 
 
 class OutboxError(Exception):
@@ -178,6 +195,20 @@ def list_by_status(db_path: Path, domain: str, status: str) -> tuple[OutboxEntry
     return tuple(_entry_from_row(row) for row in rows)
 
 
+def load_success_receipt(db_path: Path, outbox_id: str) -> str | None:
+    if not db_path.exists():
+        return None
+    with open_program_db(db_path, read_only=True) as connection:
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'outbox_success_receipts'"
+        ).fetchone() is None:
+            return None
+        row = connection.execute(
+            "SELECT receipt_json FROM outbox_success_receipts WHERE outbox_id = ?", (outbox_id,),
+        ).fetchone()
+    return None if row is None else str(row[0])
+
+
 def lease_next(
     db_path: Path,
     domain: str,
@@ -273,6 +304,7 @@ def _transition(
     fencing_token: int,
     new_status: str,
     extra_columns: dict[str, object] | None = None,
+    success_receipt_json: str | None = None,
 ) -> OutboxEntry:
     now = _now()
     columns = dict(extra_columns or {})
@@ -284,15 +316,27 @@ def _transition(
     with open_program_db(db_path, durability="strict") as connection:
         connection.execute("BEGIN IMMEDIATE")
         row = connection.execute(
-            "SELECT lease_owner, lease_fencing_token, status FROM outbox WHERE outbox_id = ?", (outbox_id,)
+            "SELECT lease_owner, lease_fencing_token, status, domain FROM outbox WHERE outbox_id = ?", (outbox_id,)
         ).fetchone()
         if row is None:
             raise OutboxError(f"unknown outbox row {outbox_id!r}")
-        current_owner, current_token, current_status = row
+        current_owner, current_token, current_status, domain = row
         if current_owner != owner or int(current_token) != fencing_token:
             raise LeaseNoLongerCurrent(outbox_id)
         if current_status in _TRUE_TERMINALS:
             raise OutboxError(f"outbox row {outbox_id!r} is terminal ({current_status!r}); automatic transition refused")
+        if current_status not in _TRANSITION_PREDECESSORS[new_status] or (
+            new_status == "completed" and current_status == "leased" and domain == ACTUATION_DISPATCH_DOMAIN
+        ):
+            raise OutboxError(
+                f"outbox row {outbox_id!r}: transition {current_status!r} -> {new_status!r} refused"
+            )
+        if success_receipt_json is not None:
+            connection.execute(_SUCCESS_RECEIPTS_SQL)
+            connection.execute(
+                "INSERT INTO outbox_success_receipts (outbox_id, receipt_json) VALUES (?, ?)",
+                (outbox_id, success_receipt_json),
+            )
         connection.execute(f"UPDATE outbox SET {set_clause} WHERE outbox_id = ?", (*values, outbox_id))
     entry = load_entry(db_path, outbox_id)
     assert entry is not None
@@ -303,8 +347,14 @@ def mark_dispatched(db_path: Path, outbox_id: str, *, owner: str, fencing_token:
     return _transition(db_path, outbox_id, owner=owner, fencing_token=fencing_token, new_status="dispatched", extra_columns={"remote_request_hash": remote_request_hash})
 
 
-def mark_succeeded(db_path: Path, outbox_id: str, *, owner: str, fencing_token: int, remote_response_hash: str | None = None) -> OutboxEntry:
-    return _transition(db_path, outbox_id, owner=owner, fencing_token=fencing_token, new_status="succeeded", extra_columns={"remote_response_hash": remote_response_hash})
+def mark_succeeded(
+    db_path: Path, outbox_id: str, *, owner: str, fencing_token: int,
+    remote_response_hash: str | None = None, success_receipt_json: str | None = None,
+) -> OutboxEntry:
+    return _transition(
+        db_path, outbox_id, owner=owner, fencing_token=fencing_token, new_status="succeeded",
+        extra_columns={"remote_response_hash": remote_response_hash}, success_receipt_json=success_receipt_json,
+    )
 
 
 def mark_audited(db_path: Path, outbox_id: str, *, owner: str, fencing_token: int) -> OutboxEntry:

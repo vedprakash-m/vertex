@@ -8,6 +8,7 @@ import re
 from typing import Any, Literal, cast
 
 from src.core.exceptions import ConfigError
+from src.core.kusto_result_limits import parse_kusto_result_limits
 from src.core.models_v2 import EngMsPage, KustoQuery, PersonDirectory, PersonProfile, Product, Team
 from src.core.profile_encryption import load_people_profiles_document
 from src.core.yaml_utils import fast_safe_load
@@ -215,6 +216,8 @@ def parse_knowledge_documents(
             classification=_query_classification(entry.get("classification"), knowledge_root / "golden_queries.yaml"),
             ado_filter=_optional_str(entry.get("ado_filter")),
             ado_select=_optional_str(entry.get("ado_select")),
+            result_limits=parse_kusto_result_limits(entry.get("result_limits")),
+            expected_cardinality=str(entry.get("expected_cardinality", "zero_ok")),
         )
         for entry in queries_doc.get("queries", [])
         if isinstance(entry, dict)

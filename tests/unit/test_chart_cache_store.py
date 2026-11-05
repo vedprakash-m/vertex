@@ -10,6 +10,7 @@ import pytest
 
 from src.core.chart_cache_store import (
     ChartCacheEntry,
+    chart_cache_contract_identity,
     chart_cache_age_hours,
     evict_stale_caches,
     load_chart_cache,
@@ -49,6 +50,76 @@ def test_write_read_chart_cache(tmp_path):
     assert entry.captured_at == _NOW
     assert len(entry.rows) == 2
     assert entry.rows[0]["p50"] == 1.5
+
+
+@pytest.mark.parametrize("identity", [None, "a" * 64])
+def test_chart_cache_definition_hash_roundtrip(identity, tmp_path):
+    path = write_chart_cache(
+        "synthetic", "synthetic", _ROWS, _NOW, "synthetic",
+        programs_root=tmp_path, pii_prescrubbed=True, query_contract_hash=identity,
+    )
+    entry = load_chart_cache("synthetic", "synthetic", programs_root=tmp_path)
+    assert entry.query_contract_hash == identity
+    assert json.loads(path.read_text(encoding="utf-8"))["query_contract_hash"] == identity
+
+
+@pytest.mark.parametrize("identity", ["", "A" * 64, "a" * 63, 1, True, [], {}])
+def test_chart_cache_refuses_malformed_definition_hash(identity, tmp_path, caplog):
+    path = _write(tmp_path)
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="query_contract_hash"):
+        write_chart_cache(
+            "acme", "q1", _ROWS, _NOW, "synthetic", programs_root=tmp_path,
+            pii_prescrubbed=True, query_contract_hash=identity,
+        )
+    assert path.read_bytes() == before
+    data = json.loads(before)
+    data["query_contract_hash"] = identity
+    path.write_text(json.dumps(data), encoding="utf-8")
+    assert load_chart_cache("acme", "q1", programs_root=tmp_path) is None
+    assert "query_contract_hash" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "change",
+    [{"expected_cardinality": "scalar_required"},
+     {"result_limits": "limits"}, {"result_limits": "other_columns"},
+     {"result_limits": "other_bytes"}, {"result_limits": "other_rows"}],
+)
+def test_chart_cache_identity_binds_authored_admission(change):
+    from dataclasses import replace
+    from src.core.kusto_result_limits import KustoResultLimits
+    from src.core.models_v2 import KustoQuery
+
+    query = KustoQuery(
+        id="synthetic", cluster="synthetic", database="synthetic", kql="synthetic",
+        section="Synthetic", render_as="chart_image", confidence="high",
+    )
+    limits = {
+        "limits": KustoResultLimits(("Value",), 1, 100),
+        "other_columns": KustoResultLimits(("Other",), 1, 100),
+        "other_bytes": KustoResultLimits(("Value",), 1, 200),
+        "other_rows": KustoResultLimits(("Value",), 2, 100),
+    }
+    if "result_limits" in change:
+        change = {"result_limits": limits[change["result_limits"]]}
+        query = replace(query, result_limits=KustoResultLimits(("Value",), 1, 100))
+        if change["result_limits"] == query.result_limits:
+            query = replace(query, result_limits=None)
+    assert chart_cache_contract_identity(query) != chart_cache_contract_identity(replace(query, **change))
+
+
+def test_chart_cache_identity_uses_existing_safe_config_policy():
+    from dataclasses import replace
+    from src.core.charts.chart_config_schema import FORBIDDEN_CHART_CONFIG_KEYS
+    from src.core.models_v2 import KustoQuery
+
+    query = KustoQuery(
+        id="synthetic", cluster="synthetic", database="synthetic", kql="synthetic",
+        section="Synthetic", render_as="chart_image", confidence="high", chart_config={"type": "line"},
+    )
+    updated = replace(query, chart_config={"type": "line", **dict.fromkeys(FORBIDDEN_CHART_CONFIG_KEYS, "synthetic")})
+    assert chart_cache_contract_identity(query) == chart_cache_contract_identity(updated)
 
 
 def test_write_uses_os_replace_atomicity(tmp_path):

@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import hashlib
 from pathlib import Path
 import sqlite3
 from typing import Any, Iterable, Iterator
@@ -18,10 +19,10 @@ from src.core.protection.supersession import apply_supersession, find_tombstoned
 from src.core.workspace_paths import PROGRAMS_ROOT
 
 
-PROJECTION_SCHEMA_VERSION = "1"
+PROJECTION_SCHEMA_VERSION = "2"
 # Bumped when projection logic changes (independent of schema_version).
 # Incremental logic forces a full rebuild when the stored projector_version differs.
-_PROJECTOR_VERSION = "4"
+_PROJECTOR_VERSION = "5"
 # Maximum events in a delta before we skip the incremental short-circuit and
 # do a full rebuild.  Keeps the incremental path bounded and predictable.
 _MAX_INCREMENTAL_DELTA = 50
@@ -129,11 +130,16 @@ def project_events_to_sqlite(
     programs_root: Path = PROGRAMS_ROOT,
     as_of: datetime | None = None,
     knowledge_as_of: datetime | None = None,
+    triage_decisions: tuple[CandidateDecisionRecord, ...] | None = None,
 ) -> ProjectionResult:
     ordered_events = tuple(sorted(events, key=lambda event: (event.recorded_at, event.event_id)))
     visible_events = _filter_events(ordered_events, as_of=as_of, knowledge_as_of=knowledge_as_of)
     effective_events = apply_supersession(visible_events)
     tombstoned_targets = find_tombstoned_targets(visible_events)
+    decisions = (
+        load_triage_decisions(program_id, programs_root=programs_root)
+        if triage_decisions is None else triage_decisions
+    )
     projection_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = projection_path.with_suffix(projection_path.suffix + ".tmp")
     if temp_path.exists():
@@ -143,11 +149,11 @@ def project_events_to_sqlite(
         _clear_projection_tables(connection)
         _fold_events(connection, effective_events, visible_events, as_of=as_of)
         _record_orphan_links(connection, visible_events=visible_events, effective_events=effective_events, tombstoned_targets=tombstoned_targets)
-        _overlay_gap_acknowledgements(connection, program_id=program_id, programs_root=programs_root)
+        _overlay_gap_acknowledgements_from_decisions(connection, triage_decisions=decisions)
         watermark = visible_events[-1].event_id if visible_events else ""
         coverage_earliest, coverage_latest = _coverage_range(effective_events)
         connection.execute(
-            "INSERT INTO projection_meta (schema_version, built_at, event_watermark, as_of, knowledge_as_of, coverage_earliest, coverage_latest, projector_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO projection_meta (schema_version, built_at, event_watermark, as_of, knowledge_as_of, coverage_earliest, coverage_latest, projector_version, event_input_digest, acknowledged_gaps_digest) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 PROJECTION_SCHEMA_VERSION,
                 datetime.now(timezone.utc).isoformat(),
@@ -157,6 +163,8 @@ def project_events_to_sqlite(
                 coverage_earliest,
                 coverage_latest,
                 _PROJECTOR_VERSION,
+                _event_input_digest(program_id, visible_events),
+                _acknowledged_gaps_digest(decisions),
             ),
         )
     if projection_path.exists():
@@ -183,24 +191,40 @@ def project_events_incremental_to_sqlite(
 ) -> ProjectionResult:
     ordered_events = tuple(sorted(events, key=lambda event: (event.recorded_at, event.event_id)))
     visible_events = _filter_events(ordered_events, as_of=as_of, knowledge_as_of=knowledge_as_of)
+    decisions = load_triage_decisions(program_id, programs_root=programs_root)
+
+    def rebuild() -> ProjectionResult:
+        return project_events_to_sqlite(
+            program_id, visible_events, projection_path=projection_path, programs_root=programs_root,
+            as_of=as_of, knowledge_as_of=knowledge_as_of, triage_decisions=decisions,
+        )
+
     if not projection_path.exists():
-        return project_events_to_sqlite(program_id, visible_events, projection_path=projection_path, programs_root=programs_root, as_of=as_of, knowledge_as_of=knowledge_as_of)
+        return rebuild()
 
     existing_meta = canonical_projection_dump(projection_path)["projection_meta"]
     if not existing_meta:
-        return project_events_to_sqlite(program_id, visible_events, projection_path=projection_path, programs_root=programs_root, as_of=as_of, knowledge_as_of=knowledge_as_of)
+        return rebuild()
 
     meta_row = existing_meta[0]
     previous_watermark = meta_row.get("event_watermark", "")
     if not previous_watermark:
-        return project_events_to_sqlite(program_id, visible_events, projection_path=projection_path, programs_root=programs_root, as_of=as_of, knowledge_as_of=knowledge_as_of)
+        return rebuild()
 
     # Force full rebuild if the projector logic version has changed (rebuild-after-upgrade).
     stored_pv = meta_row.get("projector_version")
-    if stored_pv != _PROJECTOR_VERSION:
-        return project_events_to_sqlite(program_id, visible_events, projection_path=projection_path, programs_root=programs_root, as_of=as_of, knowledge_as_of=knowledge_as_of)
+    if stored_pv != _PROJECTOR_VERSION or meta_row.get("schema_version") != PROJECTION_SCHEMA_VERSION:
+        return rebuild()
 
     delta_events = _events_after_watermark(visible_events, previous_watermark)
+    prefix = visible_events[:len(visible_events) - len(delta_events)]
+    if (
+        meta_row.get("event_input_digest") != _event_input_digest(program_id, prefix)
+        or meta_row.get("acknowledged_gaps_digest") != _acknowledged_gaps_digest(decisions)
+        or meta_row.get("as_of") != (as_of.isoformat() if as_of is not None else None)
+        or meta_row.get("knowledge_as_of") != (knowledge_as_of.isoformat() if knowledge_as_of is not None else None)
+    ):
+        return rebuild()
     if not delta_events:
         return ProjectionResult(
             program_id=program_id,
@@ -212,14 +236,7 @@ def project_events_incremental_to_sqlite(
         )
     # Bounded window: if the delta is too large, full rebuild is safer.
     if len(delta_events) > _MAX_INCREMENTAL_DELTA:
-        return project_events_to_sqlite(
-            program_id,
-            visible_events,
-            projection_path=projection_path,
-            programs_root=programs_root,
-            as_of=as_of,
-            knowledge_as_of=knowledge_as_of,
-        )
+        return rebuild()
 
     # Any delta event that requires global state reconstruction → full rebuild.
     # Covers program.*, schedule.*, workstream.* which restructure the whole projection.
@@ -228,33 +245,26 @@ def project_events_incremental_to_sqlite(
         for event in delta_events
         for prefix in _FULL_REBUILD_EVENT_PREFIXES
     ):
-        return project_events_to_sqlite(
-            program_id,
-            visible_events,
-            projection_path=projection_path,
-            programs_root=programs_root,
-            as_of=as_of,
-            knowledge_as_of=knowledge_as_of,
-        )
+        return rebuild()
 
     # A correction event can retroactively change any entity's state → full rebuild.
     if any(event.event_type == "operator.correction.v1" for event in delta_events):
-        return project_events_to_sqlite(
-            program_id,
-            visible_events,
-            projection_path=projection_path,
-            programs_root=programs_root,
-            as_of=as_of,
-            knowledge_as_of=knowledge_as_of,
-        )
+        return rebuild()
+
+    if any(
+        event.event_type != "pipeline.gap_detected.v1"
+        and _entity_family(_entity_id_from_event(event) or "") not in _INCREMENTAL_ENTITY_TABLES
+        for event in delta_events
+    ):
+        return rebuild()
 
     return _incremental_fold(
         program_id,
         visible_events=visible_events,
         delta_events=delta_events,
         projection_path=projection_path,
-        programs_root=programs_root,
         as_of=as_of,
+        triage_decisions=decisions,
     )
 
 
@@ -264,8 +274,8 @@ def _incremental_fold(
     visible_events: tuple[EventEnvelope, ...],
     delta_events: tuple[EventEnvelope, ...],
     projection_path: Path,
-    programs_root: Path,
     as_of: datetime | None,
+    triage_decisions: tuple[CandidateDecisionRecord, ...],
 ) -> ProjectionResult:
     """Apply a small, non-correction delta directly to an existing projection DB.
 
@@ -293,7 +303,7 @@ def _incremental_fold(
     entity_events: dict[str, list[EventEnvelope]] = {}
     for event in effective_events:
         eid = _entity_id_from_event(event)
-        if eid in seen_ids:
+        if eid in seen_ids and not get_event_schema(event.event_type).is_control:
             entity_events.setdefault(eid, []).append(event)
 
     new_watermark = visible_events[-1].event_id if visible_events else ""
@@ -302,9 +312,10 @@ def _incremental_fold(
     with connect_projection_db(projection_path) as connection:
         # Wipe stale rows for affected entities so re-fold starts clean
         _delete_affected_rows(connection, affected_entity_ids)
-        for event in visible_events:
-            if event.event_type == "dependency.declared.v1" and event.payload["dependency_id"] in seen_ids:
+        for event in (*visible_events, *effective_events):
+            if _entity_id_from_event(event) in seen_ids:
                 connection.execute("DELETE FROM entity_links WHERE event_id = ?", (event.event_id,))
+                connection.execute("DELETE FROM event_shadow_links WHERE event_id = ?", (event.event_id,))
 
         # Re-fold each affected entity using its complete (globally-superseded) history
         for entity_id, evts in entity_events.items():
@@ -350,16 +361,23 @@ def _incremental_fold(
         _apply_field_lock_overrides(connection, as_of=as_of)
 
         # Re-apply gap acknowledgements (idempotent)
-        _overlay_gap_acknowledgements(connection, program_id=program_id, programs_root=programs_root)
+        _overlay_gap_acknowledgements_from_decisions(connection, triage_decisions=triage_decisions)
+        connection.execute("DELETE FROM event_orphan_links")
+        _record_orphan_links(
+            connection, visible_events=visible_events, effective_events=effective_events,
+            tombstoned_targets=find_tombstoned_targets(visible_events),
+        )
 
         # Update projection metadata (watermark + coverage range)
         connection.execute(
-            "UPDATE projection_meta SET event_watermark = ?, built_at = ?, coverage_earliest = ?, coverage_latest = ?",
+            "UPDATE projection_meta SET event_watermark = ?, built_at = ?, coverage_earliest = ?, coverage_latest = ?, event_input_digest = ?, acknowledged_gaps_digest = ?",
             (
                 new_watermark,
                 datetime.now(timezone.utc).isoformat(),
                 coverage_earliest,
                 coverage_latest,
+                _event_input_digest(program_id, visible_events),
+                _acknowledged_gaps_digest(triage_decisions),
             ),
         )
 
@@ -396,7 +414,7 @@ def project_events_to_memory(
         watermark = visible_events[-1].event_id if visible_events else ""
         coverage_earliest, coverage_latest = _coverage_range(effective_events)
         connection.execute(
-            "INSERT INTO projection_meta (schema_version, built_at, event_watermark, as_of, knowledge_as_of, coverage_earliest, coverage_latest, projector_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO projection_meta (schema_version, built_at, event_watermark, as_of, knowledge_as_of, coverage_earliest, coverage_latest, projector_version, event_input_digest, acknowledged_gaps_digest) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 PROJECTION_SCHEMA_VERSION,
                 datetime.now(timezone.utc).isoformat(),
@@ -406,6 +424,8 @@ def project_events_to_memory(
                 coverage_earliest,
                 coverage_latest,
                 _PROJECTOR_VERSION,
+                _event_input_digest(program_id, visible_events),
+                _acknowledged_gaps_digest(triage_decisions),
             ),
         )
         connection.commit()
@@ -704,18 +724,6 @@ def _apply_field_lock_overrides(connection: sqlite3.Connection, *, as_of: dateti
             f"UPDATE {table} SET {field_name} = ? WHERE {key_column} = ?",
             (parsed_value, entity_id),
         )
-
-
-def _overlay_gap_acknowledgements(
-    connection: sqlite3.Connection,
-    *,
-    program_id: str,
-    programs_root: Path,
-) -> None:
-    _overlay_gap_acknowledgements_from_decisions(
-        connection,
-        triage_decisions=load_triage_decisions(program_id, programs_root=programs_root),
-    )
 
 
 def _overlay_gap_acknowledgements_from_decisions(
@@ -1518,6 +1526,19 @@ def _dimensions_hash(dimensions: dict[str, Any]) -> str:
     return json.dumps(dimensions, sort_keys=True, separators=(",", ":"))
 
 
+def _event_input_digest(program_id: str, events: tuple[EventEnvelope, ...]) -> str:
+    payload = (program_id, [event.to_dict() for event in events])
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _acknowledged_gaps_digest(decisions: tuple[CandidateDecisionRecord, ...]) -> str:
+    event_ids = sorted({
+        decision.gap_event_id for decision in decisions
+        if decision.kind == "gap_acknowledged" and decision.gap_event_id is not None
+    })
+    return hashlib.sha256(json.dumps(event_ids, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
 def _events_after_watermark(events: tuple[EventEnvelope, ...], watermark: str) -> tuple[EventEnvelope, ...]:
     for index, event in enumerate(events):
         if event.event_id == watermark:
@@ -1939,7 +1960,9 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             knowledge_as_of TEXT,
             coverage_earliest TEXT,
             coverage_latest TEXT,
-            projector_version TEXT
+            projector_version TEXT,
+            event_input_digest TEXT,
+            acknowledged_gaps_digest TEXT
         );
         """
     )

@@ -17,7 +17,7 @@ from src.core.metric_models import MetricObservation, MetricQualityState
 from src.core.reality_store import RealityStore
 
 
-@pytest.mark.parametrize("command", ["import-reply", "solicit"])
+@pytest.mark.parametrize("command", ["import-reply", "solicit", "verify-reply-origin"])
 @pytest.mark.parametrize("arguments,exit_code", [
     ([], 0), (["--dry-run"], 0), (["--help"], 0), (["--invalid-option"], 2),
 ])

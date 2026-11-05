@@ -15,7 +15,7 @@ class ScorecardTrend:
     current_risk: RiskLevel
     prior_risk: RiskLevel | None
     history: tuple[RiskLevel, ...]
-    direction: Literal["improving", "stable", "worsening"]
+    direction: Literal["improving", "stable", "worsening", "unknown"]
     consecutive_high_count: int
     annotation: str | None
 
@@ -103,9 +103,9 @@ def _consecutive_high_count(history: tuple[RiskLevel, ...]) -> int:
 def _direction(
     current_risk: RiskLevel,
     prior_risk: RiskLevel | None,
-) -> Literal["improving", "stable", "worsening"]:
-    if prior_risk is None:
-        return "stable"
+) -> Literal["improving", "stable", "worsening", "unknown"]:
+    if prior_risk is None or RiskLevel.UNKNOWN in {current_risk, prior_risk}:
+        return "unknown"
     current_rank = _risk_rank(current_risk)
     prior_rank = _risk_rank(prior_risk)
     if current_rank < prior_rank:

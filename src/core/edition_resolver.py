@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from src.core.exceptions import ConfigError, VertexMigrationError
+from src.core.kusto_result_limits import parse_kusto_result_limits
 from src.core.models_v2 import ADOCoverageRequirement, ADOConfig, AIConfig, AuthorConfig, DependencyADOQuery, DistributionConfig, EditionConfig, EmailThreadSource, LegacyDependency
 from src.core.models_v2 import GatherActivationConfig, KustoConfig, KustoQuery, LeadershipReader, M365Config, Program, Scorecard, ScorecardDimension
 from src.core.models_v2 import TeamsChat, TeamsMeetingSeries, ToneCalibration, WorkstreamFilter, Workstream, WorkstreamSignalSources, WritingStyle
@@ -958,6 +959,8 @@ def _parse_kusto(value: Any) -> KustoConfig | None:
             refresh_on_gather=bool(entry.get("refresh_on_gather", False)),
             label=_optional_string(entry.get("label")),
             result_column=_optional_string(entry.get("result_column")),
+            result_limits=parse_kusto_result_limits(entry.get("result_limits")),
+            expected_cardinality=str(entry.get("expected_cardinality", "zero_ok")),
         )
         for entry in queries_payload
         if isinstance(entry, dict)

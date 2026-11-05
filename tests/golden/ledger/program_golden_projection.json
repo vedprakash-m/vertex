@@ -107,13 +107,15 @@
   "proj_workstream": [],
   "projection_meta": [
     {
+      "acknowledged_gaps_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
       "as_of": null,
       "coverage_earliest": "2021-06-01T00:00:00+00:00",
       "coverage_latest": "2025-03-20T00:00:00+00:00",
+      "event_input_digest": "ca8fb30afd7bbafe4448b7b3d0cb688debc08130cfb396f025e018a0415d2d79",
       "event_watermark": "01KEJK7S00PD2FTBGTMJ6NYCY3",
       "knowledge_as_of": null,
-      "projector_version": "4",
-      "schema_version": "1"
+      "projector_version": "5",
+      "schema_version": "2"
     }
   ]
 }

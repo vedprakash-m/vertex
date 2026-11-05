@@ -257,7 +257,7 @@ BL-L1: complete (2026-07-22)
 | **RealityConflict** | A detected disagreement between two or more sources about the same fact. Carries `conflict_id`, `entity_id`, `authority_family`, `sources`, `materiality` (material or minor), `resolution` (open/resolved). Material conflicts block rendering (QG-27 forceable). `conflicts(open_only=True)` on `ProgramReality`. |
 | **AttentionItem** | A structured triage item from `attention()`. Kinds (closed enum): `DISPUTED_FACT`, `STALE_HIGH_SEVERITY`, `UNANSWERED_DECISION`, `PENDING_ACTUATION`, `CORROBORATED_RISK_AWAITING_REVIEW`, `COMMITMENT_SLIPPED`, `STRUCTURAL_GAP`, `DECISION_OUTCOME_DRIFT`, `OVERRIDE_RECERTIFICATION_DUE`. Carries `priority`, `description`, `action_hint`, `provisional_inputs` flag. `vertex triage --full` is the daily front door for all attention items. |
 | **RealityDelta** | What changed between two `ProgramReality` snapshots. Returned by `diff()`. Fields: `added`, `changed`, `retired`, `dispute_opened`, `dispute_resolved`, `non_replayable_families`. Drives "what changed?" prep without manual source checking. |
-| **ActuationProposal** | A governed propose→approve→execute→verify record. Three origins: fact-derived (G-11), claim-derived (WI-7.1b), gap-fix (§6.11.3). Every proposal has a TTL, requires explicit human approval (INV-12), and produces a `fact.executed` event or a reverse-proposal on failure. `pending_actuations()` on `ProgramReality`. `vertex actuate review` is the operator surface. |
+| **ActuationProposal** | A governed propose→approve→execute→verify record. Three origins: fact-derived (G-11), claim-derived (WI-7.1b), gap-fix (§6.11.3). Every proposal has a TTL, requires explicit human approval (INV-12), and produces a `fact.executed` event or a reverse-proposal on failure. `pending_actuations()` on `ProgramReality`. `vertex actuate review` is the operator surface. Execute admission, including dry-run, requires the currently loaded policy and one enabled matching rule, matching adapter/operation, explicit approval, no gap, and a nonfuture proposal time within the current TTL. Direct dispatch repeats admission before client resolution and retains its default-deny kill switch. Invalid stored approval/time/TTL and nonboolean policy enablement require correction before review, not inferred approval or renewed time. These bounded checks do not establish payload-bound approval, atomic revocation, rate reservation or effectively-once execution. |
 | **FactSorState** | Per-program, per-family source-of-record mode: `legacy` (reads from artifact stores; fact-store shadow only), `shadow` (dual-read, parity-checked), `primary` (fact-store is authoritative). Accessed via `load_fact_sor_state(program_id)`. Family flip from shadow → primary requires ≥5 clean gather-triage cycles (`fact-store-flip --family`). |
 | **NCFL Apply** | Governed context-update write workflow for accepted `ContextUpdateProposal`s. V1 may write only the ADR-0006-approved Plane 1 targets: `assumptions`, `decisions`, `milestones`, `risk_register`, and `workstreams`. Apply requires a fresh hash, optimistic concurrency, canonical `save_*` path, changelog entry, ledger/outbox recording, and repairable journal state. |
 | **EntityRegistry** | Program + org-scope canonical entity registry (`src/core/entity_registry.py`). Three-tier resolution: exact match → casefold match → fuzzy match (rapidfuzz WRatio, per-scope thresholds). Aliases learned via `entity_alias_emitter.py`. Enables cross-source entity linking for corroboration and conflict detection. |
@@ -273,6 +273,26 @@ BL-L1: complete (2026-07-22)
 | **ProgramSynthesis** | One shared, program-wide narrative synthesis (through-line, long poles, facts, inferences, source-backed recommendations) assembled deterministically from strategic risks, contradictions, critical-path milestones, and other program-level signals, then AI-authored and QG-29-released before any consumer reads it. Feeds the cockpit, the newsletter exec summary, per-workstream blurbs, `decision_brief_advisor`'s verdict generation, and `vertex brief`'s "Program Narrative" section — one contract, multiple consumer surfaces, never re-derived per surface. See §12.2b of `vertex-tech-spec.md`. |
 | **OperationTrace** | A purely internal, Vertex-generated `correlation_id` linking every artifact one logical pipeline run produces (source acquisition, fact write, context manifest, AI release decision, rendered output, actuation intent/receipt) into one queryable trace. Never touches an external system; observability only, never a write blocker. See §12.2a of `vertex-tech-spec.md`. |
 | **Solicitation** | A targeted, human-approved question Vertex proposes to a stakeholder when required evidence is stale or missing (e.g. no recent update on a claim nearing its due date). Never auto-sent — routed through the same nudge/Teams/email review-and-approval pipeline as any other outbound draft. A reply feeds back into re-evaluating the originating context gap. |
+
+**Outbox lifecycle admission:** A stored actuation cannot skip from pending/leased to completion, redispatch recorded success, or downgrade a dispatched effect to automatically retryable. The shared store checks transition order transactionally after owner/token admission; rejected transitions preserve retained evidence. Existing local registry delivery may still complete a leased event directly. This is state-machine integrity, not proof of receipt completeness, recipient/target correctness or effectively-once delivery across all providers.
+
+**Create acknowledgement durability:** Newly completed create-task dispatch retains an append-once provider acknowledgement receipt atomically with its succeeded transition in the existing outbox database. It records remote ID, exact payload hash and available identity/destination/response evidence independently of the secondary ledger. A post-request response without a positive integer/nonboolean work-item ID is uncertain, not completed or automatically retryable. Legacy rows are not backfilled. This bounded acknowledgement does not certify full terminal receipts, resulting revision, approval/principal/audience or desired-effect correctness.
+
+**Observed create revision:** First-create acknowledgements, durable receipts and applied manifests retain the provider's positive integer revision, not a guessed `1`. Missing/null revision remains unavailable; a malformed supplied revision is uncertain and cannot complete or automatically retry. This adds evidence to the acknowledgement contract, not a full remote-state proof or certification of legacy/recovery-adoption revisions.
+
+**Recovery adoption evidence:** Existing marker/title recovery now also requires exact positive integer/nonboolean candidate and readback IDs, and retains the already-required batch read's optional revision instead of guessing `1`. Missing/null revision stays unavailable; malformed identity/row/revision refuses adoption before a success event or create request. This supersedes the prior adoption-revision exclusion only for these observations; uncertain outbox rows, full-field effect proof and authoritative reconciliation receipts remain unqualified.
+
+**Ambiguous create HTTP outcomes:** Mutation transport does not follow redirects or transparently retry. HTTP 408/5xx/nonfinal/redirect responses and invalid/nonobject successful JSON are inconclusive, not evidence that no effect occurred. Creates persist existing terminal uncertainty and reconciliation guidance; definite other 4xx/credential/throttle handling remains unchanged. No automatic recovery, complete effect proof or generalized outbox qualification is implied.
+
+**Create audit target:** Successful first-create audit signals use the resolved applied entry's actual remote work-item ID, matching the receipt and manifest rather than placeholder `WI:0`. Signal identity, entity refs, prose, metadata and review links agree; distinct creates remain distinct audits. Replays do not add success audits and failed/uncertain creates emit none. Historical audit rows are not rewritten; adoption/backlog audit convergence and atomic audit/manifest recovery remain open.
+
+**Verified adoption audit:** Recovery that passes the existing exact marker/title/identity/revision gates records the adopted target through the same audit/review stores. New audit prose explicitly says adoption and metadata marks `adopted_existing`; it does not claim a new remote create or full effect verification. Existing target audits are preserved by dedup; replay and refused recovery add none. This closes the preceding recovery-adoption audit exclusion only; uncertain outbox closeout, backlog audit convergence and atomic audit recovery remain open.
+
+**Requested create-field recovery:** Recovery now also compares every additional field selected by the existing create-patch builder in the same batch read. Missing, malformed or mismatching requested fields block adoption before success audit or dispatch. Assignees require a matching explicit string/`uniqueName` identity, not display-name inference; other additional fields use type-and-value equality. Title normalization and intent-tag membership remain unchanged. This supersedes title/marker-only recovery for new observations; conservative refusal of provider-normalized strings, proposal/retained-intent binding, remote consistency and authoritative reconciliation remain separate requirements.
+
+**Retained create binding:** New attempts persist their original outbox reference before dispatch. Recovery must match that reference's current program/destination/intent key and the retained row's domain, correlation and exact serialized proposal/payload before provider lookup. Missing or changed retained evidence refuses with reconciliation guidance, not a new create or adoption. Missing intent on an attempted/referenced entry cannot generate a replacement identity. Legacy manifests without a reference remain supported but unqualified for this binding; no authenticated approval, tamper resistance, legacy backfill or uncertain-row closeout is implied.
+
+**Create audit review recovery:** Verified create recovery can restore a missing review when the exact target audit signal was saved before a review-write failure. It preserves the original signal and every existing review decision, including dismissed/deferred operator decisions. Failed repair remains explicit and does not mark the manifest applied; unverified remote state cannot repair the review. This is bounded missing-review recovery, not an atomic signal/review/manifest transaction or historical sweep.
 
 ---
 
@@ -345,6 +365,18 @@ Valid exact-marker commitments keep their identity when a malformed peer trigger
 `vertex risks history --program <prog> [--risk-id <id>]` exposes retained archive occurrences and status-update events without restoring archived risks into current judgment. Archive provenance is validated before display; reading does not approve, close, reopen or renew review (RELO-W4.3a).
 
 `milestones assess` exposes attributable accepted commitment-date revisions separately from publication-based target history. This does not infer an approved baseline, forecast, actual completion or exit evidence, and does not change slip/health scoring (RELO-W4.10a).
+
+**Milestone evidence qualification:** A future or target-day milestone with no observed linked work items is Unknown, not On Track or Completed. Non-deferred milestones with no observed items or missing required links carry a coverage gap; missing links preclude inferring completion from only the observed closed subset. Past-due MISSED/declared-complete UNKNOWN and explicit DEFERRED rules remain. Report health counts Unknown, doctor warns, and milestone assessment consumes the same result. This shared assessment does not establish a unified program verdict or new publish authority.
+
+**Report health completeness:** Unassessed dimensions remain in report totals.
+An assessed Low/Done subset cannot imply HEALTHY, overall Low/Done, a healthy
+streak or a default no-decisions message while other dimensions need input.
+Observed High/Medium findings remain visible alongside missing-assessment
+counts. Empty reports request assessments. Explicit author asks/BLUF and Top3
+items retain priority. Incomplete current/prior assessment coverage suppresses
+risk-load comparisons and comparative improvement claims; the existing numeric
+diagnostic is labeled incomplete. HTML, Teams and email share this boundary;
+QG-8 remains a hard publish block. This is not a full ProgramVerdict migration.
 
 ### 4.2 Secondary: DRI (Section Reviewer)
 
@@ -931,6 +963,10 @@ Three contract files define structural rules:
 - WorkIQ signals require explicit human review before reaching published output
 - All signal `text` is PII-scrubbed at gather time (max 500 chars)
 - Optional WorkIQ, Kusto, and IcM integrations degrade without blocking the core ADO gather; remediation hints are persisted with the gather result and surfaced through `vertex doctor`, `vertex triage`, `vertex status`, and `vertex fleet`.
+- The shared Kusto client refuses SDK-reported partial completion before returning evidence. Optional authored `result_limits` enforces exact projected column order, combined row count and decoded-byte limits without inventing legacy budgets; `kusto_no_safety` cannot disable declared limits. Existing scalar-required declarations survive query/report loading. Refusals use hydration failure/report degradation, not a successful subset or metric verdict; full typed semantics, freshness and provider cancellation remain separate obligations.
+- Injected Kusto executors do not bypass authored row admission at hydration, direct/KPI signal/history, report primary/fallback or live chart-gather boundaries. Refused rows cannot become successful observations, refresh successful history/time or reach chart sanitization/cache writes. Previous valid history/cache bytes survive refusal and independent valid queries continue. Empty consumer-only lists and previously cached artifacts do not establish original SDK schema/completeness or current contract lineage.
+- Chart gather loads cache from the selected workspace only. Legacy undeclared zero-ok entries require exact program/query identity and nonnegative age below the query TTL; retention grace does not extend freshness. Declared limits or scalar-required cardinality require live admission until cache lineage exists. A refused cache write is an explicit integration failure, never a successful written-row claim; previous valid bytes and independent queries remain.
+- Chart-cache reuse also requires the current query-definition hash, binding source/KQL, render mode/renderer/configuration and authored admission. Gather and report writeback share this identity; missing/null legacy hashes remain readable but require live refresh, and malformed hashes are refused explicitly. Definition equality is not proof of original-result completeness or permission.
 
 **UIL Channel Abstraction (Phases 0–5 complete):**
 
@@ -1111,6 +1147,82 @@ The `PROVIDER_REGISTRY` in `channel_wiring.py` maps channel names to their provi
 - `scorecards{}` — per-scorecard → per-dimension → `{risk, note, hide_details, summary}`
 
 **Resolution rule:** Override risk takes precedence over derived risk. Published scorecard shows only the resolved value.
+
+**Derived dimension completeness:** Shared scorecard aggregation orders
+High > Medium > Unknown > Low > Done. Unassessed matched work items cannot be
+hidden by assessed Low/Done peers; no matches remains Unknown. Known
+High/Medium findings remain visible, and explicit dimension overrides retain
+their separate precedence. Without an override, resulting Unknown dimensions
+reach report health and the existing QG-8 hard block.
+
+**Historical baseline separation:** Retain inherited dimensions, but do not
+substitute their prior confirmed risk for a currently Unknown assessment.
+Without current evidence or an explicit override, the dimension stays Unknown
+and blocks QG-8; its summary labels the prior confirmed value as historical.
+Current known derived risks and existing dependency uplift remain unchanged.
+
+**Selected coverage:** Every presented dimension selected by effective
+scorecard composition remains in the report, including zero-match dimensions
+without overrides or a baseline. Missing evidence is not permission to hide
+an assessment gap. Existing explicit scorecard hides, composition and
+presentation rules remain; unmatched Unknown dimensions reach QG-8.
+
+**Missing assessment trends:** Shared scorecard trend direction is unknown
+when either assessment is Unknown or there is no prior assessment. Such
+pairs cannot produce improvement/worsening narrative hints. Report vectors
+do not label them up/down or New High. Known comparison rules remain; stale
+diagnostics and consecutive-High observation counts are independent and
+counts are labeled in issues, not elapsed weeks.
+
+**Fleet confirmed-issue coverage:** The existing fleet rollup orders
+Blocked > High > Medium > Unknown > Low > Done. Identified dimensions with
+blank or missing risk remain Unknown. Any Unknown in the current or prior
+selected issue withholds aggregate comparison, even alongside known
+Blocked/High/Medium; absent prior assessment, no current dimensions and
+onboarding also produce unknown trend. Existing trend detail discloses
+incomplete coverage in all five formats. Keep publication staleness and
+context diagnostics separate; this is not live source or fleet qualification.
+
+**Observe-only program verdict:** Ordinary program-backed reports retain a
+versioned deterministic verdict observation in local manifest metadata,
+bound to the existing report/capture and its complete observation inputs.
+It preserves known adverse risk and applies Medium/High schedule floors
+at miss probability >=0.50/>=0.80; overdue targets and past p50 dates floor
+at Medium. Terminal items do not acquire overdue findings. Unqualified
+capture/trust/validation/policy and other unevaluated inputs remain explicit
+gaps: no Low/Done clearance, confidence NONE and unknown completion.
+This does not replace rendered health, change publication gates, generate
+authoritative asks or authorize actions; all-consumer migration is pending.
+
+The observer now retains the already-selected risk register, assessments,
+stale-review IDs and load diagnostics without rereading sources. Active
+strategic OPEN/ESCALATED risks reuse the existing probability x impact >=9
+high-risk threshold and establish a High observation floor. Missing owner
+or mitigation ETA yields a linked, nonauthoritative leadership ask, not a
+persisted decision/journal item or action. Candidates, hygiene, unassessed,
+mitigated, accepted and closed records do not establish this strategic floor.
+Missing, ambiguous or different-revision assessments cannot supply an ask's
+evidence; stale/disputed/provisional context and incomplete coverage remain
+explicit gaps and cannot erase known adverse observations.
+
+Selected milestone records, computed assessments and load diagnostics also
+participate in the observation. Computed Missed floors schedule/health at
+High; At Risk floors Medium. Unresolved past-target milestones floor Medium,
+excluding assessed completed/deferred states and explicit deferral when
+assessment is unavailable. An unverified authored completion claim cannot
+clear that floor. Future/target-day Unknown does not become a Medium forecast
+from the milestone heuristic's uncertainty placeholder. Missing/ambiguous
+assessments, coverage and input qualification remain explicit; neither
+completed milestones nor critical-path compatibility flags establish global
+Done, validated completion or duration-criticality.
+
+**ADO item normalization:** Hydration, report/gather/freshness, child items and
+analytics history share one policy. Terminal Closed/Done/Resolved/Completed/
+Removed items are Done. For active items, recognized authored On Track/At
+Risk/Off Track assessments take precedence over tag/state heuristics. Without
+a recognized assessment, explicit blocked/high-risk or at-risk state/tag
+fallbacks remain; otherwise missing or unsupported values are Unknown, never
+implicit Low. Dimension overrides and strategic risk proposals remain separate.
 
 ### 9.9 Vitality System (`vertex vitality`)
 
@@ -1714,6 +1826,8 @@ Config rejects unsupported combinations (e.g. `rev_verified + metadata_only`) an
 | **C — Fact discovery (REV)** | `CandidateDecisionRecord` | `candidate_store.py` + `ledger.py` | `triage approve` (verification precondition) |
 
 FR-SG-38 governs Workflow B only. Workflow C uses ledger triage exclusively. Shared identity (from Workflow A `SourceRouteIdentity`) is read-only input to Workflow C; state machines never merge.
+
+**Context reply origin:** A locally imported context-gap reply remains unverified until an explicitly authorized operator independently verifies its origin. Retain exact source/proposal binding and an append-only attestation; source/payload drift or revoked verifier authority prevents subsequent acceptance. Origin verification does not approve the proposed change, authenticate the sender through the mail provider, renew context review, resolve the gap or authorize a registry write/send. Hashless legacy replies remain unverified. See Technical Specification's explicit reply-origin verification contract.
 
 #### 12.7.7 Operator-gated items
 

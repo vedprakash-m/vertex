@@ -25,11 +25,14 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import yaml
 
 from src.core.truth_levels import TruthLevel
+
+if TYPE_CHECKING:
+    from src.core.program_reality import ActuationProposal
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -126,6 +129,12 @@ def truth_level_satisfies_gate(level: TruthLevel, gate: str) -> bool:
 # YAML loading / schema validation
 # ---------------------------------------------------------------------------
 
+def _read_enabled_flag(value: object) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError("Actuation enabled flag must be boolean; correct policy before review.")
+    return value
+
+
 def _parse_rule(raw: dict[str, Any]) -> ActuationRule:
     """Parse and validate a single rule dict from YAML into ActuationRule."""
     for key in ("id", "adapter", "operation", "gate"):
@@ -167,7 +176,7 @@ def _parse_rule(raw: dict[str, Any]) -> ActuationRule:
         rate_cap=ActuationRateCap(
             per_program_per_run=int(rate_cap_raw.get("per_program_per_run", 10))
         ),
-        enabled=bool(raw.get("enabled", False)),
+        enabled=_read_enabled_flag(raw.get("enabled", False)),
     )
 
 
@@ -209,7 +218,7 @@ def load_actuation_policy(
 
     actuation_cfg = raw.get("actuation", {})
     rate_caps = actuation_cfg.get("rate_caps", {})
-    enabled = bool(actuation_cfg.get("enabled", False))
+    enabled = _read_enabled_flag(actuation_cfg.get("enabled", False))
     approval_ttl_hours = int(actuation_cfg.get("approval_ttl_hours", 24))
 
     rules_by_id: dict[str, ActuationRule] = {}
@@ -225,7 +234,7 @@ def load_actuation_policy(
             per_raw = yaml.safe_load(fh) or {}
         per_actuation = per_raw.get("actuation", {})
         if "enabled" in per_actuation:
-            enabled = bool(per_actuation["enabled"])
+            enabled = _read_enabled_flag(per_actuation["enabled"])
         for r in per_raw.get("rules", []):
             rule = _parse_rule(r)
             rules_by_id[rule.id] = rule  # Override or add
@@ -581,3 +590,29 @@ def is_requeue_not_drop(proposal: Any, policy: ActuationPolicy, *, now: datetime
         age_hours = (now - proposal.proposed_at).total_seconds() / 3600
         return age_hours > ttl_hours
     return False
+
+
+def actuation_execution_block_reason(
+    proposal: "ActuationProposal",
+    policy: ActuationPolicy,
+    *,
+    now: datetime | None = None,
+) -> str | None:
+    if not policy.enabled:
+        return "Actuation policy is disabled; review current policy before execution."
+    rules = tuple(rule for rule in policy.rules if rule.id == proposal.rule_id)
+    if len(rules) != 1 or not rules[0].enabled:
+        return "Proposal rule is absent, ambiguous or disabled; review current rules before execution."
+    rule = rules[0]
+    if (rule.adapter, rule.operation) != (proposal.adapter, proposal.operation):
+        return "Proposal adapter/operation no longer matches its rule; review a new proposal before execution."
+    if not proposal.approved:
+        return "INV-12: proposal is not approved; obtain human approval and review before execution."
+    if proposal.gap_reason:
+        return "Proposal has an unresolved gap; resolve it and review before execution."
+    now = now or datetime.now(timezone.utc)
+    if proposal.proposed_at.utcoffset() is None or proposal.proposed_at > now:
+        return "Proposal time is unknown or future-dated; correct it and review before execution."
+    if is_requeue_not_drop(proposal, policy, now=now):
+        return "Proposal is stale under current policy TTL; renew approval through review before execution."
+    return None

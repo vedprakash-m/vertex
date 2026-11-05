@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -11,10 +12,11 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Iterator
 
-from src.core.actuation_outbox import DispatchResult, create_task_idempotency_key, dispatch_leased_create_task, enqueue_create_task_intent
+from src.core.actuation_outbox import DispatchResult, create_task_idempotency_key, dispatch_leased_create_task, enqueue_create_task_intent, outbox_db_path
+from src.core.ledger.durable_outbox_store import load_entry
 from src.core.ado_client import ADOClient
 from src.core.ado_proposal import ADOUpdateEntry, ADOUpdateProposal, open_locked_proposal_manifest, read_proposal_manifest_from_handle, write_proposal_manifest_to_handle
-from src.core.exceptions import AuthError, CredentialExpired, QueryError
+from src.core.exceptions import AuthError, CredentialExpired, MutationOutcomeUnknown, QueryError, QueryTimeoutError
 from src.core.integration_types import PaginationOutcome
 from src.core.journal import PROGRAMS_ROOT
 from src.core.models import Confidence
@@ -237,57 +239,14 @@ class ADOWriter:
             # ADF-W1.2 (Appendix B.8): stable intent id, assigned once at
             # proposal-build time normally, but generated here as a fallback
             # for pre-ADF-W1.2 manifests that predate the field.
+            if (entry.attempted_at is not None or entry.outbox_id is not None) and not entry.operation_intent_id:
+                return replace(
+                    entry, entry_status="failed",
+                    status_reason="Create intent is missing; reconciliation required before recovery.",
+                )
             operation_intent_id = entry.operation_intent_id or _new_operation_intent_id()
             title = str(task_data.get("title") or "")
             area_path = task_data.get("area_path")
-
-            # Search-before-create/retry: only when a prior attempt was
-            # persisted (attempted_at set). A never-attempted entry has
-            # nothing to reconcile against, so skip the extra WIQL round trip.
-            if entry.attempted_at is not None:
-                try:
-                    existing_id = self._search_existing_create(
-                        operation_intent_id=operation_intent_id,
-                        area_path=area_path,
-                        title=title,
-                    )
-                except (AuthError, QueryError) as error:
-                    return replace(
-                        entry,
-                        entry_status="failed",
-                        operation_intent_id=operation_intent_id,
-                        status_reason=(
-                            f"ADO task creation requires reconciliation ({type(error).__name__}): "
-                            "intent-marker lookup or readback could not be verified."
-                        ),
-                    )
-                self._emit_duplicate_prevented(
-                    proposal,
-                    operation_intent_id=operation_intent_id,
-                    existing_remote_id=existing_id,
-                    detection="preflight_search",
-                )
-                return replace(
-                    entry,
-                    entry_status="applied",
-                    work_item_id=existing_id,
-                    remote_rev=1,
-                    operation_intent_id=operation_intent_id,
-                    status_reason="adopted existing work item via search-before-create (ADF-W1.2)",
-                )
-
-            # ADF-W1.2: persist attempted_at + operation_intent_id BEFORE
-            # dispatch. If the process dies or the response is lost after
-            # this point but the server committed the write, the next apply
-            # run's search-before-create step (above) will find it.
-            attempted_entry = replace(entry, operation_intent_id=operation_intent_id, attempted_at=applied_at)
-            if persist_attempt is not None:
-                persist_attempt(attempted_entry)
-
-            # ADF-W1.3 (Sec 8.11): dispatch is outbox-backed rather than an
-            # inline POST. Enqueue is idempotent on operation_intent_id, so a
-            # crash-retry with the same (already-persisted) intent id reuses
-            # the existing row instead of enqueueing a duplicate.
             idempotency_key = create_task_idempotency_key(
                 program_id=proposal.program_id,
                 org=self._client.organization,
@@ -307,11 +266,87 @@ class ADOWriter:
                     "iteration_path": task_data.get("iteration_path"),
                     "priority": task_data.get("priority"),
                     "target_date": task_data.get("target_date"),
-                    # ADF-W1.2 (Appendix B.8): the create-marker tag makes this
-                    # dispatch attempt findable by a future search-before-create.
                     "tags": f"vertex-intent-{operation_intent_id}",
                 }
             )
+
+            # Search-before-create/retry: only when a prior attempt was
+            # persisted (attempted_at set). A never-attempted entry has
+            # nothing to reconcile against, so skip the extra WIQL round trip.
+            if entry.attempted_at is not None or entry.outbox_id is not None:
+                if entry.outbox_id is not None and entry.outbox_id != idempotency_key:
+                    return replace(
+                        entry, entry_status="failed",
+                        status_reason="Create intent or destination changed; reconciliation required before recovery.",
+                    )
+                if entry.outbox_id is not None:
+                    retained = load_entry(
+                        outbox_db_path(proposal.program_id, programs_root=self._programs_root),
+                        entry.outbox_id,
+                    )
+                    if (
+                        retained is None
+                        or retained.domain != ACTUATION_DISPATCH_DOMAIN
+                        or retained.correlation_id != entry.outbox_id
+                        or retained.payload_json != outbox_payload_json
+                    ):
+                        return replace(
+                            entry, entry_status="failed",
+                            status_reason="Retained create intent is missing or changed; reconciliation required before recovery.",
+                        )
+                try:
+                    existing_id, existing_rev = self._search_existing_create(
+                        operation_intent_id=operation_intent_id,
+                        area_path=area_path,
+                        title=title,
+                        task_data=task_data,
+                    )
+                except (AuthError, QueryError) as error:
+                    return replace(
+                        entry,
+                        entry_status="failed",
+                        operation_intent_id=operation_intent_id,
+                        status_reason=(
+                            f"ADO task creation requires reconciliation ({type(error).__name__}): "
+                            "intent-marker lookup or readback could not be verified."
+                        ),
+                    )
+                self._emit_duplicate_prevented(
+                    proposal,
+                    operation_intent_id=operation_intent_id,
+                    existing_remote_id=existing_id,
+                    detection="preflight_search",
+                )
+                adopted_entry = replace(
+                    entry,
+                    entry_status="applied",
+                    work_item_id=existing_id,
+                    remote_rev=existing_rev,
+                    operation_intent_id=operation_intent_id,
+                    status_reason="adopted existing work item via search-before-create (ADF-W1.2)",
+                )
+                self._append_audit_signal(
+                    proposal, adopted_entry, applied_at=applied_at,
+                    existing_signals=existing_signals, signal_store=signal_store,
+                    raw_ref=f"ado:{existing_id}", adopted_existing=True,
+                )
+                return adopted_entry
+
+            # ADF-W1.2: persist attempted_at + operation_intent_id BEFORE
+            # dispatch. If the process dies or the response is lost after
+            # this point but the server committed the write, the next apply
+            # run's search-before-create step (above) will find it.
+            attempted_entry = replace(
+                entry, operation_intent_id=operation_intent_id, attempted_at=applied_at,
+                outbox_id=idempotency_key,
+            )
+            if persist_attempt is not None:
+                persist_attempt(attempted_entry)
+
+            # ADF-W1.3 (Sec 8.11): dispatch is outbox-backed rather than an
+            # inline POST. Enqueue is idempotent on operation_intent_id, so a
+            # crash-retry with the same (already-persisted) intent id reuses
+            # the existing row instead of enqueueing a duplicate.
             enqueue_create_task_intent(
                 program_id=proposal.program_id,
                 idempotency_key=idempotency_key,
@@ -338,15 +373,19 @@ class ADOWriter:
                 )
 
             if outcome.status == "completed" and outcome.remote_id:
+                applied_entry = replace(
+                    attempted_entry, entry_status="applied",
+                    remote_rev=outcome.remote_rev, work_item_id=outcome.remote_id,
+                )
                 self._append_audit_signal(
                     proposal,
-                    entry,
+                    applied_entry,
                     applied_at=applied_at,
                     existing_signals=existing_signals,
                     signal_store=signal_store,
                     raw_ref=f"ado:{outcome.remote_id}",
                 )
-                return replace(attempted_entry, entry_status="applied", remote_rev=1, work_item_id=int(outcome.remote_id))
+                return applied_entry
             if outcome.status == "uncertain_remote_state":
                 return replace(
                     attempted_entry,
@@ -692,6 +731,7 @@ class ADOWriter:
         existing_signals: list[Signal],
         signal_store,
         raw_ref: str | None = None,
+        adopted_existing: bool = False,
     ) -> None:
         signal = Signal(
             id=f"{proposal.id}-{entry.work_item_id}-{entry.action}",
@@ -700,7 +740,11 @@ class ADOWriter:
             program_id=proposal.program_id,
             workstream_id=None,
             entity_refs=(f"WI:{entry.work_item_id}",),
-            text=f"Applied {entry.action} to WI:{entry.work_item_id} from proposal {proposal.id}.",
+            text=(
+                f"Adopted existing WI:{entry.work_item_id} from proposal {proposal.id}."
+                if adopted_existing
+                else f"Applied {entry.action} to WI:{entry.work_item_id} from proposal {proposal.id}."
+            ),
             raw_ref=raw_ref,
             confidence=Confidence.HIGH,
             metadata={
@@ -709,12 +753,20 @@ class ADOWriter:
                 "update_type": proposal.update_type,
                 "action": entry.action,
                 "field_or_tag": entry.field_or_tag,
+                **({"adopted_existing": True} if adopted_existing else {}),
             },
             thread_id=None,
         )
-        if is_duplicate_signal(signal, existing_signals):
-            return
-        signal_store.append(_classify_signal(signal))
+        duplicate = is_duplicate_signal(signal, existing_signals)
+        if duplicate:
+            if (
+                entry.action != "create_task"
+                or not any(existing.id == signal.id for existing in existing_signals)
+                or signal.id in signal_store.read_reviews(proposal.program_id)
+            ):
+                return
+        else:
+            signal_store.append(_classify_signal(signal))
         signal_store.append_review(
             proposal.program_id,
             SignalReviewDecision(
@@ -725,7 +777,8 @@ class ADOWriter:
                 note=None,
             ),
         )
-        existing_signals.append(signal)
+        if not duplicate:
+            existing_signals.append(signal)
 
     def _request_json(
         self,
@@ -746,6 +799,7 @@ class ADOWriter:
             headers=headers,
             timeout=self._client.timeout,
             json=json_body,
+            allow_redirects=False,
         )
         if response.status_code == 401:
             www_auth = response.headers.get("WWW-Authenticate", "")
@@ -763,13 +817,31 @@ class ADOWriter:
             raise QueryError(
                 f"ADO write rate-limited (429); no automatic retry for mutations: {response.text[:500]}"
             )
+        if response.status_code == 408 or not 200 <= response.status_code < 500:
+            raise MutationOutcomeUnknown(
+                f"ADO write outcome unknown after HTTP {response.status_code}; reconciliation required, no automatic retry"
+            )
+        if 300 <= response.status_code < 400:
+            raise MutationOutcomeUnknown(
+                f"ADO write redirect not followed (HTTP {response.status_code}); reconciliation required, no automatic retry"
+            )
         if response.status_code >= 400:
             raise QueryError(
                 f"ADO write failed with status {response.status_code}: {response.text[:500]}"
             )
         if not getattr(response, "text", ""):
             return {}
-        return response.json()
+        try:
+            body = response.json()
+        except ValueError as error:
+            raise MutationOutcomeUnknown(
+                "ADO write response is not valid JSON; reconciliation required, no automatic retry"
+            ) from error
+        if not isinstance(body, dict):
+            raise MutationOutcomeUnknown(
+                "ADO write response is not an object; reconciliation required, no automatic retry"
+            )
+        return body
 
     def _dispatch_create_task_outbox_entry(self, outbox_entry: Any) -> DispatchResult:
         """ADF-W1.3: the ``dispatch_fn`` handed to ``dispatch_leased_create_task``.
@@ -797,12 +869,31 @@ class ADOWriter:
                 json_body=patch,
                 content_type="application/json-patch+json",
             )
+        except (MutationOutcomeUnknown, QueryTimeoutError):
+            return DispatchResult(
+                succeeded=False, uncertain=True,
+                failure_reason="ADO task creation response is inconclusive; reconciliation required, no automatic retry",
+            )
         except QueryError as error:
             return DispatchResult(succeeded=False, failure_reason=f"ADO task creation failed: {error}")
         new_id = response.get("id")
-        if not new_id:
-            return DispatchResult(succeeded=False, failure_reason="response did not return a new work item id")
-        return DispatchResult(succeeded=True, remote_id=int(new_id))
+        if type(new_id) is not int or new_id <= 0:
+            return DispatchResult(
+                succeeded=False, uncertain=True,
+                failure_reason="Create response lacks a valid work-item ID; manual reconciliation required",
+            )
+        remote_rev = response.get("rev")
+        if remote_rev is not None and (type(remote_rev) is not int or remote_rev <= 0):
+            return DispatchResult(
+                succeeded=False, uncertain=True, remote_id=new_id,
+                failure_reason="Create response contains an invalid revision; manual reconciliation required",
+            )
+        return DispatchResult(
+            succeeded=True, remote_id=new_id, remote_rev=remote_rev,
+            remote_response_hash=hashlib.sha256(
+                json.dumps(response, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+            ).hexdigest(),
+        )
 
     def _search_existing_create(
         self,
@@ -810,8 +901,9 @@ class ADOWriter:
         operation_intent_id: str,
         area_path: str | None,
         title: str,
-    ) -> int:
-        """Require complete unique marker lookup and matching tag/title readback."""
+        task_data: dict[str, Any],
+    ) -> tuple[int, int | None]:
+        """Require complete unique marker lookup and matching requested-field readback."""
         tag = f"vertex-intent-{operation_intent_id}"
         tag_wiql = f"SELECT [System.Id] FROM WorkItems WHERE [System.Tags] CONTAINS '{_escape_wiql_literal(tag)}'"
         if area_path:
@@ -830,8 +922,21 @@ class ADOWriter:
             raise QueryError("create marker lookup completeness is unproven")
         if len(tag_hits) != 1:
             raise QueryError("create marker lookup did not return exactly one candidate")
-        rows = self._client.query_work_items_batch(tag_hits, fields=("System.Title", "System.Tags"))
-        if len(rows) != 1 or rows[0].get("id") != tag_hits[0]:
+        candidate_id = tag_hits[0]
+        if type(candidate_id) is not int or candidate_id <= 0:
+            raise QueryError("create marker lookup returned an invalid candidate ID")
+        desired_fields = {
+            item["path"].removeprefix("/fields/"): item["value"]
+            for item in _build_create_task_patch(task_data)
+            if item["path"] not in {"/fields/System.Title", "/fields/System.Tags"}
+        }
+        rows = self._client.query_work_items_batch(
+            tag_hits, fields=("System.Title", "System.Tags", *desired_fields),
+        )
+        if len(rows) != 1 or not isinstance(rows[0], dict):
+            raise QueryError("create marker readback did not return the unique candidate")
+        remote_id = rows[0].get("id")
+        if type(remote_id) is not int or remote_id <= 0 or remote_id != candidate_id:
             raise QueryError("create marker readback did not return the unique candidate")
         fields = rows[0].get("fields")
         if not isinstance(fields, dict):
@@ -845,7 +950,24 @@ class ADOWriter:
             or _normalize_title(row_title) != _normalize_title(title)
         ):
             raise QueryError("create marker readback does not match the retained marker and title")
-        return tag_hits[0]
+        for field_name, desired in desired_fields.items():
+            observed = fields.get(field_name)
+            if field_name == "System.AssignedTo":
+                if isinstance(observed, dict):
+                    observed = observed.get("uniqueName")
+                if (
+                    not isinstance(desired, str)
+                    or not isinstance(observed, str)
+                    or not desired.strip()
+                    or desired.strip().casefold() != observed.strip().casefold()
+                ):
+                    raise QueryError("create readback does not prove the requested assignee identity")
+            elif type(observed) is not type(desired) or observed != desired:
+                raise QueryError(f"create readback does not match requested field {field_name}")
+        remote_rev = rows[0].get("rev")
+        if remote_rev is not None and (type(remote_rev) is not int or remote_rev <= 0):
+            raise QueryError("create marker readback returned an invalid revision")
+        return remote_id, remote_rev
 
     def _emit_duplicate_prevented(
         self,

@@ -46,7 +46,7 @@ from src.core.program_synthesis import load_latest_released_program_synthesis
 from src.core.ledger.event_log import EventEnvelope, read_events
 from src.core.measurement_store import read_measurements, tier_decision_store_path
 from src.core.proposal_autonomy_ladder import PROPOSAL_CLASSES, resolve_ceiling
-from src.core.risk_register_engine import compute_risk_score, load_risk_register
+from src.core.risk_register_engine import HIGH_RISK_SCORE_THRESHOLD, compute_risk_score, load_risk_register
 from src.core.run_telemetry import read_run_telemetry
 
 #: Section 8.15.1's "Authority" column, by ladder level.
@@ -59,7 +59,6 @@ _AUTONOMY_LEVEL_PERMITTED_ACTION = {
 }
 
 _ACTIVE_RISK_STATUS_VALUES = frozenset({"open", "escalated"})
-_HIGH_RISK_SCORE_THRESHOLD = 9  # e.g. HIGH impact (3) * LIKELY probability (3)
 
 
 def build_cockpit_snapshot(
@@ -330,7 +329,7 @@ def _build_program_summary(
         except (KeyError, TypeError, ValueError):
             failed_risk_ids.append(str(risk.id))
             continue
-        if score >= _HIGH_RISK_SCORE_THRESHOLD:
+        if score >= HIGH_RISK_SCORE_THRESHOLD:
             high_risk_ids.append(str(risk.id))
     high_risk_count = len(high_risk_ids)
 
@@ -368,7 +367,7 @@ def _build_program_summary(
                 summary=f"{high_risk_count} active risk(s) at high probability*impact.",
                 detail=(
                     "Derived from the existing human-assessed risk register (probability x impact >= "
-                    f"{_HIGH_RISK_SCORE_THRESHOLD}); this is a summary of already-assessed entries, not a "
+                    f"{HIGH_RISK_SCORE_THRESHOLD}); this is a summary of already-assessed entries, not a "
                     "new risk judgment (INV-ADF-13)."
                 ),
                 owner=None,

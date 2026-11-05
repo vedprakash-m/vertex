@@ -10,6 +10,7 @@ from typing import Any
 
 from src.core.exceptions import ConfigError, QueryError
 from src.core.kusto_client import KustoClient, KustoColumn
+from src.core.kusto_result_limits import KustoResultLimits, admit_kusto_rows
 from src.core.metric_models import MetricDefinition, MetricSourceBinding
 from src.core.metric_registry import _coerce_metric_entries, _parse_metric_definition
 
@@ -39,6 +40,7 @@ def kusto_metric_result_error(
     query_id: str, expected_cardinality: str, rows: Sequence[Mapping[str, Any]],
     *, metric_id: str | None = None, result_column: str | None = None,
     slo_target: float | None = None, comparison: str | None = None,
+    result_limits: KustoResultLimits | None = None,
 ) -> str | None:
     error = kusto_scalar_cardinality_error(
         query_id, expected_cardinality, len(rows), metric_id=metric_id,
@@ -59,6 +61,11 @@ def kusto_metric_result_error(
         and comparison not in {">=", "<=", "==", ">", "<"}
     ):
         return f"Kusto query {query_id} has an unsupported SLO comparison."
+    if result_limits is not None:
+        try:
+            admit_kusto_rows(rows, result_limits)
+        except QueryError as error:
+            return f"Kusto query {query_id}: {error}"
     return None
 
 

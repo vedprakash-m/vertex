@@ -13,6 +13,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from src.ai.ai_mode import AIMode, set_ai_mode
 from src.ai.program_synthesizer import ProgramSynthesisOutcome
 from src.commands.program_synthesizer_pilot import (
@@ -239,4 +241,38 @@ def test_run_comparison_skips_when_either_side_not_released(monkeypatch, tmp_pat
 
     assert result.compared is False
     assert result.skip_reason is not None and "discarded/rejected" in result.skip_reason
+    assert read_comparisons("acme", surface="program_synthesizer", programs_root=programs_root) == ()
+
+
+def test_actual_generators_do_not_compare_a_compiler_rejected_candidate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from tests.unit.test_ai_program_synthesizer import _FakeClient, _valid_response
+
+    programs_root = tmp_path / "programs"
+    _write_ai_enabled_program(programs_root)
+    monkeypatch.setattr("src.ai.ai_mode._CURRENT_MODE", AIMode.ACTIVE)
+    monkeypatch.setattr(
+        "src.commands.program_synthesizer_pilot.assemble_program_synthesis_request",
+        lambda program_id, **kwargs: _request(program_id),
+    )
+    monkeypatch.setattr(
+        "src.commands.program_synthesizer_pilot.resolve_ai_deployments_for_feature",
+        lambda **kwargs: ("fake-deployment",),
+    )
+    client = _FakeClient(response=_valid_response())
+    monkeypatch.setattr("src.commands.program_synthesizer_pilot.FallbackAIClient", lambda **kwargs: client)
+    monkeypatch.setattr("src.ai.program_synthesizer._CONTEXT_MAX_INPUT_TOKENS", 1)
+
+    def forbidden_prompt(message: str) -> str:
+        pytest.fail("A rejected candidate must not request a comparison judgment")
+
+    result = run_context_gateway_comparison(
+        program_id="acme", programs_root=programs_root,
+        prompt_fn=forbidden_prompt, echo_fn=lambda message: None,
+    )
+
+    assert result.compared is False
+    assert client.calls == 1
+    assert result.skip_reason is not None and "ai_release_audit.jsonl" in result.skip_reason
     assert read_comparisons("acme", surface="program_synthesizer", programs_root=programs_root) == ()

@@ -7,6 +7,7 @@ always falls through to full rebuild.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,231 @@ def _risk_status(program_id: str, risk_id: str, recorded_at: datetime, *, new_st
         payload={"risk_id": risk_id, "new_status": new_status},
         source_ref=_deck_ref(),
     )
+
+
+@pytest.mark.parametrize("changed", ["as_of", "knowledge_as_of", "prefix", "program", "removed", "empty"])
+def test_cache_reuse_requires_identical_projection_inputs(tmp_path: Path, changed: str) -> None:
+    t1 = datetime(2025, 3, 20, tzinfo=timezone.utc)
+    t2 = datetime(2025, 3, 21, tzinfo=timezone.utc)
+    first = _risk_raised("acme", "risk:r1", t1, title="Original")
+    last = _risk_status("acme", "risk:r1", t2)
+    events = (first, last)
+    incremental = tmp_path / "incremental.sqlite3"
+    full = tmp_path / "full.sqlite3"
+    options = dict(programs_root=tmp_path / "programs")
+    project_events_incremental_to_sqlite("acme", events, projection_path=incremental, **options)
+    program = "acme"
+    if changed in {"as_of", "knowledge_as_of"}:
+        options[changed] = t1
+    elif changed == "prefix":
+        events = (replace(first, payload={**first.payload, "title": "Changed"}), last)
+    elif changed == "program":
+        program = "other"
+    elif changed == "removed":
+        events = (first,)
+    else:
+        events = ()
+    project_events_incremental_to_sqlite(program, events, projection_path=incremental, **options)
+    project_events_to_sqlite(program, events, projection_path=full, **options)
+    assert canonical_projection_dump(incremental) == canonical_projection_dump(full)
+
+
+@pytest.mark.parametrize("initial_ack", [False, True])
+def test_no_delta_gap_overlay_change_matches_rebuild(tmp_path: Path, monkeypatch, initial_ack: bool) -> None:
+    from src.core.ledger.candidate_store import CandidateDecisionRecord
+
+    when = datetime(2025, 3, 20, tzinfo=timezone.utc)
+    gap = build_event_envelope(
+        program_id="acme", event_type="pipeline.gap_detected.v1",
+        occurred_at=when, recorded_at=when, temporal_confidence=TemporalConfidence.EXACT,
+        confidence=ConfidenceTier.SOURCE_AUTHORITATIVE, actor="pipeline",
+        payload={"pipeline": "test", "gap_kind": "missing", "window_start": when.isoformat(),
+                 "window_end": when.isoformat(), "detail": "Synthetic gap"},
+        source_ref=_deck_ref(),
+    )
+    decision = CandidateDecisionRecord(
+        candidate_id="synthetic-gap", kind="gap_acknowledged", decided_at=when,
+        triage_actor="operator", gap_event_id=gap.event_id,
+    )
+    decisions = (decision,) if initial_ack else ()
+    monkeypatch.setattr(program_views, "load_triage_decisions", lambda *args, **kwargs: decisions)
+    incremental, full = tmp_path / "incremental.sqlite3", tmp_path / "full.sqlite3"
+    options = dict(programs_root=tmp_path / "programs")
+    project_events_incremental_to_sqlite("acme", (gap,), projection_path=incremental, **options)
+    decisions = () if initial_ack else (decision,)
+    project_events_incremental_to_sqlite("acme", (gap,), projection_path=incremental, **options)
+    project_events_to_sqlite("acme", (gap,), projection_path=full, **options)
+    assert canonical_projection_dump(incremental) == canonical_projection_dump(full)
+
+
+def test_replaced_status_clears_obsolete_shadow_links(tmp_path: Path) -> None:
+    events = (
+        _risk_raised("acme", "risk:r1", datetime(2025, 3, 20, tzinfo=timezone.utc)),
+        _risk_status("acme", "risk:r1", datetime(2025, 3, 21, tzinfo=timezone.utc), new_status="blocked"),
+        _risk_status("acme", "risk:r1", datetime(2025, 3, 22, tzinfo=timezone.utc), new_status="closed"),
+        _risk_status("acme", "risk:r1", datetime(2025, 3, 23, tzinfo=timezone.utc), new_status="blocked"),
+    )
+    incremental, full = tmp_path / "incremental.sqlite3", tmp_path / "full.sqlite3"
+    options = dict(programs_root=tmp_path / "programs")
+    project_events_incremental_to_sqlite("acme", events[:3], projection_path=incremental, **options)
+    project_events_incremental_to_sqlite("acme", events, projection_path=incremental, **options)
+    project_events_to_sqlite("acme", events, projection_path=full, **options)
+    assert canonical_projection_dump(incremental) == canonical_projection_dump(full)
+
+
+@pytest.mark.parametrize("mutation", ["schema", "legacy-schema", "missing-meta", "empty-watermark", "missing-stamp", "watermark", "backdated", "unsupported"])
+def test_input_stamp_mismatch_uses_full_rebuild(tmp_path: Path, monkeypatch, mutation: str) -> None:
+    t1 = datetime(2025, 3, 20, tzinfo=timezone.utc)
+    events = (_risk_raised("acme", "risk:r1", t1),)
+    path, full = tmp_path / "incremental.sqlite3", tmp_path / "full.sqlite3"
+    options = dict(programs_root=tmp_path / "programs")
+    project_events_incremental_to_sqlite("acme", events, projection_path=path, **options)
+    if mutation in {"legacy-schema", "missing-meta"}:
+        with program_views.connect_projection_db(path) as connection:
+            if mutation == "legacy-schema":
+                connection.execute("ALTER TABLE projection_meta DROP COLUMN event_input_digest")
+                connection.execute("ALTER TABLE projection_meta DROP COLUMN acknowledged_gaps_digest")
+                connection.execute("UPDATE projection_meta SET schema_version = '1', projector_version = '4'")
+            else:
+                connection.execute("DELETE FROM projection_meta")
+    elif mutation in {"schema", "missing-stamp", "watermark", "empty-watermark"}:
+        with program_views.connect_projection_db(path) as connection:
+            column, value = {
+                "schema": ("schema_version", "1"),
+                "missing-stamp": ("event_input_digest", None),
+                "watermark": ("event_watermark", "absent-event"),
+                "empty-watermark": ("event_watermark", ""),
+            }[mutation]
+            connection.execute(f"UPDATE projection_meta SET {column} = ?", (value,))
+    elif mutation == "backdated":
+        events += (_risk_raised("acme", "risk:r2", datetime(2025, 3, 19, tzinfo=timezone.utc)),)
+    else:
+        events += (build_event_envelope(
+            program_id="acme", event_type="operator.baseline_hardlock.v1",
+            occurred_at=t1, recorded_at=datetime(2025, 3, 21, tzinfo=timezone.utc),
+            temporal_confidence=TemporalConfidence.EXACT, confidence=ConfidenceTier.OPERATOR_CONFIRMED,
+            actor="operator", source_ref=_deck_ref(),
+            payload={"issue_number": 1, "snapshot_hash": "synthetic", "event_id_watermark": events[0].event_id,
+                     "contributing_event_count": 1},
+        ),)
+    rebuild = Mock(wraps=project_events_to_sqlite)
+    monkeypatch.setattr(program_views, "project_events_to_sqlite", rebuild)
+    monkeypatch.setattr(program_views, "_incremental_fold", Mock(side_effect=AssertionError("Unsafe cache reuse")))
+    project_events_incremental_to_sqlite("acme", events, projection_path=path, **options)
+    rebuild.assert_called_once()
+    project_events_to_sqlite("acme", events, projection_path=full, **options)
+    assert canonical_projection_dump(path) == canonical_projection_dump(full)
+
+
+def test_identical_inputs_reuse_cache_without_write(tmp_path: Path, monkeypatch) -> None:
+    events = (_risk_raised("acme", "risk:r1", datetime(2025, 3, 20, tzinfo=timezone.utc)),)
+    path = tmp_path / "incremental.sqlite3"
+    options = dict(programs_root=tmp_path / "programs")
+    project_events_incremental_to_sqlite("acme", events, projection_path=path, **options)
+    before = path.read_bytes()
+    monkeypatch.setattr(program_views, "project_events_to_sqlite", Mock(side_effect=AssertionError("Unexpected rebuild")))
+    monkeypatch.setattr(program_views, "_incremental_fold", Mock(side_effect=AssertionError("Unexpected fold")))
+    result = project_events_incremental_to_sqlite("acme", events, projection_path=path, **options)
+    assert result.event_watermark == events[0].event_id and path.read_bytes() == before
+
+
+def test_incremental_write_failure_preserves_projection_and_input_stamp(tmp_path: Path, monkeypatch) -> None:
+    events = (
+        _risk_raised("acme", "risk:r1", datetime(2025, 3, 20, tzinfo=timezone.utc)),
+        _risk_status("acme", "risk:r1", datetime(2025, 3, 21, tzinfo=timezone.utc)),
+    )
+    path = tmp_path / "incremental.sqlite3"
+    options = dict(programs_root=tmp_path / "programs")
+    project_events_incremental_to_sqlite("acme", events[:1], projection_path=path, **options)
+    before = canonical_projection_dump(path)
+    original = program_views._fold_risk_events
+
+    def fail_after_fold(*args, **kwargs):
+        original(*args, **kwargs)
+        raise ValueError("Synthetic write failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(program_views, "_fold_risk_events", fail_after_fold)
+        with pytest.raises(ValueError, match="Synthetic write failure"):
+            project_events_incremental_to_sqlite("acme", events, projection_path=path, **options)
+    assert canonical_projection_dump(path) == before
+    project_events_incremental_to_sqlite("acme", events, projection_path=path, **options)
+    full = tmp_path / "full.sqlite3"
+    project_events_to_sqlite("acme", events, projection_path=full, **options)
+    assert canonical_projection_dump(path) == canonical_projection_dump(full)
+
+
+def test_gap_decisions_are_captured_once_for_rebuild(tmp_path: Path, monkeypatch) -> None:
+    reader = Mock(return_value=())
+    monkeypatch.setattr(program_views, "load_triage_decisions", reader)
+    events = (_risk_raised("acme", "risk:r1", datetime(2025, 3, 20, tzinfo=timezone.utc)),)
+    project_events_incremental_to_sqlite(
+        "acme", events, projection_path=tmp_path / "cache.sqlite3", programs_root=tmp_path / "programs",
+    )
+    reader.assert_called_once()
+
+
+@pytest.mark.parametrize("transition", ["lock", "unlock", "expiry", "orphan"])
+def test_derived_control_outputs_match_full_rebuild(tmp_path: Path, monkeypatch, transition: str) -> None:
+    t1 = datetime(2025, 3, 20, tzinfo=timezone.utc)
+    t2 = datetime(2025, 3, 21, tzinfo=timezone.utc)
+    t3 = datetime(2025, 3, 22, tzinfo=timezone.utc)
+    creation = _risk_raised("acme", "risk:r1", t1)
+    status = _risk_status("acme", "risk:r1", t2)
+
+    def control(event_type, when, payload):
+        return build_event_envelope(
+            program_id="acme", event_type=event_type, occurred_at=when, recorded_at=when,
+            temporal_confidence=TemporalConfidence.EXACT, confidence=ConfidenceTier.OPERATOR_CONFIRMED,
+            actor="operator", source_ref=_deck_ref(), payload=payload,
+        )
+
+    lock = control("operator.field_lock.v1", t2, {
+        "entity_id": "risk:r1", "field": "status", "locked_value": "closed",
+        "valid_until": t3.isoformat(),
+    })
+    options = dict(programs_root=tmp_path / "programs")
+    if transition == "orphan":
+        correction = control("operator.correction.v1", t3, {
+            "corrects_event_id": creation.event_id, "corrected_payload": None, "reason": "Retracted",
+        })
+        base = (creation, status, correction)
+        events = (*base, _risk_status("acme", "risk:r1", datetime(2025, 3, 23, tzinfo=timezone.utc)))
+    elif transition in {"unlock", "expiry"}:
+        base = (creation, lock)
+        events = (*base, control("operator.field_unlock.v1", t3, {"entity_id": "risk:r1", "field": "status"}))
+        if transition == "expiry":
+            events = base
+            options["as_of"] = t2
+    else:
+        base, events = (creation,), (creation, lock)
+    path, full = tmp_path / "incremental.sqlite3", tmp_path / "full.sqlite3"
+    project_events_incremental_to_sqlite("acme", base, projection_path=path, **options)
+    if transition == "expiry":
+        options["as_of"] = t3
+    else:
+        monkeypatch.setattr(program_views, "project_events_to_sqlite", Mock(side_effect=AssertionError("Expected incremental fold")))
+    project_events_incremental_to_sqlite("acme", events, projection_path=path, **options)
+    project_events_to_sqlite("acme", events, projection_path=full, **options)
+    assert canonical_projection_dump(path) == canonical_projection_dump(full)
+
+
+def test_gap_support_delta_matches_full_rebuild(tmp_path: Path, monkeypatch) -> None:
+    t1 = datetime(2025, 3, 20, tzinfo=timezone.utc)
+    base = (_risk_raised("acme", "risk:r1", t1),)
+    gap = build_event_envelope(
+        program_id="acme", event_type="pipeline.gap_detected.v1", occurred_at=t1,
+        recorded_at=datetime(2025, 3, 21, tzinfo=timezone.utc), temporal_confidence=TemporalConfidence.EXACT,
+        confidence=ConfidenceTier.SOURCE_AUTHORITATIVE, actor="pipeline", source_ref=_deck_ref(),
+        payload={"pipeline": "test", "gap_kind": "missing", "detail": "Synthetic gap"},
+    )
+    path, full = tmp_path / "incremental.sqlite3", tmp_path / "full.sqlite3"
+    options = dict(programs_root=tmp_path / "programs")
+    project_events_incremental_to_sqlite("acme", base, projection_path=path, **options)
+    monkeypatch.setattr(program_views, "project_events_to_sqlite", Mock(side_effect=AssertionError("Expected incremental fold")))
+    project_events_incremental_to_sqlite("acme", (*base, gap), projection_path=path, **options)
+    project_events_to_sqlite("acme", (*base, gap), projection_path=full, **options)
+    assert canonical_projection_dump(path) == canonical_projection_dump(full)
 
 
 def test_incremental_equals_full_for_supported_delta(tmp_path) -> None:
@@ -505,4 +731,4 @@ def test_old_projector_rebuilds_stale_dependency_links_without_new_events(
     rebuild.assert_called_once()
     assert result.event_watermark == replacement.event_id
     assert canonical_projection_dump(incremental_path) == canonical_projection_dump(full_path)
-    assert canonical_projection_dump(incremental_path)["projection_meta"][0]["projector_version"] == "4"
+    assert canonical_projection_dump(incremental_path)["projection_meta"][0]["projector_version"] == "5"

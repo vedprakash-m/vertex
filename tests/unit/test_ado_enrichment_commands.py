@@ -34,9 +34,50 @@ def test_shared_risk_fallback_parser_parity(assessment: str | None, description:
     )
     expected = {
         "On Track": RiskLevel.LOW, "At Risk": RiskLevel.MEDIUM,
-        "Off Track": RiskLevel.HIGH, "Unsupported": RiskLevel.LOW,
+        "Off Track": RiskLevel.HIGH, "Unsupported": RiskLevel.UNKNOWN,
     }.get(assessment, RiskLevel.UNKNOWN)
     assert all(item.risk_level is expected for item in items)
+
+
+@pytest.mark.parametrize(
+    ("state", "tags", "assessment", "expected"),
+    [
+        ("Active", "Blocked", "On Track", RiskLevel.LOW),
+        ("Blocked", "", "At Risk", RiskLevel.MEDIUM),
+        ("Active", "Risk", "Off Track", RiskLevel.HIGH),
+        ("Active", "Blocker", "Pending", RiskLevel.HIGH),
+        ("Active", "At Risk", None, RiskLevel.MEDIUM),
+        ("Removed", "", "Off Track", RiskLevel.DONE),
+        ("Completed", "", None, RiskLevel.DONE),
+        ("Active", "", "Pending", RiskLevel.UNKNOWN),
+    ],
+)
+def test_actual_parsers_share_risk_precedence(
+    state: str, tags: str, assessment: str | None, expected: RiskLevel,
+) -> None:
+    fields = {
+        "System.Id": 901, "System.State": state, "System.Tags": tags,
+        "Custom.RiskAssessment": assessment,
+    }
+    common = {
+        "raw": {"WorkItemId": 901}, "batch_row": {"fields": fields},
+        "fetched_at": datetime(2026, 11, 4, tzinfo=timezone.utc),
+    }
+    items = (
+        report._work_item_from_sources(**common),
+        gather._work_item_from_sources(**common, revision_rows=[], comment_rows=[]),
+        freshness._work_item_from_sources(**common, revision_rows=[], comment_rows=[]),
+    )
+    assert all(item.risk_level is expected for item in items)
+
+
+@pytest.mark.parametrize(
+    ("state", "tags", "expected"),
+    [("Active", [], RiskLevel.UNKNOWN), ("Removed", [], RiskLevel.DONE),
+     ("Active", ["blocker"], RiskLevel.HIGH), ("Active", ["risk"], RiskLevel.MEDIUM)],
+)
+def test_legacy_freshness_helper_uses_shared_fallback(state: str, tags: list[str], expected: RiskLevel) -> None:
+    assert freshness._infer_risk_level(state, tags) is expected
 
 
 def test_gather_work_item_from_sources_uses_risk_assessment_mapping() -> None:

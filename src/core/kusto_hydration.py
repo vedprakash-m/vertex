@@ -162,6 +162,7 @@ class KustoHydrationProvider:
                 query.id, query.expected_cardinality, execution.rows or (),
                 metric_id=query.metric_id, result_column=query.result_column,
                 slo_target=query.slo_target, comparison=query.comparison,
+                result_limits=query.result_limits,
             )
             if cardinality_error is not None:
                 failed_ref_ids.append((registration.ref_id, registration.ref_kind))

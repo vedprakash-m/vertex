@@ -41,6 +41,28 @@ class HealthSummary:
     risk_register_includes_unconfirmed_sources: bool = False
     risk_render_warning: str | None = None
 
+    @property
+    def needs_input_count(self) -> int:
+        return self.total_count - self.high_count - self.medium_count - self.low_count - self.done_count
+
+    @property
+    def risk_load_incomplete(self) -> bool:
+        return self.total_count == 0 or self.needs_input_count > 0 or (
+            self.prior_counts is not None and self.prior_counts.get("needs_input", 0) > 0
+        )
+
+    @property
+    def health_state(self) -> str:
+        if self.high_count >= 3:
+            return "CRITICAL"
+        if self.high_count:
+            return "AT RISK"
+        if self.medium_count:
+            return "ON TRACK"
+        if self.total_count > 0 and self.low_count + self.done_count == self.total_count:
+            return "HEALTHY"
+        return "NEEDS INPUT"
+
 
 @dataclass(frozen=True, slots=True)
 class MilestoneSummaryRow:

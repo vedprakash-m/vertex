@@ -12,7 +12,9 @@ from typing import Any, Callable, Mapping
 
 from src.core.config_loader import KustoQuerySettings, KustoSettings
 from src.core.exceptions import AuthError, QueryError
+from src.core.kusto_result_limits import admit_kusto_rows
 from src.core.kusto_templates import KustoTemplateContext, render_kusto_query
+from src.core.metric_binding_validator import kusto_scalar_cardinality_error
 from src.core.view_models import KustoMetric, KustoSectionData, KustoTableCell
 
 logger = logging.getLogger(__name__)
@@ -81,7 +83,22 @@ def build_kusto_sections(
         )
 
         try:
-            rows = tuple(query_executor(query))
+            rows = tuple(admit_kusto_rows(query_executor(query), query.result_limits))
+            cardinality_error = kusto_scalar_cardinality_error(query.id, query.expected_cardinality, len(rows))
+            if cardinality_error is not None:
+                raise QueryError(cardinality_error)
+            fallback_kql = getattr(query, "fallback_kql", None)
+            if not rows and fallback_kql:
+                fallback_q = dataclasses.replace(query, kql=fallback_kql, id=f"{query.id}__fallback")
+                try:
+                    fallback_rows = tuple(admit_kusto_rows(query_executor(fallback_q), fallback_q.result_limits))
+                except (AuthError, QueryError):
+                    raise
+                except Exception:
+                    fallback_rows = ()
+                if fallback_rows:
+                    rows = fallback_rows
+                    query = fallback_q
         except (AuthError, QueryError) as exc:
             is_auth = isinstance(exc, AuthError)
             degraded = _build_degraded_section(
@@ -117,23 +134,9 @@ def build_kusto_sections(
 
         if not rows:
             # Zero rows from live query is a valid data state — spec §5.5.
-            # FR-SG-31: if fallback_kql is configured, attempt the secondary query.
-            fallback_rows: tuple[dict[str, Any], ...] | None = None
-            fallback_kql = getattr(query, "fallback_kql", None)
-            if fallback_kql:
-                try:
-                    fallback_q = dataclasses.replace(query, kql=fallback_kql, id=f"{query.id}__fallback")
-                    fallback_rows = tuple(query_executor(fallback_q))
-                except Exception:
-                    fallback_rows = None
-            if fallback_rows:
-                rows = fallback_rows
-                query = dataclasses.replace(query, id=f"{query.id}__fallback")
-                # fall through to normal render path below; quality_state=FALLBACK is embedded in observation
-            else:
-                # Cache is NOT consulted. Render "No data available" placeholder.
-                _handle_zero_rows(query, observed_time, sections, observations)
-                continue
+            # Cache is NOT consulted. Render "No data available" placeholder.
+            _handle_zero_rows(query, observed_time, sections, observations)
+            continue
 
         if query.render_as == "metric_highlight":
             sections.append(_build_metric_section(query, rows))
@@ -623,7 +626,7 @@ def _write_back_chart_cache(query, rows, observed_time, chart_cache_loader, prog
     if chart_cache_loader is None or program_id is None:
         return
     try:
-        from src.core.chart_cache_store import write_chart_cache
+        from src.core.chart_cache_store import chart_cache_contract_identity, write_chart_cache
         from src.core.charts.chart_config_schema import FORBIDDEN_CHART_CONFIG_KEYS
         import hashlib
 
@@ -641,6 +644,7 @@ def _write_back_chart_cache(query, rows, observed_time, chart_cache_loader, prog
             chart_config_hash=config_hash,
             programs_root=programs_root,
             pii_prescrubbed=True,
+            query_contract_hash=chart_cache_contract_identity(query),
         )
     except Exception as exc:
         logger.warning("_write_back_chart_cache: failed to write cache for %s/%s — %s", program_id, query.id, exc)

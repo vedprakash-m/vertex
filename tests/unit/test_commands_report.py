@@ -598,6 +598,326 @@ def test_health_templates_render_forecast_confidence() -> None:
     assert "Forecast: likely to land next week. (medium confidence)" in markdown
 
 
+def _health_test_dimensions(levels):
+    evidence = report_module.EvidencePacket(
+        work_item_id=900001, revisions=(), comments=(), enrichments=(),
+        confidence=Confidence.NONE, tier=report_module.AttributionTier.TIER1, summary_for_reviewer="Synthetic",
+    )
+    return tuple(
+        report_module.DimensionRisk(name=f"synthetic-{index}", risk=level, summary="", evidence=evidence)
+        for index, level in enumerate(levels)
+    )
+
+
+@pytest.mark.parametrize(
+    ("levels", "overall", "state"),
+    [((), RiskLevel.UNKNOWN, "NEEDS INPUT"),
+     ((RiskLevel.UNKNOWN,), RiskLevel.UNKNOWN, "NEEDS INPUT"),
+     ((RiskLevel.BLOCKED,), RiskLevel.UNKNOWN, "NEEDS INPUT"),
+     ((RiskLevel.UNKNOWN, RiskLevel.UNKNOWN), RiskLevel.UNKNOWN, "NEEDS INPUT"),
+     ((RiskLevel.LOW, RiskLevel.UNKNOWN), RiskLevel.UNKNOWN, "NEEDS INPUT"),
+     ((RiskLevel.DONE, RiskLevel.UNKNOWN), RiskLevel.UNKNOWN, "NEEDS INPUT"),
+     ((RiskLevel.MEDIUM, RiskLevel.UNKNOWN), RiskLevel.MEDIUM, "ON TRACK"),
+     ((RiskLevel.HIGH, RiskLevel.UNKNOWN), RiskLevel.HIGH, "AT RISK"),
+     ((RiskLevel.HIGH,) * 3 + (RiskLevel.UNKNOWN,), RiskLevel.HIGH, "CRITICAL"),
+     ((RiskLevel.LOW, RiskLevel.DONE), RiskLevel.LOW, "HEALTHY"),
+     ((RiskLevel.DONE,), RiskLevel.DONE, "HEALTHY")],
+)
+def test_health_summary_preserves_unknown_dimensions_across_outputs(levels, overall, state):
+    health = report_health_module._build_health_summary(
+        _health_test_dimensions(levels), None, healthy_streak=3,
+    )
+    assert health.total_count == len(levels)
+    assert health.overall_risk == overall
+    assert health.health_state == state
+    missing = sum(level not in {RiskLevel.HIGH, RiskLevel.MEDIUM, RiskLevel.LOW, RiskLevel.DONE} for level in levels)
+    assert health.needs_input_count == missing
+    assert health.healthy_streak == (3 if state == "HEALTHY" else 0)
+    environment = Environment(
+        loader=FileSystemLoader(str(Path(__file__).resolve().parents[2] / "templates")),
+        trim_blocks=True, lstrip_blocks=True,
+    )
+    environment.filters.update(JINJA_FILTERS)
+    environment.globals.update(JINJA_GLOBALS)
+    context = dict(
+        health=health, milestone_rows=(), title="Synthetic", edition=SimpleNamespace(
+            issue_number=1, ado_data_as_of=datetime(2026, 11, 5, tzinfo=timezone.utc), manifest_id="synthetic",
+        ), ordered_sections=(SimpleNamespace(kind="health"), SimpleNamespace(kind="top_3")),
+        top_items=(), auto_suggestions=(), is_dry_run=False,
+    )
+    html = environment.get_template("partials/health_banner.j2").render(**context)
+    markdown = environment.get_template("base.teams.j2").render(**context)
+    decisions = environment.get_template("partials/top_3_now.j2").render(**context)
+    assert f"Program Health: {state}," in html
+    assert f"PROGRAM HEALTH: {state}," in markdown
+    subject = report_module._build_email_subject("Synthetic", health, "Synthetic")
+    assert ("HEALTHY" in subject) is (state == "HEALTHY")
+    if missing:
+        for rendered in (html, markdown):
+            assert f"{missing} dimension" in rendered and "need" in rendered
+            assert "All " not in rendered
+        assert "maintain current execution cadence" not in health.leadership_ask
+        assert "Assess" in health.leadership_ask
+        assert "No leadership decisions needed" not in decisions
+        assert "No leadership decisions needed" not in markdown
+        assert "needs input" in report_module._build_email_preheader(health, None, ())
+    elif not levels:
+        assert "Provide" in health.leadership_ask
+        assert "No leadership decisions needed" not in decisions
+
+
+@pytest.mark.parametrize("missing_side", ["current", "prior"])
+def test_health_comparison_does_not_infer_improvement_from_unknown(missing_side):
+    prior = _lookback_snapshot(
+        issue_number=1, as_of=datetime(2026, 11, 4, tzinfo=timezone.utc), items=(),
+        scorecard_risks={"a": RiskLevel.UNKNOWN if missing_side == "prior" else RiskLevel.HIGH},
+    )
+    levels = (RiskLevel.UNKNOWN,) if missing_side == "current" else (RiskLevel.LOW,)
+    health = report_health_module._build_health_summary(_health_test_dimensions(levels), prior)
+    assert health.delta_direction == "unchanged"
+    assert health.trajectory == "stable"
+    assert health.prior_risk_load is None
+    assert health.risk_load_incomplete
+
+
+@pytest.mark.parametrize(
+    ("prior_level", "current_level", "direction", "trajectory"),
+    [(RiskLevel.HIGH, RiskLevel.MEDIUM, "improved", "improving"),
+     (RiskLevel.MEDIUM, RiskLevel.HIGH, "degraded", "degrading"),
+     (RiskLevel.HIGH, RiskLevel.HIGH, "unchanged", "stable")],
+)
+def test_health_complete_comparisons_retain_known_direction(prior_level, current_level, direction, trajectory):
+    prior = _lookback_snapshot(
+        issue_number=1, as_of=datetime(2026, 11, 4, tzinfo=timezone.utc), items=(),
+        scorecard_risks={"a": prior_level},
+    )
+    health = report_health_module._build_health_summary(_health_test_dimensions((current_level,)), prior)
+    assert health.delta_direction == direction
+    assert health.trajectory == trajectory
+    assert health.prior_risk_load is not None
+    assert not health.risk_load_incomplete
+
+
+def test_health_empty_prior_has_no_numeric_comparison():
+    prior = _lookback_snapshot(
+        issue_number=1, as_of=datetime(2026, 11, 4, tzinfo=timezone.utc), items=(), scorecard_risks={},
+    )
+    health = report_health_module._build_health_summary(_health_test_dimensions((RiskLevel.MEDIUM,)), prior)
+    assert health.delta_direction == "unchanged"
+    assert health.trajectory == "stable"
+    assert health.prior_risk_load is None
+
+
+@pytest.mark.parametrize("explicit", ["author", "top_item", "new_high"])
+def test_health_missing_input_preserves_author_and_severity_precedence(explicit):
+    overrides = report_module.OverridesDocument(
+        issue_number=1, top_3_now=(), scorecards=(),
+        leadership_ask="Synthetic author ask" if explicit == "author" else None,
+    )
+    top_items = (report_module.Top3Item(
+        item_type="ask", text="Synthetic top ask", owner="synthetic", ado_link=None, anchor="synthetic",
+    ),) if explicit == "top_item" else ()
+    health = report_health_module._build_health_summary(
+        _health_test_dimensions((RiskLevel.HIGH, RiskLevel.UNKNOWN)), None,
+        overrides_document=overrides, top_items=top_items, new_high_count=1 if explicit == "new_high" else 0,
+    )
+    if explicit == "author":
+        assert health.leadership_ask == "Leadership ask: Synthetic author ask"
+    elif explicit == "top_item":
+        assert health.leadership_ask == "Leadership ask: Synthetic top ask"
+    else:
+        assert health.trajectory == "degrading"
+    assert health.overall_risk == RiskLevel.HIGH
+    if explicit == "top_item":
+        assert "Synthetic top ask" in report_module._build_email_preheader(health, None, top_items)
+    assert "Synthetic BLUF" in report_module._build_email_preheader(health, "Synthetic BLUF", top_items)
+
+
+@pytest.mark.parametrize("known_risk", [RiskLevel.LOW, RiskLevel.DONE])
+@pytest.mark.parametrize("layout", ["dashboard", "continuity"])
+def test_generate_report_draft_unknown_subset_never_claims_healthy(repo_root: Path, tmp_path: Path, known_risk, layout):
+    reports_root, archive_root = _seed_v2_report_layout(repo_root, tmp_path)
+    programs_root = reports_root.parent / "programs"
+    edition_path = programs_root / "acme" / "editions" / f"{EDITION_NAME}.yaml"
+    edition = yaml.safe_load(edition_path.read_text(encoding="utf-8"))
+    edition["layout_mode"] = layout
+    edition_path.write_text(yaml.safe_dump(edition), encoding="utf-8")
+    bundle = load_report_bundle(EDITION_NAME, reports_root=reports_root, programs_root=programs_root)
+    first_dimension = bundle.config.scorecards[0].dimensions[0].name
+    save_overrides(
+        EDITION_NAME,
+        report_module.OverridesDocument(
+            issue_number=1, top_3_now=(),
+            scorecards=tuple(
+                report_module.ScorecardOverrides(
+                    name=scorecard.name,
+                    dimensions=tuple(report_module.DimensionOverride(
+                        name=dimension.name, risk=known_risk if dimension.name == first_dimension else None,
+                    ) for dimension in scorecard.dimensions),
+                ) for scorecard in bundle.config.scorecards
+            ),
+        ),
+        reports_root=reports_root, programs_root=programs_root,
+    )
+    artifacts = generate_report_draft(
+        edition_name=EDITION_NAME, reports_root=reports_root, archive_root=archive_root,
+        programs_root=programs_root, as_of=datetime(2026, 11, 5, 18, 0, tzinfo=timezone.utc),
+        work_item_loader=lambda bundle, timestamp: (
+            tuple(replace(item, risk_level=RiskLevel.UNKNOWN) for item in _sample_items(timestamp)), 0,
+        ), open_browser=False,
+    )
+    assert any(dimension.risk == known_risk for dimension in artifacts.report.scorecard)
+    assert any(dimension.risk == RiskLevel.UNKNOWN for dimension in artifacts.report.scorecard)
+    assert "Program Health: NEEDS INPUT, STABLE" in artifacts.html_body
+    assert "PROGRAM HEALTH: NEEDS INPUT, STABLE" in artifacts.md_path.read_text(encoding="utf-8")
+    assert "health assessment is incomplete" in artifacts.html_body
+    assert "No leadership decisions needed" not in artifacts.html_body
+    assert artifacts.manifest.qg_results["QG-8"] is False
+    assert "HEALTHY" not in message_from_bytes(artifacts.eml_path.read_bytes())["Subject"]
+
+
+@pytest.mark.parametrize("layout", ["dashboard", "continuity"])
+@pytest.mark.parametrize("known_risk", [RiskLevel.LOW, RiskLevel.DONE, RiskLevel.MEDIUM, RiskLevel.HIGH])
+@pytest.mark.parametrize("override", [None, RiskLevel.LOW])
+def test_generate_report_draft_unassessed_item_survives_dimension_aggregation(
+    repo_root: Path, tmp_path: Path, known_risk: RiskLevel, layout: str, override: RiskLevel | None,
+) -> None:
+    reports_root, archive_root = _seed_v2_report_layout(repo_root, tmp_path)
+    programs_root = reports_root.parent / "programs"
+    edition_path = programs_root / "acme" / "editions" / f"{EDITION_NAME}.yaml"
+    edition = yaml.safe_load(edition_path.read_text(encoding="utf-8"))
+    edition["layout_mode"] = layout
+    edition_path.write_text(yaml.safe_dump(edition), encoding="utf-8")
+    if override is not None:
+        bundle = load_report_bundle(EDITION_NAME, reports_root=reports_root, programs_root=programs_root)
+        save_overrides(
+            EDITION_NAME,
+            report_module.OverridesDocument(
+                issue_number=1, top_3_now=(),
+                scorecards=tuple(
+                    report_module.ScorecardOverrides(
+                        name=scorecard.name,
+                        dimensions=tuple(report_module.DimensionOverride(
+                            name=dimension.name, risk=override,
+                        ) for dimension in scorecard.dimensions),
+                    ) for scorecard in bundle.config.scorecards
+                ),
+            ),
+            reports_root=reports_root, programs_root=programs_root,
+        )
+
+    def load_items(bundle, timestamp):
+        known = tuple(replace(item, risk_level=known_risk) for item in _sample_items(timestamp))
+        unknown = tuple(replace(item, id=item.id + 100, risk_level=RiskLevel.UNKNOWN) for item in known)
+        return known + unknown, 0
+
+    artifacts = generate_report_draft(
+        edition_name=EDITION_NAME, reports_root=reports_root, archive_root=archive_root,
+        programs_root=programs_root, as_of=datetime(2026, 11, 5, 18, 0, tzinfo=timezone.utc),
+        work_item_loader=load_items, open_browser=False,
+    )
+    expected = known_risk if known_risk in {RiskLevel.HIGH, RiskLevel.MEDIUM} else RiskLevel.UNKNOWN
+    assert artifacts.report.scorecard
+    assert all(
+        dimension.derived_risk == (expected if dimension.evidence.confidence != Confidence.NONE else RiskLevel.UNKNOWN)
+        for dimension in artifacts.report.scorecard
+    )
+    assert all(dimension.risk == (override or dimension.derived_risk) for dimension in artifacts.report.scorecard)
+    if override is not None:
+        assert all(dimension.override_risk == override for dimension in artifacts.report.scorecard)
+    elif expected == RiskLevel.UNKNOWN:
+        assert artifacts.manifest.qg_results["QG-8"] is False
+        assert "health assessment is incomplete" in artifacts.html_body
+        assert "PROGRAM HEALTH: NEEDS INPUT" in artifacts.md_path.read_text(encoding="utf-8")
+        assert "HEALTHY" not in message_from_bytes(artifacts.eml_path.read_bytes())["Subject"]
+
+
+@pytest.mark.parametrize("layout", ["dashboard", "continuity"])
+@pytest.mark.parametrize("known_risk", [RiskLevel.LOW, RiskLevel.DONE])
+def test_generate_report_draft_unmatched_dimensions_remain_needs_input(
+    repo_root: Path, tmp_path: Path, layout: str, known_risk: RiskLevel,
+) -> None:
+    reports_root, archive_root = _seed_v2_report_layout(repo_root, tmp_path)
+    programs_root = reports_root.parent / "programs"
+    edition_path = programs_root / "acme" / "editions" / f"{EDITION_NAME}.yaml"
+    edition = yaml.safe_load(edition_path.read_text(encoding="utf-8"))
+    edition["layout_mode"] = layout
+    edition_path.write_text(yaml.safe_dump(edition), encoding="utf-8")
+    bundle = load_report_bundle(EDITION_NAME, reports_root=reports_root, programs_root=programs_root)
+    expected_names = [
+        dimension.name for scorecard in bundle.config.scorecards for dimension in scorecard.dimensions
+    ]
+    artifacts = generate_report_draft(
+        edition_name=EDITION_NAME, reports_root=reports_root, archive_root=archive_root,
+        programs_root=programs_root, as_of=datetime(2026, 11, 5, 18, tzinfo=timezone.utc),
+        work_item_loader=lambda bundle, timestamp: (
+            tuple(replace(item, risk_level=known_risk) for item in _sample_items(timestamp)), 0,
+        ), open_browser=False,
+    )
+    assert sorted(dimension.name for dimension in artifacts.report.scorecard) == sorted(expected_names)
+    assert any(dimension.risk == known_risk for dimension in artifacts.report.scorecard)
+    assert any(dimension.risk == RiskLevel.UNKNOWN for dimension in artifacts.report.scorecard)
+    assert artifacts.manifest.qg_results["QG-8"] is False
+    assert "health assessment is incomplete" in artifacts.html_body
+    assert "PROGRAM HEALTH: NEEDS INPUT" in artifacts.md_path.read_text(encoding="utf-8")
+    assert "HEALTHY" not in message_from_bytes(artifacts.eml_path.read_bytes())["Subject"]
+
+
+@pytest.mark.parametrize("layout", ["dashboard", "continuity"])
+@pytest.mark.parametrize("prior_risk", [RiskLevel.LOW, RiskLevel.DONE])
+def test_generate_report_draft_baseline_is_not_current_assessment(
+    repo_root: Path, tmp_path: Path, layout: str, prior_risk: RiskLevel,
+) -> None:
+    reports_root, archive_root = _seed_v2_report_layout(repo_root, tmp_path)
+    programs_root = reports_root.parent / "programs"
+    edition_path = programs_root / "acme" / "editions" / f"{EDITION_NAME}.yaml"
+    edition = yaml.safe_load(edition_path.read_text(encoding="utf-8"))
+    edition["layout_mode"] = layout
+    edition_path.write_text(yaml.safe_dump(edition), encoding="utf-8")
+    bundle = load_report_bundle(EDITION_NAME, reports_root=reports_root, programs_root=programs_root)
+    prior_as_of = datetime(2026, 11, 4, 18, tzinfo=timezone.utc)
+    previous = _lookback_snapshot(
+        issue_number=1, as_of=prior_as_of,
+        items=(_snapshot_item_from_work_item(_sample_items(prior_as_of)[0], risk_level=prior_risk),),
+        scorecard_risks={},
+    )
+    previous = replace(
+        previous, scorecards=tuple(
+            ConfirmedDimension(
+                scorecard_name=scorecard.name, name=dimension.name,
+                risk=prior_risk, prior_risk=None, item_count=0,
+                ado_query_url="https://example.invalid/ado/query",
+            ) for scorecard in bundle.config.scorecards for dimension in scorecard.dimensions
+        ),
+    )
+    write_confirmed_issue(
+        edition=EDITION_NAME, issue_number=1, snapshot=previous,
+        html_body="<html><body>Synthetic prior</body></html>", markdown_body="# Synthetic prior\n",
+        manifest=_manifest(issue_number=1, as_of=prior_as_of, edition=EDITION_NAME),
+        archive_root=archive_root,
+    )
+    advance_trusted_baseline(
+        EDITION_NAME, 1, established_at=prior_as_of, established_by="synthetic",
+        editions_root=programs_root / "acme" / "editions", programs_root=programs_root,
+    )
+    artifacts = generate_report_draft(
+        edition_name=EDITION_NAME, reports_root=reports_root, archive_root=archive_root,
+        programs_root=programs_root, as_of=datetime(2026, 11, 5, 18, tzinfo=timezone.utc),
+        work_item_loader=lambda bundle, timestamp: ((), 0), open_browser=False,
+    )
+    assert artifacts.report.scorecard
+    assert all(dimension.risk == RiskLevel.UNKNOWN for dimension in artifacts.report.scorecard)
+    assert all(dimension.vector_label == "Needs Input" for dimension in artifacts.report.scorecard)
+    assert all(
+        f"Prior confirmed risk: {prior_risk.value} (historical)" in dimension.summary
+        for dimension in artifacts.report.scorecard
+    ), [(dimension.name, dimension.summary) for dimension in artifacts.report.scorecard]
+    assert artifacts.manifest.qg_results["QG-8"] is False
+    assert "health assessment is incomplete" in artifacts.html_body
+    assert "PROGRAM HEALTH: NEEDS INPUT" in artifacts.md_path.read_text(encoding="utf-8")
+    assert "HEALTHY" not in message_from_bytes(artifacts.eml_path.read_bytes())["Subject"]
+
+
 def test_health_templates_render_telemetry_confidence() -> None:
     templates_root = Path(__file__).resolve().parents[2] / "templates"
     environment = Environment(
@@ -1429,9 +1749,10 @@ def test_build_auto_suggested_top_items_prefers_new_high_and_uses_scorecard_anch
 
 
 def test_email_subject_and_preheader_helpers_format_shared_copy() -> None:
-    health = SimpleNamespace(
+    health = HealthSummary(
         high_count=1,
         medium_count=0,
+        low_count=0, done_count=0, total_count=1, delta_direction="unchanged", prior_counts=None,
         overall_risk=RiskLevel.HIGH,
         trajectory="stable",
         risk_load=2.0,
@@ -1681,8 +2002,8 @@ def test_generate_report_draft_writes_outputs(repo_root: Path, tmp_path: Path) -
     assert "workstream_blurbs" in draft_payload
     assert "Risk register: 1 active entry, 1 stale review. Highest active: Deployment telemetry may miss the weekly gate (owner operator, score 9)." in artifacts.html_body
     assert "Risk register: 1 active entry, 1 stale review. Highest active: Deployment telemetry may miss the weekly gate (owner operator, score 9)." in artifacts.markdown_body
-    assert "Milestones: 1 at risk, 2 on track." in artifacts.html_body
-    assert "Milestones: 1 at risk, 2 on track." in artifacts.markdown_body
+    assert "Milestones: 1 at risk, 2 unknown." in artifacts.html_body
+    assert "Milestones: 1 at risk, 2 unknown." in artifacts.markdown_body
     assert ">Telemetry<" in artifacts.html_body
     assert "analytics, 5 scope, 2 completed, scope up 2, open down 1, cycle 5.0d / lead 8.0d; sprint, Sprint 24, 50% complete, 1 open, team cap 24.0h/day across 3 members" in artifacts.html_body
     assert "Telemetry: analytics, 5 scope, 2 completed, scope up 2, open down 1, cycle 5.0d / lead 8.0d; sprint, Sprint 24, 50% complete, 1 open, team cap 24.0h/day across 3 members" in artifacts.markdown_body
@@ -1911,7 +2232,7 @@ def test_generate_report_draft_reads_sqlite_backed_signals_for_telemetry(repo_ro
     assert artifacts.html_path is not None and artifacts.html_path.exists()
     assert ">Telemetry<" in artifacts.html_body
     assert "analytics, 5 scope, 2 completed, scope up 2, open down 1, cycle 5.0d / lead 8.0d; sprint, Sprint 24, 50% complete, 1 open, team cap 24.0h/day across 3 members" in artifacts.html_body
-    assert "Milestones: 1 at risk, 2 on track." in artifacts.html_body
+    assert "Milestones: 1 at risk, 2 unknown." in artifacts.html_body
     assert "Highlights: M3 - Code Complete: Tracking 2026-05-28 (10 days late vs target); target history 2026-05-12 -> 2026-05-18." in artifacts.html_body
 
 
@@ -4442,7 +4763,9 @@ def test_build_scorecard_data_retains_dimensions_with_author_override_even_witho
     assert deltas == ()
 
 
-def test_build_scorecard_data_omits_placeholder_needs_input_overrides_without_evidence() -> None:
+@pytest.mark.parametrize("risk", [RiskLevel.UNKNOWN, RiskLevel.LOW, RiskLevel.HIGH])
+@pytest.mark.parametrize("override_kind", ["absent", "placeholder", "hidden"])
+def test_build_scorecard_data_retains_selected_dimensions_without_evidence(risk, override_kind) -> None:
     bundle = SimpleNamespace(
         config=SimpleNamespace(
             scorecard_sort="risk",
@@ -4475,20 +4798,21 @@ def test_build_scorecard_data_omits_placeholder_needs_input_overrides_without_ev
                 author_risk=None,
                 ado_query_url="https://dev.azure.com/query",
                 item_links=(),
-                derived_risk=RiskLevel.UNKNOWN,
+                derived_risk=risk,
             )
         }
     }
     overrides_document = report_module.OverridesDocument(
         issue_number=1,
         top_3_now=(),
-        scorecards=(
+        scorecards=() if override_kind == "absent" else (
             report_module.ScorecardOverrides(
                 name="Fabrikam Weekly Update",
                 dimensions=(
                     report_module.DimensionOverride(
                         name="Buildouts",
                         risk=None,
+                        hide_from_scorecard=override_kind == "hidden",
                     ),
                 ),
             ),
@@ -4504,12 +4828,20 @@ def test_build_scorecard_data_omits_placeholder_needs_input_overrides_without_ev
     )
 
     assert len(scorecards) == 1
-    assert scorecards[0].dimensions == ()
-    assert all_dimensions == ()
+    if override_kind == "hidden":
+        assert scorecards[0].dimensions == ()
+        assert all_dimensions == ()
+    else:
+        assert [dimension.name for dimension in scorecards[0].dimensions] == ["Buildouts"]
+        assert scorecards[0].dimensions[0].risk == risk
+        assert all_dimensions == scorecards[0].dimensions
     assert deltas == ()
 
 
-def test_build_scorecard_data_retains_trusted_baseline_dimensions_without_evidence() -> None:
+@pytest.mark.parametrize("prior_risk", [RiskLevel.LOW, RiskLevel.DONE, RiskLevel.MEDIUM, RiskLevel.HIGH, RiskLevel.UNKNOWN])
+@pytest.mark.parametrize("current_risk", [RiskLevel.UNKNOWN, RiskLevel.LOW, RiskLevel.HIGH])
+@pytest.mark.parametrize("override", [None, RiskLevel.MEDIUM])
+def test_build_scorecard_data_retains_trusted_baseline_dimensions_without_evidence(prior_risk, current_risk, override) -> None:
     bundle = SimpleNamespace(
         config=SimpleNamespace(
             scorecard_sort="risk",
@@ -4538,18 +4870,23 @@ def test_build_scorecard_data_retains_trusted_baseline_dimensions_without_eviden
                 unowned_items=(),
                 unowned_count=0,
                 high_activity_items=(),
-                prior_confirmed_risk=RiskLevel.LOW,
+                prior_confirmed_risk=prior_risk,
                 author_risk=None,
                 ado_query_url="https://dev.azure.com/query",
                 item_links=(),
-                derived_risk=RiskLevel.UNKNOWN,
+                derived_risk=current_risk,
             )
         }
     }
     overrides_document = report_module.OverridesDocument(
         issue_number=77,
         top_3_now=(),
-        scorecards=(),
+        scorecards=() if override is None else (
+            report_module.ScorecardOverrides(
+                name="Example Release Readiness",
+                dimensions=(report_module.DimensionOverride(name="LSO", risk=override),),
+            ),
+        ),
     )
 
     scorecards, all_dimensions, deltas = report_module._build_scorecard_data(
@@ -4563,15 +4900,21 @@ def test_build_scorecard_data_retains_trusted_baseline_dimensions_without_eviden
     assert len(scorecards) == 1
     assert len(scorecards[0].dimensions) == 1
     assert scorecards[0].dimensions[0].name == "LSO"
-    # Frozen dimensions with no current evidence inherit their prior confirmed
-    # risk instead of staying UNKNOWN (avoids QG-8 hard block on inherited dims).
-    assert scorecards[0].dimensions[0].risk == RiskLevel.LOW
-    assert scorecards[0].dimensions[0].summary == "No current evidence. Retained from trusted baseline."
+    expected = override or current_risk
+    assert scorecards[0].dimensions[0].risk == expected
+    assert scorecards[0].dimensions[0].derived_risk == current_risk
+    assert scorecards[0].dimensions[0].override_risk == override
+    if expected == RiskLevel.UNKNOWN:
+        assert scorecards[0].dimensions[0].summary == (
+            f"No current risk assessment. Prior confirmed risk: {prior_risk.value} (historical)."
+        )
+    else:
+        assert "Retained from trusted baseline" not in scorecards[0].dimensions[0].summary
     assert all_dimensions == scorecards[0].dimensions
-    assert deltas == ()
+    assert len(deltas) == int(prior_risk != expected and RiskLevel.UNKNOWN not in {prior_risk, expected})
 
 
-def test_build_scorecard_data_omits_linked_dimensions_from_downstream_presentation() -> None:
+def test_build_scorecard_data_retains_selected_linked_dimensions_without_evidence() -> None:
     bundle = SimpleNamespace(
         config=SimpleNamespace(
             scorecard_sort="risk",
@@ -4666,8 +5009,8 @@ def test_build_scorecard_data_omits_linked_dimensions_from_downstream_presentati
 
     assert len(scorecards) == 2
     assert [dimension.name for dimension in scorecards[0].dimensions] == ["Deployment Velocity"]
-    assert scorecards[1].dimensions == ()
-    assert [dimension.name for dimension in all_dimensions] == ["Deployment Velocity"]
+    assert [dimension.name for dimension in scorecards[1].dimensions] == ["Deployment"]
+    assert [dimension.name for dimension in all_dimensions] == ["Deployment Velocity", "Deployment"]
     assert deltas == ()
 
 
@@ -4776,9 +5119,10 @@ def test_build_scorecard_data_enforces_trusted_baseline_composition_when_config_
     assert len(scorecards) in {0, 1}
     if scorecards:
         assert [dimension.name for dimension in scorecards[0].dimensions] == ["LSO"]
-        # Frozen dimensions inherit prior confirmed risk instead of UNKNOWN.
-        assert scorecards[0].dimensions[0].risk == RiskLevel.LOW
-        assert scorecards[0].dimensions[0].summary == "No current evidence. Retained from trusted baseline."
+        assert scorecards[0].dimensions[0].risk == RiskLevel.UNKNOWN
+        assert scorecards[0].dimensions[0].summary == (
+            "No current risk assessment. Prior confirmed risk: low (historical)."
+        )
         assert all_dimensions == scorecards[0].dimensions
     assert deltas == ()
 

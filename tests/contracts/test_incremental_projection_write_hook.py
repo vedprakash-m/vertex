@@ -125,7 +125,7 @@ def _track_full_rebuild_calls(monkeypatch) -> tuple[list[int], list[int]]:
     original_full = program_views.project_events_to_sqlite
     original_incremental = program_views._incremental_fold
 
-    def _wrapped_full(program_id, events, *, projection_path, programs_root=program_views.PROGRAMS_ROOT, as_of=None, knowledge_as_of=None):
+    def _wrapped_full(program_id, events, *, projection_path, programs_root=program_views.PROGRAMS_ROOT, as_of=None, knowledge_as_of=None, triage_decisions=None):
         event_tuple = tuple(events)
         full_calls.append(len(event_tuple))
         return original_full(
@@ -135,9 +135,10 @@ def _track_full_rebuild_calls(monkeypatch) -> tuple[list[int], list[int]]:
             programs_root=programs_root,
             as_of=as_of,
             knowledge_as_of=knowledge_as_of,
+            triage_decisions=triage_decisions,
         )
 
-    def _wrapped_incremental(program_id, *, visible_events, delta_events, projection_path, programs_root, as_of):
+    def _wrapped_incremental(program_id, *, visible_events, delta_events, projection_path, programs_root, as_of, triage_decisions):
         incremental_calls.append(len(delta_events))
         return original_incremental(
             program_id,
@@ -146,6 +147,7 @@ def _track_full_rebuild_calls(monkeypatch) -> tuple[list[int], list[int]]:
             projection_path=projection_path,
             programs_root=programs_root,
             as_of=as_of,
+            triage_decisions=triage_decisions,
         )
 
     monkeypatch.setattr(program_views, "project_events_to_sqlite", _wrapped_full)

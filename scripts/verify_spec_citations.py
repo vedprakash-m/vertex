@@ -88,7 +88,7 @@ CITATIONS: tuple[Citation, ...] = (
     Citation(
         claim="Track E: report_health reuses optional pre-loaded reality and retains risk FactAssessments before projecting records",
         path="src/commands/report_health.py",
-        line=215,
+        line=232,
         must_contain="resolved_risk_assessments = tuple(resolved_reality.risks())",
     ),
     Citation(
@@ -100,7 +100,7 @@ CITATIONS: tuple[Citation, ...] = (
     Citation(
         claim="PS-1: report_scorecards loads ProgramReality dependencies once per newly visited program in its cross-program BFS",
         path="src/commands/report_scorecards.py",
-        line=415,
+        line=406,
         must_contain="a.record for a in ProgramReality.load(",
     ),
     Citation(
@@ -130,7 +130,7 @@ CITATIONS: tuple[Citation, ...] = (
     Citation(
         claim="PS-3: incremental-projection function already exists (Track D is a wiring task)",
         path="src/core/ledger/program_views.py",
-        line=174,
+        line=183,
         must_contain="def project_events_incremental_to_sqlite",
     ),
     Citation(

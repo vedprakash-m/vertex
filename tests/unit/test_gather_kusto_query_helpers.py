@@ -26,6 +26,47 @@ def _kusto_query(query_id: str = "query-a") -> KustoQuery:
     )
 
 
+@pytest.mark.parametrize("failure", ["rows", "bytes", "missing", "extra", "order", "unmeasurable"])
+def test_direct_consumers_refuse_declared_limits_without_advancing_history(failure: str) -> None:
+    from src.commands import gather
+    from src.core.kusto_result_limits import KustoResultLimits
+
+    now = datetime(2026, 11, 5, tzinfo=timezone.utc)
+    query = replace(
+        _kusto_query(), result_limits=KustoResultLimits(
+            ("P50", "Timestamp"), 1, 2 if failure == "bytes" else 100,
+        ),
+    )
+    rows = [{"P50": 4.2, "Timestamp": now.isoformat()}]
+    if failure == "rows":
+        rows *= 2
+    elif failure == "missing":
+        rows = [{"P50": 4.2}]
+    elif failure == "extra":
+        rows[0]["Extra"] = "not projected"
+    elif failure == "order":
+        rows = [{"Timestamp": now.isoformat(), "P50": 4.2}]
+    elif failure == "unmeasurable":
+        rows[0]["Timestamp"] = object()
+    previous = {"last_succeeded_at": "2026-11-04T00:00:00+00:00", "value_last_4": [7.0]}
+    states: dict = {}
+
+    signals = kusto_query_helpers.build_kusto_signals(
+        queries=(query, replace(_kusto_query("independent"), result_limits=None)),
+        program_id="synthetic", as_of=now, executor=lambda current: rows if current.id == query.id else [{"P50": 5}],
+        query_state_sink=states, previous_query_states={query.id: previous},
+    )
+    assert [signal.metadata["query_id"] for signal in signals] == ["independent"]
+    assert states[query.id]["last_cycle_succeeded"] is False
+    assert states[query.id]["is_degraded"] is True
+    assert states[query.id]["last_error"]
+    assert states[query.id]["value_last_4"] == [7.0]
+    assert states[query.id]["last_succeeded_at"] == datetime(2026, 11, 4, tzinfo=timezone.utc)
+    assert "max_data_timestamp" not in states[query.id]
+    assert kusto_query_helpers.extract_kusto_query_numeric_value(query, rows) is None
+    assert gather._build_kusto_kpi_signal(query=query, rows=rows, program_id="synthetic", as_of=now) is None
+
+
 @pytest.mark.parametrize("legacy", [False, True])
 def test_build_kusto_signals_emits_signal_and_query_state(legacy: bool) -> None:
     query_state_sink: dict[str, dict[str, object]] = {}

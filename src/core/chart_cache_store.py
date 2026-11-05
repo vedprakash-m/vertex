@@ -5,16 +5,22 @@ No AI or M365 imports — this module must stay in Zone A.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 from src.core.models_v2 import IntegrationError
+
+if TYPE_CHECKING:
+    from src.core.config_loader import KustoQuerySettings
+    from src.core.models_v2 import KustoQuery
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +28,21 @@ MAX_CACHE_ENTRY_BYTES = 5 * 1024 * 1024  # 5 MiB
 
 # Allowed Kusto column types for cache storage
 _ALLOWED_COLUMN_TYPES = (int, float, str, bool)
+
+
+def chart_cache_contract_identity(query: KustoQuery | KustoQuerySettings) -> str:
+    from src.core.charts.chart_config_schema import FORBIDDEN_CHART_CONFIG_KEYS
+
+    config = {key: value for key, value in (query.chart_config or {}).items()
+              if key not in FORBIDDEN_CHART_CONFIG_KEYS}
+    payload = (
+        query.cluster, query.database, query.kql, query.render_as,
+        query.chart_renderer_id, config, query.expected_cardinality,
+        asdict(query.result_limits) if query.result_limits is not None else None,
+    )
+    return hashlib.sha256(json.dumps(
+        payload, sort_keys=True, ensure_ascii=True, allow_nan=False, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
 
 
 def _serialize_datetime(value: datetime) -> str:
@@ -67,6 +88,7 @@ def write_chart_cache(
     *,
     programs_root: Path,
     pii_prescrubbed: bool,
+    query_contract_hash: str | None = None,
 ) -> Path | None:
     """
     Write pre-sanitized rows to atomic JSON sidecar.
@@ -81,6 +103,7 @@ def write_chart_cache(
             "chart cache write requires pre-scrubbed data — "
             "call PII scrubber in gather pipeline before writing"
         )
+    query_contract_hash = _optional_query_contract_hash(query_contract_hash)
 
     cache_dir = programs_root / program_id / "chart_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -96,6 +119,7 @@ def write_chart_cache(
         "chart_config_hash": chart_config_hash,
         "rows": sanitized_rows,
         "row_count": len(sanitized_rows),
+        "query_contract_hash": query_contract_hash,
     }
 
     serialized = json.dumps(entry, indent=2).encode("utf-8")
@@ -180,6 +204,7 @@ def load_chart_cache(
         cache_program_id = _required_string(data.get("program_id"), field_name="program_id")
         cache_query_id = _required_string(data.get("query_id"), field_name="query_id")
         chart_config_hash = _required_string(data.get("chart_config_hash"), field_name="chart_config_hash")
+        query_contract_hash = _optional_query_contract_hash(data.get("query_contract_hash"))
         row_count = _required_int(data.get("row_count"), field_name="row_count")
         schema_version = _required_string(data.get("schema_version"), field_name="schema_version")
         if schema_version != "1":
@@ -204,6 +229,7 @@ def load_chart_cache(
         rows=rows,
         row_count=row_count,
         schema_version=schema_version,
+        query_contract_hash=query_contract_hash,
     )
 
 
@@ -270,6 +296,7 @@ class ChartCacheEntry:
     rows: tuple[dict[str, Any], ...]
     row_count: int
     schema_version: str = "1"
+    query_contract_hash: str | None = None
 
 
 def _normalize_datetime(value: datetime) -> datetime:
@@ -281,6 +308,12 @@ def _normalize_datetime(value: datetime) -> datetime:
 def _required_string(value: Any, *, field_name: str) -> str:
     if not isinstance(value, str):
         raise TypeError(f"{field_name} must be a string")
+    return value
+
+
+def _optional_query_contract_hash(value: Any) -> str | None:
+    if value is not None and (not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None):
+        raise ValueError("query_contract_hash must be a lowercase SHA-256 hex string or null")
     return value
 
 

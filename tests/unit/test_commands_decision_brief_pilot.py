@@ -10,6 +10,10 @@ deployment resolution, blind randomization, and comparison recording.
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import Mock
+
+import pytest
+import typer
 
 from src.ai.ai_mode import AIMode, set_ai_mode
 from src.commands.decision_brief_pilot import (
@@ -122,10 +126,8 @@ def test_run_comparison_records_blind_judgment_for_each_item(monkeypatch, tmp_pa
     programs_root = tmp_path / "programs"
     _write_ai_enabled_program(programs_root)
     brief = _brief(_item("risks"), _item("dependencies"))
-    monkeypatch.setattr(
-        "src.commands.decision_brief_pilot.load_pending_decision_brief",
-        lambda **kwargs: (brief, "acme"),
-    )
+    pending = Mock(return_value=(brief, "acme"))
+    monkeypatch.setattr("src.commands.decision_brief_pilot.load_pending_decision_brief", pending)
     monkeypatch.setattr(
         "src.commands.decision_brief_pilot.resolve_ai_deployments_for_feature", lambda **kwargs: ("fake-deployment",)
     )
@@ -162,6 +164,9 @@ def test_run_comparison_records_blind_judgment_for_each_item(monkeypatch, tmp_pa
     assert result.issue_number == 12
     assert set(result.compared_item_ids) == {"risks", "dependencies"}
     assert result.skipped_item_ids == ()
+    assert pending.call_args.kwargs["programs_root"] == programs_root
+    assert pending.call_args.kwargs["reports_root"] is None
+    assert pending.call_args.kwargs["archive_root"] is None
 
     records = read_comparisons("acme", surface="decision_brief_advisor", programs_root=programs_root)
     assert len(records) == 2
@@ -244,3 +249,78 @@ def test_run_comparison_skips_items_missing_advice_from_either_side(monkeypatch,
     assert result.compared_item_ids == ()
     assert result.skipped_item_ids == ("risks",)
     assert read_comparisons("acme", surface="decision_brief_advisor", programs_root=programs_root) == ()
+
+
+@pytest.mark.parametrize("invalid", ("relative", "conflict", "checkout"))
+def test_comparison_refuses_invalid_workspace_before_any_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid: str,
+) -> None:
+    from src.commands import decision_brief_pilot as pilot
+    from src.core.exceptions import ConfigError
+
+    roots = dict(programs_root=tmp_path / "programs", reports_root=tmp_path / "reports",
+                 archive_root=tmp_path / "archive")
+    if invalid == "relative":
+        roots["programs_root"] = Path("programs")
+    elif invalid == "conflict":
+        roots["archive_root"] = tmp_path / "other" / "archive"
+    else:
+        (tmp_path / ".git").write_text("gitdir: synthetic", encoding="utf-8")
+    for name in ("load_pending_decision_brief", "load_program", "resolve_ai_deployments_for_feature",
+                 "FallbackAIClient", "advise_on_decision_brief", "record_comparison"):
+        monkeypatch.setattr(pilot, name, Mock(side_effect=AssertionError("access before admission")))
+    previous_mode = pilot.get_ai_mode()
+    set_ai_mode(AIMode.ACTIVE)
+    try:
+        with pytest.raises(ConfigError):
+            pilot.run_context_gateway_comparison(edition_name="acme_weekly", **roots)
+    finally:
+        set_ai_mode(previous_mode)
+
+
+def test_pilot_summary_reads_selected_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.commands import decision_brief, decision_brief_pilot as pilot
+
+    programs = tmp_path / "programs"
+    monkeypatch.setattr(decision_brief, "PROGRAMS_ROOT", programs)
+    records = Mock(return_value=())
+    monkeypatch.setattr(pilot, "read_comparisons", records)
+    with pytest.raises(typer.Exit) as error:
+        pilot.summary_command(program="acme")
+    assert error.value.exit_code == 0
+    records.assert_called_once_with("acme", surface="decision_brief_advisor", programs_root=programs)
+
+
+@pytest.mark.parametrize("choice", ("a", "tie", "neither"))
+def test_pilot_summary_reads_actual_selected_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, choice: str,
+) -> None:
+    from src.commands import decision_brief, decision_brief_pilot as pilot
+    from src.core.blind_ab_comparison import record_comparison
+
+    programs = tmp_path / "programs"
+    monkeypatch.setattr(decision_brief, "PROGRAMS_ROOT", programs)
+    record_comparison(
+        program_id="acme", surface="decision_brief_advisor", item_id="risks",
+        option_a_text="candidate", option_b_text="baseline", a_is_candidate=True,
+        choice=choice, programs_root=programs,
+    )
+    with pytest.raises(typer.Exit) as error:
+        pilot.summary_command(program="acme")
+    assert error.value.exit_code == 0
+
+
+@pytest.mark.parametrize("failure", (False, True))
+def test_pilot_compare_direct_command_handles_result_and_configuration_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: bool,
+) -> None:
+    from src.commands import decision_brief, decision_brief_pilot as pilot
+    from src.core.exceptions import ConfigError
+
+    monkeypatch.setattr(decision_brief, "PROGRAMS_ROOT", tmp_path / "programs")
+    comparison = (Mock(side_effect=ConfigError("configuration changed")) if failure
+                  else Mock(return_value=pilot.ComparisonRunResult("acme", 7, ("risks",), ())))
+    monkeypatch.setattr(pilot, "run_context_gateway_comparison", comparison)
+    with pytest.raises(typer.Exit) as error:
+        pilot.compare_command(edition="acme_weekly", issue=7, seed=1, deployment=None)
+    assert error.value.exit_code == (2 if failure else 0)

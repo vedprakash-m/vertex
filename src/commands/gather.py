@@ -3092,6 +3092,7 @@ def _build_kusto_kpi_signal(
         query.id, query.expected_cardinality, rows,
         metric_id=query.metric_id, result_column=query.result_column,
         slo_target=query.slo_target, comparison=query.comparison,
+        result_limits=query.result_limits,
     ):
         return None
 

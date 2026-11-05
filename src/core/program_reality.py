@@ -1669,18 +1669,26 @@ class ProgramReality:
                 continue
 
             # Check TTL expiry
-            proposed_at_str = payload.get("proposed_at", "")
-            proposed_at: datetime | None = None
-            if proposed_at_str:
-                try:
-                    proposed_at = datetime.fromisoformat(str(proposed_at_str))
-                    if proposed_at.tzinfo is None:
-                        proposed_at = proposed_at.replace(tzinfo=timezone.utc)
-                    ttl_hours = int(payload.get("approval_ttl_hours", 24))
-                    if now > proposed_at + timedelta(hours=ttl_hours):
-                        continue  # expired
-                except (ValueError, TypeError):
-                    pass
+            approved = payload.get("approved", False)
+            proposed_at_str = payload.get("proposed_at")
+            ttl_hours = payload.get("approval_ttl_hours", 24)
+            if (
+                not isinstance(approved, bool)
+                or not isinstance(proposed_at_str, str)
+                or not proposed_at_str.strip()
+                or not isinstance(ttl_hours, int)
+                or isinstance(ttl_hours, bool)
+                or ttl_hours < 1
+            ):
+                raise ConfigError("Invalid retained actuation proposal approval/time/TTL; correct before review.")
+            try:
+                proposed_at = datetime.fromisoformat(proposed_at_str)
+                if proposed_at.tzinfo is None:
+                    proposed_at = proposed_at.replace(tzinfo=timezone.utc)
+            except ValueError as exc:
+                raise ConfigError("Invalid retained actuation proposal time; correct before review.") from exc
+            if (now - proposed_at).total_seconds() / 3600 > ttl_hours:
+                continue  # expired
 
             entity_refs = fact.entity_refs
             entity_ref = entity_refs[0] if entity_refs else ""
@@ -1691,8 +1699,8 @@ class ProgramReality:
                 operation=str(payload.get("operation", "")),
                 entity_ref=entity_ref,
                 payload=dict(payload),
-                proposed_at=proposed_at or now,
-                approved=bool(payload.get("approved", False)),
+                proposed_at=proposed_at,
+                approved=approved,
                 gap_reason=str(payload.get("gap_reason", "")),
             ))
 

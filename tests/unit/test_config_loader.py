@@ -161,6 +161,26 @@ queries:
 
 
 class ConfigLoaderTests(unittest.TestCase):
+    def test_declared_kusto_limits_reach_resolved_and_report_config(self) -> None:
+        from src.core.kusto_result_limits import KustoResultLimits
+
+        with TemporaryDirectory() as temp_dir:
+            editions_root, programs_root = _write_demo_v2_layout(Path(temp_dir))
+            query_path = programs_root / "demo" / "knowledge" / "golden_queries.yaml"
+            document = yaml.safe_load(query_path.read_text(encoding="utf-8"))
+            document["queries"][0]["result_limits"] = {
+                "projected_columns": ["Value"], "max_rows": 2, "max_bytes": 100,
+            }
+            document["queries"][0]["expected_cardinality"] = "scalar_required"
+            query_path.write_text(yaml.safe_dump(document), encoding="utf-8")
+            config = load_report_config("demo_weekly", editions_root=editions_root, programs_root=programs_root)
+            self.assertEqual(config.kusto.queries[0].result_limits, KustoResultLimits(("Value",), 2, 100))
+            self.assertEqual(config.kusto.queries[0].expected_cardinality, "scalar_required")
+            document["queries"][0]["result_limits"]["max_rows"] = True
+            query_path.write_text(yaml.safe_dump(document), encoding="utf-8")
+            with self.assertRaisesRegex(ConfigError, "result_limits"):
+                load_report_config("demo_weekly", editions_root=editions_root, programs_root=programs_root)
+
     def test_program_editorial_rules_use_defaults_when_optional_file_is_missing(self) -> None:
         from src.core.config_loader import load_program_editorial_rules
 
@@ -995,6 +1015,26 @@ required: true
 
         self.assertTrue(review.required)
         self.assertEqual(review.reviewers[0].sections, ("exec_summary", "ws:deployment"))
+        self.assertEqual(review.reply_origin_verifier_principals, ())
+
+    def test_review_config_has_explicit_reply_verifiers_not_reviewer_names(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "review.yaml"
+            path.write_text(
+                "reviewers: [{name: Display Name}]\n"
+                "reply_origin_verifier_principals: [' synthetic-reviewer ', synthetic-other]\n",
+                encoding="utf-8",
+            )
+            review = load_review_config(path)
+        self.assertEqual(review.reply_origin_verifier_principals, ("synthetic-reviewer", "synthetic-other"))
+
+    def test_review_config_rejects_malformed_reply_verifiers(self) -> None:
+        for value in ("true", "synthetic-reviewer", "[true]", "[{}]"):
+            with self.subTest(value=value), TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "review.yaml"
+                path.write_text(f"reply_origin_verifier_principals: {value}\n", encoding="utf-8")
+                with self.assertRaises(ConfigError):
+                    load_review_config(path)
 
     def test_discover_report_editions_excludes_tracked_example_templates(self) -> None:
         from src.core.edition_resolver import EDITIONS_ROOT

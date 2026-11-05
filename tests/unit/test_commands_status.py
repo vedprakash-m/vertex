@@ -146,8 +146,8 @@ def test_status_risk_configuration_failure_is_unavailable_in_all_formats(
         archive_root=tmp_path / "archive",
     )
     assert report.risk_register_summary == expected
-    assert report.readiness_percent == 90
-    assert report.milestone_summary == "1 at risk, 2 on track"
+    assert report.readiness_percent == 85
+    assert report.milestone_summary == "3 unknown"
 
     human = runner.invoke(app, ["status", "--edition", EDITION_NAME])
     structured = runner.invoke(app, ["status", "--edition", EDITION_NAME, "--format", "json"])
@@ -197,9 +197,9 @@ def test_build_status_report_uses_latest_draft_artifacts(monkeypatch, repo_root:
 
     assert report.display_name == "Acme"
     assert report.issue_number == 1
-    assert report.readiness_percent == 90
+    assert report.readiness_percent == 85
     assert report.blocker_count == 3
-    assert report.milestone_summary == "1 at risk, 2 on track"
+    assert report.milestone_summary == "3 unknown"
     assert report.last_gathered_at is not None
     assert report.last_confirmed_at is None
     assert report.cadence == "weekly"
@@ -380,10 +380,10 @@ def test_status_cli_supports_human_and_json(monkeypatch, repo_root: Path, tmp_pa
 
     assert human_result.exit_code == 0
     assert "Acme — Issue 001" in human_result.stdout
-    assert "Readiness:    90%" in human_result.stdout
+    assert "Readiness:    85%" in human_result.stdout
     assert "Last confirm: unknown (weekly — no confirmed issues yet)" in human_result.stdout
     assert "Next due:     example_daily (no confirmed issues yet; Acme working team and DRIs; via teams; owner maintainer)" in human_result.stdout
-    assert "Milestones:   1 at risk, 2 on track" in human_result.stdout
+    assert "Milestones:   3 unknown" in human_result.stdout
     assert "AI Safety:    disabled" in human_result.stdout
     assert "Scope:        Deliver Acme ramp readiness for the current LT gate." in human_result.stdout
 
@@ -392,14 +392,14 @@ def test_status_cli_supports_human_and_json(monkeypatch, repo_root: Path, tmp_pa
     assert payload["edition"] == EDITION_NAME
     assert payload["display_name"] == "Acme"
     assert payload["issue_number"] == 1
-    assert payload["readiness_percent"] == 90
+    assert payload["readiness_percent"] == 85
     assert payload["blocker_count"] == 3
     assert payload["cadence_status"] == "no confirmed issues yet"
     assert payload["next_due_edition"] == "example_daily"
     assert payload["next_due_status"] == "no confirmed issues yet"
     assert "Acme working team and DRIs; via teams; owner maintainer" in payload["next_due_context"]
     assert payload["risk_register_summary"] == "1 active, 1 stale review"
-    assert payload["milestone_summary"] == "1 at risk, 2 on track"
+    assert payload["milestone_summary"] == "3 unknown"
     assert payload["scope_statement"] == "Deliver Acme ramp readiness for the current LT gate."
 
 
@@ -602,7 +602,7 @@ def test_status_cli_supports_csv(monkeypatch, repo_root: Path, tmp_path: Path) -
     assert result.exit_code == 0
     assert rows[0]["edition"] == EDITION_NAME
     assert rows[0]["display_name"] == "Acme"
-    assert rows[0]["readiness_percent"] == "90"
+    assert rows[0]["readiness_percent"] == "85"
     assert rows[0]["blocker_count"] == "3"
     assert rows[0]["cadence_status"] == "no confirmed issues yet"
     assert rows[0]["ai_safety_summary"] == (

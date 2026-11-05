@@ -416,6 +416,24 @@ def test_describe_milestone_schedule_variance_reports_completion_variance() -> N
     assert summary == "Completed 2026-05-24 (1 day early vs target)"
 
 
+def test_missing_required_link_cannot_produce_a_completion_date() -> None:
+    from src.core.milestone_engine import resolve_milestone_completion_date
+
+    as_of = datetime(2026, 5, 10, 18, tzinfo=timezone.utc)
+    milestone = replace(
+        _milestone(target_date=date(2026, 12, 1)), linked_work_item_ids=(900001, 900002),
+    )
+    item = _work_item(item_id=900001, state="Closed", risk_level=RiskLevel.DONE, target_date=None)
+    assessment = assess_milestone_health(milestone, (item,), {}, as_of)
+
+    assert assessment.computed_health == MilestoneStatus.AT_RISK
+    assert assessment.coverage_gap
+    assert assessment.completion_date is None
+    assert resolve_milestone_completion_date(milestone, (item,), {}, as_of) is None
+    summary = describe_milestone_schedule_variance(milestone, (item,), {}, as_of)
+    assert summary is None or "completed" not in summary.lower()
+
+
 def _milestone(
     *,
     milestone_id: str = "m3-code-complete",

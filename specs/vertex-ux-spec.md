@@ -138,6 +138,14 @@ The canonical source is `src/core/jinja_filters.py → RISK_COLORS`. These are t
 | **Done** | `#4EA72E` | `#FFFFFF` | `#FFFFFF` | ✅ | "Done" |
 | **Unknown / Blocked** | `#C00000` | `#FFFFFF` | `#FFFFFF` | ⚪ | "Needs Input" |
 
+ADO item risk labels use one shared normalization policy across hydration,
+report/gather/freshness, children and history. Terminal items show Done;
+recognized active-item authored assessments win over conflicting state/tag
+heuristics. Missing/unsupported assessments without explicit fallback evidence
+remain Needs Input, not Low. Source state/tags remain available as evidence.
+Dimension overrides, aggregation and the existing dimension-level publish gate
+are unchanged.
+
 ### 2.2 Delta Badge Tokens
 
 The canonical source is `src/core/jinja_filters.py → DELTA_COLORS`.
@@ -267,7 +275,7 @@ The banner answers "Is this program healthy?" in ≤10 seconds.
 
 | State | Condition | Banner BG | Banner FG |
 |-------|-----------|----------|----------|
-| HEALTHY | high=0, medium=0, total>0 | `#D1FAE5` | `#047857` |
+| HEALTHY | high=0, medium=0, low+done=total, total>0 | `#D1FAE5` | `#047857` |
 | CRITICAL | high≥3 | `#FEE2E2` | `#B91C1C` |
 | AT RISK | high>0 | `#FEF3C7` | `#92400E` |
 | ON TRACK | medium>0 | `#FEF3C7` | `#92400E` |
@@ -291,7 +299,20 @@ The banner answers "Is this program healthy?" in ≤10 seconds.
 
 Tile label: 11px/700. Tile number: 18px/700. Border: `1px solid #E5E7EB`.
 
-**Risk Load bar:** 6px height. Fill color: `#991B1B` (high≥3), `#F59E0B` (high>0 or medium>0), `#047857` (all green). Empty segment: `#F3F4F6`.
+**Assessment coverage:** All dimensions remain in the total. Display the
+Needs Input count as explanatory banner text, not an additional fixed-width
+tile; zero dimensions displays no assessments available. Known High/Medium
+state takes precedence but never hides the coverage warning. HTML/Teams use
+the shared `HealthSummary.health_state`; email cannot label an incomplete
+Low/Done subset HEALTHY. Missing assessment replaces default all-clear decision
+copy with assessment guidance; authored asks/BLUF and Top3 items retain priority.
+Incomplete current/prior coverage hides comparative count deltas and prior
+risk load and labels the diagnostic incomplete/comparison unavailable.
+No healthy streak is shown for incomplete current assessment.
+Continuity's executive summary shows the same missing-assessment state/count
+and ask, because that archetype omits the standard health banner.
+
+**Risk Load bar:** 6px height. Fill color: `#991B1B` (high≥3), `#F59E0B` (high>0 or medium>0), `#6B7280` (incomplete assessment coverage without High/Medium), `#047857` (all green). Empty segment: `#F3F4F6`.
 
 ### 3.4 Top 3 Now (`partials/top_3_now.j2`)
 
@@ -336,6 +357,13 @@ Author-curated — **never auto-generated**. Max 3 items, ≤25 words each. Sour
 
 **Undated trend labels:** A prior/current comparison uses two actual samples and says `rising vs prior issue`, `falling vs prior issue` or `unchanged vs prior issue`. Escalation history names the number of displayed observations and net change, not elapsed weeks; repeated high observations alone do not establish chronicity. Unknown or insufficient samples show no trend. Do not duplicate samples to fill a four-point graphic.
 
+Shared trend direction explicitly reports `unknown` for missing assessments,
+not stable/improving/worsening; do not generate comparative narrative hints
+from it. Report vector labels retain Needs Input for current Unknown and
+omit up/down/New High without two known assessments. Existing stale
+diagnostics and consecutive-High observation counts remain; vector counts
+say `High N issues`, not `Nw`.
+
 Two rendering modes based on dimension label length and `mobile_safe_scorecards` setting:
 
 **Row-fallback mode** (labels >10 chars or explicitly set):
@@ -370,6 +398,22 @@ Explicitly failed bound KPI (RELO-W3.6a). Omit its current report workstream/cha
 Aggregate-incidents tile. Schema: `{Sev0Count, Sev1Count, Sev2Count, OldestAgeHours, OldestIncidentId, OldestUrl}`. When the Sev0/1/2 sum is greater than zero, render three count badges (Sev0 red `#A4262C`, Sev1 amber `#BC7C00`, Sev2 slate `#605E5C`) plus a one-line footer `Oldest: <Age>h - <IncidentId>` hyperlinked to `OldestUrl`. When the sum is zero, render a single green `✓ No active Sev 0-2 (<scope label>)` tile with no footer.
 
 **Cell rendering rules:**
+
+Derived scorecard labels preserve Unknown from unassessed matched work items
+when all assessed peers are Low/Done. Known High/Medium takes precedence;
+explicit dimension overrides remain separate. Use the existing Needs Input
+presentation and QG-8 block, not a Low/Done substitute; no layout or token
+change is required.
+
+Inherited dimensions without a current assessment use Needs Input, not the
+old Low/Done label. Their summary states the prior confirmed risk separately
+as historical; it does not imply a current assessment or improvement.
+Explicit overrides and observed current risks retain existing presentation.
+
+Selected configured dimensions with zero matches remain visible as Needs
+Input instead of disappearing from scorecards and health totals. Explicit
+scorecard hides and effective composition retain their rules. Existing linked
+dimension presentation is unchanged; no new linked exclusion is introduced.
 
 | Risk | Background | Text | Left Border |
 |------|-----------|------|------------|
@@ -564,6 +608,22 @@ Rendered within the detailed archetype when Kusto queries return data.
 Phase-1 table notice. For KPIs with `render_as: table` and `refresh_on_gather: true`, the body may render the 13px regular notice `Data available - see CLI inspector (python cli.py inspect kusto --query <id>).` Wave H replaces this with the inline table renderer.
 
 **Degraded state:** `color: #9A3412` message text when cluster is unreachable. Reference URL link as fallback.
+
+**Result-admission refusal:** SDK-reported partial completion, declared projection/row/decoded-byte violations and scalar-required cardinality failures use existing query-error degradation and warnings, with a reference link when available. Do not display refused rows as successful telemetry or a metric verdict. Hydration records failure without a result set. Valid empty declared projections remain distinct from schema refusal; undeclared legacy budgets are not presented as qualified.
+
+Injected report and fallback executors follow the same declared row admission. A query/auth failure in the fallback is degraded with warnings, not silently shown as an empty successful result. Refused chart-gather rows cannot reach sanitization or replace cached output. Failed direct/KPI queries retain prior successful history/time without refreshing freshness from refused rows; independent valid queries remain visible. Empty consumer-only lists and historical cache artifacts are not original-response or current-contract certification.
+
+Chart gather does not describe expired/future or foreign-program/query cache
+entries as fresh hits. Existing entries cannot bypass declared limits or
+scalar-required live admission. A size-refused cache write appears through
+the existing chart integration error, not a successful written-row count;
+independent valid charts continue. Cache retention does not extend query TTL.
+
+Changing a chart's source, KQL, rendering definition or authored admission
+cannot reuse an older definition as a fresh cache hit. Missing legacy hashes
+trigger live refresh rather than silently upgrading old evidence; malformed
+hash metadata uses the existing logged refusal path. Unchanged definitions
+and nested configuration key-order changes retain eligible cache reuse.
 
 **Invalid SLO targets (RELO-W3.5f):** A nonfinite configured target is a configuration/hydration failure, never an OK/BREACH verdict or successful numeric-history update. Valid zero, absent targets and existing zero-row data-gap presentation remain distinct.
 
@@ -926,6 +986,28 @@ When catchup is enabled and unseen items exist, the CLI may emit a short session
 
 Backup creation failures, including SQLite capture failures, return exit 2 with an explicit error in the selected human/JSON/CSV format rather than a success count or an unformatted traceback (RELO-W0.13c). A verified checksum establishes the captured files' integrity, not complete workspace scope or operational recovery readiness.
 
+Actuation execute, including dry-run, refuses disabled/missing/mismatched rule admission, unapproved/gap-blocked proposals and invalid/future/stale proposal times before rendering an execution payload. Review and execute report invalid policy enablement or retained approval/time/TTL as blocked, exit 2, with correction-before-review guidance and no raw malformed payload. Dry-run remains write-free. Expiry detected at actual dispatch after CLI admission reports failure, exit 3, with review guidance rather than success or automatic renewal. Existing not-found/expired exclusion behavior remains exit 1. These bounded checks preserve the default live-write kill switch; a successful preview is not authority to enable it or evidence of generalized effectively-once delivery.
+
+Outbox out-of-order transitions are errors, not successful completion or silent retries. The shared store reports refusal without changing retained status/attempt/receipt fields; actual create dispatch refuses a changed state before its provider callback and releases its workspace lease. No automatic repair, inferred remote success or new operator approval action is introduced. Existing local-registry delivery and replay behavior remain unchanged.
+
+Create success is no longer reported without a durable remote-ID acknowledgement receipt. A successful request with a missing/malformed/nonpositive ID uses the existing uncertain outcome and operator reconciliation guidance, not completion or automatic retry. Receipt storage/readback failures propagate explicitly without advancing to completed or repeating the provider call; the workspace lease is released. Secondary ledger failure does not erase the outbox receipt. This introduces no new operator approval UI, legacy-row certification or full desired-effect correctness claim.
+
+First-create manifest revision evidence matches the provider acknowledgement; an unavailable revision stays null, never displays a guessed `1`. Malformed supplied revisions use the existing uncertain/reconcile guidance, not successful application or automatic retry. Existing recovery-adoption evidence is not certified by this change.
+
+Recovery-adopted manifests now retain the observed batch revision too, or null when unavailable. Malformed IDs/row shapes/revisions report the existing safe reconciliation refusal before adoption or dispatch, without exposing raw provider evidence. This supersedes the prior inferred-adoption-revision limitation, not full recovery/effect certification or outbox closeout.
+
+Ambiguous create HTTP responses (408/5xx/redirect/nonfinal or malformed success JSON) report existing uncertain/reconcile guidance, not definite no-effect failure. Mutations never follow redirects or transparently retry. The new unknown-outcome message omits raw provider bodies; other writer operations retain failure presentation with reconciliation guidance rather than acquiring a new outbox lifecycle. Definite 4xx/credential/throttle behavior remains unchanged; no new approval action or recovery certification.
+
+Successful first-create audit prose and entity references now identify the actual created work item, not `WI:0`. Distinct created targets retain distinct signal/review records; applied-manifest replay and unsuccessful creates do not generate new success audits. Existing historical records remain unchanged; this is attribution correction, not an audit-recovery or full-effect certification.
+
+Verified create recovery adds an audit saying `Adopted existing WI:<id> from proposal <id>.`, not that a new create was performed. New adoption records carry `adopted_existing: true`; existing target audits remain unchanged, refused recovery adds none and replay adds no duplicate. The uncertain outbox state remains unresolved; adoption is a verified marker/target observation, not full effect or atomic recovery certification.
+
+Recovery also refuses a marker/title match when other requested create fields are missing, malformed or different. It reports existing reconciliation-required guidance without exposing provider field values, success audit or another create. Explicit assignee identities allow case/whitespace normalization; description/path/date normalization is not guessed. A refusal may therefore need manual comparison even when the provider transformed an otherwise valid value; no automatic retry or reconciliation closeout is implied.
+
+New create attempts retain their original outbox reference in the manifest. Changed intent, destination, proposal/payload or missing retained rows report reconciliation-required failure before provider lookup, adoption audit or a new create. An attempted/referenced entry with missing intent cannot regenerate one; invalid supplied references fail explicitly. Legacy reference-free manifests remain supported without claiming retained binding. The new reference is local evidence, not authenticated approval or automatic recovery authority.
+
+Verified create recovery restores a missing audit review after a partial signal/review write without duplicating or rewriting the visible signal. Existing operator review decisions remain unchanged, including dismissed/deferred decisions. Repair failure remains an explicit error and the manifest remains attempted; changed remote evidence refuses before repair. The recovered review uses recovery time, not an invented original review time; no historical sweep or atomic recovery certification.
+
 Repository backup output explicitly identifies its bounded subset and recovery as not assessed. Version 1.1 verification distinguishes listed-file integrity and declared canonical database capture obligations; absent stores and legacy scope remain unassessed. Restore with skipped preflight reports unchecked scope, not verification success. Existing JSON keys and CSV columns retain their order, with scope/qualification fields appended; unsupported mappings and malformed manifests fail explicitly (RELO-W0.13d).
 
 Default restore reports success only after copied destination bytes match its single verified manifest. Copy/hash I/O failures produce the existing human/JSON/CSV exit-2 error rather than a success payload. Earlier copied files may remain after a later failure; no automatic cleanup, rollback or safe-resume guarantee is implied. Explicit skip-preflight remains unchecked (RELO-W0.13e).
@@ -1063,6 +1145,8 @@ Human CLI surfaces that consume confidence-bearing Zone A records must preserve 
 
 `milestones assess` labels retained accepted target-date revisions **Commitment revisions**, displaying each date with recorded/superseded time, actor and revision identity. JSON `commitment_date_history` and final CSV JSON column carry the same attribution; missing persisted history stays empty, not synthesized from current YAML. Existing publication Target history, health/slip scores and dependency margins keep their meaning (RELO-W4.10a).
 
+Future/target-day milestones without observed linked evidence display **Unknown**, not an optimistic On Track or unverified Completed. Report health includes their Unknown count; doctor warns from the same assessment, and CLI JSON preserves confidence `none` and absent completion. Coverage-gap messages describe the actual evidence limitation, not an invented past-due state; an incomplete required linked set cannot display a computed completion date. Explicit Deferred and existing past-due rules remain, without new publication gates or forceability policy.
+
 Nudge Bcc mode cannot reintroduce an opted-out primary recipient in To. Rejected primary admission produces the existing visible configuration error/exit2 before draft artifacts, without selecting a fallback recipient or changing valid audience/cooldown behavior (RELO-W4.7a).
 
 ### 12.6.2 Signal-Fidelity Diagnostics
@@ -1167,6 +1251,8 @@ Exit code follows standard doctor semantics. REV diagnostic failures do not chan
 **`vertex rev export-corpus --program <id> --output <path> [--include-vault]`** — produces a portable backup bundle: `candidates.jsonl`, `triage_decisions.jsonl`, labeled corpus copy, and optional `evidence_vault.jsonl`. Direct identifiers (sender SMTP, message IDs, principal mailbox, tenant ID, triage actor) are hash-redacted; display names preserved. The manifest warns that content fields (subject, payload text, excerpts) may contain incidental PII and are operator-controlled.
 
 ### 12.6.6 NCFL Context Apply
+
+`vertex context verify-reply-origin --edition <id> --issue <n> --proposal-id <id> --reason <text>` explicitly records an independent origin check by an authorized local OS principal. Show the reply as still pending and say **not change approval**; dry-run writes nothing. Missing authorization, legacy missing source hashes, source/payload drift and wrong scope stop with corrective guidance, never success. Shared context-review evidence and manual diffs preserve the historical unverified sender/reference observation and separately show current verified origin or why verification is absent/stale/revoked. This grants no apply/send authority, review renewal or gap closure; registry changes remain manual-only.
 
 `vertex context apply` and `vertex context apply-batch` are operator mutation surfaces, not automated background jobs. Output is compact and state-oriented:
 
@@ -1626,6 +1712,10 @@ Pass condition: the brief stays within section budgets, reads cleanly as wrapped
 - Per-program health color comes from the canonical shared status palette only; no program-specific branding colors are allowed in the fleet rollup.
 - Nested tables are not allowed inside a fleet program row; secondary details must stack vertically within the same tile or row container.
 - Cross-program comparison must remain scannable in one viewport pass, so summary density takes precedence over deep per-program prose.
+- Confirmed-issue rollups retain missing assessment rather than showing a green Low/Done subset. Keep known Blocked/High/Medium visible, but show `unknown` trend and an explicit coverage detail when either selected issue has an Unknown dimension. Blank/missing risk is Unknown. No current dimensions, absent prior assessment or onboarding cannot imply stability. Human/JSON/CSV/Markdown/HTML share this meaning without changing layout; publication age and context diagnostics are independent.
+- The initial program-verdict observer is local manifest metadata only, not a new tile, status badge or leadership clearance. Existing rendered report health and publication gates remain authoritative until explicitly migrated; an observe-mode result with unqualified inputs must not be presented as certified program health.
+- Risk-aware observer asks remain local metadata, not rendered leadership requests or journal decisions. They name the actual missing owner/mitigation ETA for the linked high-scored active strategic risk; no invented owner, date, approval or completed mitigation. Missing/ambiguous assessments, stale/disputed/provisional context and load/coverage gaps prevent trust or clearance claims even when a known adverse floor remains visible.
+- Milestone-aware observations remain metadata only. Retained computed Missed/At Risk findings can raise observed schedule severity, never certify global completion. Unknown's heuristic 0.5 is missing evidence, not a measured forecast; coverage/assessment/binding gaps stay explicit. No new rendered status, duration-criticality label or completion clearance.
 - **Context health columns** (added 2026-05-27): each program row includes a context health summary line: `Context L{level} / {errors} errors / {stale} stale`. `level` maps to a semantic label: L4 = ✅ healthy, L3 = ⚠ warnings, L2 = ⚠ gaps, L1 = ❌ errors, L0 = ❌ critical. The context health line stacks below the lifecycle/phase info within the same program row — no additional column or nested table.
 
 **Current diagnostic compatibility (RELO-W0.30c):** Until the current staged compiler ladder is reconciled with canonical health meanings, doctor/fleet show the computed numeric level with that limitation rather than claim canonical health. All doctor human/JSON/CSV and fleet human/JSON/CSV/Markdown/HTML formats retain the actual context evaluation timestamp and material limitations, separate from business health/trend and source confidence. Unavailable evaluation is explicitly labeled with null/blank numeric/time fields and a safe reason, not L0/zero errors; evaluated L0 and zero counts remain measured values. Fleet HTML stacks escaped context text in the existing State cell. Missing review age is unknown; no evaluation renews review or certifies a context trend.

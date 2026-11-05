@@ -68,6 +68,32 @@ PROPOSAL_STATUSES: frozenset[str] = frozenset(
 
 
 @dataclass(frozen=True, slots=True)
+class ReplyOriginVerification:
+    principal: str
+    machine: str
+    session: str
+    source_sha256: str
+    proposal_digest: str
+    reason: str
+
+    def to_json(self) -> dict[str, str]:
+        return {
+            "principal": self.principal, "machine": self.machine, "session": self.session,
+            "source_sha256": self.source_sha256, "proposal_digest": self.proposal_digest,
+            "reason": self.reason,
+        }
+
+    @staticmethod
+    def from_json(d: dict[str, Any]) -> ReplyOriginVerification:
+        values = {key: d[key] for key in (
+            "principal", "machine", "session", "source_sha256", "proposal_digest", "reason",
+        )}
+        if any(not isinstance(value, str) or not value.strip() for value in values.values()):
+            raise ValueError("Invalid reply origin verification.")
+        return ReplyOriginVerification(**values)
+
+
+@dataclass(frozen=True, slots=True)
 class DecisionRecord:
     """One append-only entry per lifecycle transition on a proposal.
 
@@ -81,6 +107,7 @@ class DecisionRecord:
     to_status: str
     note: str | None     # e.g. dismiss reason, supersession link, reconciliation marker
     payload_digest: str | None = None  # acceptance binding: proposal.approval_payload_digest()
+    origin_verification: ReplyOriginVerification | None = None
 
     def to_json(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -92,6 +119,8 @@ class DecisionRecord:
         }
         if self.payload_digest is not None:
             payload["payload_digest"] = self.payload_digest
+        if self.origin_verification is not None:
+            payload["origin_verification"] = self.origin_verification.to_json()
         return payload
 
     @staticmethod
@@ -103,6 +132,10 @@ class DecisionRecord:
             to_status=str(d.get("to_status", "pending")),
             note=d.get("note") or None,
             payload_digest=d.get("payload_digest"),
+            origin_verification=(
+                ReplyOriginVerification.from_json(d["origin_verification"])
+                if d.get("origin_verification") is not None else None
+            ),
         )
 
 
@@ -198,6 +231,7 @@ class ContextUpdateProposal:
     applied_by: str | None = None
     dismissed_at: datetime | None = None
     dismissed_by: str | None = None
+    source_sha256: str | None = None
 
     # ------------------------------------------------------------------
     # Serialization
@@ -210,6 +244,21 @@ class ContextUpdateProposal:
         """
         payload = {key: value for key, value in self.to_json().items() if key not in _DECISION_STATE_KEYS}
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+    @property
+    def verified_reply_origin(self) -> ReplyOriginVerification | None:
+        if self.source_type != "context_gap_reply" or self.source_sha256 is None:
+            return None
+        for record in reversed(self.decision_history):
+            verification = record.origin_verification
+            if (
+                verification is not None and record.from_status == record.to_status == "pending"
+                and record.actor == verification.principal
+                and verification.source_sha256 == self.source_sha256
+                and verification.proposal_digest == self.approval_payload_digest()
+            ):
+                return verification
+        return None
 
     def acceptance_binding_error(self) -> str | None:
         """Return why the current payload lacks a valid acceptance, or None."""
@@ -229,7 +278,7 @@ class ContextUpdateProposal:
         return None
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        payload = {
             "proposal_id": self.proposal_id,
             "program_id": self.program_id,
             "issue_number": self.issue_number,
@@ -267,6 +316,9 @@ class ContextUpdateProposal:
             ),
             "dismissed_by": self.dismissed_by,
         }
+        if self.source_sha256 is not None:
+            payload["source_sha256"] = self.source_sha256
+        return payload
 
     @staticmethod
     def from_json(d: dict[str, Any]) -> ContextUpdateProposal:
@@ -283,6 +335,7 @@ class ContextUpdateProposal:
             extracted_at=_parse_datetime(str(d["extracted_at"])),
             extractor_version=str(d.get("extractor_version", "1.0.0")),
             source_artifact=str(d.get("source_artifact", "")),
+            source_sha256=d.get("source_sha256"),
             source_field=str(d.get("source_field", "")),
             extraction_method=str(d.get("extraction_method", "")),
             target_store=str(d["target_store"]),

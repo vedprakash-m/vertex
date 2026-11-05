@@ -38,6 +38,50 @@ NOW = datetime(2026, 10, 25, tzinfo=timezone.utc)
 PREVIOUS = {"last_succeeded_at": "2026-10-24T00:00:00+00:00", "value_last_4": [7.0, 8.0]}
 
 
+@pytest.mark.parametrize("failure", ["rows", "bytes", "schema"])
+def test_actual_authored_kpi_limits_withhold_observations_and_preserve_success(
+    failure: str, tmp_path: Path,
+) -> None:
+    from src.commands.gather_pipeline.kpi_projection_stage import project_kpi_signals_to_observations
+
+    program_dir = tmp_path / "demo"
+    program_dir.mkdir()
+    query = {
+        "id": "limited", "cluster": "synthetic", "database": "synthetic", "kql": "synthetic",
+        "section": "Synthetic", "render_as": "table", "confidence": "high", "result_column": "Value",
+        "validated": True, "refresh_on_gather": True,
+        "result_limits": {"projected_columns": ["Value"], "max_rows": 1, "max_bytes": 100},
+    }
+    if failure == "bytes":
+        query["result_limits"]["max_bytes"] = 2
+    (program_dir / "kpis.yaml").write_text(json.dumps({"kpis": [query, {
+        **query, "id": "independent", "result_limits": None,
+    }]}), encoding="utf-8")
+    states: dict[str, dict[str, Any]] = {}
+    rows = [{"Other" if failure == "schema" else "Value": value} for value in ([1, 2] if failure == "rows" else [1])]
+    signals = gather._build_kusto_kpi_signals(
+        program=Program(schema_version="2.0", id="demo", name="Synthetic Demo"),
+        program_id="demo", programs_root=tmp_path, as_of=NOW, workstreams=(),
+        executor=lambda current: rows if current.id == "limited" else [{"Value": 5}],
+        query_state_sink=states, previous_query_states={"limited": PREVIOUS},
+    )
+    assert [signal.metadata["query_id"] for signal in signals] == ["independent"]
+    assert states["limited"]["last_cycle_succeeded"] is False
+    assert states["limited"]["last_error"]
+    assert states["limited"]["value_last_4"] == [7.0, 8.0]
+    assert states["limited"]["last_succeeded_at"] == datetime(2026, 10, 24, tzinfo=timezone.utc)
+    queries = load_kpi_queries("demo", programs_root=tmp_path)
+    store = RealityStore("demo", db_root=tmp_path / "db")
+    store.initialize()
+    assert project_kpi_signals_to_observations(
+        "demo", queries=queries, as_of=NOW, kpi_signals=signals, query_states=states, store=store,
+    ) == ()
+    with sqlite3.connect(store.db_path) as connection:
+        assert connection.execute(
+            "SELECT status, metrics_observed FROM reality_ingestion_runs WHERE source_ref = 'limited'",
+        ).fetchall() == [("failed", 0)]
+
+
 @pytest.mark.parametrize("field,value", [
     ("unit", "s"), ("engine", "kusto-revised"), ("cluster", "other"),
     ("database", "other"), ("kql", "print Value=2"),

@@ -631,11 +631,13 @@ def _decision_strip_ack_required(
 
 
 def _derive_vector_label(risk: RiskLevel, prior_risk: RiskLevel | None, packet: ScorecardEvidencePacket) -> str:
-    if risk == RiskLevel.HIGH and prior_risk != RiskLevel.HIGH:
+    if risk == RiskLevel.UNKNOWN:
+        return risk_label(risk)
+    if risk == RiskLevel.HIGH and prior_risk not in {None, RiskLevel.UNKNOWN, RiskLevel.HIGH}:
         return "New High"
     if risk == RiskLevel.HIGH and packet.streak_count >= 3:
-        return f"High {packet.streak_count}w"
-    if prior_risk is not None:
+        return f"High {packet.streak_count} issues"
+    if prior_risk is not None and prior_risk != RiskLevel.UNKNOWN:
         if _risk_rank(risk) > _risk_rank(prior_risk):
             return f"{risk_label(risk)} (up)"
         if _risk_rank(risk) < _risk_rank(prior_risk):

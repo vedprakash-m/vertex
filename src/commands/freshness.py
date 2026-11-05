@@ -1267,15 +1267,7 @@ def _parse_datetime(value: Any) -> datetime | None:
 
 
 def _infer_risk_level(state: str, tags: list[str]) -> RiskLevel:
-    normalized_state = state.lower()
-    normalized_tags = {tag.lower() for tag in tags}
-    if normalized_state in {"closed", "done", "resolved", "completed"}:
-        return RiskLevel.DONE
-    if "blocked" in normalized_state or "blocked" in normalized_tags:
-        return RiskLevel.HIGH
-    if normalized_state in {"off track", "at risk"}:
-        return RiskLevel.HIGH if normalized_state == "off track" else RiskLevel.MEDIUM
-    return RiskLevel.LOW
+    return infer_ado_risk_level(state, tags)
 
 
 def _optional_string(value: Any) -> str | None:

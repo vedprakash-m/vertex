@@ -150,6 +150,8 @@ AI drafting contract note: approved `WorkstreamEvidenceBundle` inputs now includ
 3. **Multi-output from single snapshot:** One confirmed snapshot → HTML email, Teams Markdown, reviewer HTML, deck Markdown, EML, freshness report.
 4. **Journal immutability:** Signal journal files are append-only. Review decisions live in a separate `reviews.jsonl` sidecar.
 
+**Bounded actuation admission (RELO-W5.2 partial):** `actuation_engine.actuation_execution_block_reason()` is the shared deterministic gate for actual execute CLI admission and its direct dispatcher. It checks the loaded policy enabled flag, one enabled rule by ID, exact adapter/operation, approval and gap, timezone-aware nonfuture proposal time and current policy TTL. Strictly greater age expires; exact equality preserves existing behavior. The dispatcher repeats this before resolving a client but does not reload/fence policy or approval writers. Global/program/rule YAML enablement must be boolean; omitted flags retain false. `ProgramReality.pending_actuations()` requires boolean approval (omitted remains false), an original parseable timestamp and positive integer/nonboolean TTL (omitted retains 24 hours); legacy naive timestamps retain UTC interpretation. It excludes expired/executed/terminally failed proposals without modifying retained facts, and rejects malformed pending inputs with `ConfigError` instead of synthesizing current time. Review/execute safely report policy/retained-record validation failures as blocked, exit 2. No authenticated approval timestamp, approval-content hash, rate reservation, atomic admission or generalized outbox guarantee is added; the direct-live-write opt-in remains off by default.
+
 **Retained fact capture integrity (RELO-W2.8v):** Run-evidence assembly requires the supplied pin's v2 membership contract, revision count and content digest to match the supplied retained fact snapshot. Pin creation, reconstruction, drift detection and capture assembly reuse the same order-independent revision-content hash; its serialization and stored digest bytes are unchanged. Same-count payload/member substitutions and in-place payload mutation cannot be attributed to an unchanged pin. This is content consistency at assembly, not authentication of the caller or pin origin, temporal identity proof, nonfact-input sealing or a cross-store concurrency fence; the capture remains explicitly unqualified.
 
 **Cooperative assessment fence (RELO-W2.8w):** `ProgramReality.load()` holds exclusive process-lifetime file locks for the resolved fact database and program ledger during local assembly. The fact-store connection path, event single/batch writers and repair-capable reader, event-index connections and canonical candidate SQLite connections participate in the same fence. `workspace_lease.cooperative_capture_fence()` resolves, deduplicates and orders resource paths; nested calls may use held subsets but cannot expand the lock set. Acquisition waits at most five seconds per resource, then refuses with a bounded `ConfigError`; exception or process exit releases locks without deleting sidecars. Assessment loads may retain empty sidecars and their parent directories even when assembly fails; standalone non-repairing event reads do not enter a new fence or create paths. The original single-I/O entrypoint remains `load()`. Independent resources remain concurrent, and existing TTL lease behavior is unchanged. This fences only cooperating accesses to the covered stores: legacy authored stores, configuration/policy/environment, overrides, shared knowledge/vault, archives and multi-step event-to-fact publication remain unsealed. It does not protect against nonparticipating editors or qualify whole-input capture; existing unqualified-capture limitations remain.
@@ -483,6 +485,8 @@ Altitude values are open-vocabulary strings used by templates to choose section 
 
 **Milestone commitment revision history (RELO-W4.10a):** Assessment adds command-local `commitment_date_history` with retained accepted target_date/recorded_at/superseded_at/created_by/revision_id, preserving repeated dates and reversions. Read-only selected-program fact storage uses exact selected milestone natural keys and recorded_at<=the already-loaded fact snapshot's as_of, retaining superseded revisions and stored future supersession metadata. Missing DB/table yields no fabricated revisions without initialization; invalid existing storage fails. Human labels Commitment revisions, JSON adds an array and CSV appends its JSON encoding as the final column (blank for dependency records). Existing publication target/completion history, slip/health/confidence/reasoning and downstream shared consumers are unchanged. This is a separate recorded-time membership read, not atomic pinning or historical reconstruction of mutable metadata; concurrent backdated inserts may be visible. Scoring `--as-of` remains distinct.
 
+**Shared milestone evidence qualification:** `assess_milestone_health()` returns UNKNOWN with confidence NONE, absent completion date and the existing unmeasured slip placeholder `0.5` for future/target-day milestones with no observed linked items. Explicit DEFERRED and existing past-due rules take precedence. `coverage_gap` also marks missing required links, and completion resolution refuses an incomplete linked set. Report summaries include UNKNOWN and the existing report gap emitter records actual assessment reasoning rather than a hardcoded past-due claim. Doctor and milestone CLI reuse this assessment; no new model, calibration or ProgramVerdict migration is implied.
+
 Additional workstream-memory types live outside `models_v2.py` because they are persistence and reporting-adjacent rather than shared core program identity models:
 
 - `src/core/workstream_registry.py` — `WorkstreamRegistryEntry`, `WorkstreamIssueSnapshotEntry`, `WorkstreamIssueSnapshot`
@@ -494,6 +498,8 @@ These types carry durable lifecycle metadata plus draft-time and confirm-time wo
 `src/core/models_v2.py` also carries `KustoQuery`, whose Phase-1 loader-facing metadata now includes `catalog_source`, `validated_at`, `owner_alias`, `expected_cardinality`, and `kusto_no_safety`. Runtime-derived query telemetry such as `last_cycle_succeeded`, `last_error`, row-count history, and freshness/variance fields is populated from `gather_state.json` rather than authored config.
 
 **Explicit scalar cardinality (RELO-W3.5a):** Existing `expected_cardinality: scalar_required` requires exactly one returned row before numeric history, hydration/SLO evaluation or KPI interpretation. A violation withholds authoritative output and reports query identity plus expected/actual cardinality through existing error/degradation state without appending an invalid value or erasing prior valid success/history. Valid zero and current numeric parsing remain compatible. Other cardinality modes and diagnostic table previews retain their behavior; this is not full definition/binding, aggregation, schema, cancellation or result-limit qualification.
+
+**Declared result admission:** `KustoQuery` and report `KustoQuerySettings` carry optional frozen/slotted `KustoResultLimits`. KPI, golden-query, inline-program, report-config and gather-state reconstruction preserve the declaration; golden/inline/report bridges also preserve existing `expected_cardinality`. History identity includes declared limits and nondefault cardinality, invalidating prior validation lineage when either changes; undeclared `zero_ok` queries retain their existing identity. Actual client/executor enforcement is defined in §3.6, not inferred from loader validation or injected custom executors.
 
 **Bound Kusto signal prose (RELO-W3.6b):** Direct gather and UIL reuse the same result formatter and SLO comparator for an admitted single-row bound metric. Prose uses the declared metric identity, normalized numeric value, optional unit and optional SLO verdict; unrelated row fields cannot become bound-metric prose. Missing target or comparison yields a measurement without an invented verdict. Existing invalid-result/cardinality admission remains ahead of signal generation. Direct signal identity, source time, confidence, scope and metadata are unchanged; raw rows remain available to existing extraction/diagnostic consumers. Unbound diagnostic-table previews and full typed table/time-series interpretation remain outside this bounded convergence.
 
@@ -801,12 +807,46 @@ REST enrichment batches revisions by chunks of 50 items.
 ```python
 class KustoClient:
     def __init__(self, credential=None, sleep_func=time.sleep) -> None
-    def execute(self, cluster, database, kql, timeout=120, max_retries=3) -> list[dict]
+    def execute(self, cluster, database, kql, timeout=120, max_retries=3, no_safety=False, result_limits=None) -> list[dict]
 ```
 
 Auth via `DefaultAzureCredential`. Caches client instances per cluster URI. Timeout as `timedelta`. Dependencies: `pyproject.toml`'s `kusto` extra (`azure-kusto-data`).
 
 Safety defaults: `kusto_client.py` injects `max_memory_consumption_per_query_per_node` (8 GB) and `request_timeout` (5 min) by default. Per-query opt-out is allowed via `kusto_no_safety: true` on `KustoQuery`.
+
+Optional query `result_limits` requires exactly `projected_columns` (nonempty, distinct nonblank names in exact order), `max_rows` (positive integer, not boolean), and `max_bytes` (integer at least 2, not boolean). Invalid declarations raise `ConfigError`; absent/null preserves legacy undeclared budgets. The common client sets service `truncationmaxrecords`/`truncationmaxsize` even with `no_safety`, then independently refuses mismatched primary-table schemas, combined row overflow or decoded-byte overflow with `QueryError`, never a successful truncated subset. Every primary table, including an empty one, must match; no table cannot establish a declared projection.
+
+Decoded bytes mean the compact UTF-8 JSON array of decoded rows, including brackets/commas, with unescaped Unicode and no nonfinite numbers. Date/datetime use ISO text; timedelta, UUID and finite Decimal use their explicit text encodings solely for accounting, without changing returned values. Unsupported/nonfinite/unencodable values refuse admission. This is not a wire-byte or SDK-materialization memory guarantee.
+
+Before returning any rows, the common client refuses positive or malformed SDK `errors_count` completion metadata, including plausible partial results; contract refusals are not retried. Legacy wrappers without that attribute retain compatibility, not completion certification. Existing authentication/throttle handling remains. The common query executor also applies existing scalar-required cardinality. Hydration records failure without a result set; report rendering uses existing degradation/warning surfaces. No new ordering, aggregation proof, freshness/watermark, provider cancellation or operating-budget qualification is implied.
+
+**Consumer admission:** The client and injected-executor consumers reuse `admit_kusto_rows` from `kusto_result_limits.py`. It checks declared projected key order, count and decoded bytes incrementally, returning original row objects only after complete admission; overflow stops at the first violating row, never a successful subset. Hydration and the existing shared metric guard forward limits before normalization, signals, numeric history and observation projection. Direct/KPI/history entry points also forward limits; prior scalar/numeric/SLO error priority remains. Refused rows cannot advance successful history/time or supply a new data-freshness timestamp, while independent valid queries continue.
+
+Report primary and fallback executors both admit rows before rendering. Fallback query/auth refusals now use existing explicit degradation/warnings rather than becoming empty data; unrelated legacy fallback exceptions retain their existing handling. The separate chart-gather live path admits limits and scalar cardinality before historical truncation, sanitization or cache write. Existing cached artifacts are not certified for original-response completeness or changed-contract lineage by these checks. Consumer-only empty lists retain zero-ok no-data behavior but cannot prove an absent SDK table schema or completion status. No custom executor's hidden transport/completeness metadata is inferred.
+
+**Chart-gather cache admission:** Load only from the selected `programs_root`.
+An undeclared zero-ok query may reuse an exact program/query cache entry only
+when its age is nonnegative and strictly below `chart_cache_ttl_hours`.
+The eviction grace is retention, not freshness. Queries with `result_limits`
+or scalar-required cardinality execute live because existing cache metadata
+cannot prove original-response admission. This adds no contract-lineage
+backfill or cache schema. Cache-loader failures are logged and fall through
+to live execution. A size-refused cache write returns an explicit gather
+error, no written-row count and the existing integration error, while retaining
+previous cache bytes and allowing independent queries to progress.
+
+**Chart-cache definition binding:** Schema-1 entries have an optional
+`query_contract_hash`; absent/null legacy values remain readable but cannot
+qualify a gather cache hit. Present hashes must be lowercase SHA-256 hex.
+Malformed hashes follow existing logged cache-refusal behavior; invalid write
+hashes fail before replacing bytes. `chart_cache_contract_identity` binds
+cluster, database, actual KQL, render mode, renderer, safe chart configuration,
+declared limits and cardinality with sorted compact JSON. Nested key order
+does not invalidate the hash; only the hash is persisted, not extra KQL.
+Both gather and report chart writeback use this helper; gather requires an
+exact definition match in addition to scope/TTL. Old or changed definitions
+refresh live. Hash equality is not original-response or authenticated lineage
+proof; declared limits/scalar-required still require live admission.
 
 ---
 
@@ -862,7 +902,7 @@ def build_evidence(
 ### 4.3 Scorecard Engine (`src/core/scorecard_engine.py`)
 
 ```python
-_RISK_PRIORITY = {HIGH: 4, MEDIUM: 3, LOW: 2, DONE: 1, UNKNOWN: 0}
+_RISK_PRIORITY = {HIGH: 5, MEDIUM: 4, UNKNOWN: 3, LOW: 2, DONE: 1}
 
 def build_scorecard(
     items: tuple[WorkItem, ...] | list[WorkItem],
@@ -876,6 +916,19 @@ def build_scorecard(
 
 **Dimension assignment:** Filter items by `ado_filter` DSL, then compute aggregates.
 
+Report scorecard assembly keeps `prior_confirmed_risk` as historical context,
+not a fallback for current Unknown. A retained dimension with no current
+evidence, no effective override and current Unknown keeps that risk and labels
+its prior confirmed value as historical in the summary. Existing known
+derived/dependency risks and effective overrides keep precedence; no baseline
+mutation or snapshot schema change. Unknown still reaches health and QG-8.
+
+After effective composition, presentation and explicit hide gates, report
+assembly appends every selected dimension. No evidence-dependent skip removes
+dimensions with `Confidence.NONE`, absent overrides or no prior risk.
+Empty selected coverage stays Unknown through health and QG-8; known risks,
+counts, overrides and linked-dimension presentation retain existing logic.
+
 **ado_filter DSL grammar:**
 ```
 filter     := predicate ( ("AND" | "OR") predicate )*
@@ -885,7 +938,14 @@ operator   := "contains" | "eq" | "ne"
 value      := "'" [^']* "'"
 ```
 
-**Derived risk:** `max(item.risk_level for matched_items)` using `_RISK_PRIORITY` ordering (HIGH wins). Override application happens in `commands/report.py`, not in the engine.
+**Derived risk:** `max(item.risk_level for matched_items)` using `_RISK_PRIORITY`
+ordering (High > Medium > Unknown > Low > Done); no matched items yields Unknown.
+An unassessed matched peer prevents an assessed Low/Done subset from becoming
+the dimension verdict. Known High/Medium findings remain visible; counts and
+item identities retain the full matched set. Override application remains in
+the report command layer, not the engine, with its existing precedence.
+This is the existing scorecard aggregation boundary, not the full
+snapshot-bound ProgramVerdict engine or a new source/forecast/trust policy.
 
 **Item classifications:**
 - Stale: latest revision/comment older than `stale_warn_days` from `fetched_at`
@@ -1269,6 +1329,24 @@ The master render payload (frozen dataclass, ~35 fields):
 | `workspace_root` | `str \| None` |
 | `mobile_safe_scorecards` | `str \| None` |
 | `show_footer` | `bool` |
+
+**Shared report health presentation:** `report_health._build_health_summary()`
+retains all dimensions in `total_count`, including unclassified/Unknown
+assessments. `HealthSummary.needs_input_count` derives the difference from
+High/Medium/Low/Done counts; `health_state` resolves Critical (three High),
+At Risk (High), On Track (Medium), Healthy (nonempty, entirely Low/Done),
+otherwise Needs Input. Overall risk preserves High/Medium before Unknown;
+unassessed input precludes overall Low/Done. HTML and Teams consume the shared
+state, and the email subject uses Healthy only for that state.
+
+Prior counts retain an additive `needs_input` count. Incomplete current/prior
+coverage suppresses count-delta display, summary improvement/degradation and
+prior risk-load comparison; `risk_load_incomplete` qualifies the retained
+numeric diagnostic. New-High trajectory and existing Critical reason remain.
+Missing assessment suppresses healthy streak and default all-clear asks,
+without overriding explicit author asks/BLUF or Top3 items. Empty reports
+request assessment. No new persisted snapshot schema, full verdict engine,
+forecast/trust policy or authority is introduced.
 
 ### 8.3a DraftState (`src/commands/report.py`)
 
@@ -1978,6 +2056,7 @@ All 13 data-model quality gates are registered and enforced. Hard-block gates en
 
 **Operational contract:**
 - JSONL is authoritative; SQLite artifacts (`<id>-index.sqlite3`, `current.sqlite3`) are rebuildable caches/projections.
+- **Projection input binding (RELO-W2.10c):** Schema version 2 / projector version 5 bind cache reuse to deterministic visible-event representations and program identity, both bitemporal filters, and the acknowledged-gap ID set. Capture triage decisions once and use that same tuple for admission and projection. Changed/contracted history, missing watermark/stamps, old schema (including absent columns), changed filters/acknowledgements or unroutable deltas rebuild before reuse. Supported bounded append-only deltas remain incremental; affected event-owned links/shadows are replaced, orphan links recomputed, and field-lock controls are excluded from domain provenance. Watermark and input stamps commit with derived rows; a failed incremental fold rolls back. Full SQLite and memory projections emit equivalent metadata. Four golden metadata rows change only versions and added digests, preserving all entity/evidence data. This does not seal source writers, qualify full-rebuild concurrency, implement shared verdict invalidation or establish scale/resource budgets.
 - **Dependency replacement parity (RELO-W2.10a):** Incremental projection removes links owned by historical declaration event IDs for affected dependency IDs inside its existing transaction before re-folding. Endpoint-based deletion is not used: unrelated dependencies sharing endpoints retain their links. Projector version 3 forces the existing full-rebuild fallback for older materializations, including replay with no new events. Authoritative events, schema, external checkpoint stores and the separate ProgramReality projection remain unchanged; this is not complete verdict-cache invalidation.
 - `vertex ledger replay` and `vertex ledger verify` operate over the append-only log, not the projection database.
 - `vertex backup` recursively captures the ledger files under its existing `programs/`, `knowledge/` and `editions/` roots, including event logs, candidate audit, projections, snapshots and evidence-vault artifacts. This fixed root subset is not a complete workspace/store inventory.
@@ -2006,9 +2085,29 @@ Foundational persistence primitives closing the architecture-remediation program
 
 **Terminal containment (RELO-W5.1b):** Every automatic transition checks the current row status inside its existing immediate transaction, after owner/token admission. All six true terminals (`uncertain_remote_state`, `failed_terminal`, `compensation_required`, `dead_letter`, `manually_resolved`, `completed`) reject automatic mutation, including a late success from the same owner/token. Explicit manual closeout remains separate. Create-task dispatch rejects a missing or currently non-dispatchable requested row before acquiring a workspace lease or draining unrelated backlog; uncertainty retains its unresolved return and completion retains repeat refusal. Existing direct leased-to-completed registry handling is unchanged. This establishes neither a complete predecessor-state matrix nor remote reconciliation, retry or compensation authority.
 
+**Transition ordering (RELO-W5.1b follow-through):** The same transaction now enforces predecessor states after owner/token and terminal checks: `dispatched` from `leased`; `succeeded` from `dispatched`; `audited` from `succeeded`; `completed` from `audited` (or `leased` outside the `actuation_dispatch` domain for existing local registry delivery). Retryable failure requires `leased`, never a recorded dispatched effect; terminal failure permits `leased`/`dispatched`, uncertainty requires `dispatched`, compensation requires `succeeded`/`audited`, and dead-letter permits `leased`/`failed_retryable`. Unknown/current-repeat/out-of-order states refuse with `OutboxError` and no row mutation. The prior paragraph's predecessor-matrix exclusion is historical and superseded by this bounded guard; remote reconciliation, receipt authentication, lease-expiry guarantees and completed-effect correctness remain unqualified. Actual create dispatch uses the guard before its provider callback, including a state changed after lease selection; local registry delivery/replay remains unchanged.
+
 **Retained create destination (RELO-W5.2a):** The ADO create callback requires an object payload whose retained `org` and `project` exactly match the current client's destination before constructing a patch or sending a request. Missing/mismatched destinations produce the existing definite failure result and terminal outbox outcome; backlog cannot be silently retargeted after configuration changes. Nonobject JSON uses empty dispatcher diagnostic metadata, but the original raw payload still reaches the callback for explicit rejection, never successful empty-task substitution. No other client is constructed, destination inferred or permission expanded.
 
+**Create acknowledgement receipt (RELO-W5.5 partial):** Actual create dispatch supplies a version-1 JSON receipt to `mark_succeeded`; the shared store creates `outbox_success_receipts(outbox_id PRIMARY KEY, receipt_json)` lazily and inserts it in the same `BEGIN IMMEDIATE` transaction as `dispatched→succeeded`, after existing owner/token/state admission. Insert/update/duplicate failure rolls back both writes; no receipt overwrites or legacy backfill. Read-only `load_success_receipt` reports absent database/table/key as unavailable without creating a store. Existing generic callers may omit receipts; local registry leased completion is unchanged. The receipt binds outbox/program/operation, exact retained UTF-8 payload SHA-256, supplied intent/proposal/destination (absent values remain null), remote ID, optional response hash, acknowledgement time, dispatch attempt count and fencing token. Dispatcher rechecks/read-consumes the retained receipt before audited/completed; failed storage leaves dispatched and changed/missing readback leaves succeeded, without retrying the provider. Secondary ledger projection remains best effort. Real ADO success hashes the decoded response's sorted compact JSON and accepts only a positive integer/nonboolean ID; invalid post-request IDs become existing terminal uncertainty with reconciliation guidance. No full desired-effect proof, remote revision, authenticated execution/approval, failure receipt, succeeded/audited restart recovery or generalized terminal receipt is inferred.
+
+**Observed first-create revision (RELO-W5.5 continuation):** `DispatchResult` and `ActuationDispatchOutcome` append optional defaulted `remote_rev` fields, preserving earlier positional construction. The actual ADO callback accepts omitted/null revision as unavailable and a supplied positive integer/nonboolean revision as observed evidence; bool/string/float/nonpositive revisions produce terminal uncertainty after the request. The shared dispatcher repeats supplied revision validation for other callbacks, adds `remote_rev` to the existing version-1 acknowledgement receipt and consumes the persisted revision in its outcome. First-create manifest application uses that outcome rather than hardcoded `1`. No database change/backfill, additional read request or provider retry is introduced. Existing search-before-create adoption still reports an inferred revision and remains outside this bounded qualification; acknowledgement revision is not authenticated approval, current remote-state reconciliation or full terminal receipt certification.
+
 **Create recovery lookup (RELO-W5.4b):** An already-attempted create is adopted only after a complete, single-hit intent-marker WIQL lookup and one matching batch row containing the exact marker tag token and normalized proposed title. Exactly one pagination outcome must report the fetched count, a positive page count and no truncation. Unavailable authentication/query/readback, empty or ambiguous lookup, malformed fields and mismatched marker/title persist a failed proposal requiring explicit reconciliation before enqueue or dispatch; retained outbox rows and successful-adoption events remain untouched. Unmarked title-only recovery is retired. First attempts and verified lost-response adoption remain supported. This does not establish full desired-field equivalence, authenticated principal/approval binding, remote consistency or generalized reconciliation authority.
+
+**Recovery identity/revision follow-through:** `_search_existing_create` now returns the exact readback `(remote_id, remote_rev)`; both selected WIQL ID and object batch row ID must be positive integers/nonboolean and equal. Missing/nonobject batch rows refuse with the existing safe `QueryError` path. The already-required batch read's optional top-level `rev` must be a positive integer/nonboolean when supplied; absent/null remains unavailable, with no coercion or field fallback. Manifest adoption uses this observed revision instead of `1`, without another read, create call, schema/backfill or successful event on refusal. This supersedes the prior inferred-adoption-revision exclusion for new observations only; it does not close uncertain outbox rows, write authoritative reconciliation receipts or prove complete desired fields/current remote-state/authorization.
+
+**Create HTTP uncertainty:** `MutationOutcomeUnknown` subclasses `QueryError` for the existing writer transport. Mutation requests set `allow_redirects=False`; 408, 5xx, nonfinal and redirect statuses raise typed unknown outcome without raw response body. Other 4xx retain definite rejection; 401's credential guidance and 429's single Retry-After courtesy wait/no retry stay unchanged. Successful empty body remains `{}` (create's missing-ID gate yields uncertainty); invalid JSON or a nonobject decoded body raises safe typed uncertainty. Actual create callback handles this type and `QueryTimeoutError` before ordinary definite `QueryError`, emitting an uncertain result that the shared outbox persists with an alert and no automatic re-lease/success receipt. Existing escaped transport failures still use the outbox's uncertainty path. Non-create apply/rollback retain their `QueryError` failure handling and now carry unknown-outcome guidance; they are not thereby migrated to a durable outbox. Read retries remain unchanged. Scripted commit-before-error and exact-marker adoption test one remote effect/no second mutation; this does not certify provider capabilities, full reconciliation or the generalized fault framework.
+
+**Create audit target attribution:** On first-create completion, `ADOWriter` builds one applied entry from the attempted entry and the durable dispatch outcome's remote ID/revision. It passes that value to the existing audit-signal helper and returns it for manifest persistence. Existing signal ID/entity refs/prose/work-item metadata and review ID consequently bind the actual target rather than placeholder `0`; the existing exact fingerprint distinguishes multiple created targets in one proposal without a dedup-policy change. JSONL and SQLite controls preserve legacy signals, retain distinct audits and leave applied-manifest replay unchanged. Failed/uncertain creates do not emit success audits. No historical backfill, new audit for recovery-adopted/backlog creates, action-tracker redesign or audit/manifest atomic transaction is implied; these remain separate convergence/recovery gaps.
+
+**Verified adoption audit follow-through:** The already-attempted create branch builds a resolved adopted entry after verified recovery lookup and passes it to the existing audit helper before returning it for manifest persistence. Optional `adopted_existing=False` preserves ordinary helper callers; adoption sets true, emits explicit adoption prose and adds `adopted_existing: true` metadata. Existing signal fingerprint/review policy and file/SQLite store selection remain unchanged. An existing target audit is retained rather than rewritten; malformed recovery emits no success audit and applied-manifest replay skips adoption. This supersedes the recovery-adoption audit exclusion above, not backlog convergence, atomic signal/review/manifest repair or authoritative reconciliation. No provider request, schema migration or uncertain-row mutation is added.
+
+**Requested-field readback follow-through:** `_search_existing_create` receives the current proposal task data and derives additional desired fields from `_build_create_task_patch`, excluding title/tags already checked by their canonical rules. It requests those fields in the existing single batch call and compares equal type and value without bool/numeric coercion. `System.AssignedTo` alone accepts a string or identity object's `uniqueName` compared with stripped casefolded nonempty requested string; no display-name/alias fallback. Exact description/path/date strings conservatively refuse provider transformations. Omitted/non-sent fields are not constrained. Missing/malformed/different requested fields raise safe `QueryError` before adoption events/audits/manifest success, with no retry or uncertain-outbox mutation. No new schema or extra provider round trip. This retires title/marker-only proof for these supplied fields; current-proposal-to-retained-payload binding, authenticated identity, consistency, terminal reconciliation and audit repair remain unqualified.
+
+**Retained create-reference follow-through:** `ADOUpdateEntry` appends optional defaulted `outbox_id`, serialized as a nullable manifest field and preserved by replay/adoption; missing legacy fields upcast to None, supplied nonstring/blank values raise explicit `ValueError`. The writer constructs its key/payload once for both first-create and recovery, persisting reference/intent/time before enqueue/dispatch. A referenced entry enters recovery even if attempted time is unavailable; missing intent refuses before generating one. Before provider reads, current key must equal the reference and read-only `load_entry` must find an exact actuation-domain/correlation/payload match. Missing row or changed proposal/destination/intent/payload refuses without queue mutation. Legacy reference-free recovery remains supported but outside this binding guarantee; no backfill, new database schema, authenticated reference, downgrade prevention, reconciliation receipt or unknown closeout. A crash before enqueue leaves missing retained evidence requiring explicit reconciliation, never an inferred safe retry.
+
+**Create missing-review repair:** The existing audit helper retains duplicate-fingerprint suppression, but an exact existing create signal ID with no stored review proceeds to the existing `append_review` call without appending/replacing the signal. Any existing review causes return, preserving approved/dismissed/deferred decisions and their actor/time/note. Non-create duplicates and fingerprint duplicates without exact ID remain suppressed. A missing review is recorded at verified recovery time using the existing system audit-review policy; it is not provider execution approval. Store failures propagate before manifest application, permitting another verified rerun without a remote create. Actual JSONL/SQLite first-create signal-write/review-failure tests preserve completed outbox evidence and restore one review after retained-intent/readback gates. No schema, historical sweep, applied-manifest repair, atomic transaction, authenticated review authority or outbox closeout is added.
 
 - `program_checkpoint_manifest.py` — `ProgramCheckpointManifest` composes event-log position + `program_sequence` + `projection_checkpoint_store` + caller-supplied outbox watermarks/tracked-file hashes/schema versions into one content-addressed (self-hashing) checkpoint; `verify_manifest_against_disk()` detects drift between a captured manifest and current on-disk store state (the restore-drill check).
 - `src/core/quality_gates/gate_registry.py` — central `RESERVED_GATE_IDS` map + a code scanner (`scan_defined_gate_ids()`) so a new gate ID can be checked for collision before it's claimed. QG-29 is the fail-closed AI release-audit gate, live and enforced — see §12.1a.
@@ -2041,6 +2140,8 @@ SCHEMAS_ROOT = REPORTS_ROOT / "schemas"
 **External review runtime mapping (RELO-W0.17x):** Full/section review adopts the same resolver at preflight and direct generation/context/export boundaries. External selected history, review status, narratives and artifacts use conventional sibling runtime roots without cwd/installation fallback. Explicit report-root program inference, independent mismatch rejection, installation assets and unset legacy behavior remain. Invalid roots fail before state access; existing scoped set/clear and explicitly requested card-posting semantics are unchanged. This does not qualify remaining command routes or authorize migration or external effects.
 
 **External freshness/prep runtime mapping (RELO-W0.17y):** Freshness and prep reuse that resolver at preflight and direct generation. Omitted installation defaults derive selected conventional runtime siblings; deliberate nondefault roots and explicit report-root program inference remain supported, with independent mismatches rejected before startup/state access. Import-time selection, installation assets and nested unset-legacy calls remain compatible. Selected history/status/output and local notification preview stay in the admitted home without decoy/archive mutation; notification and satellite restrictions are unchanged. No global root-default change, migration or new external-effect authority is introduced.
+
+**Decision-brief workspace mapping (RELO-W0.17 follow-through):** Production generation, pending-brief loading and the blind-comparison pilot reuse the same admitted workspace. An explicit programs root is honored through bundle/proposal/signal reads, AI advice and review HTML; comparison advice, judgment records and summary reads use that same home. Conventional report/archive siblings, reports-only compatibility and captured defaults remain supported. Public callers resolve their original selection independently so nested unset-legacy calls do not become explicitly configured installation roots. CLI preflight rejects invalid roots before shared startup hooks; direct entry points reject them before state/provider/output access. Installation assets, AI-disabled behavior, blind judgment and production/pilot separation remain unchanged. This closes these callers only, not all-command isolation, AI migration, workspace relocation or operating qualification.
 
 **Brief escalation handoff (RELO-W0.17z):** The escalation intervention resolves admitted reports context from its selected programs home and supplies it to both planner and apply, preserving nested unset-legacy behavior and standalone planner defaults. Successful approve dry-run returns the real preview before resolution, brief/EML, ask-touch or audit writes. Existing ordinary local approval remains supported; handoff root admission does not claim startup-wide containment or new send authority.
 
@@ -2122,6 +2223,21 @@ Committed prefetch snapshots preserve these new diagnostics and restore their er
 
 **Hydrated authored ADO risk (RELO-W2.6b):** The hydration converter reuses shared normalization for recognized `On Track`, `At Risk` and `Off Track` labels after its existing terminal/state and tag precedence. Missing, blank or unsupported authored values retain the hydration path's UNKNOWN fallback; shared unsupported-value behavior is not imported. No risk-register probability/impact, write-back field mapping, score or authority rule changes. This closes discarded explicit labels, not complete risk-policy convergence.
 
+**Shared ADO risk policy (RELO-W2.6):** The completed convergence supersedes the
+precedence/unsupported-value compatibility limits of W2.6a/b above.
+`ado_enrichment.infer_ado_risk_level` is the single normalization policy for
+hydration, report/gather/freshness, children and analytics history. Terminal
+Closed/Done/Resolved/Completed/Removed states produce DONE. Recognized authored
+On Track/At Risk/Off Track maps to LOW/MEDIUM/HIGH before active-item heuristics.
+Otherwise blocked state or blocked/blocker/high-risk tags yield HIGH;
+risk/at-risk tags yield MEDIUM; Off Track/At Risk states retain HIGH/MEDIUM.
+Absent/blank/unsupported assessment without such evidence yields UNKNOWN.
+Hydration's competing helper is retired; the legacy freshness helper delegates
+without duplicating policy. Risk-register scoring, strategic proposals, override
+precedence, dimension aggregation and QG-8 are unchanged. Identical item inputs
+produce identical levels; this does not authenticate authored assessment or
+erase independent blocker evidence.
+
 **Editorial workspace propagation (RELO-W0.48):** Narrative placeholder injection loads metric definitions from the knowledge directory adjacent to its selected reports root, not a captured checkout registry. Phase-1b gates accept selected reports context; staged validation, legacy/lookback assembly, confirm and triage forward it into QG-23 executive-summary checks. Omitted phase-1b reports derive from the selected program root; direct QG-23 calls retain their historical default. QG-24 resolves its database with the selected program root through `get_program_reality_db_path()`, preserving configured database overrides. Existing gate outcomes and database initialization behavior are unchanged; these changes do not certify read-only operation.
 
 **Synthetic qualification (RELO-W0.45/W0.46/W0.48):** Report-AI and pipeline-stage fixtures use authored temporary configuration without private copies, default-store bindings or reduced assertions. The guarded runner counts denied reads, mutations, database and network attempts and fails the process even when source catches a denial. A pytest pass count alone therefore does not qualify context isolation. This bounded accidental-access guard is not a physical sandbox or whole-repository qualification.
@@ -2131,6 +2247,16 @@ Committed prefetch snapshots preserve these new diagnostics and restore their er
 **Optional doctor edition (RELO-W0.65):** Banner lookup skips only an absent (`None`) edition. Normal-mode selected-workspace discovery remains; fleet-wide platform readiness without an edition does not select an unrelated single-edition banner. An explicitly blank/invalid selector still reaches strict validation and must not become discovery. This does not certify fleet acquisition or suppress its errors.
 
 **Fleet fact history (RELO-W0.66):** Cross-program dependencies, active issue projections and risk-register summaries pass the selected workspace archive root into existing fact acquisition. Canonical per-program archives remain resolved through the existing edition resolver. This adds no root setting, database policy or store relocation.
+
+**Fleet assessment coverage:** Preserve identified blank/missing risk rows as
+Unknown in current/prior confirmed-issue aggregation. Rank Blocked > High >
+Medium > Unknown > Low > Done. `FleetProgramSummary.trend` includes `unknown`:
+use it for missing comparisons, no current dimensions/onboarding or any
+Unknown in either selected issue, even when the aggregate retains known
+severity. Reuse `trend_detail` to disclose current/prior gap counts or no
+current dimensions through human/JSON/CSV/Markdown/HTML. Complete known
+comparisons remain; no persisted schema, history rewrite, inferred absent
+dimensions, FleetReality/cockpit migration or source-freshness change.
 
 **Metric-binding doctor definitions (RELO-W0.68):** Omitted definitions load through the existing registry from selected workspace `knowledge/metrics`. Supplied mappings, including empty mappings, remain authoritative. Binding validation/revalidation and database authority are unchanged.
 
@@ -2236,6 +2362,16 @@ Missing persisted fact pins raise safe `ConfigError` at the quality-gate boundar
 
 **Dated publication-risk pairs (RELO-W0.15j):** Report sparkline comparison binds current `data_as_of` to the `generated_at` of the exact usable confirmed continuity snapshot that supplied prior risk, independently of an inherited-settings trusted issue number. Escalation pairs the latest confirmed issue's risk with that issue's publication timestamp and its assessment clock, using the selected programs root's existing archive mapping. Missing/unknown risk, absent/naive clocks and duplicate/non-increasing times withhold the descriptive trend. The shared two-observation rule does not infer source-event dates, elapsed weeks, cadence or chronicity; existing separate consecutive-high inputs remain unchanged.
 
+**Missing scorecard comparison:** `ScorecardTrend.direction` includes
+`unknown`; the shared loader uses it for absent prior or Unknown risk on
+either side, retaining original risks/history and consecutive-High counts.
+Improving/worsening hint selection remains explicit, so these gaps produce
+neither hint kind. Report vector comparison likewise excludes Unknown or
+absent prior assessment from up/down/New High labels. Preserve observed
+stale diagnostics and known-to-known precedence; High streak vectors say
+`High N issues`, not weeks. No persisted schema or history rewrite, fleet
+aggregate-verdict migration or new dated-policy requirement is introduced.
+
 **Runner admission (RELO-W1.6b/W1.6c):** `RunnerContext` requires nonblank string program/run/policy/snapshot/principal/classification identities through `StateError`. Single and batch compiled manifests must match the invocation's program, feature and prompt version before released-model cache, call reservation or provider dispatch; mismatch yields explicit `BLOCKED`/no value with safe guidance and skipped telemetry. Compiler policy version and routing policy version are distinct namespaces, not compared as equal. Frontier-ineligible batches preserve deterministic/cache/local hits while unresolved items use the existing single-call blocked/fallback contract, before context compilation. These checks neither authenticate opaque identities nor migrate production AI features.
 
 **Runner program selectors (RELO-W1.6e):** `RunnerContext` and the direct call-ceiling, released-result and deterministic-result cache path helpers require the shared `workspace_paths.is_bare_identifier()` rule before constructing paths. Invalid selectors raise safe `StateError` without exposing their contents or probing/creating storage. Valid identifiers retain explicit-root mapping. This is lexical validation, not physical containment or a new identity policy.
@@ -2256,6 +2392,83 @@ Ordinary resolution populates the existing `StageContext.fact_snapshot`. Fully-p
 
 **Unqualified draft evidence capture (RELO-W2.8o):** Actual resolved ordinary report output retains the selected gather manifest once and constructs a content-addressed `RunEvidenceSnapshot` before output-directory creation. It references the original fact pin/content digest and retained transaction/valid clocks, existing report snapshot/config hashes, query declaration triplets, unevaluated fact-revision/entity-ref declarations and the rendered item-ID population. Query membership remains in the referenced gather manifest; it is not the rendered population or an independent completeness denominator. The manifest contains the capture; draft state contains its checksum. Confirm checks both already-captured payloads with its existing single manifest read, rejecting malformed or mismatched declared captures before artifact construction. Historical reads retain v1/absent-capture compatibility; ordinary program-backed confirmation follows the selector-binding extension below. The fixed, digest-bound `unqualified_capture` limitations explicitly exclude qualified source scope, evaluated binding, gather-to-fetch equivalence, authenticated principal, complete effective policy, authorization and sealed nonfact inputs. No new store, accepted-binding path, release gate, dormant-assembly adoption or qualified whole-run snapshot is established.
 
+**Program verdict observation:** `program_verdict.py` adds frozen
+`ProgramVerdict`, retained inputs and an observe-mode envelope. Actual
+ordinary program-backed output calls the pure full-recompute evaluator
+after capture and before artifact writes, retaining it under
+`program_verdict_observation` in existing manifest metadata. Reuse the
+canonical capture decoder through `validate_run_evidence_snapshot()`;
+require the exact rendered snapshot hash and fetched membership. Bind the
+retained capture, snapshot and canonical ETAForecast tuple by an input hash.
+Sort retained risk- and milestone-diagnostic messages before hashing so
+equivalent source-order permutations produce the same observation identity.
+Reject nonpositive or non-integer forecast work-item IDs before canonical
+ordering, duplicate forecasts, invalid probabilities and naive clocks
+explicitly before output writes. Retain foreign/older-target forecasts as
+explicit gaps and do not infer current probability/p50 floors from them;
+ordinary reports with historical trajectories remain supported.
+
+Evaluate at the report's selected `ado_data_as_of` normalized to UTC, not
+artifact generation time; historical selection is not current clearance.
+Preserve Blocked > High > Medium > Unknown > Low > Done across observed
+items/dimensions and schedule floors. Nonterminal overdue target/past p50
+floors Medium; target day is not overdue; target-bound miss probability
+>=0.50 floors Medium and >=0.80 High. Missing forecasts are explicit gaps,
+not Low. All capture limitations and unevaluated trust/dependency/validation/
+override/contradiction/horizon inputs remain gaps. Confidence NONE,
+unknown completion and no validity clearance are intentional. Existing
+rendered health, QG/confirmation/AI/action authority and legacy absent-capture
+behavior remain unchanged. This is observation-input recomputation, not
+qualified whole-ProgramReality replay, incremental invalidation or promoted
+consumer migration.
+
+`observe.v2` / `observe-conservative.v2` additionally retain RiskStage's exact
+selected risks, assessments, warnings and stale-review IDs in the observation
+input hash. Canonical record/assessment ordering supports pure recomputation;
+this is not authenticated fact-revision binding or deep immutable capture.
+Reuse `risk_register_engine.HIGH_RISK_SCORE_THRESHOLD` (9), also used by
+cockpit, and the existing score function. Only active strategic OPEN/
+ESCALATED assessed records can establish this High floor. A mitigation plan
+is not completed mitigation. Missing nonblank owner or mitigation_due_date
+produces one frozen `LeadershipAsk` with the actual missing fields, risk ref,
+available owner and matched evidence; no invented edition/issue/date or
+persisted `DecisionAsk`. Duplicate/blank IDs and foreign program records
+refuse before output. Only one exactly matching assessment revision can
+supply evidence; duplicate, missing, differing or unbound assessments remain
+explicit gaps. Retain stale/disputed/provisional and load-degradation gaps
+without clearing adverse evidence. Absent register input remains unevaluated;
+explicit empty input is distinguishable and always coverage-unqualified.
+No new reads, rendered asks, publication gates, store writes or authority
+promotion are introduced.
+
+Risk-register fact writes now preserve the existing `kind` alongside the
+authored YAML row, so newly saved candidate/hygiene records do not reload
+through the legacy absent-kind strategic default. Existing stored facts are
+not backfilled; this does not certify historical classification or change
+cockpit's current eligibility policy. A normal resave can create a new
+revision when the prior payload lacked kind; risk identity is unchanged and
+there is no historical sweep.
+
+`observe.v3` / `observe-conservative.v3` additionally retain MilestoneStage's
+selected records, computed assessments and warnings without new reads.
+Canonicalize those tuples in the observation input hash. Match exactly one
+assessment by milestone ID; missing/duplicate status context stays unavailable
+and orphan assessments remain unbound. Record identity must be nonblank,
+unique and in the captured program before output writes. Unlike risk
+FactAssessment, MilestoneAssessment has no exact record-revision/clock stamp;
+`milestone_inputs_unqualified` remains even for loaded empty sets. Keep
+coverage_gap, UNKNOWN and degraded-load diagnostics explicit.
+
+Reuse computed MISSED -> High and AT_RISK -> Medium schedule floors; otherwise
+strictly past-target unresolved status floors Medium. Assessed COMPLETED/
+DEFERRED is exempt; absent/ambiguous assessment exempts only explicit authored
+DEFERRED, not unverified authored completion. Evaluate against selected UTC
+data time. Never interpret the existing heuristic slip_probability (including
+UNKNOWN's 0.5 placeholder) as a calibrated forecast distribution. No new
+trajectory evaluation or duration-criticality inference from critical_path.
+Completion validation, confidence and all other qualification limits remain
+unchanged; no rendered-health, publication-gate or action migration.
+
 **Source-selector-bound draft evidence (RELO-W2.8u):** Version 2 extends the existing capture with canonical sorted authority-family/effective-mode pairs recorded at actual stage selection, not reconstructed from late output-stage policy reads. Preserve exact legacy/shadow/primary modes for `workitem.state` milestone/dependency consumers and `judgment` risk consumers; repeated selection of one family with conflicting modes fails. Ordinary program-backed confirm requires this v2 capture and exact equality with the current effective selectors, checked both early and again under the archive lock immediately before the confirmed write. Selector drift and old/absent captures require regeneration and review; force cannot bypass either refusal. Historical reads and the explicit lookback path retain their separate compatibility scope. This binds only the selected source modes: it does not seal complete policy, authenticate authority, replay historical modes or establish cross-store atomicity.
 
 **Retained fact assessments (RELO-W2.8h):** Selected ordinary report risk/milestone/dependency consumers forward that retained snapshot through the existing ProgramReality loader before projection and assessment. Eligibility requires program-primary mode with no non-primary family overrides; the same conservative rule now governs action capture. Legacy/shadow/mixed programs retain authored merges. Empty captures stay empty, foreign-program captures fail, and eligible resolved report paths cannot silently substitute current facts for a missing capture. The complete captured supporting fact set participates in existing trust/dispute/provisional/evidence assessment; raw record projectors do not replace assessed consumers. Approval-event enrichment is shared consistently between returned family assessments and entity-index views without changing fact IDs/truth rules. Live triage, ledger, knowledge, configuration and other nonfact inputs remain live; whole-ProgramReality or cross-store coherence is not established.
@@ -2273,6 +2486,10 @@ Dismissal checks apply to state observed at read time. The existing temp-file/re
 **Reply manual-diff baseline (RELO-W4.11f):** A `context_gap_reply` must retain a canonical lowercase `intake-v1:<64 hex>` baseline before manual-diff registry reads. Missing/null/empty/malformed baselines are invalid, not permission to skip concurrency checking. Installed CLI fails without patch output or mutation; valid unchanged replies remain pending/manual-only with unverified-origin warnings, and stale replies still fail. Hashless legacy non-reply behavior remains compatible. No review authority, authored write, renewal or closure is granted.
 
 **Pending context reply intake (RELO-W4.11a):** `vertex context import-reply --edition <id> --issue <n> --source <eml> --gap-fingerprint <id> --solicitation-id <id> [--dry-run]` stages only an origin-unverified, non-batch pending NCFL proposal. Hidden `--programs-root` supports explicit scoped callers. Preserve conflicting proposals and duplicate idempotency; legacy records bind the intake-time baseline without claiming packet-time evidence. Manual diffs allow only `deep_context.why/what/how` beyond existing flat fields, distinguish missing/null/empty, preserve multiline values and reject intervening target changes. The installed intake and solicitation routes skip unrelated telemetry/maintenance/catchup even for help/invalid options; other context commands preserve startup behavior. Dry-run stages nothing. Sender/reference strings are observations, not authentication, approval, review renewal or gap closure; the registry remains manual-diff-only.
+
+**Explicit reply-origin verification (RELO-W4.11z):** New reply intake retains optional immutable `source_sha256`; absent legacy fields are omitted on serialization so existing approval digests remain unchanged. `vertex context verify-reply-origin --edition <id> --issue <n> --proposal-id <id> --reason <text> [--dry-run]` records an independent operator origin check, never exact-change approval. Authorize only an explicit exact principal in the selected program's private `review.yaml` `reply_origin_verifier_principals` string list; missing/empty authorization refuses, malformed lists fail, and reviewer display names grant no entitlement. The strict mode of the existing operator identity capture uses Windows domain-qualified native security-context identity or POSIX effective-user identity; differing principal/host environment overrides cannot impersonate a verifier. Legacy identity-capture callers remain compatible. Local OS attestation is not SSO, provider proof or signed-record tamper protection.
+
+Append a structured frozen `ReplyOriginVerification` to existing `DecisionRecord` history, retaining principal, machine, session, exact source hash, immutable proposal digest and mandatory reason. Keep pending status, non-batch eligibility, original baseline/rationale/conflicts and existing decisions. Preflight before locking and revalidate under the existing queue lock; unchanged replay appends nothing. Legacy hashless replies, absent/edited sources, changed retained payloads, foreign/wrong-issue targets and changed registry baselines cannot be verified. Dry-run and preflight refusals write nothing; this is not atomic protection against uncooperative source/config/registry writers. Subsequent reply acceptance independently rechecks current origin binding, exact source and current verifier authorization, including under the queue lock; generic non-reply acceptance is unchanged. Shared review evidence and manual diffs separately label current verified/unverified origin without rewriting intake history. The verification startup route skips unrelated maintenance/telemetry/catchup. No automatic acceptance, canonical registry writer, send, review renewal or gap-resolution authority is introduced.
 
 **Legacy reply application (RELO-W4.11v):** The older exported `apply_context_gap_answer` helper does not grant registry write authority. Otherwise approved legacy proposals refuse with `ContextGapReplyError` and manual-diff guidance before registry reads, backup/temp creation or replacement. Existing staged/rejected/no-target diagnostics remain. Parser/assembly APIs, pending reply intake and manually reviewed diffs are preserved; refusal neither decides the pending proposal nor renews review or resolves a gap.
 
@@ -2901,6 +3118,14 @@ class DeterministicContextCompiler:
 ```
 
 Ordered stages: privacy filter → injection screening → required-evidence reservation (a required span that can't fit raises `ContextCompileRejected` rather than silently dropping it) → entity/authority filtering → dedup → deterministic salience ranking → per-source quotas → token-budget packing → manifest emission. The emitted `ContextManifest` records exactly what evidence was included/excluded and why, giving every compiled prompt an audit trail. `decision_brief_advisor`'s pilot path (§12.1a) is the reference caller: required spans (current text, evidence delta, prior AI proposal, stale claims) plus optional spans (ranked signals with decaying recency salience, KPI/vitality summaries) — the compiler's own quota/token-budget logic replaces what used to be a hardcoded `[:6]` truncation.
+
+Compiler rejection is terminal for that attempted context: callers must not
+rebuild an ad-hoc prompt or reuse a cached release to bypass it. The
+program-synthesis context-gateway path returns an unreleased, discarded outcome
+with required-evidence/budget review guidance before provider/cache access.
+The existing comparison caller skips human judgment when either path is
+unreleased; prior released synthesis history remains unchanged. This does not
+promote the pilot or qualify production runner/snapshot/principal integration.
 
 ### 12.2 AIClient (`src/ai/client.py`)
 

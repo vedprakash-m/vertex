@@ -156,10 +156,8 @@ def _build_scorecard_data(
             ).items
             evidence = _select_dimension_evidence(matching_items, evidence_by_item)
             summary = _resolve_dimension_summary(packet, effective_override)
-            if packet.prior_confirmed_risk is not None and evidence.confidence == Confidence.NONE and effective_override is None:
-                summary = "No current evidence. Retained from trusted baseline."
-                if risk == RiskLevel.UNKNOWN:
-                    risk = packet.prior_confirmed_risk
+            if packet.prior_confirmed_risk is not None and evidence.confidence == Confidence.NONE and effective_override is None and risk == RiskLevel.UNKNOWN:
+                summary = f"No current risk assessment. Prior confirmed risk: {packet.prior_confirmed_risk.value} (historical)."
             if dependency_uplift_applied:
                 assert dependency_uplift is not None
                 summary = f"Dependency risk: {dependency_uplift.detail}. {summary}".strip()
@@ -179,13 +177,6 @@ def _build_scorecard_data(
                 trend_label=trend_label,
                 note=(effective_override.note if effective_override is not None else None),
             )
-            if (
-                evidence.confidence == Confidence.NONE
-                and effective_override is None
-                and packet.prior_confirmed_risk is None
-                and (edition_name is None or trusted_issue_number is None)
-            ):
-                continue
             dimension_models.append(model)
             all_dimensions.append(model)
             if (
