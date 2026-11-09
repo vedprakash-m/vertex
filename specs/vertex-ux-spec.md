@@ -835,6 +835,8 @@ Two-pane grid: `grid-template-columns: minmax(0, 1.35fr) minmax(340px, 0.95fr)`.
 
 **Right pane:** "Evidence" — scrollable evidence stack.
 
+Links from the reviewer pane to the standalone draft use the configured artifact base URL when present; otherwise they use a relative path from the reviewer page. Never embed an absolute machine-local path or `file://` URL in reviewer HTML.
+
 ### 9.2 CSS Variables (`:root`)
 
 `--page-bg`, `--panel-bg`, `--panel-border`, `--text-strong`, `--text-muted`, `--text-subtle`, `--chip-bg`, `--approved-bg/fg`, `--pending-bg/fg`, `--changes-bg/fg`, `--rejected-bg/fg`, `--link`, `--shadow`, `--radius: 18px`

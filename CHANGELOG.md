@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-11-09
+
+| Change | Behavior |
+|---|---|
+| Reviewer link privacy | Use the configured artifact URL or a page-relative draft link; do not embed machine-local absolute paths or `file://` URLs in reviewer HTML. |
+| Nested CLI isolation | Run the guarded CLI cohort with temporary program, database and working roots so tests cannot touch repository workspaces. The legacy-root help-contract test remains covered by the full suite. |
+
+Modified components: reviewer HTML link construction, reviewer privacy regression, nested CLI workspace audit.
+Tests: `tests/unit/test_commands_review_full.py`, `tests/unit/test_synthetic_fixture_isolation.py`.
+
 ## 2026-11-08
 
 | Change | Behavior |

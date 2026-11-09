@@ -183,6 +183,9 @@ def test_actual_reviewer_html_preserves_pending_revision_for_gap_failures(
     assert "pending" in html and "vertex context manual-diff" in html
     assert "synthetic_canary" not in html, "untrusted context-gap content appeared in reviewer HTML"
     assert str(program) not in html, "the local program path appeared in reviewer HTML"
+    assert program.resolve().as_uri() not in html, "the local program file URL appeared in reviewer HTML"
+    expected_report_link = f"../issue_{artifacts.issue_number:03d}/issue_{artifacts.issue_number:03d}.html"
+    assert expected_report_link in html
     assert {path: path.read_bytes() for path in (registry, history, queue)} == before
 
 
@@ -1381,7 +1384,8 @@ def test_generate_review_full_writes_section_review_adaptive_cards(repo_root: Pa
     assert all(path.parent == programs_root / "acme" / "publications" / EDITION_NAME / "review" / "adaptive_cards" for path in artifacts.adaptive_card_paths)
     assert all(":" not in path.name for path in artifacts.adaptive_card_paths)
     published_html_path = programs_root / "acme" / "publications" / EDITION_NAME / "issue_001" / "issue_001.html"
-    assert published_html_path.resolve().as_uri() in reviewer_html
+    assert "https://contoso.example/vertex-output/acme_weekly/issue_001/issue_001.html" in reviewer_html
+    assert published_html_path.resolve().as_uri() not in reviewer_html
 
     exec_summary_path = next(path for path in artifacts.adaptive_card_paths if ".exec_summary." in path.name)
     exec_summary_payload = json.loads(exec_summary_path.read_text(encoding="utf-8"))

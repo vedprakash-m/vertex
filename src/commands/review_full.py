@@ -529,6 +529,16 @@ def prepare_review_full_context(
         reviewer_signal_people_directory = reviewer_signal_knowledge.people_directory
         reviewer_signal_source_confidence_order = resolved_v2.program.source_confidence_order
 
+    published_html_uri = _artifact_url(
+        bundle,
+        output_root=get_program_output_root(bundle.program.id, programs_root=programs_root),
+        artifact_path=published_html_path,
+    )
+    if not (bundle.config.m365.artifact_base_url or "").strip():
+        published_html_uri = (
+            Path("..") / published_html_path.relative_to(get_program_output_dir(edition_name, programs_root=programs_root))
+        ).as_posix()
+
     reviewer_context = _build_reviewer_context(
         bundle=bundle,
         edition_name=edition_name,
@@ -536,7 +546,7 @@ def prepare_review_full_context(
         data_as_of=data_as_of,
         reports_root=resolved_reports_root,
         published_html=published_html,
-        published_html_uri=_artifact_url(bundle, artifact_path=published_html_path),
+        published_html_uri=published_html_uri,
         items=items,
         deltas=deltas,
         evidence_by_item=evidence_by_item,

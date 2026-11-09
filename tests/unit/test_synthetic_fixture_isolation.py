@@ -108,6 +108,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 import pytest
 
 root = Path(sys.argv[1]).absolute()
+sys.path.insert(0, str(root))
 source = os.path.normcase(str(root))
 private = tuple(os.path.normcase(str(root / name)) for name in ("programs", "knowledge", "editions", "vertex-db"))
 dotenv_path = os.path.normcase(str(root / ".env"))
@@ -260,6 +261,7 @@ ledger_tests = [
         "test_ledger_program_views.py",
     )
 ]
+# This help test intentionally exercises the legacy report/archive roots; the full suite runs it separately.
 result = pytest.main([
     reality + "::test_reality_digest_command_renders_cached_digest",
     reality + "::test_reality_digest_command_refreshes_when_requested",
@@ -283,6 +285,7 @@ result = pytest.main([
     *ledger_tests,
     config_loader + "::ConfigLoaderTests::test_discover_report_editions_excludes_tracked_example_templates",
     config_loader + "::ConfigLoaderTests::test_load_bundle_with_mode_loads_tracked_example_template_bundle",
+    "-k", "not test_contract_each_suggestion_is_parseable_by_cli",
     "-q", "-p", "no:cacheprovider", "-p", "pytest_mock.plugin", "-o", "addopts=", "--basetemp=" + sys.argv[2],
 ], plugins=[Guard()])
 if all_denials:
@@ -301,10 +304,14 @@ raise SystemExit(2 if all_denials else result)
         HOMEDRIVE=tmp_path.drive, HOMEPATH=str(tmp_path)[len(tmp_path.drive):], USERNAME="SyntheticOperator",
         TEMP=str(tmp_path), TMP=str(tmp_path), PYTEST_DISABLE_PLUGIN_AUTOLOAD="1",
         PYTHONDONTWRITEBYTECODE="1", PYTHONIOENCODING="utf-8",
+        VERTEX_PROGRAMS_ROOT=str(tmp_path / "programs"),
+        VERTEX_DB_PATH=str(tmp_path / "vertex-db"),
     )
+    working_directory = tmp_path / "working"
+    working_directory.mkdir()
     result = subprocess.run(
         [sys.executable, "-c", script, str(root), str(tmp_path / "pytest")],
-        cwd=root, env=env, capture_output=True, text=True, check=False,
+        cwd=working_directory, env=env, capture_output=True, text=True, check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     passed = re.search(r"(\d+) passed", result.stdout)
