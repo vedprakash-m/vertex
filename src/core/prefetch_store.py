@@ -46,10 +46,15 @@ logger = logging.getLogger(__name__)
 _PAYLOAD_FILENAME = "payload.json"
 _MANIFEST_FILENAME = "manifest.json"
 _LATEST_POINTER_FILENAME = "latest.json"
+_MAX_PAYLOAD_JSON_NESTING_DEPTH = 1000
 
 #: PrefetchSnapshotManifest.completeness (Appendix A.7).
 COMPLETENESS_STATES = frozenset({"complete", "partial", "degraded"})
 _SNAPSHOT_ID_RE = re.compile(r"[0-9a-f]{64}\Z")
+
+
+class PrefetchSnapshotPayloadTooDeepError(ValueError):
+    """A committed payload exceeds the supported JSON nesting depth."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,7 +260,39 @@ def read_snapshot_payload(
     if compute_snapshot_id(payload_bytes) != manifest.snapshot_id:
         logger.warning("Prefetch snapshot payload does not match its content address.")
         raise ValueError("Prefetch snapshot payload does not match its content address.")
-    return json.loads(payload_bytes.decode("utf-8"))
+    raw_payload = payload_bytes.decode("utf-8")
+    _ensure_payload_json_nesting_within_bounds(raw_payload)
+    try:
+        return json.loads(raw_payload)
+    except RecursionError as error:
+        raise PrefetchSnapshotPayloadTooDeepError(
+            "Prefetch snapshot payload exceeds the maximum nesting depth."
+        ) from error
+
+
+def _ensure_payload_json_nesting_within_bounds(value: str) -> None:
+    depth = 0
+    in_string = False
+    escaped = False
+    for character in value:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+        elif character in "[{":
+            depth += 1
+            if depth > _MAX_PAYLOAD_JSON_NESTING_DEPTH:
+                raise PrefetchSnapshotPayloadTooDeepError(
+                    "Prefetch snapshot payload exceeds the maximum nesting depth."
+                )
+        elif character in "]}":
+            depth -= 1
 
 
 def read_unexpired_committed_snapshot(
@@ -283,6 +320,7 @@ __all__ = [
     "PREFETCH_SCHEMA_VERSION",
     "COMPLETENESS_STATES",
     "PrefetchSnapshotManifest",
+    "PrefetchSnapshotPayloadTooDeepError",
     "compute_snapshot_id",
     "write_prefetch_snapshot",
     "read_latest_committed_snapshot",

@@ -137,8 +137,13 @@ def check(path, writing=False):
     source_write = writing and (value == source or value.startswith(source + os.sep))
     allowed_example_read = not writing and value in example_files
     if (private_access and not allowed_example_read) or source_write:
-        denials.append("private workspace")
-        all_denials.append("private workspace")
+        relative = os.path.relpath(value, source)
+        parts = relative.split(os.sep)
+        detail = f"{'write' if writing else 'read'}:{parts[0]}"
+        if parts[:3] == ["programs", "_templates", "example_tpm"]:
+            detail = f"{'write' if writing else 'read'}:{os.path.join(*parts[:3])}"
+        denials.append(detail)
+        all_denials.append(detail)
         raise PermissionError("Private workspace access forbidden")
 
 def audit(event, args):
@@ -196,7 +201,8 @@ class Guard:
         global active
         active = False
         if denials:
-            pytest.fail("Private workspace or network access was attempted", pytrace=False)
+            details = ", ".join(list(dict.fromkeys(denials))[:5])
+            pytest.fail(f"Private workspace or network access was attempted ({details})", pytrace=False)
 
 os.stat = guarded_stat
 os.lstat = guarded_lstat
@@ -279,6 +285,8 @@ result = pytest.main([
     config_loader + "::ConfigLoaderTests::test_load_bundle_with_mode_loads_tracked_example_template_bundle",
     "-q", "-p", "no:cacheprovider", "-p", "pytest_mock.plugin", "-o", "addopts=", "--basetemp=" + sys.argv[2],
 ], plugins=[Guard()])
+if all_denials:
+    print("Denied repository accesses: " + "; ".join(list(dict.fromkeys(all_denials))[:10]), file=sys.stderr)
 raise SystemExit(2 if all_denials else result)
 """
     env = os.environ.copy()

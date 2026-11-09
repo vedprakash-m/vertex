@@ -29,6 +29,7 @@ from src.core.m365_payload_support import has_provisional_workiq_identity
 from src.core.models_v2 import IntegrationError, Signal
 from src.core.prefetch_store import (
     PrefetchSnapshotManifest,
+    PrefetchSnapshotPayloadTooDeepError,
     read_snapshot_payload,
     read_unexpired_committed_snapshot,
 )
@@ -154,7 +155,7 @@ def _try_read_snapshot_signals(
     try:
         try:
             payload = read_snapshot_payload(program_id, WORKIQ_PREFETCH_CHANNEL, manifest, programs_root=programs_root)
-        except RecursionError:
+        except (PrefetchSnapshotPayloadTooDeepError, RecursionError):
             logger.warning("WorkIQ cached snapshot is too deeply nested; falling back to live.")
             return None
         if _is_too_deep(payload):

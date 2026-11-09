@@ -181,7 +181,8 @@ def test_actual_reviewer_html_preserves_pending_revision_for_gap_failures(
     }[failure]
     assert expected in html
     assert "pending" in html and "vertex context manual-diff" in html
-    assert "synthetic_canary" not in html and str(program) not in html
+    assert "synthetic_canary" not in html, "untrusted context-gap content appeared in reviewer HTML"
+    assert str(program) not in html, "the local program path appeared in reviewer HTML"
     assert {path: path.read_bytes() for path in (registry, history, queue)} == before
 
 

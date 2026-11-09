@@ -20,6 +20,7 @@ from src.core.models_v2 import Signal
 from src.core.journal import signal_to_record
 from src.core.m365_payload_support import has_provisional_workiq_identity
 from src.core.prefetch_store import (
+    PrefetchSnapshotPayloadTooDeepError,
     compute_snapshot_id,
     read_snapshot_payload,
     read_unexpired_committed_snapshot,
@@ -263,8 +264,8 @@ def test_resolve_falls_back_for_deeply_nested_content_addressed_payload(
     pointer_before = (channel_dir / "latest.json").read_bytes()
     manifest = read_unexpired_committed_snapshot("samplealpha", WORKIQ_PREFETCH_CHANNEL, programs_root=tmp_path, now=_NOW)
     assert manifest is not None
-    payload = read_snapshot_payload("samplealpha", WORKIQ_PREFETCH_CHANNEL, manifest, programs_root=tmp_path)
-    assert isinstance(payload, dict)
+    with pytest.raises(PrefetchSnapshotPayloadTooDeepError, match="maximum nesting depth"):
+        read_snapshot_payload("samplealpha", WORKIQ_PREFETCH_CHANNEL, manifest, programs_root=tmp_path)
     live = _signal("live")
     live_calls: list[bool] = []
 

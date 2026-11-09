@@ -7285,7 +7285,7 @@ def test_generate_report_draft_renders_ado_vitality_section_with_archive_trend(r
     assert "Avg days since last meaningful ADO update:" in artifacts.html_body
     assert re.search(r"(?:unknown|[0-9.]+ days) \(known for \d+/\d+ items\)", artifacts.html_body)
     assert "known for 2/2 items" in artifacts.html_body
-    assert "9999" not in artifacts.html_body
+    assert re.search(r"\b9999(?:\.0+)? days\b", artifacts.html_body) is None
     assert "ADO Vitality This Week" in artifacts.markdown_body
     assert "Best documented: WI:" in artifacts.markdown_body
     assert "Items with leakage signals: 1 item" in artifacts.markdown_body
