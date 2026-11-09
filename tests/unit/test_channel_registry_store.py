@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -959,7 +960,7 @@ def test_schema_version_guard_raises_on_unknown_version_with_data(tmp_path) -> N
     store = ChannelRegistryStore(db_path, "demo")
     store.apply_discovery_result(_result(_discovered("42", "ws-a")))
     # Overwrite schema_version to simulate a future/incompatible schema.
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn, conn:
         conn.execute("UPDATE schema_meta SET value = '99' WHERE key = 'schema_version'")
 
     with pytest.raises(SchemaVersionError):
@@ -980,7 +981,7 @@ def test_schema_version_one_registry_upgrades_additively_to_v2(tmp_path) -> None
     db_path = tmp_path / "channel_registry.sqlite3"
     store = ChannelRegistryStore(db_path, "demo")
     store.apply_discovery_result(_result(_discovered("42", "ws-a")))
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn, conn:
         conn.execute("DROP TABLE IF EXISTS discovery_attempts")
         conn.execute("DROP TABLE IF EXISTS candidate_intent_matches")
         conn.execute("DROP TABLE IF EXISTS source_candidates")
@@ -990,7 +991,7 @@ def test_schema_version_one_registry_upgrades_additively_to_v2(tmp_path) -> None
     upgraded = ChannelRegistryStore(db_path, "demo")
 
     assert {registration.ref_id for registration in upgraded.active_registrations("ado")} == {"42"}
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn, conn:
         table_names = {
             row[0]
             for row in conn.execute(
@@ -1137,7 +1138,7 @@ def test_apply_discovery_result_computes_expires_at_from_ttl_days(tmp_path) -> N
     store.apply_discovery_result(result, ttl_days=30)
 
     # Read expires_at directly from SQLite since ChannelRegistration DTO does not expose it.
-    with sqlite3.connect(tmp_path / "channel_registry.sqlite3") as conn:
+    with closing(sqlite3.connect(tmp_path / "channel_registry.sqlite3")) as conn, conn:
         row = conn.execute("SELECT expires_at FROM registrations WHERE ref_id = '101'").fetchone()
     assert row is not None
     assert row[0] is not None

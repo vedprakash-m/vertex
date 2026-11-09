@@ -11,10 +11,11 @@ Layout::
     programs/<id>/runtime/prefetch/<channel>/<snapshot_id>/manifest.json
     programs/<id>/runtime/prefetch/<channel>/latest.json
 
-Commit protocol: the payload file is written and fsynced *first*; the
-manifest is written *last* via atomic rename and is the sole commit marker.
-A snapshot directory without ``manifest.json`` is always treated as absent
-by every reader here -- an in-flight or interrupted write is never visible.
+Commit protocol: a new or nonmatching payload is written and fsynced first.
+A matching committed payload is reused without truncation. The manifest is
+written last via atomic rename and is the sole commit marker. A snapshot
+directory without ``manifest.json`` is always treated as absent by every
+reader here.
 The ``latest.json`` pointer is only rewritten (also atomically) after the
 manifest exists, so a reader can never be pointed at an uncommitted
 snapshot.
@@ -29,7 +30,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -38,6 +41,7 @@ from typing import Any
 from src.core.edition_resolver import PROGRAMS_ROOT
 
 PREFETCH_SCHEMA_VERSION = "1"
+logger = logging.getLogger(__name__)
 
 _PAYLOAD_FILENAME = "payload.json"
 _MANIFEST_FILENAME = "manifest.json"
@@ -45,6 +49,7 @@ _LATEST_POINTER_FILENAME = "latest.json"
 
 #: PrefetchSnapshotManifest.completeness (Appendix A.7).
 COMPLETENESS_STATES = frozenset({"complete", "partial", "degraded"})
+_SNAPSHOT_ID_RE = re.compile(r"[0-9a-f]{64}\Z")
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,13 +161,19 @@ def write_prefetch_snapshot(
     snapshot_dir = _snapshot_dir(program_id, channel, snapshot_id, programs_root=programs_root)
     snapshot_dir.mkdir(parents=True, exist_ok=True)
 
-    # Payload first, fsynced -- readers only ever look for it via a manifest
-    # they already trust to exist.
+    # A matching committed payload is already fsynced; do not truncate it.
+    manifest_path = snapshot_dir / _MANIFEST_FILENAME
     payload_path = snapshot_dir / _PAYLOAD_FILENAME
-    with payload_path.open("wb") as handle:
-        handle.write(payload_bytes)
-        handle.flush()
-        os.fsync(handle.fileno())
+    if not (
+        manifest_path.exists()
+        and payload_path.exists()
+        and payload_path.stat().st_size == len(payload_bytes)
+        and payload_path.read_bytes() == payload_bytes
+    ):
+        with payload_path.open("wb") as handle:
+            handle.write(payload_bytes)
+            handle.flush()
+            os.fsync(handle.fileno())
 
     manifest = PrefetchSnapshotManifest(
         schema_version=PREFETCH_SCHEMA_VERSION,
@@ -178,7 +189,7 @@ def write_prefetch_snapshot(
         payload_path=_PAYLOAD_FILENAME,
     )
     # Manifest last -- the sole commit marker (atomic rename).
-    _atomic_write_json(snapshot_dir / _MANIFEST_FILENAME, manifest.to_dict())
+    _atomic_write_json(manifest_path, manifest.to_dict())
 
     # Only now, after the manifest is committed, point "latest" at it.
     _atomic_write_json(
@@ -196,9 +207,9 @@ def read_latest_committed_snapshot(
 ) -> PrefetchSnapshotManifest | None:
     """Return the newest *committed* snapshot's manifest, or None.
 
-    A snapshot directory without ``manifest.json`` (in-flight, interrupted,
-    or corrupted) is always treated as absent, never as a success-shaped
-    empty result.
+    A snapshot directory without ``manifest.json`` or whose manifest names
+    another snapshot is treated as absent, never as a success-shaped empty
+    result.
     """
     channel_dir = _channel_dir(program_id, channel, programs_root=programs_root)
     pointer_path = channel_dir / _LATEST_POINTER_FILENAME
@@ -206,16 +217,28 @@ def read_latest_committed_snapshot(
         return None
     try:
         pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
-        snapshot_id = str(pointer["snapshot_id"])
-    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+        snapshot_id = pointer["snapshot_id"]
+        if not isinstance(snapshot_id, str) or _SNAPSHOT_ID_RE.fullmatch(snapshot_id) is None:
+            raise ValueError("invalid snapshot identifier")
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
+        logger.warning("Prefetch snapshot pointer is unreadable or invalid.")
         return None
     manifest_path = channel_dir / snapshot_id / _MANIFEST_FILENAME
     if not manifest_path.exists():
         return None
     try:
-        return PrefetchSnapshotManifest.from_dict(json.loads(manifest_path.read_text(encoding="utf-8")))
-    except (OSError, json.JSONDecodeError, KeyError, ValueError, TypeError):
+        manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest_snapshot_id = manifest_data.get("snapshot_id") if isinstance(manifest_data, dict) else None
+        if not isinstance(manifest_snapshot_id, str) or _SNAPSHOT_ID_RE.fullmatch(manifest_snapshot_id) is None:
+            raise ValueError("invalid snapshot identifier")
+        manifest = PrefetchSnapshotManifest.from_dict(manifest_data)
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
+        logger.warning("Prefetch snapshot manifest is unreadable or invalid.")
         return None
+    if manifest.snapshot_id != snapshot_id:
+        logger.warning("Prefetch snapshot manifest does not match the selected snapshot.")
+        return None
+    return manifest
 
 
 def read_snapshot_payload(
@@ -225,9 +248,14 @@ def read_snapshot_payload(
     *,
     programs_root: Path = PROGRAMS_ROOT,
 ) -> dict[str, Any]:
+    """Verify the payload's content address before decoding its bytes."""
     snapshot_dir = _snapshot_dir(program_id, channel, manifest.snapshot_id, programs_root=programs_root)
     payload_path = snapshot_dir / manifest.payload_path
-    return json.loads(payload_path.read_text(encoding="utf-8"))
+    payload_bytes = payload_path.read_bytes()
+    if compute_snapshot_id(payload_bytes) != manifest.snapshot_id:
+        logger.warning("Prefetch snapshot payload does not match its content address.")
+        raise ValueError("Prefetch snapshot payload does not match its content address.")
+    return json.loads(payload_bytes.decode("utf-8"))
 
 
 def read_unexpired_committed_snapshot(

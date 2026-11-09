@@ -108,7 +108,7 @@ def doctor_tip(
     if fact_parity:
         return "Tip: Re-run `vertex doctor --fact-parity --edition <name>` after running `vertex facts dual-read-log --program <id>` to add parity cycles."
     if confirm_readiness:
-        return "Tip: Re-run `vertex doctor --confirm-readiness --edition <name>` after resolving blockers (overrides, gather freshness, archive integrity)."
+        return "Tip: Re-run `vertex doctor --confirm-readiness --edition <name>` after editing overrides or gathering; confirmation still evaluates the selected issue and its gates."
     if adapter_cert:
         return "Tip: Re-run `vertex doctor --adapter-cert --edition <name>` after enabling new UIL channels (VERTEX_UIL_KUSTO/TEAMS/ICM env flags) or after certifying an adapter with `vertex facts dual-read-log`."
     if charts:

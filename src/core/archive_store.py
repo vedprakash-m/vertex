@@ -10,6 +10,7 @@ from pathlib import Path
 import shutil
 from typing import Any, Literal
 
+from src.core.baseline_lock import assert_issue_unlocked
 from src.core.edition_resolver import PROGRAMS_ROOT, list_editions_for_program
 from src.core.models import ArchiveEntry, ArchiveIndex, RunManifest, Snapshot
 from src.core.models_v2 import SkippedIssueEntry, VitalityArchiveEntry
@@ -51,6 +52,10 @@ def read_archive_index(
     if not path.exists():
         return ArchiveIndex(edition=edition, issues=())
     payload = json.loads(path.read_text(encoding="utf-8"))
+    return _parse_archive_index_payload(edition, payload)
+
+
+def _parse_archive_index_payload(edition: str, payload: dict[str, Any]) -> ArchiveIndex:
     return ArchiveIndex(
         edition=str(payload.get("edition", edition)),
         issues=tuple(
@@ -463,6 +468,7 @@ def write_confirmed_issue(
         chart_cache_dir=(edition_root / "chart_cache") if chart_cache_entries else None,
     )
 
+    assert_issue_unlocked(issue_number, target_path=final_paths.snapshot_path, artifact="confirmed snapshot")
     lock_context = ArchiveLock(edition_root) if acquire_lock else nullcontext()
     with lock_context:
         if acquire_lock:

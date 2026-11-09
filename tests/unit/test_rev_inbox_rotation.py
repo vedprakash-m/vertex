@@ -216,11 +216,11 @@ class TestAutoRotationInCycle:
         old_ts = time.time() - (DEFAULT_PROCESSED_MAX_AGE_DAYS + 5) * 86400
         os.utime(stale, (old_ts, old_ts))
 
-        mailbox = type("M", (), {"tenant_id": "t", "principal_mailbox": "u@x.com", "container": "inbox"})()
+        mailbox = type("M", (), {"tenant_id": "t", "principal_mailbox": "fixture-user-01@group-01.fixture.example.net", "container": "inbox"})()
         deps = RevPipelineDeps(
             enumerator=EmlEnumerator(inbox_root=inbox, mailbox_tenant_id="t",
-                                      principal_mailbox="u@x.com", container="inbox"),
-            hydrator=EmlHydrator(mailbox_tenant_id="t", principal_mailbox="u@x.com",
+                                      principal_mailbox="fixture-user-01@group-01.fixture.example.net", container="inbox"),
+            hydrator=EmlHydrator(mailbox_tenant_id="t", principal_mailbox="fixture-user-01@group-01.fixture.example.net",
                                  container="inbox"),
             shields=LocalOnlyPromptShields(),
             extractor=DeterministicRevExtractor(),
@@ -232,7 +232,7 @@ class TestAutoRotationInCycle:
             intent=intent,
             deps=deps,
             profile=RevRetrievalProfile(profile=REV_PROFILE_SEARCH_HYDRATE),
-            mailbox_tenant_id="t", mailbox_principal="u@x.com", mailbox_container="inbox",
+            mailbox_tenant_id="t", mailbox_principal="fixture-user-01@group-01.fixture.example.net", mailbox_container="inbox",
             correlation_id="auto-rot",
             programs_root=tmp_path,
             budget_limits=BudgetLimits(),

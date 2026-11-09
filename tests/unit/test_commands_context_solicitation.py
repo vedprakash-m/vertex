@@ -199,6 +199,50 @@ def test_invalid_registry_or_gap_records_fail_cleanly(tmp_path: Path, content: s
     assert _files(tmp_path) == before
 
 
+@pytest.mark.parametrize("operation", ["solicit", "import-reply"])
+@pytest.mark.parametrize("damage", ["timestamp", "invalid-time", "overflow", "lane", "missing"])
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_invalid_gap_record_refuses_actual_context_commands_without_writes(
+    tmp_path: Path, operation: str, damage: str, dry_run: bool,
+) -> None:
+    from cli import app
+
+    programs, fingerprint = _workspace(tmp_path)
+    history = programs / "sample" / "_feedback" / "context_gaps.jsonl"
+    record = json.loads(history.read_text(encoding="utf-8"))
+    if damage == "timestamp":
+        record["ts"] = None
+    elif damage == "invalid-time":
+        record["ts"] = "synthetic_canary"
+    elif damage == "overflow":
+        record["ts"] = "9999-12-31T23:59:59-11:00"
+    elif damage == "lane":
+        record["lane"] = ["synthetic_canary"]
+    else:
+        del record["feature"]
+    history.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    source = programs / "sample" / "reply.eml"
+    source.write_text("From: reviewer@example.com\n\nSynthetic reply\n", encoding="utf-8")
+    if operation == "solicit":
+        args = _args(programs, fingerprint)
+    else:
+        args = [
+            "context", "import-reply", "--edition", "sample_weekly", "--issue", "1",
+            "--source", str(source), "--gap-fingerprint", fingerprint,
+            "--solicitation-id", "synthetic-packet", "--programs-root", str(programs),
+        ]
+    if dry_run:
+        args.append("--dry-run")
+    before = _files(tmp_path)
+
+    result = CliRunner().invoke(app, args)
+
+    assert result.exit_code == 2, result.output + repr(result.exception)
+    assert "unavailable" in result.output.lower()
+    assert "synthetic_canary" not in result.output and str(programs) not in result.output
+    assert _files(tmp_path) == before
+
+
 @pytest.mark.parametrize("value,expected", [("null", "<null>"), ('""', ""), ('"line one\\nline two"', "line one\nline two")])
 def test_packet_binding_preserves_typed_scalar_baseline(tmp_path: Path, value: str, expected: str) -> None:
     from cli import app

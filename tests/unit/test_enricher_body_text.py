@@ -14,7 +14,7 @@ def _mail_record(**kwargs) -> MagicMock:
     defaults = dict(
         source_id="msg:ABC123",
         subject="Test Subject",
-        sender="sender@test.com",
+        sender="sender@synthetic-10.example",
         received_at="2026-06-03T23:34:00Z",
         web_url="https://outlook.com/msg/ABC123",
         preview=None,

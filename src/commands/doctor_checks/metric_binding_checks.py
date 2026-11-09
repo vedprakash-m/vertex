@@ -5,8 +5,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from src.commands.doctor_checks.models import DoctorCheck, DoctorReport
-from src.commands.metric import _build_metric_rollout_status, _build_program_metric_binding_probe
+from src.commands.doctor_checks.yaml_support import _raise_if_unsafe_doctor_yaml, _raise_with_cleared_context
+from src.commands.metric import (
+    _build_metric_rollout_status,
+    _build_program_metric_binding_probe,
+    _privacy_safe_metric_binding_probe,
+)
 from src.core.edition_resolver import resolve_edition
 from src.core.exceptions import ConfigError, QueryError
 from src.core.kusto_query_loader import load_kpi_queries
@@ -27,7 +34,11 @@ def run_metric_binding_doctor(
     now: datetime | None,
     revalidation_days: int,
 ) -> DoctorReport:
-    resolved = resolve_edition(edition_name, editions_root=editions_root, programs_root=programs_root)
+    try:
+        resolved = resolve_edition(edition_name, editions_root=editions_root, programs_root=programs_root)
+    except ConfigError as error:
+        _raise_if_unsafe_doctor_yaml(error)
+        raise
     if resolved is None:
         return DoctorReport(
             edition=edition_name,
@@ -38,12 +49,22 @@ def run_metric_binding_doctor(
     store = RealityStore(resolved.program.id, db_root=reality_db_root)
     store.initialize()
     bindings = store.list_active_metric_source_bindings()
-    definition_map = metric_definitions if metric_definitions is not None else load_metric_definition_map(
-        metrics_root=programs_root.parent / "knowledge" / "metrics", as_of=current_now,
-    )
+    try:
+        definition_map = metric_definitions if metric_definitions is not None else load_metric_definition_map(
+            metrics_root=programs_root.parent / "knowledge" / "metrics", as_of=current_now,
+        )
+    except yaml.YAMLError:
+        _raise_with_cleared_context(
+            yaml.YAMLError("Cannot parse selected metric-binding registry YAML; check syntax and values.")
+        )
+    try:
+        queries = load_kpi_queries(resolved.program.id, programs_root=programs_root)
+    except ConfigError as error:
+        _raise_if_unsafe_doctor_yaml(error)
+        raise
     rollout_statuses = tuple(
         _build_metric_rollout_status(store, query, definition_map)
-        for query in load_kpi_queries(resolved.program.id, programs_root=programs_root)
+        for query in queries
     )
     eligible_rollout_statuses = tuple(status for status in rollout_statuses if status.eligible)
     missing_rollout_statuses = tuple(status for status in eligible_rollout_statuses if not status.ready)
@@ -67,7 +88,9 @@ def run_metric_binding_doctor(
         for binding in bindings
         if binding.validated and (binding.last_validated_at is None or binding.last_validated_at < revalidation_due_before)
     )
-    probe = metric_binding_probe or _build_program_metric_binding_probe(resolved.program.id, programs_root=programs_root)
+    probe = _privacy_safe_metric_binding_probe(
+        metric_binding_probe or _build_program_metric_binding_probe(resolved.program.id, programs_root=programs_root)
+    )
 
     revalidated_binding_ids: list[str] = []
     revalidation_failures: list[dict[str, str]] = []

@@ -7,6 +7,31 @@ import yaml
 
 from src.core.exceptions import ConfigError
 
+
+class UniqueKeySafeLoader(yaml.SafeLoader):
+    def __init__(self, stream: str) -> None:
+        super().__init__(stream)
+        self._checked_mappings: set[yaml.MappingNode] = set()
+
+    def flatten_mapping(self, node: yaml.MappingNode) -> None:
+        # Check authored keys before merges expand; aliased nodes may be revisited.
+        if node not in self._checked_mappings:
+            self._checked_mappings.add(node)
+            keys: set[Any] = set()
+            for key_node, _ in node.value:
+                if key_node.tag in {"tag:yaml.org,2002:merge", "tag:yaml.org,2002:value"}:
+                    key = key_node.value
+                else:
+                    key = self.construct_object(key_node)
+                try:
+                    if key in keys:
+                        raise yaml.constructor.ConstructorError(problem="duplicate explicit mapping key")
+                    keys.add(key)
+                except TypeError as error:
+                    raise yaml.constructor.ConstructorError(problem="unhashable mapping key") from error
+        super().flatten_mapping(node)
+
+
 try:
     _FAST_YAML_LOADER: type = yaml.CSafeLoader
 except AttributeError:  # LibYAML not available in this environment; pure-Python fallback.

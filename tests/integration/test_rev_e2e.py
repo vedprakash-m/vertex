@@ -111,7 +111,7 @@ def _run_cycle(
     verifier=None,
 ) -> dict:
     graph = FakeRevGraphClient(messages)
-    mailbox = MailboxContext(tenant_id="t", principal_mailbox="u@x.com", container="inbox")
+    mailbox = MailboxContext(tenant_id="t", principal_mailbox="user@example.com", container="inbox")
     deps = RevPipelineDeps(
         enumerator=CollectionSearchEnumerator(graph, mailbox),
         hydrator=MailHydrator(graph, mailbox),
@@ -147,6 +147,40 @@ def _run_cycle(
 
 
 class TestRevEndToEnd:
+    @pytest.mark.parametrize(
+        "received_at",
+        [
+            "",
+            "2026-06-23T10:00:00",
+            "2026-06-23T10:00:00-00:00",
+            "2026-06-23T10:00:00+12:60",
+            "Wed, 24 Jun 2026 10:00:00, +1260",
+            "private-synthetic-invalid-time",
+        ],
+    )
+    def test_invalid_source_time_is_quarantined_before_staging(
+        self, tmp_path: Path, received_at: str, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        invalid = _message(
+            message_id="msg-invalid-time",
+            subject="Deployment complete",
+            sender="owner@example.com",
+            body="The rollout deployment completed on 2026-06-23 without issues.",
+            received_at=received_at,
+        )
+        report = _run_cycle(
+            program_id="prog-source-time", programs_root=tmp_path, messages=(invalid, SIGNAL_MSG),
+        )
+
+        assert report["enumerated"] == 2
+        assert report["quarantined"] == 1
+        assert report["date_parse_failures"] == 1
+        assert report["candidates_staged"] == 1
+        candidates = load_pending_candidates("prog-source-time", programs_root=tmp_path)
+        assert len(candidates) == 1
+        assert candidates[0].source_ref.message_id == SIGNAL_MSG.message_id
+        assert "private-synthetic-invalid-time" not in caplog.text
+
     def test_signal_and_quiet_messages_classified_correctly(self, tmp_path: Path) -> None:
         """A signal message stages a candidate; a quiet message is metadata-only."""
         report = _run_cycle(
@@ -221,8 +255,7 @@ class TestRevEndToEnd:
         )
         candidates = load_pending_candidates(program_id, programs_root=tmp_path)
         assert len(candidates) == 1
-        # Rollback maps to deliverable.status_changed.v1 (pipeline shaper).
-        assert candidates[0].proposed_event_type == "deliverable.status_changed.v1"
+        assert candidates[0].proposed_event_type == "deployment.rollback.v1"
 
     def test_quarantine_on_forbidden_get(self, tmp_path: Path) -> None:
         """A 403 on hydration quarantines the candidate rather than crashing."""
@@ -270,12 +303,12 @@ class TestBudgetStops:
         big_msg = _message(
             message_id="msg-big",
             subject="Big",
-            sender="a@x.com",
+            sender="author@example.com",
             body="deployment completed. " * 5000,  # ~100KB
         )
         limits = BudgetLimits(max_hydrated_bytes_per_item=1024)
         graph = FakeRevGraphClient((big_msg,))
-        mailbox = MailboxContext(tenant_id="t", principal_mailbox="u@x.com")
+        mailbox = MailboxContext(tenant_id="t", principal_mailbox="user@example.com")
         deps = RevPipelineDeps(
             enumerator=CollectionSearchEnumerator(graph, mailbox),
             hydrator=MailHydrator(graph, mailbox),
@@ -288,7 +321,7 @@ class TestBudgetStops:
             intent=RetrievalIntent(entity_type=EntityType.MESSAGE),
             deps=deps,
             profile=RevRetrievalProfile(profile=REV_PROFILE_SEARCH_HYDRATE),
-            mailbox_tenant_id="t", mailbox_principal="u@x.com", mailbox_container="inbox",
+            mailbox_tenant_id="t", mailbox_principal="user@example.com", mailbox_container="inbox",
             correlation_id="budget",
             programs_root=tmp_path,
             budget_limits=limits,

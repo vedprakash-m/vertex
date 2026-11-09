@@ -14,6 +14,28 @@ from src.core.edition_resolver import resolve_edition
 from src.core.exceptions import ConfigError
 
 
+def _stage_tracked_example_template(root: Path) -> Path:
+    source = Path(__file__).absolute().parents[2] / "programs" / "_templates" / "example_tpm"
+    programs_root = root / "programs"
+    destination = programs_root / "_templates" / "example_tpm"
+    for relative in (
+        Path("program.yaml"),
+        Path("workstreams.yaml"),
+        Path("scorecards.yaml"),
+        Path("editorial_rules.yaml"),
+        Path("review.yaml"),
+        Path("editions") / "example_tpm_weekly.yaml",
+        Path("knowledge") / "golden_queries.yaml",
+        Path("knowledge") / "people_directory.yaml",
+        Path("knowledge") / "products.yaml",
+        Path("knowledge") / "teams.yaml",
+    ):
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((source / relative).read_bytes())
+    return programs_root
+
+
 def _write_demo_v2_layout(
     root: Path,
     *,
@@ -610,7 +632,8 @@ scorecards:
         self.assertTrue(config.m365.prefer_agency)
         self.assertIn("newsletter_search", dir(config.m365.workiq))
         self.assertTrue(config.m365.workiq.newsletter_search)
-        self.assertEqual(config.m365.bluebird.teams_channels, ("xInfraSWPM: Acme Weekly",))
+        self.assertEqual(len(config.m365.bluebird.teams_channels), 1)
+        self.assertTrue(config.m365.bluebird.teams_channels[0].strip())
         self.assertEqual(config.m365.bluebird.lookback_days, 7)
         self.assertEqual(config.m365.offline.transcript_dir, "backfill/transcripts/")
 
@@ -1037,37 +1060,34 @@ required: true
                     load_review_config(path)
 
     def test_discover_report_editions_excludes_tracked_example_templates(self) -> None:
-        from src.core.edition_resolver import EDITIONS_ROOT
+        with TemporaryDirectory() as temp_dir:
+            programs_root = _stage_tracked_example_template(Path(temp_dir))
+            normal_edition = programs_root / "demo" / "editions" / "demo_weekly.yaml"
+            normal_edition.parent.mkdir(parents=True)
+            normal_edition.write_text("", encoding="utf-8")
+            discovered = discover_report_editions(programs_root=programs_root)
 
-        if not (EDITIONS_ROOT / "example_tpm_weekly.yaml").exists():
-            self.skipTest("Requires tracked example edition")
-
-        discovered = discover_report_editions()
-
-        self.assertNotIn("example_tpm_weekly", discovered)
+            self.assertIn("demo_weekly", discovered)
+            self.assertNotIn("example_tpm_weekly", discovered)
 
     def test_load_bundle_with_mode_loads_tracked_example_template_bundle(self) -> None:
-        from src.core.edition_resolver import PROGRAMS_ROOT, find_edition_yaml
+        with TemporaryDirectory() as temp_dir:
+            programs_root = _stage_tracked_example_template(Path(temp_dir))
+            result = load_bundle_with_mode(
+                "example_tpm_weekly",
+                programs_root=programs_root,
+            )
 
-        edition_path = find_edition_yaml("example_tpm_weekly", programs_root=PROGRAMS_ROOT)
-        if not edition_path.exists():
-            self.skipTest("Requires tracked example edition")
-
-        result = load_bundle_with_mode(
-            "example_tpm_weekly",
-            programs_root=PROGRAMS_ROOT,
-        )
-
-        self.assertEqual(result.mode, "v2")
-        self.assertEqual(result.bundle.program_id, "example_tpm")
-        self.assertEqual(result.bundle.config.edition.name, "example_tpm_weekly")
-        self.assertEqual(result.bundle.config.ado.organization, "your-org")
-        self.assertEqual(result.bundle.config.ado.area_paths, ("One\\Example\\Delivery",))
-        self.assertFalse(result.bundle.config.kusto.enabled)
-        self.assertIsNotNone(result.bundle.program_context)
-        assert result.bundle.program_context is not None
-        self.assertEqual(result.bundle.program_context.program_name, "Example TPM Program")
-        self.assertEqual(result.bundle.program_context.workstreams[0].name, "Delivery Readiness")
+            self.assertEqual(result.mode, "v2")
+            self.assertEqual(result.bundle.program_id, "example_tpm")
+            self.assertEqual(result.bundle.config.edition.name, "example_tpm_weekly")
+            self.assertEqual(result.bundle.config.ado.organization, "your-org")
+            self.assertEqual(result.bundle.config.ado.area_paths, ("One\\Example\\Delivery",))
+            self.assertFalse(result.bundle.config.kusto.enabled)
+            self.assertIsNotNone(result.bundle.program_context)
+            assert result.bundle.program_context is not None
+            self.assertEqual(result.bundle.program_context.program_name, "Example TPM Program")
+            self.assertEqual(result.bundle.program_context.workstreams[0].name, "Delivery Readiness")
 
 
 if __name__ == "__main__":

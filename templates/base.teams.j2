@@ -111,14 +111,8 @@ Query {{ ks.query_id }} · {{ ks.source_label }} · Confidence {{ ks.confidence 
 {% if ks.render_mode == "metric_highlight" and ks.metrics %}
 {% for metric in ks.metrics %}- **{{ metric.label }}**: {{ metric.value }}
 {% endfor %}
-{% elif ks.render_mode == "chart_image" and ks.image_data_url %}
-{% if ks.message %}{{ ks.title }}: {{ ks.message }}. [View chart →]({{ ks.reference_url if ks.reference_url else "#" }})
-{% else %}{{ ks.title }}. [View chart →]({{ ks.reference_url if ks.reference_url else "#" }})
-{% endif %}
-{% elif ks.render_mode == "chart" %}
-{% if ks.message %}{{ ks.title }}: {{ ks.message }}. [View chart →]({{ ks.reference_url if ks.reference_url else "#" }})
-{% else %}{{ ks.title }}. [View chart →]({{ ks.reference_url if ks.reference_url else "#" }})
-{% endif %}
+{% elif ks.render_mode == "chart" or (ks.render_mode == "chart_image" and ks.image_data_url) %}
+{% include "partials/teams_chart_summary.j2" %}
 {% elif ks.rows %}
 | {% for column in ks.columns %}{{ column }} |{% endfor %}
 | {% for column in ks.columns %}--- |{% endfor %}
@@ -140,6 +134,10 @@ Query {{ subgroup.query_id }} · {{ subgroup.source_label }} · Confidence {{ su
 {% endif %}
 {% for metric in subgroup.metrics %}- **{{ metric.label }}**: {{ metric.value }}
 {% endfor %}
+{% if subgroup.render_mode == "chart" or (subgroup.render_mode == "chart_image" and subgroup.image_data_url) -%}
+{% set ks = subgroup -%}
+{% include "partials/teams_chart_summary.j2" %}
+{% endif -%}
 {% if subgroup.rows %}
 ### {{ subgroup.query_id }}
 | {% for column in subgroup.columns %}{{ column }} |{% endfor %}

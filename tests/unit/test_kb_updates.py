@@ -42,7 +42,7 @@ def _seed_minimal_program(programs_root: Path, program_id: str, *, extra_program
         encoding="utf-8",
     )
     (program_dir / "knowledge" / "people_directory.yaml").write_text(
-        'schema_version: "1.0"\npeople:\n  - alias: "alice"\n    email: "alice@acme.com"\n    display_name: "Alice"\n',
+        'schema_version: "1.0"\npeople:\n  - alias: "alice"\n    email: "alice@synthetic-01.example"\n    display_name: "Alice"\n',
         encoding="utf-8",
     )
     return program_dir
@@ -79,7 +79,7 @@ def test_read_program_kb_documents_prefers_shared_root_when_present(tmp_path: Pa
     knowledge_root = tmp_path / "knowledge"
     knowledge_root.mkdir(parents=True)
     (knowledge_root / "people_directory.yaml").write_text(
-        'schema_version: "1.0"\npeople:\n  - alias: "shared_bob"\n    email: "bob@acme.com"\n',
+        'schema_version: "1.0"\npeople:\n  - alias: "shared_bob"\n    email: "bob@synthetic-01.example"\n',
         encoding="utf-8",
     )
 

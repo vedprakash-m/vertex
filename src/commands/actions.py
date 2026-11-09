@@ -12,7 +12,7 @@ from typing import cast
 import typer
 
 from src.commands.ado import apply_ado_proposal
-from src.core.action_tracker import assess_action_staleness, load_action_resolution_candidate_ids, update_action_status
+from src.core.action_tracker import ActionJournalReadError, assess_action_staleness, load_action_resolution_candidate_ids, update_action_status
 from src.core.journal import PROGRAMS_ROOT
 from src.core.models_v2 import ActionItem, ActionStatus
 from src.core.program_fact_store import load_program_facts, project_action_items
@@ -25,13 +25,29 @@ app = typer.Typer(help="List and review extracted actions.", invoke_without_comm
 
 
 def _load_action_items(program_id: str) -> tuple[ActionItem, ...]:
-    return project_action_items(
-        load_program_facts(
-            program_id,
-            programs_root=PROGRAMS_ROOT,
-            fact_types=("action.item",),
+    try:
+        return project_action_items(
+            load_program_facts(
+                program_id,
+                programs_root=PROGRAMS_ROOT,
+                fact_types=("action.item",),
+            )
         )
-    )
+    except ActionJournalReadError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=1) from error
+
+
+def _update_action_status(
+    program_id: str, action_id: str, status: ActionStatus, note: str | None, *, updated_by: str,
+) -> None:
+    try:
+        update_action_status(
+            program_id, action_id, status, note, updated_by=updated_by, programs_root=PROGRAMS_ROOT,
+        )
+    except ActionJournalReadError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=1) from error
 
 
 def _meeting_close_batch_summaries(entries: tuple[ActionItem, ...]) -> tuple[dict[str, object], ...]:
@@ -451,13 +467,12 @@ def review_actions_command(
             raise typer.BadParameter("Review decision must be approve, cancel, skip, or quit.")
         new_status = ActionStatus.OPEN if choice in {"a", "approve"} else ActionStatus.CANCELLED
         note_value = typer.prompt("Note (optional)", default="", show_default=False).strip()
-        update_action_status(
+        _update_action_status(
             program_id,
             action.id,
             new_status,
             note_value or None,
             updated_by=review_actor,
-            programs_root=PROGRAMS_ROOT,
         )
         reviewed_statuses[action.id] = new_status
         reviewed += 1
@@ -485,13 +500,12 @@ def resolve_action_command(
     status_value = ActionStatus.from_string(status)
     if status_value not in {ActionStatus.DONE, ActionStatus.CANCELLED}:
         raise typer.BadParameter("--status must be done or cancelled.")
-    update_action_status(
+    _update_action_status(
         program.strip(),
         action_id.strip(),
         status_value,
         note,
         updated_by=_default_actor(resolver),
-        programs_root=PROGRAMS_ROOT,
     )
     typer.echo(f"Resolved action {action_id.strip()} in {program.strip()} as {status_value.value}.")
     raise typer.Exit(code=0)

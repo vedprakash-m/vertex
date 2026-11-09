@@ -279,6 +279,187 @@ def test_legacy_empty_response_is_not_certified_as_a_declared_projection(monkeyp
     assert client.execute_with_schema("synthetic", "synthetic", "synthetic") == ([], ())
 
 
+@pytest.mark.parametrize("method", ["execute", "execute_with_schema"])
+@pytest.mark.parametrize("attempts", [0, -1, False, True, None, 1.0, "1"])
+@pytest.mark.parametrize("declared", [False, True])
+def test_invalid_attempt_count_refuses_before_client_creation(monkeypatch, method, attempts, declared) -> None:
+    from src.core.exceptions import QueryError
+    from src.core.kusto_result_limits import KustoResultLimits
+
+    calls: list[object] = []
+    client = _limited_client(monkeypatch, _FakeResponse([]), calls)
+    original = client._get_or_create_client
+    created: list[str] = []
+
+    def record_client(cluster):
+        created.append(cluster)
+        return original(cluster)
+
+    monkeypatch.setattr(client, "_get_or_create_client", record_client)
+    limits = KustoResultLimits(("Value",), 1, 100) if declared else None
+    with pytest.raises(QueryError, match="max_retries"):
+        getattr(client, method)("synthetic", "synthetic", "synthetic", max_retries=attempts, result_limits=limits)
+    assert created == []
+    assert calls == []
+
+
+def _synthetic_sdk_response(columns: list[tuple[str, str]], rows: list[list[object]]) -> object:
+    from azure.kusto.data.response import KustoResponseDataSetV2
+
+    return KustoResponseDataSetV2([
+        {
+            "FrameType": "DataTable", "TableId": 0, "TableKind": "PrimaryResult",
+            "TableName": "PrimaryResult",
+            "Columns": [{"ColumnName": name, "ColumnType": kind} for name, kind in columns],
+            "Rows": rows,
+        },
+        {
+            "FrameType": "DataTable", "TableId": 1, "TableKind": "QueryCompletionInformation",
+            "TableName": "QueryCompletionInformation",
+            "Columns": [
+                {"ColumnName": "Level", "ColumnType": "int"},
+                {"ColumnName": "Payload", "ColumnType": "string"},
+                {"ColumnName": "ClientRequestId", "ColumnType": "string"},
+            ],
+            "Rows": [[4, "synthetic", "synthetic"]],
+        },
+    ])
+
+
+def _declared_row_response(kind: str, complete: bool) -> object:
+    values = [[1, None], [2, None] if complete else [2]]
+    if kind == "sdk":
+        return _synthetic_sdk_response([("Left", "int"), ("Right", "string")], values)
+    if kind == "mapping":
+        rows = [{"Left": 1, "Right": None}, {"Left": 2, **({"Right": None} if complete else {})}]
+    else:
+        rows = [tuple(row) for row in values]
+    return _FakeResponse([_FakeTable(["Left", "Right"], rows)])
+
+
+@pytest.mark.parametrize("method", ["execute", "execute_with_schema"])
+@pytest.mark.parametrize("kind", ["sdk", "mapping", "tuple"])
+@pytest.mark.parametrize("complete", [False, True])
+def test_declared_rows_distinguish_missing_cells_from_null(monkeypatch, method, kind, complete) -> None:
+    from src.core.exceptions import QueryError
+    from src.core.kusto_result_limits import KustoResultLimits
+
+    calls: list[object] = []
+    client = _limited_client(monkeypatch, _declared_row_response(kind, complete), calls)
+    if complete:
+        value = getattr(client, method)(
+            "synthetic", "synthetic", "synthetic", result_limits=KustoResultLimits(("Left", "Right"), 3, 500),
+        )
+        rows = value if method == "execute" else value[0]
+        assert rows == [{"Left": 1, "Right": None}, {"Left": 2, "Right": None}]
+    else:
+        with pytest.raises(QueryError, match="row"):
+            getattr(client, method)(
+                "synthetic", "synthetic", "synthetic", result_limits=KustoResultLimits(("Left", "Right"), 3, 500),
+            )
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("kind", ["sdk", "mapping", "tuple"])
+def test_undeclared_missing_row_cell_retains_legacy_conversion(monkeypatch, kind) -> None:
+    client = _limited_client(monkeypatch, _declared_row_response(kind, False), [])
+    assert client.execute("synthetic", "synthetic", "synthetic") == [
+        {"Left": 1, "Right": None}, {"Left": 2, "Right": None},
+    ]
+
+
+def test_missing_sdk_cell_cannot_fall_back_to_sdk_attribute(monkeypatch) -> None:
+    from src.core.exceptions import QueryError
+    from src.core.kusto_result_limits import KustoResultLimits
+
+    response = _synthetic_sdk_response([("Left", "int"), ("columns_count", "int")], [[1]])
+    client = _limited_client(monkeypatch, response, [])
+    with pytest.raises(QueryError, match="row"):
+        client.execute(
+            "synthetic", "synthetic", "synthetic",
+            result_limits=KustoResultLimits(("Left", "columns_count"), 1, 100),
+        )
+
+
+def test_missing_mapping_cell_cannot_fall_back_to_integer_key(monkeypatch) -> None:
+    from types import MappingProxyType
+
+    from src.core.exceptions import QueryError
+    from src.core.kusto_result_limits import KustoResultLimits
+
+    row = MappingProxyType({"Left": 1, 1: "not a projected value"})
+    client = _limited_client(monkeypatch, _FakeResponse([_FakeTable(["Left", "Right"], [row])]), [])
+    with pytest.raises(QueryError, match="row"):
+        client.execute(
+            "synthetic", "synthetic", "synthetic",
+            result_limits=KustoResultLimits(("Left", "Right"), 1, 100),
+        )
+
+
+@pytest.mark.parametrize("complete", [False, True])
+def test_declared_attribute_rows_require_present_fields(monkeypatch, complete) -> None:
+    from types import SimpleNamespace
+
+    from src.core.exceptions import QueryError
+    from src.core.kusto_result_limits import KustoResultLimits
+
+    row = SimpleNamespace(Left=1, **({"Right": None} if complete else {}))
+    client = _limited_client(monkeypatch, _FakeResponse([_FakeTable(["Left", "Right"], [row])]), [])
+    limits = KustoResultLimits(("Left", "Right"), 1, 100)
+    if complete:
+        assert client.execute("synthetic", "synthetic", "synthetic", result_limits=limits) == [
+            {"Left": 1, "Right": None},
+        ]
+    else:
+        with pytest.raises(QueryError, match="row"):
+            client.execute("synthetic", "synthetic", "synthetic", result_limits=limits)
+
+
+@pytest.mark.parametrize("sized", [False, True])
+def test_declared_hybrid_row_retains_attribute_fallback(monkeypatch, sized: bool) -> None:
+    from src.core.kusto_result_limits import KustoResultLimits
+
+    class HybridRow:
+        Right = None
+
+        def __getitem__(self, key):
+            if key == "Left" or key == 0:
+                return 1
+            raise KeyError(key)
+
+    class SizedHybridRow(HybridRow):
+        def __len__(self) -> int:
+            return 2
+
+    row = SizedHybridRow() if sized else HybridRow()
+    client = _limited_client(monkeypatch, _FakeResponse([_FakeTable(["Left", "Right"], [row])]), [])
+    assert client.execute(
+        "synthetic", "synthetic", "synthetic", result_limits=KustoResultLimits(("Left", "Right"), 1, 100),
+    ) == [{"Left": 1, "Right": None}]
+
+
+@pytest.mark.parametrize("method", ["execute", "execute_with_schema"])
+@pytest.mark.parametrize("throttled", [False, True])
+def test_one_attempt_retains_existing_success_and_throttle_behavior(monkeypatch, method, throttled) -> None:
+    from src.core.exceptions import QueryError
+
+    calls: list[object] = []
+    client = _limited_client(monkeypatch, _FakeResponse([_FakeTable(["Value"], [(1,)])]), calls)
+    if throttled:
+        class ThrottledClient:
+            def execute(self, database, kql, properties=None):
+                calls.append(properties.options)
+                raise RuntimeError("429 throttled")
+
+        monkeypatch.setattr(client, "_get_or_create_client", lambda _: ThrottledClient())
+        with pytest.raises(QueryError, match="429"):
+            getattr(client, method)("synthetic", "synthetic", "synthetic", max_retries=1)
+    else:
+        result = getattr(client, method)("synthetic", "synthetic", "synthetic", max_retries=1)
+        assert (result if method == "execute" else result[0]) == [{"Value": 1}]
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize("row_count", [0, 1, 2])
 def test_common_executor_enforces_existing_scalar_cardinality(monkeypatch, row_count: int) -> None:
     from src.core.exceptions import QueryError
@@ -303,6 +484,8 @@ def test_common_executor_enforces_existing_scalar_cardinality(monkeypatch, row_c
 @pytest.mark.parametrize("consumer", ["hydration", "report"])
 @pytest.mark.parametrize("failure,injected", [
     ("partial", False),
+    ("missing_cell", False),
+    ("zero_attempt", False),
     *[(failure, injected) for failure in ("rows", "bytes", "schema", "scalar") for injected in (False, True)],
 ])
 def test_common_result_refusal_reaches_actual_consumers(
@@ -321,11 +504,17 @@ def test_common_result_refusal_reaches_actual_consumers(
         ["Other"] if failure == "schema" else ["Value"], [(1,), (2,)] if failure in {"rows", "scalar"} else [(1,)],
     )])
     response.errors_count = 1 if failure == "partial" else 0
+    if failure == "missing_cell":
+        response = _synthetic_sdk_response([("Value", "int")], [[]])
     calls: list[object] = []
     client = _limited_client(monkeypatch, response, calls)
     monkeypatch.setattr("src.core.kusto_client.KustoClient", lambda: client)
     execute = build_live_kusto_query_executor()
-    if injected:
+    if failure == "zero_attempt":
+        execute = lambda selected: client.execute(
+            selected.cluster, selected.database, selected.kql, max_retries=0, result_limits=selected.result_limits,
+        )
+    elif injected:
         execute = lambda _query: [
             {"Other" if failure == "schema" else "Value": value}
             for value in ([1, 2] if failure in {"rows", "scalar"} else [1])
@@ -360,7 +549,7 @@ def test_common_result_refusal_reaches_actual_consumers(
         assert not sections[0].rows
         assert observations[0].execution_state == "degraded"
         assert warnings
-    assert len(calls) == (0 if injected else 1)
+    assert len(calls) == (0 if injected or failure == "zero_attempt" else 1)
 
 
 def test_streaming_row_admission_stops_before_returning_a_truncated_subset() -> None:

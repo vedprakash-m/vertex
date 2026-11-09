@@ -223,6 +223,7 @@ def _decode_run_capture(value: Any) -> RunEvidenceSnapshot:
                         for row in family_modes
                     )
                     or family_modes != tuple(sorted(set(family_modes)))
+                    or len({family for family, _ in family_modes}) != len(family_modes)
                 )
             )
             or capture.capture_state != "unqualified_capture"

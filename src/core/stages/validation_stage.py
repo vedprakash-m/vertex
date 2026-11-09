@@ -476,15 +476,10 @@ def _build_manifest_metadata(ctx: StageContext, render_state: Any) -> dict[str, 
 
 
 def _build_family_read_paths_metadata(ctx: StageContext) -> dict[str, str]:
-    """Track K (fix-data-flow.md §6.11): per-issue render manifest recording
-    which read path each migrated fact family actually used for this render
-    -- ``"reality"`` when its authority family's SoR mode was non-legacy,
-    ``"legacy"`` otherwise (or when the program/programs_root couldn't be
-    resolved for this render pass). Makes the SoR-mode-vs-actual-read-path
-    consistency check concretely queryable (a doctor check compares this
-    against `fact_store_sor.yaml`'s declared state) rather than requiring the
-    kind of manual code-reading exercise PS-11/PS-14's own verification
-    needed this session.
+    """Record selected paths and known audited stage rollbacks.
+
+    Other paths are selector-derived and do not account for empty risk
+    rollback, rendering fallback or an unsuccessful read.
     """
     selector_modes = dict(report_family_selectors(ctx))
     family_to_authority = {
@@ -493,11 +488,17 @@ def _build_family_read_paths_metadata(ctx: StageContext) -> dict[str, str]:
         "risk": "judgment",
         "assumption": "judgment",
     }
-    return {
+    paths = {
         family: "legacy" if selector_modes[authority_family] == "legacy" else "reality"
         for family, authority_family in family_to_authority.items()
         if authority_family in selector_modes
     }
+    if ctx.milestone_legacy_rollback and "milestone" in paths:
+        paths["milestone"] = "legacy"
+        paths["dependency"] = "legacy"
+    if ctx.risk_legacy_rollback_nonempty and "risk" in paths:
+        paths["risk"] = "legacy"
+    return paths
 
 
 def _build_ai_safety_metadata(ctx: StageContext) -> dict[str, Any]:

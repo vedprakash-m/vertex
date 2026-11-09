@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from src.core._db import open_program_db
+from src.core._db import SQLiteUnitOfWork, open_program_db
 from src.core.channel_registry_store import ChannelRegistryStore
 from src.core.discovery_intent import (
     CandidateIntentMatch,
@@ -24,6 +25,7 @@ from src.core.m365_registry_store import M365RegistryArtifact
 from src.core.models_v2 import Workstream
 
 
+_LOG = logging.getLogger(__name__)
 CANDIDATE_REJECTION_SUPPRESSION_DAYS = 60
 _DISCOVERY_TABLE_NAMES = (
     "source_intents",
@@ -108,6 +110,7 @@ class SourceCandidateStore:
                     _DISCOVERY_TABLE_NAMES,
                 ).fetchall()
         except sqlite3.Error:
+            _LOG.warning("Source candidate schema check unavailable due to a database error.")
             return False
         return {str(row["name"]) for row in rows} == set(_DISCOVERY_TABLE_NAMES)
 
@@ -797,20 +800,9 @@ class SourceCandidateStore:
         self.upsert_intent(intent)
         return 1
 
-    def _connect(self) -> sqlite3.Connection:
-        """INV-AF-13 (WO-2 item 10): same migration and atomicity caveat as
-        channel_registry_store.py's ``_connect()`` (WO-2 item 9) -- routed
-        through open_program_db() with its context-manager sugar bypassed,
-        since callers use ``with self._connect() as conn:`` on the raw
-        connection. Dropping the prior ``isolation_level=None`` autocommit
-        mode means statements in one block now commit/roll back atomically
-        together rather than independently; see
-        test_source_candidate_store.py's
-        ``test_connect_is_atomic_across_multiple_statements_in_one_block``.
-        ``durability="strict"`` preserves the prior always-FULL synchronous
-        default (never explicitly set before).
-        """
-        return open_program_db(self.db_path, durability="strict").connection
+    def _connect(self) -> SQLiteUnitOfWork:
+        """INV-AF-13: use strict durability and close after the transaction."""
+        return open_program_db(self.db_path, durability="strict")
 
 
 def _intent_from_row(row: sqlite3.Row) -> SourceIntent:

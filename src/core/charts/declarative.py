@@ -66,9 +66,11 @@ class DeclarativeChartBuilder:
 
         x_idx = col_index[x_axis]
         y_indices: list[int] = []
+        valid_y_axes: list[str] = []
         for y_col in y_axes:
             if y_col in col_index:
                 y_indices.append(col_index[y_col])
+                valid_y_axes.append(y_col)
             else:
                 logger.warning(
                     "declarative_chart: y_axis column '%s' not found in data — skipping",
@@ -78,6 +80,7 @@ class DeclarativeChartBuilder:
         if not y_indices:
             logger.warning("declarative_chart: no valid y_axes found")
             return None
+        y_axes = valid_y_axes
 
         # Extract data
         x_labels: list[str] = []
@@ -125,11 +128,7 @@ class DeclarativeChartBuilder:
                 return None
 
             # Goal lines
-            for gl in chart_config.get("goal_lines", []):
-                try:
-                    axis.axhline(y=gl["value"], color="#D97706", linewidth=1.2, linestyle="--", alpha=0.8)
-                except (KeyError, ValueError):
-                    pass
+            self._render_goal_lines(axis, chart_config.get("goal_lines", []))
 
             fig.tight_layout(pad=0.1)
 
@@ -169,6 +168,7 @@ class DeclarativeChartBuilder:
                     buf.seek(0)
                     png_bytes = buf.getvalue()
                 if "fig2" in dir():
+                    self._render_goal_lines(ax2, chart_config.get("goal_lines", []))
                     fig2.tight_layout(pad=0.1)
                     buf2 = BytesIO()
                     fig2.savefig(
@@ -181,6 +181,13 @@ class DeclarativeChartBuilder:
                     buf2.seek(0)
                     png_bytes = buf2.getvalue()
                     del fig2
+                    if len(png_bytes) > PNG_HARD_GATE_BYTES:
+                        logger.warning(
+                            "declarative_chart: PNG size %d exceeds hard gate %d — returning None",
+                            len(png_bytes),
+                            PNG_HARD_GATE_BYTES,
+                        )
+                        return None
 
             del fig
 
@@ -205,6 +212,13 @@ class DeclarativeChartBuilder:
         }
 
         return png_bytes, metadata
+
+    def _render_goal_lines(self, axis, goal_lines):
+        for gl in goal_lines:
+            try:
+                axis.axhline(y=gl["value"], color="#D97706", linewidth=1.2, linestyle="--", alpha=0.8)
+            except (KeyError, ValueError):
+                pass
 
     def _render_line(self, axis, x_labels, y_data, y_axes, palette, grid_alpha, grid_color="#E5E7EB", facecolor="#FFFFFF"):
         x_pos = list(range(len(x_labels)))

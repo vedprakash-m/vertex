@@ -37,6 +37,7 @@ def apply_baseline_followthrough(
                 issue_number,
                 calibrations,
                 archive_root=archive_root,
+                programs_root=programs_root,
             )
         except Exception as exc:
             warnings = warnings + (f"CalibrationPrior skipped: {exc}",)

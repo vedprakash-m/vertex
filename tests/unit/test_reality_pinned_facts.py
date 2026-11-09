@@ -163,7 +163,7 @@ def test_empty_capture_does_not_reload_replacement_facts(workspace, stage):
     store.append_fact(_milestone(), recorded_at=NOW)
     with (
         patch.object(program_reality, "load_program_facts", side_effect=AssertionError("current facts")),
-        patch.object(risk_stage, "_load_current_risks", return_value=()) as cross_check,
+        patch.object(risk_stage, "_load_legacy_risks", return_value=()) as cross_check,
     ):
         result = stage().execute(ctx)
     assert (result.risks if stage is RiskStage else result.milestones) == ()
@@ -361,7 +361,7 @@ def test_primary_family_overrides_accept_complete_capture(workspace):
     ctx = _resolved(workspace)
     with (
         patch.object(program_reality, "load_program_facts", side_effect=AssertionError("current facts")),
-        patch.object(risk_stage, "_load_current_risks", return_value=()),
+        patch.object(risk_stage, "_load_legacy_risks", return_value=()),
     ):
         assert RiskStage().execute(ctx).risks == ()
         assert MilestoneStage().execute(ctx).milestones == ()

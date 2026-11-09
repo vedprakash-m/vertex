@@ -61,7 +61,7 @@ from src.core.gather_run_manifest import (
 
 
 @pytest.mark.parametrize("message,expected_category", [
-    ("ConnectionError: 401 unauthorized alice@contoso.com", FailureCategory.TRANSIENT_AUTH),
+    ("ConnectionError: 401 unauthorized alice@synthetic-02.example", FailureCategory.TRANSIENT_AUTH),
     ("HTTP 429 too many requests", FailureCategory.RATE_LIMIT),
     ("ConnectionError: remote end closed connection", FailureCategory.NETWORK),
     ("Kusto query timeout after 60s", FailureCategory.QUERY_TIMEOUT),
@@ -261,7 +261,7 @@ def test_support_bundle_redacts_planted_pii(tmp_path: Path) -> None:
         "channels": {
             "ado": {
                 "yield": 5,
-                "last_error": "401 unauthorized alice@contoso.com",  # planted PII
+                "last_error": "401 unauthorized alice@synthetic-02.example",  # planted PII
             },
         },
     }), encoding="utf-8")
@@ -279,7 +279,7 @@ def test_support_bundle_redacts_planted_pii(tmp_path: Path) -> None:
         assert "environment.txt" in names
         assert "redaction_log.txt" in names
         gs = tar.extractfile("gather_state.json").read().decode("utf-8")
-        assert "alice@contoso.com" not in gs
+        assert "alice@synthetic-02.example" not in gs
         assert "[REDACTED]" in gs
         env = tar.extractfile("environment.txt").read().decode("utf-8")
         assert "host: [REDACTED]" in env
@@ -296,7 +296,7 @@ def test_support_bundle_preserves_documented_pii_slots(tmp_path: Path) -> None:
         "program_id": program_id,
         "gathered_at": "2026-06-09T12:00:00Z",
         "raw_metadata": {
-            "assignee_email": "bob@contoso.com",  # DOCUMENTED PII slot — keep
+            "assignee_email": "bob@synthetic-02.example",  # DOCUMENTED PII slot — keep
         },
     }), encoding="utf-8")
     result = build_support_bundle(
@@ -306,7 +306,7 @@ def test_support_bundle_preserves_documented_pii_slots(tmp_path: Path) -> None:
     )
     with tarfile.open(result.bundle_path, "r:gz") as tar:
         gs = tar.extractfile("gather_state.json").read().decode("utf-8")
-        assert "bob@contoso.com" in gs, "Documented PII slot was scrubbed — should be preserved"
+        assert "bob@synthetic-02.example" in gs, "Documented PII slot was scrubbed — should be preserved"
 
 
 def test_support_bundle_includes_bounded_gather_run_lifecycle_diagnostics(tmp_path: Path) -> None:

@@ -1,7 +1,4 @@
 from __future__ import annotations
-import pytest
-from pathlib import Path
-pytestmark = pytest.mark.skipif(not (Path(__file__).resolve().parents[2] / "editions").exists(), reason="Requires private data")
 
 import json
 from datetime import datetime, timedelta, timezone
@@ -13,6 +10,8 @@ from typer.testing import CliRunner
 from cli import app
 from src.commands.next import NextSuggestion, suggest_next_steps
 from src.core.edition_resolver import get_program_output_dir
+
+pytestmark = pytest.mark.usefixtures("isolated_cli_startup")
 
 runner = CliRunner()
 EDITION = "acme_weekly"
@@ -55,6 +54,7 @@ def _write_manifest(
 def test_suggest_no_manifest_yields_report_suggestion(tmp_path: Path) -> None:
     suggestions = suggest_next_steps(
         EDITION,
+        editions_root=tmp_path / "editions",
         archive_root=tmp_path / "archive",
         programs_root=tmp_path / "programs",
         reports_root=tmp_path / "reports",
@@ -76,6 +76,7 @@ def test_suggest_stale_manifest_yields_gather_suggestion(tmp_path: Path, monkeyp
 
     suggestions = suggest_next_steps(
         EDITION,
+        editions_root=tmp_path / "editions",
         archive_root=tmp_path / "archive",
         programs_root=tmp_path / "programs",
         reports_root=tmp_path / "reports",
@@ -97,6 +98,7 @@ def test_suggest_qg8_failure_yields_override_suggestion(tmp_path: Path, monkeypa
 
     suggestions = suggest_next_steps(
         EDITION,
+        editions_root=tmp_path / "editions",
         archive_root=tmp_path / "archive",
         programs_root=tmp_path / "programs",
         reports_root=tmp_path / "reports",
@@ -119,6 +121,7 @@ def test_suggest_freshness_blocks_yields_freshness_suggestion(tmp_path: Path, mo
 
     suggestions = suggest_next_steps(
         EDITION,
+        editions_root=tmp_path / "editions",
         archive_root=tmp_path / "archive",
         programs_root=tmp_path / "programs",
         reports_root=tmp_path / "reports",
@@ -139,6 +142,7 @@ def test_suggest_capped_at_three_and_deduplicates(tmp_path: Path, monkeypatch) -
 
     suggestions = suggest_next_steps(
         EDITION,
+        editions_root=tmp_path / "editions",
         archive_root=tmp_path / "archive",
         programs_root=tmp_path / "programs",
         reports_root=tmp_path / "reports",
@@ -160,6 +164,7 @@ def test_suggest_qg3_failure_yields_review_sections_suggestion(tmp_path: Path, m
 
     suggestions = suggest_next_steps(
         EDITION,
+        editions_root=tmp_path / "editions",
         archive_root=tmp_path / "archive",
         programs_root=tmp_path / "programs",
         reports_root=tmp_path / "reports",
@@ -182,6 +187,7 @@ def test_suggest_qg3_failure_ranks_above_freshness(tmp_path: Path, monkeypatch) 
 
     suggestions = suggest_next_steps(
         EDITION,
+        editions_root=tmp_path / "editions",
         archive_root=tmp_path / "archive",
         programs_root=tmp_path / "programs",
         reports_root=tmp_path / "reports",
@@ -206,6 +212,7 @@ def test_suggest_missing_narratives_yields_report_suggestion(tmp_path: Path, mon
 
     suggestions = suggest_next_steps(
         EDITION,
+        editions_root=tmp_path / "editions",
         archive_root=tmp_path / "archive",
         programs_root=tmp_path / "programs",
         reports_root=tmp_path / "reports",
@@ -230,6 +237,7 @@ def test_suggest_missing_narratives_ranks_above_qg3(tmp_path: Path, monkeypatch)
 
     suggestions = suggest_next_steps(
         EDITION,
+        editions_root=tmp_path / "editions",
         archive_root=tmp_path / "archive",
         programs_root=tmp_path / "programs",
         reports_root=tmp_path / "reports",
@@ -253,6 +261,7 @@ def test_suggest_sorted_by_priority(tmp_path: Path, monkeypatch) -> None:
 
     suggestions = suggest_next_steps(
         EDITION,
+        editions_root=tmp_path / "editions",
         archive_root=tmp_path / "archive",
         programs_root=tmp_path / "programs",
         reports_root=tmp_path / "reports",
@@ -274,6 +283,7 @@ def test_contract_each_suggestion_is_parseable_by_cli(tmp_path: Path, monkeypatc
 
     suggestions = suggest_next_steps(
         EDITION,
+        editions_root=tmp_path / "editions",
         archive_root=tmp_path / "archive",
         programs_root=tmp_path / "programs",
         reports_root=tmp_path / "reports",
@@ -421,6 +431,7 @@ def test_qg5_verbosity_violations_yields_report_suggestion(tmp_path: Path, monke
 
     suggestions = suggest_next_steps(
         EDITION,
+        editions_root=tmp_path / "editions",
         archive_root=tmp_path / "archive",
         programs_root=tmp_path / "programs",
         reports_root=tmp_path / "reports",
@@ -462,6 +473,7 @@ def test_qg5_clean_overrides_does_not_yield_qg5_suggestion(tmp_path: Path, monke
 
     suggestions = suggest_next_steps(
         EDITION,
+        editions_root=tmp_path / "editions",
         archive_root=tmp_path / "archive",
         programs_root=tmp_path / "programs",
         reports_root=tmp_path / "reports",

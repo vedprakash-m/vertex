@@ -8,6 +8,7 @@ import hashlib
 import json
 from typing import Any
 
+from src.core.gather_channel_support import is_workiq_catchup_diagnostic, workiq_catchup_diagnostic_identity
 from src.core.models_v2 import Signal
 from src.core.signal_ranking import signal_source_family
 
@@ -102,6 +103,14 @@ def signal_fingerprint(signal: Signal) -> str:
             metadata.get("date"),
         )
     if source == "vertex/catchup":
+        if is_workiq_catchup_diagnostic(signal):
+            return _join_fingerprint(
+                source,
+                "workiq-diagnostic",
+                signal.program_id,
+                signal.timestamp.astimezone(timezone.utc).date().isoformat() if signal.timestamp.tzinfo is not None else signal.timestamp.date().isoformat(),
+                workiq_catchup_diagnostic_identity(signal),
+            )
         return _join_fingerprint(
             source,
             signal.program_id,

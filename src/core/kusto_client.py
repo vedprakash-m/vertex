@@ -2,7 +2,7 @@ from __future__ import annotations
 
 # Adapted from Artha scripts/kusto_runner.py
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping, Sized
 from dataclasses import dataclass
 from datetime import timedelta
 import logging
@@ -70,6 +70,8 @@ class KustoClient:
         no_safety: bool = False,
         result_limits: KustoResultLimits | None = None,
     ) -> tuple[list[dict[str, Any]], tuple[KustoColumn, ...]]:
+        if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 1:
+            raise QueryError("Kusto max_retries must be a positive integer number of attempts.")
         client = self._get_or_create_client(cluster)
         request_properties = self._build_request_properties(timeout, no_safety=no_safety)
         if result_limits is not None:
@@ -101,7 +103,7 @@ class KustoClient:
 
         if last_error is not None:
             raise QueryError(f"Kusto query failed for {cluster}/{database}: {last_error}") from last_error
-        return [], ()
+        raise QueryError("Kusto query did not execute.")
 
     def _get_or_create_client(self, cluster: str) -> Any:
         if cluster not in self._clients:
@@ -139,7 +141,7 @@ class KustoClient:
                 if result_limits is not None and tuple(columns) != result_limits.projected_columns:
                     raise QueryError("Kusto result schema does not match the declared projected columns.")
                 for row in table:
-                    yield _row_to_dict(columns, row)
+                    yield _row_to_dict(columns, row, require_complete=result_limits is not None)
 
         return admit_kusto_rows(converted_rows(), result_limits)
 
@@ -209,20 +211,19 @@ def build_live_kusto_query_probe(
             seen_targets.add(target)
             try:
                 client.execute(target[0], target[1], ".show version", timeout=30, max_retries=1)
-            except (AuthError, QueryError) as error:
+            except (AuthError, QueryError):
                 failed_targets.add(target)
                 if log_failures:
-                    log.warning(
-                        "Kusto pre-flight failed for %s/%s — queries on this cluster will be skipped. Error: %s",
-                        target[0],
-                        target[1],
-                        error,
-                    )
+                    log.warning("Kusto pre-flight failed; queries on this target will be skipped.")
         return frozenset(failed_targets)
 
     return probe
 
-def _row_to_dict(columns: list[str], row: Any) -> dict[str, Any]:
+def _row_to_dict(columns: list[str], row: Any, *, require_complete: bool = False) -> dict[str, Any]:
+    if require_complete and isinstance(row, Mapping) and any(column not in row for column in columns):
+        raise QueryError("Kusto result row is missing a declared projected value.")
+    if require_complete and isinstance(row, Sized) and len(row) < len(columns):
+        raise QueryError("Kusto result row is missing a declared projected value.")
     if isinstance(row, dict):
         return {column: row.get(column) for column in columns} if columns else dict(row)
     converted: dict[str, Any] = {}
@@ -237,5 +238,11 @@ def _row_to_dict(columns: list[str], row: Any) -> dict[str, Any]:
             continue
         except Exception:
             pass
-        converted[column] = getattr(row, column, None)
+        missing = object()
+        value = getattr(row, column, missing)
+        if value is missing:
+            if require_complete:
+                raise QueryError("Kusto result row is missing a declared projected value.")
+            value = None
+        converted[column] = value
     return converted

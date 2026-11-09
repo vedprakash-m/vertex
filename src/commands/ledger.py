@@ -1154,7 +1154,9 @@ def verify(
         if current_projection_path.exists():
             with tempfile.TemporaryDirectory() as temp_dir:
                 fresh_path = Path(temp_dir) / "projection.sqlite3"
-                project_events_to_sqlite(program, events, projection_path=fresh_path)
+                project_events_to_sqlite(
+                    program, events, projection_path=fresh_path, programs_root=programs_root,
+                )
                 deep_projection_match = canonical_projection_dump(current_projection_path) == canonical_projection_dump(fresh_path)
         else:
             deep_projection_match = False
@@ -1270,8 +1272,12 @@ def diff(
         temp_root = Path(temp_dir)
         before_path = temp_root / "before.sqlite3"
         after_path = temp_root / "after.sqlite3"
-        project_events_to_sqlite(program, events, projection_path=before_path, as_of=parsed_from_as_of)
-        project_events_to_sqlite(program, events, projection_path=after_path, as_of=parsed_to_as_of)
+        project_events_to_sqlite(
+            program, events, projection_path=before_path, programs_root=programs_root, as_of=parsed_from_as_of,
+        )
+        project_events_to_sqlite(
+            program, events, projection_path=after_path, programs_root=programs_root, as_of=parsed_to_as_of,
+        )
         before_dump = canonical_projection_dump(before_path)
         after_dump = canonical_projection_dump(after_path)
     payload: dict[str, Any] = {

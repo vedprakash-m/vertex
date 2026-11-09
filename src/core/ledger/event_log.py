@@ -290,6 +290,7 @@ def write_event(
     max_bytes: int = DEFAULT_MAX_BYTES,
     grounded_in_validator: Callable[[str], bool] | None = None,
 ) -> EventWriteResult:
+    _validate_writable_envelope(envelope)
     with cooperative_capture_fence(get_event_logs_dir(envelope.program_id, programs_root=programs_root).parent):
         return _write_event(
             envelope, programs_root=programs_root, max_bytes=max_bytes,
@@ -351,7 +352,9 @@ def _write_event(
         prev_event_hash=prev_hash,
         content_hash=compute_content_hash(envelope.event_type, envelope.occurred_at, envelope.payload),
     )
-    line = canonical_json(persisted.to_dict()) + "\n"
+    payload = persisted.to_dict()
+    EventEnvelope.from_dict(payload)
+    line = canonical_json(payload) + "\n"
     append_jsonl_line(target_path, line)
     line_no = base_line_no + 1
     index_event(persisted, file_path=target_path, line_no=line_no, programs_root=programs_root)
@@ -377,6 +380,8 @@ def write_events_atomic(
 ) -> EventBatchWriteResult:
     if not envelopes:
         raise ValueError("write_events_atomic requires at least one envelope.")
+    for envelope in envelopes:
+        _validate_writable_envelope(envelope)
     program_ids = {envelope.program_id for envelope in envelopes}
     if len(program_ids) != 1:
         raise ValueError("write_events_atomic requires envelopes from a single program.")
@@ -440,6 +445,7 @@ def _write_events_atomic(
             prev_event_hash=previous_hash,
             content_hash=compute_content_hash(envelope.event_type, envelope.occurred_at, envelope.payload),
         )
+        EventEnvelope.from_dict(persisted.to_dict())
         persisted_envelopes.append(persisted)
         previous_hash = compute_envelope_hash(persisted)
         previous_recorded_at = persisted.recorded_at
@@ -467,6 +473,15 @@ def _write_events_atomic(
         ),
     )
     return EventBatchWriteResult(envelopes=tuple(persisted_envelopes), path=target_path, rotated=rotated)
+
+
+def _validate_writable_envelope(envelope: EventEnvelope) -> None:
+    payload = envelope.to_dict()
+    # These three fields are assigned by the writer after the cooperative fence.
+    payload["event_id"] = "pending"
+    payload["prev_event_hash"] = genesis_prev_hash(envelope.program_id)
+    payload["content_hash"] = "pending"
+    EventEnvelope.from_dict(payload)
 
 
 def _validate_grounded_in_claim_refs(

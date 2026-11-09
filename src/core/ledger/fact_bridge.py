@@ -21,6 +21,7 @@ from src.core.program_fact_store import (
     ProgramFactStore,
     ProgramFactWriteResult,
     build_natural_key,
+    _resolve_fact_db_root,
 )
 from src.core.truth_model import get_authority_family, load_source_authority_policy
 
@@ -1121,7 +1122,7 @@ def run_cross_source_conflict_detection(
         from src.core.truth_model import build_truth_context, detect_corroboration_and_conflicts
 
         now = datetime.now(timezone.utc)
-        store = ProgramFactStore(program_id, home_root=None, db_root=programs_root.parent)
+        store = ProgramFactStore(program_id, home_root=None, db_root=_resolve_fact_db_root(programs_root))
         snapshot = store.snapshot(as_of=now)
         observations = list(snapshot.facts)
         if not observations:

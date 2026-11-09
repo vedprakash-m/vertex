@@ -55,8 +55,8 @@ def evaluate_prefetch_schedule_health(
         return ScheduleHealthFinding(
             artifact="prefetch",
             status="missing",
-            detail=f"No committed prefetch snapshot for {program_id}/{channel}. "
-            "Either the scheduled task has never run, or it has always failed before committing. "
+            detail=f"No usable committed prefetch snapshot for {program_id}/{channel}. "
+            "The scheduled task may not have run, may have failed, or its latest snapshot may be invalid. "
             "gather will fall back to a live WorkIQ call.",
             age_hours=None,
         )

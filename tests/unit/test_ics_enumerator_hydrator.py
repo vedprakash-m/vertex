@@ -1,5 +1,7 @@
 """Unit tests for IcsEnumerator (P3-1) and IcsHydrator (P3-1).
 
+The inline calendar examples are authored synthetic fixtures.
+
 Covers:
 * IcsEnumerator: 3-dir atomicity, FIFO ordering, crash recovery, limit,
   uid extraction, sha256-fallback ID, quarantine
@@ -32,14 +34,14 @@ icalendar = pytest.importorskip("icalendar", reason="icalendar>=5.0 not installe
 _BASIC_VEVENT = """\
 BEGIN:VCALENDAR
 VERSION:2.0
-PRODID:-//Test//EN
+PRODID:-//Vertex//Synthetic fixture//EN
 BEGIN:VEVENT
-UID:event-gen9-deployment@example.com
-SUMMARY:Gen9 BIOS AP Deployment Complete
-DTSTART:20260624T140000Z
-DTEND:20260624T150000Z
-ORGANIZER;CN=Firmware Lead:mailto:fwlead@example.com
-DESCRIPTION:All Gen9 devices migrated to new firmware. Rollout complete.
+UID:basic-event@fixture.example.net
+SUMMARY:Example checkpoint completed
+DTSTART:20260624T090000Z
+DTEND:20260624T100000Z
+ORGANIZER;CN=Example Owner:mailto:basic-organizer@fixture.example.net
+DESCRIPTION:A synthetic status checkpoint.
 STATUS:CONFIRMED
 SEQUENCE:0
 END:VEVENT
@@ -49,14 +51,14 @@ END:VCALENDAR
 _ALLDAY_VEVENT = """\
 BEGIN:VCALENDAR
 VERSION:2.0
-PRODID:-//Test//EN
+PRODID:-//Vertex//Synthetic fixture//EN
 BEGIN:VEVENT
-UID:allday-milestone-001@example.com
-SUMMARY:Q2 Milestone Freeze
+UID:allday-event@fixture.example.net
+SUMMARY:Example all-day event
 DTSTART;VALUE=DATE:20260630
 DTEND;VALUE=DATE:20260701
-ORGANIZER;CN=PM Lead:mailto:pm@example.com
-DESCRIPTION:Q2 feature freeze milestone.
+ORGANIZER;CN=Example Owner:mailto:allday-organizer@fixture.example.net
+DESCRIPTION:A synthetic all-day event.
 END:VEVENT
 END:VCALENDAR
 """
@@ -64,13 +66,13 @@ END:VCALENDAR
 _CANCELLED_VEVENT = """\
 BEGIN:VCALENDAR
 VERSION:2.0
-PRODID:-//Test//EN
+PRODID:-//Vertex//Synthetic fixture//EN
 METHOD:CANCEL
 BEGIN:VEVENT
-UID:cancelled-event-001@example.com
-SUMMARY:Cancelled Review Meeting
-DTSTART:20260624T160000Z
-DTEND:20260624T170000Z
+UID:cancelled-event@fixture.example.net
+SUMMARY:Cancelled example
+DTSTART:20260624T090000Z
+DTEND:20260624T100000Z
 STATUS:CANCELLED
 SEQUENCE:1
 END:VEVENT
@@ -80,15 +82,15 @@ END:VCALENDAR
 _RECURRING_VEVENT = """\
 BEGIN:VCALENDAR
 VERSION:2.0
-PRODID:-//Test//EN
+PRODID:-//Vertex//Synthetic fixture//EN
 BEGIN:VEVENT
-UID:weekly-sync-001@example.com
-SUMMARY:Weekly NOVA Sync
-DTSTART:20260624T150000Z
-DTEND:20260624T160000Z
-ORGANIZER;CN=TPM Lead:mailto:tpm@example.com
+UID:recurring-event@fixture.example.net
+SUMMARY:Recurring example
+DTSTART:20260624T090000Z
+DTEND:20260624T100000Z
+ORGANIZER;CN=Example Owner:mailto:recurring-organizer@fixture.example.net
 RRULE:FREQ=WEEKLY;COUNT=10
-DESCRIPTION:Weekly alignment sync for NOVA workstream.
+DESCRIPTION:A synthetic recurring event.
 END:VEVENT
 END:VCALENDAR
 """
@@ -96,17 +98,17 @@ END:VCALENDAR
 _SEQUENCE_HIGH_VEVENT = """\
 BEGIN:VCALENDAR
 VERSION:2.0
-PRODID:-//Test//EN
+PRODID:-//Vertex//Synthetic fixture//EN
 BEGIN:VEVENT
-UID:seq-test-001@example.com
+UID:sequence-event@fixture.example.net
 SUMMARY:Original Event
-DTSTART:20260624T140000Z
+DTSTART:20260624T090000Z
 SEQUENCE:0
 END:VEVENT
 BEGIN:VEVENT
-UID:seq-test-001@example.com
+UID:sequence-event@fixture.example.net
 SUMMARY:Updated Event Title
-DTSTART:20260624T150000Z
+DTSTART:20260624T100000Z
 SEQUENCE:2
 END:VEVENT
 END:VCALENDAR
@@ -115,10 +117,10 @@ END:VCALENDAR
 _NO_UID_VEVENT = """\
 BEGIN:VCALENDAR
 VERSION:2.0
-PRODID:-//Test//EN
+PRODID:-//Vertex//Synthetic fixture//EN
 BEGIN:VEVENT
-SUMMARY:Event Without UID
-DTSTART:20260624T140000Z
+SUMMARY:Example without an ID
+DTSTART:20260624T090000Z
 END:VEVENT
 END:VCALENDAR
 """
@@ -126,17 +128,17 @@ END:VCALENDAR
 _EMPTY_CALENDAR = """\
 BEGIN:VCALENDAR
 VERSION:2.0
-PRODID:-//Test//EN
+PRODID:-//Vertex//Synthetic fixture//EN
 END:VCALENDAR
 """
 
 _VALARM_ONLY = """\
 BEGIN:VCALENDAR
 VERSION:2.0
-PRODID:-//Test//EN
+PRODID:-//Vertex//Synthetic fixture//EN
 BEGIN:VTODO
-UID:todo-001@example.com
-SUMMARY:A to-do item (should be skipped)
+UID:todo@fixture.example.net
+SUMMARY:Synthetic task
 END:VTODO
 END:VCALENDAR
 """
@@ -156,7 +158,7 @@ def _make_candidate(ics_path: Path, uid: str) -> EnumeratedCandidate:
         locator=HydrationLocator(
             source_type=EntityType.EVENT,
             tenant_id="tenant-test",
-            principal_mailbox="tpm@example.com",
+            principal_mailbox="recurring-organizer@fixture.example.net",
             container="calendar",
             resource_id=uid,
         ),
@@ -181,7 +183,7 @@ class TestUidFromIcs:
     def test_extracts_uid_from_valid_ics(self, tmp_path: Path) -> None:
         p = _write_ics(tmp_path / "e.ics", _BASIC_VEVENT)
         uid = uid_from_ics(p)
-        assert uid == "event-gen9-deployment@example.com"
+        assert uid == "basic-event@fixture.example.net"
 
     def test_fallback_sha256_when_no_uid(self, tmp_path: Path) -> None:
         p = _write_ics(tmp_path / "nouid.ics", _NO_UID_VEVENT)
@@ -208,7 +210,7 @@ class TestIcsEnumerator:
         return IcsEnumerator(
             inbox_root=inbox,
             mailbox_tenant_id="tenant-test",
-            principal_mailbox="tpm@example.com",
+            principal_mailbox="recurring-organizer@fixture.example.net",
         )
 
     def test_empty_inbox_returns_empty_success(self, tmp_path: Path) -> None:
@@ -228,7 +230,7 @@ class TestIcsEnumerator:
         assert len(result.value) == 1
         candidate = result.value[0]
         assert candidate.enumerator == "ics_local"
-        assert candidate.locator.resource_id == "event-gen9-deployment@example.com"
+        assert candidate.locator.resource_id == "basic-event@fixture.example.net"
         # File should be in claimed/ now.
         assert len(list(enum.claimed_dir().glob("*.ics"))) == 1
         assert not (inbox / "event001.ics").exists()
@@ -279,14 +281,14 @@ class TestIcsEnumerator:
             _write_ics(
                 inbox / f"event{i:03d}.ics",
                 _BASIC_VEVENT.replace(
-                    "event-gen9-deployment@example.com",
+                    "basic-event@fixture.example.net",
                     f"event-{i:03d}@example.com",
                 ),
             )
         enum = IcsEnumerator(
             inbox_root=inbox,
             mailbox_tenant_id="t",
-            principal_mailbox="u@x.com",
+            principal_mailbox="fixture-user-01@group-01.fixture.example.net",
             limit=3,
         )
         result = enum.enumerate(_make_intent(), correlation_id="c5")
@@ -339,7 +341,7 @@ class TestIcsHydrator:
     def _hydrator(self) -> IcsHydrator:
         return IcsHydrator(
             mailbox_tenant_id="tenant-test",
-            principal_mailbox="tpm@example.com",
+            principal_mailbox="recurring-organizer@fixture.example.net",
         )
 
     def _candidate(self, ics_path: Path, uid: str) -> EnumeratedCandidate:
@@ -348,31 +350,31 @@ class TestIcsHydrator:
     def test_basic_vevent_hydrated(self, tmp_path: Path) -> None:
         p = _write_ics(tmp_path / "event.ics", _BASIC_VEVENT)
         hydrator = self._hydrator()
-        uid = "event-gen9-deployment@example.com"
+        uid = "basic-event@fixture.example.net"
         result = hydrator.hydrate(self._candidate(p, uid), correlation_id="h1")
         assert isinstance(result, Success)
         content = result.value
         assert isinstance(content, HydratedContent)
-        assert "Gen9 BIOS AP Deployment Complete" in content.canonical_text
+        assert "Example checkpoint completed" in content.canonical_text
         assert content.metadata_only is False
         assert content.chunks
 
     def test_organizer_cn_extracted_not_smtp(self, tmp_path: Path) -> None:
         p = _write_ics(tmp_path / "event.ics", _BASIC_VEVENT)
         hydrator = self._hydrator()
-        uid = "event-gen9-deployment@example.com"
+        uid = "basic-event@fixture.example.net"
         result = hydrator.hydrate(self._candidate(p, uid), correlation_id="h2")
         assert isinstance(result, Success)
         text = result.value.canonical_text
         # CN= display name should appear
-        assert "Firmware Lead" in text
+        assert "Example Owner" in text
         # Raw mailto: address must NOT appear in canonical text
-        assert "fwlead@example.com" not in text
+        assert "basic-organizer@fixture.example.net" not in text
 
     def test_allday_event_formatted_as_date(self, tmp_path: Path) -> None:
         p = _write_ics(tmp_path / "allday.ics", _ALLDAY_VEVENT)
         hydrator = self._hydrator()
-        uid = "allday-milestone-001@example.com"
+        uid = "allday-event@fixture.example.net"
         result = hydrator.hydrate(self._candidate(p, uid), correlation_id="h3")
         assert isinstance(result, Success)
         content = result.value
@@ -383,7 +385,7 @@ class TestIcsHydrator:
     def test_cancelled_event_is_metadata_only(self, tmp_path: Path) -> None:
         p = _write_ics(tmp_path / "cancel.ics", _CANCELLED_VEVENT)
         hydrator = self._hydrator()
-        uid = "cancelled-event-001@example.com"
+        uid = "cancelled-event@fixture.example.net"
         result = hydrator.hydrate(self._candidate(p, uid), correlation_id="h4")
         assert isinstance(result, Success)
         content = result.value
@@ -394,7 +396,7 @@ class TestIcsHydrator:
     def test_recurring_event_expands_rrule(self, tmp_path: Path) -> None:
         p = _write_ics(tmp_path / "recur.ics", _RECURRING_VEVENT)
         hydrator = self._hydrator()
-        uid = "weekly-sync-001@example.com"
+        uid = "recurring-event@fixture.example.net"
         result = hydrator.hydrate(self._candidate(p, uid), correlation_id="h5")
         assert isinstance(result, Success)
         content = result.value
@@ -404,7 +406,7 @@ class TestIcsHydrator:
     def test_sequence_highest_wins(self, tmp_path: Path) -> None:
         p = _write_ics(tmp_path / "seq.ics", _SEQUENCE_HIGH_VEVENT)
         hydrator = self._hydrator()
-        uid = "seq-test-001@example.com"
+        uid = "sequence-event@fixture.example.net"
         result = hydrator.hydrate(self._candidate(p, uid), correlation_id="h6")
         assert isinstance(result, Success)
         content = result.value
@@ -418,7 +420,7 @@ class TestIcsHydrator:
             locator=HydrationLocator(
                 source_type=EntityType.EVENT,
                 tenant_id="t",
-                principal_mailbox="u@x.com",
+                principal_mailbox="fixture-user-01@group-01.fixture.example.net",
                 container="calendar",
                 resource_id="no-path",
             ),
@@ -457,7 +459,7 @@ class TestIcsHydrator:
     def test_route_metadata_populated(self, tmp_path: Path) -> None:
         p = _write_ics(tmp_path / "event.ics", _BASIC_VEVENT)
         hydrator = self._hydrator()
-        uid = "event-gen9-deployment@example.com"
+        uid = "basic-event@fixture.example.net"
         result = hydrator.hydrate(self._candidate(p, uid), correlation_id="hm")
         assert isinstance(result, Success)
         meta = result.value.route_metadata
@@ -494,11 +496,11 @@ class TestIcsEnumeratorHydratorEndToEnd:
         enumerator = IcsEnumerator(
             inbox_root=inbox,
             mailbox_tenant_id="t",
-            principal_mailbox="u@x.com",
+            principal_mailbox="fixture-user-01@group-01.fixture.example.net",
         )
         hydrator = IcsHydrator(
             mailbox_tenant_id="t",
-            principal_mailbox="u@x.com",
+            principal_mailbox="fixture-user-01@group-01.fixture.example.net",
         )
 
         enum_result = enumerator.enumerate(
@@ -512,9 +514,9 @@ class TestIcsEnumeratorHydratorEndToEnd:
         hydrate_result = hydrator.hydrate(candidate, correlation_id="e2e-1")
         assert isinstance(hydrate_result, Success)
         hydrated = hydrate_result.value
-        assert "Gen9" in hydrated.canonical_text
+        assert "Example" in hydrated.canonical_text
         assert not hydrated.metadata_only
-        assert hydrated.identity.resource_id == "event-gen9-deployment@example.com"
+        assert hydrated.identity.resource_id == "basic-event@fixture.example.net"
 
     def test_enumerate_and_mark_processed(self, tmp_path: Path) -> None:
         inbox = tmp_path / "cal_inbox"
@@ -524,7 +526,7 @@ class TestIcsEnumeratorHydratorEndToEnd:
         enumerator = IcsEnumerator(
             inbox_root=inbox,
             mailbox_tenant_id="t",
-            principal_mailbox="u@x.com",
+            principal_mailbox="fixture-user-01@group-01.fixture.example.net",
         )
         result = enumerator.enumerate(_make_intent(), correlation_id="e2e-2")
         assert isinstance(result, Success)

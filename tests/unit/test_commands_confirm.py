@@ -1897,6 +1897,78 @@ def test_confirm_issue_v2_falls_back_to_regex_when_ai_claim_extraction_fails(rep
     assert any(claim.text == "WI:900001 Deployment readiness expected by June 15" for claim in claims)
     assert any("invalid structured output" in warning for warning in result.warnings)
 
+
+def test_confirm_issue_v2_budget_failure_keeps_regex_fallback_without_retry(
+    repo_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.ai.ai_mode import AIMode
+    from src.ai.client import BudgetExceeded
+    from src.ai.deployment_fallback import FallbackStructuredClient
+    from src.core.ledger.event_log import read_events
+
+    reports_root, archive_root = _seed_v2_report_layout(repo_root, tmp_path)
+    programs_root = reports_root.parent / "programs"
+    _set_program_ai_claim_extractor(programs_root, enabled=True, mode="production")
+    as_of = datetime(2026, 5, 5, 18, 0, tzinfo=timezone.utc)
+
+    generate_report_draft(
+        edition_name="acme_weekly", issue_number=1,
+        reports_root=reports_root, archive_root=archive_root, programs_root=programs_root,
+        as_of=as_of, work_item_loader=lambda bundle, timestamp: (_sample_items(timestamp), 0),
+        kusto_query_executor=lambda query: [], open_browser=False,
+    )
+    _seed_high_risk_signal_coverage(programs_root, captured_at=as_of)
+    overrides_path = programs_root / "acme" / "overrides" / "issue_001.yaml"
+    overrides_payload = yaml.safe_load(overrides_path.read_text(encoding="utf-8"))
+    for scorecard in overrides_payload["scorecards"].values():
+        for dimension in scorecard.values():
+            dimension["risk"] = "low"
+    _ack_decision_strip(overrides_payload)
+    overrides_path.write_text(yaml.safe_dump(overrides_payload, sort_keys=False), encoding="utf-8")
+    narrative = programs_root / "acme" / "narratives" / "issue_001" / "exec_summary.md"
+    narrative.write_text(
+        "WI:900001 Deployment readiness expected by June 15. Need LT decision on EXGATE timeline.\n",
+        encoding="utf-8",
+    )
+    _write_authored_workstream_narratives(
+        reports_root, 1, text="Synthetic narrative.\n", edition_name="acme_weekly",
+    )
+
+    monkeypatch.setattr("src.ai.tiered_router.get_ai_mode", lambda: AIMode.ACTIVE)
+    monkeypatch.setattr("src.ai.claim_extractor._extract_deterministic_claims", lambda **kwargs: (None, 0.0))
+    provider = Mock()
+    provider.structured.side_effect = BudgetExceeded("synthetic budget exhaustion")
+    factory = Mock(return_value=provider)
+    client = FallbackStructuredClient(
+        deployments=("primary", "backup"), temperature=0.0, budget_usd=1.0, client_factory=factory,
+    )
+    monkeypatch.setattr(
+        claim_resolution.ClaimExtractor, "from_program",
+        classmethod(lambda cls, program, trace_context=None: cls(client=client)),
+    )
+
+    result = confirm_issue(
+        edition_name="acme_weekly", issue_number=1,
+        reports_root=reports_root, archive_root=archive_root, programs_root=programs_root, force=True,
+    )
+
+    assert result.exit_code == 0, (result.failures, result.warnings)
+    assert result.archive_paths is not None
+    assert any("Claim tracker skipped: AOAI cost guard triggered" in warning for warning in result.warnings)
+    assert any(
+        claim.text == "WI:900001 Deployment readiness expected by June 15"
+        for claim in load_claim_entries("acme", programs_root)
+    )
+    factory.assert_called_once()
+    provider.structured.assert_called_once()
+    decisions = [
+        event for event in read_events("acme", programs_root=programs_root)
+        if event.event_type == "ai.release_decision.v1"
+    ]
+    assert len(decisions) == 1
+    assert decisions[0].payload["terminal"] == "discarded"
+
+
 def test_confirm_issue_warns_on_stale_proposed_decisions(repo_root: Path, tmp_path: Path) -> None:
     reports_root, archive_root = _seed_v2_report_layout(repo_root, tmp_path)
     programs_root = reports_root.parent / "programs"
@@ -2820,7 +2892,7 @@ def test_confirm_issue_reuses_persisted_kusto_sections(repo_root: Path, tmp_path
     draft_payload = json.loads((programs_root / "acme" / "publications" / EDITION_NAME / "issue_001" / "issue_001.draft.json").read_text(encoding="utf-8"))
     assert draft_payload["kusto_sections"]
     active_incidents = next(section for section in draft_payload["kusto_sections"] if section["title"] == "Active Incidents")
-    assert active_incidents["rows"][0][-1]["href"] == "https://portal.microsofticm.com/imp/v3/incidents/details/12345"
+    assert active_incidents["rows"][0][-1]["href"] == "https://incident.example.invalid/items/12345"
 
 
 def test_confirm_issue_tracks_ai_review_acceptance_from_review_artifact(repo_root: Path, tmp_path: Path) -> None:
@@ -3110,7 +3182,7 @@ def _confirm_kusto_query_results(query):
                 "Severity": "3",
                 "Title": "Fleet capacity alert",
                 "Status": "Active",
-                "IncidentUrl": "https://portal.microsofticm.com/imp/v3/incidents/details/12345",
+                "IncidentUrl": "https://incident.example.invalid/items/12345",
             }
         ]
     if query.id == "icm-mttr":

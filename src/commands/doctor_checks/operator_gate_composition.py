@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.commands.doctor_checks.models import ADOProbeResult, DoctorCheck, DoctorReport
+from src.commands.doctor_checks.yaml_support import _raise_if_unsafe_doctor_yaml
+from src.core.exceptions import ConfigError
 from src.core.metric_models import MetricDefinition
 from src.core.models_v2 import KustoQuery
 from src.m365.agency_bridge import AgencyCapabilities
@@ -37,28 +39,32 @@ def run_operator_gates_doctor(
     operator_gate_checkpoint_creation_check: Callable[..., DoctorCheck],
     operator_gate_rollback_drill_check: Callable[..., DoctorCheck],
 ) -> DoctorReport:
-    resolved = resolve_edition_fn(
-        edition_name,
-        editions_root=editions_root,
-        programs_root=programs_root,
-    )
-    if resolved is None:
-        return DoctorReport(edition=edition_name, checks=(DoctorCheck("Operator Gates", "fail", f"Edition '{edition_name}' could not be resolved."),))
+    try:
+        resolved = resolve_edition_fn(
+            edition_name,
+            editions_root=editions_root,
+            programs_root=programs_root,
+        )
+        if resolved is None:
+            return DoctorReport(edition=edition_name, checks=(DoctorCheck("Operator Gates", "fail", f"Edition '{edition_name}' could not be resolved."),))
 
-    auth_report = run_auth_doctor(
-        edition_name=edition_name,
-        reports_root=reports_root,
-        editions_root=editions_root,
-        programs_root=programs_root,
-        ado_probe=ado_probe,
-        kusto_probe=kusto_probe,
-    )
-    channel_report = run_channel_doctor(
-        edition_name=edition_name,
-        reports_root=reports_root,
-        editions_root=editions_root,
-        programs_root=programs_root,
-    )
+        auth_report = run_auth_doctor(
+            edition_name=edition_name,
+            reports_root=reports_root,
+            editions_root=editions_root,
+            programs_root=programs_root,
+            ado_probe=ado_probe,
+            kusto_probe=kusto_probe,
+        )
+        channel_report = run_channel_doctor(
+            edition_name=edition_name,
+            reports_root=reports_root,
+            editions_root=editions_root,
+            programs_root=programs_root,
+        )
+    except ConfigError as error:
+        _raise_if_unsafe_doctor_yaml(error, mode="operator-gates")
+        raise
     metric_report = run_metric_binding_doctor(
         edition_name=edition_name,
         editions_root=editions_root,

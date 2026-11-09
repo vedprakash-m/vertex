@@ -41,7 +41,7 @@ from src.core.stages.sor_gated_load import retained_report_fact_snapshot
 from src.core.teams_renderer import TeamsRenderer
 from src.core.velocity_metrics import build_velocity_kusto_section
 from src.core.vitality_reporting import build_vitality_section
-from src.core.view_models import EditionMeta, WorkstreamData
+from src.core.view_models import EditionMeta, HealthSummary, WorkstreamData
 
 log = logging.getLogger(__name__)
 _RISK_RENDER_WARNING = (
@@ -65,6 +65,7 @@ class RenderStageState:
     review_status: ReviewStatus
     review_status_path: Path
     report: ReportData
+    health: HealthSummary
     scorecard_band_block_ids: tuple[str, ...]
     workstream_data: Any
     narrative_warnings: tuple[str, ...]
@@ -326,6 +327,10 @@ class RenderStage:
             risks=(ctx.risks or ()),
             risk_assessments=(ctx.risk_assessments or ()),
             stale_risk_ids=ctx.stale_risk_ids,
+            **(
+                {"use_selected_empty_risks": True}
+                if ctx.risk_reality_empty_selected or ctx.risk_legacy_empty_selected else {}
+            ),
             program_id=(ctx.resolved_v2.program.id if ctx.resolved_v2 is not None else None),
             programs_root=ctx.programs_root,
             as_of=ctx.data_as_of,
@@ -655,6 +660,7 @@ class RenderStage:
                 review_status=review_status,
                 review_status_path=review_status_path,
                 report=report,
+                health=health,
                 scorecard_band_block_ids=(
                     tuple(f"scorecard-band-{band.band_id}" for band in continuity_render.scorecard_bands)
                     if continuity_render is not None
@@ -718,6 +724,7 @@ def _build_health_summary_with_risk_fallback(
             for risk in legacy_risks
             if assess_risk_staleness(risk, ctx.data_as_of.date())
         )
+        kwargs.pop("use_selected_empty_risks", None)
         fallback_health = support.build_health_summary(
             *args,
             **{

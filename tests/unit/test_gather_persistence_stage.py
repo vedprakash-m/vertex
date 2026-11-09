@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -121,6 +122,40 @@ def test_run_persistence_stage_canonicalizes_manifest_backed_signal_ids(monkeypa
     assert persisted.id == build_deterministic_signal_id(signal)
     assert persisted.gather_run_id == "gather-committed-candidate"
     assert signal.id == "sig-1"
+
+
+def test_run_persistence_stage_excludes_preview_only_workiq_signals(
+    tmp_path: Path, caplog,
+) -> None:
+    current_time = datetime(2026, 6, 5, 12, 0, tzinfo=timezone.utc)
+    preview = replace(
+        _demo_signal(current_time=current_time),
+        source="workiq/email",
+        metadata={
+            "message_id": "semantic:preview",
+            "native_message_id": "semantic:preview",
+            "source_identity_kind": "semantic_preview",
+        },
+    )
+    result = run_persistence_stage(
+        PersistenceStageInput(
+            program=_demo_program(),
+            program_id="demo",
+            workstreams=(),
+            candidate_signals=(preview,),
+            existing_signals=(),
+            signal_store=SimpleNamespace(),
+            current_time=current_time,
+            programs_root=tmp_path,
+            ai_action_extractor=None,
+            dry_run=True,
+        )
+    )
+
+    assert result.new_signals == ()
+    assert result.pending_review == 0
+    assert result.extracted_action_count == 0
+    assert "semantic:preview" not in caplog.text
 
 
 def test_run_persistence_stage_surfaces_auto_enforcement_errors(monkeypatch, tmp_path: Path) -> None:

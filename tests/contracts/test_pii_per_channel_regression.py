@@ -59,7 +59,7 @@ def _ado_signal_payload() -> dict[str, Any]:
         "channel": "ado",
         "text": "Work item 12345 is in state Active",
         "entity_refs": ["WI:12345"],
-        "assignee_email": "alice@contoso.com",  # documented slot
+        "assignee_email": "alice@synthetic-02.example",  # documented slot
         "raw_metadata": {
             "System.AssignedTo": "Alice",  # scrubbed: just the name, no email
         },
@@ -90,7 +90,7 @@ def _teams_signal_payload() -> dict[str, Any]:
         "channel": "teams",
         "text": "Adaptive card posted in channel acme-leads",
         "channel_id": "19:abc@thread.tacv2",
-        "raw_metadata": {"posted_by": "alice@contoso.com"},  # documented slot
+        "raw_metadata": {"posted_by": "alice@synthetic-02.example"},  # documented slot
     }
 
 
@@ -99,7 +99,7 @@ def _workiq_signal_payload() -> dict[str, Any]:
     return {
         "channel": "workiq",
         "text": "Calendar: 'Storage Sync' scheduled on 2026-06-15",  # scrubbed: no name in text
-        "raw_metadata": {"attendees": ["bob@contoso.com"]},  # documented slot
+        "raw_metadata": {"attendees": ["bob@synthetic-02.example"]},  # documented slot
     }
 
 
@@ -179,9 +179,9 @@ def test_known_channels_have_payload_fixtures() -> None:
 def test_pii_scrub_helper_works() -> None:
     """The `_scrub_email` helper must actually remove emails (so the rule
     is enforceable, not just enforced)."""
-    text = "Contact alice@contoso.com or bob@example.org for details."
+    text = "Contact alice@synthetic-02.example or bob@example.org for details."
     scrubbed = _scrub_email(text)
-    assert "alice@contoso.com" not in scrubbed
+    assert "alice@synthetic-02.example" not in scrubbed
     assert "bob@example.org" not in scrubbed
     assert "[REDACTED]" in scrubbed
 
@@ -217,7 +217,7 @@ def test_pii_scrubber_catches_known_test_emails() -> None:
     documented PII slot must be flagged by the discipline check."""
     planted = {
         "channel": "icm",
-        "text": "Auto-assigned to charlie@contoso.com by escalation policy",
+        "text": "Auto-assigned to charlie@synthetic-02.example by escalation policy",
         "raw_metadata": {},
     }
 

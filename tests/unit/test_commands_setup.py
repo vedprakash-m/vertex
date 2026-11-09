@@ -414,7 +414,7 @@ def test_session_save_uses_atomic_write(tmp_path: Path, monkeypatch) -> None:
 
 def test_to_onboard_draft_returns_all_five_stage_fields() -> None:
     """T7: to_onboard_draft() returns (identity, ado, structure, people, style)."""
-    identity = SimpleNamespace(program_name="Test", author_email="t@t.com")
+    identity = SimpleNamespace(program_name="Test", author_email="test@example.com")
     ado = SimpleNamespace(organization="contoso", project="One")
     structure = SimpleNamespace(scorecards=())
     people = SimpleNamespace(workstreams=())
@@ -860,7 +860,7 @@ def test_setup_assistant_suggest_workstreams_from_description_uses_injected_clie
                         {
                             "name": "Reliability",
                             "description": "Track platform health.",
-                            "rationale": "Reliability work is central and foo@gmail.com owns the escalation path.",
+                            "rationale": "Reliability work is central and foo@example.com owns the escalation path.",
                         }
                     ]
                 }
@@ -883,7 +883,7 @@ def test_setup_assistant_suggest_workstreams_from_description_uses_injected_clie
     assert len(result) == 1
     assert result[0].name == "Reliability"
     assert result[0].description == "Track platform health."
-    assert "foo@gmail.com" not in result[0].rationale
+    assert "foo@example.com" not in result[0].rationale
     assert "[PII-FILTERED-EMAIL]" in result[0].rationale
     assert client.last_prompt_version == "setup_ws_suggest.v1"
     assert client.last_user == "Program description: Storage platform reliability and compliance"

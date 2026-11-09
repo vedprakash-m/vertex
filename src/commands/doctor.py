@@ -96,6 +96,7 @@ from src.commands.doctor_checks.milestone_health_checks import load_latest_confi
 from src.commands.doctor_checks.milestone_health_checks import snapshot_to_work_items as _snapshot_to_work_items_impl
 from src.commands.doctor_checks.milestone_checks import load_current_milestones
 from src.commands.doctor_checks.milestone_checks import run_milestone_doctor as _run_milestone_doctor_impl
+from src.commands.doctor_checks.yaml_support import _raise_if_unsafe_doctor_yaml
 from src.commands.doctor_checks.metric_binding_checks import run_metric_binding_doctor as _run_metric_binding_doctor_impl
 from src.commands.doctor_checks.m365_review_checks import build_m365_registry_review_metadata as _build_m365_registry_review_metadata_impl
 from src.commands.doctor_checks.m365_review_checks import artifact_is_missing_m365_id as _artifact_is_missing_m365_id_impl
@@ -155,7 +156,7 @@ from src.core.config_loader import EDITIONS_ROOT, PROGRAMS_ROOT, REPORTS_ROOT, d
 from src.core.decision_register import assess_decision_review_staleness, assess_proposed_decision_staleness, get_decisions_path
 from src.core.dependency_graph import build_dependency_dag, get_dependencies_path
 from src.core.edition_resolver import ResolvedEdition, resolve_edition, resolve_edition_paths as _resolve_edition_paths
-from src.core.exceptions import AuthError, QueryError, QueryTimeoutError, StateError as _StateError
+from src.core.exceptions import AuthError, ConfigError, QueryError, QueryTimeoutError, StateError as _StateError
 from src.core.gather_state_store import load_gather_state
 from src.core.knowledge_store import (
     KnowledgeStore,
@@ -251,7 +252,7 @@ def doctor_command(
     fact_parity: bool = typer.Option(False, "--fact-parity", help="Check whether enough dual-read parity cycles have been logged for the resolved program (reads fact_store.dual_read_cycles from platform_state.yaml, default 5)."),
     fact_bridge: bool = typer.Option(False, "--fact-bridge", help="Check the ledger->fact-store bridge posture: whether it is enabled for a REV-configured program, and whether a persistent bridge-failure backlog exists (fix-data-flow.md Track A / PS-2)."),
     fact_deserialization: bool = typer.Option(False, "--fact-deserialization", help="Confirm existing persisted facts still deserialize against the current schema, not just newly-bridged ones (fix-data-flow.md Track L)."),
-    confirm_readiness: bool = typer.Option(False, "--confirm-readiness", help="Enumerate exact live blockers that would prevent a non-forced confirm. Returns 0 only when confirm would succeed."),
+    confirm_readiness: bool = typer.Option(False, "--confirm-readiness", help="Inspect selected local confirmation prerequisites without running confirmation."),
     adapter_cert: bool = typer.Option(False, "--adapter-cert", help="Audit UIL adapter certification per WS-3: checks which channels are enabled/certified and probes WorkIQ verb availability."),
     issue: int | None = typer.Option(None, "--issue", help="Issue number required by --flip-parity."),
     charts: bool = typer.Option(False, "--charts", help="Validate chart cache TTL vs edition cadence, attachment targets, exec-summary uniqueness, and renderer IDs."),
@@ -325,17 +326,20 @@ def doctor_command(
         raise typer.BadParameter("--issue requires --flip-parity.")
 
     try:
-        _ed_paths = _resolve_edition_paths(
-            edition, editions_root=effective_editions_root, programs_root=effective_programs_root,
-        ) if edition is not None else None
-        if _ed_paths is None and edition is None and not platform_readiness:
-            _discovered = discover_report_editions(
-                reports_root=effective_reports_root, programs_root=effective_programs_root,
-            )
-            if len(_discovered) == 1:
-                _ed_paths = _resolve_edition_paths(
-                    _discovered[0], editions_root=effective_editions_root, programs_root=effective_programs_root,
-                )
+        try:
+            _ed_paths = _resolve_edition_paths(
+                edition, editions_root=effective_editions_root, programs_root=effective_programs_root,
+            ) if edition is not None else None
+            if _ed_paths is None and edition is None and not platform_readiness:
+                _discovered = discover_report_editions(reports_root=effective_reports_root, programs_root=effective_programs_root)
+                if len(_discovered) == 1:
+                    _ed_paths = _resolve_edition_paths(
+                        _discovered[0], editions_root=effective_editions_root, programs_root=effective_programs_root,
+                    )
+        except ConfigError as error:
+            if metric_bindings or operator_gates:
+                _raise_if_unsafe_doctor_yaml(error, mode="metric-binding" if metric_bindings else "operator-gates")
+            raise
         if _ed_paths is not None:
             _doctor_banner = _surface_alert_banner(_ed_paths.program_id, programs_root=effective_programs_root)
             if _doctor_banner is not None:
@@ -827,14 +831,14 @@ def run_doctor(
         )
         if resolved is None:
             raise typer.BadParameter(f"Unknown edition '{resolved_edition}'.")
-        cadence_value = getattr(resolved, "cadence", None) or "weekly"
         return _run_confirm_readiness_doctor(
             edition_name=resolved_edition,
             program_id=resolved.program.id,
             programs_root=resolved_programs_root,
             editions_root=resolved_editions_root,
             archive_root=resolved_archive_root,
-            cadence=cadence_value if isinstance(cadence_value, str) else "weekly",
+            cadence=resolved.edition.cadence,
+            now=now,
         )
     if adapter_cert:
         resolved = resolve_edition(

@@ -378,14 +378,14 @@ def test_suggestion_from_payload_scrubs_pii_from_user_visible_fields() -> None:
         {
             "category": "leadership_question",
             "section_id": "exec_summary",
-            "suggestion_text": "Ask foo@gmail.com to confirm the blocker.",
+            "suggestion_text": "Ask foo@example.com to confirm the blocker.",
             "confidence": "medium",
-            "reader_name": "foo@gmail.com",
+            "reader_name": "foo@example.com",
         }
     )
 
-    assert "foo@gmail.com" not in suggestion.suggestion_text
-    assert "foo@gmail.com" not in (suggestion.reader_name or "")
+    assert "foo@example.com" not in suggestion.suggestion_text
+    assert "foo@example.com" not in (suggestion.reader_name or "")
     assert "[PII-FILTERED-EMAIL]" in suggestion.suggestion_text
     assert suggestion.reader_name == "[PII-FILTERED-EMAIL]"
 

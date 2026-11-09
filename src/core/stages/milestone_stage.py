@@ -11,7 +11,10 @@ from src.core.fact_sor_state import resolve_family_sor_mode
 from src.core.milestone_engine import assess_milestone_health, build_critical_path
 from src.core.models_v2 import Dependency, LegacyDependency, Milestone
 from src.core.pipeline import StageContext, capture_milestone_trajectory_snapshot
-from src.core.program_fact_store import ProgramFactSnapshot, load_program_facts, project_dependencies, project_milestones
+from src.core.program_fact_store import (
+    ProgramFactSnapshot, build_legacy_program_fact_snapshot, load_program_facts,
+    project_dependencies, project_milestones,
+)
 from src.core.stages.sor_gated_load import (
     record_report_family_selector, report_reality_scope, retained_report_fact_snapshot,
 )
@@ -31,6 +34,7 @@ class MilestoneStage:
     def execute(self, ctx: StageContext) -> StageContext:
         if ctx.milestone_assessments is not None:
             return ctx
+        ctx = replace(ctx, milestone_legacy_rollback=False)
         if ctx.resolved_edition_type is not None and ctx.resolved_edition_type.value == "lookback":
             return replace(ctx, milestones=(), milestone_assessments=(), milestone_trajectory_snapshot=None, milestone_warnings=())
         if ctx.resolved_v2 is None or ctx.programs_root is None or ctx.data_as_of is None:
@@ -49,7 +53,7 @@ class MilestoneStage:
         sor_mode = resolve_family_sor_mode(program_id, "workitem.state", programs_root=programs_root)
         ctx = record_report_family_selector(ctx, scope, "workitem.state", sor_mode)
         if sor_mode != "legacy":
-            milestones, dependencies, warnings, lineage = _load_milestones_via_reality(
+            milestones, dependencies, warnings, lineage, legacy_rollback = _load_milestones_via_reality(
                 program_id,
                 programs_root=ctx.programs_root,
                 load_program_reality=(
@@ -63,6 +67,7 @@ class MilestoneStage:
                 fact_snapshot=fact_snapshot,
                 on_loaded=retained_reality.append if scope is not None else None,
             )
+            ctx = replace(ctx, milestone_legacy_rollback=legacy_rollback)
             if retained_reality:
                 ctx = replace(ctx, report_reality=retained_reality[0])
         else:
@@ -140,12 +145,15 @@ def _load_milestones_via_reality(
     archive_root=None,
     fact_snapshot: ProgramFactSnapshot | None = None,
     on_loaded: Callable[[Any], None] | None = None,
-) -> tuple[tuple[Milestone, ...], tuple[Dependency | LegacyDependency, ...], tuple[str, ...], dict[str, dict[str, str | None]]]:
+) -> tuple[
+    tuple[Milestone, ...], tuple[Dependency | LegacyDependency, ...],
+    tuple[str, ...], dict[str, dict[str, str | None]], bool,
+]:
     """S-8a: load milestones from ProgramReality (shadow/primary SoR paths).
 
-    Returns (milestones, dependencies, warnings).  Falls back to the legacy
-    path if ProgramReality is unavailable.  The report facade injects
-    ``ProgramReality.load`` so the pipeline has one explicit read facade.
+    The final return value records whether the audited legacy rollback was
+    used. The report facade injects ``ProgramReality.load`` so the pipeline
+    has one explicit read facade.
     """
     try:
         if load_program_reality is None:
@@ -177,9 +185,9 @@ def _load_milestones_via_reality(
         dependencies = tuple(assessment.record for assessment in dependency_assessments)
         if on_loaded is not None:
             on_loaded(reality)
-        return milestones, dependencies, (), lineage
+        return milestones, dependencies, (), lineage, False
     except ConfigError as exc:
-        return (), (), (f"Milestones skipped (reality): {exc}",), {}
+        return (), (), (f"Milestones skipped (reality): {exc}",), {}, False
     except Exception as exc:  # noqa: BLE001
         if not _legacy_milestone_rollback_enabled():
             raise ConfigError(
@@ -187,8 +195,12 @@ def _load_milestones_via_reality(
                 f"Set {_ALLOW_LEGACY_MILESTONE_ROLLBACK_ENV}=1 to use the audited legacy rollback path."
             ) from exc
         archive_options = {"archive_root": archive_root} if archive_root is not None else {}
-        fallback_milestones = _load_current_milestones(program_id, programs_root=programs_root, **archive_options)
-        fallback_deps = _load_current_dependencies(program_id, programs_root=programs_root, **archive_options)
+        fallback_milestones = project_milestones(build_legacy_program_fact_snapshot(
+            program_id, programs_root=programs_root, fact_types=("milestone.entry",), **archive_options,
+        ))
+        fallback_deps = project_dependencies(build_legacy_program_fact_snapshot(
+            program_id, programs_root=programs_root, fact_types=("dependency.link",), **archive_options,
+        ))
         return (
             fallback_milestones,
             fallback_deps,
@@ -197,6 +209,7 @@ def _load_milestones_via_reality(
                 f"{_ALLOW_LEGACY_MILESTONE_ROLLBACK_ENV}=1; ProgramReality error: {exc}",
             ),
             {},
+            True,
         )
 
 

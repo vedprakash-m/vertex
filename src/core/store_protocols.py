@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, Protocol, runtime_checkable
 
-from src.core.models import ArchiveIndex, Snapshot
+from src.core.models import ArchiveIndex
 from src.core.models_v2 import Signal, SignalReviewDecision, SignalThreadLink, SignalUsageMarker, TrajectoryPoint
 
 
@@ -53,13 +53,5 @@ class TrajectoryStore(Protocol):
 @runtime_checkable
 class ArchiveStore(Protocol):
     def read_index(self, edition: str) -> ArchiveIndex: ...
-
-    def write_confirmed(
-        self,
-        edition: str,
-        issue_number: int,
-        snapshot: Snapshot,
-        acquire_lock: bool = True,
-    ) -> None: ...
 
     def read_scorecard_history(self, edition: str) -> tuple[dict[str, Any], ...]: ...

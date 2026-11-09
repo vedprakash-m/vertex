@@ -6,18 +6,28 @@ orchestrator focus on lifecycle ordering and channel composition.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta
+import logging
 from pathlib import Path
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
 from src.commands.gather_workiq_helpers import _truncate_signal_text
 from src.core.engms_signal_extractor import EngMsSignalExtractor, hashes_from_artifacts
-from src.core.gather_channel_support import append_integration_error_once
+from src.core.gather_channel_support import (
+    WORKIQ_INVALID_RECORD_OPERATOR_ACTION,
+    WORKIQ_PLAN_BUDGET_MESSAGE,
+    WORKIQ_PLAN_BUDGET_OPERATOR_ACTION,
+    append_integration_error_once,
+)
 from src.core.journal import archive_weekly_journal_files, archive_weekly_journal_files_by_retention, get_week_key
 from src.core.journal_retention import load_signal_retention_policy
 from src.core.models import Confidence
 from src.core.models_v2 import IntegrationError, Signal
+
+
+log = logging.getLogger(__name__)
 
 
 def build_integration_error_signal(
@@ -41,6 +51,71 @@ def build_integration_error_signal(
         confidence=Confidence.NONE,
         metadata={"integration_source": source, "error": normalized_error},
     )
+
+
+def build_workiq_quarantine_signal(
+    *,
+    program_id: str,
+    error: str,
+    count: int,
+    as_of: datetime,
+    integration_error_sink: list[IntegrationError] | None,
+    invalid_structured_record: bool = False,
+) -> Signal:
+    append_integration_error_once(
+        integration_error_sink, source="workiq", stage="quarantine", error=error,
+        retryable=False,
+        operator_action=(
+            WORKIQ_INVALID_RECORD_OPERATOR_ACTION if invalid_structured_record
+            else "Obtain native observation IDs and timezone-qualified source times before reviewing these records."
+        ),
+    )
+    diagnostic = build_integration_error_signal(program_id=program_id, source="workiq", error=error, as_of=as_of)
+    assert diagnostic.metadata is not None
+    log.warning("%s", error)
+    return replace(diagnostic, metadata={
+        **diagnostic.metadata, "quarantined": True, "quarantined_record_count": count,
+        "source_event_time": None, "retrieved_at": as_of.isoformat(), "temporal_confidence": "unknown",
+        **({"workiq_structured_record_invalid": True} if invalid_structured_record else {}),
+    })
+
+
+def build_workiq_discovery_failure_signal(
+    *,
+    program_id: str,
+    error: str,
+    as_of: datetime,
+    integration_error_sink: list[IntegrationError] | None,
+) -> Signal:
+    append_integration_error_once(
+        integration_error_sink, source="workiq", stage="discovery", error=error,
+        retryable=True, operator_action="Retry structured WorkIQ discovery and verify the returned JSON format.",
+    )
+    diagnostic = build_integration_error_signal(program_id=program_id, source="workiq", error=error, as_of=as_of)
+    assert diagnostic.metadata is not None
+    log.warning("%s", error)
+    return replace(diagnostic, metadata={
+        **diagnostic.metadata, "workiq_structured_response_unusable": True,
+        "source_event_time": None, "retrieved_at": as_of.isoformat(), "temporal_confidence": "unknown",
+    })
+
+
+def build_workiq_plan_budget_signal(
+    *, program_id: str, as_of: datetime, integration_error_sink: list[IntegrationError] | None,
+) -> Signal:
+    append_integration_error_once(
+        integration_error_sink, source="workiq", stage="budget", error=WORKIQ_PLAN_BUDGET_MESSAGE,
+        retryable=True, operator_action=WORKIQ_PLAN_BUDGET_OPERATOR_ACTION,
+    )
+    diagnostic = build_integration_error_signal(
+        program_id=program_id, source="workiq", error=WORKIQ_PLAN_BUDGET_MESSAGE, as_of=as_of,
+    )
+    assert diagnostic.metadata is not None
+    log.warning("%s", WORKIQ_PLAN_BUDGET_MESSAGE)
+    return replace(diagnostic, metadata={
+        **diagnostic.metadata, "workiq_plan_budget_exhausted": True,
+        "source_event_time": None, "retrieved_at": as_of.isoformat(), "temporal_confidence": "unknown",
+    })
 
 
 def compute_adaptive_window_days(

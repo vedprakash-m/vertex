@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 from dataclasses import replace
+
+import pytest
 
 from src.commands.review_full import _build_context_revision_rows
 from src.commands.triage import TriageArtifacts, _build_triage_payload, render_triage_output
@@ -188,6 +191,213 @@ def test_maintenance_projection_corrupt_history_is_safe_and_keeps_proposals(tmp_
     assert path.read_bytes() == before
 
 
+@pytest.mark.parametrize("damage", ["null", "missing", "timestamp", "lane"])
+@pytest.mark.parametrize("placement", ["before", "after"])
+def test_maintenance_invalid_record_preserves_pending_proposals_and_no_partial_gaps(
+    tmp_path: Path, damage: str, placement: str,
+) -> None:
+    import src.core.context_proposal_review as review
+
+    root = tmp_path / "selected"
+    proposal = _proposal("pending", issue_number=8, target_store="workstream_registry", conflict_key="registry")
+    stage_extracted_proposals("contoso", 8, (proposal,), programs_root=root)
+    history = root / "contoso" / "_feedback" / "context_gaps.jsonl"
+    history.parent.mkdir()
+    valid = {
+        "ts": "2026-10-01T00:00:00Z", "feature": "synthetic", "program": "contoso",
+        "lane": None, "field": "purpose", "severity": "quality_degraded",
+        "message": "Valid observation", "impact_estimate": "high",
+    }
+    damaged = {
+        "null": None,
+        "missing": {"message": "synthetic_canary"},
+        "timestamp": dict(valid, ts=None, message="synthetic_canary"),
+        "lane": dict(valid, lane=["synthetic_canary"]),
+    }[damage]
+    rows = (damaged, valid) if placement == "before" else (valid, damaged)
+    history.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    before = {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+    projection = review.load_context_maintenance_review(
+        "contoso", programs_root=root, as_of=datetime(2026, 11, 1, tzinfo=timezone.utc),
+    )
+
+    assert [row.proposal_id for row in projection.proposals] == ["pending"]
+    assert projection.proposal_diagnostic is None and projection.gaps == ()
+    assert projection.gap_diagnostic == "Context gap history unavailable; inspect and repair it before retrying."
+    assert "synthetic_canary" not in repr(projection) and str(root) not in repr(projection)
+    assert {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()} == before
+
+
+@pytest.mark.parametrize("registry", [
+    None,
+    "workstreams: [\nsynthetic_canary\n",
+    "workstreams: !synthetic_canary []\n",
+    "workstreams: synthetic_canary\n",
+    "workstreams: [{id: another, deep_context: {}}]\n",
+    "workstreams: [{id: delivery, deep_context: [synthetic_canary]}]\n",
+])
+def test_maintenance_registry_failure_preserves_pending_proposals_and_history(
+    tmp_path: Path, registry: str | None,
+) -> None:
+    import src.core.context_proposal_review as review
+
+    root = tmp_path / "selected"
+    program = root / "contoso"
+    feedback = program / "_feedback"
+    feedback.mkdir(parents=True)
+    history = feedback / "context_gaps.jsonl"
+    history.write_text(json.dumps({
+        "ts": "2026-10-01T00:00:00Z", "feature": "doctor --context", "program": "contoso",
+        "lane": "delivery", "field": "deep_context.why", "severity": "quality_degraded",
+        "message": "Synthetic observation", "impact_estimate": "high",
+    }) + "\n", encoding="utf-8")
+    if registry is not None:
+        (program / "workstream_registry.yaml").write_text(registry, encoding="utf-8")
+    decoy = tmp_path / "decoy" / "contoso" / "workstream_registry.yaml"
+    decoy.parent.mkdir(parents=True)
+    decoy.write_text(
+        "workstreams: [{id: delivery, deep_context: {why: Decoy}}]\n", encoding="utf-8",
+    )
+    proposal = _proposal("pending", issue_number=8, target_store="workstream_registry", conflict_key="registry")
+    stage_extracted_proposals("contoso", 8, (proposal,), programs_root=root)
+    before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+
+    projection = review.load_context_maintenance_review(
+        "contoso", programs_root=root, as_of=datetime(2026, 11, 1, tzinfo=timezone.utc),
+    )
+
+    assert projection.gaps == ()
+    assert projection.gap_diagnostic == (
+        "Context gap ranking unavailable; inspect the selected workstream_registry.yaml "
+        "and recorded gap targets before retrying."
+    )
+    assert projection.proposal_diagnostic is None
+    assert len(projection.proposals) == 1 and projection.proposals[0].proposal_id == "pending"
+    assert "synthetic_canary" not in projection.gap_diagnostic and str(tmp_path) not in projection.gap_diagnostic
+    assert {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+
+@pytest.mark.parametrize("history", [
+    "foreign-only", "foreign-structural", "foreign-first", "foreign-last", "selected-only",
+])
+def test_maintenance_rejects_foreign_observations_before_ranking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, history: str,
+) -> None:
+    from unittest.mock import Mock
+    import src.core.context_proposal_review as review
+
+    root = tmp_path / "programs"
+    program = root / "contoso"
+    feedback = program / "_feedback"
+    feedback.mkdir(parents=True)
+    (program / "workstream_registry.yaml").write_text(
+        "workstreams: [{id: delivery, deep_context: {why: ''}}]\n", encoding="utf-8",
+    )
+    foreign_registry = root / "foreign_program" / "workstream_registry.yaml"
+    foreign_registry.parent.mkdir()
+    foreign_registry.write_text(
+        "workstreams: [{id: delivery, deep_context: {why: populated}}]\n", encoding="utf-8",
+    )
+    selected = {
+        "ts": "2026-10-01T00:00:00Z", "feature": "doctor --context", "program": "contoso",
+        "lane": "delivery", "field": "deep_context.why", "severity": "quality_degraded",
+        "message": "Selected observation", "impact_estimate": "high",
+    }
+    foreign = dict(selected, program="foreign_program", message="synthetic_foreign_canary")
+    if history == "foreign-only":
+        foreign.update(feature="synthetic", lane=None, field="purpose")
+    records = {
+        "foreign-only": [foreign],
+        "foreign-structural": [foreign],
+        "foreign-first": [foreign, selected],
+        "foreign-last": [selected, foreign],
+        "selected-only": [selected],
+    }[history]
+    (feedback / "context_gaps.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8",
+    )
+    proposal = _proposal("pending", issue_number=8, target_store="workstream_registry", conflict_key="registry")
+    stage_extracted_proposals("contoso", 8, (proposal,), programs_root=root)
+    before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    rank = Mock(wraps=review.rank_context_gaps)
+    monkeypatch.setattr(review, "rank_context_gaps", rank)
+
+    projection = review.load_context_maintenance_review(
+        "contoso", programs_root=root, as_of=datetime(2026, 11, 1, tzinfo=timezone.utc),
+    )
+
+    assert len(projection.proposals) == 1
+    if history == "selected-only":
+        assert projection.gap_diagnostic is None and len(projection.gaps) == 1
+        rank.assert_called_once()
+    else:
+        assert projection.gaps == ()
+        assert projection.gap_diagnostic == (
+            "Context gap history unavailable: observations contain a foreign program."
+        )
+        assert "synthetic_foreign_canary" not in repr(projection)
+        rank.assert_not_called()
+    assert {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+
+@pytest.mark.parametrize("error", [OSError("synthetic_canary"), ValueError("synthetic_canary")])
+def test_expected_ranking_error_is_not_mislabeled_as_history_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception,
+) -> None:
+    import src.core.context_proposal_review as review
+
+    proposal = _proposal("pending", issue_number=8, target_store="workstream_registry", conflict_key="registry")
+    stage_extracted_proposals("contoso", 8, (proposal,), programs_root=tmp_path)
+    monkeypatch.setattr(review, "rank_context_gaps", lambda *args, **kwargs: (_ for _ in ()).throw(error))
+
+    projection = review.load_context_maintenance_review(
+        "contoso", programs_root=tmp_path, as_of=datetime(2026, 11, 1, tzinfo=timezone.utc),
+    )
+
+    assert len(projection.proposals) == 1 and projection.gaps == ()
+    assert projection.gap_diagnostic == (
+        "Context gap ranking unavailable; inspect the selected workstream_registry.yaml "
+        "and recorded gap targets before retrying."
+    )
+
+
+def test_corrupt_proposals_and_unusable_registry_keep_separate_diagnostics(tmp_path: Path) -> None:
+    import src.core.context_proposal_review as review
+
+    program = tmp_path / "contoso"
+    proposals = program / "context_proposals"
+    proposals.mkdir(parents=True)
+    queue = proposals / "issue_001.proposals.json"
+    queue.write_text("{synthetic_canary: invalid", encoding="utf-8")
+    registry = program / "workstream_registry.yaml"
+    registry.write_text("workstreams: [\nsynthetic_canary\n", encoding="utf-8")
+    feedback = program / "_feedback"
+    feedback.mkdir()
+    history = feedback / "context_gaps.jsonl"
+    history.write_text(json.dumps({
+        "ts": "2026-10-01T00:00:00Z", "feature": "doctor --context", "program": "contoso",
+        "lane": "delivery", "field": "deep_context.why", "severity": "quality_degraded",
+        "message": "Synthetic observation", "impact_estimate": "high",
+    }) + "\n", encoding="utf-8")
+    before = {path: path.read_bytes() for path in (queue, registry, history)}
+
+    projection = review.load_context_maintenance_review(
+        "contoso", programs_root=tmp_path, as_of=datetime(2026, 11, 1, tzinfo=timezone.utc),
+    )
+
+    assert projection.proposals == () and projection.gaps == ()
+    assert projection.proposal_diagnostic == (
+        "Context proposal history unavailable; inspect and repair it before retrying."
+    )
+    assert projection.gap_diagnostic == (
+        "Context gap ranking unavailable; inspect the selected workstream_registry.yaml "
+        "and recorded gap targets before retrying."
+    )
+    assert "synthetic_canary" not in repr(projection) and str(tmp_path) not in repr(projection)
+    assert {path: path.read_bytes() for path in (queue, registry, history)} == before
+
+
 def test_reviewer_projects_active_gap_without_candidate_and_corrupt_diagnostic(tmp_path: Path) -> None:
     path = tmp_path / "contoso" / "_feedback" / "context_gaps.jsonl"
     path.parent.mkdir(parents=True)
@@ -273,7 +483,7 @@ def test_unexpected_projection_errors_are_not_empty_consumer_success(tmp_path: P
         raise RuntimeError("synthetic implementation failure")
 
     now = datetime(2026, 11, 1, tzinfo=timezone.utc)
-    for loader in ("load_pending_context_proposal_rows", "load_context_gaps"):
+    for loader in ("load_pending_context_proposal_rows", "load_context_gaps", "rank_context_gaps"):
         with monkeypatch.context() as patch:
             patch.setattr(projection, loader, fail)
             with pytest.raises(RuntimeError):

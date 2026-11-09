@@ -56,6 +56,191 @@ from src.core.exceptions import ConfigError
 EDITION_NAME = "acme_weekly"
 
 
+@pytest.mark.parametrize(
+    "contents",
+    [
+        pytest.param(b"# authored\nissue_number: 8\nhealth_bluf: reviewed\n", id="authored"),
+        pytest.param(b"issue_number: 8\nscorecards: [\n", id="malformed-yaml"),
+        pytest.param(b"issue_number: 8\n# \xff\n", id="invalid-utf8"),
+    ],
+)
+def test_reset_preserves_existing_program_override_bytes(tmp_path: Path, contents: bytes) -> None:
+    from tests.unit.test_narrative_store import _selected_artifact_root
+
+    root = _selected_artifact_root(tmp_path)
+    target = root / "fixture" / "overrides" / "issue_008.yaml"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(contents)
+
+    result = reset_overrides_for_next_issue("fixture_weekly", 8, (), tmp_path / "reports", programs_root=root)
+
+    assert target.read_bytes() == contents
+    assert result is None
+
+
+@pytest.mark.parametrize("explicit", [False, True], ids=["inferred-root", "selected-root"])
+@pytest.mark.parametrize("existing", [False, True], ids=["create", "preserve"])
+def test_reset_program_target_respects_inferred_and_selected_roots(
+    tmp_path: Path, explicit: bool, existing: bool,
+) -> None:
+    root = tmp_path / "programs"
+    editions = root / "fixture" / "editions"
+    editions.mkdir(parents=True)
+    (editions / "fixture_weekly.yaml").write_text("program_id: fixture\n", encoding="utf-8")
+    target = root / "fixture" / "overrides" / "issue_008.yaml"
+    if existing:
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"issue_number: 8\nhealth_bluf: future authoring\n")
+    dimensions = (
+        ConfirmedDimension(
+            scorecard_name="Delivery",
+            name="Readiness",
+            risk=RiskLevel.HIGH,
+            prior_risk=RiskLevel.LOW,
+            item_count=1,
+            ado_query_url="https://example.com/query",
+        ),
+    )
+    kwargs = {"programs_root": root} if explicit else {}
+
+    result = reset_overrides_for_next_issue("fixture_weekly", 8, dimensions, tmp_path / "reports", **kwargs)
+
+    if existing:
+        assert result is None
+        assert target.read_bytes() == b"issue_number: 8\nhealth_bluf: future authoring\n"
+    else:
+        assert result is not None
+        assert result.issue_number == 8
+        assert result.scorecards[0].dimensions[0].risk is None
+        assert load_overrides("fixture_weekly", tmp_path / "reports", issue_number=8, **kwargs) == result
+
+
+def test_reset_does_not_replace_program_override_created_during_reset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.unit.test_narrative_store import _selected_artifact_root
+
+    root = _selected_artifact_root(tmp_path)
+    target = root / "fixture" / "overrides" / "issue_008.yaml"
+    authored = b"issue_number: 8\nhealth_bluf: concurrent author\n"
+    original_open = Path.open
+    raced = False
+
+    def competing_create(path: Path, mode: str = "r", *args, **kwargs):
+        nonlocal raced
+        if path == target and mode in {"w", "x"} and not raced:
+            raced = True
+            with original_open(path, "wb") as stream:
+                stream.write(authored)
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", competing_create)
+    result = reset_overrides_for_next_issue("fixture_weekly", 8, (), tmp_path / "reports", programs_root=root)
+
+    assert raced
+    assert target.read_bytes() == authored
+    assert result is None
+
+
+def test_concurrent_program_resets_create_only_one_next_issue_file(tmp_path: Path) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from tests.unit.test_narrative_store import _selected_artifact_root
+
+    root = _selected_artifact_root(tmp_path)
+    barrier = Barrier(2)
+
+    def reset():
+        barrier.wait(timeout=10)
+        return reset_overrides_for_next_issue("fixture_weekly", 8, (), tmp_path / "reports", programs_root=root)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = tuple(executor.map(lambda _: reset(), range(2)))
+
+    created = [result for result in results if result is not None]
+    assert len(created) == 1
+    assert results.count(None) == 1
+    assert load_overrides("fixture_weekly", tmp_path / "reports", issue_number=8, programs_root=root) == created[0]
+
+
+@pytest.mark.parametrize("simulate_file_exists", [False, True], ids=["platform-error", "file-exists"])
+def test_reset_preserves_nonfile_program_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, simulate_file_exists: bool,
+) -> None:
+    from tests.unit.test_narrative_store import _selected_artifact_root
+
+    root = _selected_artifact_root(tmp_path)
+    target = root / "fixture" / "overrides" / "issue_008.yaml"
+    target.mkdir(parents=True)
+    (target / "sentinel").write_bytes(b"synthetic")
+    if simulate_file_exists:
+        original_open = Path.open
+
+        def existing_directory(path: Path, mode: str = "r", *args, **kwargs):
+            if path == target and mode == "x":
+                raise FileExistsError("synthetic existing directory")
+            return original_open(path, mode, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", existing_directory)
+
+    with pytest.raises(IsADirectoryError, match="Next-issue overrides target is a directory"):
+        reset_overrides_for_next_issue("fixture_weekly", 8, (), tmp_path / "reports", programs_root=root)
+    assert (target / "sentinel").read_bytes() == b"synthetic"
+
+
+def test_reset_propagates_program_override_creation_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.unit.test_narrative_store import _selected_artifact_root
+
+    root = _selected_artifact_root(tmp_path)
+    target = root / "fixture" / "overrides" / "issue_008.yaml"
+    original_open = Path.open
+
+    def denied_create(path: Path, mode: str = "r", *args, **kwargs):
+        if path == target and mode in {"w", "x"}:
+            raise PermissionError("synthetic write refusal")
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", denied_create)
+    with pytest.raises(PermissionError, match="synthetic write refusal"):
+        reset_overrides_for_next_issue("fixture_weekly", 8, (), tmp_path / "reports", programs_root=root)
+    assert not target.exists()
+
+
+def test_reset_replaces_flat_active_override_for_the_next_issue(tmp_path: Path) -> None:
+    reports = tmp_path / "reports"
+    target = reports / "legacy_weekly" / "overrides.yaml"
+    target.parent.mkdir(parents=True)
+    target.write_text("issue_number: 7\nhealth_bluf: previous issue\n", encoding="utf-8")
+
+    result = reset_overrides_for_next_issue("legacy_weekly", 8, (), reports)
+
+    assert result is not None and result.issue_number == 8
+    assert load_overrides("legacy_weekly", reports) == result
+    assert "previous issue" not in target.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_reset_still_refuses_hardlocked_program_issue(tmp_path: Path, existing: bool) -> None:
+    from src.core.baseline_lock import BaselineLockError
+    from tests.unit.test_narrative_store import _selected_artifact_root
+
+    root = _selected_artifact_root(tmp_path)
+    target = root / "fixture" / "overrides" / "issue_008.yaml"
+    (root / "fixture" / "trusted_baseline.yaml").write_text("trusted_issue_number: 8\n", encoding="utf-8")
+    if existing:
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"authored")
+
+    with pytest.raises(BaselineLockError):
+        reset_overrides_for_next_issue("fixture_weekly", 8, (), tmp_path / "reports", programs_root=root)
+
+    assert target.exists() is existing
+    if existing:
+        assert target.read_bytes() == b"authored"
+
+
 def test_merge_overrides_preserves_adds_and_marks_removed(tmp_path: Path) -> None:
     existing = OverridesDocument(
         issue_number=77,

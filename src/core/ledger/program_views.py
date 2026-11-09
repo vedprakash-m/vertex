@@ -167,8 +167,6 @@ def project_events_to_sqlite(
                 _acknowledged_gaps_digest(decisions),
             ),
         )
-    if projection_path.exists():
-        projection_path.unlink()
     temp_path.replace(projection_path)
     return ProjectionResult(
         program_id=program_id,

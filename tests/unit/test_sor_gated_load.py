@@ -190,3 +190,95 @@ def test_config_error_in_legacy_mode_returns_empty_with_warning(monkeypatch: pyt
     assert assessments is None
     assert lineage is None
     assert "skipped" in warnings[0]
+
+
+@pytest.mark.parametrize("case", ("legacy", "nonempty", "empty", "rollback", "rollback_disabled"))
+def test_distinct_legacy_comparison_loader_is_used_only_for_nonlegacy_checks(
+    monkeypatch: pytest.MonkeyPatch, case: str,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.delenv("VERTEX_ALLOW_LEGACY_TEST_ROLLBACK", raising=False)
+    if case == "rollback":
+        monkeypatch.setenv("VERTEX_ALLOW_LEGACY_TEST_ROLLBACK", "1")
+
+    def legacy_loader():
+        calls.append("legacy")
+        return (_FakeRecord("current"),)
+
+    def comparison_loader():
+        calls.append("comparison")
+        return (_FakeRecord("authored"),)
+
+    def reality_loader(*_args, **_kwargs):
+        if case in {"rollback", "rollback_disabled"}:
+            raise RuntimeError("synthetic reality failure")
+        records = (_FakeAssessment(_FakeRecord("reality")),) if case == "nonempty" else ()
+        return _FakeReality(records)
+
+    kwargs = dict(
+        program_id="acme",
+        family="judgment",
+        programs_root="unused",
+        reality_accessor=lambda reality: reality.items(),
+        legacy_loader=legacy_loader,
+        legacy_comparison_loader=comparison_loader,
+        allow_legacy_rollback_env="VERTEX_ALLOW_LEGACY_TEST_ROLLBACK",
+        cross_check_label="risk",
+        load_program_reality=reality_loader,
+        sor_mode="legacy" if case == "legacy" else "primary",
+    )
+    if case == "rollback_disabled":
+        with pytest.raises(ConfigError, match="audited legacy rollback"):
+            sor_gated_family_load(**kwargs)
+        assert calls == []
+        return
+
+    records, _, warnings, _ = sor_gated_family_load(**kwargs)
+    if case == "legacy":
+        assert records == (_FakeRecord("current"),)
+        assert calls == ["legacy"]
+    elif case == "nonempty":
+        assert records == (_FakeRecord("reality"),)
+        assert calls == []
+    elif case == "empty":
+        assert records == ()
+        assert "legacy source has 1" in warnings[0]
+        assert calls == ["comparison"]
+    else:
+        assert records == (_FakeRecord("authored"),)
+        assert "degraded to legacy" in warnings[0]
+        assert calls == ["comparison"]
+
+
+@pytest.mark.parametrize("separate_loader", (False, True))
+@pytest.mark.parametrize("error_type", (ConfigError, OSError))
+def test_legacy_comparison_failure_is_not_treated_as_reality_failure(
+    monkeypatch: pytest.MonkeyPatch, separate_loader: bool, error_type: type[Exception],
+) -> None:
+    monkeypatch.setenv("VERTEX_ALLOW_LEGACY_TEST_ROLLBACK", "1")
+    calls: list[str] = []
+
+    def unavailable():
+        calls.append("comparison")
+        raise error_type("synthetic authored-source failure")
+
+    kwargs = dict(
+        program_id="acme",
+        family="judgment",
+        programs_root="unused",
+        reality_accessor=lambda reality: reality.items(),
+        legacy_loader=(lambda: ()) if separate_loader else unavailable,
+        legacy_comparison_loader=unavailable if separate_loader else None,
+        allow_legacy_rollback_env="VERTEX_ALLOW_LEGACY_TEST_ROLLBACK",
+        cross_check_label="risk",
+        load_program_reality=_load_program_reality_stub(()),
+        sor_mode="primary",
+    )
+    if error_type is ConfigError:
+        records, assessments, warnings, _ = sor_gated_family_load(**kwargs)
+        assert records == assessments == ()
+        assert "legacy cross-check unavailable" in warnings[0]
+    else:
+        with pytest.raises(OSError, match="authored-source failure"):
+            sor_gated_family_load(**kwargs)
+    assert calls == ["comparison"]

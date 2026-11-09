@@ -5,11 +5,12 @@ from datetime import date, datetime, timezone
 
 import pytest
 
+from src.core.delta_engine import build_deltas
 from src.core.html_renderer import HTMLRenderer, RenderContext, build_render_payload
 from src.core.models import AttributionTier, Confidence, DeltaKind, DeltaSet, DimensionRisk, EditionType
 from src.core.models import EvidencePacket, FreshnessItem, FreshnessReport, ItemDelta, PersonProfile, ProgramContext, ReportData
 from src.core.models import ReviewSection, ReviewState, ReviewStatus, RiskLevel, RunManifest, ScorecardDelta
-from src.core.models import ScorecardEvidencePacket, WorkItem, Workstream
+from src.core.models import ScorecardEvidencePacket, Snapshot, SnapshotItem, WorkItem, Workstream
 from src.core.template_contract_loader import TemplateFamilyContract, TemplateSectionRule
 from src.core.teams_renderer import TeamsRenderer
 from src.core.view_models import Citation, EditionMeta, HealthSummary, KpiTile, KustoMetric, KustoSectionData, KustoTableCell
@@ -381,8 +382,80 @@ def test_html_renderer_renders_focused_newsletter_without_baseline_changes() -> 
 
     assert "DECISIONS &amp; SIGNALS" in rendered
     assert "WHAT CHANGED" not in rendered
+    assert 'href="#changes" aria-label="Jump to Changes section"' not in rendered
     assert "Acme Ramp Readiness scorecard (Risk levels)" in rendered
     assert "Executive Summary" in rendered
+
+
+@pytest.mark.parametrize(
+    ("name", "email", "expected"),
+    [
+        ("First Owner", None, "Unassigned \u2192 First Owner"),
+        (None, "first@example.com", "Unassigned \u2192 first@example.com"),
+        (None, None, None),
+    ],
+)
+@pytest.mark.parametrize(
+    "risk",
+    [RiskLevel.BLOCKED, RiskLevel.HIGH, RiskLevel.MEDIUM, RiskLevel.LOW, RiskLevel.DONE, RiskLevel.UNKNOWN],
+)
+def test_html_renderer_renders_first_owner_assignment_from_snapshot(
+    name: str | None, email: str | None, expected: str | None, risk: RiskLevel,
+) -> None:
+    context = _render_context()
+    current = replace(context.report.items[0], assigned_to=name, assigned_to_email=email, risk_level=risk)
+    previous = SnapshotItem(
+        id=current.id, type=current.type, title=current.title, state=current.state,
+        assigned_to=None, area_path=current.area_path, target_date=current.target_date,
+        risk_level=current.risk_level, tags=current.tags,
+    )
+    snapshot = Snapshot(
+        issue_number=77, generated_at=context.report.generated_at,
+        ado_data_as_of=context.report.ado_data_as_of, edition_type=EditionType.DETAILED,
+        items=(previous,), scorecards=(),
+    )
+    deltas = build_deltas((current,), snapshot, issue_number=78, previous_issue_number=77)
+    report = replace(context.report, items=(current,), deltas=deltas)
+
+    rendered = HTMLRenderer("acme_weekly").render(replace(context, report=report))
+
+    if expected is None:
+        assert deltas.owner_changes == ()
+        assert "WHAT CHANGED" not in rendered
+    else:
+        assert len(deltas.owner_changes) == 1
+        assert expected in rendered
+        assert "ADO#101" in rendered
+
+
+def test_html_renderer_orders_blocked_owner_change_before_high() -> None:
+    context = _render_context()
+    items = (
+        replace(context.report.items[0], assigned_to="Blocked Owner", assigned_to_email=None, risk_level=RiskLevel.BLOCKED),
+        replace(context.report.items[1], assigned_to="High Owner", assigned_to_email=None, risk_level=RiskLevel.HIGH),
+    )
+    previous_items = tuple(
+        SnapshotItem(
+            id=item.id, type=item.type, title=item.title, state=item.state,
+            assigned_to=None, area_path=item.area_path, target_date=item.target_date,
+            risk_level=item.risk_level, tags=item.tags,
+        )
+        for item in items
+    )
+    snapshot = Snapshot(
+        issue_number=77, generated_at=context.report.generated_at,
+        ado_data_as_of=context.report.ado_data_as_of, edition_type=EditionType.DETAILED,
+        items=previous_items, scorecards=(),
+    )
+    deltas = build_deltas(items, snapshot, issue_number=78, previous_issue_number=77)
+    report = replace(context.report, items=items, deltas=deltas)
+
+    rendered = HTMLRenderer("acme_weekly").render(
+        replace(context, report=report, top_items=(), scorecards=(), scorecard_packets={})
+    )
+
+    assert rendered.index("Unassigned \u2192 Blocked Owner") < rendered.index("Unassigned \u2192 High Owner")
+    assert "ADO#101" in rendered and "ADO#102" in rendered
 
 
 def test_html_renderer_renders_focused_newsletter_changes_after_summary_when_baseline_exists() -> None:
@@ -412,6 +485,8 @@ def test_html_renderer_renders_focused_newsletter_changes_after_summary_when_bas
     rendered = renderer.render(focused_context)
 
     assert rendered.index("Executive Summary") < rendered.index("WHAT CHANGED")
+    assert 'href="#changes" aria-label="Jump to Changes section"' in rendered
+    assert '<a id="changes"></a>' in rendered
 
 
 def test_html_renderer_focused_newsletter_calls_out_unchanged_dimensions() -> None:
@@ -509,6 +584,207 @@ def test_nav_bar_fragment_includes_accessible_jump_link_labels() -> None:
     assert 'aria-label="Jump to Scorecards section"' in rendered
     assert 'aria-label="Jump to Changes section"' in rendered
     assert 'aria-label="Jump to Details section"' in rendered
+
+
+@pytest.mark.parametrize("edition", [EditionType.DETAILED, EditionType.FOCUSED, EditionType.LOOKBACK])
+@pytest.mark.parametrize(
+    ("hidden", "label"),
+    [
+        ("health", "Health"),
+        ("top_3", "Decisions"),
+        ("selected_changes", "Changes"),
+        ("scorecard:acme-ramp-readiness", "Scorecards"),
+        ("workstream:deployment", "Details"),
+    ],
+)
+def test_navigation_does_not_link_to_hidden_sections(
+    edition: EditionType, hidden: str, label: str,
+) -> None:
+    context = _render_context()
+    context = replace(
+        context,
+        report=replace(context.report, edition=edition),
+        hidden_render_sections=frozenset({hidden}),
+    )
+    renderer = HTMLRenderer("acme_weekly")
+    rendered = renderer.render(context)
+    navigation = renderer.render_fragment("partials/nav_bar.j2", **build_render_payload(context))
+
+    assert f'aria-label="Jump to {label} section"' not in navigation
+    assert f">{label}</td>" in navigation
+    if hidden == "selected_changes":
+        assert '<a id="changes"></a>' not in rendered
+
+
+@pytest.mark.parametrize("edition", [EditionType.DETAILED, EditionType.FOCUSED, EditionType.LOOKBACK])
+def test_navigation_links_to_first_rendered_scorecard_and_chapter(edition: EditionType) -> None:
+    context = _render_context()
+    second_scorecard = replace(context.scorecards[0], scorecard_name="Second Scorecard")
+    second_workstream = replace(
+        context.workstreams[0],
+        section_id="second",
+        edit_path=r"narratives\issue_078\chapter_second.md",
+    )
+    contract = TemplateFamilyContract(
+        name="selected",
+        order=("health", "top_3", "scorecard:second-scorecard", "selected_changes", "workstream:second"),
+        mandatory=(),
+        optional=(),
+        rules={},
+    )
+    context = replace(
+        context,
+        report=replace(context.report, edition=edition),
+        scorecards=(*context.scorecards, second_scorecard),
+        workstreams=(*context.workstreams, second_workstream),
+        template_contract=contract,
+    )
+
+    rendered = HTMLRenderer("acme_weekly").render(context)
+
+    assert 'href="#second-scorecard" aria-label="Jump to Scorecards section"' in rendered
+    assert '<a id="second-scorecard"></a>' in rendered
+    assert 'href="#chapter-second" aria-label="Jump to Details section"' in rendered
+    assert '<a id="chapter-second"></a>' in rendered
+
+
+@pytest.mark.parametrize("edition", [EditionType.DETAILED, EditionType.FOCUSED, EditionType.LOOKBACK])
+@pytest.mark.parametrize("visible", [False, True])
+def test_scorecard_detail_links_follow_rendered_chapter(
+    edition: EditionType, visible: bool,
+) -> None:
+    context = _render_context()
+    section_id = "acme-ramp-readiness-deployment-velocity"
+    workstream = replace(
+        context.workstreams[0],
+        section_id=section_id,
+        edit_path=rf"narratives\issue_078\chapter_{section_id}.md",
+    )
+    context = replace(
+        context,
+        report=replace(context.report, edition=edition),
+        workstreams=(workstream,),
+        hidden_render_sections=frozenset() if visible else frozenset({f"workstream:{section_id}"}),
+    )
+
+    rendered = HTMLRenderer("acme_weekly").render(context)
+
+    assert (f'<a id="chapter-{section_id}"></a>' in rendered) is visible
+    assert rendered.count(f'href="#chapter-{section_id}"') == (2 if visible else 0)
+    assert f'href="#{section_id}"' not in rendered
+
+
+@pytest.mark.parametrize("edition", [EditionType.DETAILED, EditionType.FOCUSED, EditionType.LOOKBACK])
+@pytest.mark.parametrize("visible", [False, True])
+@pytest.mark.parametrize("chapter", [False, True])
+@pytest.mark.parametrize("suggested", [False, True])
+def test_decision_workstream_links_follow_rendered_sections(
+    edition: EditionType, visible: bool, chapter: bool, suggested: bool,
+) -> None:
+    context = _render_context()
+    workstream = replace(
+        context.workstreams[0],
+        edit_path=r"narratives\issue_078\chapter_deployment.md" if chapter else None,
+    )
+    item = replace(context.top_items[0], suggested=suggested)
+    context = replace(
+        context,
+        report=replace(context.report, edition=edition),
+        workstreams=(workstream,),
+        top_items=() if suggested else (item,),
+        auto_suggestions=(item,) if suggested else (),
+        is_dry_run=suggested,
+        hidden_render_sections=frozenset() if visible else frozenset({"workstream:deployment"}),
+    )
+    renderer = HTMLRenderer("acme_weekly")
+    decision_strip = renderer.render_fragment("partials/top_3_now.j2", **build_render_payload(context))
+    rendered = renderer.render(context)
+    anchor = "chapter-deployment" if chapter else "deployment"
+
+    assert (f'href="#{anchor}"' in decision_strip) is visible
+    assert (f'<a id="{anchor}"></a>' in rendered) is visible
+    if chapter or not visible:
+        assert 'href="#deployment"' not in decision_strip
+    assert f'href="{item.ado_link}"' in decision_strip
+
+
+@pytest.mark.parametrize("chapter", [False, True])
+def test_narrative_decision_link_follows_its_rendered_workstream(chapter: bool) -> None:
+    context = _render_context()
+    workstream = replace(
+        context.workstreams[0],
+        edit_path=r"narratives\issue_078\chapter_deployment.md" if chapter else None,
+    )
+    context = replace(
+        context,
+        report=replace(context.report, edition=EditionType.NARRATIVE),
+        workstreams=(workstream,),
+        hidden_render_sections=frozenset({"workstream:deployment"}),
+    )
+    rendered = HTMLRenderer("acme_weekly").render(context)
+    anchor = "chapter-deployment" if chapter else "deployment"
+
+    assert f'href="#{anchor}"' in rendered
+    assert f'<a id="{anchor}"></a>' in rendered
+
+
+@pytest.mark.parametrize("edition", [EditionType.DETAILED, EditionType.FOCUSED, EditionType.LOOKBACK])
+@pytest.mark.parametrize("visible", [False, True])
+def test_decision_link_recognizes_authored_chapter_anchor(edition: EditionType, visible: bool) -> None:
+    context = _render_context()
+    workstream = replace(
+        context.workstreams[0],
+        edit_path=r"narratives\issue_078\chapter_deployment.md",
+    )
+    item = replace(context.top_items[0], anchor="chapter-deployment")
+    context = replace(
+        context,
+        report=replace(context.report, edition=edition),
+        workstreams=(workstream,),
+        top_items=(item,),
+        hidden_render_sections=frozenset() if visible else frozenset({"workstream:deployment"}),
+    )
+    renderer = HTMLRenderer("acme_weekly")
+    decision_strip = renderer.render_fragment("partials/top_3_now.j2", **build_render_payload(context))
+    rendered = renderer.render(context)
+
+    assert ('href="#chapter-deployment"' in decision_strip) is visible
+    assert ('<a id="chapter-deployment"></a>' in rendered) is visible
+
+
+@pytest.mark.parametrize("custom_anchor", ["custom-target", "chapter-custom"])
+def test_decision_link_omits_empty_workstream_but_preserves_custom_anchors(custom_anchor: str) -> None:
+    context = _render_context()
+    empty_workstream = replace(context.workstreams[0], blurb="", items=())
+    context = replace(context, workstreams=(empty_workstream,))
+    renderer = HTMLRenderer("acme_weekly")
+
+    omitted = renderer.render_fragment("partials/top_3_now.j2", **build_render_payload(context))
+    custom = replace(context.top_items[0], anchor=custom_anchor)
+    preserved = renderer.render_fragment(
+        "partials/top_3_now.j2",
+        **build_render_payload(replace(context, top_items=(custom,))),
+    )
+
+    assert 'href="#deployment"' not in omitted
+    assert f'href="#{custom_anchor}"' in preserved
+
+
+def test_decision_link_omits_workstream_excluded_by_template_contract() -> None:
+    context = _render_context()
+    contract = TemplateFamilyContract(
+        name="selected",
+        order=("health", "top_3"),
+        mandatory=(),
+        optional=(),
+        rules={},
+    )
+    context = replace(context, template_contract=contract)
+
+    rendered = HTMLRenderer("acme_weekly").render(context)
+
+    assert 'href="#deployment"' not in rendered
+    assert '<a id="deployment"></a>' not in rendered
 
 
 def test_workstream_risk_chip_includes_accessible_label() -> None:
@@ -985,3 +1261,396 @@ def test_teams_summary_uses_trend_description() -> None:
 
     without_message = renderer.render(replace(_render_context(), kusto_sections=(chart_no_message,)))
     assert "Deployment Velocity. [View chart →](https://dash.example/deploy)" in without_message
+
+
+def _render_chart_placement(placement, section, tmp_path, repo_root):
+    from src.core.stages.render_stage import _route_chart_placements
+
+    context = replace(_render_context(), kusto_sections=())
+    if placement in {"standalone_registry", "standalone_legacy"}:
+        target = "standalone"
+    elif placement in {"workstream_registry", "workstream_legacy"}:
+        target = f"workstream:{context.workstreams[0].section_id}"
+    elif placement == "executive":
+        target = "exec_summary"
+    else:
+        raise AssertionError(f"Unknown chart placement: {placement}")
+    sections, executive, workstreams = _route_chart_placements(
+        (replace(section, section_placement=target),), context.workstreams,
+    )
+    context = replace(context, kusto_sections=sections, exec_summary_chart=executive, workstreams=workstreams)
+    return HTMLRenderer("acme_weekly", reports_root=tmp_path, templates_root=repo_root / "templates").render(context)
+
+
+def _chart_images(rendered):
+    from html.parser import HTMLParser
+
+    class ImageParser(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.images = []
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "img":
+                self.images.append(dict(attrs))
+
+    parser = ImageParser()
+    parser.feed(rendered)
+    return [image for image in parser.images if (image.get("src") or "").startswith("data:image/png;base64,")]
+
+
+def _chart_section(placement, *, title="Deployment", message=None):
+    return replace(
+        _render_context().kusto_sections[0],
+        title=title,
+        render_mode="chart_image" if placement.endswith("legacy") else "chart",
+        message=message,
+        image_data_url="data:image/png;base64,ZmFrZQ==",
+        chart_png_base64="ZmFrZQ==",
+        chart_png_size_bytes=4,
+        captured_at=None,
+        cache_captured_at=None,
+        is_degraded=False,
+    )
+
+
+@pytest.mark.parametrize(
+    "placement",
+    ["standalone_registry", "standalone_legacy", "workstream_registry", "workstream_legacy", "executive"],
+)
+@pytest.mark.parametrize("message", [None, "", "P50 improved by 12%"])
+def test_chart_alt_includes_message_without_changing_empty_fallback(placement, message, tmp_path, repo_root):
+    section = _chart_section(placement, message=message)
+    images = _chart_images(_render_chart_placement(placement, section, tmp_path, repo_root))
+
+    assert len(images) == 1
+    expected = "Deployment chart" + (f": {message}" if message else "")
+    assert images[0]["alt"] == expected
+
+
+@pytest.mark.parametrize(
+    "placement",
+    ["standalone_registry", "standalone_legacy", "workstream_registry", "workstream_legacy", "executive"],
+)
+@pytest.mark.parametrize("marked_safe", [False, True])
+def test_chart_alt_and_kusto_text_are_literal_and_attribute_safe(placement, marked_safe, tmp_path, repo_root):
+    from markupsafe import Markup
+
+    title = 'Latency " onerror="unexpected & <em>peak</em>'
+    message = 'Trend " onerror="unexpected & <script>sentinel</script> Δ'
+    if marked_safe:
+        title, message = Markup(title), Markup(message)
+    section = _chart_section(placement, title=title, message=message)
+
+    rendered = _render_chart_placement(placement, section, tmp_path, repo_root)
+    images = _chart_images(rendered)
+
+    assert len(images) == 1
+    assert images[0]["alt"] == f"{title} chart: {message}"
+    assert "onerror" not in images[0]
+    assert "<em>peak</em>" not in rendered
+    assert "<script>sentinel</script>" not in rendered
+
+
+@pytest.mark.parametrize("render_mode", ["metric_highlight", "table"])
+@pytest.mark.parametrize("marked_safe", [False, True])
+def test_kusto_non_chart_title_and_message_are_literal(render_mode, marked_safe, tmp_path, repo_root):
+    from markupsafe import Markup
+
+    title = "<em>Latency</em> & load"
+    message = "<script>sentinel</script> & trend"
+    if marked_safe:
+        title, message = Markup(title), Markup(message)
+    section = replace(
+        _render_context().kusto_sections[0],
+        render_mode=render_mode,
+        title=title,
+        message=message,
+    )
+
+    rendered = _render_chart_placement("standalone_registry", section, tmp_path, repo_root)
+
+    assert "&lt;em&gt;Latency&lt;/em&gt; &amp; load" in rendered
+    assert "&lt;script&gt;sentinel&lt;/script&gt; &amp; trend" in rendered
+    assert "<em>Latency</em>" not in rendered
+    assert "<script>sentinel</script>" not in rendered
+
+
+@pytest.mark.parametrize("placement", ["standalone_registry", "workstream_registry", "executive"])
+@pytest.mark.parametrize("cached", [False, True])
+def test_chart_alt_timestamp_uses_existing_utc_formatter(placement, cached, tmp_path, repo_root):
+    from datetime import timedelta
+
+    observed = datetime(2026, 6, 18, 19, 30, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+    cached_at = datetime(2026, 6, 17, 7, 45, tzinfo=timezone.utc)
+    section = replace(
+        _chart_section(placement, message="Trend stable"),
+        captured_at=observed,
+        cache_captured_at=cached_at if cached else None,
+        is_degraded=cached,
+    )
+
+    rendered = _render_chart_placement(placement, section, tmp_path, repo_root)
+
+    assert _chart_images(rendered)[0]["alt"] == "Deployment chart: Trend stable"
+    if cached:
+        assert "Jun 17 2026, 07:45 UTC" in rendered
+        assert "live data unavailable" in rendered
+        assert "Jun 18 2026, 14:00 UTC" not in rendered
+    else:
+        assert "Jun 18 2026, 14:00 UTC" in rendered
+        assert "live data unavailable" not in rendered
+
+
+@pytest.mark.parametrize(
+    "placement",
+    ["standalone_registry", "standalone_legacy", "workstream_registry", "workstream_legacy", "executive"],
+)
+def test_chart_alt_missing_image_does_not_create_image(placement, tmp_path, repo_root):
+    section = replace(_chart_section(placement, message="No chart"), image_data_url=None, chart_png_base64=None)
+
+    assert _chart_images(_render_chart_placement(placement, section, tmp_path, repo_root)) == []
+
+
+@pytest.mark.parametrize(
+    ("placement", "title"),
+    [
+        ("standalone_registry", "Synthetic"),
+        ("standalone_registry", "Fleet Parity"),
+        ("workstream_registry", "Synthetic"),
+        ("executive", "Synthetic"),
+    ],
+)
+def test_chart_alt_real_registry_result_reaches_html(placement, title, tmp_path, repo_root, monkeypatch):
+    from src.core.chart_renderer_registry import ChartRendererRegistry
+    from src.core.config_loader import KustoQuerySettings, KustoSettings
+    from src.core.kusto_rendering import build_kusto_sections
+    import src.core.kusto_rendering as rendering
+
+    pytest.importorskip("matplotlib")
+    monkeypatch.setattr(rendering, "_VERTEX_CHARTS_ENABLED", True)
+    query = KustoQuerySettings(
+        id="synthetic", cluster="synthetic", database="synthetic", kql="synthetic",
+        section=title, render_as="chart_image", confidence="high",
+        kusto_section_validates_slice=False, caveats=(), reference_url=None,
+        chart_config={"type": "line", "x_axis": "Day", "y_axes": ["Value"]},
+    )
+    rows = [{"Day": "one", "Value": 1.0}, {"Day": "two", "Value": 2.0}]
+    observed = datetime(2026, 6, 18, 14, 30, tzinfo=timezone.utc)
+    sections, observations, warnings = build_kusto_sections(
+        KustoSettings(enabled=True, queries=(query,)), lambda _: rows,
+        chart_registry=ChartRendererRegistry(), observed_at=observed,
+    )
+    assert warnings == ()
+    assert observations[0].execution_state == "success"
+    assert sections[0].message
+
+    rendered = _render_chart_placement(placement, sections[0], tmp_path, repo_root)
+
+    assert _chart_images(rendered)[0]["alt"] == f"{title} chart: {sections[0].message}"
+    assert "Jun 18 2026, 14:30 UTC" in rendered
+
+
+def _fleet_chart(placement, message):
+    return replace(
+        _chart_section(placement, title="Fleet Parity", message=message),
+        section_id="kusto-fleet-chart",
+        query_id="fleet-chart",
+        rows=(),
+        metrics=(),
+        reference_url="https://example.com/chart",
+    )
+
+
+def _fleet_group_context(chart, edition=EditionType.DETAILED, mixed=True):
+    context = _render_context()
+    metric = replace(
+        context.kusto_sections[0],
+        section_id="kusto-fleet-metric",
+        title="Fleet Parity",
+        query_id="fleet-metric",
+        rows=(),
+        metrics=(KustoMetric(label="Fleet count", value="7"),),
+        message="Fleet metric summary",
+    )
+    sections = (metric, chart) if mixed else (chart,)
+    return replace(context, report=replace(context.report, edition=edition), kusto_sections=sections)
+
+
+@pytest.mark.parametrize("edition", [EditionType.DETAILED, EditionType.FOCUSED, EditionType.LOOKBACK])
+@pytest.mark.parametrize("placement", ["standalone_registry", "standalone_legacy"])
+@pytest.mark.parametrize("mixed", [False, True])
+@pytest.mark.parametrize("marked_safe", [False, True])
+def test_grouped_kusto_chart_renders_escaped_description(
+    edition, placement, mixed, marked_safe, tmp_path, repo_root,
+):
+    from markupsafe import Markup
+
+    message = 'Trend " onerror="unexpected & <script>sentinel</script>'
+    if marked_safe:
+        message = Markup(message)
+    chart = _fleet_chart(placement, message)
+    context = _fleet_group_context(chart, edition, mixed)
+    payload = build_render_payload(context)
+    groups = [section for section in payload["ordered_sections"] if section.kind == "kusto_group"]
+    assert len(groups) == 1
+    assert groups[0].anchor_id == "fleet-parity"
+    assert groups[0].kusto_group_sections[-1] == chart
+
+    renderer = HTMLRenderer("acme_weekly", reports_root=tmp_path, templates_root=repo_root / "templates")
+    rendered = renderer.render(context)
+    images = _chart_images(rendered)
+    assert len(images) == 1
+    assert images[0]["alt"] == f"Fleet Parity chart: {message}"
+    assert "onerror" not in images[0]
+    assert "<script>sentinel</script>" not in rendered
+    assert "&lt;script&gt;sentinel&lt;/script&gt;" in rendered
+    assert rendered.count('id="fleet-parity"') == 1
+    assert "Query fleet-chart" in rendered
+    if placement == "standalone_registry":
+        assert '<a href="https://example.com/chart" target="_blank"' in rendered
+    if mixed:
+        assert "Fleet count" in rendered
+        assert "Fleet metric summary" in rendered
+
+
+@pytest.mark.parametrize("edition", [EditionType.DETAILED, EditionType.LOOKBACK])
+@pytest.mark.parametrize("placement", ["standalone_registry", "standalone_legacy"])
+@pytest.mark.parametrize("message", [None, ""])
+def test_grouped_kusto_chart_empty_description_keeps_alt(edition, placement, message, tmp_path, repo_root):
+    context = _fleet_group_context(_fleet_chart(placement, message), edition)
+    rendered = HTMLRenderer("acme_weekly", reports_root=tmp_path, templates_root=repo_root / "templates").render(context)
+    assert _chart_images(rendered)[0]["alt"] == "Fleet Parity chart"
+
+
+@pytest.mark.parametrize("edition", [EditionType.DETAILED, EditionType.LOOKBACK])
+def test_grouped_kusto_multiple_charts_keep_their_own_content(edition, tmp_path, repo_root):
+    first = _fleet_chart("standalone_registry", "First trend")
+    second = replace(
+        _fleet_chart("standalone_legacy", "Second trend"),
+        section_id="kusto-fleet-other-chart",
+        query_id="fleet-other-chart",
+        image_data_url="data:image/png;base64,c2Vjb25k",
+        reference_url="https://example.com/other",
+    )
+    context = _fleet_group_context(first, edition)
+    context = replace(context, kusto_sections=context.kusto_sections + (second,))
+    html = HTMLRenderer("acme_weekly", reports_root=tmp_path, templates_root=repo_root / "templates").render(context)
+    images = _chart_images(html)
+    assert [image["alt"] for image in images] == [
+        "Fleet Parity chart: First trend",
+        "Fleet Parity chart: Second trend",
+    ]
+    assert [image["src"] for image in images] == [
+        "data:image/png;base64,ZmFrZQ==",
+        "data:image/png;base64,c2Vjb25k",
+    ]
+    teams = TeamsRenderer("acme_weekly", reports_root=tmp_path, templates_root=repo_root / "templates").render(context)
+    assert "Fleet Parity: First trend. [View chart →](https://example.com/chart)" in teams
+    assert "Fleet Parity: Second trend. [View chart →](https://example.com/other)" in teams
+
+
+@pytest.mark.parametrize("edition", [EditionType.DETAILED, EditionType.LOOKBACK])
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("has_image", [False, True])
+def test_grouped_kusto_chart_preserves_registry_status(edition, cached, has_image, tmp_path, repo_root):
+    chart = replace(
+        _fleet_chart("standalone_registry", "Stable"),
+        chart_png_base64="ZmFrZQ==" if has_image else None,
+        captured_at=datetime(2026, 6, 18, 14, 30, tzinfo=timezone.utc),
+        cache_captured_at=datetime(2026, 6, 17, 7, 45, tzinfo=timezone.utc) if cached else None,
+        is_degraded=cached,
+    )
+    context = _fleet_group_context(chart, edition)
+    rendered = HTMLRenderer("acme_weekly", reports_root=tmp_path, templates_root=repo_root / "templates").render(context)
+    assert len(_chart_images(rendered)) == int(has_image)
+    assert ("No data available for this period." in rendered) == (not has_image)
+    if cached:
+        assert "Jun 17 2026, 07:45 UTC" in rendered
+        assert "live data unavailable" in rendered
+    elif has_image:
+        assert "Jun 18 2026, 14:30 UTC" in rendered
+        assert "live data unavailable" not in rendered
+
+
+@pytest.mark.parametrize("edition", [EditionType.DETAILED, EditionType.LOOKBACK])
+def test_grouped_kusto_legacy_missing_image_preserves_message_and_reference(edition, tmp_path, repo_root):
+    chart = replace(_fleet_chart("standalone_legacy", "Unavailable"), image_data_url=None)
+    context = _fleet_group_context(chart, edition)
+    rendered = HTMLRenderer("acme_weekly", reports_root=tmp_path, templates_root=repo_root / "templates").render(context)
+    assert _chart_images(rendered) == []
+    assert "Unavailable" in rendered
+    assert "fleet-chart dashboard" in rendered
+    assert "No data available for this period." not in rendered
+
+
+@pytest.mark.parametrize("placement", ["standalone_registry", "standalone_legacy"])
+@pytest.mark.parametrize("message", [None, "Trend stable"])
+@pytest.mark.parametrize("reference_url", [None, "https://example.com/chart"])
+@pytest.mark.parametrize("has_image", [False, True])
+def test_grouped_kusto_chart_teams_summary(placement, message, reference_url, has_image, tmp_path, repo_root):
+    chart = replace(
+        _fleet_chart(placement, message),
+        reference_url=reference_url,
+        image_data_url="data:image/png;base64,ZmFrZQ==" if has_image else None,
+        chart_png_base64="ZmFrZQ==" if has_image else None,
+    )
+    renderer = TeamsRenderer("acme_weekly", reports_root=tmp_path, templates_root=repo_root / "templates")
+    rendered = renderer.render(_fleet_group_context(chart))
+    if placement == "standalone_legacy" and not has_image:
+        assert "[View chart" not in rendered
+    else:
+        summary = "Fleet Parity" + (f": {message}" if message else "")
+        assert f"{summary}. [View chart →]({reference_url or '#'})" in rendered
+
+
+@pytest.mark.parametrize("edition", [EditionType.DETAILED, EditionType.LOOKBACK])
+@pytest.mark.parametrize("order_entry", ["kusto-group:fleet-parity", "kusto:all"])
+def test_grouped_kusto_chart_retains_group_order_and_visibility(edition, order_entry, tmp_path, repo_root):
+    chart = _fleet_chart("standalone_registry", "Group-only chart")
+    contract = TemplateFamilyContract(
+        name="synthetic", order=(order_entry,), mandatory=(), optional=(), rules={},
+    )
+    context = replace(_fleet_group_context(chart, edition), template_contract=contract)
+    sections = build_render_payload(context)["ordered_sections"]
+    assert [(section.kind, section.anchor_id) for section in sections] == [("kusto_group", "fleet-parity")]
+    html = HTMLRenderer("acme_weekly", reports_root=tmp_path, templates_root=repo_root / "templates")
+    teams = TeamsRenderer("acme_weekly", reports_root=tmp_path, templates_root=repo_root / "templates")
+    assert len(_chart_images(html.render(context))) == 1
+    assert "Group-only chart" in teams.render(context)
+
+    hidden = replace(context, hidden_render_sections=frozenset({"fleet-parity"}))
+    assert build_render_payload(hidden)["ordered_sections"] == ()
+    assert _chart_images(html.render(hidden)) == []
+    assert "Group-only chart" not in teams.render(hidden)
+
+
+@pytest.mark.parametrize("metric_count", [3, 4, 6])
+@pytest.mark.parametrize("chart_first", [False, True])
+def test_grouped_kusto_three_or_more_metrics_and_chart_render(metric_count, chart_first, tmp_path, repo_root):
+    context = _fleet_group_context(_fleet_chart("standalone_registry", "Stable"))
+    metric = replace(
+        context.kusto_sections[0],
+        metrics=tuple(KustoMetric(label=f"Metric {index}", value=str(index)) for index in range(metric_count)),
+    )
+    chart = context.kusto_sections[1]
+    context = replace(context, kusto_sections=(chart, metric) if chart_first else (metric, chart))
+    rendered = HTMLRenderer("acme_weekly", reports_root=tmp_path, templates_root=repo_root / "templates").render(context)
+    assert len(_chart_images(rendered)) == 1
+    for index in range(metric_count):
+        assert f"Metric {index}" in rendered
+
+
+@pytest.mark.parametrize("marked_safe", [False, True])
+def test_grouped_kusto_non_chart_message_is_literal(marked_safe, tmp_path, repo_root):
+    from markupsafe import Markup
+
+    context = _fleet_group_context(_fleet_chart("standalone_registry", None))
+    message = "<script>sentinel</script> & metric"
+    if marked_safe:
+        message = Markup(message)
+    metric = replace(context.kusto_sections[0], message=message)
+    context = replace(context, kusto_sections=(metric,))
+    rendered = HTMLRenderer("acme_weekly", reports_root=tmp_path, templates_root=repo_root / "templates").render(context)
+    assert "&lt;script&gt;sentinel&lt;/script&gt; &amp; metric" in rendered
+    assert "<script>sentinel</script>" not in rendered

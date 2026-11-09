@@ -6,7 +6,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from src.core.file_stores import FileArchiveStore, FileSignalStore, FileTrajectoryStore
-from src.core.models import ArchiveIndex, Confidence, EditionType, RiskLevel, Snapshot, SnapshotItem
+from src.core.journal import signal_to_record
+from src.core.models import ArchiveIndex, Confidence, RiskLevel
 from src.core.models_v2 import Signal, SignalReviewDecision, SignalThreadLink, SignalUsageMarker, TrajectoryPoint
 from src.core.signal_classification import classify_signal
 from src.core.sqlite_stores import SQLiteSignalStore, SQLiteTrajectoryStore
@@ -106,22 +107,11 @@ class InMemoryTrajectoryStore:
 class InMemoryArchiveStore:
     def __init__(self) -> None:
         self._index = ArchiveIndex(edition="acme_weekly", issues=())
-        self._snapshots: dict[tuple[str, int], Snapshot] = {}
         self._scorecard_history: dict[str, tuple[dict[str, object], ...]] = {}
 
     def read_index(self, edition: str) -> ArchiveIndex:
         del edition
         return self._index
-
-    def write_confirmed(
-        self,
-        edition: str,
-        issue_number: int,
-        snapshot: Snapshot,
-        acquire_lock: bool = True,
-    ) -> None:
-        del acquire_lock
-        self._snapshots[(edition, issue_number)] = snapshot
 
     def read_scorecard_history(self, edition: str) -> tuple[dict[str, object], ...]:
         return self._scorecard_history.get(edition, ())
@@ -181,33 +171,22 @@ def _build_point() -> TrajectoryPoint:
     )
 
 
-def _build_snapshot() -> Snapshot:
-    return Snapshot(
-        issue_number=1,
-        generated_at=datetime(2026, 5, 10, 9, 0, tzinfo=timezone.utc),
-        ado_data_as_of=datetime(2026, 5, 10, 8, 55, tzinfo=timezone.utc),
-        edition_type=EditionType.DETAILED,
-        items=(
-            SnapshotItem(
-                id=101,
-                type="Feature",
-                title="Acme rollout",
-                state="Active",
-                assigned_to="operator",
-                area_path="One\\Adventure\\Acme",
-                target_date=date(2026, 5, 20),
-                risk_level=RiskLevel.MEDIUM,
-                tags=["acme"],
-            ),
-        ),
-        scorecards=(),
-    )
-
-
 def test_in_memory_stores_satisfy_protocols() -> None:
     assert isinstance(InMemorySignalStore(), SignalStore)
     assert isinstance(InMemoryTrajectoryStore(), TrajectoryStore)
     assert isinstance(InMemoryArchiveStore(), ArchiveStore)
+
+
+def test_archive_store_protocol_does_not_declare_snapshot_writes() -> None:
+    assert not hasattr(ArchiveStore, "write_confirmed")
+
+
+def test_file_archive_store_does_not_expose_snapshot_writes(tmp_path: Path) -> None:
+    archive_root = tmp_path / "archive"
+    store = FileArchiveStore(archive_root=archive_root)
+
+    assert not hasattr(store, "write_confirmed")
+    assert not archive_root.exists()
 
 
 def test_file_signal_store_round_trips_signals_and_reviews(tmp_path: Path) -> None:
@@ -241,6 +220,31 @@ def test_file_trajectory_store_round_trips_points(tmp_path: Path) -> None:
     assert store.append("acme", 101, point) is False
     assert store.list_work_item_ids("acme") == (101,)
     assert store.read("acme", 101) == (point,)
+
+
+def test_file_signal_store_preserves_non_derivable_single_workstreams(tmp_path: Path) -> None:
+    store = FileSignalStore(programs_root=tmp_path)
+    signals = (
+        replace(_build_signal(), id="sig-1", workstream_id=None, workstream_ids=("shared",)),
+        replace(_build_signal(), id="sig-2", workstream_ids=("shared",)),
+    )
+    for signal in signals:
+        store.append(signal)
+
+    assert tuple((signal.id, signal.workstream_ids) for signal in store.read("acme")) == (
+        ("sig-1", ("shared",)),
+        ("sig-2", ("shared",)),
+    )
+    assert tuple(signal.id for signal in store.read("acme", workstream_id="shared")) == ("sig-1", "sig-2")
+    assert store.read("acme", workstream_id="core") == ()
+
+
+def test_signal_record_preserves_legacy_representation_for_derivable_workstreams() -> None:
+    signal = _build_signal()
+
+    assert signal_to_record(signal)["ws_ids"] is None
+    assert signal_to_record(replace(signal, workstream_ids=("shared",)))["ws_ids"] == ["shared"]
+    assert signal_to_record(replace(signal, workstream_id=None, workstream_ids=("shared",)))["ws_ids"] == ["shared"]
 
 
 def test_sqlite_signal_store_round_trips_signals_reviews_and_threads(tmp_path: Path) -> None:
@@ -278,6 +282,26 @@ def test_sqlite_signal_store_round_trips_signals_reviews_and_threads(tmp_path: P
     assert store.read_threads(signal.program_id) == {latest_thread.signal_id: latest_thread}
 
 
+def test_sqlite_signal_store_preserves_gather_provenance_and_all_workstreams(tmp_path: Path) -> None:
+    sqlite_store = SQLiteSignalStore(programs_root=tmp_path)
+    file_store = FileSignalStore(programs_root=tmp_path)
+    signals = (
+        replace(_build_signal(), id="sig-1", gather_run_id="run-1", workstream_ids=("core", "shared")),
+        replace(_build_signal(), id="sig-2", workstream_ids=("shared",)),
+        replace(_build_signal(), id="sig-3", workstream_id=None, workstream_ids=("shared",)),
+    )
+    for signal in signals:
+        sqlite_store.append(signal)
+        file_store.append(signal)
+
+    assert sqlite_store.read("acme") == signals
+    assert sqlite_store.read("acme", read_only=True) == signals
+    for workstream_id in ("core", "shared", "missing"):
+        expected = tuple(signal.id for signal in file_store.read("acme", workstream_id=workstream_id))
+        assert tuple(signal.id for signal in sqlite_store.read("acme", workstream_id=workstream_id)) == expected
+        assert tuple(signal.id for signal in sqlite_store.read("acme", read_only=True, workstream_id=workstream_id)) == expected
+
+
 def test_sqlite_trajectory_store_round_trips_points(tmp_path: Path) -> None:
     store = SQLiteTrajectoryStore(programs_root=tmp_path)
     point = _build_point()
@@ -299,17 +323,13 @@ def test_sqlite_trajectory_store_round_trips_points(tmp_path: Path) -> None:
     assert store.read("acme", 101, start=date(2026, 5, 11)) == (changed_point,)
 
 
-def test_file_archive_store_writes_snapshot_and_reads_history(tmp_path: Path) -> None:
+def test_file_archive_store_reads_index_and_history(tmp_path: Path) -> None:
     archive_root = tmp_path / "archive"
     store = FileArchiveStore(archive_root=archive_root)
-    snapshot = _build_snapshot()
 
     assert store.read_index("acme_weekly") == ArchiveIndex(edition="acme_weekly", issues=())
-
-    store.write_confirmed("acme_weekly", 1, snapshot)
-
-    snapshot_path = archive_root / "acme_weekly" / "snapshots" / "issue_001.snapshot.json"
-    assert snapshot_path.exists()
+    assert store.read_scorecard_history("acme_weekly") == ()
+    assert not archive_root.exists()
 
     scorecard_path = archive_root / "acme_weekly" / "scorecards.json"
     scorecard_path.parent.mkdir(parents=True, exist_ok=True)

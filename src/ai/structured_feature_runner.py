@@ -70,15 +70,17 @@ covered by tests that supply a fake for exactly that seam:
   enforced by ``_fallback()`` only ever relabeling a ``RELEASED`` outcome
   (to ``DETERMINISTIC_FALLBACK``); every other status
   (``BLOCKED``/``UNAVAILABLE``/``PARTIAL``/``ABSTAINED``/``EVIDENCE_GAP``)
-  passes through a caller's ``fallback_handler`` untouched, so none of them
-  can ever surface as ``RELEASED``.
+  stays unchanged, so none can surface as ``RELEASED``. Ceiling refusals
+  append the exhausted kind to the caller's existing limitations; budget
+  refusals append their reason and are non-retryable. Other non-released
+  fallback outcomes pass through untouched.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -271,25 +273,37 @@ class CallCeilingLedger:
         """Atomically increment the counter for ``(scope_key, kind)``.
         Raises :class:`CallCeilingExceeded` — without incrementing — if the
         ceiling would be exceeded. ``ceiling=None`` means unbounded."""
-        if ceiling is None:
+        self._reserve_calls(scope_key=scope_key, ceilings=((kind, ceiling),))
+
+    def reserve_frontier_call(
+        self, *, scope_key: str, remote_ceiling: int | None, frontier_ceiling: int | None,
+    ) -> None:
+        """Reserve both applicable call slots in one transaction."""
+        self._reserve_calls(
+            scope_key=scope_key, ceilings=(("remote", remote_ceiling), ("frontier", frontier_ceiling)),
+        )
+
+    def _reserve_calls(self, *, scope_key: str, ceilings: tuple[tuple[str, int | None], ...]) -> None:
+        bounded = [(kind, ceiling) for kind, ceiling in ceilings if ceiling is not None]
+        if not bounded:
             return
         try:
             with open_program_db(self._ledger_path, durability="strict") as connection:
                 connection.executescript(_CEILING_SCHEMA_SQL)
                 connection.execute("BEGIN IMMEDIATE")
-                row = connection.execute(
-                    "SELECT call_count FROM call_ceiling_counters WHERE scope_key = ? AND kind = ?",
-                    (scope_key, kind),
-                ).fetchone()
-                current = int(row[0]) if row is not None else 0
-                if current >= ceiling:
-                    connection.rollback()
-                    raise CallCeilingExceeded(kind=kind, scope_key=scope_key, ceiling=ceiling)
-                connection.execute(
-                    "INSERT INTO call_ceiling_counters (scope_key, kind, call_count, updated_at) VALUES (?, ?, 1, ?) "
-                    "ON CONFLICT(scope_key, kind) DO UPDATE SET call_count = call_count + 1, updated_at = excluded.updated_at",
-                    (scope_key, kind, datetime.now(timezone.utc).isoformat()),
-                )
+                for kind, ceiling in bounded:
+                    row = connection.execute(
+                        "SELECT call_count FROM call_ceiling_counters WHERE scope_key = ? AND kind = ?",
+                        (scope_key, kind),
+                    ).fetchone()
+                    current = int(row[0]) if row is not None else 0
+                    if current >= ceiling:
+                        raise CallCeilingExceeded(kind=kind, scope_key=scope_key, ceiling=ceiling)
+                    connection.execute(
+                        "INSERT INTO call_ceiling_counters (scope_key, kind, call_count, updated_at) VALUES (?, ?, 1, ?) "
+                        "ON CONFLICT(scope_key, kind) DO UPDATE SET call_count = call_count + 1, updated_at = excluded.updated_at",
+                        (scope_key, kind, datetime.now(timezone.utc).isoformat()),
+                    )
                 connection.commit()
         except sqlite3.DatabaseError as error:
             raise StateError(f"Unable to update call-ceiling ledger at {self._ledger_path}") from error
@@ -785,11 +799,13 @@ class StructuredFeatureRunner:
         # Step 9/10: remote/frontier call-count ceiling — checked and
         # incremented BEFORE any provider call is attempted.
         try:
-            self._ceiling_ledger.reserve_call(scope_key=scope_key, kind="remote", ceiling=spec.max_remote_calls_per_run)
-            self._ceiling_ledger.reserve_call(scope_key=scope_key, kind="frontier", ceiling=spec.max_frontier_calls_per_run)
-        except CallCeilingExceeded:
+            self._ceiling_ledger.reserve_frontier_call(
+                scope_key=scope_key, remote_ceiling=spec.max_remote_calls_per_run,
+                frontier_ceiling=spec.max_frontier_calls_per_run,
+            )
+        except CallCeilingExceeded as error:
             self._record_decision(spec.feature, Tier.NONE, RouteOutcome.SKIPPED, 0.0)
-            return self._fallback(spec, request, reason="remote_cap_exhausted")
+            return self._fallback(spec, request, reason=f"{error.kind}_cap_exhausted")
 
         # Step 11: call the provider. AIClient.structured() (or equivalent)
         # already reserves/settles its own cost atomically — see module
@@ -797,7 +813,7 @@ class StructuredFeatureRunner:
         try:
             response = spec.call_provider(request, context_build.compiled)
         except BudgetExceeded:
-            # Sec 8.1.6: non-retryable, like a policy block or cap exhaustion.
+            # Sec 8.1.6: budget exhaustion is non-retryable.
             self._record_decision(spec.feature, Tier.FRONTIER, RouteOutcome.FRONTIER_BLOCKED, 0.0)
             return self._fallback(spec, request, reason="budget_exceeded")
         except Exception:
@@ -858,7 +874,9 @@ class StructuredFeatureRunner:
         not configured for batching (missing ``item_id``/
         ``build_batch_context``/``call_provider_batch``) falls back to one
         ``run()`` per item, keyed by ``spec.request_hash`` if available or
-        the item's index otherwise.
+        the item's index otherwise. Effective keys must be distinct
+        nonblank strings; an explicit batch size must be a positive integer.
+        Invalid inputs are rejected before any item is processed.
 
         Only the *deterministic*-result cache is consulted per item before
         batching (Sec 8.1.7's "keyed without model context" cache) — the
@@ -868,16 +886,31 @@ class StructuredFeatureRunner:
         for batched items remains a ``run()``-per-item concern until a
         batch-aware context/cache-key design is reviewed separately.
         """
-        if spec.item_id is None or spec.build_batch_context is None or spec.call_provider_batch is None:
-            return {
-                (spec.request_hash(request) if spec.request_hash is not None else str(index)): self.run(spec, request)
+        batchable = spec.item_id is not None and spec.build_batch_context is not None and spec.call_provider_batch is not None
+        if batchable and spec.max_batch_size is not None and (
+            type(spec.max_batch_size) is not int or spec.max_batch_size <= 0
+        ):
+            raise StateError("max_batch_size must be a positive integer or None.")
+
+        if batchable:
+            assert spec.item_id is not None
+            keyed_requests = [(spec.item_id(request), request) for request in requests]
+        else:
+            keyed_requests = [
+                (spec.request_hash(request) if spec.request_hash is not None else str(index), request)
                 for index, request in enumerate(requests)
-            }
+            ]
+        if any(not isinstance(item_id, str) or not item_id.strip() for item_id, _ in keyed_requests):
+            raise StateError("Batch result keys must be nonblank strings.")
+        if len({item_id for item_id, _ in keyed_requests}) != len(keyed_requests):
+            raise StateError("Batch result keys must be unique.")
+
+        if not batchable:
+            return {item_id: self.run(spec, request) for item_id, request in keyed_requests}
 
         results: dict[str, FeatureOutcome[ResponseT]] = {}
         needs_call: list[tuple[str, RequestT]] = []
-        for request in requests:
-            item_id = spec.item_id(request)
+        for item_id, request in keyed_requests:
             fast_outcome = self._pre_context_fast_path(spec, request)
             if fast_outcome is not None:
                 results[item_id] = fast_outcome
@@ -887,7 +920,7 @@ class StructuredFeatureRunner:
         if not needs_call:
             return results
 
-        chunk_size = spec.max_batch_size or len(needs_call)
+        chunk_size = spec.max_batch_size if spec.max_batch_size is not None else len(needs_call)
         for start in range(0, len(needs_call), chunk_size):
             chunk = needs_call[start : start + chunk_size]
             results.update(self._run_batch_chunk(spec, chunk))
@@ -930,11 +963,13 @@ class StructuredFeatureRunner:
         # ONE call-count reservation for the whole chunk (Sec 8.1.9: "the
         # same... cost... budgets" as a single call, not N).
         try:
-            self._ceiling_ledger.reserve_call(scope_key=scope_key, kind="remote", ceiling=spec.max_remote_calls_per_run)
-            self._ceiling_ledger.reserve_call(scope_key=scope_key, kind="frontier", ceiling=spec.max_frontier_calls_per_run)
-        except CallCeilingExceeded:
+            self._ceiling_ledger.reserve_frontier_call(
+                scope_key=scope_key, remote_ceiling=spec.max_remote_calls_per_run,
+                frontier_ceiling=spec.max_frontier_calls_per_run,
+            )
+        except CallCeilingExceeded as error:
             self._record_decision(spec.feature, Tier.NONE, RouteOutcome.SKIPPED, 0.0)
-            return {item_id: self._fallback(spec, request, reason="remote_cap_exhausted") for item_id, request in chunk}
+            return {item_id: self._fallback(spec, request, reason=f"{error.kind}_cap_exhausted") for item_id, request in chunk}
 
         assert spec.call_provider_batch is not None
         try:
@@ -1009,6 +1044,10 @@ class StructuredFeatureRunner:
                 limitations=outcome.limitations + (reason,),
                 evidence_refs=outcome.evidence_refs,
             )
+        if reason == "budget_exceeded":
+            return replace(outcome, limitations=outcome.limitations + (reason,), retryable=False)
+        if reason in ("remote_cap_exhausted", "frontier_cap_exhausted"):
+            return replace(outcome, limitations=outcome.limitations + (reason,))
         return outcome
 
     def _record_decision(self, feature: str, tier: Tier, outcome: RouteOutcome, confidence: float) -> None:

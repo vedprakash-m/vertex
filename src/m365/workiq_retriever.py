@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,12 +16,11 @@ from src.core.workiq_freshness import (
 )
 from src.m365.workiq_ask_support import (
     DiscoveryRequest,
+    _is_native_workiq_identity,
+    _normalize_discovery_identity,
     build_structured_discovery_question,
-    validate_structured_discovery_payload,
+    validate_structured_discovery_payload_with_diagnostics,
 )
-
-
-_TRANSIENT_WORKIQ_ID_RE = re.compile(r"^turn\d+(?:search|result)\d+$", re.IGNORECASE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +30,9 @@ class WorkIQRetrievalResult:
     calls_made: int
     skipped_unchanged: int
     rejected_identity_count: int = 0
+    rejected_source_time_count: int = 0
+    response_usable: bool = True
+    rejected_invalid_record_count: int = 0
 
 
 def retrieve_workiq_threads(
@@ -51,17 +52,17 @@ def retrieve_workiq_threads(
     started = monotonic()
     calls = 1
     payload = bridge.ask_workiq(build_structured_discovery_question(request), use_cache=False)
-    validated = validate_structured_discovery_payload(
+    validated = validate_structured_discovery_payload_with_diagnostics(
         payload,
         window_start=request.window_start,
         window_end=request.window_end,
         limit=request.limit,
     )
-    records = tuple(validated.get("emails") or [])
+    records = tuple(validated.payload.get("emails") or [])
     cache = load_workiq_freshness_cache(cache_path) if cache_path is not None else {}
     enrichments: list[Enrichment] = []
     skipped = 0
-    rejected = 0
+    rejected = validated.rejected_identity_count
     for record in records[:top_k]:
         if calls >= max_calls or monotonic() - started >= max_wall_clock_seconds:
             break
@@ -108,7 +109,10 @@ def retrieve_workiq_threads(
         }
     if cache_path is not None:
         write_workiq_freshness_cache(cache_path, cache)
-    return WorkIQRetrievalResult(tuple(enrichments), len(records), calls, skipped, rejected)
+    return WorkIQRetrievalResult(
+        tuple(enrichments), len(records), calls, skipped, rejected, validated.rejected_source_time_count,
+        response_usable=validated.response_usable, rejected_invalid_record_count=validated.rejected_invalid_record_count,
+    )
 
 
 def _thread_extraction_question(record: dict[str, Any], *, request: DiscoveryRequest, one_hop: bool) -> str:
@@ -128,11 +132,8 @@ def _thread_extraction_question(record: dict[str, Any], *, request: DiscoveryReq
 
 def _canonical_source_id(record: dict[str, Any]) -> str | None:
     for key in ("conversationId", "threadId", "id"):
-        raw = record.get(key)
-        if not isinstance(raw, str):
-            continue
-        value = raw.strip()
-        if value and not value.casefold().startswith("semantic:") and not _TRANSIENT_WORKIQ_ID_RE.fullmatch(value):
+        value = _normalize_discovery_identity(record.get(key))
+        if value is not None and _is_native_workiq_identity(value):
             return value
     return None
 

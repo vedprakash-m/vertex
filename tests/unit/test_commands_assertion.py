@@ -1,12 +1,10 @@
 from __future__ import annotations
-import pytest
-from pathlib import Path
-pytestmark = pytest.mark.skipif(not (Path(__file__).resolve().parents[2] / "editions").exists(), reason="Requires private data")
 
 from datetime import date, datetime, timezone
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 import yaml
 
@@ -17,6 +15,7 @@ from src.core.metric_models import MetricAggregation, MetricQualityState, Metric
 from src.core.reality_store import RealityStore
 
 
+pytestmark = pytest.mark.usefixtures("isolated_cli_startup")
 runner = CliRunner()
 
 
@@ -34,6 +33,10 @@ def test_assertion_add_command_persists_assertion_with_defaults(tmp_path: Path) 
             ">=",
             "--threshold",
             "150",
+            "--programs-root",
+            str(tmp_path / "programs"),
+            "--metrics-root",
+            str(tmp_path / "metrics"),
             "--db-root",
             str(tmp_path / "db"),
         ],
@@ -70,6 +73,10 @@ def test_assertion_add_command_accepts_explicit_assertion_id(tmp_path: Path) -> 
             ">=",
             "--threshold",
             "99.9",
+            "--programs-root",
+            str(tmp_path / "programs"),
+            "--metrics-root",
+            str(tmp_path / "metrics"),
             "--db-root",
             str(tmp_path / "db"),
         ],
@@ -202,6 +209,8 @@ kpis:
             "99.9",
             "--programs-root",
             str(programs_root),
+            "--metrics-root",
+            str(tmp_path / "metrics"),
             "--db-root",
             str(tmp_path / "db"),
         ],
@@ -297,6 +306,10 @@ def test_assertion_add_command_persists_between_operator_with_upper_threshold(tm
             "95",
             "--threshold-upper",
             "99.5",
+            "--programs-root",
+            str(tmp_path / "programs"),
+            "--metrics-root",
+            str(tmp_path / "metrics"),
             "--db-root",
             str(tmp_path / "db"),
         ],
@@ -331,6 +344,10 @@ def test_assertion_add_command_persists_percent_change_baseline(tmp_path: Path) 
             "100",
             "--baseline-captured-at",
             "2026-05-20T10:00:00+00:00",
+            "--programs-root",
+            str(tmp_path / "programs"),
+            "--metrics-root",
+            str(tmp_path / "metrics"),
             "--db-root",
             str(tmp_path / "db"),
         ],
@@ -361,6 +378,10 @@ def test_assertion_add_command_persists_forecast_operator(tmp_path: Path) -> Non
             "forecast_gte",
             "--threshold",
             "120",
+            "--programs-root",
+            str(tmp_path / "programs"),
+            "--metrics-root",
+            str(tmp_path / "metrics"),
             "--db-root",
             str(tmp_path / "db"),
         ],
@@ -390,6 +411,10 @@ def test_assertion_add_command_persists_burn_rate_operator(tmp_path: Path) -> No
             "burn_rate_gte",
             "--threshold",
             "20",
+            "--programs-root",
+            str(tmp_path / "programs"),
+            "--metrics-root",
+            str(tmp_path / "metrics"),
             "--db-root",
             str(tmp_path / "db"),
         ],
@@ -419,6 +444,10 @@ def test_assertion_add_command_rejects_percent_change_without_baseline(tmp_path:
             "pct_regression",
             "--threshold",
             "5",
+            "--programs-root",
+            str(tmp_path / "programs"),
+            "--metrics-root",
+            str(tmp_path / "metrics"),
             "--db-root",
             str(tmp_path / "db"),
         ],
@@ -875,6 +904,10 @@ def test_assertion_add_command_rejects_between_without_upper_threshold(tmp_path:
             "between",
             "--threshold",
             "95",
+            "--programs-root",
+            str(tmp_path / "programs"),
+            "--metrics-root",
+            str(tmp_path / "metrics"),
             "--db-root",
             str(tmp_path / "db"),
         ],

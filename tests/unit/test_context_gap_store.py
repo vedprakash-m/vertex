@@ -73,6 +73,132 @@ def test_load_preserves_historical_defaults_unknown_fields_and_coercion(tmp_path
     assert path.read_bytes() == before
 
 
+@pytest.mark.parametrize("lane", [None, "", 0, False, [], {}, "delivery", 7, True])
+def test_load_preserves_legacy_lane_values_that_can_be_grouped(tmp_path: Path, lane: object) -> None:
+    path = tmp_path / "sample" / "_feedback" / "context_gaps.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({
+        "ts": "2026-10-26T14:00:00+02:00", "feature": "synthetic", "program": "sample",
+        "field": "purpose", "severity": "quality_degraded", "message": "Synthetic observation",
+        "lane": lane,
+    }) + "\n", encoding="utf-8")
+    before = path.read_bytes()
+    record, = load_context_gaps("sample", programs_root=tmp_path)
+    assert record.lane == (lane or None)
+    assert len(rank_context_gaps([record])) == 1
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("damage", [
+    "null-row", "list-row", "string-row", "missing-ts", "missing-feature",
+    "missing-program", "missing-field", "missing-severity", "missing-message",
+    "null-ts", "numeric-ts", "list-ts", "invalid-ts", "naive-ts", "overflow-ts",
+    "list-lane", "mapping-lane",
+])
+@pytest.mark.parametrize("placement", ["only", "before", "after"])
+def test_load_rejects_unparseable_observations_without_partial_history(
+    tmp_path: Path, damage: str, placement: str,
+) -> None:
+    program = tmp_path / "sample" / "_feedback"
+    program.mkdir(parents=True)
+    record = {
+        "ts": "2026-10-26T12:00:00Z", "feature": "synthetic", "program": "sample",
+        "field": "purpose", "severity": "quality_degraded", "message": "Synthetic observation",
+        "lane": None, "impact_estimate": "high",
+    }
+    valid = json.dumps(record) + "\n"
+    if damage == "null-row":
+        damaged: object = None
+    elif damage == "list-row":
+        damaged = ["synthetic_canary"]
+    elif damage == "string-row":
+        damaged = "synthetic_canary"
+    else:
+        damaged_record = dict(record)
+        if damage.startswith("missing-"):
+            del damaged_record[damage.removeprefix("missing-")]
+        elif damage.endswith("-ts"):
+            damaged_record["ts"] = {
+                "null-ts": None,
+                "numeric-ts": 123,
+                "list-ts": ["synthetic_canary"],
+                "invalid-ts": "synthetic_canary",
+                "naive-ts": "2026-10-26T12:00:00",
+                "overflow-ts": "9999-12-31T23:59:59-11:00",
+            }[damage]
+        else:
+            damaged_record["lane"] = (
+                ["synthetic_canary"] if damage == "list-lane" else {"synthetic_canary": 1}
+            )
+        damaged = damaged_record
+    invalid = json.dumps(damaged) + "\n"
+    content = invalid if placement == "only" else invalid + valid if placement == "before" else valid + invalid
+    path = program / "context_gaps.jsonl"
+    path.write_text(content, encoding="utf-8")
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError) as raised:
+        load_context_gaps("sample", programs_root=tmp_path)
+
+    assert type(raised.value).__name__ == "ContextGapRecordError"
+    assert "synthetic_canary" not in str(raised.value) and str(path) not in str(raised.value)
+    assert path.read_bytes() == before and list(program.iterdir()) == [path]
+
+
+@pytest.mark.parametrize("filters", [
+    {"since": datetime(2026, 11, 1, tzinfo=timezone.utc)},
+    {"impact_filter": "low"},
+])
+def test_load_cannot_filter_away_an_invalid_observation(tmp_path: Path, filters: dict) -> None:
+    path = tmp_path / "sample" / "_feedback" / "context_gaps.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text('{"ts": null, "message": "synthetic_canary"}\n', encoding="utf-8")
+    before = path.read_bytes()
+    with pytest.raises(ValueError) as raised:
+        load_context_gaps("sample", programs_root=tmp_path, **filters)
+    assert type(raised.value).__name__ == "ContextGapRecordError"
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("error", [
+    TypeError("synthetic bug"), AttributeError("synthetic bug"), RuntimeError("synthetic bug"),
+])
+def test_load_propagates_unexpected_record_parser_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception,
+) -> None:
+    path = tmp_path / "sample" / "_feedback" / "context_gaps.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text("{}\n", encoding="utf-8")
+
+    def fail(_record: object) -> ContextGapRecord:
+        raise error
+
+    monkeypatch.setattr(ContextGapRecord, "from_json", staticmethod(fail))
+    with pytest.raises(type(error)) as raised:
+        load_context_gaps("sample", programs_root=tmp_path)
+    assert raised.value is error
+
+
+@pytest.mark.parametrize("error", [
+    TypeError("synthetic bug"), AttributeError("synthetic bug"), RuntimeError("synthetic bug"),
+])
+def test_record_parser_propagates_unexpected_timestamp_errors(
+    monkeypatch: pytest.MonkeyPatch, error: Exception,
+) -> None:
+    import src.core.context_gap_store as store
+
+    def fail(_value: str) -> datetime:
+        raise error
+
+    monkeypatch.setattr(store, "_parse_datetime", fail)
+    with pytest.raises(type(error)) as raised:
+        ContextGapRecord.from_json({
+            "ts": "2026-10-26T12:00:00Z", "feature": "synthetic", "program": "sample",
+            "field": "purpose", "severity": "quality_degraded", "message": "Synthetic observation",
+        })
+    assert raised.value is error
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

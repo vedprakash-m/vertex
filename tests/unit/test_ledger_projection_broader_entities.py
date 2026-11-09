@@ -171,7 +171,7 @@ def test_identity_structure_observation_and_knowledge_folds(tmp_path) -> None:
     )
 
     projection_path = tmp_path / "broader.sqlite3"
-    project_events_to_sqlite("acme", events, projection_path=projection_path)
+    project_events_to_sqlite("acme", events, projection_path=projection_path, programs_root=tmp_path / "programs")
     dump = canonical_projection_dump(projection_path)
 
     assert dump["proj_program"][0]["program_id"] == "acme"

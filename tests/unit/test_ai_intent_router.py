@@ -4,10 +4,21 @@ import json
 
 import pytest
 
+import src.ai.intent_router as intent_router
 from src.ai.ai_mode import AIMode, set_ai_mode
 from src.ai.client import AIClientError
 from src.ai.intent_router import IntentRouter, IntentRouterError, render_invocation
 from src.core.ledger.event_log import read_events
+
+
+@pytest.fixture(autouse=True)
+def configured_edition(tmp_path, monkeypatch) -> None:
+    edition_dir = tmp_path / "acme" / "editions"
+    edition_dir.mkdir(parents=True)
+    (edition_dir / "acme_weekly.yaml").write_text(
+        "id: acme_weekly\nprogram_id: acme\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(intent_router, "PROGRAMS_ROOT", tmp_path)
 
 
 class _FakeAIClient:

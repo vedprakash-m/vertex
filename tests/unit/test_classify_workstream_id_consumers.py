@@ -131,12 +131,11 @@ def test_build_report_against_real_repo_matches_bl_f2_reconnaissance_counts() ->
     disappeared entirely, since the new expression only references the
     plural `.workstream_ids` field. That drops the file out of this
     script's `.workstream_id\\b`-pattern count. The current implementation
-    checkpoint has 116 after RELO-W4.11v retires the legacy
-    `context_gap_reply.py` writer's target workstream lookup;
-    files, 39 also importing `Signal`. If it drifts further, either the
-    codebase changed again (expected, and this test should be updated
-    alongside a fresh reconnaissance note in specs/bklg.md's BL-F2 row) or
-    the script's classification logic regressed (a real bug)."""
+    checkpoint has 116 files after RELO-W4.11v retires the legacy
+    `context_gap_reply.py` writer's target workstream lookup. Moving WorkIQ
+    signal deduplication into the already-matched `gather_workiq_helpers.py`
+    raises the number also importing `Signal` to 40. Further drift may
+    reflect a codebase change or a regression in the classification logic."""
     report = build_report()
     assert report["total_files_with_matches"] == 116
-    assert report["signal_importing_file_count"] == 39
+    assert report["signal_importing_file_count"] == 40

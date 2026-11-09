@@ -13,6 +13,8 @@ Covers:
 * Governor quiet-lane early exit
 * Governor concurrency fields in BudgetLimits
 * Pipeline priority ordering (highest relevance processed first)
+
+Email identities in this module are locally authored synthetic examples.
 """
 
 from __future__ import annotations
@@ -38,7 +40,7 @@ def _locator(resource_id: str, source_type: EntityType = EntityType.MESSAGE) -> 
     return HydrationLocator(
         source_type=source_type,
         tenant_id="tenant-1",
-        principal_mailbox="user@example.com",
+        principal_mailbox="identity-1@rev-fixture.example.net",
         container="inbox",
         resource_id=resource_id,
     )
@@ -64,13 +66,13 @@ class TestSyncStateStore:
         from src.core.rev.sync_state import SyncStateStore, make_sync_state_key
 
         store = SyncStateStore.load("prog-1", programs_root=tmp_path)
-        state = store.get_or_create("t1", "user@ex.com", "inbox", "v1.0")
+        state = store.get_or_create("t1", "identity-2@rev-fixture.example.net", "inbox", "v1.0")
         state.delta_link = "https://graph.microsoft.com/v1.0/delta?link=abc"
         store.upsert(state)
         store.save("prog-1", programs_root=tmp_path)
 
         store2 = SyncStateStore.load("prog-1", programs_root=tmp_path)
-        key = make_sync_state_key("t1", "user@ex.com", "inbox", "v1.0")
+        key = make_sync_state_key("t1", "identity-2@rev-fixture.example.net", "inbox", "v1.0")
         loaded = store2.get(key)
         assert loaded is not None
         assert loaded.delta_link == "https://graph.microsoft.com/v1.0/delta?link=abc"
@@ -79,7 +81,7 @@ class TestSyncStateStore:
         from src.core.rev.sync_state import SyncState, SyncStateStore, make_sync_state_key
 
         store = SyncStateStore(eviction_ttl_days=1, max_states=1000)
-        state = store.get_or_create("t1", "user@ex.com", "inbox", "v1.0")
+        state = store.get_or_create("t1", "identity-2@rev-fixture.example.net", "inbox", "v1.0")
         # Manually backdate accessed_at to simulate dormancy.
         state.accessed_at = datetime.now(timezone.utc) - timedelta(days=2)
         store.upsert(state)
@@ -94,29 +96,29 @@ class TestSyncStateStore:
         from src.core.rev.sync_state import SyncStateStore
 
         store = SyncStateStore(eviction_ttl_days=365, max_states=2)
-        s1 = store.get_or_create("t1", "a@ex.com", "inbox", "v1.0")
-        s2 = store.get_or_create("t1", "b@ex.com", "inbox", "v1.0")
-        s3 = store.get_or_create("t1", "c@ex.com", "inbox", "v1.0")
+        s1 = store.get_or_create("t1", "identity-3@rev-fixture.example.net", "inbox", "v1.0")
+        s2 = store.get_or_create("t1", "identity-4@rev-fixture.example.net", "inbox", "v1.0")
+        s3 = store.get_or_create("t1", "identity-5@rev-fixture.example.net", "inbox", "v1.0")
         # s1 is now LRU (accessed first, then s2, then s3).
         store.save("prog-1", programs_root=tmp_path)
         store2 = SyncStateStore.load("prog-1", programs_root=tmp_path)
         assert len(store2.all_states()) == 2
         keys = {s.principal_mailbox for s in store2.all_states()}
         # s1 (LRU) should have been evicted.
-        assert "a@ex.com" not in keys
+        assert "identity-3@rev-fixture.example.net" not in keys
 
     def test_invalidate_api_version_change(self, tmp_path: Path) -> None:
         from src.core.rev.sync_state import SyncStateStore, make_sync_state_key
 
         store = SyncStateStore()
-        state = store.get_or_create("t1", "user@ex.com", "inbox", "v1.0")
+        state = store.get_or_create("t1", "identity-2@rev-fixture.example.net", "inbox", "v1.0")
         state.delta_link = "old_link"
         store.upsert(state)
 
-        store.invalidate_for_api_version_change("t1", "user@ex.com", "inbox", "v1.0", "beta")
+        store.invalidate_for_api_version_change("t1", "identity-2@rev-fixture.example.net", "inbox", "v1.0", "beta")
 
-        old_key = make_sync_state_key("t1", "user@ex.com", "inbox", "v1.0")
-        new_key = make_sync_state_key("t1", "user@ex.com", "inbox", "beta")
+        old_key = make_sync_state_key("t1", "identity-2@rev-fixture.example.net", "inbox", "v1.0")
+        new_key = make_sync_state_key("t1", "identity-2@rev-fixture.example.net", "inbox", "beta")
         assert store.get(old_key) is None
         new_state = store.get(new_key)
         assert new_state is not None
@@ -126,21 +128,21 @@ class TestSyncStateStore:
         from src.core.rev.sync_state import SyncStateStore, make_sync_state_key
 
         store = SyncStateStore()
-        state1 = store.get_or_create("t1", "user@ex.com", "inbox", "v1.0")
+        state1 = store.get_or_create("t1", "identity-2@rev-fixture.example.net", "inbox", "v1.0")
         state1.delta_link = "link1"
-        state2 = store.get_or_create("t1", "user@ex.com", "calendar", "v1.0")
+        state2 = store.get_or_create("t1", "identity-2@rev-fixture.example.net", "calendar", "v1.0")
         state2.delta_link = "link2"
-        state_other = store.get_or_create("t2", "other@ex.com", "inbox", "v1.0")
+        state_other = store.get_or_create("t2", "identity-6@rev-fixture.example.net", "inbox", "v1.0")
         state_other.delta_link = "link3"
         store.upsert(state1)
         store.upsert(state2)
         store.upsert(state_other)
 
-        store.invalidate_for_token_expiry("t1", "user@ex.com")
+        store.invalidate_for_token_expiry("t1", "identity-2@rev-fixture.example.net")
 
-        k1 = make_sync_state_key("t1", "user@ex.com", "inbox", "v1.0")
-        k2 = make_sync_state_key("t1", "user@ex.com", "calendar", "v1.0")
-        ko = make_sync_state_key("t2", "other@ex.com", "inbox", "v1.0")
+        k1 = make_sync_state_key("t1", "identity-2@rev-fixture.example.net", "inbox", "v1.0")
+        k2 = make_sync_state_key("t1", "identity-2@rev-fixture.example.net", "calendar", "v1.0")
+        ko = make_sync_state_key("t2", "identity-6@rev-fixture.example.net", "inbox", "v1.0")
         assert store.get(k1).delta_link is None   # cleared
         assert store.get(k2).delta_link is None   # cleared
         assert store.get(ko).delta_link == "link3"  # unaffected
@@ -149,7 +151,7 @@ class TestSyncStateStore:
         from src.core.rev.sync_state import SyncStateStore
 
         store = SyncStateStore(eviction_ttl_days=30)
-        store.get_or_create("t1", "a@ex.com", "inbox", "v1.0")
+        store.get_or_create("t1", "identity-3@rev-fixture.example.net", "inbox", "v1.0")
         stats = store.stats()
         assert stats["total_states"] == 1
         assert stats["eviction_ttl_days"] == 30
@@ -179,7 +181,7 @@ class TestFakeChangeFeed:
         from src.m365.rev.change_feeds import DeltaPage, DeltaTombstone, FakeChangeFeed
 
         tombstone = DeltaTombstone(
-            canonical_id="msg:tenant-1:user@example.com:inbox:msg-3",
+            canonical_id="msg:tenant-1:identity-1@rev-fixture.example.net:inbox:msg-3",
             resource_id="msg-3",
             source_type=EntityType.MESSAGE,
         )
@@ -191,7 +193,7 @@ class TestFakeChangeFeed:
         candidates = result.value
         assert len(candidates) == 1
         assert candidates[0].partial_metadata.get("deleted") is True
-        assert candidates[0].partial_metadata.get("canonical_id") == "msg:tenant-1:user@example.com:inbox:msg-3"
+        assert candidates[0].partial_metadata.get("canonical_id") == "msg:tenant-1:identity-1@rev-fixture.example.net:inbox:msg-3"
 
     def test_exhausted_feed_returns_empty(self) -> None:
         from src.m365.rev.change_feeds import FakeChangeFeed
@@ -239,7 +241,7 @@ class TestCalendarHydrator:
         )
 
         client = FakeRevCalendarClient(events=events)
-        context = CalendarContext(tenant_id="t1", principal_mailbox="user@ex.com", calendar_id="primary")
+        context = CalendarContext(tenant_id="t1", principal_mailbox="identity-2@rev-fixture.example.net", calendar_id="primary")
         hydrator = CalendarHydrator(client, context)
         return hydrator, client
 
@@ -249,7 +251,7 @@ class TestCalendarHydrator:
         event = GraphEvent(
             event_id="ev-1",
             subject="Architecture review",
-            organizer="pm@ex.com",
+            organizer="identity-7@rev-fixture.example.net",
             start_datetime="2026-06-23T10:00:00Z",
             end_datetime="2026-06-23T11:00:00Z",
             body="Deployment timeline was agreed: deploy by 2026-06-30.",
@@ -311,7 +313,7 @@ class TestSharePointHydrator:
         )
 
         client = FakeRevSharePointClient(items=items)
-        context = SharePointContext(tenant_id="t1", principal_mailbox="user@ex.com", drive_id="drive-1")
+        context = SharePointContext(tenant_id="t1", principal_mailbox="identity-2@rev-fixture.example.net", drive_id="drive-1")
         hydrator = SharePointHydrator(client, context)
         return hydrator, client
 
@@ -381,7 +383,7 @@ class TestTeamsHydrator:
         client = FakeRevTeamsClient(messages=messages)
         context = TeamsHydratorContext(
             tenant_id="t1",
-            principal_mailbox="user@ex.com",
+            principal_mailbox="identity-2@rev-fixture.example.net",
             teams_context=TeamsContext.CHAT.value,
             chat_id="chat-1",
         )
@@ -399,7 +401,7 @@ class TestTeamsHydrator:
         client = FakeRevTeamsClient(messages=messages)
         context = TeamsHydratorContext(
             tenant_id="t1",
-            principal_mailbox="user@ex.com",
+            principal_mailbox="identity-2@rev-fixture.example.net",
             teams_context=TeamsContext.CHANNEL.value,
             team_id="team-1",
             channel_id="chan-1",
@@ -414,7 +416,7 @@ class TestTeamsHydrator:
             message_id="msg-1",
             teams_context=TeamsContext.CHAT.value,
             chat_id="chat-1",
-            sender="pm@ex.com",
+            sender="identity-7@rev-fixture.example.net",
             sent_at="2026-06-23T10:00:00Z",
             body="The deployment was completed and validated.",
             body_content_type="text",
@@ -437,7 +439,7 @@ class TestTeamsHydrator:
             teams_context=TeamsContext.CHANNEL.value,
             team_id="team-1",
             channel_id="chan-1",
-            sender="eng@ex.com",
+            sender="identity-8@rev-fixture.example.net",
             body="Rollback initiated due to high error rate.",
             body_content_type="text",
         )

@@ -159,7 +159,7 @@ def _seed_edition(programs_root: Path, program_id: str, seed: dict) -> None:
             "comment_window_days": 7, "cooldown_days": 14,
             "compress_titles_with_ai": False,
             "brand_label": f"{program_id.title()} Hygiene",
-            "audience_policy": {"allowed_domains": ["nudge-synth.local"]},
+            "audience_policy": {"allowed_domains": ["nudge-synth.example.net"]},
         },
     }
     edition_path = programs_root / program_id / "editions" / f"{program_id}_nudge.yaml"
@@ -272,7 +272,7 @@ def _generate_normalized_eml(
     _seed_recipient(
         tmp_path,
         alias="tpm",
-        email="tpm@nudge-synth.local",
+        email="tpm@nudge-synth.example.net",
         display_name="TPM Owner",
     )
     seed_path = FIXTURES_DIR / seed_name
@@ -308,12 +308,12 @@ def _generate_normalized_eml(
     item_ids = [row.work_item_id for section in artifacts.sections for group in section.groups for row in group.rows]
     assert len(item_ids) == len(set(item_ids)) == len(seed["work_items"])
     recipient_emails = {recipient.email for recipient in artifacts.to_recipients}
-    assert "tpm@nudge-synth.local" in recipient_emails
+    assert "tpm@nudge-synth.example.net" in recipient_emails
     assert recipient_emails <= {
-        "tpm@nudge-synth.local",
+        "tpm@nudge-synth.example.net",
         *(item["fields"]["System.AssignedTo"]["uniqueName"] for item in seed["work_items"]),
     }
-    assert all(email.endswith("@nudge-synth.local") for email in recipient_emails)
+    assert all(email.endswith("@nudge-synth.example.net") for email in recipient_emails)
     assert len(artifacts.eml_paths) == 1, (
         f"{program_id}: expected exactly one EML path, got {artifacts.eml_paths}"
     )

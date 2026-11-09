@@ -6,6 +6,7 @@ from pathlib import Path
 
 from src.core.config_loader import PROGRAMS_ROOT
 from src.core.exceptions import AuthError, QueryError
+from src.core.failure_taxonomy import safe_failure_suffix
 from src.core.integration_types import (
     ChannelConfig,
     ChannelRegistration,
@@ -157,13 +158,14 @@ class IcMDiscoveryProvider:
         try:
             client = IcmClient()
         except (AuthError, Exception) as exc:
+            message = f"IcM discovery failed{safe_failure_suffix(str(exc))}"
             return [], ScopeStatus(
                 scope_id=_INCIDENT_SCOPE_ID,
                 status=ScopeStatusKind.AUTH_ERROR,
                 completeness=DiscoveryCompleteness.PARTIAL,
                 item_count=0,
-                error_message=str(exc),
-            ), [IntegrationError(source="icm", stage="discovery", message=str(exc), retryable=False)]
+                error_message=message,
+            ), [IntegrationError(source="icm", stage="discovery", message=message, retryable=False)]
 
         existing_incident_ids = {
             r.ref_id for r in existing_registrations if r.ref_kind == "incident"
@@ -217,14 +219,15 @@ class IcMDiscoveryProvider:
                 )
                 item_count += 1
         except Exception as exc:
-            errors.append(IntegrationError(source="icm", stage="discovery", message=str(exc), retryable=True))
+            message = f"IcM discovery failed{safe_failure_suffix(str(exc))}"
+            errors.append(IntegrationError(source="icm", stage="discovery", message=message, retryable=True))
             is_auth_error = isinstance(exc, AuthError)
             return refs, ScopeStatus(
                 scope_id=_INCIDENT_SCOPE_ID,
                 status=ScopeStatusKind.AUTH_ERROR if is_auth_error else ScopeStatusKind.ERROR,
                 completeness=DiscoveryCompleteness.PARTIAL,
                 item_count=item_count,
-                error_message=str(exc),
+                error_message=message,
             ), errors
 
         return refs, ScopeStatus(

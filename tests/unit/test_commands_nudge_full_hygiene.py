@@ -65,7 +65,7 @@ class _FullHygieneFakeADOClient:
                     "System.WorkItemType": "Feature",
                     "System.Title": f"Work item {wid}",
                     "System.State": "Active",
-                    "System.AssignedTo": {"displayName": "Test Owner", "uniqueName": "towner@nudge-synth.local"},
+                    "System.AssignedTo": {"displayName": "Test Owner", "uniqueName": "towner@nudge-synth.example.net"},
                     "System.AreaPath": "One\\Adventure\\Acme",
                     "System.IterationPath": "FY26\\Sprint 20",
                     "System.ChangedDate": "2026-05-01T18:00:00+00:00",
@@ -111,7 +111,7 @@ class _RegistryItemsFakeADOClient(_FullHygieneFakeADOClient):
                 "System.WorkItemType": "Feature",
                 "System.Title": f"Registry item {wid}",
                 "System.State": "Active",
-                "System.AssignedTo": {"displayName": "Registry Owner", "uniqueName": "regowner@nudge-synth.local"},
+                "System.AssignedTo": {"displayName": "Registry Owner", "uniqueName": "regowner@nudge-synth.example.net"},
                 "System.AreaPath": "One\\Adventure\\Acme",
                 "System.IterationPath": "FY26\\Sprint 20",
                 "System.ChangedDate": "2026-05-10T18:00:00+00:00",
@@ -144,7 +144,7 @@ def _seed_full_hygiene_config(programs_root: Path) -> None:
         "post_ramp_tag": "POST RAMP",
         "area_paths": ["One\\Adventure\\Acme", "One\\Adventure\\Contoso"],
         "recipient": "towner",
-        "audience_policy": {"allowed_domains": ["nudge-synth.local"]},
+        "audience_policy": {"allowed_domains": ["nudge-synth.example.net"]},
         "comment_window_days": 7,
         "compress_titles_with_ai": False,
         "stale_business_days": {"section_a": 2, "section_b": 4, "section_c": 6},
@@ -160,7 +160,7 @@ def _seed_people(knowledge_root: Path) -> None:
     people_path = knowledge_root / "people_directory.yaml"
     doc = {
         "schema_version": "1.0",
-        "people": [{"alias": "towner", "email": "towner@nudge-synth.local", "display_name": "Test Owner"}],
+        "people": [{"alias": "towner", "email": "towner@nudge-synth.example.net", "display_name": "Test Owner"}],
     }
     people_path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
 
@@ -304,7 +304,7 @@ def _seed_audience_scope_registry(programs_root: Path) -> None:
                 entity_id="person:newmember", alias="newmember", status=PersonStatus.ACTIVE,
                 contacts=(
                     ContactPoint(
-                        kind=ContactKind.PRIMARY_EMAIL, value="newmember@nudge-synth.local", status=ContactStatus.ACTIVE,
+                        kind=ContactKind.PRIMARY_EMAIL, value="newmember@nudge-synth.example.net", status=ContactStatus.ACTIVE,
                         valid_from=None, valid_until=None, source="test", source_ref=None,
                         recorded_at=now, verified_at=now, verified_by_principal="steward", delivery_eligible=True,
                     ),
@@ -314,7 +314,7 @@ def _seed_audience_scope_registry(programs_root: Path) -> None:
                 entity_id="person:towner", alias="towner", status=PersonStatus.ACTIVE,
                 contacts=(
                     ContactPoint(
-                        kind=ContactKind.PRIMARY_EMAIL, value="towner@nudge-synth.local", status=ContactStatus.ACTIVE,
+                        kind=ContactKind.PRIMARY_EMAIL, value="towner@nudge-synth.example.net", status=ContactStatus.ACTIVE,
                         valid_from=None, valid_until=None, source="test", source_ref=None,
                         recorded_at=now, verified_at=now, verified_by_principal="steward", delivery_eligible=True,
                     ),
@@ -326,7 +326,7 @@ def _seed_audience_scope_registry(programs_root: Path) -> None:
     people_path = knowledge_root / "people_directory.yaml"
     people_doc = yaml.safe_load(people_path.read_text(encoding="utf-8"))
     for person in people_doc["people"]:
-        person["email"] = f"{person['alias']}@nudge-synth.local"
+        person["email"] = f"{person['alias']}@nudge-synth.example.net"
     people_path.write_text(yaml.safe_dump(people_doc, sort_keys=False), encoding="utf-8")
     edition_path = programs_root / "acme" / "editions" / "acme_nudge.yaml"
     edition_doc = yaml.safe_load(edition_path.read_text(encoding="utf-8"))
@@ -380,7 +380,7 @@ def test_generate_full_hygiene_nudges_adds_audience_scope_recipients(
     )
 
     emails = {r.email for r in artifacts.to_recipients}
-    assert "newmember@nudge-synth.local" in emails
+    assert "newmember@nudge-synth.example.net" in emails
 
 
 def test_generate_full_hygiene_nudges_without_audience_scope_ids_is_unaffected(
@@ -408,7 +408,7 @@ def test_generate_full_hygiene_nudges_without_audience_scope_ids_is_unaffected(
     )
 
     emails = {r.email for r in artifacts.to_recipients}
-    assert "newmember@nudge-synth.local" not in emails
+    assert "newmember@nudge-synth.example.net" not in emails
 
 
 def test_generate_full_hygiene_nudges_deduplicates_b_from_c(

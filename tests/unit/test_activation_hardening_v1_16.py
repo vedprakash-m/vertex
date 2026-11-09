@@ -67,33 +67,33 @@ from src.core.rev.provenance_gate import (
 
 class TestProvenanceGate:
     def test_unconfigured_allowlist_admits_everyone(self):
-        verdict = evaluate_sender("attacker@evil.com", addresses=(), domains=())
+        verdict = evaluate_sender("attacker@synthetic-05.example", addresses=(), domains=())
         assert verdict.verdict == "unconfigured"
         assert verdict.admitted  # opt-in: open until an operator pins a boundary
 
     def test_exact_address_match_admits(self):
         verdict = evaluate_sender(
-            "pm@corp.com",
-            addresses=("pm@corp.com",),
+            "pm@synthetic-03.example",
+            addresses=("pm@synthetic-03.example",),
             domains=(),
         )
         assert verdict.verdict == "ok"
-        assert verdict.matched_rule == "pm@corp.com"
+        assert verdict.matched_rule == "pm@synthetic-03.example"
 
     def test_domain_match_admits(self):
         verdict = evaluate_sender(
-            "anyone@corp.com",
+            "anyone@synthetic-03.example",
             addresses=(),
-            domains=("corp.com",),
+            domains=("synthetic-03.example",),
         )
         assert verdict.verdict == "ok"
-        assert verdict.matched_rule == "@corp.com"
+        assert verdict.matched_rule == "@synthetic-03.example"
 
     def test_outside_allowlist_denied(self):
         verdict = evaluate_sender(
-            "attacker@evil.com",
-            addresses=("pm@corp.com",),
-            domains=("corp.com",),
+            "attacker@synthetic-05.example",
+            addresses=("pm@synthetic-03.example",),
+            domains=("synthetic-03.example",),
         )
         assert verdict.verdict == "denied"
         assert not verdict.admitted
@@ -101,27 +101,27 @@ class TestProvenanceGate:
 
     def test_case_insensitive(self):
         verdict = evaluate_sender(
-            "PM@CORP.COM",
-            addresses=("pm@corp.com",),
+            "PM@SYNTHETIC-03.EXAMPLE",
+            addresses=("pm@synthetic-03.example",),
             domains=(),
         )
         assert verdict.verdict == "ok"
 
     def test_load_allowlist_env_override(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("VERTEX_PROVENANCE_ALLOWLIST", "a@corp.com, @trusted.com")
+        monkeypatch.setenv("VERTEX_PROVENANCE_ALLOWLIST", "a@synthetic-03.example, @trusted.com")
         addresses, domains = load_allowlist("samplealpha", programs_root=tmp_path)
-        assert "a@corp.com" in addresses
+        assert "a@synthetic-03.example" in addresses
         assert "trusted.com" in domains
 
     def test_load_allowlist_yaml_file(self, tmp_path):
         (tmp_path / "samplealpha").mkdir()
         (tmp_path / "samplealpha" / "sender_allowlist.yaml").write_text(
-            "senders:\n  - pm@corp.com\n  - '@corp.com'\n",
+            "senders:\n  - pm@synthetic-03.example\n  - '@synthetic-03.example'\n",
             encoding="utf-8",
         )
         addresses, domains = load_allowlist("samplealpha", programs_root=tmp_path)
-        assert addresses == ("pm@corp.com",)
-        assert domains == ("corp.com",)
+        assert addresses == ("pm@synthetic-03.example",)
+        assert domains == ("synthetic-03.example",)
 
     def test_load_allowlist_absent_returns_empty(self, tmp_path):
         assert load_allowlist("none", programs_root=tmp_path) == ((), ())
@@ -262,7 +262,7 @@ class TestEmailThreadRef:
         ref = EmailRef(
             subject="M1 done",
             sent_at=datetime(2026, 6, 30, tzinfo=timezone.utc),
-            sender="pm@corp.com",
+            sender="pm@synthetic-03.example",
             message_id="<m1@corp>",
             thread_id="<thread-abc@corp>",
         )
@@ -277,7 +277,7 @@ class TestEmailThreadRef:
             "ref_type": "email",
             "subject": "x",
             "sent_at": "2026-06-30T00:00:00+00:00",
-            "sender": "pm@corp.com",
+            "sender": "pm@synthetic-03.example",
         }
         restored = source_ref_from_dict(payload)
         assert restored.thread_id is None
@@ -306,7 +306,7 @@ def _candidate_record_with_rationale():
         source_ref=EmailRef(
             subject="M1 done",
             sent_at=datetime(2026, 6, 30, tzinfo=timezone.utc),
-            sender="pm@corp.com",
+            sender="pm@synthetic-03.example",
         ),
         pipeline="rev_mail",
         extraction_confidence=0.9,
@@ -346,7 +346,7 @@ class TestCandidateLineage:
                 "ref_type": "email",
                 "subject": "x",
                 "sent_at": "2026-06-30T00:00:00+00:00",
-                "sender": "pm@corp.com",
+                "sender": "pm@synthetic-03.example",
             },
             "pipeline": "rev_mail",
             "extraction_confidence": 0.9,

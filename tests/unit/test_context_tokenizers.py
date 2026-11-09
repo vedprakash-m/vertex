@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import builtins
 import importlib
+from pathlib import Path
 
 import pytest
 
@@ -172,7 +173,7 @@ class TestResolveTokenEstimator:
 
 
 class TestContextCompilerIntegration:
-    def test_tiktoken_estimator_is_injectable_into_compiler(self) -> None:
+    def test_tiktoken_estimator_is_injectable_into_compiler(self, tmp_path: Path) -> None:
         if not _HAS_TIKTOKEN:
             pytest.skip("tiktoken not installed")
         from src.core.context_compiler import (
@@ -181,10 +182,12 @@ class TestContextCompilerIntegration:
             EvidenceSpan,
             ValidationContext,
             ContentOrigin,
+            context_manifest_path,
         )
 
         est = resolve_token_estimator("gpt-4o")
-        compiler = DeterministicContextCompiler(token_estimator=est)
+        programs_root = tmp_path / "programs"
+        compiler = DeterministicContextCompiler(token_estimator=est, programs_root=programs_root)
         span = EvidenceSpan(
             evidence_id="ev1",
             source_family="ado",
@@ -218,3 +221,4 @@ class TestContextCompilerIntegration:
         compiled = compiler.compile(request, validation_context=validation)
         assert compiled.manifest.tokenizer_id == est.tokenizer_id
         assert "ev1" in compiled.manifest.included_evidence_ids
+        assert context_manifest_path(compiled.manifest, programs_root=programs_root).is_file()

@@ -64,7 +64,7 @@ CITATIONS: tuple[Citation, ...] = (
     Citation(
         claim="Track B.5 (closed 2026-07-08): risk_stage.py now routes through sor_gated_family_load(family=\"judgment\", ...) instead of a hand-written inline branch",
         path="src/core/stages/risk_stage.py",
-        line=50,
+        line=71,
         must_contain='family="judgment"',
     ),
     Citation(
@@ -76,13 +76,13 @@ CITATIONS: tuple[Citation, ...] = (
     Citation(
         claim="PS-1: milestone_stage dependency load is the same isolated function Track B reuses",
         path="src/core/stages/milestone_stage.py",
-        line=261,
+        line=277,
         must_contain="def _load_current_dependencies",
     ),
     Citation(
         claim="Track B: MilestoneStage resolves the workitem.state authority family before selecting its reality or legacy path",
         path="src/core/stages/milestone_stage.py",
-        line=47,
+        line=52,
         must_contain='resolve_family_sor_mode(program_id, "workitem.state"',
     ),
     Citation(
@@ -106,25 +106,25 @@ CITATIONS: tuple[Citation, ...] = (
     Citation(
         claim="Track C (closed 2026-07-08): report_lookback's assumption lifecycle now routes through sor_gated_family_load(family=\"judgment\", ...)",
         path="src/commands/report_lookback.py",
-        line=907,
+        line=916,
         must_contain='family="judgment"',
     ),
     Citation(
         claim="Track A (closed 2026-07-07): bridge-disabled early return now gated by _ledger_fact_bridge_enabled, with a reactive warning added alongside it",
         path="src/commands/ledger.py",
-        line=2314,
+        line=2320,
         must_contain="_ledger_fact_bridge_enabled",
     ),
     Citation(
         claim="Track A (closed 2026-07-07): PASSTHROUGH branch now logs at debug (previously a bare silent return, per PS-2's v1.1 addition)",
         path="src/commands/ledger.py",
-        line=2333,
+        line=2341,
         must_contain='"bridge: event type %r is PASSTHROUGH',
     ),
     Citation(
         claim="Track A (closed 2026-07-07): bridge except-Exception handler (logs ERROR, now also records to bridge_failures.jsonl for the backlog doctor check)",
         path="src/commands/ledger.py",
-        line=2383,
+        line=2389,
         must_contain="except Exception as exc:",
     ),
     Citation(
@@ -140,9 +140,9 @@ CITATIONS: tuple[Citation, ...] = (
         must_contain="_MAX_INCREMENTAL_DELTA",
     ),
     Citation(
-        claim="PS-1: all 8 ProgramReality family assessment accessors exist (1167-1189; risk accessor sampled here)",
+        claim="PS-1: all 8 ProgramReality family assessment accessors exist (1183-1204; risk accessor sampled here)",
         path="src/core/program_reality.py",
-        line=1177,
+        line=1186,
         must_contain="def risks",
     ),
     Citation(
@@ -160,13 +160,13 @@ CITATIONS: tuple[Citation, ...] = (
     Citation(
         claim="PS-10 / Track J: AI narrative context now derives a reality assessment summary from loaded ProgramReality, carried to blurb and executive-summary prompt context",
         path="src/commands/report_ai.py",
-        line=473,
+        line=755,
         must_contain="reality_assessments = build_reality_assessment_summary(program_reality)",
     ),
     Citation(
         claim="Track B (closed 2026-07-08): render_stage.py's former 7th risk-read call site now reuses ctx.risks, falling back to _load_current_risks only for isolated-stage execution",
         path="src/core/stages/render_stage.py",
-        line=598,
+        line=602,
         must_contain="_load_current_risks",
     ),
     Citation(

@@ -24,7 +24,7 @@ import typer
 from src.ai.ai_mode import AIMode, get_ai_mode
 from src.commands.ado import apply_ado_proposal
 from src.core.action_extractor_basic import extract_actions_from_signals
-from src.core.action_tracker import append_action, get_actions_path
+from src.core.action_tracker import ActionJournalReadError, append_action, get_actions_path
 from src.core.action_mapper import MeetingActionMapping, build_meeting_action_proposal, map_actions_to_work_items
 from src.core.ado_client import ADOClient
 from src.core.ado_proposal import write_proposal_manifest
@@ -131,7 +131,7 @@ def meeting_close_command(
             dry_run=dry_run,
             programs_root=PROGRAMS_ROOT,
         )
-    except (FileNotFoundError, QueryError, ValueError) as error:
+    except (ActionJournalReadError, FileNotFoundError, QueryError, ValueError) as error:
         typer.echo(str(error))
         raise typer.Exit(code=1) from error
 

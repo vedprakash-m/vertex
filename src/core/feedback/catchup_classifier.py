@@ -5,6 +5,7 @@ from datetime import date, datetime
 from uuid import NAMESPACE_URL, uuid5
 
 from src.core.feedback.anomaly_kinds import get_anomaly_kind
+from src.core.gather_channel_support import is_workiq_catchup_diagnostic, workiq_catchup_diagnostic_summary
 from src.core.models_v2 import CatchupEvent, Signal
 
 
@@ -50,9 +51,10 @@ def build_catchup_summaries(
 
 
 def _classify_signal(signal: Signal, *, salience_weights: Mapping[str, float]) -> CatchupEvent:
-    kind_name = _infer_kind(signal)
+    diagnostic = is_workiq_catchup_diagnostic(signal)
+    kind_name = "generic_change" if diagnostic else _infer_kind(signal)
     kind = get_anomaly_kind(kind_name)
-    work_item_id = _coerce_work_item_id(signal)
+    work_item_id = None if diagnostic else _coerce_work_item_id(signal)
     return CatchupEvent(
         event_id=str(uuid5(NAMESPACE_URL, f"{signal.program_id}|{signal.id}|{kind_name}")),
         program_id=signal.program_id,
@@ -60,7 +62,7 @@ def _classify_signal(signal: Signal, *, salience_weights: Mapping[str, float]) -
         kind=kind_name,
         work_item_id=work_item_id,
         workstream_id=signal.workstream_id,
-        summary=kind.banner_fn(signal),
+        summary=workiq_catchup_diagnostic_summary(signal) if diagnostic else kind.banner_fn(signal),
         severity=kind.severity_fn(signal),
         salience_score=_salience_for_signal(signal, salience_weights),
         confidence=signal.confidence,

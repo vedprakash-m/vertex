@@ -55,7 +55,7 @@ def privacy_show_command(
     Sections:
       - channels: per-channel read/write classification, retention, RBAC model
       - sidecars: per-sidecar classification + retention
-      - retention: retention-class → days mapping
+      - retention: retention-class to days mapping
     """
     show_channels = section in (None, "all", "channels")
     show_sidecars = section in (None, "all", "sidecars")

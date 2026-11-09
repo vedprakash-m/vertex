@@ -7,7 +7,7 @@ import pytest
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 
-GOLDEN_DIR = Path(__file__).resolve().parent / "snapshots"
+GOLDEN_DIR = Path(__file__).resolve().parent / "public_snapshots"
 
 
 class GoldenFileMismatchError(AssertionError):
@@ -28,11 +28,10 @@ def _save_golden(name: str, content: str) -> None:
 
 def _compare_with_golden(name: str, actual: str, update: bool) -> None:
     golden = _load_golden(name)
-    if update or golden is None:
+    if update:
         _save_golden(name, actual)
-        if golden is None:
-            pytest.skip(f"Created new golden file: {name}.golden")
         return
+    assert golden is not None, f"Missing public golden baseline: {name}.golden; regenerate explicitly with --update-golden."
 
     if actual != golden:
         diff = "".join(

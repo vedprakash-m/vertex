@@ -27,13 +27,16 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field, replace as dc_replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable
 
 from src.core.jsonl_utils import read_jsonl_records
+from src.core.rev.cycle_history import InvalidCycleHistory, read_cycle_history_without_repair
 from src.core.ledger.candidate_store import (
     PROGRAMS_ROOT,
     CandidateEntityResolution,
@@ -46,6 +49,7 @@ from src.core.ledger.rev_evidence import (
     store_admitted_excerpt,
 )
 from src.core.ledger.source_refs import EmailRef
+from src.core.rev.entity_types import EntityType
 from src.core.rev.governor import BudgetLimits, Governor, GovernorDecision
 from src.core.rev.normalizer import dedupe_core_hash_for
 from src.core.rev.provenance_gate import admit as provenance_admit
@@ -61,7 +65,7 @@ from src.core.rev.prompt_shields import (
     PromptShields,
     admit_chunks,
 )
-from src.core.rev.result import Incomplete, Success, is_success
+from src.core.rev.result import Incomplete, Success, Unsupported, is_success
 from src.core.rev.run_state import RunState, advance
 
 log = logging.getLogger(__name__)
@@ -190,6 +194,45 @@ def _parse_iso(value: str) -> tuple[datetime, bool]:
     return datetime.now(timezone.utc), True
 
 
+def _parse_mail_source_time(value: object) -> datetime | None:
+    raw = str(value).strip() if value is not None else ""
+    if not raw:
+        return None
+    try:
+        # The standard parsers can normalize invalid offsets into plausible times.
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            parsed = parsedate_to_datetime(raw)
+            offset = re.search(
+                r"\b\d+[:.]\d+(?:[:.]\d+)?,?(?:\s+([^\s()]+)|\s*([+-][^\s()]+))",
+                raw,
+            )
+            if offset is None:
+                return None
+            zone = offset.group(1) or offset.group(2)
+            if (zone[0] in "+-" or zone[0].isdigit()) and (
+                re.fullmatch(r"[+-][0-9]{4}", zone) is None or int(zone[-2:]) >= 60
+            ):
+                return None
+        else:
+            offset = re.search(
+                r"([+-])\d{2}(?::?(\d{2}))?(?::?(\d{2}))?(?:[.,]\d+)?$",
+                raw,
+            )
+            if offset and (
+                int(offset.group(2) or 0) >= 60
+                or int(offset.group(3) or 0) >= 60
+                or (offset.group(1) == "-" and parsed.utcoffset() == timedelta(0))
+            ):
+                return None
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            return None
+        return parsed.astimezone(timezone.utc)
+    except (ValueError, OverflowError):
+        return None
+
+
 def _candidate_id(source_document_key: str, dedupe_core_hash: str) -> str:
     return derive_candidate_dedupe_key(source_document_key, dedupe_core_hash)
 
@@ -269,8 +312,15 @@ def run_rev_cycle(
             deps=deps,
             programs_root=programs_root,
         )
+    if isinstance(enum_result, Unsupported):
+        report = _report(
+            program_id, correlation_id, counts,
+            GovernorDecision(continue_run=True, reason="enumeration_unsupported", category="unsupported"),
+            shield_degrade,
+        )
+        _write_cycle_checkpoint(program_id, report, programs_root)
+        return report
     if not isinstance(enum_result, (Success, Incomplete)):
-        # Unsupported / Forbidden / RateLimited — skip cleanly (not a run stop).
         return _report(program_id, correlation_id, counts, GovernorDecision(continue_run=True), shield_degrade)
     candidates = enum_result.value if hasattr(enum_result, "value") else ()
     counts["enumerated"] = len(candidates)
@@ -330,18 +380,32 @@ def run_rev_cycle(
                 pass
             continue
         hydrated: HydratedContent = hydrate_result.value
-        if hydrated.metadata_only:
-            counts["metadata_only"] += 1
-        else:
-            counts["hydrated"] += 1
         gov = governor.record_hydration(
             item_bytes=len(hydrated.canonical_text.encode("utf-8")),
             chunk_count=len(hydrated.chunks),
         )
         if not gov.continue_run:
+            counts["metadata_only" if hydrated.metadata_only else "hydrated"] += 1
             stop_reason, stop_category, breached = gov.reason, gov.category, gov.breached_budget
             counts["explicitly_skipped"] += len(sorted_candidates) - idx
             break
+        if (
+            hydrated.identity.source_type is EntityType.MESSAGE
+            and _parse_mail_source_time(hydrated.route_metadata.get("received_at")) is None
+        ):
+            counts["quarantined"] += 1
+            counts["date_parse_failures"] += 1
+            _finalize_source_file(deps, candidate, success=False, reason="source_time_invalid")
+            try:
+                advance(program_id, cid, RunState.HYDRATION_REQUIRED, RunState.QUARANTINED,
+                        correlation_id=sub_corr, programs_root=programs_root, set_at=now)
+            except ValueError:
+                pass
+            continue
+        if hydrated.metadata_only:
+            counts["metadata_only"] += 1
+        else:
+            counts["hydrated"] += 1
         if hydrated.metadata_only:
             # No extractable body — record metadata-only and move on so the item
             # is visible in run-state (doctor --rev-health) without re-hydration.
@@ -613,7 +677,13 @@ def _stage_candidates(
     """
     if not claims:
         return [], 0
-    received_at, iso_failed = _parse_iso(str(hydrated.route_metadata.get("received_at", "")))
+    if hydrated.identity.source_type is EntityType.MESSAGE:
+        received_at = _parse_mail_source_time(hydrated.route_metadata.get("received_at"))
+        if received_at is None:
+            return [], 1
+        iso_failed = False
+    else:
+        received_at, iso_failed = _parse_iso(str(hydrated.route_metadata.get("received_at", "")))
     vault_hash = evidence_refs[0].vault_hash if evidence_refs else None
     from src.core.ledger.source_refs import source_document_key
     source_ref = EmailRef(
@@ -1001,8 +1071,8 @@ def _derive_cycle_status(
     assertions_written: int,
     candidates_staged: int,
 ) -> str:
-    if stop_category == "provider_limited":
-        return "provider_limited"
+    if stop_category in {"provider_limited", "unsupported"}:
+        return stop_category
     if shield_degrade or counts.get("policy_denied", 0):
         return "security_degraded"
     if stop_category and stop_category not in {"complete", "fully_verified"}:
@@ -1205,8 +1275,9 @@ def _compute_family_divergence(
             ProgramFactStore,
             build_legacy_program_fact_snapshot,
             _FACT_TYPE_TO_FAMILY,
+            _resolve_fact_db_root,
         )
-        db_root = programs_root.parent
+        db_root = _resolve_fact_db_root(programs_root)
         db_snapshot = ProgramFactStore(
             program_id, home_root=None, db_root=db_root
         ).snapshot(as_of=None)
@@ -1340,7 +1411,7 @@ def _finalize_report(
     )
     # S-5c: evaluate flip gates only on complete (non-degraded) cycles
     family_flip_results: dict[str, str] = {}
-    if not stop_reason and not shield_degrade:
+    if not stop_reason and not shield_degrade and not counts["quarantined"] and not counts["date_parse_failures"]:
         family_flip_results = _run_family_flip_gates(program_id, family_divergence, programs_root)
     report = RevCycleReport(
         program_id=program_id,
@@ -1442,7 +1513,11 @@ def _write_cycle_checkpoint(program_id: str, report: RevCycleReport, programs_ro
 
     hist_path = rev_dir / "cycle_history.jsonl"
     try:
-        existing = list(read_jsonl_records(hist_path))
+        existing = (
+            (read_cycle_history_without_repair(hist_path) or [])
+            if report.stop_category == "unsupported"
+            else list(read_jsonl_records(hist_path))
+        )
         existing.append({
             "correlation_id": report.correlation_id,
             "stop_category": report.stop_category,
@@ -1465,6 +1540,8 @@ def _write_cycle_checkpoint(program_id: str, report: RevCycleReport, programs_ro
         tmp_hist = rev_dir / "cycle_history.jsonl.tmp"
         tmp_hist.write_text("".join(json.dumps(r) + "\n" for r in existing), encoding="utf-8")
         os.replace(tmp_hist, hist_path)
+    except InvalidCycleHistory:
+        log.warning("REV pipeline: cycle_history.jsonl is invalid; history was not updated")
     except OSError as exc:
         log.warning("REV pipeline: could not write cycle_history.jsonl: %s", exc)
 

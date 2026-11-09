@@ -7,6 +7,7 @@ from typing import Callable
 from src.commands.doctor_checks.models import DoctorCheck, DoctorReport
 from src.core.edition_resolver import resolve_edition
 from src.core.exceptions import AuthError, ConfigError, QueryError
+from src.core.failure_taxonomy import safe_failure_suffix
 from src.core.kusto_client import KustoClient
 from src.core.kusto_query_loader import load_kpi_queries
 from src.core.kusto_templates import KustoTemplateContext, render_kusto_query
@@ -323,12 +324,10 @@ def probe_kusto_queries(
     for query in queries:
         try:
             probe(query)
-        except AuthError as error:
-            failures.append(f"{query.id}: {error}")
-            break
-        except QueryError as error:
-            failures.append(f"{query.id}: {error}")
-            if len(failures) >= 2:
+        except (AuthError, QueryError) as error:
+            diagnostic = f"{query.id}: {error}"
+            failures.append(f"{query.id}: Kusto query probe failed{safe_failure_suffix(diagnostic)}")
+            if isinstance(error, AuthError) or len(failures) >= 2:
                 break
     return tuple(failures)
 

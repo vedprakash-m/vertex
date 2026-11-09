@@ -15,6 +15,7 @@ from src.core.action_tracker import append_action
 from src.core.decision_extractor_basic import extract_decisions_from_signals
 from src.core.decision_register import upsert_decisions
 from src.core.incident_journal_store import append_incident_entry
+from src.core.m365_payload_support import has_provisional_workiq_identity
 from src.core.models_v2 import IncidentEntry, Program, ReviewPolicy, Signal, SignalReviewDecision, Workstream
 from src.core.program_fact_store import load_program_facts, project_action_items
 from src.core.program_paths import get_dedup_drop_log_path
@@ -28,8 +29,22 @@ log = logging.getLogger(__name__)
 
 
 def run_persistence_stage(stage_input: PersistenceStageInput) -> PersistenceStageResult:
+    candidate_signals = tuple(
+        signal
+        for signal in stage_input.candidate_signals
+        if not (
+            signal.source.startswith("workiq/")
+            and has_provisional_workiq_identity(signal.metadata)
+        )
+    )
+    rejected_preview_count = len(stage_input.candidate_signals) - len(candidate_signals)
+    if rejected_preview_count:
+        log.warning(
+            "Excluded %s WorkIQ preview-only signal(s) from persistence and downstream extraction.",
+            rejected_preview_count,
+        )
     dedup_result = dedupe_signals_with_audit(
-        stage_input.candidate_signals,
+        candidate_signals,
         existing_signals=stage_input.existing_signals,
     )
     # Stamp every genuinely new signal (from

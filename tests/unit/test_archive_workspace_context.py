@@ -151,6 +151,110 @@ def test_selected_confirmed_hardlock_uses_selected_index(tmp_path: Path) -> None
     assert _bytes(tmp_path) == before
 
 
+@pytest.mark.parametrize("locked_kind", ("trusted", "listed"))
+@pytest.mark.parametrize("snapshot_mode", ("generated", "staged", "existing"))
+@pytest.mark.parametrize("acquire_lock", (True, False))
+def test_archive_transaction_refuses_hardlocked_issue_without_changes(
+    tmp_path: Path, locked_kind: str, snapshot_mode: str, acquire_lock: bool,
+) -> None:
+    selected, archive, decoy = _workspace(tmp_path)
+    edition_root = _seed(selected)
+    _seed(decoy, 77)
+    baseline = selected / "acme" / "trusted_baseline.yaml"
+    baseline.write_text(
+        "trusted_issue_number: 78\n" if locked_kind == "trusted"
+        else "trusted_issue_number: 77\nlocked_issues: [78]\n",
+        encoding="utf-8",
+    )
+    kwargs: dict[str, Any] = {}
+    if snapshot_mode == "staged":
+        staged = tmp_path / "synthetic-staged-snapshot.json"
+        staged.write_text("synthetic staged snapshot", encoding="utf-8")
+        kwargs.update(snapshot_source=staged, snapshot_is_staged=True)
+    elif snapshot_mode == "existing":
+        kwargs["snapshot_source"] = edition_root / "snapshots" / "issue_078.snapshot.json"
+    before = _bytes(tmp_path)
+    before_dirs = {path.relative_to(tmp_path) for path in tmp_path.rglob("*") if path.is_dir()}
+
+    with pytest.raises(BaselineLockError):
+        archive_store.write_confirmed_issue(
+            EDITION, 78, _build_snapshot(), "replacement", "replacement", _build_manifest(),
+            archive_root=archive, programs_root=selected, acquire_lock=acquire_lock, **kwargs,
+        )
+
+    assert _bytes(tmp_path) == before
+    assert {path.relative_to(tmp_path) for path in tmp_path.rglob("*") if path.is_dir()} == before_dirs
+
+
+@pytest.mark.parametrize("snapshot_mode", ("generated", "staged", "existing"))
+def test_archive_transaction_allows_unlocked_issue_with_locked_baseline(
+    tmp_path: Path, snapshot_mode: str,
+) -> None:
+    selected, archive, decoy = _workspace(tmp_path)
+    _seed(selected)
+    _seed(decoy, 77)
+    (selected / "acme" / "trusted_baseline.yaml").write_text(
+        "trusted_issue_number: 78\nlocked_issues: [77]\n", encoding="utf-8",
+    )
+    decoy_before = _bytes(decoy)
+    snapshot = _build_snapshot(79)
+    kwargs: dict[str, Any] = {}
+    if snapshot_mode == "staged":
+        staged = tmp_path / "synthetic-staged-snapshot.json"
+        snapshot_store._write_atomic_json(staged, snapshot_store._to_jsonable(snapshot))
+        kwargs.update(snapshot_source=staged, snapshot_is_staged=True)
+    elif snapshot_mode == "existing":
+        existing = snapshot_store.write_confirmed(
+            EDITION, 79, snapshot, archive_root=archive, programs_root=selected,
+        )
+        kwargs["snapshot_source"] = existing
+
+    paths = archive_store.write_confirmed_issue(
+        EDITION, 79, snapshot, "next html", "next markdown", _build_manifest(79),
+        archive_root=archive, programs_root=selected, **kwargs,
+    )
+
+    assert snapshot_store.read_snapshot(paths.snapshot_path).issue_number == 79
+    assert [row.issue_number for row in archive_store.read_archive_index(
+        EDITION, archive, programs_root=selected,
+    ).issues] == [78, 79]
+    assert _bytes(decoy) == decoy_before
+
+
+def test_confirmation_preserves_staged_snapshot_if_issue_becomes_locked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.commands.confirm_stages import archive_transaction
+    from tests.unit.test_confirm_archive_transaction import _spine_inputs
+
+    kwargs, effects = _spine_inputs(tmp_path, monkeypatch)
+    selected = kwargs["programs_root"]
+    edition_root = selected / "acme" / "archive" / EDITION
+    before_selected = _bytes(edition_root)
+    before_decoy = _bytes(kwargs["archive_root"].parent)
+    baseline = selected / "acme" / "trusted_baseline.yaml"
+
+    def stage_then_lock(**writer_kwargs: Any) -> Path:
+        staged = snapshot_store.write_confirmed(**writer_kwargs)
+        baseline.write_text("trusted_issue_number: 79\n", encoding="utf-8")
+        return staged
+
+    kwargs["write_confirmed_fn"] = stage_then_lock
+    with pytest.raises(BaselineLockError):
+        archive_transaction.execute_archive_transaction(**kwargs)
+
+    staged = edition_root / "staging" / "snapshots" / "issue_079.snapshot.json"
+    after_selected = _bytes(edition_root)
+    staged_name = str(staged.relative_to(edition_root))
+    assert set(after_selected) == set(before_selected) | {staged_name}
+    assert all(after_selected[name] == value for name, value in before_selected.items())
+    assert snapshot_store.read_snapshot(staged).issue_number == 79
+    assert snapshot_store.find_orphaned_staging(EDITION, programs_root=selected) == staged.parents[1]
+    assert not (edition_root / ".lock").exists()
+    assert _bytes(kwargs["archive_root"].parent) == before_decoy
+    assert effects == ["revalidate", "checkpoint"]
+
+
 def test_selected_archive_transaction_retains_history_and_index(tmp_path: Path) -> None:
     from src.core.models_v2 import VitalityArchiveEntry
 

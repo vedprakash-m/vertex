@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from src.core.journal import PROGRAMS_ROOT
+from src.core.m365_payload_support import has_provisional_workiq_identity
 from src.core.m365_registry_store import M365RegistryArtifact, M365RoutingFeedbackEvent
 from src.core.m365_router_interface import M365ReassignCorrection
 from src.core.models_v2 import Signal, Workstream
@@ -49,7 +50,9 @@ def build_m365_corpus_texts_by_workstream(
         corpus_texts.extend(
             signal.text
             for signal in approved_signals
-            if workstream.id in signal.workstream_ids and signal.text
+            if workstream.id in signal.workstream_ids
+            and not has_provisional_workiq_identity(signal.metadata)
+            and signal.text
         )
         if corpus_texts:
             corpus_texts_by_workstream[workstream.id] = tuple(corpus_texts)
@@ -160,6 +163,7 @@ def load_approved_m365_corpus_signals(
         signal
         for signal in signal_store.read(program_id, start=window_start, end=as_of)
         if signal.source.startswith("workiq/")
+        and not has_provisional_workiq_identity(signal.metadata)
         and signal.workstream_id is not None
         and signal_is_approved_for_evidence(signal, review_states)
     )

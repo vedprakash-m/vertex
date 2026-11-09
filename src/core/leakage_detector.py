@@ -9,6 +9,7 @@ from pathlib import Path
 
 from src.core.ado_semantics import item_owner_alias, latest_meaningful_ado_update
 from src.core.journal import PROGRAMS_ROOT
+from src.core.m365_payload_support import has_provisional_workiq_identity
 from src.core.models import WorkItem
 from src.core.models_v2 import Signal, TrajectoryPoint
 
@@ -50,6 +51,7 @@ def load_approved_workiq_signals(
         signal
         for signal in signal_store.read(program_id, start=window_start, end=as_of)
         if signal.source.startswith("workiq/")
+        and not has_provisional_workiq_identity(signal.metadata)
         and signal.entity_refs
         and review_states.get(signal.id) is not None
         and review_states[signal.id].decision == "approved"
@@ -70,6 +72,8 @@ def detect_leakage(
     events: list[LeakageEvent] = []
 
     for signal in signals:
+        if has_provisional_workiq_identity(signal.metadata):
+            continue
         if _entity_link_confidence(signal) != "high":
             continue
         referenced_items = tuple(

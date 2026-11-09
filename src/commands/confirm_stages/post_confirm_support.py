@@ -55,7 +55,7 @@ def render_confirm_result(result: ConfirmResult, *, edition: str, dry_run: bool)
 
     if dry_run:
         typer.echo(f"Confirm dry-run passed for issue {result.issue_number:03d}.")
-        typer.echo("Would write confirmed snapshot, archive HTML/Markdown/manifest, and reset active author state.")
+        typer.echo("Would write confirmed snapshot, archive HTML/Markdown/manifest, and prepare next-issue author state.")
         if result.risk_delta_preview:
             typer.echo(f"Risk-register delta preview ({len(result.risk_delta_preview)} approved risk signal(s)):")
             for entry in result.risk_delta_preview:
@@ -79,7 +79,10 @@ def render_confirm_result(result: ConfirmResult, *, edition: str, dry_run: bool)
         typer.echo(f"Weekly Summary Card: {result.weekly_summary_card_path}")
         if result.posted_weekly_summary_card:
             typer.echo("Weekly summary card posted to Teams.")
-    typer.echo(f"Reset active state for issue {result.next_issue_number:03d}.")
+    if result.next_issue_overrides_preserved:
+        typer.echo(f"Prepared review and narratives for issue {result.next_issue_number:03d}.")
+    else:
+        typer.echo(f"Reset active state for issue {result.next_issue_number:03d}.")
     if result.review_tracking_summary is not None:
         typer.echo(result.review_tracking_summary)
         if result.review_tracking_path is not None:

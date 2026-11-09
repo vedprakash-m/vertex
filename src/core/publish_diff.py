@@ -120,9 +120,12 @@ def _build_item_lines(
     for delta in sorted(deltas.owner_changes, key=lambda entry: entry.work_item_id):
         item = current_by_id.get(delta.work_item_id) or reference_by_id.get(delta.work_item_id)
         title = item.title if item is not None else f"Work item {delta.work_item_id}"
-        prior_owner, new_owner = delta.field_changes.get("Assigned To", (None, None))
-        if prior_owner is None and new_owner is None:
-            prior_owner, new_owner = delta.field_changes.get("System.AssignedTo", (None, None))
+        if "assigned_to" in delta.field_changes:
+            prior_owner, new_owner = delta.field_changes["assigned_to"]
+        else:
+            prior_owner, new_owner = delta.field_changes.get("Assigned To", (None, None))
+            if prior_owner is None and new_owner is None:
+                prior_owner, new_owner = delta.field_changes.get("System.AssignedTo", (None, None))
         lines.append(
             f'OWNER CHANGED: WI:{delta.work_item_id} "{title}" ({_owner_label(prior_owner)} -> {_owner_label(new_owner)})'
         )

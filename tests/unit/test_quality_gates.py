@@ -1400,14 +1400,15 @@ def test_qg11_flags_open_claims_contradicted_by_current_ado_state(tmp_path: Path
     assert qg11.forceable is True
 
 
-def test_qg11_is_not_forceable_at_l2_and_above() -> None:
+def test_qg11_is_not_forceable_at_l2_and_above(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("VERTEX_DB_PATH", str(tmp_path / "vertex-db"))
     report = evaluate_phase_1b_gates(
         freshness_report=FreshnessReport(issue_number=78, items=(), blocks=0, warns=0, infos=0),
         items=(_work_item(1001, target_date=date(2026, 5, 20)),),
         program_id="acme",
         program_maturity_level=2,
         workstreams=_resolved_workstreams(),
-        programs_root=Path(".") / "missing-programs-root",
+        programs_root=tmp_path / "missing-programs-root",
     )
 
     qg11 = next(result for result in report.results if result.gate_id == "QG-11")
@@ -2145,7 +2146,8 @@ def test_qg23_staleness_warning(mocker) -> None:
     assert failing.forceable is True
 
 
-def test_qg24_missing_metric_warning(mocker) -> None:
+def test_qg24_missing_metric_warning(mocker, monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("VERTEX_DB_PATH", str(tmp_path / "vertex-db"))
     mock_store_cls = mocker.patch("src.core.reality_store.RealityStore")
     mock_store = mock_store_cls.return_value
     mock_store.list_metric_observations.return_value = []
@@ -2153,6 +2155,7 @@ def test_qg24_missing_metric_warning(mocker) -> None:
     report = evaluate_phase_1b_gates(
         freshness_report=FreshnessReport(issue_number=78, items=(), blocks=0, warns=0, infos=0),
         program_id="acme",
+        programs_root=tmp_path / "programs",
         narratives={"ws_velocity.md": "Deployment velocity: <!-- vertex:metric: acme.deployment_p50_mins -->"},
     )
 
@@ -2161,7 +2164,8 @@ def test_qg24_missing_metric_warning(mocker) -> None:
     assert "cannot be resolved from reality_store" in failing.message
 
 
-def test_qg24_missing_ado_fields(mocker) -> None:
+def test_qg24_missing_ado_fields(mocker, monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("VERTEX_DB_PATH", str(tmp_path / "vertex-db"))
     mock_store_cls = mocker.patch("src.core.reality_store.RealityStore")
     mock_store = mock_store_cls.return_value
     mock_store.list_metric_observations.return_value = [object()]
@@ -2171,6 +2175,7 @@ def test_qg24_missing_ado_fields(mocker) -> None:
     report = evaluate_phase_1b_gates(
         freshness_report=FreshnessReport(issue_number=78, items=(), blocks=0, warns=0, infos=0),
         program_id="acme",
+        programs_root=tmp_path / "programs",
         items=(item,),
         narratives={"ws_velocity.md": "Deployment velocity: <!-- vertex:metric: acme.deployment_p50_mins -->"},
     )

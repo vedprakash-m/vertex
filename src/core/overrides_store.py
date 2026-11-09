@@ -499,7 +499,7 @@ def reset_overrides_for_next_issue(
     reports_root: Path = REPORTS_ROOT,
     *,
     programs_root: Path | None = None,
-) -> OverridesDocument:
+) -> OverridesDocument | None:
     grouped_dimensions: dict[str, list[DimensionOverride]] = {}
     for dimension in confirmed_dimensions:
         grouped_dimensions.setdefault(dimension.scorecard_name, []).append(
@@ -528,7 +528,24 @@ def reset_overrides_for_next_issue(
         removed_sections=(),
         persona_overrides=(),
     )
-    save_overrides(edition, document, reports_root, programs_root=programs_root)
+    path = get_overrides_path(edition, reports_root, issue_number=next_issue_number, programs_root=programs_root)
+    if path == reports_root / edition / "overrides.yaml":
+        save_overrides(edition, document, reports_root, programs_root=programs_root)
+        return document
+
+    assert_issue_unlocked(next_issue_number, target_path=path, artifact="overrides")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    contents = _render_overrides_document(document)
+    try:
+        stream = path.open("x", encoding="utf-8")
+    except (FileExistsError, PermissionError) as exc:
+        if path.is_dir():
+            raise IsADirectoryError("Next-issue overrides target is a directory.") from exc
+        if isinstance(exc, FileExistsError):
+            return None
+        raise
+    with stream:
+        stream.write(contents)
     return document
 
 

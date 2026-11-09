@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
+import json
 from pathlib import Path
 import sqlite3
 
@@ -14,7 +15,7 @@ from src.core.archive_store import write_skipped_issue
 from src.core.claim_tracker import append_claim_entry, append_claim_status_update, append_decision_ask, load_claim_status_updates, load_open_claims, load_open_decision_asks
 from src.core.decision_register import load_decisions, save_decisions
 from src.core.dependency_graph import load_dependencies, save_dependencies
-from src.core.exceptions import ConfigError
+from src.core.exceptions import ConfigError, StateError
 from src.core.milestone_engine import load_milestones, save_milestones
 from src.core.models_v2 import (
     ActionItem,
@@ -52,6 +53,7 @@ from src.core.program_fact_store import (
     ProgramFactInput,
     ProgramFactStore,
     build_fact_id,
+    build_legacy_program_fact_snapshot,
     build_natural_key,
     load_program_facts,
     persist_program_fact_snapshot,
@@ -563,6 +565,422 @@ def test_load_program_facts_shadow_mode_keeps_shim_merge(tmp_path: Path, monkeyp
     snapshot = load_program_facts("acme", programs_root=programs_root)
 
     assert len(project_action_items(snapshot)) == 1
+
+
+_MAPPED_SHIM_BUILDERS = (
+    ("workitem.state", "action.item", "_build_action_item_facts"),
+    ("workitem.state", "dependency.link", "_build_dependency_facts"),
+    ("workitem.state", "milestone.entry", "_build_milestone_entry_facts"),
+    ("workitem.state", "workstream.entry", "_build_workstream_entry_facts"),
+    ("judgment", "risk.entry", "_build_risk_entry_facts"),
+    ("judgment", "decision.entry", "_build_decision_entry_facts"),
+    ("judgment", "assumption.entry", "_build_assumption_facts"),
+    ("narrative", "claim.entry", "_build_claim_entry_facts"),
+)
+
+
+@pytest.mark.parametrize("builder", ["current", "legacy"])
+@pytest.mark.parametrize("bad_row", [b'{"synthetic-private"\n', b'["synthetic-private"]\n', b"\xff\n"])
+def test_action_fact_projection_refuses_corrupt_history_without_repair(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, builder: str, bad_row: bytes,
+) -> None:
+    monkeypatch.setenv("VERTEX_FACT_SOR", "legacy")
+    programs_root = _programs_root(tmp_path)
+    path = programs_root / "acme" / "journal" / "actions.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(bad_row)
+
+    with pytest.raises(StateError, match="Action journal") as error:
+        if builder == "current":
+            load_program_facts("acme", programs_root=programs_root, fact_types=("action.item",))
+        else:
+            build_legacy_program_fact_snapshot("acme", programs_root=programs_root, fact_types=("action.item",))
+
+    assert "synthetic-private" not in str(error.value)
+    assert path.read_bytes() == bad_row
+    assert not (path.parent / "quarantine").exists()
+    assert not path.with_suffix(".sha256").exists()
+
+
+@pytest.mark.parametrize("builder", ["current", "legacy"])
+def test_action_fact_projection_does_not_hide_configuration_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, builder: str,
+) -> None:
+    monkeypatch.setenv("VERTEX_FACT_SOR", "legacy")
+    programs_root = _programs_root(tmp_path)
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise ConfigError("synthetic configuration failure")
+
+    monkeypatch.setattr("src.core.action_tracker.load_actions", fail)
+    with pytest.raises(ConfigError, match="synthetic configuration failure"):
+        if builder == "current":
+            load_program_facts("acme", programs_root=programs_root, fact_types=("action.item",))
+        else:
+            build_legacy_program_fact_snapshot("acme", programs_root=programs_root, fact_types=("action.item",))
+
+
+@pytest.mark.parametrize("mode", ["primary", "historical"])
+def test_unused_action_history_is_not_read_in_primary_or_historical_snapshot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: str,
+) -> None:
+    monkeypatch.setenv("VERTEX_FACT_SOR", "primary" if mode == "primary" else "legacy")
+    programs_root = _programs_root(tmp_path)
+    path = programs_root / "acme" / "journal" / "actions.jsonl"
+    path.parent.mkdir(parents=True)
+    original = b'["synthetic-private"]\n'
+    path.write_bytes(original)
+    as_of = datetime(2026, 1, 1, tzinfo=timezone.utc) if mode == "historical" else None
+
+    assert project_action_items(load_program_facts(
+        "acme", as_of=as_of, programs_root=programs_root, fact_types=("action.item",),
+    )) == ()
+    assert path.read_bytes() == original
+    assert not (path.parent / "quarantine").exists()
+
+
+@pytest.mark.parametrize("program_mode", ("legacy", "shadow"))
+@pytest.mark.parametrize(("family", "fact_type", "builder"), _MAPPED_SHIM_BUILDERS)
+def test_mixed_primary_family_does_not_run_its_legacy_builder(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    program_mode: str,
+    family: str,
+    fact_type: str,
+    builder: str,
+) -> None:
+    monkeypatch.delenv("VERTEX_FACT_SOR", raising=False)
+    programs_root = _programs_root(tmp_path)
+    state = save_fact_sor_state(
+        "acme", mode=program_mode, family_modes={family: "primary"},
+        recorded_at=datetime(2020, 1, 1, tzinfo=timezone.utc), programs_root=programs_root,
+    )
+
+    def forbidden(*args: object, **kwargs: object) -> tuple:
+        raise AssertionError("primary family read its legacy builder")
+
+    monkeypatch.setattr(f"src.core.program_fact_store.{builder}", forbidden)
+    snapshot = load_program_facts(
+        "acme", programs_root=programs_root, db_root=tmp_path / "database",
+        fact_types=(f" {fact_type.upper()} ",), sor_state=state,
+    )
+
+    assert snapshot.facts == ()
+    assert snapshot.source_diagnostics == ()
+
+
+@pytest.mark.parametrize("program_mode", ("legacy", "shadow"))
+@pytest.mark.parametrize(("family", "fact_type", "builder"), _MAPPED_SHIM_BUILDERS)
+def test_mixed_nonprimary_family_still_runs_its_legacy_builder(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    program_mode: str,
+    family: str,
+    fact_type: str,
+    builder: str,
+) -> None:
+    monkeypatch.delenv("VERTEX_FACT_SOR", raising=False)
+    programs_root = _programs_root(tmp_path)
+    state = save_fact_sor_state(
+        "acme", mode=program_mode, family_modes={family: program_mode},
+        recorded_at=datetime(2020, 1, 1, tzinfo=timezone.utc), programs_root=programs_root,
+    )
+
+    def observed(*args: object, **kwargs: object) -> tuple:
+        raise AssertionError("nonprimary family read its legacy builder")
+
+    monkeypatch.setattr(f"src.core.program_fact_store.{builder}", observed)
+    with pytest.raises(AssertionError, match="nonprimary family"):
+        load_program_facts(
+            "acme", programs_root=programs_root, db_root=tmp_path / "database",
+            fact_types=(fact_type,), sor_state=state,
+        )
+
+
+def _synthetic_action_fact() -> ProgramFactInput:
+    return ProgramFactInput(
+        fact_type="action.item",
+        entity_refs=("ACTION:primary-action",),
+        payload={
+            "id": "primary-action", "program_id": "acme", "text": "Primary action",
+            "owner_alias": "operator", "status": "open", "source_type": "manual",
+            "created_at": "2020-01-01T00:00:00+00:00",
+        },
+    )
+
+
+@pytest.mark.parametrize("program_mode", ("legacy", "shadow"))
+@pytest.mark.parametrize("fact_types", (None, ("action.item",)))
+def test_mixed_primary_action_does_not_repair_unused_corrupt_log(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    program_mode: str,
+    fact_types: tuple[str, ...] | None,
+) -> None:
+    monkeypatch.delenv("VERTEX_FACT_SOR", raising=False)
+    programs_root = _programs_root(tmp_path)
+    state = save_fact_sor_state(
+        "acme", mode=program_mode, family_modes={"workitem.state": "primary"},
+        recorded_at=datetime(2020, 1, 1, tzinfo=timezone.utc), programs_root=programs_root,
+    )
+    actions_path = programs_root / "acme" / "journal" / "actions.jsonl"
+    actions_path.parent.mkdir(parents=True)
+    original = b'["synthetic malformed row"]\n'
+    actions_path.write_bytes(original)
+    store = ProgramFactStore("acme", db_root=tmp_path / "database")
+    store.append_fact(_synthetic_action_fact(), recorded_at=datetime(2020, 1, 1, tzinfo=timezone.utc))
+
+    snapshot = load_program_facts(
+        "acme", programs_root=programs_root, db_root=tmp_path / "database",
+        fact_types=fact_types, sor_state=state,
+    )
+
+    assert tuple(item.id for item in project_action_items(snapshot)) == ("primary-action",)
+    assert snapshot.source_diagnostics == ()
+    assert actions_path.read_bytes() == original
+    assert not (actions_path.parent / "quarantine").exists()
+    assert not actions_path.with_suffix(".sha256").exists()
+
+
+@pytest.mark.parametrize("program_mode", ("legacy", "shadow"))
+def test_reality_mixed_primary_uses_stored_action_and_milestone_with_legacy_risk(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, program_mode: str,
+) -> None:
+    from src.core.program_reality import ProgramReality
+
+    monkeypatch.delenv("VERTEX_FACT_SOR", raising=False)
+    monkeypatch.setenv("VERTEX_DB_PATH", str(tmp_path / "database"))
+    programs_root = _programs_root(tmp_path)
+    save_fact_sor_state(
+        "acme", mode=program_mode, family_modes={"workitem.state": "primary"},
+        recorded_at=datetime(2020, 1, 1, tzinfo=timezone.utc), programs_root=programs_root,
+    )
+    program = programs_root / "acme"
+    actions_path = program / "journal" / "actions.jsonl"
+    actions_path.parent.mkdir(parents=True)
+    action_bytes = b'["synthetic malformed row"]\n'
+    actions_path.write_bytes(action_bytes)
+    milestone_path = program / "milestones.yaml"
+    milestone_bytes = b"schema_version: '2.0'\nmilestones: []\n"
+    milestone_path.write_bytes(milestone_bytes)
+    (program / "risk_register.yaml").write_text(
+        "schema_version: '1.0'\nrisks:\n"
+        "  - id: legacy-risk\n    title: Legacy risk\n    description: Synthetic risk\n"
+        "    probability: likely\n    impact: high\n    category: dependency\n"
+        "    owner_alias: operator\n    status: open\n    identified_date: '2020-01-01'\n",
+        encoding="utf-8",
+    )
+    store = ProgramFactStore("acme", db_root=tmp_path / "database")
+    store.append_fact(_synthetic_action_fact(), recorded_at=datetime(2020, 1, 1, tzinfo=timezone.utc))
+    store.append_fact(
+        ProgramFactInput(
+            "milestone.entry", ("MILESTONE:primary-milestone",),
+            {
+                "id": "primary-milestone", "program_id": "acme", "name": "Primary milestone",
+                "target_date": "2030-01-01", "owner_alias": "operator", "status": "on_track",
+            },
+        ),
+        recorded_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+    )
+
+    reality = ProgramReality.load(
+        "acme", programs_root=programs_root, archive_root=tmp_path / "archive",
+        require_committed_gather_run=False,
+    )
+
+    assert tuple(item.record.id for item in reality.actions()) == ("primary-action",)
+    assert tuple(item.record.id for item in reality.milestones()) == ("primary-milestone",)
+    assert tuple(item.record.id for item in reality.risks()) == ("legacy-risk",)
+    assert reality.to_dict()["source_diagnostics"] == []
+    assert actions_path.read_bytes() == action_bytes
+    assert milestone_path.read_bytes() == milestone_bytes
+    assert not (actions_path.parent / "quarantine").exists()
+
+
+@pytest.mark.parametrize("program_mode", ("legacy", "shadow"))
+def test_reality_mixed_primary_risk_preserves_nonprimary_actions(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, program_mode: str,
+) -> None:
+    from src.core.program_reality import ProgramReality
+
+    monkeypatch.delenv("VERTEX_FACT_SOR", raising=False)
+    monkeypatch.setenv("VERTEX_DB_PATH", str(tmp_path / "database"))
+    programs_root = _programs_root(tmp_path)
+    save_fact_sor_state(
+        "acme", mode=program_mode, family_modes={"judgment": "primary"},
+        recorded_at=datetime(2020, 1, 1, tzinfo=timezone.utc), programs_root=programs_root,
+    )
+    program = programs_root / "acme"
+    risk_path = program / "risk_register.yaml"
+    risk_bytes = b"schema_version: '2.0'\nrisks: []\n"
+    risk_path.write_bytes(risk_bytes)
+    actions_path = program / "journal" / "actions.jsonl"
+    actions_path.parent.mkdir(parents=True)
+    payload = dict(_synthetic_action_fact().payload, record_type="action", id="legacy-action")
+    actions_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    action_bytes = actions_path.read_bytes()
+    store = ProgramFactStore("acme", db_root=tmp_path / "database")
+    store.append_fact(
+        ProgramFactInput(
+            "risk.entry", ("RISK:primary-risk",),
+            {
+                "id": "primary-risk", "program_id": "acme", "title": "Primary risk",
+                "description": "Synthetic risk", "probability": "likely", "impact": "high",
+                "category": "dependency", "owner_alias": "operator", "status": "open",
+                "identified_date": "2020-01-01",
+            },
+        ),
+        recorded_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+    )
+
+    reality = ProgramReality.load(
+        "acme", programs_root=programs_root, archive_root=tmp_path / "archive",
+        require_committed_gather_run=False,
+    )
+
+    assert tuple(item.record.id for item in reality.risks()) == ("primary-risk",)
+    assert tuple(item.record.id for item in reality.actions()) == ("legacy-action",)
+    assert reality.to_dict()["source_diagnostics"] == []
+    assert risk_path.read_bytes() == risk_bytes
+    assert actions_path.read_bytes() == action_bytes
+
+
+def test_primary_empty_risk_cross_check_can_still_read_legacy_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from src.core.program_reality import ProgramReality
+    from src.core.stages.risk_stage import _load_current_risks
+    from src.core.stages.sor_gated_load import sor_gated_family_load
+
+    monkeypatch.delenv("VERTEX_FACT_SOR", raising=False)
+    monkeypatch.setenv("VERTEX_DB_PATH", str(tmp_path / "database"))
+    programs_root = _programs_root(tmp_path)
+    save_fact_sor_state(
+        "acme", mode="legacy", family_modes={"judgment": "primary"},
+        recorded_at=datetime(2020, 1, 1, tzinfo=timezone.utc), programs_root=programs_root,
+    )
+    (programs_root / "acme" / "risk_register.yaml").write_text(
+        "schema_version: '1.0'\nrisks:\n"
+        "  - id: legacy-risk\n    title: Legacy risk\n    description: Synthetic risk\n"
+        "    probability: likely\n    impact: high\n    category: dependency\n"
+        "    owner_alias: operator\n    status: open\n    identified_date: '2020-01-01'\n",
+        encoding="utf-8",
+    )
+    reality = ProgramReality.load(
+        "acme", programs_root=programs_root, archive_root=tmp_path / "archive",
+        require_committed_gather_run=False,
+    )
+    records, assessments, warnings, _ = sor_gated_family_load(
+        program_id="acme", family="judgment", programs_root=programs_root,
+        reality_accessor=lambda value: value.risks(),
+        legacy_loader=lambda: _load_current_risks("acme", programs_root=programs_root),
+        allow_legacy_rollback_env="VERTEX_REPORT_ALLOW_LEGACY_RISK_ROLLBACK",
+        cross_check_label="risk", reality=reality,
+    )
+
+    assert records == ()
+    assert assessments == ()
+    assert len(warnings) == 1
+    assert "legacy source has 1" in warnings[0]
+
+
+@pytest.mark.parametrize("program_mode", ("legacy", "shadow"))
+def test_mixed_primary_milestone_ignores_invalid_unused_file_for_targeted_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, program_mode: str,
+) -> None:
+    monkeypatch.delenv("VERTEX_FACT_SOR", raising=False)
+    programs_root = _programs_root(tmp_path)
+    state = save_fact_sor_state(
+        "acme", mode=program_mode, family_modes={"workitem.state": "primary"},
+        recorded_at=datetime(2020, 1, 1, tzinfo=timezone.utc), programs_root=programs_root,
+    )
+    milestone_path = programs_root / "acme" / "milestones.yaml"
+    original = b"schema_version: '2.0'\nmilestones: []\n"
+    milestone_path.write_bytes(original)
+
+    snapshot = load_program_facts(
+        "acme", programs_root=programs_root, db_root=tmp_path / "database",
+        fact_types=("milestone.entry",), sor_state=state,
+    )
+
+    assert snapshot.facts == ()
+    assert snapshot.source_diagnostics == ()
+    assert milestone_path.read_bytes() == original
+
+
+@pytest.mark.parametrize("family_mode", ("legacy", "shadow"))
+def test_nonprimary_milestone_errors_remain_visible(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, family_mode: str,
+) -> None:
+    monkeypatch.delenv("VERTEX_FACT_SOR", raising=False)
+    programs_root = _programs_root(tmp_path)
+    state = save_fact_sor_state(
+        "acme", mode="legacy", family_modes={"workitem.state": family_mode},
+        recorded_at=datetime(2020, 1, 1, tzinfo=timezone.utc), programs_root=programs_root,
+    )
+    milestone_path = programs_root / "acme" / "milestones.yaml"
+    milestone_path.write_text("schema_version: '2.0'\nmilestones: []\n", encoding="utf-8")
+
+    snapshot = load_program_facts(
+        "acme", programs_root=programs_root, db_root=tmp_path / "database", sor_state=state,
+    )
+
+    assert [(item.source, item.status) for item in snapshot.source_diagnostics] == [
+        ("milestones.yaml", "invalid"),
+    ]
+    with pytest.raises(ConfigError, match="Unsupported milestones schema_version"):
+        load_program_facts(
+            "acme", programs_root=programs_root, db_root=tmp_path / "database",
+            fact_types=("milestone.entry",), sor_state=state,
+        )
+
+
+@pytest.mark.parametrize(("fact_type", "builder"), (
+    ("event.issue.skip", "_build_skip_issue_facts"),
+    ("workstream.association", "_build_workstream_association_facts"),
+))
+def test_unmapped_legacy_event_builders_remain_enabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fact_type: str, builder: str,
+) -> None:
+    monkeypatch.delenv("VERTEX_FACT_SOR", raising=False)
+    programs_root = _programs_root(tmp_path)
+    state = save_fact_sor_state(
+        "acme", mode="legacy",
+        family_modes={"workitem.state": "primary", "judgment": "primary", "narrative": "primary"},
+        recorded_at=datetime(2020, 1, 1, tzinfo=timezone.utc), programs_root=programs_root,
+    )
+    observed: list[bool] = []
+
+    def build(*args: object, **kwargs: object) -> tuple:
+        observed.append(True)
+        return ()
+
+    monkeypatch.setattr(f"src.core.program_fact_store.{builder}", build)
+    load_program_facts(
+        "acme", programs_root=programs_root, db_root=tmp_path / "database",
+        fact_types=(fact_type,), sor_state=state,
+    )
+    assert observed == [True]
+
+
+def test_legacy_comparison_snapshot_still_reads_primary_family_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("VERTEX_FACT_SOR", raising=False)
+    programs_root = _programs_root(tmp_path)
+    save_fact_sor_state(
+        "acme", mode="legacy", family_modes={"workitem.state": "primary"},
+        recorded_at=datetime(2020, 1, 1, tzinfo=timezone.utc), programs_root=programs_root,
+    )
+    actions_path = programs_root / "acme" / "journal" / "actions.jsonl"
+    actions_path.parent.mkdir(parents=True)
+    payload = dict(_synthetic_action_fact().payload, record_type="action", id="legacy-action")
+    actions_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    snapshot = build_legacy_program_fact_snapshot(
+        "acme", programs_root=programs_root, fact_types=("action.item",),
+    )
+    assert tuple(item.id for item in project_action_items(snapshot)) == ("legacy-action",)
 
 
 def test_claim_entry_projection_tracks_current_open_claims_only(tmp_path: Path) -> None:

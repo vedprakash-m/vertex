@@ -5,14 +5,12 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-import pytest
-
 from src.core.knowledge_claim_store import KnowledgeClaimRevision, resolve_knowledge_context
 from src.core.ledger.event_log import ConfidenceTier
 from src.core.ledger.source_refs import KnowledgeDocumentRef, LTDeckRef, OperatorAssertionRef
 
 
-GOLDEN_DIR = Path(__file__).resolve().parent / "snapshots"
+GOLDEN_DIR = Path(__file__).resolve().parent / "public_snapshots"
 
 
 class GoldenFileMismatchError(AssertionError):
@@ -33,11 +31,10 @@ def _save_golden(name: str, content: str) -> None:
 
 def _compare_with_golden(name: str, actual: str, update: bool) -> None:
     golden = _load_golden(name)
-    if update or golden is None:
+    if update:
         _save_golden(name, actual)
-        if golden is None:
-            pytest.skip(f"Created new golden file: {name}.golden")
         return
+    assert golden is not None, f"Missing public golden baseline: {name}.golden; regenerate explicitly with --update-golden."
 
     if actual != golden:
         diff = "".join(
@@ -54,15 +51,15 @@ def _compare_with_golden(name: str, actual: str, update: bool) -> None:
 
 
 def _deck_ref() -> LTDeckRef:
-    return LTDeckRef(file_path="docs/Monthly_LT_Review/gen9.pptx", deck_date=datetime(2025, 3, 20, tzinfo=timezone.utc).date(), slide_number=14)
+    return LTDeckRef(file_path="fixtures/synthetic-review.pptx", deck_date=datetime(2025, 3, 20, tzinfo=timezone.utc).date(), slide_number=14)
 
 
 def _kb_ref(vault_hash: str, section: str) -> KnowledgeDocumentRef:
     return KnowledgeDocumentRef(
         vault_hash=vault_hash,
-        original_filename="gen9-kb.md",
+        original_filename="synthetic-knowledge.md",
         origin_kind="local_path",
-        origin_path="Q:/knowledge/gen9-kb.md",
+        origin_path="fixtures/synthetic-knowledge.md",
         origin_url=None,
         ingested_at=datetime(2025, 1, 5, tzinfo=timezone.utc),
         section=section,
@@ -146,7 +143,7 @@ def _golden_revisions() -> tuple[KnowledgeClaimRevision, ...]:
             scope="domain:storage-platform",
             subject="sku_generation:gen9",
             predicate="launch_blocker",
-            value="wingtip",
+            value="synthetic-blocker",
             valid_from=datetime(2025, 9, 1, tzinfo=timezone.utc),
             valid_until=None,
             recorded_at=datetime(2025, 9, 20, tzinfo=timezone.utc),

@@ -217,6 +217,38 @@ def test_observation_retains_exact_replayable_inputs_and_frozen_result():
         observation.verdict.health = RiskLevel.LOW
 
 
+@pytest.mark.parametrize(("report_risk", "verdict_risk"), list(product(RISKS, RISKS)))
+def test_report_health_comparison_records_literal_risk_values(report_risk, verdict_risk):
+    from src.core.program_verdict import compare_report_health
+    from src.core.view_models import HealthSummary
+
+    health = HealthSummary(
+        overall_risk=report_risk,
+        high_count=int(report_risk == RiskLevel.HIGH),
+        medium_count=int(report_risk == RiskLevel.MEDIUM),
+        low_count=int(report_risk == RiskLevel.LOW),
+        done_count=int(report_risk == RiskLevel.DONE),
+        total_count=1, delta_direction="unchanged", prior_counts=None,
+    )
+    observation = _observe()
+    observation = replace(observation, verdict=replace(observation.verdict, health=verdict_risk))
+
+    comparison = compare_report_health(health, observation)
+
+    assert asdict(comparison) == {
+        "schema_version": "report-verdict-comparison.v1",
+        "mode": "observe",
+        "capture_sha256": observation.verdict.snapshot_id,
+        "observation_inputs_sha256": observation.inputs_sha256,
+        "report_risk": report_risk,
+        "report_health_state": health.health_state,
+        "verdict_risk": verdict_risk,
+        "risk_values_equal": report_risk == verdict_risk,
+    }
+    with pytest.raises(FrozenInstanceError):
+        comparison.risk_values_equal = False
+
+
 def test_observer_forecast_order_is_canonical():
     snapshot = _snapshot()
     snapshot = replace(snapshot, items=snapshot.items + (replace(snapshot.items[0], id=2),))

@@ -12,10 +12,98 @@ from src.core.jsonl_utils import (
     list_jsonl_quarantine_paths,
     list_rotated_jsonl_paths,
     quarantine_and_rewrite_jsonl,
+    read_jsonl_records,
     rotate_jsonl_if_oversize,
     validate_jsonl_row,
     write_checksum_file,
 )
+
+
+@pytest.mark.parametrize("bad_row", [b'{"synthetic-private"\n', b'["synthetic-private"]\n', b"null\n"])
+@pytest.mark.parametrize("valid_prefix", [b"", b'{"valid":true}\n'])
+def test_nonrepairing_read_rejects_bad_rows_without_changing_files(
+    tmp_path: Path, bad_row: bytes, valid_prefix: bytes,
+) -> None:
+    path = tmp_path / "records.jsonl"
+    original = valid_prefix + bad_row
+    path.write_bytes(original)
+
+    with pytest.raises(ValueError, match="Invalid JSONL record") as error:
+        read_jsonl_records(path, repair_corruption=False)
+
+    assert "synthetic-private" not in str(error.value)
+    assert path.read_bytes() == original
+    assert tuple(tmp_path.iterdir()) == (path,)
+
+
+def test_nonrepairing_read_preserves_missing_empty_and_valid_records(tmp_path: Path) -> None:
+    path = tmp_path / "records.jsonl"
+    assert read_jsonl_records(path, repair_corruption=False) == ()
+    path.write_text("\n", encoding="utf-8")
+    assert read_jsonl_records(path, repair_corruption=False) == ()
+    path.write_text('{"first":1}\n\n{"second":2}', encoding="utf-8")
+    assert read_jsonl_records(path, repair_corruption=False) == ({"first": 1}, {"second": 2})
+    assert tuple(tmp_path.iterdir()) == (path,)
+
+
+def test_default_read_still_repairs_invalid_json(tmp_path: Path) -> None:
+    path = tmp_path / "records.jsonl"
+    path.write_text('{"first":1}\ninvalid\n{"second":2}\n', encoding="utf-8")
+
+    assert read_jsonl_records(path) == ({"first": 1}, {"second": 2})
+    assert path.read_text(encoding="utf-8").splitlines() == ['{"first":1}', '{"second":2}']
+    assert len(tuple((tmp_path / "quarantine").glob("records.*.jsonl"))) == 1
+    assert path.with_suffix(".sha256").exists()
+
+
+def test_nonrepairing_read_does_not_treat_existing_missing_read_as_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "records.jsonl"
+    path.write_text('{"valid":true}\n', encoding="utf-8")
+    original_read = Path.read_text
+
+    def missing_read(target: Path, *args: object, **kwargs: object) -> str:
+        if target == path:
+            raise FileNotFoundError("synthetic read failure")
+        return original_read(target, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", missing_read)
+    with pytest.raises(FileNotFoundError):
+        read_jsonl_records(path, repair_corruption=False)
+
+
+def test_default_read_propagates_file_disappearance_after_existence_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "records.jsonl"
+    path.write_text('{"valid":true}\n', encoding="utf-8")
+    original_read = Path.read_text
+
+    def missing_read(target: Path, *args: object, **kwargs: object) -> str:
+        if target == path:
+            raise FileNotFoundError("synthetic read failure")
+        return original_read(target, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", missing_read)
+    with pytest.raises(FileNotFoundError, match="synthetic read failure"):
+        read_jsonl_records(path)
+
+
+def test_nonrepairing_read_does_not_treat_dangling_link_as_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "records.jsonl"
+    original_lstat = Path.lstat
+
+    def dangling_lstat(target: Path) -> object:
+        if target == path:
+            return object()
+        return original_lstat(target)
+
+    monkeypatch.setattr(Path, "lstat", dangling_lstat)
+    with pytest.raises(FileNotFoundError):
+        read_jsonl_records(path, repair_corruption=False)
 
 
 class TestComputeFileChecksum:

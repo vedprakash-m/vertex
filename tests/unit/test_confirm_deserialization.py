@@ -114,7 +114,7 @@ def test_deserialize_revision_and_comment_direct() -> None:
             "work_item_id": 1,
             "rev_number": 3,
             "changed_by": "C",
-            "changed_by_email": "c@e.com",
+            "changed_by_email": "c@synthetic-04.example",
             "changed_date": "2026-06-01T00:00:00",
             "fields_changed": {},
         }
@@ -125,7 +125,7 @@ def test_deserialize_revision_and_comment_direct() -> None:
             "work_item_id": 1,
             "comment_id": 9,
             "created_by": "C",
-            "created_by_email": "c@e.com",
+            "created_by_email": "c@synthetic-04.example",
             "created_date": "2026-06-01T00:00:00",
             "text": "hi",
         }

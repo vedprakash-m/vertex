@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+import yaml
+
 from src.core.context_gap_store import RankedGap, load_context_gaps, rank_context_gaps
 from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.ncfl_proposal_store import conflicting_pending_proposals, load_proposals, reply_origin_label
@@ -112,14 +114,22 @@ def load_context_maintenance_review(
         proposals = ()
         proposal_diagnostic = "Context proposal history unavailable; inspect and repair it before retrying."
     diagnostic = None
+    gaps: tuple[RankedGap, ...] = ()
     try:
-        gaps = tuple(rank_context_gaps(
-            load_context_gaps(program_id, programs_root=programs_root),
-            programs_root=programs_root,
-        ))
+        records = load_context_gaps(program_id, programs_root=programs_root)
     except (OSError, ValueError):
-        gaps = ()
         diagnostic = "Context gap history unavailable; inspect and repair it before retrying."
+    else:
+        if any(record.program != program_id for record in records):
+            diagnostic = "Context gap history unavailable: observations contain a foreign program."
+        else:
+            try:
+                gaps = tuple(rank_context_gaps(records, programs_root=programs_root))
+            except (OSError, ValueError, yaml.YAMLError):
+                diagnostic = (
+                    "Context gap ranking unavailable; inspect the selected workstream_registry.yaml "
+                    "and recorded gap targets before retrying."
+                )
     return ContextMaintenanceReview(proposals, gaps, diagnostic, as_of.astimezone(timezone.utc), proposal_diagnostic)
 
 

@@ -204,7 +204,7 @@ def test_broader_update_events_fold_correctly(tmp_path) -> None:
     )
 
     projection_path = tmp_path / "updates.sqlite3"
-    project_events_to_sqlite("acme", events, projection_path=projection_path)
+    project_events_to_sqlite("acme", events, projection_path=projection_path, programs_root=tmp_path / "programs")
     dump = canonical_projection_dump(projection_path)
 
     assert dump["proj_workstream"][0]["owner_person_id"] == "person:b"

@@ -248,6 +248,58 @@ def _build_good_repo(root: Path) -> None:
         Canonical gap count: 23 rows, of which GAP-019 is retracted and GAP-022 is documented/closed → 21 live gaps.
         """,
     )
+    _write_file(root, "scripts/generate_cli_reference.py", "# synthetic generator\n")
+    _write_file(root, "tests/contracts/cli_reference_snapshot.md", "# synthetic reference\n")
+
+
+@pytest.mark.parametrize(
+    ("missing", "detail"),
+    [
+        ("generator", "scripts/generate_cli_reference.py"),
+        ("snapshot", "tests/contracts/cli_reference_snapshot.md"),
+    ],
+)
+def test_cli_reference_assets_fail_when_required_file_is_missing(
+    tmp_path: Path, missing: str, detail: str,
+) -> None:
+    module = _load_module()
+    if missing != "generator":
+        _write_file(tmp_path, "scripts/generate_cli_reference.py", "# generator\n")
+    if missing != "snapshot":
+        _write_file(tmp_path, "tests/contracts/cli_reference_snapshot.md", "# reference\n")
+    _write_file(tmp_path, "specs/cli-reference.md", "# ignored legacy reference\n")
+
+    result = module._check_cli_reference_drift(tmp_path)
+
+    assert result.status == "fail"
+    assert detail in result.detail
+
+
+def test_cli_reference_assets_reject_snapshot_directory(tmp_path: Path) -> None:
+    module = _load_module()
+    _write_file(tmp_path, "scripts/generate_cli_reference.py", "# generator\n")
+    (tmp_path / "tests" / "contracts" / "cli_reference_snapshot.md").mkdir(parents=True)
+
+    result = module._check_cli_reference_drift(tmp_path)
+
+    assert result.status == "fail"
+    assert "tests/contracts/cli_reference_snapshot.md" in result.detail
+
+
+def test_cli_reference_assets_report_presence_not_content_matching(tmp_path: Path) -> None:
+    module = _load_module()
+    _write_file(tmp_path, "scripts/generate_cli_reference.py", "# generator\n")
+    _write_file(tmp_path, "tests/contracts/cli_reference_snapshot.md", "stale sentinel\n")
+    snapshot = tmp_path / "tests" / "contracts" / "cli_reference_snapshot.md"
+    before = snapshot.read_bytes()
+
+    result = module._check_cli_reference_drift(tmp_path)
+
+    assert result.status == "pass"
+    assert "tests/contracts/cli_reference_snapshot.md" in result.detail
+    assert "python scripts/generate_cli_reference.py --check" in result.detail
+    assert "matches" not in result.detail
+    assert snapshot.read_bytes() == before
 
 
 def test_run_checks_passes_against_repo() -> None:
@@ -608,5 +660,4 @@ def test_check_digest_sunset_fails_after_sunset_when_shim_still_present(tmp_path
     by_id = {result.check_id: result for result in results}
     assert by_id["p13-digest-sunset"].status == "fail"
     assert "still present after sunset" in by_id["p13-digest-sunset"].detail
-
 

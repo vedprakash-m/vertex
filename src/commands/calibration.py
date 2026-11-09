@@ -230,7 +230,7 @@ def edit_distance_trend_command(
     min_issues: int = typer.Option(4, "--min-issues", min=2, help="Minimum issues required to compute a trend (default 4)."),
     programs_root: Path = typer.Option(PROGRAMS_ROOT, "--programs-root", hidden=True),
 ) -> None:
-    """Show draft↔confirm edit distance trend per task type (WS-22 learning-loop efficacy)."""
+    """Show draft-to-confirm edit distance trend per task type (WS-22 learning-loop efficacy)."""
     from src.ai.edit_learner import compute_edit_distance_trend  # noqa: PLC0415
 
     trends = compute_edit_distance_trend(

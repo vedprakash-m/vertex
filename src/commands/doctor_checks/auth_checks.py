@@ -5,6 +5,7 @@ from typing import Any, Callable
 
 from src.commands.doctor_checks.models import ADOProbeResult, DoctorCheck, DoctorReport
 from src.core.exceptions import AuthError, QueryError
+from src.core.failure_taxonomy import safe_failure_suffix
 from src.core.kusto_templates import KustoTemplateContext
 from src.core.models_v2 import KustoQuery
 from src.m365.agency_bridge import AgencyCapabilities
@@ -251,9 +252,22 @@ def kusto_auth_check(
             for query in probe_queries:
                 kusto_probe(query)
         else:
-            build_live_kusto_query_probe_fn(log_failures=False)(probe_queries)
+            failed_targets = build_live_kusto_query_probe_fn(log_failures=False)(probe_queries)
+            if failed_targets:
+                failed_queries = tuple(
+                    query for query in probe_queries
+                    if (query.cluster.strip(), query.database.strip()) in failed_targets
+                )
+                failed_labels = kusto_target_labels_fn(failed_queries)
+                return DoctorCheck(
+                    "Kusto Access",
+                    "fail",
+                    f"Kusto auth probe failed for {summarize_kusto_targets_fn(failed_labels)}. Verify credentials and target access.",
+                    metadata=metadata,
+                )
     except (AuthError, QueryError) as error:
-        return DoctorCheck("Kusto Access", "fail", str(error), metadata=metadata)
+        detail = f"Kusto access probe failed{safe_failure_suffix(str(error))}. Check access and retry."
+        return DoctorCheck("Kusto Access", "fail", detail, metadata=metadata)
 
     return DoctorCheck(
         "Kusto Access",

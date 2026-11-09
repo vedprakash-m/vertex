@@ -6,16 +6,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
 from src.commands.confirm_stages import archive_transaction
+from src.commands.confirm_stages.draft_loaders import ConfirmDraftManifest
 from src.core.archive_store import ConfirmedIssueArchivePaths
+from src.core.exceptions import ConfigError
 from src.core.ledger.event_log import ConfidenceTier, TemporalConfidence, build_event_envelope, read_events
 from src.core.ledger.program_views import project_program_events
 from src.core.ledger.source_refs import LTDeckRef, NewsletterRef, OperatorAssertionRef
 from src.core.models import RunManifest
 from src.core.projections.snapshot_manager import write_projection_snapshot
+from src.core.quality_gates.models import GateEvaluation, QualityGateReport
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +78,87 @@ def _selected_callback(result: Any, programs_root: Path | None):
         return result
 
     return invoke
+
+
+@pytest.fixture
+def revalidation_inputs(tmp_path: Path) -> dict[str, Any]:
+    programs_root = tmp_path / "programs"
+    config = {"title": "Synthetic"}
+    manifest = ConfirmDraftManifest(
+        edition_name="synthetic",
+        issue_number=12,
+        programs_root=programs_root,
+        manifest_id="manifest",
+        config_hash="sha256:synthetic",
+        ai_safety=None,
+        draft_readiness=None,
+        milestone_assessments=("assessed",),
+        milestone_trajectory_snapshot={"capture": "synthetic"},
+    )
+    return {
+        "edition_name": "synthetic",
+        "issue_number": 12,
+        "reports_root": tmp_path / "reports",
+        "programs_root": programs_root,
+        "program_id": "synthetic",
+        "draft_state": {"gather_run_id": "run", "gather_run_hash": "hash"},
+        "draft_manifest": manifest,
+        "db_root": tmp_path / "fact-db",
+        "effective_family_modes": (("judgment", "primary"),),
+        "load_bundle_fn": Mock(return_value=SimpleNamespace(config=config)),
+        "hash_jsonable_fn": Mock(return_value=manifest.config_hash),
+        "evaluate_fact_drift_fn": Mock(return_value=QualityGateReport(results=())),
+        "validate_pinned_gather_run_fn": Mock(return_value=()),
+    }
+
+
+@pytest.mark.parametrize("program_id", [None, "synthetic"])
+def test_revalidate_evidence_preserves_inputs_and_flat_scope(
+    revalidation_inputs: dict[str, Any], program_id: str | None,
+) -> None:
+    inputs = revalidation_inputs
+    inputs["program_id"] = program_id
+    archive_transaction.revalidate_evidence(**inputs)
+
+    inputs["load_bundle_fn"].assert_called_once_with(
+        "synthetic", reports_root=inputs["reports_root"], programs_root=inputs["programs_root"],
+    )
+    inputs["hash_jsonable_fn"].assert_called_once_with({"title": "Synthetic"})
+    inputs["evaluate_fact_drift_fn"].assert_called_once_with(
+        draft_state=inputs["draft_state"], program_id=program_id, db_root=inputs["db_root"],
+        edition_name="synthetic", issue_number=12,
+        milestone_assessments=("assessed",), milestone_trajectory_snapshot={"capture": "synthetic"},
+        programs_root=inputs["programs_root"], effective_family_modes=inputs["effective_family_modes"],
+    )
+    if program_id is None:
+        inputs["validate_pinned_gather_run_fn"].assert_not_called()
+    else:
+        inputs["validate_pinned_gather_run_fn"].assert_called_once_with(
+            program_id, gather_run_id="run", gather_run_hash="hash", programs_root=inputs["programs_root"],
+        )
+
+
+def test_revalidate_evidence_refuses_config_drift_before_other_checks(
+    revalidation_inputs: dict[str, Any],
+) -> None:
+    inputs = revalidation_inputs
+    inputs["hash_jsonable_fn"].return_value = "sha256:changed"
+    with pytest.raises(ConfigError, match="configuration changed before archive write"):
+        archive_transaction.revalidate_evidence(**inputs)
+    inputs["evaluate_fact_drift_fn"].assert_not_called()
+    inputs["validate_pinned_gather_run_fn"].assert_not_called()
+
+
+def test_revalidate_evidence_reports_fact_and_gather_failures_in_order(
+    revalidation_inputs: dict[str, Any],
+) -> None:
+    inputs = revalidation_inputs
+    inputs["evaluate_fact_drift_fn"].return_value = QualityGateReport(
+        results=(GateEvaluation(gate_id="QG-SG-20", passed=False, message="fact drift", exit_code=3),),
+    )
+    inputs["validate_pinned_gather_run_fn"].return_value = ("gather drift",)
+    with pytest.raises(ConfigError, match="fact drift; gather drift"):
+        archive_transaction.revalidate_evidence(**inputs)
 
 
 @pytest.mark.parametrize("program_backed", [False, True])
@@ -153,6 +238,7 @@ def test_execute_archive_transaction_records_semantic_index_warning(
         legacy_regex_extractor=False,
         extraction_result=None,
         extraction_mode="disabled",
+        evidence_fence_resources=(),
         revalidate_evidence_fn=lambda: None,
         build_confirmed_eml_bytes_fn=lambda *args, **kwargs: None,
         write_confirmed_fn=_selected_callback(tmp_path / "staged.snapshot.json", programs_root if program_backed else None),
@@ -227,6 +313,7 @@ def test_execute_archive_transaction_records_ledger_baseline_warning_on_snapshot
         legacy_regex_extractor=False,
         extraction_result=None,
         extraction_mode="disabled",
+        evidence_fence_resources=(),
         revalidate_evidence_fn=lambda: None,
         build_confirmed_eml_bytes_fn=lambda *args, **kwargs: None,
         write_confirmed_fn=_selected_callback(tmp_path / "staged.snapshot.json", tmp_path / "programs"),
@@ -318,6 +405,7 @@ def test_execute_archive_transaction_projects_metrics_and_risk_followthrough(tmp
         legacy_regex_extractor=False,
         extraction_result=None,
         extraction_mode="disabled",
+        evidence_fence_resources=(),
         revalidate_evidence_fn=lambda: None,
         build_confirmed_eml_bytes_fn=lambda *args, **kwargs: None,
         write_confirmed_fn=_selected_callback(tmp_path / "staged.snapshot.json", tmp_path / "programs"),
@@ -556,6 +644,7 @@ def _spine_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[dict
         "legacy_regex_extractor": False,
         "extraction_result": None,
         "extraction_mode": "disabled",
+        "evidence_fence_resources": (),
         "revalidate_evidence_fn": lambda: effects.append("revalidate"),
         "build_confirmed_eml_bytes_fn": lambda *args, **kwargs: None,
         "write_confirmed_fn": snapshot_store.write_confirmed,

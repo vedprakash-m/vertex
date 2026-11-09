@@ -84,8 +84,8 @@ def test_graph_mail_client_search_threads_uses_workiq() -> None:
             "results": [
                 {
                     "messageId": "thread-1",
-                    "title": "Rushi feedback",
-                    "sender": "rushi@example.com",
+                    "title": "ExampleUser feedback",
+                    "sender": "exampleuser@example.com",
                     "snippet": "Please tighten the exec summary",
                     "link": "https://outlook.office.com/mail/thread-1",
                 }
@@ -94,13 +94,13 @@ def test_graph_mail_client_search_threads_uses_workiq() -> None:
     )
     client = GraphMailClient(bridge)
 
-    page = client.search_threads(question="Find feedback from Rushi on Acme newsletter drafts")
+    page = client.search_threads(question="Find feedback from ExampleUser on Acme newsletter drafts")
 
-    assert bridge.workiq_questions == ["Find feedback from Rushi on Acme newsletter drafts"]
+    assert bridge.workiq_questions == ["Find feedback from ExampleUser on Acme newsletter drafts"]
     assert page.source == "workiq"
     assert len(page.records) == 1
     assert page.records[0].source_id == "thread-1"
-    assert page.records[0].subject == "Rushi feedback"
+    assert page.records[0].subject == "ExampleUser feedback"
     assert page.records[0].preview == "Please tighten the exec summary"
 
 

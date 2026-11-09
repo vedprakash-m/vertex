@@ -13,11 +13,15 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timezone
 import json
+import logging
 from pathlib import Path
+import sqlite3
 
+import portalocker
 import pytest
 
 from src.core.actuation_outbox import create_task_idempotency_key, enqueue_create_task_intent, outbox_db_path
+import src.core.action_tracker as action_tracker
 from src.core.ado_client import ADOClient
 from src.core.ado_proposal import (
     ADOUpdateEntry,
@@ -26,7 +30,7 @@ from src.core.ado_proposal import (
     read_proposal_manifest_from_handle,
     write_proposal_manifest_to_handle,
 )
-from src.core.exceptions import AuthError, QueryError
+from src.core.exceptions import AuthError, ConfigError, QueryError, StateError
 from src.core.integration_types import PaginationOutcome
 from src.core.ledger.event_log import read_events
 from src.core.ledger.durable_outbox_store import load_entry, load_success_receipt
@@ -244,6 +248,404 @@ def test_never_attempted_entry_skips_search_and_creates_normally(tmp_path: Path)
     assert receipt["operation_intent_id"] == proposal.entries[0].operation_intent_id
     assert receipt["org"] == client.organization and receipt["project"] == client.project
     assert receipt["remote_response_hash"]
+
+
+_ASSOCIATION_WARNING = (
+    "ADO entry is applied; local action association may be incomplete. Review the action history."
+)
+
+
+def _action_record(*, program_id: str = "fixture_prog") -> dict:
+    return {
+        "record_type": "action",
+        "id": "action-42",
+        "program_id": program_id,
+        "text": "synthetic action",
+        "owner_alias": "synthetic owner",
+        "status": "proposed",
+        "source_type": "signal",
+        "created_at": "2026-07-01T00:00:00+00:00",
+    }
+
+
+@pytest.mark.parametrize(
+    "problem",
+    ["malformed_json", "non_object", "invalid_utf8", "foreign_program", "invalid_record", "unreadable"],
+)
+def test_applied_create_discloses_invalid_action_history_without_repair_or_redispatch(
+    tmp_path, monkeypatch, caplog, problem,
+) -> None:
+    programs_root = tmp_path / "programs"
+    proposal, manifest_path = _proposal(programs_root)
+    write_proposal_manifest_to_handle_at_path(manifest_path, proposal)
+    journal = action_tracker.get_actions_path(proposal.program_id, programs_root)
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    record = _action_record(program_id="foreign" if problem == "foreign_program" else proposal.program_id)
+    if problem == "invalid_record":
+        del record["id"]
+    valid_line = (json.dumps(record) + "\n").encode()
+    original = {
+        "malformed_json": valid_line + b'{"synthetic-private":\n',
+        "non_object": valid_line + b'["synthetic-private"]\n',
+        "invalid_utf8": valid_line + b"synthetic-private\xff\n",
+        "foreign_program": valid_line,
+        "invalid_record": valid_line,
+        "unreadable": valid_line,
+    }[problem]
+    journal.write_bytes(original)
+    backend = _FakeADOBackend()
+    client = _fake_client(backend, lose_first_response=False)
+    writer = ADOWriter(client, programs_root=programs_root)
+    caplog.set_level(logging.WARNING, logger="src.m365.ado_writer")
+    open_path = Path.open
+
+    with monkeypatch.context() as patch:
+        if problem == "unreadable":
+            def refuse_journal(path, mode="r", *args, **kwargs):
+                if path == journal and mode.startswith("r"):
+                    raise PermissionError("synthetic-private journal path")
+                return open_path(path, mode, *args, **kwargs)
+
+            patch.setattr(Path, "open", refuse_journal)
+        result = writer.apply_manifest(manifest_path, applied_at=datetime(2026, 7, 2, tzinfo=timezone.utc))
+
+    entry = result.proposal.entries[0]
+    assert result.applied_count == 1 and result.failed_count == 0
+    assert entry.entry_status == "applied"
+    assert entry.work_item_id == next(iter(backend.work_items))
+    assert entry.status_reason == _ASSOCIATION_WARNING
+    warning_records = [record for record in caplog.records if record.name == "src.m365.ado_writer"]
+    warnings = [record.getMessage() for record in warning_records]
+    assert warnings == [_ASSOCIATION_WARNING]
+    assert all(record.exc_info is None and record.stack_info is None for record in warning_records)
+    assert "synthetic-private" not in warnings[0] and str(journal) not in warnings[0]
+    assert journal.read_bytes() == original
+    assert not (journal.parent / "quarantine").exists()
+    assert not journal.with_suffix(".sha256").exists()
+
+    with manifest_path.open(encoding="utf-8") as handle:
+        retained, status = read_proposal_manifest_from_handle(handle)
+    assert status == "applied" and retained.entries[0] == entry
+    key = create_task_idempotency_key(
+        program_id=proposal.program_id, org=client.organization, project=client.project,
+        operation_intent_id=proposal.entries[0].operation_intent_id,
+    )
+    db = outbox_db_path(proposal.program_id, programs_root=programs_root)
+    receipt = load_success_receipt(db, key)
+    assert load_entry(db, key).status == "completed"
+    assert json.loads(receipt)["remote_id"] == entry.work_item_id
+
+    replay = writer.apply_manifest(manifest_path, applied_at=datetime(2026, 7, 2, 0, 5, tzinfo=timezone.utc))
+    assert replay.proposal.entries[0] == entry and backend.create_call_count == 1
+    assert load_success_receipt(db, key) == receipt
+    assert journal.read_bytes() == original
+    assert [record.getMessage() for record in caplog.records if record.name == "src.m365.ado_writer"] == [
+        _ASSOCIATION_WARNING, _ASSOCIATION_WARNING
+    ]
+
+
+@pytest.mark.parametrize(
+    "error_type",
+    [StateError, ConfigError, OSError, sqlite3.Error, portalocker.exceptions.LockException, ValueError, TypeError, KeyError],
+)
+def test_expected_association_errors_preserve_existing_reason_without_leaking_details(
+    tmp_path, monkeypatch, caplog, error_type,
+) -> None:
+    programs_root = tmp_path / "programs"
+    proposal, manifest_path = _proposal(programs_root)
+    proposal = replace(proposal, entries=(replace(proposal.entries[0], status_reason="prior reason"),))
+    write_proposal_manifest_to_handle_at_path(manifest_path, proposal)
+    backend = _FakeADOBackend()
+    writer = ADOWriter(_fake_client(backend, lose_first_response=False), programs_root=programs_root)
+    caplog.set_level(logging.WARNING, logger="src.m365.ado_writer")
+
+    def fail_association(*args, **kwargs):
+        raise error_type("synthetic-private details")
+
+    monkeypatch.setattr(action_tracker, "associate_action_with_work_item", fail_association)
+    result = writer.apply_manifest(manifest_path, applied_at=datetime(2026, 7, 2, tzinfo=timezone.utc))
+    entry = result.proposal.entries[0]
+    assert entry.entry_status == "applied" and entry.work_item_id == next(iter(backend.work_items))
+    assert entry.status_reason == f"prior reason; {_ASSOCIATION_WARNING}"
+    warnings = [record.getMessage() for record in caplog.records if record.name == "src.m365.ado_writer"]
+    assert warnings == [_ASSOCIATION_WARNING]
+    assert "synthetic-private" not in warnings[0] and "synthetic-private" not in entry.status_reason
+    with manifest_path.open(encoding="utf-8") as handle:
+        retained, _ = read_proposal_manifest_from_handle(handle)
+    assert retained.entries[0] == entry
+    assert writer.apply_manifest(manifest_path).proposal.entries[0] == entry
+    assert backend.create_call_count == 1
+
+
+@pytest.mark.parametrize("journal_exists", [False, True])
+def test_successful_or_absent_action_history_retains_existing_create_behavior(tmp_path, caplog, journal_exists) -> None:
+    programs_root = tmp_path / "programs"
+    proposal, manifest_path = _proposal(programs_root)
+    write_proposal_manifest_to_handle_at_path(manifest_path, proposal)
+    journal = action_tracker.get_actions_path(proposal.program_id, programs_root)
+    if journal_exists:
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text(json.dumps(_action_record()) + "\n", encoding="utf-8")
+    backend = _FakeADOBackend()
+    writer = ADOWriter(_fake_client(backend, lose_first_response=False), programs_root=programs_root)
+    caplog.set_level(logging.WARNING, logger="src.m365.ado_writer")
+
+    result = writer.apply_manifest(manifest_path, applied_at=datetime(2026, 7, 2, tzinfo=timezone.utc))
+
+    entry = result.proposal.entries[0]
+    assert result.applied_count == 1 and entry.status_reason is None
+    assert not [record for record in caplog.records if record.name == "src.m365.ado_writer"]
+    if journal_exists:
+        action = action_tracker.load_actions(proposal.program_id, programs_root)[0]
+        assert action.linked_work_item_ids == (entry.work_item_id,)
+    else:
+        assert not journal.exists()
+    assert writer.apply_manifest(manifest_path).proposal.entries[0] == entry
+    assert backend.create_call_count == 1
+
+
+def test_association_warning_does_not_claim_a_partially_written_link_failed(tmp_path, monkeypatch, caplog) -> None:
+    programs_root = tmp_path / "programs"
+    proposal, manifest_path = _proposal(programs_root)
+    write_proposal_manifest_to_handle_at_path(manifest_path, proposal)
+    journal = action_tracker.get_actions_path(proposal.program_id, programs_root)
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_text(json.dumps(_action_record()) + "\n", encoding="utf-8")
+    backend = _FakeADOBackend()
+    writer = ADOWriter(_fake_client(backend, lose_first_response=False), programs_root=programs_root)
+    caplog.set_level(logging.WARNING, logger="src.m365.ado_writer")
+
+    def fail_fact_write(*args, **kwargs):
+        raise sqlite3.OperationalError("synthetic-private fact data")
+
+    monkeypatch.setattr(action_tracker, "_sync_action_fact", fail_fact_write)
+    result = writer.apply_manifest(manifest_path, applied_at=datetime(2026, 7, 2, tzinfo=timezone.utc))
+    entry = result.proposal.entries[0]
+    assert json.loads(journal.read_text(encoding="utf-8"))["linked_work_item_ids"] == [entry.work_item_id]
+    assert entry.status_reason == _ASSOCIATION_WARNING
+    assert [record.getMessage() for record in caplog.records if record.name == "src.m365.ado_writer"] == [
+        _ASSOCIATION_WARNING
+    ]
+    assert writer.apply_manifest(manifest_path).proposal.entries[0] == entry
+    assert backend.create_call_count == 1
+
+
+def test_unexpected_association_error_persists_applied_entry_before_propagating_and_replay(
+    tmp_path, monkeypatch,
+) -> None:
+    programs_root = tmp_path / "programs"
+    proposal, manifest_path = _proposal(programs_root)
+    second = replace(proposal.entries[0], reason="action-43", operation_intent_id="fixed-intent-def456")
+    proposal = replace(proposal, entries=(proposal.entries[0], second))
+    write_proposal_manifest_to_handle_at_path(manifest_path, proposal)
+    backend = _FakeADOBackend()
+    client = _fake_client(backend, lose_first_response=False)
+    writer = ADOWriter(client, programs_root=programs_root)
+    associate = action_tracker.associate_action_with_work_item
+    calls = []
+
+    def fail_once(*args, **kwargs):
+        calls.append(kwargs["action_id"])
+        if len(calls) == 1:
+            raise RuntimeError("synthetic programming error")
+        return associate(*args, **kwargs)
+
+    monkeypatch.setattr(action_tracker, "associate_action_with_work_item", fail_once)
+    with pytest.raises(RuntimeError, match="synthetic programming error"):
+        writer.apply_manifest(manifest_path, applied_at=datetime(2026, 7, 2, tzinfo=timezone.utc))
+    with manifest_path.open(encoding="utf-8") as handle:
+        retained, _ = read_proposal_manifest_from_handle(handle)
+    first = retained.entries[0]
+    assert first.entry_status == "applied" and first.status_reason == _ASSOCIATION_WARNING
+    assert first.work_item_id == next(iter(backend.work_items))
+    assert retained.entries[1] == second
+    key = create_task_idempotency_key(
+        program_id=proposal.program_id, org=client.organization, project=client.project,
+        operation_intent_id=proposal.entries[0].operation_intent_id,
+    )
+    db = outbox_db_path(proposal.program_id, programs_root=programs_root)
+    assert load_entry(db, key).status == "completed"
+    assert json.loads(load_success_receipt(db, key))["remote_id"] == first.work_item_id
+
+    replay = writer.apply_manifest(manifest_path, applied_at=datetime(2026, 7, 2, 0, 5, tzinfo=timezone.utc))
+    assert replay.proposal.entries[0] == first
+    assert replay.proposal.entries[1].entry_status == "applied"
+    assert replay.proposal.entries[1].work_item_id != first.work_item_id
+    assert backend.create_call_count == 2 and calls == ["action-42", "action-43"]
+
+
+def test_adopted_create_keeps_recovery_reason_when_association_fails(tmp_path, monkeypatch, caplog) -> None:
+    programs_root = tmp_path / "programs"
+    proposal, manifest_path = _proposal(programs_root)
+    write_proposal_manifest_to_handle_at_path(manifest_path, proposal)
+    backend = _FakeADOBackend()
+    first = ADOWriter(_fake_client(backend, lose_first_response=True), programs_root=programs_root)
+    assert first.apply_manifest(manifest_path, applied_at=datetime(2026, 7, 2, tzinfo=timezone.utc)).failed_count == 1
+    writer = ADOWriter(_fake_client(backend, lose_first_response=False), programs_root=programs_root)
+    caplog.set_level(logging.WARNING, logger="src.m365.ado_writer")
+
+    def fail_association(*args, **kwargs):
+        raise StateError("synthetic-private details")
+
+    monkeypatch.setattr(action_tracker, "associate_action_with_work_item", fail_association)
+    result = writer.apply_manifest(manifest_path, applied_at=datetime(2026, 7, 2, 0, 5, tzinfo=timezone.utc))
+    entry = result.proposal.entries[0]
+    assert entry.entry_status == "applied" and "search-before-create" in entry.status_reason
+    assert entry.status_reason.endswith(_ASSOCIATION_WARNING)
+    assert [record.getMessage() for record in caplog.records if record.name == "src.m365.ado_writer"] == [
+        _ASSOCIATION_WARNING
+    ]
+    with manifest_path.open(encoding="utf-8") as handle:
+        retained, _ = read_proposal_manifest_from_handle(handle)
+    assert retained.entries[0] == entry
+    assert backend.create_call_count == 1
+
+
+def test_expected_association_error_does_not_stop_later_entries(tmp_path, monkeypatch, caplog) -> None:
+    programs_root = tmp_path / "programs"
+    proposal, manifest_path = _proposal(programs_root)
+    second = replace(proposal.entries[0], reason="action-43", operation_intent_id="fixed-intent-def456")
+    proposal = replace(proposal, entries=(proposal.entries[0], second))
+    write_proposal_manifest_to_handle_at_path(manifest_path, proposal)
+    backend = _FakeADOBackend()
+    writer = ADOWriter(_fake_client(backend, lose_first_response=False), programs_root=programs_root)
+    associate = action_tracker.associate_action_with_work_item
+    calls = []
+    caplog.set_level(logging.WARNING, logger="src.m365.ado_writer")
+
+    def fail_first(*args, **kwargs):
+        calls.append(kwargs["action_id"])
+        if len(calls) == 1:
+            raise StateError("synthetic-private details")
+        return associate(*args, **kwargs)
+
+    monkeypatch.setattr(action_tracker, "associate_action_with_work_item", fail_first)
+    result = writer.apply_manifest(manifest_path, applied_at=datetime(2026, 7, 2, tzinfo=timezone.utc))
+    assert result.applied_count == 2 and result.failed_count == 0
+    assert result.proposal.entries[0].status_reason == _ASSOCIATION_WARNING
+    assert result.proposal.entries[1].status_reason is None
+    assert calls == ["action-42", "action-43"] and backend.create_call_count == 2
+    with manifest_path.open(encoding="utf-8") as handle:
+        retained, _ = read_proposal_manifest_from_handle(handle)
+    assert retained == result.proposal
+    replay = writer.apply_manifest(manifest_path)
+    assert replay.proposal == result.proposal
+    assert calls == ["action-42", "action-43"] and backend.create_call_count == 2
+    assert [record.getMessage() for record in caplog.records if record.name == "src.m365.ado_writer"] == [
+        _ASSOCIATION_WARNING, _ASSOCIATION_WARNING
+    ]
+
+
+@pytest.mark.parametrize("action,status", [("create_task", "skipped"), ("add_tag", "applied")])
+def test_unrelated_retained_reasons_do_not_emit_association_warning(tmp_path, caplog, action, status) -> None:
+    programs_root = tmp_path / "programs"
+    proposal, manifest_path = _proposal(programs_root)
+    entry = replace(proposal.entries[0], action=action, entry_status=status, status_reason=_ASSOCIATION_WARNING)
+    proposal = replace(proposal, entries=(entry,))
+    write_proposal_manifest_to_handle_at_path(manifest_path, proposal)
+    backend = _FakeADOBackend()
+    writer = ADOWriter(_fake_client(backend, lose_first_response=False), programs_root=programs_root)
+    caplog.set_level(logging.WARNING, logger="src.m365.ado_writer")
+
+    result = writer.apply_manifest(manifest_path)
+
+    assert result.proposal.entries[0] == entry and backend.create_call_count == 0
+    assert not [record for record in caplog.records if record.name == "src.m365.ado_writer"]
+
+
+def test_association_warning_manifest_failure_propagates_and_recovery_does_not_recreate(
+    tmp_path, monkeypatch, caplog,
+) -> None:
+    import src.m365.ado_writer as writer_module
+
+    programs_root = tmp_path / "programs"
+    proposal, manifest_path = _proposal(programs_root)
+    write_proposal_manifest_to_handle_at_path(manifest_path, proposal)
+    journal = action_tracker.get_actions_path(proposal.program_id, programs_root)
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    original = b'["synthetic-private"]\n'
+    journal.write_bytes(original)
+    backend = _FakeADOBackend()
+    client = _fake_client(backend, lose_first_response=False)
+    writer = ADOWriter(client, programs_root=programs_root)
+    caplog.set_level(logging.WARNING, logger="src.m365.ado_writer")
+    write = writer_module.write_proposal_manifest_to_handle
+    failed = []
+
+    def fail_before_first_applied_write(handle, updated_proposal, **kwargs):
+        if not failed and any(entry.entry_status == "applied" for entry in updated_proposal.entries):
+            failed.append(True)
+            raise OSError("synthetic manifest write failure")
+        return write(handle, updated_proposal, **kwargs)
+
+    monkeypatch.setattr(writer_module, "write_proposal_manifest_to_handle", fail_before_first_applied_write)
+    with pytest.raises(OSError, match="synthetic manifest write failure"):
+        writer.apply_manifest(manifest_path, applied_at=datetime(2026, 7, 2, tzinfo=timezone.utc))
+    with manifest_path.open(encoding="utf-8") as handle:
+        retained, _ = read_proposal_manifest_from_handle(handle)
+    assert retained.entries[0].entry_status == "pending" and retained.entries[0].attempted_at is not None
+    key = create_task_idempotency_key(
+        program_id=proposal.program_id, org=client.organization, project=client.project,
+        operation_intent_id=proposal.entries[0].operation_intent_id,
+    )
+    db = outbox_db_path(proposal.program_id, programs_root=programs_root)
+    assert load_entry(db, key).status == "completed"
+    assert json.loads(load_success_receipt(db, key))["remote_id"] == next(iter(backend.work_items))
+
+    recovered = writer.apply_manifest(manifest_path, applied_at=datetime(2026, 7, 2, 0, 5, tzinfo=timezone.utc))
+    assert recovered.applied_count == 1
+    assert "search-before-create" in recovered.proposal.entries[0].status_reason
+    assert recovered.proposal.entries[0].status_reason.endswith(_ASSOCIATION_WARNING)
+    assert journal.read_bytes() == original and backend.create_call_count == 1
+    assert [record.getMessage() for record in caplog.records if record.name == "src.m365.ado_writer"] == [
+        _ASSOCIATION_WARNING, _ASSOCIATION_WARNING
+    ]
+
+
+def test_ado_apply_cli_warns_on_original_apply_and_retained_replay(tmp_path, monkeypatch) -> None:
+    from datetime import timedelta
+    from typer.testing import CliRunner
+
+    from cli import app
+    from src.commands import ado as ado_command
+    from src.core.models_v2 import ADOConfig, Program
+
+    programs_root = tmp_path / "programs"
+    proposal, manifest_path = _proposal(programs_root)
+    now = datetime.now(timezone.utc)
+    proposal = replace(proposal, created_at=now, expires_at=now + timedelta(hours=1))
+    write_proposal_manifest_to_handle_at_path(manifest_path, proposal)
+    journal = action_tracker.get_actions_path(proposal.program_id, programs_root)
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    original = b'["synthetic-private"]\n'
+    journal.write_bytes(original)
+    backend = _FakeADOBackend()
+    client = _fake_client(backend, lose_first_response=False)
+    program = Program(
+        schema_version="2.0", id=proposal.program_id, name="Synthetic",
+        ado=ADOConfig(
+            organization=client.organization, project=client.project, area_paths=("One\\Contoso",),
+            work_item_types=("Task",), excluded_states=(), date_window_days=30,
+        ),
+    )
+    monkeypatch.setattr(ado_command, "PROGRAMS_ROOT", programs_root)
+    monkeypatch.setattr(ado_command, "_batch_approval_rule_for_action_type", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ado_command.gather_command_helpers, "_load_program_context", lambda *args: (program, ()))
+    monkeypatch.setattr(ado_command, "_build_ado_client", lambda _: client)
+    monkeypatch.setattr(logging.getLogger(), "handlers", [])
+    logger = logging.getLogger("src.m365.ado_writer")
+    monkeypatch.setattr(logger, "handlers", [])
+    monkeypatch.setattr(logger, "propagate", True)
+    runner = CliRunner()
+    arguments = ["ado", "apply", "--proposal", str(manifest_path), "--yes"]
+
+    for _ in range(2):
+        result = runner.invoke(app, arguments)
+        assert result.exit_code == 0, result.output
+        assert "1 applied" in result.stdout
+        assert _ASSOCIATION_WARNING in result.stderr
+        assert "synthetic-private" not in result.output and str(journal) not in result.output
+    assert backend.create_call_count == 1 and journal.read_bytes() == original
 
 
 @pytest.mark.parametrize("storage_backend", ["file", "sqlite"])

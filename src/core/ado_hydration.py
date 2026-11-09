@@ -20,6 +20,7 @@ from src.core.ado_relations import parse_relations_payload, traverse_relations
 from src.core.ado_schema_drift import assert_row_shape
 from src.core.config_loader import PROGRAMS_ROOT
 from src.core.exceptions import QueryError
+from src.core.failure_taxonomy import safe_failure_suffix
 from src.core.integration_types import (
     ADOHydrationOutput,
     ChannelConfig,
@@ -161,7 +162,7 @@ class ADOHydrationProvider:
                     IntegrationError(
                         source="ado",
                         stage="hydration",
-                        message=str(error),
+                        message=f"ADO hydration failed{safe_failure_suffix(str(error))}",
                         retryable=True,
                         operator_action="Verify Azure DevOps access and retry hydration.",
                     )
@@ -221,11 +222,12 @@ class ADOHydrationProvider:
                     api_calls += 1
                     hydrated_ref_ids.append((repo_id, "repository"))
                 except Exception as error:
+                    description = f"Failed to fetch pull requests for repository {repo_id}"
                     errors.append(
                         IntegrationError(
                             source="ado",
                             stage="hydration",
-                            message=f"Failed to fetch pull requests for repository {repo_id}: {error}",
+                            message=f"{description}{safe_failure_suffix(f'{description}: {error}')}",
                             retryable=True,
                             ref_id=repo_id,
                             ref_kind="repository",
@@ -260,11 +262,12 @@ class ADOHydrationProvider:
                     relation_truncation = traversal.truncation
                     errors.extend(traversal.errors)
                 except QueryError as error:
+                    description = "Failed to hydrate work item relations"
                     errors.append(
                         IntegrationError(
                             source="ado",
                             stage="hydration",
-                            message=f"Failed to hydrate work item relations: {error}",
+                            message=f"{description}{safe_failure_suffix(f'{description}: {error}')}",
                             retryable=True,
                         )
                     )
@@ -356,6 +359,7 @@ class ADOHydrationProvider:
                 api_calls += 1
             return _ItemDetailFetch(work_item_id, revision_rows, comment_rows, api_calls)
         except QueryError as error:
+            description = f"Failed to hydrate work item {work_item_id}"
             return _ItemDetailFetch(
                 work_item_id,
                 [],
@@ -364,7 +368,7 @@ class ADOHydrationProvider:
                 IntegrationError(
                     source="ado",
                     stage="hydration",
-                    message=f"Failed to hydrate work item {work_item_id}: {error}",
+                    message=f"{description}{safe_failure_suffix(f'{description}: {error}')}",
                     retryable=True,
                     ref_id=str(work_item_id),
                     ref_kind="work_item",

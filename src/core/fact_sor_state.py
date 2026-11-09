@@ -80,6 +80,7 @@ def family_sor_modes_match(
         )
         or {family for family, _ in expected} != {"judgment", "workitem.state"}
         or expected != tuple(sorted(set(expected)))
+        or len({family for family, _ in expected}) != len(expected)
     ):
         return False
     try:

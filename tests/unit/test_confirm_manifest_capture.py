@@ -117,6 +117,47 @@ def test_program_backed_confirmation_rejects_unbound_historical_capture_without_
     assert tuple(path.parent.iterdir()) == (path,)
 
 
+@pytest.mark.parametrize(("dry_run", "force"), [(True, False), (False, True)])
+@pytest.mark.parametrize("family", ["judgment", "workitem.state"])
+def test_confirm_rejects_conflicting_captured_modes_before_artifact_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dry_run: bool, force: bool, family: str,
+) -> None:
+    root = tmp_path / "programs"
+    payload, draft = _wire(_capture())
+    payload = json.loads(json.dumps(payload, default=lambda value: value.isoformat()))
+    raw = payload["metadata"]["run_evidence_snapshot"]
+    current = dict(raw["effective_family_modes"])[family]
+    other = "legacy" if current != "legacy" else "primary"
+    raw["effective_family_modes"] = sorted((*raw["effective_family_modes"], [family, other]))
+    raw.pop("sha256")
+    raw["sha256"] = hash_jsonable(raw)
+    draft["run_evidence_snapshot_sha256"] = raw["sha256"]
+    payload["manifest_id"] = "synthetic"
+    path = _manifest(root, payload)
+    original = path.read_bytes()
+
+    monkeypatch.setattr(confirm, "load_bundle", lambda *_args, **_kwargs: SimpleNamespace(
+        program=SimpleNamespace(id="fixture"), program_id="fixture", config={},
+    ))
+    monkeypatch.setattr(confirm, "_load_draft_state", lambda *_args, **_kwargs: draft)
+    monkeypatch.setattr(confirm, "_assert_state_authority_for_confirm", lambda *_args, **_kwargs: None)
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Conflicting capture must stop before overrides or artifact construction.")
+
+    monkeypatch.setattr(confirm, "_load_confirm_overrides", forbidden)
+    monkeypatch.setattr(confirm, "_build_confirm_artifacts", forbidden)
+    with pytest.raises(BadParameter, match="Declared run evidence capture is invalid"):
+        confirm.confirm_issue(
+            "fixture", 7, dry_run=dry_run, force=force, programs_root=root,
+            reports_root=tmp_path / "reports", archive_root=tmp_path / "archive",
+        )
+
+    assert path.read_bytes() == original
+    assert tuple(path.parent.iterdir()) == (path,)
+    assert not (tmp_path / "archive").exists()
+
+
 def test_capture_projects_milestone_assessment_scope_and_trajectory_snapshot(tmp_path: Path) -> None:
     assessments = [
         {"milestone_id": "m1", "linked_work_item_ids": [11, 12]},

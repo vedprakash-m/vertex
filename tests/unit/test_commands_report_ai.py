@@ -1,17 +1,23 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
+from src.ai.ai_mode import AIMode
 from src.commands import report_ai
+from src.core.dependency_graph import save_dependencies
 from src.core.evidence_models import SourceRef, WorkstreamEvidence
 from src.core.exceptions import ConfigError
 from src.core.models import Confidence, RiskLevel
-from src.core.models_v2 import Signal
+from src.core.models_v2 import Dependency, DependencyStatus, DependencyType, Signal
 from src.core.models_v2 import WorkstreamEvidenceBundle
+from src.core.program_reality import FactAssessment, ProgramReality
+from src.core.truth_levels import TruthLevel
 
 
 def test_missing_report_ai_deployment_warning_for_exec_summary_is_vertex_first() -> None:
@@ -32,9 +38,42 @@ def test_load_report_signal_context_ignores_unrelated_action_loader_failures(mon
     monkeypatch.delenv("VERTEX_FACT_SOR", raising=False)
     reports_root = tmp_path / "reports"
     reports_root.mkdir(parents=True)
-    (tmp_path / "programs" / "demo").mkdir(parents=True)
+    programs_root = tmp_path / "programs"
+    program_root = programs_root / "demo"
+    program_root.mkdir(parents=True)
+    (program_root / "risk_register.yaml").write_text(
+        'schema_version: "1.0"\n'
+        'risks:\n'
+        '  - id: risk-1\n'
+        '    title: Synthetic delivery risk\n'
+        '    description: Synthetic risk for this test.\n'
+        '    probability: likely\n'
+        '    impact: high\n'
+        '    category: schedule\n'
+        '    owner_alias: maintainer\n'
+        '    status: open\n'
+        '    identified_date: 2026-05-01\n'
+        '    entity_refs: []\n',
+        encoding="utf-8",
+    )
+    save_dependencies(
+        "demo",
+        (Dependency(
+            id="dep-1", from_program_id="demo", from_workstream_id="source",
+            from_item_id=None, from_milestone_id=None, to_program_id="other", to_workstream_id="target",
+            to_item_id=None, to_milestone_id=None, dependency_type=DependencyType.BLOCKS,
+            risk_if_broken="Synthetic dependency", mitigation=None, status=DependencyStatus.ACTIVE,
+            owner_alias=None,
+        ),),
+        programs_root=programs_root,
+    )
+    baseline = ProgramReality.load(
+        "demo", programs_root=programs_root, archive_root=tmp_path / "archive",
+    )
 
-    bundle = SimpleNamespace(config=SimpleNamespace(ado=SimpleNamespace(date_window_days=7)))
+    bundle = SimpleNamespace(config=SimpleNamespace(
+        ado=SimpleNamespace(date_window_days=7), ai=SimpleNamespace(enabled=True),
+    ))
     resolved = SimpleNamespace(
         program=SimpleNamespace(id="demo"),
         edition=SimpleNamespace(workstream_filter=(), altitude="weekly"),
@@ -57,7 +96,10 @@ def test_load_report_signal_context_ignores_unrelated_action_loader_failures(mon
     monkeypatch.setattr(report_ai, "filter_workstreams", lambda workstreams, _: workstreams)
     monkeypatch.setattr(report_ai, "build_signal_store_for_program_id", lambda *args, **kwargs: _SignalStore())
     monkeypatch.setattr(report_ai, "load_program_knowledge", lambda *args, **kwargs: SimpleNamespace(people_directory=()))
-    monkeypatch.setattr(report_ai, "detect_dependency_cascades", lambda **kwargs: ())
+    detect_cascades = Mock(return_value=())
+    monkeypatch.setattr(report_ai, "detect_dependency_cascades", detect_cascades)
+    monkeypatch.setattr(report_ai, "get_ai_mode", lambda: AIMode.ACTIVE)
+    monkeypatch.setattr("src.commands.reality_context.estimate_tokens", lambda text: max(1, len(text) // 4))
     monkeypatch.setattr("src.core.action_tracker.load_actions", _boom)
 
     context = report_ai._load_report_signal_context(
@@ -74,6 +116,145 @@ def test_load_report_signal_context_ignores_unrelated_action_loader_failures(mon
     assert context is not None
     assert context.program_id == "demo"
     assert context.dependency_cascades == ()
+    assert context.program_reality is not None
+    for family in ("risks", "decisions", "assumptions", "milestones", "dependencies"):
+        current = [asdict(a.record) for a in getattr(context.program_reality, family)()]
+        previous = [asdict(a.record) for a in getattr(baseline, family)()]
+        for record in current + previous:
+            record.pop("last_validated_at", None)
+        assert current == previous
+    assert [dependency.id for dependency in detect_cascades.call_args.kwargs["dependencies"]] == ["dep-1"]
+    draft = report_ai._load_draft_ai_context(
+        edition_name="demo_weekly", bundle=bundle, items=(),
+        as_of=datetime(2026, 5, 31, tzinfo=timezone.utc), previous_snapshot=None,
+        reports_root=reports_root, signal_context=context,
+    )
+    assert draft is not None
+    assert draft.reality_assessments is not None
+    assert draft.reality_assessments.family_totals == {"risk": 1, "dependency": 1}
+
+
+@pytest.mark.parametrize(
+    ("ai_enabled", "mode", "expects_summary"),
+    [
+        (False, AIMode.ACTIVE, False),
+        (True, AIMode.DISABLED, False),
+        (True, AIMode.ACTIVE, True),
+        (True, AIMode.OBSERVE_ONLY, True),
+    ],
+)
+def test_report_defers_ai_reality_summary_until_draft_context(
+    monkeypatch, tmp_path: Path, ai_enabled: bool, mode: AIMode, expects_summary: bool,
+) -> None:
+    reports_root = tmp_path / "reports"
+    archive_root = tmp_path / "archive"
+    bundle = SimpleNamespace(config=SimpleNamespace(
+        ado=SimpleNamespace(date_window_days=7),
+        ai=SimpleNamespace(enabled=ai_enabled),
+    ))
+    resolved = SimpleNamespace(
+        program=SimpleNamespace(id="demo"),
+        edition=SimpleNamespace(workstream_filter=(), altitude="weekly"),
+        workstreams=(),
+        scorecards=(),
+    )
+    store = Mock()
+    store.read.return_value = ()
+    store.read_reviews.return_value = {}
+    risk = FactAssessment(
+        record=SimpleNamespace(title="Synthetic disputed risk", status=None, probability=None, impact=None),
+        fact_id="risk:synthetic",
+        truth_level=TruthLevel.RAW_OBSERVED,
+        disputed=True,
+        stale=False,
+        provisional_inputs=False,
+        evidence=("synthetic-private-evidence",),
+    )
+    reality = SimpleNamespace(
+        risks=lambda: (risk,), decisions=lambda: (), assumptions=lambda: (),
+        milestones=lambda: (), dependencies=lambda: (),
+    )
+    reality_loader = Mock(return_value=reality)
+    build_summary = Mock(wraps=report_ai.build_reality_assessment_summary)
+    token_estimate = Mock(side_effect=lambda text: max(1, len(text) // 4))
+    monkeypatch.setattr(report_ai, "load_bundle_with_mode", lambda *args, **kwargs: SimpleNamespace(mode="v2"))
+    monkeypatch.setattr(report_ai, "resolve_edition", lambda *args, **kwargs: resolved)
+    monkeypatch.setattr(report_ai, "filter_workstreams", lambda workstreams, _: workstreams)
+    monkeypatch.setattr(report_ai, "build_signal_store_for_program_id", lambda *args, **kwargs: store)
+    monkeypatch.setattr(report_ai, "load_program_knowledge", lambda *args, **kwargs: SimpleNamespace(people_directory=()))
+    monkeypatch.setattr(report_ai.ProgramReality, "load", reality_loader)
+    monkeypatch.setattr("src.commands.reality_context.estimate_tokens", token_estimate)
+    monkeypatch.setattr(report_ai, "detect_dependency_cascades", lambda **kwargs: ())
+    monkeypatch.setattr(report_ai, "build_reality_assessment_summary", build_summary)
+    monkeypatch.setattr(report_ai, "_write_top3_candidates", lambda *args, **kwargs: None)
+    monkeypatch.setattr(report_ai, "get_ai_mode", lambda: mode)
+
+    as_of = datetime(2026, 5, 31, tzinfo=timezone.utc)
+    context = report_ai._load_report_signal_context(
+        edition_name="demo_weekly", bundle=bundle, items=(), as_of=as_of,
+        previous_snapshot=None, reports_root=reports_root, archive_root=archive_root,
+        item_trajectory_points=lambda *args, **kwargs: (),
+    )
+    assert context is not None
+    assert context.approved_signals == ()
+    assert context.dependency_cascades == ()
+    build_summary.assert_not_called()
+
+    draft_context = report_ai._load_draft_ai_context(
+        edition_name="demo_weekly", bundle=bundle, items=(), as_of=as_of,
+        previous_snapshot=None, reports_root=reports_root, signal_context=context,
+    )
+    if ai_enabled:
+        assert draft_context is not None
+        if expects_summary:
+            assert draft_context.reality_assessments is not None
+            assert draft_context.reality_assessments.family_totals == {"risk": 1}
+            exec_lines = report_ai._exec_ai_context_lines(None, draft_context)
+            section_lines = report_ai._section_ai_context_lines((), None, draft_context)
+            for lines in (exec_lines, section_lines):
+                assert any("Synthetic disputed risk" in line and "DISPUTED" in line for line in lines)
+                assert not any("synthetic-private-evidence" in line for line in lines)
+        else:
+            assert draft_context.reality_assessments is None
+    else:
+        assert draft_context is None
+    if expects_summary:
+        build_summary.assert_called_once_with(reality)
+        assert token_estimate.called
+    else:
+        build_summary.assert_not_called()
+        token_estimate.assert_not_called()
+    reality_loader.assert_called_once_with(
+        "demo", programs_root=tmp_path / "programs", archive_root=archive_root,
+        _omit_action_shim=True,
+    )
+
+
+@pytest.mark.parametrize("mode", [AIMode.ACTIVE, AIMode.OBSERVE_ONLY, AIMode.DISABLED])
+@pytest.mark.parametrize("has_summary", [False, True])
+def test_draft_context_preserves_injected_precomputed_reality_summary(
+    monkeypatch, tmp_path: Path, mode: AIMode, has_summary: bool,
+) -> None:
+    summary = report_ai.RealityAssessmentSummary(empty=True) if has_summary else None
+    signal_context = SimpleNamespace(
+        program_id="demo", workstreams=(), approved_signals=(), drift_patterns=(),
+        dependency_cascades=(), people_directory=(), source_confidence_order=(),
+        as_of=None, reality_assessments=summary,
+    )
+    load_signal_context = Mock(return_value=signal_context)
+    build_summary = Mock()
+    monkeypatch.setattr(report_ai, "build_reality_assessment_summary", build_summary)
+    monkeypatch.setattr(report_ai, "get_ai_mode", lambda: mode)
+
+    draft = report_ai._load_draft_ai_context(
+        edition_name="demo_weekly", bundle=SimpleNamespace(config=SimpleNamespace(ai=SimpleNamespace(enabled=True))),
+        items=(), as_of=datetime(2026, 5, 31, tzinfo=timezone.utc), previous_snapshot=None,
+        reports_root=tmp_path / "reports", load_report_signal_context=load_signal_context,
+    )
+
+    assert draft is not None and draft.reality_assessments is summary
+    load_signal_context.assert_called_once()
+    build_summary.assert_not_called()
 
 
 def test_signal_context_lines_use_signal_class_ranking_when_ai_context_available() -> None:
@@ -157,6 +338,32 @@ def test_feedback_context_lines_thread_workiq_email_feedback_with_subject_and_se
         "2026-05-31 gm: Please call out the blocker explicitly in next week's summary. | "
         "2026-05-30 alex: Can you confirm whether the fallback date moved?",
     )
+
+
+def test_feedback_context_excludes_preview_only_workiq_signals() -> None:
+    signal = Signal(
+        id="preview-feedback",
+        timestamp=datetime(2026, 5, 31, 11, 59, tzinfo=timezone.utc),
+        source="workiq/email",
+        program_id="demo",
+        workstream_id="ws1",
+        entity_refs=("WI:1",),
+        text="Provisional preview must not enter AI feedback context.",
+        raw_ref="workiq:email:semantic:preview",
+        confidence=Confidence.MEDIUM,
+        metadata={
+            "message_id": "semantic:preview",
+            "native_message_id": "semantic:preview",
+        },
+        thread_id="semantic:thread",
+    )
+
+    assert report_ai._feedback_context_lines(
+        (signal,),
+        item_ids=set(),
+        workstream_ids=(),
+        limit=1,
+    ) == ()
 
 
 def test_exec_ai_context_lines_include_feedback_context_for_next_issue(tmp_path) -> None:

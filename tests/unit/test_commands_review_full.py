@@ -50,6 +50,7 @@ EDITION_NAME = "acme_weekly"
 
 def test_actual_reviewer_html_context_gap_and_unavailable_projection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from unittest.mock import Mock
+    from src.commands.report_pipeline import assemble_stage
     import src.core.context_proposal_review as projection
 
     reports, archive = _seed_v2_report_layout(tmp_path, tmp_path)
@@ -69,6 +70,10 @@ def test_actual_reviewer_html_context_gap_and_unavailable_projection(tmp_path: P
     before = path.read_bytes()
     load = Mock(wraps=projection.load_context_gaps)
     monkeypatch.setattr(projection, "load_context_gaps", load)
+    signal_loader = Mock(wraps=assemble_stage._load_report_signal_context)
+    summary_builder = Mock(side_effect=AssertionError("review should not build AI reality context"))
+    monkeypatch.setattr(assemble_stage, "_load_report_signal_context", signal_loader)
+    monkeypatch.setattr("src.commands.report_ai.build_reality_assessment_summary", summary_builder)
     artifacts = generate_review_full(edition_name=EDITION_NAME)
     html = artifacts.html_path.read_text(encoding="utf-8")
     assert "Context Maintenance" in html and "Active context gap" in html
@@ -77,6 +82,8 @@ def test_actual_reviewer_html_context_gap_and_unavailable_projection(tmp_path: P
     assert "2026-10-01" in html and "2026-11-01" in html
     assert f"doctor --context --ranked --edition {EDITION_NAME}" in html
     load.assert_called_once_with("acme", programs_root=root)
+    assert signal_loader.called
+    summary_builder.assert_not_called()
     assert path.read_bytes() == before
     path.write_text("{private_canary: invalid", encoding="utf-8")
     load.reset_mock()
@@ -120,6 +127,62 @@ def test_actual_reviewer_html_corrupt_proposals_preserve_valid_unknown_impact_ga
         else:
             assert "Active context gap" in html and "unknown impact" in html and "None impact" not in html
             assert before == (queue.read_bytes(), gap.read_bytes())
+
+
+@pytest.mark.parametrize("failure", ["registry", "foreign", "record"])
+def test_actual_reviewer_html_preserves_pending_revision_for_gap_failures(
+    tmp_path: Path, failure: str,
+) -> None:
+    from src.core.ncfl_proposal_store import stage_extracted_proposals
+    from tests.unit.test_context_proposal_review import _proposal
+
+    reports, archive = _seed_v2_report_layout(tmp_path, tmp_path)
+    root = tmp_path / "programs"
+    now = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    generate_report_draft(
+        edition_name=EDITION_NAME, reports_root=reports, archive_root=archive, programs_root=root,
+        as_of=now, work_item_loader=lambda bundle, timestamp: (_sample_items(timestamp), 0), open_browser=False,
+    )
+    program = root / "acme"
+    registry = program / "workstream_registry.yaml"
+    registry.write_text(
+        "workstreams: [\nsynthetic_canary\n" if failure == "registry" else "workstreams: []\n",
+        encoding="utf-8",
+    )
+    feedback = program / "_feedback"
+    feedback.mkdir(exist_ok=True)
+    history = feedback / "context_gaps.jsonl"
+    history.write_text(json.dumps({
+        "ts": "2026-10-01T00:00:00Z",
+        "feature": "doctor --context" if failure == "registry" else "synthetic",
+        "program": "acme" if failure == "registry" else "foreign_program",
+        "lane": "lane" if failure == "registry" else None,
+        "field": "deep_context.why" if failure == "registry" else "purpose",
+        "severity": "quality_degraded", "message": "synthetic_canary", "impact_estimate": "high",
+    }) + "\n", encoding="utf-8")
+    if failure == "record":
+        history.write_text(json.dumps({"ts": None, "message": "synthetic_canary"}) + "\n", encoding="utf-8")
+    proposal = replace(
+        _proposal("pending", issue_number=8, target_store="workstream_registry", conflict_key="registry"),
+        program_id="acme", edition_id="acme_weekly",
+    )
+    stage_extracted_proposals("acme", 8, (proposal,), programs_root=root)
+    queue = program / "context_proposals" / "issue_008.proposals.json"
+    before = {path: path.read_bytes() for path in (registry, history, queue)}
+
+    artifacts = generate_review_full(edition_name=EDITION_NAME)
+    html = artifacts.html_path.read_text(encoding="utf-8")
+
+    assert "Context gap evaluation unavailable" in html
+    expected = {
+        "registry": "workstream_registry.yaml",
+        "foreign": "foreign program",
+        "record": "Context gap history unavailable",
+    }[failure]
+    assert expected in html
+    assert "pending" in html and "vertex context manual-diff" in html
+    assert "synthetic_canary" not in html and str(program) not in html
+    assert {path: path.read_bytes() for path in (registry, history, queue)} == before
 
 
 @pytest.fixture(autouse=True)
@@ -2712,10 +2775,10 @@ class _FakeEnricher:
                 Enrichment(
                     source="mail",
                     source_id="mail-1",
-                    author="rushi@example.com",
+                    author="author@example.com",
                     timestamp=datetime(2026, 5, 5, 17, 45, tzinfo=timezone.utc),
                     excerpt="Subject: Leadership feedback digest",
-                    permalink="https://outlook.office.com/mail/leadership-feedback",
+                    permalink="https://example.invalid/mail/1",
                 ),
             )
         }

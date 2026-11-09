@@ -51,7 +51,7 @@ def test_field_lock_pins_supported_field(tmp_path) -> None:
     )
 
     projection_path = tmp_path / "locks.sqlite3"
-    project_events_to_sqlite("acme", (created, locked, revised), projection_path=projection_path, as_of=datetime(2025, 1, 4, tzinfo=timezone.utc))
+    project_events_to_sqlite("acme", (created, locked, revised), projection_path=projection_path, as_of=datetime(2025, 1, 4, tzinfo=timezone.utc), programs_root=tmp_path / "programs")
     dump = canonical_projection_dump(projection_path)
 
     assert dump["proj_milestone"][0]["target_date"] == "2025-10-15"
@@ -93,7 +93,7 @@ def test_field_lock_expires_by_as_of(tmp_path) -> None:
     )
 
     projection_path = tmp_path / "locks_expired.sqlite3"
-    project_events_to_sqlite("acme", (created, locked, revised), projection_path=projection_path, as_of=datetime(2025, 1, 4, tzinfo=timezone.utc))
+    project_events_to_sqlite("acme", (created, locked, revised), projection_path=projection_path, as_of=datetime(2025, 1, 4, tzinfo=timezone.utc), programs_root=tmp_path / "programs")
     dump = canonical_projection_dump(projection_path)
 
     assert dump["proj_milestone"][0]["target_date"] == "2025-11-01"

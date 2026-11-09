@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from typer.testing import CliRunner
 
 from cli import app
@@ -4170,3 +4171,105 @@ def test_ledger_triage_batch_reject_rejects_all_active_candidates(monkeypatch, t
     events = read_events("acme", programs_root=programs_root)
     reject_events = [e for e in events if e.event_type == "discovery.candidate_rejected.v1"]
     assert len(reject_events) == 2
+
+
+@pytest.mark.parametrize("command", ["verify", "diff"])
+@pytest.mark.parametrize("selected_ack", [False, True])
+@pytest.mark.parametrize("decoy_present", [False, True])
+def test_ledger_projection_consumers_respect_selected_workspace(
+    monkeypatch, tmp_path: Path, command: str, selected_ack: bool, decoy_present: bool,
+) -> None:
+    import hashlib
+
+    import src.commands.ledger as ledger_commands
+    import src.core.ledger.program_views as program_views
+    from src.core.ledger.event_index import rebuild_event_index
+
+    monkeypatch.setattr("cli.maybe_run_scheduled_compaction", lambda *_args, **_kwargs: None)
+    programs_root = tmp_path / "selected" / "programs"
+    decoy_root = tmp_path / "decoy" / "programs"
+    when = datetime(2025, 3, 20, tzinfo=timezone.utc)
+    event = build_event_envelope(
+        program_id="acme",
+        event_type="pipeline.gap_detected.v1",
+        occurred_at=when,
+        recorded_at=when,
+        temporal_confidence=TemporalConfidence.EXACT,
+        confidence=ConfidenceTier.SOURCE_AUTHORITATIVE,
+        actor="pipeline",
+        payload={
+            "pipeline": "synthetic", "gap_kind": "missing", "detail": "Synthetic gap",
+            "window_start": when.isoformat(), "window_end": when.isoformat(),
+        },
+        source_ref=LTDeckRef(file_path="deck.pptx", deck_date=when.date(), slide_number=1),
+    )
+    event = write_event(event, programs_root=programs_root).envelope
+    rebuild_event_index("acme", programs_root=programs_root)
+    decision = CandidateDecisionRecord(
+        candidate_id="synthetic-gap", kind="gap_acknowledged", decided_at=when,
+        triage_actor="operator", gap_event_id=event.event_id,
+    )
+    if selected_ack:
+        append_triage_decision(decision, program_id="acme", programs_root=programs_root)
+    else:
+        load_triage_decisions("acme", programs_root=programs_root)
+    if decoy_present:
+        if selected_ack:
+            load_triage_decisions("acme", programs_root=decoy_root)
+        else:
+            append_triage_decision(decision, program_id="acme", programs_root=decoy_root)
+
+    path = get_current_projection_path("acme", programs_root=programs_root)
+    program_views.project_events_to_sqlite("acme", (event,), projection_path=path, programs_root=programs_root)
+    assert canonical_projection_dump(path)["gaps"][0]["acknowledged"] == int(selected_ack)
+
+    def decoy_files() -> dict[str, str]:
+        if not decoy_root.exists():
+            return {}
+        return {
+            str(item.relative_to(decoy_root)): hashlib.sha256(item.read_bytes()).hexdigest()
+            for item in decoy_root.rglob("*") if item.is_file()
+        }
+
+    decoy_before = decoy_files()
+    defaults = program_views.project_events_to_sqlite.__kwdefaults__
+    assert defaults is not None
+    monkeypatch.setitem(defaults, "programs_root", decoy_root)
+    original_load = program_views.load_triage_decisions
+    observed_roots: list[Path] = []
+
+    def observe_decisions(program_id: str, *, programs_root: Path):
+        observed_roots.append(programs_root)
+        return original_load(program_id, programs_root=programs_root)
+
+    monkeypatch.setattr(program_views, "load_triage_decisions", observe_decisions)
+    original_dump = ledger_commands.canonical_projection_dump
+    projections: list[dict] = []
+
+    def observe_projection(projection_path: Path):
+        projection = original_dump(projection_path)
+        projections.append(projection)
+        return projection
+
+    monkeypatch.setattr(ledger_commands, "canonical_projection_dump", observe_projection)
+    args = [
+        "--no-catchup", "ledger", command, "--program", "acme",
+        "--programs-root", str(programs_root), "--format", "json",
+    ]
+    if command == "verify":
+        args.append("--deep")
+    else:
+        args.extend(["--from", "2025-03-21T00:00:00+00:00", "--to", "2025-03-22T00:00:00+00:00"])
+    result = runner.invoke(app, args)
+
+    assert observed_roots == [programs_root] * (1 if command == "verify" else 2)
+    assert result.exit_code == 0, repr(result.exception)
+    payload = json.loads(result.stdout)
+    if command == "verify":
+        assert payload["deep_projection_match"] is True
+        assert payload["ok"] is True
+    assert len(projections) == 2
+    assert all(projection["gaps"][0]["acknowledged"] == int(selected_ack) for projection in projections)
+    assert decoy_files() == decoy_before
+    if not decoy_present:
+        assert not decoy_root.exists()

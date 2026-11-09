@@ -53,7 +53,7 @@ class _FakeMailClient:
                 MailRecord(
                     source_id="mail-2",
                     subject="Review feedback for deployment section",
-                    sender="rushi@example.com",
+                    sender="exampleuser@example.com",
                     recipients=("maintainer@example.com",),
                     received_at="2026-05-07T18:00:00Z",
                     web_url="https://outlook.office.com/mail/2",
@@ -171,7 +171,7 @@ def test_m365_enricher_builds_metadata_only_workstream_evidence() -> None:
     assert {enrichment.source for enrichment in workstream.enrichments} == {"mail", "calendar", "teams_chat", "transcript"}
     assert any(enrichment.excerpt == "Subject: Acme Weekly digest" for enrichment in workstream.enrichments)
     assert any(enrichment.excerpt == "Subject: Review feedback for deployment section" for enrichment in workstream.enrichments)
-    assert any(enrichment.excerpt == "Channel: xInfraSWPM: Acme Weekly" for enrichment in workstream.enrichments)
+    assert any(enrichment.excerpt == "Channel: ExampleTeam: Acme Weekly" for enrichment in workstream.enrichments)
     assert any(enrichment.excerpt == "Transcript: Deployment Velocity sync" for enrichment in workstream.enrichments)
     assert all("ignored" not in enrichment.excerpt for enrichment in workstream.enrichments)
 
@@ -187,8 +187,8 @@ def test_m365_enricher_builds_metadata_only_workstream_evidence() -> None:
     assert mail_client.email_queries == ["emails to acme_newsletter@example.com Deployment Velocity", "emails to acme_newsletter@example.com Deployment Velocity"]
     assert "Focus on Deployment Velocity" in mail_client.thread_questions[0]
     assert calendar_client.queries == ["Deployment Velocity", "Deployment Velocity"]
-    assert teams_reader.calls[0][0] == "xInfraSWPM: Acme Weekly"
-    assert teams_reader.calls[0][1] == "xInfraSWPM channel discussions about newsletter content Deployment Velocity"
+    assert teams_reader.calls[0][0] == "ExampleTeam: Acme Weekly"
+    assert teams_reader.calls[0][1] == "ExampleTeam channel discussions about newsletter content Deployment Velocity"
     assert teams_reader.calls[0][2] == "2026-04-30T19:00:00+00:00"
     assert transcript_reader.meeting_ids == ["meeting-1", "meeting-1"]
 
@@ -214,11 +214,11 @@ def _m365_settings(*, enabled: bool) -> M365Settings:
         prefer_agency=True,
         workiq=M365WorkIQSettings(
             newsletter_search="emails to acme_newsletter@example.com",
-            feedback_search="review feedback from Rushi on Acme newsletter drafts",
-            teams_search="xInfraSWPM channel discussions about newsletter content",
+            feedback_search="review feedback from ExampleUser on Acme newsletter drafts",
+            teams_search="ExampleTeam channel discussions about newsletter content",
         ),
         bluebird=M365BluebirdSettings(
-            teams_channels=("xInfraSWPM: Acme Weekly",),
+            teams_channels=("ExampleTeam: Acme Weekly",),
             lookback_days=7,
         ),
         offline=M365OfflineSettings(

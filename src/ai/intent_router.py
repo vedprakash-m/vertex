@@ -12,8 +12,8 @@ from src.ai.deployment_fallback import FallbackStructuredClient, LEGACY_DEPLOYME
 from src.ai.provider import LLMProvider
 from src.ai.tiered_router import TierResult, route_through_tiers
 from src.core.ai_schema_gateway import SchemaGatewayError, validate_bounded_payload
-from src.core.edition_resolver import PROGRAMS_ROOT
-from src.core.exceptions import ConfigError
+from src.core.edition_resolver import PROGRAMS_ROOT, ResolvedEditionPaths, resolve_edition_paths
+from src.core.exceptions import ConfigError, VertexMigrationError
 from src.core.quality_gates.ai_release_audit import (
     AIRunState,
     ReleaseTerminal,
@@ -54,6 +54,31 @@ _MEETING_ID_PATTERN = re.compile(r"\bmeeting(?:\s+id)?\s+([A-Za-z0-9][A-Za-z0-9.
 
 class IntentRouterError(Exception):
     """Raised when a natural-language request cannot be mapped safely."""
+
+
+def _resolve_ask_edition(
+    edition: str, *, programs_root: Path | None = None,
+) -> ResolvedEditionPaths:
+    root = PROGRAMS_ROOT if programs_root is None else programs_root
+    try:
+        paths = resolve_edition_paths(edition, programs_root=root)
+    except VertexMigrationError as error:
+        raise IntentRouterError(
+            "The edition has conflicting output and publications layouts. "
+            "Resolve the edition layout before retrying."
+        ) from error
+    except (ConfigError, OSError) as error:
+        raise IntentRouterError(
+            "The edition is unavailable, invalid, or ambiguous. Run 'vertex list editions' and check its configuration."
+        ) from error
+    if paths is None:
+        raise IntentRouterError("Unknown edition. Run 'vertex list editions' to see available editions.")
+    if paths.program_dir != root / paths.program_id:
+        raise IntentRouterError(
+            "Template editions are sealed scaffolds and cannot be used for ask. "
+            "Choose a configured program edition or pass --program for a real program."
+        )
+    return paths
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,29 +143,38 @@ class IntentRouter:
         )
         return cls(client=client)
 
-    def route(self, request: str, *, default_edition: str = "", programs_root: Path = PROGRAMS_ROOT) -> RoutedInvocation:
+    def route(
+        self, request: str, *, default_edition: str = "", programs_root: Path | None = None,
+    ) -> RoutedInvocation:
         normalized_request = request.strip()
         if not normalized_request:
             raise IntentRouterError("A natural-language request is required.")
 
+        root = PROGRAMS_ROOT if programs_root is None else programs_root
+        edition = default_edition.strip()
+        program_id = ""
+        if edition:
+            paths = _resolve_ask_edition(edition, programs_root=root)
+            program_id = paths.program_id
+
+        routed = _route_known_intent(normalized_request, default_edition=edition, program_id=program_id)
         if self._client is None:
             # No AI client — deterministic-only path.
-            routed = _route_known_intent(normalized_request, default_edition=default_edition)
             if routed is not None:
                 return routed
             raise IntentRouterError(
                 "Unsupported natural-language request for deterministic routing. Try a direct CLI command or configure Azure OpenAI for AI fallback."
             )
 
+        if not program_id:
+            raise IntentRouterError("AI routing requires a configured edition.")
         system_prompt = _load_prompt()
-        user_prompt = _build_user_prompt(request=normalized_request, default_edition=default_edition)
-        _det = _route_known_intent(normalized_request, default_edition=default_edition)
-        program_id = _program_id_from_edition(default_edition)
+        user_prompt = _build_user_prompt(request=normalized_request, default_edition=edition)
 
         def _deterministic_fn() -> TierResult[RoutedInvocation] | None:
-            if _det is None:
+            if routed is None:
                 return None
-            return TierResult(value=_det, confidence=1.0)
+            return TierResult(value=routed, confidence=1.0)
 
         try:
             client = self._client
@@ -152,7 +186,7 @@ class IntentRouter:
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     program_id=program_id,
-                    programs_root=programs_root,
+                    programs_root=root,
                 ),
                 policy=load_ai_feature_policy(_FEATURE),
             )
@@ -352,7 +386,7 @@ def _parse_string_collection(value: object, *, field_name: str) -> frozenset[str
     return frozenset(items)
 
 
-def _route_known_intent(request: str, *, default_edition: str) -> RoutedInvocation | None:
+def _route_known_intent(request: str, *, default_edition: str, program_id: str) -> RoutedInvocation | None:
     lowered = request.casefold()
     warnings = list(_unsupported_filter_warnings(request))
 
@@ -383,7 +417,7 @@ def _route_known_intent(request: str, *, default_edition: str) -> RoutedInvocati
             warnings.extend(_program_scope_warnings(request))
             return RoutedInvocation(
                 command="kb",
-                args=("changelog", "--program", _program_id_from_edition(default_edition), "--since", week_match.group(1).upper()),
+                args=("changelog", "--program", program_id, "--since", week_match.group(1).upper()),
                 warnings=tuple(dict.fromkeys(warnings)),
                 prompt_version=None,
             )
@@ -393,7 +427,7 @@ def _route_known_intent(request: str, *, default_edition: str) -> RoutedInvocati
         warnings.extend(_program_scope_warnings(request))
         return RoutedInvocation(
             command="investigate",
-            args=("--program", _program_id_from_edition(default_edition), "--icm", investigate_icm_match.group(1), "--dry-run"),
+            args=("--program", program_id, "--icm", investigate_icm_match.group(1), "--dry-run"),
             warnings=tuple(dict.fromkeys(warnings)),
             prompt_version=None,
         )
@@ -403,7 +437,7 @@ def _route_known_intent(request: str, *, default_edition: str) -> RoutedInvocati
         warnings.extend(_program_scope_warnings(request))
         return RoutedInvocation(
             command="investigate",
-            args=("--program", _program_id_from_edition(default_edition), "--account", investigate_account_match.group(1), "--dry-run"),
+            args=("--program", program_id, "--account", investigate_account_match.group(1), "--dry-run"),
             warnings=tuple(dict.fromkeys(warnings)),
             prompt_version=None,
         )
@@ -484,7 +518,7 @@ def _route_known_intent(request: str, *, default_edition: str) -> RoutedInvocati
         warnings.extend(_program_scope_warnings(request))
         return RoutedInvocation(
             command="meeting-close",
-            args=("--program", _program_id_from_edition(default_edition), "--transcript", transcript_id, "--dry-run"),
+            args=("--program", program_id, "--transcript", transcript_id, "--dry-run"),
             warnings=tuple(dict.fromkeys(warnings)),
             prompt_version=None,
         )
@@ -505,7 +539,7 @@ def _route_known_intent(request: str, *, default_edition: str) -> RoutedInvocati
         warnings.extend(_program_scope_warnings(request))
         return RoutedInvocation(
             command="catchup",
-            args=("--program", _program_id_from_edition(default_edition)),
+            args=("--program", program_id),
             warnings=tuple(dict.fromkeys(warnings)),
             prompt_version=None,
         )
@@ -535,7 +569,7 @@ def _route_known_intent(request: str, *, default_edition: str) -> RoutedInvocati
         warnings.extend(_program_scope_warnings(request))
         return RoutedInvocation(
             command="reconcile",
-            args=("--program", _program_id_from_edition(default_edition), "--dry-run"),
+            args=("--program", program_id, "--dry-run"),
             warnings=tuple(dict.fromkeys(warnings)),
             prompt_version=None,
         )
@@ -586,7 +620,7 @@ def _route_known_intent(request: str, *, default_edition: str) -> RoutedInvocati
         warnings.extend(_program_scope_warnings(request))
         return RoutedInvocation(
             command="registry",
-            args=("list", "--program", _program_id_from_edition(default_edition)),
+            args=("list", "--program", program_id),
             warnings=tuple(dict.fromkeys(warnings)),
             prompt_version=None,
         )
@@ -606,7 +640,7 @@ def _route_known_intent(request: str, *, default_edition: str) -> RoutedInvocati
         warnings.extend(_program_scope_warnings(request))
         return RoutedInvocation(
             command="milestones",
-            args=("list", "--program", _program_id_from_edition(default_edition)),
+            args=("list", "--program", program_id),
             warnings=tuple(dict.fromkeys(warnings)),
             prompt_version=None,
         )
@@ -625,7 +659,7 @@ def _route_known_intent(request: str, *, default_edition: str) -> RoutedInvocati
         warnings.extend(_program_scope_warnings(request))
         return RoutedInvocation(
             command="milestones",
-            args=("assess", "--program", _program_id_from_edition(default_edition)),
+            args=("assess", "--program", program_id),
             warnings=tuple(dict.fromkeys(warnings)),
             prompt_version=None,
         )
@@ -658,7 +692,7 @@ def _route_known_intent(request: str, *, default_edition: str) -> RoutedInvocati
         warnings.extend(_program_scope_warnings(request))
         return RoutedInvocation(
             command="dependencies",
-            args=("list", "--program", _program_id_from_edition(default_edition)),
+            args=("list", "--program", program_id),
             warnings=tuple(dict.fromkeys(warnings)),
             prompt_version=None,
         )
@@ -688,7 +722,7 @@ def _route_known_intent(request: str, *, default_edition: str) -> RoutedInvocati
     if owner_pack_alias is not None:
         return RoutedInvocation(
             command="owner-pack",
-            args=("--program", _program_id_from_edition(default_edition), "--owner", owner_pack_alias),
+            args=("--program", program_id, "--owner", owner_pack_alias),
             warnings=tuple(warnings),
             prompt_version=None,
         )
@@ -749,7 +783,7 @@ def _route_known_intent(request: str, *, default_edition: str) -> RoutedInvocati
         warnings.extend(_program_scope_warnings(request))
         return RoutedInvocation(
             command="trust",
-            args=("--program", _program_id_from_edition(default_edition)),
+            args=("--program", program_id),
             warnings=tuple(dict.fromkeys(warnings)),
             prompt_version=None,
         )
@@ -766,7 +800,7 @@ def _route_known_intent(request: str, *, default_edition: str) -> RoutedInvocati
         )
     ):
         warnings.extend(_program_scope_warnings(request))
-        audit_args: tuple[str, ...] = ("--program", _program_id_from_edition(default_edition))
+        audit_args: tuple[str, ...] = ("--program", program_id)
         if (
             "prompt learning" in lowered
             or "what did we learn from prompts" in lowered
@@ -806,7 +840,7 @@ def _route_known_intent(request: str, *, default_edition: str) -> RoutedInvocati
         warnings.extend(_program_scope_warnings(request))
         return RoutedInvocation(
             command="decisions",
-            args=("aging", "--program", _program_id_from_edition(default_edition), "--apply", "--dry-run"),
+            args=("aging", "--program", program_id, "--apply", "--dry-run"),
             warnings=tuple(dict.fromkeys(warnings)),
             prompt_version=None,
         )
@@ -839,7 +873,7 @@ def _route_known_intent(request: str, *, default_edition: str) -> RoutedInvocati
         warnings.extend(_program_scope_warnings(request))
         return RoutedInvocation(
             command="decisions",
-            args=("aging", "--program", _program_id_from_edition(default_edition), "--apply"),
+            args=("aging", "--program", program_id, "--apply"),
             warnings=tuple(dict.fromkeys(warnings)),
             prompt_version=None,
         )
@@ -860,7 +894,7 @@ def _route_known_intent(request: str, *, default_edition: str) -> RoutedInvocati
         warnings.extend(_program_scope_warnings(request))
         return RoutedInvocation(
             command="decisions",
-            args=("aging", "--program", _program_id_from_edition(default_edition)),
+            args=("aging", "--program", program_id),
             warnings=tuple(dict.fromkeys(warnings)),
             prompt_version=None,
         )
@@ -878,7 +912,7 @@ def _route_known_intent(request: str, *, default_edition: str) -> RoutedInvocati
         warnings.extend(_program_scope_warnings(request))
         return RoutedInvocation(
             command="salience",
-            args=("show", "--program", _program_id_from_edition(default_edition), "--no-refresh"),
+            args=("show", "--program", program_id, "--no-refresh"),
             warnings=tuple(dict.fromkeys(warnings)),
             prompt_version=None,
         )
@@ -948,7 +982,7 @@ def _route_known_intent(request: str, *, default_edition: str) -> RoutedInvocati
         warnings.extend(brief_warnings)
         return RoutedInvocation(
             command="brief",
-            args=("--program", _program_id_from_edition(default_edition), "--today"),
+            args=("--program", program_id, "--today"),
             warnings=tuple(dict.fromkeys(warnings)),
             prompt_version=None,
         )
@@ -1017,7 +1051,7 @@ def _route_known_intent(request: str, *, default_edition: str) -> RoutedInvocati
         warnings.extend(readiness_warnings)
         return RoutedInvocation(
             command="readiness",
-            args=("--program", _program_id_from_edition(default_edition)),
+            args=("--program", program_id),
             warnings=tuple(dict.fromkeys(warnings)),
             prompt_version=None,
         )
@@ -1039,7 +1073,7 @@ def _route_known_intent(request: str, *, default_edition: str) -> RoutedInvocati
         warnings.extend(_program_scope_warnings(request))
         return RoutedInvocation(
             command="risks",
-            args=("list", "--program", _program_id_from_edition(default_edition)),
+            args=("list", "--program", program_id),
             warnings=tuple(dict.fromkeys(warnings)),
             prompt_version=None,
         )
@@ -1059,7 +1093,7 @@ def _route_known_intent(request: str, *, default_edition: str) -> RoutedInvocati
         warnings.extend(_program_scope_warnings(request))
         return RoutedInvocation(
             command="assumptions",
-            args=("--program", _program_id_from_edition(default_edition)),
+            args=("--program", program_id),
             warnings=tuple(dict.fromkeys(warnings)),
             prompt_version=None,
         )
@@ -1077,7 +1111,7 @@ def _route_known_intent(request: str, *, default_edition: str) -> RoutedInvocati
         warnings.extend(_program_scope_warnings(request))
         return RoutedInvocation(
             command="claims",
-            args=("--program", _program_id_from_edition(default_edition)),
+            args=("--program", program_id),
             warnings=tuple(dict.fromkeys(warnings)),
             prompt_version=None,
         )
@@ -1098,7 +1132,7 @@ def _route_known_intent(request: str, *, default_edition: str) -> RoutedInvocati
         warnings.extend(_program_scope_warnings(request))
         return RoutedInvocation(
             command="calibration",
-            args=("report", "--program", _program_id_from_edition(default_edition)),
+            args=("report", "--program", program_id),
             warnings=tuple(dict.fromkeys(warnings)),
             prompt_version=None,
         )
@@ -1117,7 +1151,7 @@ def _route_known_intent(request: str, *, default_edition: str) -> RoutedInvocati
         warnings.extend(_program_scope_warnings(request))
         return RoutedInvocation(
             command="signals",
-            args=("--program", _program_id_from_edition(default_edition)),
+            args=("--program", program_id),
             warnings=tuple(dict.fromkeys(warnings)),
             prompt_version=None,
         )
@@ -1135,7 +1169,7 @@ def _route_known_intent(request: str, *, default_edition: str) -> RoutedInvocati
         warnings.extend(_program_scope_warnings(request))
         return RoutedInvocation(
             command="actions",
-            args=("--program", _program_id_from_edition(default_edition)),
+            args=("--program", program_id),
             warnings=tuple(dict.fromkeys(warnings)),
             prompt_version=None,
         )
@@ -1155,7 +1189,7 @@ def _route_known_intent(request: str, *, default_edition: str) -> RoutedInvocati
         warnings.extend(_program_scope_warnings(request))
         return RoutedInvocation(
             command="vitality",
-            args=("--program", _program_id_from_edition(default_edition)),
+            args=("--program", program_id),
             warnings=tuple(dict.fromkeys(warnings)),
             prompt_version=None,
         )
@@ -1164,7 +1198,7 @@ def _route_known_intent(request: str, *, default_edition: str) -> RoutedInvocati
         warnings.extend(_program_scope_warnings(request))
         return RoutedInvocation(
             command="ado",
-            args=("status", "--program", _program_id_from_edition(default_edition)),
+            args=("status", "--program", program_id),
             warnings=tuple(dict.fromkeys(warnings)),
             prompt_version=None,
         )
@@ -1173,7 +1207,7 @@ def _route_known_intent(request: str, *, default_edition: str) -> RoutedInvocati
         warnings.extend(_program_scope_warnings(request))
         return RoutedInvocation(
             command="ado",
-            args=("reconcile", "--program", _program_id_from_edition(default_edition)),
+            args=("reconcile", "--program", program_id),
             warnings=tuple(dict.fromkeys(warnings)),
             prompt_version=None,
         )
@@ -1185,7 +1219,7 @@ def _route_known_intent(request: str, *, default_edition: str) -> RoutedInvocati
         warnings.extend(_program_scope_warnings(request))
         return RoutedInvocation(
             command="storage",
-            args=("stats", "--program", _program_id_from_edition(default_edition)),
+            args=("stats", "--program", program_id),
             warnings=tuple(dict.fromkeys(warnings)),
             prompt_version=None,
         )
@@ -1197,7 +1231,7 @@ def _route_known_intent(request: str, *, default_edition: str) -> RoutedInvocati
         warnings.extend(_program_scope_warnings(request))
         return RoutedInvocation(
             command="storage",
-            args=("check", "--program", _program_id_from_edition(default_edition)),
+            args=("check", "--program", program_id),
             warnings=tuple(dict.fromkeys(warnings)),
             prompt_version=None,
         )
@@ -1312,13 +1346,6 @@ def _program_scope_warnings(request: str) -> tuple[str, ...]:
             "Current CLI does not support conversational topic filters for this request; routing the nearest program-level command instead."
         )
     return tuple(dict.fromkeys(warnings))
-
-
-def _program_id_from_edition(edition: str) -> str:
-    normalized = edition.strip()
-    if not normalized:
-        return ""
-    return normalized.split("_", 1)[0]
 
 
 def _load_prompt() -> str:

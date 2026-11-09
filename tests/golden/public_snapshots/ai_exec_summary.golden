@@ -1,0 +1,9 @@
+{
+  "cited_work_item_ids": [
+    101,
+    102,
+    103
+  ],
+  "prompt_version": "exec_summary_drafter.v1",
+  "text": "Risk rose for Cache warmup safeguard [#101]. Deployment blocker entered scope [#102]. Repairs incident closed after mitigation [#103]."
+}

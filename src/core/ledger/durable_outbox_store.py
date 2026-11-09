@@ -73,6 +73,12 @@ _TRANSITION_PREDECESSORS = {
     "compensation_required": frozenset({"succeeded", "audited"}),
     "dead_letter": frozenset({"leased", "failed_retryable"}),
 }
+_KNOWN_STATUSES = frozenset({"pending", "leased"}) | frozenset(_TRANSITION_PREDECESSORS) | _TRUE_TERMINALS
+_OUTBOX_COLUMNS = frozenset({
+    "outbox_id", "domain", "correlation_id", "payload_json", "status", "lease_owner",
+    "lease_fencing_token", "lease_expires_at", "attempt_count", "next_attempt_at",
+    "remote_request_hash", "remote_response_hash", "failure_reason", "created_at", "updated_at",
+})
 
 
 class OutboxError(Exception):
@@ -193,6 +199,50 @@ def list_by_status(db_path: Path, domain: str, status: str) -> tuple[OutboxEntry
             (domain, status),
         ).fetchall()
     return tuple(_entry_from_row(row) for row in rows)
+
+
+def read_status_counts(db_path: Path, domain: str) -> dict[str, int] | None:
+    """Read one domain's status counts without creating the outbox or loading payloads."""
+    for suffix in ("-wal", "-shm", "-journal"):
+        try:
+            db_path.with_name(db_path.name + suffix).lstat()
+        except FileNotFoundError:
+            continue
+        raise OutboxError("SQLite sidecars are present; refusing a read that may alter them")
+    try:
+        db_path.stat()
+    except FileNotFoundError:
+        return None
+    with db_path.open("rb") as database_file:
+        header = database_file.read(20)
+    if header.startswith(b"SQLite format 3\x00") and 2 in header[18:20]:
+        raise OutboxError("WAL-mode databases are unavailable under the strict no-write policy")
+    with open_program_db(db_path, read_only=True) as connection:
+        connection.execute("BEGIN")
+        definition = connection.execute(
+            "SELECT type, sql FROM sqlite_master WHERE name = ?", ("outbox",),
+        ).fetchone()
+        if (
+            definition is None
+            or definition["type"] != "table"
+            or not isinstance(definition["sql"], str)
+            or definition["sql"].upper().split(None, 2)[:2] != ["CREATE", "TABLE"]
+        ):
+            raise OutboxError("Outbox is not an ordinary table")
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(outbox)")}
+        if not _OUTBOX_COLUMNS.issubset(columns):
+            raise OutboxError("Outbox schema is incomplete")
+        rows = connection.execute(
+            "SELECT status, COUNT(*) AS count FROM outbox WHERE domain = ? GROUP BY status",
+            (domain,),
+        ).fetchall()
+    counts: dict[str, int] = {}
+    for row in rows:
+        status = row["status"]
+        if not isinstance(status, str) or status not in _KNOWN_STATUSES:
+            raise OutboxError("Outbox contains an unrecognized status")
+        counts[status] = int(row["count"])
+    return counts
 
 
 def load_success_receipt(db_path: Path, outbox_id: str) -> str | None:

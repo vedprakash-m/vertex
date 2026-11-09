@@ -4653,8 +4653,8 @@ def test_gather_program_appends_workiq_signals_without_auto_review(monkeypatch, 
             enabled=True,
             prefer_agency=True,
             workiq_queries={
-                "feedback_search": "Find feedback from Rushi on Acme newsletter drafts",
-                "teams_search": "xInfraSWPM channel discussions about WI:5678 blocker status",
+                "feedback_search": "Find feedback from ExampleUser on Acme newsletter drafts",
+                "teams_search": "ExampleTeam channel discussions about WI:5678 blocker status",
             },
         ),
     )
@@ -4678,20 +4678,20 @@ def test_gather_program_appends_workiq_signals_without_auto_review(monkeypatch, 
     )
     bridge = _FakeWorkIQBridge(
         responses={
-            "Find feedback from Rushi on Acme newsletter drafts. Focus on Acme. Keywords: Acme Eng Core Chat, Acme Incident Triage, Acme Weekly Ops Review, Adventure Ramp Weekly Sync.": {
+            "Find feedback from ExampleUser on Acme newsletter drafts. Focus on Acme. Keywords: Acme Eng Core Chat, Acme Incident Triage, Acme Weekly Ops Review, Adventure Ramp Weekly Sync.": {
                 "results": [
                     {
                         "messageId": "thread-1",
                         "threadId": "observed-email-thread-1",
-                        "title": "Rushi feedback on WI:1234",
-                        "sender": "rushi@example.com",
+                        "title": "ExampleUser feedback on WI:1234",
+                        "sender": "exampleuser@example.com",
                         "snippet": "Please update WI:1234 before the next draft.",
                         "timestamp": "2026-05-10T09:00:00Z",
                         "link": "https://outlook.office.com/mail/thread-1",
                     }
                 ]
             },
-            "xInfraSWPM channel discussions about WI:5678 blocker status. Focus on Acme. Keywords: Acme Eng Core Chat, Acme Incident Triage, Acme Weekly Ops Review, Adventure Ramp Weekly Sync.": {
+            "ExampleTeam channel discussions about WI:5678 blocker status. Focus on Acme. Keywords: Acme Eng Core Chat, Acme Incident Triage, Acme Weekly Ops Review, Adventure Ramp Weekly Sync.": {
                 "results": [
                     {
                         "messageId": "teams-1",
@@ -4735,12 +4735,12 @@ def test_gather_program_appends_workiq_signals_without_auto_review(monkeypatch, 
     # configured sources (ops-ready.md S1 discovery recall fix); those are asserted by
     # shape rather than exact prose to avoid pinning the full discovery prompt sequence.
     assert any(
-        q.startswith("Find feedback from Rushi on Acme newsletter drafts. Focus on Acme.")
+        q.startswith("Find feedback from ExampleUser on Acme newsletter drafts. Focus on Acme.")
         and "ramp sync" in q
         for q in bridge.questions
     )
     assert any(
-        q.startswith("xInfraSWPM channel discussions about WI:5678 blocker status. Focus on Acme.")
+        q.startswith("ExampleTeam channel discussions about WI:5678 blocker status. Focus on Acme.")
         and "ramp sync" in q
         for q in bridge.questions
     )
@@ -4770,10 +4770,7 @@ def test_workiq_thread_id_falls_back_to_teams_urls_when_direct_id_missing() -> N
 
 
 def test_gather_program_threads_configured_workiq_total_budget_seconds(monkeypatch, tmp_path: Path) -> None:
-    """The whole WorkIQ phase (all query plans combined) must be bounded by the
-    program's configured ``m365.retrieval.max_wall_clock_seconds`` -- without
-    this, a live run with N query plans could take up to WORKIQ_TIMEOUT per
-    plan with no overall cap, stalling gather for tens of minutes."""
+    """Forward the configured query-plan budget without claiming a whole-phase deadline."""
     programs_root = tmp_path / "programs"
 
     program = Program(
@@ -9056,7 +9053,7 @@ def test_build_workiq_signals_resolves_workstream_from_linked_ado_items() -> Non
             enabled=True,
             prefer_agency=True,
             workiq_queries={
-                "feedback_search": "Find feedback from Rushi on Acme newsletter drafts",
+                "feedback_search": "Find feedback from ExampleUser on Acme newsletter drafts",
             },
         ),
     )
@@ -9074,8 +9071,8 @@ def test_build_workiq_signals_resolves_workstream_from_linked_ado_items() -> Non
             type="Feature",
             title="Ramp checkpoint",
             state="Active",
-            assigned_to="Rushi",
-            assigned_to_email="rushi@example.com",
+            assigned_to="ExampleUser",
+            assigned_to_email="exampleuser@example.com",
             area_path="One\\Adventure\\Acme",
             iteration_path="One\\FY26\\Q4",
             target_date=date(2026, 5, 17),
@@ -9089,12 +9086,12 @@ def test_build_workiq_signals_resolves_workstream_from_linked_ado_items() -> Non
     )
     bridge = _FakeWorkIQBridge(
         responses={
-            "Find feedback from Rushi on Acme newsletter drafts": {
+            "Find feedback from ExampleUser on Acme newsletter drafts": {
                 "results": [
                     {
                         "messageId": "thread-1",
-                        "title": "Rushi feedback on WI:1234",
-                        "sender": "rushi@example.com",
+                        "title": "ExampleUser feedback on WI:1234",
+                        "sender": "exampleuser@example.com",
                         "snippet": "Please update WI:1234 before the next draft.",
                         "timestamp": "2026-05-10T09:00:00Z",
                     }
@@ -10194,7 +10191,8 @@ def test_build_workiq_signals_honors_timeout_and_total_budget(monkeypatch) -> No
         total_budget_seconds=5,
     )
 
-    assert len(signals) == 1
+    assert len(signals) == 2
+    assert sum((signal.metadata or {}).get("workiq_plan_budget_exhausted") is True for signal in signals) == 1
     assert bridge.timeouts == [5]
     assert bridge.questions == ["Find current status. Focus on Adventure on Northwind. Keywords: shared status."]
 
@@ -13777,11 +13775,11 @@ def test_gather_program_degrades_gracefully_when_kusto_fails(monkeypatch, tmp_pa
     assert gather_state.integration_errors == 1
     assert len(gather_state.integration_error_details) == 1
     assert gather_state.integration_error_details[0].source == "kusto"
-    assert gather_state.channels["kusto"]["last_error"] == "kusto unavailable"
+    assert gather_state.channels["kusto"]["last_error"] == "Kusto gather failed"
     outcomes = {outcome.channel: outcome for outcome in artifacts.channel_outcomes}
     assert outcomes["ado"].degraded is False
     assert outcomes["kusto"].degraded is True
-    assert outcomes["kusto"].degrade_reason == "kusto unavailable"
+    assert outcomes["kusto"].degrade_reason == "Kusto gather failed"
     assert outcomes["kusto"].elapsed_seconds >= 0
 
 
@@ -15291,6 +15289,84 @@ def test_gather_program_degrades_gracefully_when_workiq_fails(monkeypatch, tmp_p
     assert gather_state.integration_error_details[0].source == "workiq"
 
 
+def test_gather_program_reports_skipped_workiq_plans_as_optional_degradation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    import cli as cli_module
+    from src.commands.gather_workiq_helpers import WorkIQQueryPlan
+
+    programs_root = tmp_path / "programs"
+    db_root = tmp_path / "vertex-db"
+    monkeypatch.setenv("VERTEX_DB_PATH", str(db_root))
+    program = Program(
+        schema_version="2.0", id="fixture", name="Fixture",
+        ado=ADOConfig(
+            organization="fixture", project="fixture", area_paths=(), work_item_types=("Feature",),
+            excluded_states=(), date_window_days=14, api_timeout_seconds=30,
+        ),
+        m365=M365Config(
+            enabled=True, prefer_agency=True, workiq_queries={"feedback_search": "Synthetic query"},
+            retrieval=WorkIQRetrievalConfig(max_wall_clock_seconds=5),
+        ),
+    )
+    plans = tuple(
+        WorkIQQueryPlan(query_name=f"feedback_search:private-lane-{index}", question="Private query")
+        for index in range(2)
+    )
+    monkeypatch.setattr(gather, "_load_program_context", lambda *_args, **_kwargs: (program, ()))
+    monkeypatch.setattr(gather, "_load_freshness_thresholds", lambda *_args, **_kwargs: (14, 30))
+    monkeypatch.setattr(gather, "_build_workiq_query_plans", lambda **_kwargs: plans)
+    clock = [0.0]
+    monkeypatch.setattr(gather, "monotonic", lambda: clock[0])
+
+    class Bridge:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def probe(self):
+            return SimpleNamespace(available=True, has_workiq=True)
+
+        def ask_workiq(self, *args, **kwargs):
+            self.calls += 1
+            clock[0] = 5.0
+            return {"emails": [{
+                "id": "valid-message", "subject": "Synthetic status", "receivedDateTime": "2026-10-24T09:00:00Z",
+            }]}
+
+    bridge = Bridge()
+    artifacts = gather.gather_program(
+        "fixture", as_of=datetime(2026, 10, 24, 12, 0, tzinfo=timezone.utc), programs_root=programs_root,
+        loader=lambda *_args, **_kwargs: ((), 0), freshness_loader=lambda *_args, **_kwargs: ((), 0),
+        include_workiq=True, bridge_factory=lambda: bridge,
+    )
+
+    assert bridge.calls == 1
+    assert artifacts.discovered_signals == artifacts.new_signals == artifacts.pending_review == 2
+    assert artifacts.auto_reviews_written == 0
+    assert len(artifacts.integration_errors) == 1
+    error = artifacts.integration_errors[0]
+    assert error.source == "workiq" and error.stage == "budget" and error.retryable is True
+    assert error.message == "WorkIQ query-plan budget exhausted; at least one plan was not attempted."
+    assert gather._semantic_gather_exit_code(artifacts) == 2
+    outcome = next(outcome for outcome in artifacts.channel_outcomes if outcome.channel == "workiq")
+    assert outcome.degraded is True and outcome.degrade_reason == error.message
+    state = load_gather_state("fixture", programs_root=programs_root)
+    assert state is not None
+    assert state.channels["workiq"]["last_error"] == error.message
+    assert ("workiq", "failed", 1) in _read_ingestion_run_rows("fixture", db_root=db_root)
+    signals = read_signals("fixture", programs_root=programs_root)
+    assert len(signals) == 2 and read_review_log("fixture", programs_root=programs_root) == ()
+
+    monkeypatch.setattr(gather, "gather_program", lambda *_args, **_kwargs: artifacts)
+    monkeypatch.setattr(cli_module, "_maybe_register_tier_decision_sink", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli_module, "_maybe_run_scheduled_db_maintenance", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli_module, "_maybe_run_session_catchup", lambda *_args, **_kwargs: None)
+    result = runner.invoke(app, ["gather", "--program", "fixture", "--workiq"])
+    assert result.exit_code == 2, result.output
+    assert error.message in result.output
+    assert "private-lane" not in result.output and "Private query" not in result.output
+
+
 def test_gather_program_persists_workiq_discovery_runtime_failures(monkeypatch, tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     current_time = datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc)
@@ -15312,7 +15388,7 @@ def test_gather_program_persists_workiq_discovery_runtime_failures(monkeypatch, 
             enabled=True,
             prefer_agency=True,
             workiq_queries={
-                "feedback_search": "Find feedback from Rushi on Acme newsletter drafts",
+                "feedback_search": "Find feedback from ExampleUser on Acme newsletter drafts",
             },
         ),
     )
@@ -15327,13 +15403,13 @@ def test_gather_program_persists_workiq_discovery_runtime_failures(monkeypatch, 
     )
     bridge = _FakeWorkIQBridge(
         responses={
-            "Find feedback from Rushi on Acme newsletter drafts. Focus on Acme. Keywords: ExampleNetwork, Acme.": {
+            "Find feedback from ExampleUser on Acme newsletter drafts. Focus on Acme. Keywords: ExampleNetwork, Acme.": {
                 "results": [
                     {
                         "messageId": "thread-1",
                         "threadId": "observed-email-thread-1",
-                        "title": "Rushi feedback on WI:1234",
-                        "sender": "rushi@example.com",
+                        "title": "ExampleUser feedback on WI:1234",
+                        "sender": "exampleuser@example.com",
                         "snippet": "Please update WI:1234 before the next draft.",
                         "timestamp": "2026-05-10T09:00:00Z",
                         "link": "https://outlook.office.com/mail/thread-1",
@@ -15973,7 +16049,7 @@ def test_gather_program_appends_ai_extracted_actions_when_ai_is_enabled(monkeypa
             enabled=True,
             prefer_agency=True,
             workiq_queries={
-                "feedback_search": "Find feedback from Rushi on Acme newsletter drafts",
+                "feedback_search": "Find feedback from ExampleUser on Acme newsletter drafts",
             },
         ),
     )
@@ -15988,13 +16064,13 @@ def test_gather_program_appends_ai_extracted_actions_when_ai_is_enabled(monkeypa
     )
     bridge = _FakeWorkIQBridge(
         responses={
-            "Find feedback from Rushi on Acme newsletter drafts. Focus on Acme. Keywords: ExampleNetwork, Acme.": {
+            "Find feedback from ExampleUser on Acme newsletter drafts. Focus on Acme. Keywords: ExampleNetwork, Acme.": {
                 "results": [
                     {
                         "messageId": "thread-1",
                         "threadId": "observed-email-thread-1",
-                        "title": "Rushi feedback on WI:1234",
-                        "sender": "rushi@example.com",
+                        "title": "ExampleUser feedback on WI:1234",
+                        "sender": "exampleuser@example.com",
                         "snippet": "Please update WI:1234 before the next draft.",
                         "timestamp": "2026-05-10T09:00:00Z",
                         "link": "https://outlook.office.com/mail/thread-1",
@@ -16631,6 +16707,7 @@ def test_build_workiq_signals_structured_discovery_validates_and_clamps_union_re
             }
 
     bridge = StructuredBridge()
+    errors: list[IntegrationError] = []
     signals = gather._build_workiq_signals(
         program=program,
         program_id="acme",
@@ -16638,13 +16715,25 @@ def test_build_workiq_signals_structured_discovery_validates_and_clamps_union_re
         items=(),
         workstreams=workstreams,
         bridge=bridge,
+        integration_error_sink=errors,
     )
 
     assert len(bridge.questions) == 1
     assert "between 2026-06-06 and 2026-06-20" in bridge.questions[0]
     assert "Return up to 8 results." in bridge.questions[0]
-    assert len(signals) == 1
+    assert len(signals) == 2
     assert signals[0].raw_ref == "workiq:email:mail-1"
+    diagnostic = signals[1]
+    assert diagnostic.source == "system"
+    assert diagnostic.confidence == Confidence.NONE
+    assert diagnostic.workstream_id is None and diagnostic.entity_refs == ()
+    assert diagnostic.metadata is not None
+    assert diagnostic.metadata["quarantined_record_count"] == 1
+    assert diagnostic.metadata["workiq_structured_record_invalid"] is True
+    assert len(errors) == 1
+    assert errors[0].source == "workiq" and errors[0].stage == "quarantine"
+    assert errors[0].retryable is False
+    assert "example.invalid" not in repr(diagnostic) + repr(errors)
 
 
 def test_query_plans_email_subject_filters_coexist_with_keywords() -> None:

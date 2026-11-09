@@ -1,0 +1,1941 @@
+[
+  {
+    "request": "redo issue 12 with fabrikam only",
+    "command": "report",
+    "args": [
+      "--edition",
+      "",
+      "--issue",
+      "12",
+      "--dry-run"
+    ],
+    "warnings": [
+      "Current CLI does not support scoped reruns for \"fabrikam only\"; routing the nearest full-command equivalent instead."
+    ],
+    "rendered": "vertex report --edition  --issue 12 --dry-run"
+  },
+  {
+    "request": "compare issue 11 and issue 12",
+    "command": "history",
+    "args": [
+      "--edition",
+      "",
+      "--diff",
+      "11",
+      "12"
+    ],
+    "warnings": [],
+    "rendered": "vertex history --edition  --diff 11 12"
+  },
+  {
+    "request": "kb changelog since 2026-W20",
+    "command": "kb",
+    "args": [
+      "changelog",
+      "--program",
+      "",
+      "--since",
+      "2026-W20"
+    ],
+    "warnings": [],
+    "rendered": "vertex kb changelog --program  --since 2026-W20"
+  },
+  {
+    "request": "search archive for \"ud chunking\"",
+    "command": "history",
+    "args": [
+      "--edition",
+      "",
+      "--search",
+      "ud chunking"
+    ],
+    "warnings": [],
+    "rendered": "vertex history --edition  --search ud chunking"
+  },
+  {
+    "request": "show semantic history for rollout regression",
+    "command": "history",
+    "args": [
+      "--edition",
+      "",
+      "--semantic",
+      "rollout regression"
+    ],
+    "warnings": [],
+    "rendered": "vertex history --edition  --semantic rollout regression"
+  },
+  {
+    "request": "confirm issue 12",
+    "command": "confirm",
+    "args": [
+      "--edition",
+      "",
+      "--issue",
+      "12"
+    ],
+    "warnings": [],
+    "rendered": "vertex confirm --edition  --issue 12"
+  },
+  {
+    "request": "publish gate for issue 12",
+    "command": "publish-gate",
+    "args": [
+      "--edition",
+      "",
+      "--issue",
+      "12"
+    ],
+    "warnings": [],
+    "rendered": "vertex publish-gate --edition  --issue 12"
+  },
+  {
+    "request": "review issue 12",
+    "command": "review-full",
+    "args": [
+      "--edition",
+      "",
+      "--issue",
+      "12",
+      "--open"
+    ],
+    "warnings": [],
+    "rendered": "vertex review-full --edition  --issue 12 --open"
+  },
+  {
+    "request": "history for issue 12",
+    "command": "history",
+    "args": [
+      "--edition",
+      "",
+      "--issue",
+      "12"
+    ],
+    "warnings": [],
+    "rendered": "vertex history --edition  --issue 12"
+  },
+  {
+    "request": "show evidence for WI 12345",
+    "command": "evidence",
+    "args": [
+      "--edition",
+      "",
+      "--issue",
+      "latest",
+      "--ado",
+      "12345"
+    ],
+    "warnings": [],
+    "rendered": "vertex evidence --edition  --issue latest --ado 12345"
+  },
+  {
+    "request": "investigate icm 12345",
+    "command": "investigate",
+    "args": [
+      "--program",
+      "",
+      "--icm",
+      "12345",
+      "--dry-run"
+    ],
+    "warnings": [],
+    "rendered": "vertex investigate --program  --icm 12345 --dry-run"
+  },
+  {
+    "request": "investigate account acme-prod",
+    "command": "investigate",
+    "args": [
+      "--program",
+      "",
+      "--account",
+      "acme-prod",
+      "--dry-run"
+    ],
+    "warnings": [],
+    "rendered": "vertex investigate --program  --account acme-prod --dry-run"
+  },
+  {
+    "request": "follow up on transcript thread-abc-123",
+    "command": "meeting-close",
+    "args": [
+      "--program",
+      "",
+      "--transcript",
+      "thread-abc-123",
+      "--dry-run"
+    ],
+    "warnings": [
+      "Current CLI does not support conversational topic filters for this request; routing the nearest program-level command instead."
+    ],
+    "rendered": "vertex meeting-close --program  --transcript thread-abc-123 --dry-run"
+  },
+  {
+    "request": "catch me up",
+    "command": "catchup",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex catchup --program "
+  },
+  {
+    "request": "give me a catchup",
+    "command": "catchup",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex catchup --program "
+  },
+  {
+    "request": "show me a catchup",
+    "command": "catchup",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex catchup --program "
+  },
+  {
+    "request": "bring me up to speed",
+    "command": "catchup",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex catchup --program "
+  },
+  {
+    "request": "bring me up to date",
+    "command": "catchup",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex catchup --program "
+  },
+  {
+    "request": "show manifest for issue 12",
+    "command": "manifest",
+    "args": [
+      "--edition",
+      "",
+      "--issue",
+      "12"
+    ],
+    "warnings": [],
+    "rendered": "vertex manifest --edition  --issue 12"
+  },
+  {
+    "request": "show contradictions",
+    "command": "reconcile",
+    "args": [
+      "--program",
+      "",
+      "--dry-run"
+    ],
+    "warnings": [],
+    "rendered": "vertex reconcile --program  --dry-run"
+  },
+  {
+    "request": "show me contradictions",
+    "command": "reconcile",
+    "args": [
+      "--program",
+      "",
+      "--dry-run"
+    ],
+    "warnings": [],
+    "rendered": "vertex reconcile --program  --dry-run"
+  },
+  {
+    "request": "what contradictions exist?",
+    "command": "reconcile",
+    "args": [
+      "--program",
+      "",
+      "--dry-run"
+    ],
+    "warnings": [],
+    "rendered": "vertex reconcile --program  --dry-run"
+  },
+  {
+    "request": "list editions",
+    "command": "list",
+    "args": [
+      "editions"
+    ],
+    "warnings": [],
+    "rendered": "vertex list editions"
+  },
+  {
+    "request": "what editions are available?",
+    "command": "list",
+    "args": [
+      "editions"
+    ],
+    "warnings": [],
+    "rendered": "vertex list editions"
+  },
+  {
+    "request": "list workstreams",
+    "command": "list",
+    "args": [
+      "workstreams",
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex list workstreams --edition "
+  },
+  {
+    "request": "which editions are configured?",
+    "command": "list",
+    "args": [
+      "editions"
+    ],
+    "warnings": [],
+    "rendered": "vertex list editions"
+  },
+  {
+    "request": "what workstreams are there?",
+    "command": "list",
+    "args": [
+      "workstreams",
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex list workstreams --edition "
+  },
+  {
+    "request": "list dris",
+    "command": "list",
+    "args": [
+      "dris",
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex list dris --edition "
+  },
+  {
+    "request": "show registry",
+    "command": "registry",
+    "args": [
+      "list",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex registry list --program "
+  },
+  {
+    "request": "which workstreams are configured?",
+    "command": "list",
+    "args": [
+      "workstreams",
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex list workstreams --edition "
+  },
+  {
+    "request": "who are the dris?",
+    "command": "list",
+    "args": [
+      "dris",
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex list dris --edition "
+  },
+  {
+    "request": "list milestones",
+    "command": "milestones",
+    "args": [
+      "list",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex milestones list --program "
+  },
+  {
+    "request": "who are the owners?",
+    "command": "list",
+    "args": [
+      "dris",
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex list dris --edition "
+  },
+  {
+    "request": "assess milestones",
+    "command": "milestones",
+    "args": [
+      "assess",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex milestones assess --program "
+  },
+  {
+    "request": "show milestone status",
+    "command": "milestones",
+    "args": [
+      "assess",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex milestones assess --program "
+  },
+  {
+    "request": "show me milestone status",
+    "command": "milestones",
+    "args": [
+      "assess",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex milestones assess --program "
+  },
+  {
+    "request": "what milestones are at risk?",
+    "command": "milestones",
+    "args": [
+      "assess",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex milestones assess --program "
+  },
+  {
+    "request": "review sections for issue 12",
+    "command": "review-sections",
+    "args": [
+      "show",
+      "--edition",
+      "",
+      "--issue",
+      "12"
+    ],
+    "warnings": [],
+    "rendered": "vertex review-sections show --edition  --issue 12"
+  },
+  {
+    "request": "dependency proposals",
+    "command": "dependencies",
+    "args": [
+      "list",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex dependencies list --program "
+  },
+  {
+    "request": "show dependencies",
+    "command": "dependencies",
+    "args": [
+      "list",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex dependencies list --program "
+  },
+  {
+    "request": "show me dependencies",
+    "command": "dependencies",
+    "args": [
+      "list",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex dependencies list --program "
+  },
+  {
+    "request": "show me the dependency proposals",
+    "command": "dependencies",
+    "args": [
+      "list",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex dependencies list --program "
+  },
+  {
+    "request": "give me the dependency proposals",
+    "command": "dependencies",
+    "args": [
+      "list",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex dependencies list --program "
+  },
+  {
+    "request": "what dependencies need review?",
+    "command": "dependencies",
+    "args": [
+      "list",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex dependencies list --program "
+  },
+  {
+    "request": "prep brief",
+    "command": "prep",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex prep --edition "
+  },
+  {
+    "request": "prepare prep brief",
+    "command": "prep",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex prep --edition "
+  },
+  {
+    "request": "prepare me for the meeting",
+    "command": "prep",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex prep --edition "
+  },
+  {
+    "request": "prep me for the meeting",
+    "command": "prep",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex prep --edition "
+  },
+  {
+    "request": "show me prep brief",
+    "command": "prep",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex prep --edition "
+  },
+  {
+    "request": "show me the prep brief",
+    "command": "prep",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex prep --edition "
+  },
+  {
+    "request": "give me prep brief",
+    "command": "prep",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex prep --edition "
+  },
+  {
+    "request": "give me the prep brief",
+    "command": "prep",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex prep --edition "
+  },
+  {
+    "request": "help me prepare for the meeting",
+    "command": "prep",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex prep --edition "
+  },
+  {
+    "request": "owner pack for priya",
+    "command": "owner-pack",
+    "args": [
+      "--program",
+      "",
+      "--owner",
+      "priya"
+    ],
+    "warnings": [],
+    "rendered": "vertex owner-pack --program  --owner priya"
+  },
+  {
+    "request": "show owner pack for Priya",
+    "command": "owner-pack",
+    "args": [
+      "--program",
+      "",
+      "--owner",
+      "priya"
+    ],
+    "warnings": [],
+    "rendered": "vertex owner-pack --program  --owner priya"
+  },
+  {
+    "request": "give me owner pack for jordan",
+    "command": "owner-pack",
+    "args": [
+      "--program",
+      "",
+      "--owner",
+      "jordan"
+    ],
+    "warnings": [],
+    "rendered": "vertex owner-pack --program  --owner jordan"
+  },
+  {
+    "request": "show me Priya's owner pack",
+    "command": "owner-pack",
+    "args": [
+      "--program",
+      "",
+      "--owner",
+      "priya"
+    ],
+    "warnings": [],
+    "rendered": "vertex owner-pack --program  --owner priya"
+  },
+  {
+    "request": "give me Jordan's owner pack",
+    "command": "owner-pack",
+    "args": [
+      "--program",
+      "",
+      "--owner",
+      "jordan"
+    ],
+    "warnings": [],
+    "rendered": "vertex owner-pack --program  --owner jordan"
+  },
+  {
+    "request": "show deck companion for issue 12",
+    "command": "deck-companion",
+    "args": [
+      "--edition",
+      "",
+      "--issue",
+      "12"
+    ],
+    "warnings": [],
+    "rendered": "vertex deck-companion --edition  --issue 12"
+  },
+  {
+    "request": "review proposals for issue 12",
+    "command": "review-proposals",
+    "args": [
+      "--edition",
+      "",
+      "--issue",
+      "12",
+      "--no-open"
+    ],
+    "warnings": [],
+    "rendered": "vertex review-proposals --edition  --issue 12 --no-open"
+  },
+  {
+    "request": "fleet health",
+    "command": "fleet",
+    "args": [],
+    "warnings": [],
+    "rendered": "vertex fleet"
+  },
+  {
+    "request": "how is the fleet doing?",
+    "command": "fleet",
+    "args": [],
+    "warnings": [],
+    "rendered": "vertex fleet"
+  },
+  {
+    "request": "how are all programs doing?",
+    "command": "fleet",
+    "args": [],
+    "warnings": [],
+    "rendered": "vertex fleet"
+  },
+  {
+    "request": "trust calibration",
+    "command": "trust",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex trust --program "
+  },
+  {
+    "request": "how much do we trust the system?",
+    "command": "trust",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex trust --program "
+  },
+  {
+    "request": "how much can we trust the system?",
+    "command": "trust",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex trust --program "
+  },
+  {
+    "request": "how trustworthy is the system?",
+    "command": "trust",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex trust --program "
+  },
+  {
+    "request": "how trustworthy are we?",
+    "command": "trust",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex trust --program "
+  },
+  {
+    "request": "prompt learning summary",
+    "command": "audit",
+    "args": [
+      "--program",
+      "",
+      "--prompt-learning-summary"
+    ],
+    "warnings": [],
+    "rendered": "vertex audit --program  --prompt-learning-summary"
+  },
+  {
+    "request": "what did we learn from prompts?",
+    "command": "audit",
+    "args": [
+      "--program",
+      "",
+      "--prompt-learning-summary"
+    ],
+    "warnings": [],
+    "rendered": "vertex audit --program  --prompt-learning-summary"
+  },
+  {
+    "request": "what have we learned from prompts?",
+    "command": "audit",
+    "args": [
+      "--program",
+      "",
+      "--prompt-learning-summary"
+    ],
+    "warnings": [],
+    "rendered": "vertex audit --program  --prompt-learning-summary"
+  },
+  {
+    "request": "preview decision debt follow-ups",
+    "command": "decisions",
+    "args": [
+      "aging",
+      "--program",
+      "",
+      "--apply",
+      "--dry-run"
+    ],
+    "warnings": [],
+    "rendered": "vertex decisions aging --program  --apply --dry-run"
+  },
+  {
+    "request": "apply decision debt follow-ups",
+    "command": "decisions",
+    "args": [
+      "aging",
+      "--program",
+      "",
+      "--apply"
+    ],
+    "warnings": [],
+    "rendered": "vertex decisions aging --program  --apply"
+  },
+  {
+    "request": "decision debt",
+    "command": "decisions",
+    "args": [
+      "aging",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex decisions aging --program "
+  },
+  {
+    "request": "show me pending decision follow-ups",
+    "command": "decisions",
+    "args": [
+      "aging",
+      "--program",
+      "",
+      "--apply",
+      "--dry-run"
+    ],
+    "warnings": [],
+    "rendered": "vertex decisions aging --program  --apply --dry-run"
+  },
+  {
+    "request": "preview pending 14-day decision nudges",
+    "command": "decisions",
+    "args": [
+      "aging",
+      "--program",
+      "",
+      "--apply",
+      "--dry-run"
+    ],
+    "warnings": [],
+    "rendered": "vertex decisions aging --program  --apply --dry-run"
+  },
+  {
+    "request": "apply all approved decision follow-ups",
+    "command": "decisions",
+    "args": [
+      "aging",
+      "--program",
+      "",
+      "--apply"
+    ],
+    "warnings": [],
+    "rendered": "vertex decisions aging --program  --apply"
+  },
+  {
+    "request": "what decisions are due?",
+    "command": "decisions",
+    "args": [
+      "aging",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex decisions aging --program "
+  },
+  {
+    "request": "which decisions need follow-up?",
+    "command": "decisions",
+    "args": [
+      "aging",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex decisions aging --program "
+  },
+  {
+    "request": "author salience",
+    "command": "salience",
+    "args": [
+      "show",
+      "--program",
+      "",
+      "--no-refresh"
+    ],
+    "warnings": [],
+    "rendered": "vertex salience show --program  --no-refresh"
+  },
+  {
+    "request": "how much attention are we paying?",
+    "command": "salience",
+    "args": [
+      "show",
+      "--program",
+      "",
+      "--no-refresh"
+    ],
+    "warnings": [],
+    "rendered": "vertex salience show --program  --no-refresh"
+  },
+  {
+    "request": "what changed since Friday on UD chunking?",
+    "command": "triage",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [
+      "Current CLI does not support conversational time-scoped status queries; routing the nearest full-command equivalent instead.",
+      "Current CLI does not support conversational topic filters for status queries; routing the nearest full-command equivalent instead."
+    ],
+    "rendered": "vertex triage --edition "
+  },
+  {
+    "request": "status",
+    "command": "status",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex status --edition "
+  },
+  {
+    "request": "our status",
+    "command": "status",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex status --edition "
+  },
+  {
+    "request": "status please",
+    "command": "status",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex status --edition "
+  },
+  {
+    "request": "give me status",
+    "command": "status",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex status --edition "
+  },
+  {
+    "request": "give us status",
+    "command": "status",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex status --edition "
+  },
+  {
+    "request": "give me the status",
+    "command": "status",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex status --edition "
+  },
+  {
+    "request": "give us the status",
+    "command": "status",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex status --edition "
+  },
+  {
+    "request": "show status",
+    "command": "status",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex status --edition "
+  },
+  {
+    "request": "show me the status",
+    "command": "status",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex status --edition "
+  },
+  {
+    "request": "show me our status",
+    "command": "status",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex status --edition "
+  },
+  {
+    "request": "what is the status?",
+    "command": "status",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex status --edition "
+  },
+  {
+    "request": "what's the status?",
+    "command": "status",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex status --edition "
+  },
+  {
+    "request": "what is our status?",
+    "command": "status",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex status --edition "
+  },
+  {
+    "request": "what's our status?",
+    "command": "status",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex status --edition "
+  },
+  {
+    "request": "how is the status?",
+    "command": "status",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex status --edition "
+  },
+  {
+    "request": "show me status",
+    "command": "status",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex status --edition "
+  },
+  {
+    "request": "show us status",
+    "command": "status",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex status --edition "
+  },
+  {
+    "request": "how's the status?",
+    "command": "status",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex status --edition "
+  },
+  {
+    "request": "show us the status",
+    "command": "status",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex status --edition "
+  },
+  {
+    "request": "how is our status?",
+    "command": "status",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex status --edition "
+  },
+  {
+    "request": "how's our status?",
+    "command": "status",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex status --edition "
+  },
+  {
+    "request": "give me a status update",
+    "command": "status",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex status --edition "
+  },
+  {
+    "request": "where do we stand?",
+    "command": "status",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex status --edition "
+  },
+  {
+    "request": "brief me",
+    "command": "brief",
+    "args": [
+      "--program",
+      "",
+      "--today"
+    ],
+    "warnings": [],
+    "rendered": "vertex brief --program  --today"
+  },
+  {
+    "request": "give me today's brief",
+    "command": "brief",
+    "args": [
+      "--program",
+      "",
+      "--today"
+    ],
+    "warnings": [],
+    "rendered": "vertex brief --program  --today"
+  },
+  {
+    "request": "what's my brief today?",
+    "command": "brief",
+    "args": [
+      "--program",
+      "",
+      "--today"
+    ],
+    "warnings": [],
+    "rendered": "vertex brief --program  --today"
+  },
+  {
+    "request": "brief me for today",
+    "command": "brief",
+    "args": [
+      "--program",
+      "",
+      "--today"
+    ],
+    "warnings": [],
+    "rendered": "vertex brief --program  --today"
+  },
+  {
+    "request": "next",
+    "command": "next",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex next --edition "
+  },
+  {
+    "request": "what should i do",
+    "command": "next",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex next --edition "
+  },
+  {
+    "request": "what should i do next?",
+    "command": "next",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex next --edition "
+  },
+  {
+    "request": "what can i do next?",
+    "command": "next",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex next --edition "
+  },
+  {
+    "request": "what's next?",
+    "command": "next",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex next --edition "
+  },
+  {
+    "request": "what is next?",
+    "command": "next",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex next --edition "
+  },
+  {
+    "request": "what do we do next?",
+    "command": "next",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex next --edition "
+  },
+  {
+    "request": "what should we do next?",
+    "command": "next",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex next --edition "
+  },
+  {
+    "request": "what should i focus on?",
+    "command": "next",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex next --edition "
+  },
+  {
+    "request": "what should i work on next?",
+    "command": "next",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex next --edition "
+  },
+  {
+    "request": "what do i do now?",
+    "command": "next",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex next --edition "
+  },
+  {
+    "request": "what's my next move?",
+    "command": "next",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex next --edition "
+  },
+  {
+    "request": "next move",
+    "command": "next",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex next --edition "
+  },
+  {
+    "request": "launch readiness",
+    "command": "readiness",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex readiness --program "
+  },
+  {
+    "request": "are we ready?",
+    "command": "readiness",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex readiness --program "
+  },
+  {
+    "request": "are we ready to launch?",
+    "command": "readiness",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex readiness --program "
+  },
+  {
+    "request": "how ready are we?",
+    "command": "readiness",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex readiness --program "
+  },
+  {
+    "request": "ready for launch?",
+    "command": "readiness",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex readiness --program "
+  },
+  {
+    "request": "ready for the launch?",
+    "command": "readiness",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex readiness --program "
+  },
+  {
+    "request": "how ready is launch?",
+    "command": "readiness",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex readiness --program "
+  },
+  {
+    "request": "how ready is the launch?",
+    "command": "readiness",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex readiness --program "
+  },
+  {
+    "request": "am i ready for release?",
+    "command": "readiness",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex readiness --program "
+  },
+  {
+    "request": "ready for the release?",
+    "command": "readiness",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex readiness --program "
+  },
+  {
+    "request": "how ready is the release?",
+    "command": "readiness",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex readiness --program "
+  },
+  {
+    "request": "risk register",
+    "command": "risks",
+    "args": [
+      "list",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex risks list --program "
+  },
+  {
+    "request": "show me risks",
+    "command": "risks",
+    "args": [
+      "list",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex risks list --program "
+  },
+  {
+    "request": "what are the top risks?",
+    "command": "risks",
+    "args": [
+      "list",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex risks list --program "
+  },
+  {
+    "request": "what risks are open?",
+    "command": "risks",
+    "args": [
+      "list",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex risks list --program "
+  },
+  {
+    "request": "show me current risks",
+    "command": "risks",
+    "args": [
+      "list",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex risks list --program "
+  },
+  {
+    "request": "which risks need attention?",
+    "command": "risks",
+    "args": [
+      "list",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex risks list --program "
+  },
+  {
+    "request": "show assumptions",
+    "command": "assumptions",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex assumptions --program "
+  },
+  {
+    "request": "show me assumptions",
+    "command": "assumptions",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex assumptions --program "
+  },
+  {
+    "request": "give me assumptions",
+    "command": "assumptions",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex assumptions --program "
+  },
+  {
+    "request": "what assumptions are open?",
+    "command": "assumptions",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex assumptions --program "
+  },
+  {
+    "request": "current assumptions",
+    "command": "assumptions",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex assumptions --program "
+  },
+  {
+    "request": "claims",
+    "command": "claims",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex claims --program "
+  },
+  {
+    "request": "show me claims",
+    "command": "claims",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex claims --program "
+  },
+  {
+    "request": "calibration",
+    "command": "calibration",
+    "args": [
+      "report",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex calibration report --program "
+  },
+  {
+    "request": "how calibrated are we?",
+    "command": "calibration",
+    "args": [
+      "report",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex calibration report --program "
+  },
+  {
+    "request": "forecast accuracy",
+    "command": "calibration",
+    "args": [
+      "report",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex calibration report --program "
+  },
+  {
+    "request": "show forecast accuracy",
+    "command": "calibration",
+    "args": [
+      "report",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex calibration report --program "
+  },
+  {
+    "request": "show me forecast accuracy",
+    "command": "calibration",
+    "args": [
+      "report",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex calibration report --program "
+  },
+  {
+    "request": "how accurate are our forecasts?",
+    "command": "calibration",
+    "args": [
+      "report",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex calibration report --program "
+  },
+  {
+    "request": "signals",
+    "command": "signals",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex signals --program "
+  },
+  {
+    "request": "show me signals",
+    "command": "signals",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex signals --program "
+  },
+  {
+    "request": "show me pending signals",
+    "command": "signals",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex signals --program "
+  },
+  {
+    "request": "show actions",
+    "command": "actions",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex actions --program "
+  },
+  {
+    "request": "show me actions",
+    "command": "actions",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex actions --program "
+  },
+  {
+    "request": "vitality",
+    "command": "vitality",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex vitality --program "
+  },
+  {
+    "request": "how healthy is the program?",
+    "command": "vitality",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex vitality --program "
+  },
+  {
+    "request": "how healthy are we?",
+    "command": "vitality",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex vitality --program "
+  },
+  {
+    "request": "show me program health",
+    "command": "vitality",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex vitality --program "
+  },
+  {
+    "request": "how fresh is the program?",
+    "command": "vitality",
+    "args": [
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex vitality --program "
+  },
+  {
+    "request": "ado status",
+    "command": "ado",
+    "args": [
+      "status",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex ado status --program "
+  },
+  {
+    "request": "ado reconcile",
+    "command": "ado",
+    "args": [
+      "reconcile",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex ado reconcile --program "
+  },
+  {
+    "request": "storage stats",
+    "command": "storage",
+    "args": [
+      "stats",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex storage stats --program "
+  },
+  {
+    "request": "storage check",
+    "command": "storage",
+    "args": [
+      "check",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex storage check --program "
+  },
+  {
+    "request": "how much storage do we have?",
+    "command": "storage",
+    "args": [
+      "stats",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex storage stats --program "
+  },
+  {
+    "request": "how is storage doing?",
+    "command": "storage",
+    "args": [
+      "check",
+      "--program",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex storage check --program "
+  },
+  {
+    "request": "backfill using hybrid",
+    "command": "backfill",
+    "args": [
+      "--edition",
+      "",
+      "--source",
+      "hybrid",
+      "--dry-run"
+    ],
+    "warnings": [],
+    "rendered": "vertex backfill --edition  --source hybrid --dry-run"
+  },
+  {
+    "request": "freshness",
+    "command": "freshness",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex freshness --edition "
+  },
+  {
+    "request": "show me freshness",
+    "command": "freshness",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex freshness --edition "
+  },
+  {
+    "request": "how fresh is the data?",
+    "command": "freshness",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex freshness --edition "
+  },
+  {
+    "request": "how current is the data?",
+    "command": "freshness",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex freshness --edition "
+  },
+  {
+    "request": "health check",
+    "command": "doctor",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex doctor --edition "
+  },
+  {
+    "request": "check health",
+    "command": "doctor",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex doctor --edition "
+  },
+  {
+    "request": "check the health",
+    "command": "doctor",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex doctor --edition "
+  },
+  {
+    "request": "are things healthy?",
+    "command": "doctor",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex doctor --edition "
+  },
+  {
+    "request": "is everything healthy?",
+    "command": "doctor",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex doctor --edition "
+  },
+  {
+    "request": "how healthy are things?",
+    "command": "doctor",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex doctor --edition "
+  },
+  {
+    "request": "how healthy is everything?",
+    "command": "doctor",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex doctor --edition "
+  },
+  {
+    "request": "is the edition healthy?",
+    "command": "doctor",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex doctor --edition "
+  },
+  {
+    "request": "how healthy is the edition?",
+    "command": "doctor",
+    "args": [
+      "--edition",
+      ""
+    ],
+    "warnings": [],
+    "rendered": "vertex doctor --edition "
+  }
+]

@@ -64,9 +64,13 @@ def record_optional_source_ingestion_runs(
     for source_ref, source_names in source_specs:
         error_message = next(
             (
-                detail.message
+                "Analytics gather failed; see gather diagnostics."
+                if source_ref == "ado/analytics" and detail.source.strip().lower() == "analytics"
+                else detail.message
                 for detail in integration_error_details
                 if detail.source.strip().lower() == source_ref
+                or (source_ref == "ado/sprint" and detail.source.strip().lower() == "sprints")
+                or (source_ref == "ado/analytics" and detail.source.strip().lower() == "analytics")
             ),
             None,
         )

@@ -28,7 +28,7 @@ def _record(**identity: Any) -> dict[str, Any]:
 
 
 class Bridge:
-    def __init__(self, records: list[dict[str, Any]], body: Any = None) -> None:
+    def __init__(self, records: list[Any], body: Any = None) -> None:
         self.records = records
         self.body = {"response": BODY} if body is None else body
         self.questions: list[str] = []
@@ -73,6 +73,10 @@ def test_provisional_identity_never_enters_rich_extraction_or_cache(
     ({"conversationId": "semantic:preview", "threadId": " native-thread "}, "native-thread"),
     ({"conversationId": "TURN12RESULT3", "threadId": "turn1search2"}, None),
     ({"conversationId": " native-conversation ", "threadId": "native-thread"}, "native-conversation"),
+    ({"conversationId": "http://[", "threadId": "native-thread"}, "native-thread"),
+    ({"conversationId": "http://["}, None),
+    ({"threadId": "https://example.invalid/?threadId=semantic%3Apreview", "id": "native-message"}, "native-message"),
+    ({"threadId": "https://example.invalid/?threadId=native-thread"}, "native-thread"),
     ({"threadId": "native-thread"}, "native-thread"),
     ({"id": "native-message"}, "native-message"),
 ])
@@ -161,7 +165,7 @@ def test_actual_enrich_caller_reports_bounded_private_safe_identity_rejections(
         records.append(_record(id="native-message", conversationId="native-thread"))
     bridge = Bridge(records)
     monkeypatch.setattr("src.commands.enrich._workiq_thread_freshness_path", lambda **_: tmp_path / "freshness.json")
-    evidence = _extract_per_thread_evidence(
+    evidence, has_rejections = _extract_per_thread_evidence(
         bridge=bridge, entry={"id": "synthetic", "name": "Synthetic lane"},
         since_dt=datetime(2026, 6, 1, tzinfo=timezone.utc),
         as_of=datetime(2026, 6, 21, tzinfo=timezone.utc),
@@ -176,6 +180,7 @@ def test_actual_enrich_caller_reports_bounded_private_safe_identity_rejections(
     assert "turn1search2" not in stderr
     assert "Synthetic private subject" not in stderr
     assert "fixture@example.net" not in stderr
+    assert has_rejections is True
     assert len(evidence) == int(include_native)
     if include_native:
         assert evidence[0].source_refs[0].canonical_id == "native-thread"
@@ -202,7 +207,7 @@ def test_enrich_preserves_empty_lane_and_unparseable_extraction_behavior(
             per_thread_top_k=8, max_calls_per_cycle=10,
             max_wall_clock_seconds=30, per_thread_one_hop=True,
         ), edition="synthetic", programs_root=tmp_path,
-    ) == ()
+    ) == ((), False)
     assert capsys.readouterr().err == ""
 
 
@@ -250,3 +255,231 @@ def test_enrich_cli_retains_identity_warning_and_valid_partial_results(
     assert "turn1search2" not in result.output
     assert "Synthetic private subject" not in result.output
     assert "fixture@example.net" not in result.output
+
+
+@pytest.mark.parametrize("max_calls", [1, 10])
+def test_rich_retrieval_preserves_time_rejections_and_valid_partial_results(
+    max_calls: int, tmp_path: Path,
+) -> None:
+    missing = _record(id="private-missing")
+    missing.pop("receivedDateTime")
+    invalid = _record(id="private-invalid", receivedDateTime="invalid")
+    outside = _record(id="outside", receivedDateTime="2026-05-01T00:00:00Z")
+    bridge = Bridge([missing, invalid, outside, _record(id="valid", conversationId="valid-thread")])
+    cache = tmp_path / "freshness.json"
+
+    result = _retrieve(bridge, cache_path=cache, max_calls=max_calls)
+
+    assert result.rejected_source_time_count == 2
+    assert result.enumeration_count == 1
+    assert result.calls_made == (1 if max_calls == 1 else 2)
+    assert len(result.enrichments) == (0 if max_calls == 1 else 1)
+    assert set(json.loads(cache.read_text(encoding="utf-8"))) == (set() if max_calls == 1 else {"valid-thread"})
+    assert all("private-missing" not in question and "private-invalid" not in question for question in bridge.questions)
+
+
+@pytest.mark.parametrize("max_calls, expected_rejected", [(1, 1), (10, 2)])
+def test_rich_retrieval_combines_disjoint_identity_rejections(
+    max_calls: int, expected_rejected: int, tmp_path: Path,
+) -> None:
+    bridge = Bridge([
+        {"subject": "Private missing sender", "receivedDateTime": "2026-06-20T10:00:00Z"},
+        _record(conversationId="turn1search2"),
+        _record(id="valid", conversationId="valid-thread"),
+    ])
+    cache = tmp_path / "freshness.json"
+
+    result = _retrieve(bridge, cache_path=cache, max_calls=max_calls)
+
+    assert result.rejected_identity_count == expected_rejected
+    assert result.enumeration_count == 2
+    assert result.calls_made == (1 if max_calls == 1 else 2)
+    assert len(result.enrichments) == (0 if max_calls == 1 else 1)
+    assert set(json.loads(cache.read_text(encoding="utf-8"))) == (set() if max_calls == 1 else {"valid-thread"})
+    assert all("Private missing sender" not in question for question in bridge.questions)
+
+
+def test_rich_retrieval_uses_native_identity_hidden_by_transient_conversation(tmp_path: Path) -> None:
+    bridge = Bridge([{
+        "conversationId": "turn1search2", "id": "native-message",
+        "receivedDateTime": "2026-06-20T10:00:00Z",
+    }])
+    cache = tmp_path / "freshness.json"
+
+    result = _retrieve(bridge, cache_path=cache)
+
+    assert result.rejected_identity_count == 0
+    assert result.enumeration_count == 1 and result.calls_made == 2
+    assert len(result.enrichments) == 1
+    assert result.enrichments[0].source_id == "native-message"
+    assert set(json.loads(cache.read_text(encoding="utf-8"))) == {"native-message"}
+    assert all("turn1search2" not in question for question in bridge.questions)
+
+
+@pytest.mark.parametrize("identity", [
+    {"conversationId": "http://["},
+    {"conversationId": "semantic:preview", "threadId": "http://["},
+    {"conversationId": "semantic:preview", "threadId": "https://example.invalid/?threadId=semantic%3Apreview"},
+])
+@pytest.mark.parametrize("include_native", [False, True])
+def test_rich_retrieval_rejects_malformed_and_encoded_preview_fallbacks(
+    identity: dict[str, str], include_native: bool, tmp_path: Path,
+) -> None:
+    bridge = Bridge([_record(**identity)] + (
+        [_record(id="valid-message", conversationId="valid-thread")] if include_native else []
+    ))
+    cache = tmp_path / "freshness.json"
+
+    result = _retrieve(bridge, cache_path=cache)
+
+    assert len(result.enrichments) == int(include_native)
+    assert result.rejected_identity_count == 1
+    assert result.calls_made == len(bridge.questions) == 1 + int(include_native)
+    assert set(json.loads(cache.read_text(encoding="utf-8"))) == ({"valid-thread"} if include_native else set())
+    if include_native:
+        assert result.enrichments[0].source_id == "valid-thread"
+        assert "semantic:preview" not in bridge.questions[1]
+
+
+@pytest.mark.parametrize("payload", [None, {}, {"emails": None}, {"response": "Private malformed response"}])
+def test_rich_retrieval_distinguishes_unusable_structured_responses(payload: Any, tmp_path: Path) -> None:
+    bridge = Bridge([])
+    bridge.ask_workiq = lambda question, **kwargs: payload
+    result = _retrieve(bridge, cache_path=tmp_path / "freshness.json")
+    assert result.response_usable is False
+    assert result.enrichments == ()
+    assert result.calls_made == 1
+    assert result.rejected_identity_count == result.rejected_source_time_count == 0
+    assert "Private malformed response" not in repr(result)
+
+
+@pytest.mark.parametrize("include_native", [False, True])
+@pytest.mark.parametrize("max_calls", [1, 10])
+def test_rich_retrieval_preserves_invalid_record_counts_and_valid_partial_evidence(
+    include_native: bool, max_calls: int, tmp_path: Path,
+) -> None:
+    records: list[Any] = [
+        "Private malformed record",
+        _record(id="private-control", subject="Private unsafe \x1b[2J content"),
+        _record(id="private-url", webUrl="https://untrusted.invalid/private"),
+    ]
+    if include_native:
+        records.append(_record(id="valid-message", conversationId="valid-thread"))
+    bridge = Bridge(records)
+
+    cache = tmp_path / "freshness.json"
+    result = _retrieve(bridge, cache_path=cache, max_calls=max_calls)
+
+    assert result.rejected_invalid_record_count == 3
+    assert result.rejected_identity_count == result.rejected_source_time_count == 0
+    assert result.response_usable is True
+    expected_evidence = int(include_native and max_calls > 1)
+    assert result.enumeration_count == int(include_native)
+    assert len(result.enrichments) == expected_evidence
+    assert result.calls_made == len(bridge.questions) == 1 + expected_evidence
+    assert set(json.loads(cache.read_text(encoding="utf-8"))) == ({"valid-thread"} if expected_evidence else set())
+    for private_value in ("Private malformed record", "Private unsafe", "private-control", "private-url", "untrusted.invalid"):
+        assert private_value not in repr(result) + repr(bridge.questions)
+
+
+@pytest.mark.parametrize(
+    ("kind", "include_native"),
+    [(kind, include) for kind in (
+        "missing_time", "invalid_time", "identity", "identity_missing", "empty", "outside",
+        "invalid_shape", "unsafe_control", "unsafe_url",
+    )
+     for include in (False, True)] + [("unavailable", False), ("malformed", False)],
+)
+def test_enrich_cli_does_not_record_rejected_only_results_as_zero_yield(
+    kind: str, include_native: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import typer
+    from typer.testing import CliRunner
+    import src.commands.enrich as command
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> datetime:
+            return datetime(2026, 6, 21, tzinfo=timezone.utc)
+
+    rejected: Any = _record(id="private-rejected")
+    if kind == "missing_time":
+        rejected.pop("receivedDateTime")
+    elif kind == "invalid_time":
+        rejected["receivedDateTime"] = "invalid"
+    elif kind == "identity":
+        rejected = _record(conversationId="turn1search2")
+    elif kind == "identity_missing":
+        rejected = {"subject": "Private missing sender", "receivedDateTime": "2026-06-20T10:00:00Z"}
+    elif kind == "invalid_shape":
+        rejected = "Private malformed record"
+    elif kind == "unsafe_control":
+        rejected = _record(id="private-control", subject="Private unsafe \x1b[2J content")
+    elif kind == "unsafe_url":
+        rejected = _record(id="private-url", webUrl="https://untrusted.invalid/private")
+    elif kind == "outside":
+        rejected["receivedDateTime"] = "2026-05-01T00:00:00Z"
+    records = [] if kind == "empty" else [rejected]
+    if include_native:
+        records.append(_record(id="valid-message", conversationId="valid-thread"))
+    bridge = Bridge(records)
+    if kind == "unavailable":
+        monkeypatch.setattr(bridge, "ask_workiq", lambda *args, **kwargs: None)
+    elif kind == "malformed":
+        monkeypatch.setattr(bridge, "ask_workiq", lambda *args, **kwargs: {"response": "Private malformed response"})
+    retrieval_config = SimpleNamespace(
+        per_thread_extraction=True, per_thread_top_k=8, max_calls_per_cycle=10,
+        max_wall_clock_seconds=30, per_thread_one_hop=False,
+    )
+    resolved = SimpleNamespace(
+        paths=SimpleNamespace(program_id="synthetic"),
+        program=SimpleNamespace(m365=SimpleNamespace(retrieval=retrieval_config)),
+    )
+    state_path = tmp_path / "lane-state.json"
+    monkeypatch.setattr(command, "_PROGRAMS_ROOT", tmp_path)
+    monkeypatch.setattr(command, "_workiq_lane_state_path", lambda **_: state_path)
+    command._record_workiq_lane_result(
+        lane_id="synthetic", edition="synthetic", program_id="synthetic", programs_root=tmp_path,
+        observed_yield=2, as_of=datetime(2026, 6, 20, tzinfo=timezone.utc), last_result="previous",
+    )
+    previous_state = state_path.read_bytes()
+    monkeypatch.setattr(bridge, "probe", lambda: SimpleNamespace(available=True, has_workiq=True), raising=False)
+    monkeypatch.setattr("src.m365.agency_bridge.AgencyBridge", lambda **_: bridge)
+    monkeypatch.setattr(command, "resolve_edition", lambda *_, **__: resolved)
+    monkeypatch.setattr(command, "load_program_context", lambda *_, **__: None)
+    monkeypatch.setattr(command, "_load_registry_lanes", lambda *_: [{"id": "synthetic", "name": "Synthetic lane"}])
+    monkeypatch.setattr(command, "_build_workiq_breaker", lambda **_: None)
+    monkeypatch.setattr(command, "_build_workiq_cost_guard", lambda **_: None)
+    monkeypatch.setattr(command, "_workiq_thread_freshness_path", lambda **_: tmp_path / "freshness.json")
+    monkeypatch.setattr(command, "datetime", Clock)
+    app = typer.Typer()
+    app.command()(command.enrich_command)
+
+    result = CliRunner().invoke(app, ["--edition", "synthetic", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    if not include_native and kind in {
+        "missing_time", "invalid_time", "identity", "identity_missing", "unavailable", "malformed",
+        "invalid_shape", "unsafe_control", "unsafe_url",
+    }:
+        assert state_path.read_bytes() == previous_state
+    else:
+        state = json.loads(state_path.read_text(encoding="utf-8"))["lanes"]["synthetic"]
+        assert state["last_observed_yield"] == int(include_native)
+    if kind in {"missing_time", "invalid_time"}:
+        assert "missing or invalid source time" in result.stderr
+    elif kind in {"identity", "identity_missing"}:
+        assert "stable source identity" in result.stderr
+    elif kind in {"unavailable", "malformed"}:
+        assert "structured discovery response unavailable or invalid" in result.stderr
+    elif kind in {"invalid_shape", "unsafe_control", "unsafe_url"}:
+        assert "1 inspected record occurrence(s) rejected for malformed or unsafe content" in result.stderr
+    else:
+        assert result.stderr == ""
+    assert f"sources={int(include_native)}" in result.stdout
+    for private_value in (
+        "private-rejected", "turn1search2", "Synthetic private subject", "fixture@example.net",
+        "Private malformed response", "Private missing sender", "Private malformed record",
+        "Private unsafe", "private-control", "private-url", "untrusted.invalid",
+    ):
+        assert private_value not in result.output

@@ -6,8 +6,6 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
-
 from src.ai.draft_reviewer import review_draft
 from src.ai.blurb_generator import generate_workstream_blurb
 from src.ai.exec_summary_drafter import draft_exec_summary
@@ -19,7 +17,7 @@ from src.core.models import AttributionTier, Comment, Confidence, DeltaKind, Del
 from src.core.models import ProgramContext, ReportData, ReviewSection, ReviewState, ReviewStatus, RiskLevel, RunManifest, Snapshot, SnapshotItem, WorkItem
 
 
-GOLDEN_DIR = Path(__file__).resolve().parent / "snapshots"
+GOLDEN_DIR = Path(__file__).resolve().parent / "public_snapshots"
 FROZEN_NOW = datetime(2026, 5, 6, 10, 0, tzinfo=timezone.utc)
 EDITION_NAME = "acme_weekly"
 
@@ -55,11 +53,10 @@ def _save_golden(name: str, content: str) -> None:
 
 def _compare_with_golden(name: str, actual: str, update: bool) -> None:
     golden = _load_golden(name)
-    if update or golden is None:
+    if update:
         _save_golden(name, actual)
-        if golden is None:
-            pytest.skip(f"Created new golden file: {name}.golden")
         return
+    assert golden is not None, f"Missing public golden baseline: {name}.golden; regenerate explicitly with --update-golden."
 
     if actual != golden:
         diff = "".join(

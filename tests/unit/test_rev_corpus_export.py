@@ -55,7 +55,7 @@ def _run_one_cycle(program_id: str, programs_root: Path) -> None:
         immutable_id="imm-export-1",
     )
     graph = FakeRevGraphClient((msg,))
-    mailbox = MailboxContext(tenant_id="tenant-export", principal_mailbox="ved@ms.com", container="inbox")
+    mailbox = MailboxContext(tenant_id="tenant-export", principal_mailbox="reviewer@revision.example", container="inbox")
     deps = RevPipelineDeps(
         enumerator=CollectionSearchEnumerator(graph, mailbox),
         hydrator=MailHydrator(graph, mailbox),
@@ -70,7 +70,7 @@ def _run_one_cycle(program_id: str, programs_root: Path) -> None:
         deps=deps,
         profile=RevRetrievalProfile(profile=REV_PROFILE_SEARCH_HYDRATE),
         mailbox_tenant_id="tenant-export",
-        mailbox_principal="ved@ms.com",
+        mailbox_principal="reviewer@revision.example",
         mailbox_container="inbox",
         correlation_id="export-test",
         programs_root=programs_root,
@@ -100,13 +100,13 @@ class TestExportCorpus:
         program_id = "p-export-1"
         _run_one_cycle(program_id, tmp_path)
         candidate = load_pending_candidates(program_id, programs_root=tmp_path)[0]
-        # Seed a triage decision with a real actor identity.
+        # Seed a triage decision with a synthetic actor identity.
         append_triage_decision(
             CandidateDecisionRecord(
                 candidate_id=candidate.candidate_id,
                 kind="approved",
                 decided_at=NOW,
-                triage_actor="ved@ms.com",
+                triage_actor="reviewer@revision.example",
                 reason="looks good",
             ),
             program_id=program_id,
@@ -145,7 +145,7 @@ class TestExportCorpus:
         # Triage: actor redacted, candidate_id kept.
         dec = json.loads((out / "triage_decisions.jsonl").read_text(encoding="utf-8").splitlines()[0])
         assert dec["triage_actor"].startswith("redacted:")
-        assert "ved@ms.com" not in dec["triage_actor"]
+        assert "reviewer@revision.example" not in dec["triage_actor"]
         assert dec["candidate_id"] == candidate.candidate_id
         assert dec["kind"] == "approved"
 
@@ -161,7 +161,7 @@ class TestExportCorpus:
         assert vrec["excerpt_text"]  # raw content kept (corpus value)
         assert vrec["vault_hash"].startswith("sha256:")
         meta = vrec["metadata"]
-        assert "ved@ms.com" not in json.dumps(meta)
+        assert "reviewer@revision.example" not in json.dumps(meta)
         assert "tenant-export" not in json.dumps(meta)
 
         # Manifest.

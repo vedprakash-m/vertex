@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 from datetime import datetime, timezone
 import json
 import os
@@ -676,14 +677,12 @@ def _render_manifest_sor_consistency_check(
     latest_confirmed_issue_number: int | None,
 ) -> DoctorCheck:
     """Track K (fix-data-flow.md §6.11): compares the per-issue render
-    manifest's recorded ``family_read_paths`` (which read path each family
-    actually used at render time, written by `validation_stage.py`'s
-    `_build_family_read_paths_metadata`) against what `resolve_family_sor_mode`
-    resolves to *right now* for the same families. A mismatch means either
-    the SoR config changed after that issue rendered (expected, informational)
-    or — more concerning — a family's stage silently isn't honoring the
-    declared SoR mode at all (the exact class of drift PS-11/PS-14's own
-    manual verification took hours to notice).
+    manifest's recorded ``family_read_paths`` against what
+    `resolve_family_sor_mode` resolves to *right now* for the same families.
+    These paths are generally selector-derived; milestone rollback and
+    nonempty risk rollback are recorded separately. A mismatch may reflect
+    a later SoR config change, an audited rollback, or a family stage not
+    honoring the declared mode.
     """
     if latest_confirmed_issue_number is None:
         return DoctorCheck(
@@ -1042,7 +1041,7 @@ def _count_fact_store_rows(db_path: Path) -> int:
     if not db_path.exists():
         return 0
     try:
-        with sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True) as connection:
+        with closing(sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)) as connection, connection:
             table_row = connection.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'program_fact_revisions'",
             ).fetchone()
@@ -1100,7 +1099,7 @@ def _sqlite_storage_check(
     location_warning = expected_location is not None and not _path_is_within(db_path, expected_location)
 
     try:
-        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as connection:
+        with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as connection, connection:
             journal_mode_row = connection.execute("PRAGMA journal_mode").fetchone()
             journal_mode = str(journal_mode_row[0]).lower() if journal_mode_row else "unknown"
             integrity_rows = connection.execute("PRAGMA integrity_check").fetchall()

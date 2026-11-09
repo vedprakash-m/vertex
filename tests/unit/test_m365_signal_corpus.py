@@ -1,10 +1,77 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timezone
 
 from src.core.m365_registry_store import M365RegistryArtifact, M365RoutingFeedbackEvent
-from src.core.m365_signal_corpus import build_m365_corpus_texts_by_workstream, build_m365_reassign_corrections_by_workstream, build_m365_rejected_texts_by_workstream
-from src.core.models_v2 import Workstream
+from src.core.m365_signal_corpus import (
+    build_m365_corpus_texts_by_workstream,
+    build_m365_reassign_corrections_by_workstream,
+    build_m365_rejected_texts_by_workstream,
+    load_approved_m365_corpus_signals,
+)
+from src.core.models import Confidence
+from src.core.models_v2 import Signal, Workstream
+
+
+def test_preview_only_workiq_signal_is_excluded_from_routing_corpus() -> None:
+    preview = Signal(
+        id="preview",
+        timestamp=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        source="workiq/email",
+        program_id="acme",
+        workstream_id="acme",
+        workstream_ids=("acme",),
+        entity_refs=(),
+        text="Provisional preview text",
+        raw_ref="workiq:email:semantic:preview",
+        confidence=Confidence.MEDIUM,
+        metadata={
+            "message_id": "semantic:preview",
+            "native_message_id": "semantic:preview",
+            "source_identity_kind": "semantic_preview",
+        },
+    )
+    native = replace(preview, id="native", text="Native source text", metadata={})
+
+    corpus = build_m365_corpus_texts_by_workstream(
+        workstreams=(Workstream(id="acme", name="Store rollout"),),
+        registry_artifacts=(),
+        feedback_events=(),
+        approved_signals=(preview, native),
+    )
+
+    assert corpus == {"acme": ("Native source text",)}
+
+
+def test_load_approved_m365_corpus_signals_excludes_legacy_preview_identity(
+    monkeypatch,
+) -> None:
+    preview = Signal(
+        id="preview",
+        timestamp=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        source="workiq/email",
+        program_id="acme",
+        workstream_id="acme",
+        entity_refs=(),
+        text="Provisional preview text",
+        raw_ref="workiq:email:semantic:preview",
+        confidence=Confidence.MEDIUM,
+        metadata={"message_id": "semantic:preview", "native_message_id": "semantic:preview"},
+    )
+    native = replace(preview, id="native", text="Native source text", metadata={"native_message_id": "native"})
+    store = type("Store", (), {
+        "read_reviews": lambda self, program_id: {},
+        "read": lambda self, program_id, start, end: (preview, native),
+    })()
+    monkeypatch.setattr("src.core.m365_signal_corpus.build_signal_store_for_program_id", lambda *args, **kwargs: store)
+    monkeypatch.setattr("src.core.m365_signal_corpus.signal_is_approved_for_evidence", lambda signal, reviews: True)
+
+    signals = load_approved_m365_corpus_signals(
+        "acme", as_of=datetime(2026, 6, 2, tzinfo=timezone.utc),
+    )
+
+    assert tuple(signal.id for signal in signals) == ("native",)
 
 
 def test_build_m365_corpus_texts_by_workstream_ignores_stale_feedback() -> None:

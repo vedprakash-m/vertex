@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from functools import partial
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
+from src.core.context_gap_store import append_context_gap, load_context_gaps
 from src.core.nudge_models import (
     AssessedDeadline,
     ExplicitActionDue,
@@ -25,6 +28,14 @@ from src.core.nudge_resolution import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def isolate_context_gap_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "src.core.nudge_resolution.append_context_gap",
+        partial(append_context_gap, programs_root=tmp_path / "programs"),
+    )
 
 
 def _make_config(
@@ -136,7 +147,7 @@ class TestResolveSectionsNoReality:
         assert assessed.resolution_status == "explicit"
         assert assessed.date == date(2026, 7, 1)
 
-    def test_milestone_deadline_no_reality_returns_unavailable(self):
+    def test_milestone_deadline_no_reality_returns_unavailable(self, tmp_path: Path):
         sec = _make_section(deadline_milestone_id="m6-ramp")
         config = _make_config(sections=(sec,))
         result = resolve_sections(config, None, program_id="nova")
@@ -144,6 +155,10 @@ class TestResolveSectionsNoReality:
         assert assessed.resolution_status == "unavailable"
         assert assessed.authority == "none"
         assert assessed.date is None
+        gaps = load_context_gaps("nova", programs_root=tmp_path / "programs")
+        assert [(gap.feature, gap.lane, gap.field) for gap in gaps] == [
+            ("nudge", "test", "deadline_milestone_id"),
+        ]
 
     def test_no_deadline_returns_none(self):
         sec = _make_section()

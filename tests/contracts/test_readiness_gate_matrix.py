@@ -3,7 +3,12 @@ from pathlib import Path
 
 import pytest
 
-from src.core.readiness_engine import DEFAULT_DIMENSION_ORDER, DEFAULT_READINESS_DIMENSIONS, load_readiness_config
+from src.core.readiness_engine import (
+    DEFAULT_DIMENSION_ORDER,
+    DEFAULT_READINESS_DIMENSIONS,
+    get_readiness_config_path,
+    load_readiness_config,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -12,7 +17,10 @@ PROGRAMS_ROOT = REPO_ROOT / "programs"
 # is tracked (rev. 326), so "any(iterdir())" is always True even on the fresh-clone CI.
 from tests.support.data_guards import live_program_data_available
 
-_PROGRAMS_EXIST = live_program_data_available()
+_PROGRAMS_EXIST = (
+    live_program_data_available()
+    and get_readiness_config_path("acme", programs_root=PROGRAMS_ROOT).is_file()
+)
 STANDARD_RD_GATES = tuple(f"QG-RD{index}" for index in range(1, 9))
 
 

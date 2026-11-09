@@ -4,7 +4,7 @@ from pathlib import Path
 
 import typer
 
-from src.ai.intent_router import IntentRouter, IntentRouterError, RoutedInvocation, render_invocation
+from src.ai.intent_router import IntentRouter, IntentRouterError, RoutedInvocation, _resolve_ask_edition, render_invocation
 from src.commands.ask_intents import (
     NAMED_INTENTS,
     citation_only_fallback,
@@ -13,6 +13,7 @@ from src.commands.ask_intents import (
     match_named_intent,
     render_named_intent,
 )
+from src.core.workspace_paths import is_bare_identifier
 
 
 def ask_command(
@@ -21,8 +22,8 @@ def ask_command(
         metavar="REQUEST",
         help="Natural-language request. With --program, answers directly from ProgramReality.",
     ),
-    edition: str = typer.Option("", "--edition", help="Default edition for routed command."),
-    program: str = typer.Option("", "--program", help="Program id. Enables named-intent answering."),
+    edition: str = typer.Option("", "--edition", help="Edition for routed commands; required unless --program is set."),
+    program: str = typer.Option("", "--program", help="Program for named intents; required unless --edition is set."),
     cluster_misses_flag: bool = typer.Option(
         False,
         "--cluster-misses",
@@ -35,7 +36,13 @@ def ask_command(
         hidden=True,
     ),
 ) -> None:
+    _require_ask_scope(edition, program)
     if cluster_misses_flag:
+        if not program.strip():
+            try:
+                _resolve_ask_edition(edition.strip())
+            except IntentRouterError as error:
+                raise typer.BadParameter(str(error)) from error
         typer.echo(cluster_misses(path=miss_log))
         raise typer.Exit(code=0)
 
@@ -50,7 +57,7 @@ def ask_command(
 
     # Default: route to a Vertex command (original behaviour)
     try:
-        typer.echo(route_request(request, edition=edition))
+        typer.echo(route_request(request, edition=edition.strip()))
     except typer.BadParameter as error:
         typer.echo(str(error))
         raise typer.Exit(code=1) from error
@@ -83,12 +90,26 @@ def _answer_with_reality(question: str, *, program: str, miss_log: Path) -> str:
 
 
 def route_request(request: str, *, edition: str = "") -> str:
+    _require_ask_scope(edition, "")
     try:
         invocation = _build_router().route(request, default_edition=edition)
     except IntentRouterError as error:
         raise typer.BadParameter(f"Intent routing failed: {error}") from error
 
     return _render_ask_output(invocation)
+
+
+def _has_ask_scope(edition: object, program: object) -> bool:
+    return any(isinstance(value, str) and value.strip() for value in (edition, program))
+
+
+def _require_ask_scope(edition: object, program: object) -> None:
+    if not _has_ask_scope(edition, program):
+        raise typer.BadParameter(
+            "--edition or --program is required for ask. Run 'vertex list editions' to see available editions."
+        )
+    if isinstance(program, str) and program.strip() and not is_bare_identifier(program.strip()):
+        raise typer.BadParameter("--program must be a bare program identifier.")
 
 
 def _build_router() -> IntentRouter:

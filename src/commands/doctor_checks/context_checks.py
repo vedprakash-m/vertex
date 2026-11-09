@@ -10,15 +10,17 @@ if TYPE_CHECKING:
     from src.core.evidence_models import WorkstreamEvidence
 
 import typer
+import yaml
 
 from src.commands.doctor_checks.models import DoctorCheck, DoctorReport
 from src.commands.doctor_checks.yaml_support import check_schema_versions, load_yaml_document
-from src.core.context_gap_store import append_context_gap, load_context_gaps, rank_context_gaps
+from src.core.context_gap_store import ContextGapRecordError, append_context_gap, load_context_gaps, rank_context_gaps
 from src.core.edition_resolver import PROGRAMS_ROOT, resolve_edition
 from src.core.ncfl_proposal_store import conflicting_pending_proposals, load_proposals, stale_pending_proposals
 from src.commands.doctor_checks.evidence_checks import check_eta_slippage, check_false_done_lanes, check_evidence_quality_drift
 from src.core.evidence_models import parse_workiq_latest_date
 from src.core.exceptions import ConfigError
+from src.core.manual_registry_diff import ManualRegistryDiffError
 from src.core.program_context import InvariantSeverity, load_program_context, summarize_context_limitations
 
 
@@ -75,6 +77,8 @@ def run_rev_health(
         typer.echo(_json.dumps(report.to_dict(), indent=2, sort_keys=True))
     else:
         typer.echo(render_rev_health_human(report), nl=False)
+    if report.last_cycle is not None and report.last_cycle.stop_category == "unsupported":
+        raise typer.Exit(code=2)
     # Non-zero when shield degrade is active (Azure Prompt Shields not wired) so
     # the operator sees the visible-degrade state in CI/exit code.
     raise typer.Exit(code=1 if report.shield_degrade else 0)
@@ -94,6 +98,8 @@ def run_ranked_gaps(*, edition_name: str | None, programs_root: Path, editions_r
         gaps = load_context_gaps(program_id, programs_root=programs_root)
     except json.JSONDecodeError as error:
         raise typer.BadParameter("Context gap history is invalid JSON; repair it before retrying.") from error
+    except ContextGapRecordError as error:
+        raise typer.BadParameter("Context gap history contains an invalid record; repair it before retrying.") from error
     if not gaps:
         typer.echo(typer.style("No context gaps recorded yet.", fg="green"))
         typer.echo("Run gather or propose to accumulate gap signals in _feedback/context_gaps.jsonl.")
@@ -101,7 +107,25 @@ def run_ranked_gaps(*, edition_name: str | None, programs_root: Path, editions_r
 
     if any(gap.program != program_id for gap in gaps):
         raise ConfigError("Context gap observations contain a foreign program.")
-    ranked = rank_context_gaps(gaps, programs_root=programs_root)
+    try:
+        ranked = rank_context_gaps(gaps, programs_root=programs_root)
+    except FileNotFoundError as error:
+        registry_path = programs_root / program_id / "workstream_registry.yaml"
+        if error.filename is None or Path(error.filename) != registry_path:
+            raise
+        typer.echo(
+            "Context gap ranking unavailable: recorded structural gaps require the selected "
+            "workstream_registry.yaml, which is missing.",
+            err=True,
+        )
+        raise typer.Exit(code=1) from error
+    except (ManualRegistryDiffError, yaml.YAMLError) as error:
+        typer.echo(
+            "Context gap ranking unavailable: inspect the selected workstream_registry.yaml "
+            "and recorded structural gap targets.",
+            err=True,
+        )
+        raise typer.Exit(code=1) from error
     if not ranked:
         typer.echo("No active context gaps; historical observations retained.")
         return
@@ -118,7 +142,10 @@ def run_ranked_gaps(*, edition_name: str | None, programs_root: Path, editions_r
             typer.echo(typer.style(f"  [{label}]", bold=True, fg=color))
 
         lane_part = f" / {gap.lane}" if gap.lane else ""
-        typer.echo(f"    {gap.program}{lane_part}  {gap.field} — missing for {gap.count} gather cycle{'s' if gap.count != 1 else ''}")
+        typer.echo(
+            f"    {gap.program}{lane_part}  {gap.field} — "
+            f"{gap.count} recorded observation{'s' if gap.count != 1 else ''}"
+        )
         typer.echo(f"    > Impact: {gap.message}")
         typer.echo(f"    > Fix: {gap.fix_hint}")
         typer.echo()
@@ -314,18 +341,25 @@ def run_context_doctor(
         checks.append(DoctorCheck("NCFL proposals", "ok", "0 pending context proposals"))
 
     registry_path = program_dir / "workstream_registry.yaml"
+    registry_exists = registry_path.exists()
     registry_entries = (
         load_yaml_document(registry_path).get("workstreams", [])
-        if registry_path.exists() else []
+        if registry_exists else []
     )
 
     # BL-09: detect empty workstream_registry
-    if registry_path.exists() and not registry_entries:
+    if not registry_exists:
+        checks.append(DoctorCheck(
+            "Registry coverage",
+            "info",
+            "Optional workstream_registry.yaml is absent; registry-based workstream gap checks were not evaluated.",
+        ))
+    elif not registry_entries:
         checks.append(DoctorCheck(
             "Registry",
             "fail",
             "workstream_registry.yaml exists but defines 0 active workstreams. "
-            "Run `vertex registry scaffold --program <prog>` or populate manually.",
+            "Populate workstream_registry.yaml manually.",
         ))
 
     # BL-10/BL-11: validate name field on registry lanes

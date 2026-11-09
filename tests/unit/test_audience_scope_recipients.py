@@ -68,7 +68,7 @@ def _seed(programs_root: Path, *, audience_scopes_enabled: bool = True) -> Path:
     )
     write_people_directory(
         knowledge_root / "people_directory.yaml",
-        (PersonDirectory(entity_id="person:jdoe", alias="jdoe", status=PersonStatus.ACTIVE, contacts=(_contact("jdoe@acme.com"),)),),
+        (PersonDirectory(entity_id="person:jdoe", alias="jdoe", status=PersonStatus.ACTIVE, contacts=(_contact("jdoe@synthetic-01.example"),)),),
     )
     scope_path = audience_scopes_path_for_program("acme", programs_root=programs_root)
     scope_path.parent.mkdir(parents=True, exist_ok=True)
@@ -77,7 +77,7 @@ def _seed(programs_root: Path, *, audience_scopes_enabled: bool = True) -> Path:
 
 
 def _delivery(*, audience_scope_ids: tuple[str, ...] = ()) -> NudgeDeliveryConfig:
-    return NudgeDeliveryConfig(recipient="pm@acme.com", delivery_mode="broadcast", cadence_days=7, audience_scope_ids=audience_scope_ids)
+    return NudgeDeliveryConfig(recipient="pm@synthetic-01.example", delivery_mode="broadcast", cadence_days=7, audience_scope_ids=audience_scope_ids)
 
 
 def test_empty_audience_scope_ids_is_a_true_no_op(tmp_path: Path) -> None:
@@ -102,7 +102,7 @@ def test_resolves_a_real_team_expansion_scope_to_a_recipient(tmp_path: Path) -> 
     )
 
     assert len(recipients) == 1
-    assert recipients[0] == ResolvedRecipient(alias="jdoe", email="jdoe@acme.com", display_name="jdoe")
+    assert recipients[0] == ResolvedRecipient(alias="jdoe", email="jdoe@synthetic-01.example", display_name="jdoe")
 
 
 def test_kill_switch_off_is_a_true_no_op(tmp_path: Path) -> None:
@@ -131,7 +131,7 @@ def test_undefined_scope_id_raises(tmp_path: Path) -> None:
 def test_opt_out_from_audience_policy_removes_the_candidate(tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     _seed(programs_root)
-    policy = NudgeAudiencePolicy(allowed_domains=("acme.com",), opt_out=frozenset({"jdoe"}))
+    policy = NudgeAudiencePolicy(allowed_domains=("synthetic-01.example",), opt_out=frozenset({"jdoe"}))
 
     recipients = resolve_audience_scope_recipients(
         program_id="acme", delivery=_delivery(audience_scope_ids=("engineering_hygiene",)),
@@ -154,21 +154,21 @@ def test_invalid_email_is_skipped_not_crashed_on(tmp_path: Path) -> None:
 
 
 def test_merge_is_additive_and_deduplicates_by_email() -> None:
-    existing = [ResolvedRecipient(alias="alice", email="alice@acme.com", display_name="Alice")]
+    existing = [ResolvedRecipient(alias="alice", email="alice@synthetic-01.example", display_name="Alice")]
     new = [
-        ResolvedRecipient(alias="alice", email="ALICE@acme.com", display_name="Alice Duplicate"),
-        ResolvedRecipient(alias="bob", email="bob@acme.com", display_name="Bob"),
+        ResolvedRecipient(alias="alice", email="ALICE@synthetic-01.example", display_name="Alice Duplicate"),
+        ResolvedRecipient(alias="bob", email="bob@synthetic-01.example", display_name="Bob"),
     ]
 
     merged = merge_audience_scope_recipients(existing, new)
 
     assert len(merged) == 2
-    assert merged[0].email == "alice@acme.com"
-    assert merged[1].email == "bob@acme.com"
+    assert merged[0].email == "alice@synthetic-01.example"
+    assert merged[1].email == "bob@synthetic-01.example"
 
 
 def test_merge_with_no_new_recipients_returns_the_same_list() -> None:
-    existing = [ResolvedRecipient(alias="alice", email="alice@acme.com", display_name="Alice")]
+    existing = [ResolvedRecipient(alias="alice", email="alice@synthetic-01.example", display_name="Alice")]
 
     merged = merge_audience_scope_recipients(existing, [])
 
@@ -182,8 +182,8 @@ def test_active_delegation_routes_the_recipient_to_the_delegates_email(tmp_path:
     write_people_directory(
         knowledge_root / "people_directory.yaml",
         (
-            PersonDirectory(entity_id="person:jdoe", alias="jdoe", status=PersonStatus.ACTIVE, contacts=(_contact("jdoe@acme.com"),)),
-            PersonDirectory(entity_id="person:carol", alias="carol", status=PersonStatus.ACTIVE, contacts=(_contact("carol@acme.com"),)),
+            PersonDirectory(entity_id="person:jdoe", alias="jdoe", status=PersonStatus.ACTIVE, contacts=(_contact("jdoe@synthetic-01.example"),)),
+            PersonDirectory(entity_id="person:carol", alias="carol", status=PersonStatus.ACTIVE, contacts=(_contact("carol@synthetic-01.example"),)),
         ),
     )
     write_delegations(
@@ -204,4 +204,4 @@ def test_active_delegation_routes_the_recipient_to_the_delegates_email(tmp_path:
     )
 
     assert len(recipients) == 1
-    assert recipients[0] == ResolvedRecipient(alias="carol", email="carol@acme.com", display_name="carol")
+    assert recipients[0] == ResolvedRecipient(alias="carol", email="carol@synthetic-01.example", display_name="carol")

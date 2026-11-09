@@ -11,6 +11,7 @@ from src.core.manifest_writer import (
     build_run_manifest,
     hash_jsonable,
     load_run_evidence_snapshot,
+    validate_run_evidence_snapshot,
 )
 from src.core.gather_run_manifest import GatherRunManifest, GatherRunStatus, QueryResultEntry, RequiredScopeStatus
 from src.core.models import EditionType, EvidenceBinding, RiskLevel, RunEvidenceSnapshot, Snapshot, SnapshotItem, SourceScopeContract
@@ -209,6 +210,60 @@ def test_v2_capture_without_observed_selectors_remains_readable_unbound():
     assert loaded is not None
     assert loaded.schema_version == "run-evidence-capture.v2"
     assert loaded.effective_family_modes == ()
+
+
+@pytest.mark.parametrize("modes", [
+    (("judgment", "legacy"), ("judgment", "primary"), ("workitem.state", "shadow")),
+    (("judgment", "primary"), ("workitem.state", "legacy"), ("workitem.state", "shadow")),
+    (("judgment", "legacy"), ("judgment", "primary"), ("workitem.state", "legacy"), ("workitem.state", "shadow")),
+])
+@pytest.mark.parametrize("entry", ["builder", "validator", "reader"])
+def test_capture_rejects_conflicting_modes_for_one_family(modes, entry):
+    if entry == "builder":
+        with pytest.raises(ConfigError, match="capture is invalid"):
+            build_run_evidence_snapshot(*_capture_inputs(), effective_family_modes=modes)
+        return
+    capture = replace(_capture(), effective_family_modes=modes, sha256="")
+    content = asdict(capture)
+    content.pop("sha256")
+    capture = replace(capture, sha256=hash_jsonable(content))
+    with pytest.raises(ConfigError, match="capture is invalid"):
+        if entry == "validator":
+            validate_run_evidence_snapshot(capture)
+        else:
+            load_run_evidence_snapshot(*_wire(capture))
+
+
+@pytest.mark.parametrize("modes", [
+    [["judgment"]],
+    [["judgment", "legacy", "extra"]],
+    [["judgment", "legacy"], ["judgment", "legacy"]],
+    [["judgment", "legacy"], ["unknown", "primary"]],
+    [["judgment", "unknown"]],
+    [["workitem.state", "legacy"], ["judgment", "legacy"]],
+])
+def test_reader_rejects_other_invalid_selector_shapes(modes):
+    payload, draft = _wire(_capture())
+    raw = payload["metadata"]["run_evidence_snapshot"]
+    raw["effective_family_modes"] = modes
+    raw.pop("sha256")
+    raw["sha256"] = hash_jsonable(raw)
+    draft["run_evidence_snapshot_sha256"] = raw["sha256"]
+    with pytest.raises(ConfigError, match="capture is invalid"):
+        load_run_evidence_snapshot(payload, draft)
+
+
+@pytest.mark.parametrize("modes", [
+    (),
+    (("judgment", "legacy"),),
+    (("workitem.state", "primary"),),
+    (("workitem.state", "shadow"), ("judgment", "primary")),
+])
+def test_builder_preserves_valid_empty_partial_and_unsorted_selectors(modes):
+    capture = build_run_evidence_snapshot(*_capture_inputs(), effective_family_modes=modes)
+    assert capture.effective_family_modes == tuple(sorted(modes))
+    payload, draft = _wire(capture)
+    assert load_run_evidence_snapshot(payload, draft) == capture
 
 
 def test_builder_rejects_missing_or_foreign_retained_facts():

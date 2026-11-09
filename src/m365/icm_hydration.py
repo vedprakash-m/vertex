@@ -7,6 +7,7 @@ from typing import Any
 
 from src.core.config_loader import PROGRAMS_ROOT
 from src.core.exceptions import AuthError, QueryError
+from src.core.failure_taxonomy import safe_failure_suffix
 from src.core.integration_types import (
     ChannelConfig,
     ChannelRegistration,
@@ -91,11 +92,12 @@ class IcMHydrationProvider:
         try:
             client = IcmClient()
         except AuthError as exc:
+            message = f"IcM hydration failed{safe_failure_suffix(str(exc))}"
             return HydrationResult(
                 channel="icm",
                 resources=IcMHydrationOutput(incident_states=()),
                 api_call_count=0,
-                errors=(IntegrationError(source="icm", stage="hydration", message=str(exc), retryable=False),),
+                errors=(IntegrationError(source="icm", stage="hydration", message=message, retryable=False),),
                 hydrated_ref_ids=(),
                 failed_ref_ids=tuple((r.ref_id, r.ref_kind) for r in incident_regs),
             )
@@ -119,10 +121,12 @@ class IcMHydrationProvider:
                 incidents.append(state)
                 hydrated_ref_ids.append((reg.ref_id, reg.ref_kind))
             except (QueryError, RuntimeError) as exc:
+                message = f"Failed to hydrate incident {reg.ref_id}"
+                message += safe_failure_suffix(f"{message}: {exc}")
                 errors.append(IntegrationError(
                     source="icm",
                     stage="hydration",
-                    message=f"Failed to hydrate incident {reg.ref_id}: {exc}",
+                    message=message,
                     retryable=True,
                 ))
                 failed_ref_ids.append((reg.ref_id, reg.ref_kind))

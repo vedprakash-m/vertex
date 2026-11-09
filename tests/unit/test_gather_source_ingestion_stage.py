@@ -80,7 +80,7 @@ def test_record_optional_source_ingestion_runs_marks_matching_workiq_error_faile
     assert workiq_run.error_message == "WorkIQ unavailable"
 
 
-def test_record_optional_source_ingestion_runs_preserves_analytics_error_mismatch_behavior() -> None:
+def test_record_optional_source_ingestion_runs_marks_analytics_channel_error_failed() -> None:
     store = _FakeStore()
 
     source_ingestion_stage.record_optional_source_ingestion_runs(
@@ -100,8 +100,8 @@ def test_record_optional_source_ingestion_runs_preserves_analytics_error_mismatc
 
     assert store.runs is not None
     analytics_run = next(run for run in store.runs if run.source_ref == "ado/analytics")
-    assert analytics_run.status == "success"
-    assert analytics_run.error_message is None
+    assert analytics_run.status == "failed"
+    assert analytics_run.error_message == "Analytics gather failed; see gather diagnostics."
 
 
 def test_record_optional_source_ingestion_runs_adds_pipeline_and_pr_entries() -> None:

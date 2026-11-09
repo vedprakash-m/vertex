@@ -5,8 +5,6 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-import pytest
-
 from src.core.ledger.event_log import EventEnvelope
 from src.core.ledger.program_views import canonical_projection_dump, project_events_to_sqlite
 
@@ -31,11 +29,10 @@ def _save_text(path: Path, content: str) -> None:
 
 def _compare_with_golden(path: Path, actual: str, update: bool) -> None:
     golden = _load_text(path)
-    if update or golden is None:
+    if update:
         _save_text(path, actual)
-        if golden is None:
-            pytest.skip(f"Created new golden file: {path.name}")
         return
+    assert golden is not None, f"Missing public golden baseline: {path.name}; regenerate explicitly with --update-golden."
 
     if actual != golden:
         diff = "".join(
@@ -72,6 +69,7 @@ def _render_projection(
         "acme",
         _load_events(),
         projection_path=projection_path,
+        programs_root=tmp_path / "programs",
         as_of=as_of,
         knowledge_as_of=knowledge_as_of,
     )
@@ -127,6 +125,6 @@ def test_qg_dm_2_golden_log_order_independence(tmp_path: Path) -> None:
     events = _load_events()
     forward_path = tmp_path / "forward.sqlite3"
     reverse_path = tmp_path / "reverse.sqlite3"
-    project_events_to_sqlite("acme", events, projection_path=forward_path)
-    project_events_to_sqlite("acme", tuple(reversed(events)), projection_path=reverse_path)
+    project_events_to_sqlite("acme", events, projection_path=forward_path, programs_root=tmp_path / "programs")
+    project_events_to_sqlite("acme", tuple(reversed(events)), projection_path=reverse_path, programs_root=tmp_path / "programs")
     assert canonical_projection_dump(forward_path) == canonical_projection_dump(reverse_path)

@@ -4420,7 +4420,11 @@ def test_generate_report_draft_daily_skips_weekly_summary_adaptive_card(repo_roo
     assert not (programs_root / "acme" / "publications" / "example_daily" / "issue_001" / "issue_001.weekly_summary.json").exists()
 
 
-def test_generate_report_draft_offline_uses_cached_snapshot_without_live_loader(repo_root: Path, tmp_path: Path) -> None:
+def test_generate_report_draft_offline_uses_cached_snapshot_without_live_loader(
+    repo_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import Mock
+
     reports_root, archive_root = _seed_v2_report_layout(repo_root, tmp_path)
     programs_root = reports_root.parent / "programs"
 
@@ -4437,6 +4441,9 @@ def test_generate_report_draft_offline_uses_cached_snapshot_without_live_loader(
     def _unexpected_loader(bundle, timestamp):
         raise AssertionError("offline report should not invoke the live work item loader")
 
+    _enable_v2_program_ai(programs_root)
+    summary_builder = Mock(side_effect=AssertionError("offline report should not build AI reality context"))
+    monkeypatch.setattr("src.commands.report_ai.build_reality_assessment_summary", summary_builder)
     offline_artifacts = generate_report_draft(
         edition_name=EDITION_NAME,
         reports_root=reports_root,
@@ -4453,6 +4460,7 @@ def test_generate_report_draft_offline_uses_cached_snapshot_without_live_loader(
     # Offline banner may be rendered via status_note / template context rather
     # than directly in html_body after render-stage decomposition.
     assert offline_artifacts.snapshot.items == seeded_artifacts.snapshot.items
+    summary_builder.assert_not_called()
 
 
 def test_generate_report_draft_timeout_suggests_offline_when_cache_exists(repo_root: Path, tmp_path: Path) -> None:
@@ -9024,6 +9032,170 @@ def test_generate_report_draft_builds_lookback_from_confirmed_archive(repo_root:
         assert "persistent risk" in artifacts.report.exec_summary_text.lower()
         assert "retrospective" in artifacts.html_body.lower()
         assert "Network capacity check" in artifacts.html_body
+
+
+@pytest.mark.parametrize("source_state", ("missing", "invalid", "present", "rollback"))
+def test_lookback_draft_surfaces_assumption_source_warnings(
+    monkeypatch: pytest.MonkeyPatch, repo_root: Path, tmp_path: Path, source_state: str,
+) -> None:
+    from src.core.fact_sor_state import save_fact_sor_state
+
+    monkeypatch.delenv("VERTEX_FACT_SOR", raising=False)
+    monkeypatch.delenv("VERTEX_REPORT_ALLOW_LEGACY_ASSUMPTION_ROLLBACK", raising=False)
+    monkeypatch.setenv("VERTEX_DB_PATH", str(tmp_path / "database"))
+    reports_root, archive_root = _seed_v2_report_layout(repo_root, tmp_path)
+    programs_root = reports_root.parent / "programs"
+    save_fact_sor_state(
+        "acme", mode="primary", recorded_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+        programs_root=programs_root,
+    )
+    assumption_path = programs_root / "acme" / "assumptions.yaml"
+    if source_state == "invalid":
+        assumption_path.write_text("schema_version: '2.0'\nassumptions: []\n", encoding="utf-8")
+    elif source_state in ("present", "rollback"):
+        assumption_path.write_text(
+            "schema_version: '1.0'\nassumptions:\n"
+            "  - id: authored-assumption\n    text: Synthetic assumption\n"
+            "    status: unvalidated\n    identified_date: '2026-04-15'\n",
+            encoding="utf-8",
+        )
+    if source_state == "rollback":
+        from src.commands import report_lookback
+
+        monkeypatch.setenv("VERTEX_REPORT_ALLOW_LEGACY_ASSUMPTION_ROLLBACK", "1")
+        original_loader = report_lookback._load_lookback_assumptions
+
+        def fail_reality(*_args, **_kwargs):
+            raise RuntimeError("Synthetic reality failure")
+
+        def load_with_failed_reality(**kwargs):
+            return original_loader(**{**kwargs, "load_program_reality": fail_reality})
+
+        monkeypatch.setattr(report_lookback, "_load_lookback_assumptions", load_with_failed_reality)
+    for issue_number, issue_as_of in (
+        (1, datetime(2026, 4, 14, 18, tzinfo=timezone.utc)),
+        (2, datetime(2026, 4, 21, 18, tzinfo=timezone.utc)),
+    ):
+        write_confirmed_issue(
+            edition=EDITION_NAME,
+            issue_number=issue_number,
+            snapshot=_lookback_snapshot(
+                issue_number=issue_number, as_of=issue_as_of,
+                items=(_snapshot_item_from_work_item(_sample_items(issue_as_of)[0], risk_level=RiskLevel.HIGH),),
+                scorecard_risks={"Deployment Velocity": RiskLevel.LOW, "Deployment Safety": RiskLevel.HIGH},
+            ),
+            html_body=f"<html><body>Issue {issue_number:03d}</body></html>",
+            markdown_body=f"# Issue {issue_number:03d}",
+            manifest=_manifest(issue_number=issue_number, as_of=issue_as_of, edition=EDITION_NAME),
+            archive_root=archive_root,
+        )
+
+    artifacts = generate_report_draft(
+        edition_name=EDITION_NAME, reports_root=reports_root, archive_root=archive_root,
+        programs_root=programs_root, as_of=datetime(2026, 5, 5, 18, tzinfo=timezone.utc),
+        edition_type_override="lookback", lookback_range=2, open_browser=False,
+    )
+
+    assumption_warnings = tuple(warning for warning in artifacts.warnings if "assumption" in warning.lower())
+    if source_state == "missing":
+        assert assumption_warnings == ()
+    elif source_state == "invalid":
+        assert any("assumption legacy cross-check unavailable" in warning for warning in assumption_warnings)
+        assert artifacts.exit_code >= 2
+    elif source_state == "present":
+        assert any("legacy source has 1" in warning for warning in assumption_warnings)
+        assert artifacts.exit_code >= 2
+    else:
+        assert any("audited rollback flag" in warning for warning in assumption_warnings)
+        assert artifacts.exit_code >= 2
+        assert "Assumption Lifecycle" in artifacts.html_body
+        assert "Synthetic assumption" in artifacts.html_body
+    if source_state != "rollback":
+        assert "Assumption Lifecycle" not in artifacts.html_body
+    assert str(assumption_path) not in artifacts.html_body
+    assert str(assumption_path) not in artifacts.markdown_body
+
+
+@pytest.mark.parametrize("is_raw", [False, True])
+def test_lookback_draft_discloses_unconfirmed_assumption_during_render_fallback(
+    monkeypatch: pytest.MonkeyPatch, repo_root: Path, tmp_path: Path, is_raw: bool,
+) -> None:
+    from src.commands import report_lookback
+    from src.core.fact_sor_state import save_fact_sor_state
+    from src.core.program_reality import FactAssessment
+    from src.core.truth_levels import TruthLevel
+
+    monkeypatch.delenv("VERTEX_FACT_SOR", raising=False)
+    monkeypatch.setenv("VERTEX_DB_PATH", str(tmp_path / "database"))
+    reports_root, archive_root = _seed_v2_report_layout(repo_root, tmp_path)
+    programs_root = reports_root.parent / "programs"
+    save_fact_sor_state(
+        "acme", mode="legacy", family_modes={"judgment": "shadow"},
+        recorded_at=datetime(2020, 1, 1, tzinfo=timezone.utc), programs_root=programs_root,
+    )
+    assessment = FactAssessment(
+        record=Assumption(
+            id="synthetic-assumption",
+            program_id="acme",
+            text="Synthetic assumption",
+            validation_method=None,
+            validation_due=None,
+            status=AssumptionStatus.UNVALIDATED,
+            linked_risk_id=None,
+            linked_milestone_id=None,
+            owner_alias=None,
+            identified_date=date(2026, 4, 15),
+            entity_refs=(),
+        ),
+        fact_id="synthetic-fact",
+        truth_level=TruthLevel.RAW_OBSERVED if is_raw else TruthLevel.SOURCE_VALIDATED,
+        disputed=False,
+        stale=False,
+        provisional_inputs=False,
+        evidence=(),
+    )
+    original_loader = report_lookback._load_lookback_assumptions
+
+    def load_with_synthetic_reality(**kwargs):
+        return original_loader(**{
+            **kwargs,
+            "load_program_reality": lambda *_a, **_kw: SimpleNamespace(assumptions=lambda: (assessment,)),
+        })
+
+    def fail_shaping(*_args, **_kwargs):
+        raise RuntimeError("Synthetic assessment shaping failure")
+
+    monkeypatch.setattr(report_lookback, "_load_lookback_assumptions", load_with_synthetic_reality)
+    monkeypatch.setattr(report_lookback, "_build_lookback_assumption_rows_from_assessments", fail_shaping)
+    for issue_number, issue_as_of in (
+        (1, datetime(2026, 4, 14, 18, tzinfo=timezone.utc)),
+        (2, datetime(2026, 4, 21, 18, tzinfo=timezone.utc)),
+    ):
+        write_confirmed_issue(
+            edition=EDITION_NAME,
+            issue_number=issue_number,
+            snapshot=_lookback_snapshot(
+                issue_number=issue_number, as_of=issue_as_of,
+                items=(_snapshot_item_from_work_item(_sample_items(issue_as_of)[0], risk_level=RiskLevel.HIGH),),
+                scorecard_risks={"Deployment Velocity": RiskLevel.LOW, "Deployment Safety": RiskLevel.HIGH},
+            ),
+            html_body=f"<html><body>Issue {issue_number:03d}</body></html>",
+            markdown_body=f"# Issue {issue_number:03d}",
+            manifest=_manifest(issue_number=issue_number, as_of=issue_as_of, edition=EDITION_NAME),
+            archive_root=archive_root,
+        )
+
+    artifacts = generate_report_draft(
+        edition_name=EDITION_NAME, reports_root=reports_root, archive_root=archive_root,
+        programs_root=programs_root, as_of=datetime(2026, 5, 5, 18, tzinfo=timezone.utc),
+        edition_type_override="lookback", lookback_range=2, open_browser=False,
+    )
+
+    section = re.search(r'<table id="assumption-lifecycle".*?</table>', artifacts.html_body, re.DOTALL)
+    assert section is not None
+    assert "Synthetic assumption" in section.group()
+    assert "live assumption metadata rendering failed" in section.group()
+    assert ("⚠ includes unconfirmed sources" in section.group()) is is_raw
 
 
 def test_generate_report_draft_lookback_surfaces_action_quality_gate(repo_root: Path, tmp_path: Path) -> None:

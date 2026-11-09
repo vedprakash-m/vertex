@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from src.core.cockpit_models import ValueConfidence
 from src.core.outcome_metrics import (
     CANARY_WINDOW_START,
@@ -42,6 +44,24 @@ def test_om2_is_unavailable_but_surfaces_duplicate_preventions_count(tmp_path: P
     result = compute_om2_duplicate_entities("acme", programs_root=tmp_path / "programs")
     assert result.confidence == ValueConfidence.UNAVAILABLE
     assert result.value is None
+    assert "0 search-before-create prevention" in result.detail
+
+
+@pytest.mark.parametrize("composite", [False, True])
+def test_om2_does_not_claim_the_actuation_domain_is_unwired(tmp_path: Path, composite: bool) -> None:
+    root = tmp_path / "programs"
+    result = (
+        compute_all_outcome_metrics("acme", programs_root=root)[1]
+        if composite
+        else compute_om2_duplicate_entities("acme", programs_root=root)
+    )
+
+    assert result.confidence == ValueConfidence.UNAVAILABLE
+    assert result.value is None
+    assert result.evidence_refs == ()
+    assert "duplicate outcomes are not measured" in result.detail.lower()
+    assert "outbox status" in result.detail.lower()
+    assert "no live ado mutation domain" not in result.detail.lower()
     assert "0 search-before-create prevention" in result.detail
 
 

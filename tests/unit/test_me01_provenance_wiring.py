@@ -77,6 +77,27 @@ def test_provenance_skipped_for_no_workstream(tmp_path: Path) -> None:
     assert not prov_file.exists()
 
 
+def test_provenance_skips_preview_only_workiq_signals(tmp_path: Path) -> None:
+    from src.commands.gather import _record_workiq_provenance
+
+    preview = replace(
+        _make_signal("acme.networking"),
+        metadata={
+            "message_id": "semantic:preview",
+            "native_message_id": "semantic:preview",
+        },
+    )
+    _record_workiq_provenance(
+        workiq_signals=(preview,),
+        program_id="acme",
+        programs_root=tmp_path,
+        run_at=datetime(2026, 6, 17, 18, 0, 0, tzinfo=timezone.utc),
+    )
+
+    provenance_path = tmp_path / "acme" / "journal" / "evidence_provenance.jsonl"
+    assert not provenance_path.exists()
+
+
 def test_provenance_failure_does_not_propagate(tmp_path: Path) -> None:
     """Exception in record_provenance must not raise."""
     from src.commands.gather import _record_workiq_provenance

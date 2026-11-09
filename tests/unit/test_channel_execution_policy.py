@@ -10,6 +10,7 @@ budget").
 
 from __future__ import annotations
 
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -89,20 +90,30 @@ def test_fast_call_completes_normally() -> None:
 
 def test_slow_call_degrades_within_budget_not_after_it_completes() -> None:
     """The defining safety property: the caller must not block past the budget."""
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
 
-    def _hangs_forever() -> str:
-        time.sleep(3600)
-        return "should never get here in this test's lifetime"
+    def _waits_for_release() -> str:
+        entered.set()
+        release.wait(timeout=30)
+        finished.set()
+        return "completed after the caller returned"
 
-    started = time.monotonic()
-    outcome = run_under_channel_budget(_hangs_forever, policy=_policy(timeout_seconds=1))
-    elapsed = time.monotonic() - started
+    try:
+        started = time.monotonic()
+        outcome = run_under_channel_budget(_waits_for_release, policy=_policy(timeout_seconds=1))
+        elapsed = time.monotonic() - started
 
-    assert outcome.degraded is True
-    assert outcome.value is None
-    assert outcome.degrade_reason == DEGRADE_REASON_TIMEOUT
-    # Bounded by the configured budget, not by the fake provider's 3600s sleep.
-    assert elapsed < 5.0
+        assert outcome.degraded is True
+        assert outcome.value is None
+        assert outcome.degrade_reason == DEGRADE_REASON_TIMEOUT
+        assert elapsed < 5.0
+        assert entered.is_set()
+        assert not finished.is_set()
+    finally:
+        release.set()
+    assert finished.wait(timeout=5)
 
 
 def test_provider_exception_propagates_unchanged() -> None:
@@ -281,10 +292,16 @@ def test_slow_optional_channel_degrades_instead_of_blocking_gather(tmp_path: Pat
                 computed_at=current_time,
             )
 
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
     class _HangingHydrationProvider:
         def hydrate(self, registrations, since, program_id, config, mode=None, run_ctx=None):
             del registrations, since, program_id, config, mode, run_ctx
-            time.sleep(3600)  # simulates the historical WorkIQ 65+ minute latency
+            entered.set()
+            release.wait(timeout=30)
+            finished.set()
             return HydrationResult(channel="workiq", resources=(), api_call_count=1, errors=(), hydrated_ref_ids=(), failed_ref_ids=())
 
     binding = ChannelBinding(
@@ -296,25 +313,29 @@ def test_slow_optional_channel_degrades_instead_of_blocking_gather(tmp_path: Pat
         hydration_config=object(),
     )
 
-    errors: list[IntegrationError] = []
-    started = time.monotonic()
-    hydration_result, delta = channel_runtime.run_channel(
-        binding,
-        store,
-        program_id="fixture_prog",
-        since=current_time - timedelta(days=14),
-        verified_at=current_time,
-        run_ctx=RunContext(),
-        integration_error_sink=errors,
-        programs_root=programs_root,
-    )
-    elapsed = time.monotonic() - started
+    try:
+        errors: list[IntegrationError] = []
+        started = time.monotonic()
+        hydration_result, delta = channel_runtime.run_channel(
+            binding,
+            store,
+            program_id="fixture_prog",
+            since=current_time - timedelta(days=14),
+            verified_at=current_time,
+            run_ctx=RunContext(),
+            integration_error_sink=errors,
+            programs_root=programs_root,
+        )
+        elapsed = time.monotonic() - started
 
-    # The optional channel's 3600s hang must not delay the caller past its
-    # configured 1s per-attempt budget.
-    assert elapsed < 10.0
-    assert hydration_result is None
-    assert any("budget" in error.message.lower() for error in errors)
+        assert elapsed < 10.0
+        assert hydration_result is None
+        assert any("budget" in error.message.lower() for error in errors)
+        assert entered.is_set()
+        assert not finished.is_set()
+    finally:
+        release.set()
+    assert finished.wait(timeout=5)
 
 
 def test_slow_discovery_leaves_no_total_budget_for_hydration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

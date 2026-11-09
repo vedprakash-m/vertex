@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ast
+import os
+import re
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -45,15 +47,261 @@ def guard(event, args):
 sys.addaudithook(guard)
 dotenv.load_dotenv = lambda *args, **kwargs: False
 raise SystemExit(pytest.main([
-    "-p", "tests.conftest", sys.argv[2], "-q", "-o", "addopts=",
+    "-p", "no:cacheprovider", "-p", "tests.conftest", "--rootdir", str(Path(sys.argv[2]).parent),
+    sys.argv[2], "-q", "-o", "addopts=",
 ]))
 """
+    env = os.environ.copy()
+    has_cache_probe = (tmp_path / "synthetic_cache_probe.py").exists()
+    for key in tuple(env):
+        if key.upper().startswith("PYTEST_"):
+            env.pop(key)
+    env.update(
+        PYTHONPATH=str(tmp_path) if has_cache_probe else "",
+        TEMP=str(tmp_path),
+        TMP=str(tmp_path),
+        TMPDIR=str(tmp_path),
+    )
+    if has_cache_probe:
+        env["PYTEST_ADDOPTS"] = "-p synthetic_cache_probe"
     result = subprocess.run(
         [sys.executable, "-c", script, str(root), str(test_path)],
-        cwd=root, capture_output=True, text=True, check=False,
+        cwd=root, env=env,
+        capture_output=True, text=True, check=False, timeout=60,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "1 passed" in result.stdout
+
+
+def test_actual_startup_disables_nested_pytest_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin = tmp_path / "synthetic_cache_probe.py"
+    plugin.write_text(
+        "def pytest_configure(config):\n"
+        "    if config.pluginmanager.hasplugin('cacheprovider'):\n"
+        "        raise RuntimeError('nested pytest cache provider is enabled')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-p synthetic_cache_probe")
+    original_run = subprocess.run
+    observed_timeouts: list[float | None] = []
+
+    def bounded_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        observed_timeouts.append(kwargs.get("timeout"))
+        kwargs.setdefault("timeout", 60)
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", bounded_run)
+    test_actual_pytest_startup_does_not_copy_repository_context(tmp_path)
+    assert observed_timeouts == [60]
+
+
+def test_cli_commands_do_not_access_repository_workspace(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[2]
+    script = """
+import os
+from pathlib import Path
+import sys
+from urllib.parse import parse_qs, unquote, urlsplit
+import pytest
+
+root = Path(sys.argv[1]).absolute()
+source = os.path.normcase(str(root))
+private = tuple(os.path.normcase(str(root / name)) for name in ("programs", "knowledge", "editions", "vertex-db"))
+dotenv_path = os.path.normcase(str(root / ".env"))
+example = root / "programs" / "_templates" / "example_tpm"
+example_files = {
+    os.path.normcase(str(example / path))
+    for path in (
+        "program.yaml", "workstreams.yaml", "scorecards.yaml", "editorial_rules.yaml", "review.yaml",
+        os.path.join("editions", "example_tpm_weekly.yaml"),
+        os.path.join("knowledge", "golden_queries.yaml"),
+        os.path.join("knowledge", "people_directory.yaml"),
+        os.path.join("knowledge", "products.yaml"),
+        os.path.join("knowledge", "teams.yaml"),
+    )
+}
+active = False
+denials = []
+all_denials = []
+
+def check(path, writing=False):
+    if not isinstance(path, (str, bytes, os.PathLike)):
+        return
+    value = os.path.normcase(os.path.abspath(os.fsdecode(path)))
+    private_access = value == dotenv_path or any(
+        value == base or value.startswith(base + os.sep) for base in private
+    )
+    source_write = writing and (value == source or value.startswith(source + os.sep))
+    allowed_example_read = not writing and value in example_files
+    if (private_access and not allowed_example_read) or source_write:
+        denials.append("private workspace")
+        all_denials.append("private workspace")
+        raise PermissionError("Private workspace access forbidden")
+
+def audit(event, args):
+    if event in {"socket.connect", "socket.getaddrinfo"}:
+        denials.append("network")
+        all_denials.append("network")
+        raise PermissionError("Network access forbidden")
+    if event == "open" and args:
+        mode = args[1] if len(args) > 1 else None
+        flags = args[2] if len(args) > 2 else 0
+        writing = isinstance(mode, str) and any(char in mode for char in "wax+")
+        if isinstance(flags, int):
+            writing = writing or bool(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND))
+        check(args[0], writing=writing)
+    if event in {"os.scandir", "os.listdir"} and args:
+        check(args[0])
+    if event in {"os.mkdir", "os.remove", "os.rmdir"} and args:
+        check(args[0], writing=True)
+    if event in {"os.rename", "os.replace"}:
+        for path in args[:2]:
+            check(path, writing=True)
+    if event == "sqlite3.connect" and args and isinstance(args[0], (str, bytes, os.PathLike)):
+        path = os.fsdecode(args[0])
+        if path.startswith("file:"):
+            uri = urlsplit(path)
+            if parse_qs(uri.query).get("mode") == ["memory"]:
+                return
+            path = unquote(uri.path)
+            if len(path) > 2 and path[0] == "/" and path[2] == ":":
+                path = path[1:]
+        if path != ":memory:":
+            check(path, writing=True)
+
+original_stat = os.stat
+original_lstat = os.lstat
+def guarded_stat(path, *args, **kwargs):
+    if active:
+        check(path)
+    return original_stat(path, *args, **kwargs)
+
+def guarded_lstat(path, *args, **kwargs):
+    if active:
+        check(path)
+    return original_lstat(path, *args, **kwargs)
+
+class Guard:
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_runtest_setup(self, item):
+        global active
+        denials.clear()
+        active = True
+
+    @pytest.hookimpl(trylast=True)
+    def pytest_runtest_teardown(self, item, nextitem):
+        global active
+        active = False
+        if denials:
+            pytest.fail("Private workspace or network access was attempted", pytrace=False)
+
+os.stat = guarded_stat
+os.lstat = guarded_lstat
+sys.addaudithook(audit)
+probe = root / "synthetic-guard-probe"
+for event, args in (
+    ("open", (str(probe), "w", os.O_WRONLY | os.O_CREAT)),
+    ("sqlite3.connect", (str(probe),)),
+    ("sqlite3.connect", (probe.as_uri() + "?mode=rwc",)),
+):
+    try:
+        audit(event, args)
+    except PermissionError:
+        pass
+    else:
+        raise AssertionError("Source-write guard did not reject a probe")
+audit("open", (str(probe), "r", os.O_RDONLY))
+audit("sqlite3.connect", ("file:guard-memory?mode=memory&cache=shared",))
+audit("open", (str(example / "program.yaml"), "r", os.O_RDONLY))
+for event, args in (
+    ("open", (str(example / "program.yaml"), "w", os.O_WRONLY | os.O_CREAT)),
+    ("open", (str(example / "untracked.yaml"), "r", os.O_RDONLY)),
+    ("os.scandir", (str(root / "programs"),)),
+):
+    try:
+        audit(event, args)
+    except PermissionError:
+        pass
+    else:
+        raise AssertionError("Private example guard did not reject a probe")
+denials.clear()
+all_denials.clear()
+reality = str(root / "tests" / "unit" / "test_commands_reality.py")
+assertion = str(root / "tests" / "unit" / "test_commands_assertion.py")
+ask = str(root / "tests" / "unit" / "test_commands_ask.py")
+quickstart = str(root / "tests" / "unit" / "test_commands_quickstart.py")
+next_command = str(root / "tests" / "unit" / "test_commands_next.py")
+metric = str(root / "tests" / "unit" / "test_commands_metric.py")
+ai_client = str(root / "tests" / "unit" / "test_ai_client.py")
+quality_gates = str(root / "tests" / "unit" / "test_quality_gates.py")
+ado_writer = str(root / "tests" / "unit" / "test_ado_writer.py")
+nudge_resolution = str(root / "tests" / "unit" / "test_nudge_resolution.py")
+ledger_projection = str(root / "tests" / "unit" / "test_ledger_incremental_projection.py")
+ledger_golden = str(root / "tests" / "golden" / "test_ledger_projection.py")
+config_loader = str(root / "tests" / "unit" / "test_config_loader.py")
+ledger_tests = [
+    str(root / "tests" / "unit" / name)
+    for name in (
+        "test_ledger_projection_broader_entities.py",
+        "test_ledger_projection_entities.py",
+        "test_ledger_projection_provenance.py",
+        "test_ledger_projection_updates.py",
+        "test_ledger_field_locks.py",
+        "test_ledger_snapshot_manager.py",
+        "test_ledger_program_views.py",
+    )
+]
+result = pytest.main([
+    reality + "::test_reality_digest_command_renders_cached_digest",
+    reality + "::test_reality_digest_command_refreshes_when_requested",
+    reality + "::test_reality_digest_refresh_renders_delivery_date_challenge",
+    reality + "::test_reality_digest_refresh_renders_staleness_challenge",
+    assertion + "::test_assertion_add_command_persists_assertion_with_defaults",
+    assertion + "::test_assertion_add_command_can_reuse_catalog_linked_query_id",
+    assertion + "::test_assertion_add_command_can_infer_threshold_from_metric_definition",
+    ask,
+    quickstart,
+    next_command,
+    metric,
+    ai_client,
+    quality_gates + "::test_qg11_is_not_forceable_at_l2_and_above",
+    quality_gates + "::test_qg24_missing_metric_warning",
+    quality_gates + "::test_qg24_missing_ado_fields",
+    ado_writer,
+    nudge_resolution,
+    ledger_projection,
+    ledger_golden,
+    *ledger_tests,
+    config_loader + "::ConfigLoaderTests::test_discover_report_editions_excludes_tracked_example_templates",
+    config_loader + "::ConfigLoaderTests::test_load_bundle_with_mode_loads_tracked_example_template_bundle",
+    "-q", "-p", "no:cacheprovider", "-p", "pytest_mock.plugin", "-o", "addopts=", "--basetemp=" + sys.argv[2],
+], plugins=[Guard()])
+raise SystemExit(2 if all_denials else result)
+"""
+    env = os.environ.copy()
+    for key in list(env):
+        if key.upper().startswith((
+            "GIT_", "VERTEX_", "ADO_", "AZURE_", "WORKIQ_", "GH_", "GITHUB_", "AWS_",
+            "OPENAI_", "ANTHROPIC_", "KUSTO_", "UV_", "PIP_", "PYTEST_",
+        )):
+            env.pop(key)
+    env.update(
+        HOME=str(tmp_path), USERPROFILE=str(tmp_path), APPDATA=str(tmp_path), LOCALAPPDATA=str(tmp_path),
+        HOMEDRIVE=tmp_path.drive, HOMEPATH=str(tmp_path)[len(tmp_path.drive):], USERNAME="SyntheticOperator",
+        TEMP=str(tmp_path), TMP=str(tmp_path), PYTEST_DISABLE_PLUGIN_AUTOLOAD="1",
+        PYTHONDONTWRITEBYTECODE="1", PYTHONIOENCODING="utf-8",
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(root), str(tmp_path / "pytest")],
+        cwd=root, env=env, capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    passed = re.search(r"(\d+) passed", result.stdout)
+    assert passed is not None and int(passed.group(1)) >= 137
+    assert " skipped" not in result.stdout
 
 
 @pytest.mark.parametrize("operation", ["source", "prime", "stage"])

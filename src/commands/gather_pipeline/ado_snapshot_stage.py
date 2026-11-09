@@ -20,6 +20,7 @@ from src.commands.gather_pipeline.ado_analytics_primitives import (
 )
 from src.core.ado_client import ADOClient
 from src.core.exceptions import QueryError
+from src.core.gather_channel_support import append_integration_error_once
 from src.core.m365_payload_support import optional_string as _optional_string
 from src.core.models import WorkItem
 from src.core.models_v2 import IntegrationError, Program, Signal, Workstream
@@ -95,18 +96,12 @@ def load_analytics_signals(
             # retry, bounded by _MAX_VS403522_RETRIES so a project missing
             # several fields is still handled without looping forever.
             if "VS403522" not in str(error):
-                log.warning(
-                    "ADO analytics snapshot query failed for %s: %s — skipping analytics stage",
-                    program.id,
-                    error,
-                )
+                log.warning("ADO analytics snapshot query failed; skipping analytics stage")
                 raise
             if attempt == _MAX_VS403522_RETRIES:
                 log.warning(
-                    "ADO analytics snapshot query for %s still failing with VS403522 after %d retries — skipping analytics stage: %s",
-                    program.id,
+                    "ADO analytics snapshot query still failing with VS403522 after %d retries; skipping analytics stage",
                     _MAX_VS403522_RETRIES,
-                    error,
                 )
                 raise
             unavailable = _extract_vs403522_property(str(error))
@@ -118,17 +113,10 @@ def load_analytics_signals(
                 attempt_fields = tuple(f for f in attempt_fields if f != unavailable)
                 changed = True
             if not changed:
-                log.warning(
-                    "ADO analytics snapshot query for %s failed with VS403522 for an already-removed field %r — skipping analytics stage: %s",
-                    program.id,
-                    unavailable,
-                    error,
-                )
+                log.warning("ADO analytics snapshot unavailable field cannot be removed; skipping analytics stage")
                 raise
             log.warning(
-                "ADO analytics snapshot: VS403522 for %s (field=%r) — retrying without it (attempt %d/%d)",
-                program.id,
-                unavailable,
+                "ADO analytics snapshot has an unavailable field (VS403522); retrying (attempt %d/%d)",
                 attempt + 1,
                 _MAX_VS403522_RETRIES,
             )
@@ -168,6 +156,7 @@ def load_sprint_signals(
     *,
     query_state_sink: dict[str, dict[str, Any]] | None = None,
     previous_query_states: dict[str, dict[str, Any]] | None = None,
+    integration_error_sink: list[IntegrationError] | None = None,
     ado_client_factory: Callable[..., ADOClient],
     normalize_ado_team_name_fn: TeamNameNormalizer,
     date_to_sk_fn: Callable[[date], int],
@@ -219,13 +208,15 @@ def load_sprint_signals(
                     capacities_by_team_iteration[(team_name, iteration_id)] = tuple(
                         client.list_iteration_capacities(iteration_id, team=team_name)
                     )
-            except QueryError as error:
-                log.warning(
-                    "ADO sprint capacity fetch skipped for %s team %s iteration %s: %s",
-                    program.id,
-                    team_name or "<default>",
-                    iteration_id,
-                    error,
+            except QueryError:
+                message = "Sprint capacity unavailable for one or more team iterations."
+                log.warning(message)
+                append_integration_error_once(
+                    integration_error_sink,
+                    source="sprints",
+                    stage="capacity",
+                    error=message,
+                    operator_action="Verify Azure DevOps team capacity access and retry gather.",
                 )
                 capacities_by_team_iteration[(team_name, iteration_id)] = ()
             finally:
@@ -243,12 +234,8 @@ def load_sprint_signals(
             select_fields=sprint_snapshot_fields,
         )
         ado_calls += 1
-    except QueryError as error:
-        log.warning(
-            "ADO sprint snapshot filter fallback for %s: %s",
-            program.id,
-            error,
-        )
+    except QueryError:
+        log.warning("ADO sprint snapshot filter failed; using item-scoped fallback.")
         fallback_client = ado_client_factory(
             organization=program.ado.organization,
             project=program.ado.project,

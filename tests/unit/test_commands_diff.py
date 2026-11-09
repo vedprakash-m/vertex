@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import csv
 from dataclasses import replace
 from datetime import date, datetime, timezone
 from functools import partial
+from io import StringIO
 import json
 from pathlib import Path
 import shutil
@@ -13,17 +15,26 @@ import yaml
 from typer.testing import CliRunner
 
 from cli import app
+from src.ai.exec_summary_drafter import _describe_owner_change
 from src.commands.diff import build_offline_diff_summary
 from src.commands.report import generate_report_draft
+from src.commands.report_history import _format_draft_item_delta
 from src.core import metric_registry, narrative_store
+from src.core.ado_narrative_hint_engine import HintKind, generate_delta_hints
 from src.core.chapter_contract_loader import canonical_dimension_binding_id
+from src.core.delta_engine import build_deltas
+from src.core.html_renderer import _delta_row_detail
 from src.core.jinja_filters import build_anchor
 from src.core.narrative_store import get_narratives_dir
 from src.core.overrides_store import get_overrides_path
 from src.core.archive_store import write_confirmed_issue
 from src.core.journal import append_review_decision, append_signal
-from src.core.models import Comment, Confidence, Revision, RiskLevel, WorkItem
-from src.core.models_v2 import Signal, SignalReviewDecision, TrajectoryPoint
+from src.core.models import (
+    AttributionTier, Comment, Confidence, DeltaKind, DeltaSet, EditionType,
+    EvidencePacket, ItemDelta, Revision, RiskLevel, Snapshot, SnapshotItem, WorkItem,
+)
+from src.core.models_v2 import Program, Signal, SignalReviewDecision, TrajectoryPoint
+from src.core.publish_diff import _build_item_lines
 from src.core.trajectory import append_trajectory_point
 from tests.unit.test_config_loader import _write_demo_v2_layout
 
@@ -53,6 +64,10 @@ def test_diff_cli_since_last_confirmed_renders_semantic_v2_sections(
     programs_root = tmp_path / "programs"
     as_of_issue_1 = datetime(2026, 5, 5, 18, 0, tzinfo=timezone.utc)
     as_of_issue_2 = datetime(2026, 5, 12, 18, 0, tzinfo=timezone.utc)
+    baseline_items = tuple(
+        replace(item, assigned_to=None, assigned_to_email=None) if item.id == 900002 else item
+        for item in _sample_items(as_of_issue_1)
+    )
 
     baseline = generate_report_draft(
         edition_name="acme_weekly",
@@ -61,7 +76,7 @@ def test_diff_cli_since_last_confirmed_renders_semantic_v2_sections(
         archive_root=archive_root,
         programs_root=programs_root,
         as_of=as_of_issue_1,
-        work_item_loader=lambda bundle, timestamp: (_sample_items(timestamp), 0),
+        work_item_loader=lambda bundle, timestamp: (baseline_items, 0),
         kusto_query_executor=lambda query: [],
         open_browser=False,
     )
@@ -70,23 +85,6 @@ def test_diff_cli_since_last_confirmed_renders_semantic_v2_sections(
     baseline_exec_summary.write_text("Baseline weekly summary.\n", encoding="utf-8")
     workstream_path = baseline.narratives_dir / "ws_deployment_readiness.md"
     workstream_path.write_text("Baseline deployment workstream summary.\n", encoding="utf-8")
-
-    current = generate_report_draft(
-        edition_name="acme_weekly",
-        issue_number=2,
-        reports_root=reports_root,
-        archive_root=archive_root,
-        programs_root=programs_root,
-        as_of=as_of_issue_2,
-        work_item_loader=lambda bundle, timestamp: (_sample_items_with_diff(timestamp), 0),
-        kusto_query_executor=lambda query: [],
-        open_browser=False,
-    )
-
-    current_exec_summary = current.narratives_dir / "exec_summary.md"
-    current_exec_summary.write_text("Updated weekly summary with rollout risk.\n", encoding="utf-8")
-    current_workstream_path = current.narratives_dir / "ws_deployment_readiness.md"
-    current_workstream_path.write_text("Deployment workstream updated with new safeguard.\n", encoding="utf-8")
 
     adjusted_snapshot = replace(
         baseline.snapshot,
@@ -111,6 +109,30 @@ def test_diff_cli_since_last_confirmed_renders_semantic_v2_sections(
         narratives_source_dir=baseline.narratives_dir,
         archive_root=archive_root,
     )
+
+    current = generate_report_draft(
+        edition_name="acme_weekly",
+        issue_number=2,
+        reports_root=reports_root,
+        archive_root=archive_root,
+        programs_root=programs_root,
+        as_of=as_of_issue_2,
+        work_item_loader=lambda bundle, timestamp: (_sample_items_with_diff(timestamp), 0),
+        kusto_query_executor=lambda query: [],
+        open_browser=False,
+    )
+    assert {
+        delta.work_item_id: delta.field_changes["assigned_to"]
+        for delta in current.report.deltas.owner_changes
+    } == {
+        900001: ("Vertex Maintainer", "next-maintainer@example.com"),
+        900002: (None, "Second Owner"),
+    }
+
+    current_exec_summary = current.narratives_dir / "exec_summary.md"
+    current_exec_summary.write_text("Updated weekly summary with rollout risk.\n", encoding="utf-8")
+    current_workstream_path = current.narratives_dir / "ws_deployment_readiness.md"
+    current_workstream_path.write_text("Deployment workstream updated with new safeguard.\n", encoding="utf-8")
 
     programs_root = reports_root.parent / "programs"
     _append_approved_signal(
@@ -154,22 +176,157 @@ def test_diff_cli_since_last_confirmed_renders_semantic_v2_sections(
     monkeypatch.setattr("src.commands.diff.PROGRAMS_ROOT", programs_root)
     monkeypatch.setattr("src.commands.diff.ARCHIVE_ROOT", archive_root)
 
+    archived_files = {
+        path.relative_to(archive_root): path.read_bytes()
+        for path in archive_root.rglob("*") if path.is_file()
+    }
     result = runner.invoke(app, ["diff", "--edition", "acme_weekly", "--since", "last-confirmed"])
     explicit_issue_result = runner.invoke(app, ["diff", "--edition", "acme_weekly", "--since", "issue-1"])
+    json_result = runner.invoke(app, ["diff", "--edition", "acme_weekly", "--since", "last-confirmed", "--format", "json"])
+    csv_result = runner.invoke(app, ["diff", "--edition", "acme_weekly", "--since", "last-confirmed", "--format", "csv"])
 
     assert result.exit_code == 0
     assert explicit_issue_result.exit_code == 0
+    assert json_result.exit_code == 0
+    assert csv_result.exit_code == 0
     assert "VERTEX DIFF - Changes since Issue #001" in result.stdout
     assert "VERTEX DIFF - Changes since Issue #001" in explicit_issue_result.stdout
     assert "Items:" in result.stdout
     assert '+ NEW: WI:900004 "New cache warmup safeguard"' in result.stdout
     assert 'RISK UP: WI:900001 "Deployment velocity telemetry stabilization"' in result.stdout
+    expected_owner = (
+        'OWNER CHANGED: WI:900001 "Deployment velocity telemetry stabilization" '
+        "(Vertex Maintainer -> next-maintainer@example.com)"
+    )
+    expected_new_owner = (
+        'OWNER CHANGED: WI:900002 "Fleet pilot dependency on capacity allocation" '
+        "(Unassigned -> Second Owner)"
+    )
+    assert [
+        line.strip() for line in result.stdout.splitlines()
+        if line.strip().startswith("OWNER CHANGED: WI:900001")
+    ] == [expected_owner]
+    assert expected_owner in explicit_issue_result.stdout
+    assert expected_owner in json.loads(json_result.stdout)["summary"]
+    assert expected_owner in next(csv.DictReader(StringIO(csv_result.stdout)))["summary"]
+    assert expected_new_owner in result.stdout
+    assert expected_new_owner in explicit_issue_result.stdout
+    assert expected_new_owner in json.loads(json_result.stdout)["summary"]
+    assert expected_new_owner in next(csv.DictReader(StringIO(csv_result.stdout)))["summary"]
     assert "Scorecards:" in result.stdout
     assert "Narratives:" in result.stdout
     assert f"{current_workstream_path.name}:" in result.stdout
     assert "Signals:" in result.stdout
     assert "2 new approved signals since Issue #001 (1 ADO, 1 Kusto)." in result.stdout
     assert "new drift pattern" in result.stdout
+    assert {
+        path.relative_to(archive_root): path.read_bytes()
+        for path in archive_root.rglob("*") if path.is_file()
+    } == archived_files
+
+
+@pytest.mark.parametrize(
+    ("field_changes", "expected"),
+    [
+        ({"assigned_to": ("Old Owner", "New Owner")}, "Old Owner -> New Owner"),
+        ({"assigned_to": (None, "New Owner"), "Assigned To": ("Wrong", "Wrong")}, "Unassigned -> New Owner"),
+        ({"assigned_to": ("Old Owner", None), "System.AssignedTo": ("Wrong", "Wrong")}, "Old Owner -> Unassigned"),
+        ({"assigned_to": (None, None), "Assigned To": ("Wrong", "Wrong")}, "Unassigned -> Unassigned"),
+        ({"Assigned To": ("Legacy Old", "Legacy New")}, "Legacy Old -> Legacy New"),
+        ({"System.AssignedTo": ("ADO Old", "ADO New")}, "ADO Old -> ADO New"),
+        ({"Assigned To": (None, None), "System.AssignedTo": ("ADO Old", "ADO New")}, "ADO Old -> ADO New"),
+        ({}, "Unassigned -> Unassigned"),
+    ],
+)
+def test_publish_diff_owner_fields_preserve_canonical_and_legacy_values(
+    field_changes: dict[str, tuple[str | None, str | None]], expected: str,
+) -> None:
+    delta = ItemDelta(
+        work_item_id=900001,
+        kind=DeltaKind.OWNER_CHANGED,
+        field_changes=field_changes,
+        old_risk=None,
+        new_risk=None,
+        old_eta=None,
+        new_eta=None,
+        evidence=EvidencePacket(
+            work_item_id=900001,
+            revisions=(),
+            comments=(),
+            enrichments=(),
+            confidence=Confidence.NONE,
+            tier=AttributionTier.TIER3,
+            summary_for_reviewer="Synthetic.",
+        ),
+    )
+    deltas = DeltaSet(
+        issue_number=2,
+        previous_issue_number=1,
+        new_items=(),
+        closed_items=(),
+        risk_changes=(),
+        eta_changes=(),
+        unchanged_count=0,
+        owner_changes=(delta,),
+    )
+
+    lines = _build_item_lines(current_items=(), reference_items=(), deltas=deltas)
+
+    assert lines == (f'OWNER CHANGED: WI:900001 "Work item 900001" ({expected})',)
+
+
+@pytest.mark.parametrize(
+    ("prior_owner", "current_name", "current_email", "expected"),
+    [
+        ("Old Owner", "New Owner", "new@example.com", "Old Owner -> new@example.com"),
+        ("Old Owner", "New Owner", None, "Old Owner -> New Owner"),
+        (None, "New Owner", None, "Unassigned -> New Owner"),
+        (None, None, "new@example.com", "Unassigned -> new@example.com"),
+        ("", "New Owner", None, "Unassigned -> New Owner"),
+        ("Old Owner", None, None, "Old Owner -> Unassigned"),
+        (None, None, None, None),
+        ("", None, "", None),
+        ("Old Owner", "Old Owner", "new@example.com", None),
+        ("old@example.com", "Old Owner", "old@example.com", None),
+    ],
+)
+def test_publish_diff_renders_owner_transitions_from_delta_engine(
+    prior_owner: str | None, current_name: str | None,
+    current_email: str | None, expected: str | None,
+) -> None:
+    as_of = datetime(2026, 5, 12, 18, 0, tzinfo=timezone.utc)
+    current = replace(_sample_items(as_of)[0], assigned_to=current_name, assigned_to_email=current_email)
+    prior = SnapshotItem(
+        id=current.id, type=current.type, title=current.title, state=current.state,
+        assigned_to=prior_owner, area_path=current.area_path, target_date=current.target_date,
+        risk_level=current.risk_level, tags=current.tags,
+    )
+    snapshot = Snapshot(
+        issue_number=1, generated_at=as_of, ado_data_as_of=as_of,
+        edition_type=EditionType.DETAILED, items=(prior,), scorecards=(),
+    )
+
+    deltas = build_deltas((current,), snapshot, issue_number=2, previous_issue_number=1)
+    lines = _build_item_lines(current_items=(current,), reference_items=(prior,), deltas=deltas)
+
+    if expected is None:
+        assert lines == ("No item deltas detected.",)
+    else:
+        assert lines == (f'OWNER CHANGED: WI:{current.id} "{current.title}" ({expected})',)
+        delta = deltas.owner_changes[0]
+        assert _delta_row_detail(delta, category="owner_change") == expected.replace(" -> ", " \u2192 ")
+        assert _format_draft_item_delta(delta) == f"Owner changed: {expected}"
+        old_value = prior_owner or "unassigned"
+        new_value = current_email or current_name or "unassigned"
+        assert _describe_owner_change(delta, current) == (
+            f"OWNER_CHANGE #{current.id} {current.title} moved from {old_value} to {new_value}."
+        )
+        hints = generate_delta_hints(
+            deltas, {current.id: current}, 2,
+            Program(schema_version="2.0", id="synthetic", name="Synthetic"),
+        )
+        owner_hint = next(hint for hint in hints if hint.hint_kind is HintKind.OWNER_CHANGED)
+        assert (owner_hint.old_value, owner_hint.new_value) == (old_value, new_value)
 
 
 def _seed_v2_report_layout(repo_root: Path, tmp_path: Path) -> tuple[Path, Path, Path]:
@@ -327,8 +484,13 @@ def _sample_items(as_of: datetime) -> tuple[WorkItem, ...]:
 def _sample_items_with_diff(as_of: datetime) -> tuple[WorkItem, ...]:
     baseline = _sample_items(as_of)
     return (
-        replace(baseline[0], target_date=date(2026, 5, 14)),
-        baseline[1],
+        replace(
+            baseline[0],
+            target_date=date(2026, 5, 14),
+            assigned_to="Next Maintainer",
+            assigned_to_email="next-maintainer@example.com",
+        ),
+        replace(baseline[1], assigned_to="Second Owner", assigned_to_email=None),
         baseline[2],
         WorkItem(
             id=900004,
@@ -373,8 +535,12 @@ def _append_approved_signal(*, programs_root: Path, signal: Signal) -> None:
     )
 
 
-def test_build_offline_diff_summary_detects_narrative_and_override_changes(repo_root: Path, tmp_path: Path) -> None:
-    reports_root, archive_root, output_root = _seed_v2_report_layout(repo_root, tmp_path)
+def test_build_offline_diff_summary_detects_narrative_and_override_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import Mock
+
+    reports_root, archive_root, output_root = _seed_v2_report_layout(tmp_path, tmp_path)
     programs_root = tmp_path / "programs"
 
     as_of = datetime(2026, 5, 5, 18, 0, tzinfo=timezone.utc)
@@ -397,6 +563,8 @@ def test_build_offline_diff_summary_detects_narrative_and_override_changes(repo_
     overrides_payload["scorecards"]["Acme Adventure/SYN-A 100% Ramp Readiness"]["Deployment Velocity"]["risk"] = "high"
     overrides_path.write_text(yaml.safe_dump(overrides_payload, sort_keys=False, allow_unicode=True), encoding="utf-8")
 
+    summary_builder = Mock(side_effect=AssertionError("diff should not build AI reality context"))
+    monkeypatch.setattr("src.commands.report_ai.build_reality_assessment_summary", summary_builder)
     summary = build_offline_diff_summary(
         edition_name="acme_weekly",
         issue_number=1,
@@ -408,6 +576,7 @@ def test_build_offline_diff_summary_detects_narrative_and_override_changes(repo_
     assert "VERTEX DIFF - Issue 001 vs last dry-run" in summary
     assert "Deployment Velocity (narrative changed):" in summary
     assert "Deployment Velocity (risk level changed via override):" in summary
+    summary_builder.assert_not_called()
 
 
 def test_diff_cli_supports_json_and_csv(monkeypatch, repo_root: Path, tmp_path: Path) -> None:

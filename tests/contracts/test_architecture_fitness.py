@@ -2,6 +2,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import date, datetime, timezone
+from importlib.util import resolve_name
 from pathlib import Path
 
 import pytest
@@ -152,38 +153,160 @@ def _is_broad_except(node: ast.AST) -> bool:
     return isinstance(node.type, ast.Name) and node.type.id == "Exception"
 
 
-# INV-2: Only snapshot_store.write_confirmed() writes confirmed snapshots, and
-# it may only be imported by confirm.py (direct call) and file_stores.py
-# (delegation wrapper that proxies the same function).  No other module may
-# import write_confirmed from snapshot_store directly.
-_WRITE_CONFIRMED_IMPORT_PATTERN = re.compile(
-    r"from\s+src\.core\.snapshot_store\s+import\s+[^\n]*\bwrite_confirmed\b"
-)
+# INV-2: Direct snapshot-writer imports are restricted to confirm.py.
 _WRITE_CONFIRMED_ALLOWED_CALLERS = frozenset(
     {
         "src/commands/confirm.py",
-        "src/core/file_stores.py",
     }
 )
 
 
 def test_inv2_write_confirmed_single_write_path() -> None:
-    """INV-2: confirm.py and file_stores.py are the only modules allowed to
-    import write_confirmed from snapshot_store.  Any new import elsewhere would
-    introduce a second write path that bypasses the archive lock and manifest."""
+    """Only confirm.py may directly import or wildcard-import the writer."""
     violations: list[str] = []
     for py_file in (REPO_ROOT / "src").rglob("*.py"):
         relative = py_file.relative_to(REPO_ROOT).as_posix()
         if relative in _WRITE_CONFIRMED_ALLOWED_CALLERS:
             continue
         source = py_file.read_text(encoding="utf-8")
-        if _WRITE_CONFIRMED_IMPORT_PATTERN.search(source):
-            violations.append(relative)
+        tree = ast.parse(source, filename=relative)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            module = node.module
+            if node.level:
+                package = py_file.parent.relative_to(REPO_ROOT).parts
+                if node.level > len(package):
+                    continue
+                module = resolve_name("." * node.level + (node.module or ""), ".".join(package))
+            if module == "src.core.snapshot_store" and any(
+                name.name in {"write_confirmed", "*"} for name in node.names
+            ):
+                violations.append(relative)
+                break
 
     assert violations == [], (
         "INV-2 violation: write_confirmed imported outside approved callers: "
         + ", ".join(violations)
     )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from src.core.snapshot_store import write_confirmed\n",
+        "from src.core.snapshot_store import write_confirmed as writer\n",
+        "from src.core.snapshot_store import (\n    write_confirmed,\n)\n",
+        "from src.core.snapshot_store import (\n    read_snapshot,\n    write_confirmed as writer,\n)\n",
+        "from src.core.snapshot_store import \\\n    write_confirmed\n",
+        "from src.core.snapshot_store import *\n",
+    ],
+)
+def test_inv2_rejects_writer_import_forms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    outside = tmp_path / "src" / "outside.py"
+    outside.parent.mkdir(parents=True)
+    outside.write_text(source, encoding="utf-8")
+    monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+
+    with pytest.raises(AssertionError, match="src/outside.py"):
+        test_inv2_write_confirmed_single_write_path()
+
+
+@pytest.mark.parametrize(
+    ("relative", "source"),
+    [
+        ("src/core/outside.py", "from .snapshot_store import write_confirmed\n"),
+        ("src/core/outside.py", "from .snapshot_store import (\n    write_confirmed as writer,\n)\n"),
+        ("src/core/outside.py", "from .snapshot_store import *\n"),
+        ("src/core/__init__.py", "from .snapshot_store import write_confirmed\n"),
+        ("src/commands/outside.py", "from ..core.snapshot_store import write_confirmed\n"),
+        ("src/commands/confirm_stages/outside.py", "from ...core.snapshot_store import write_confirmed\n"),
+    ],
+)
+def test_inv2_rejects_relative_writer_import_forms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str, source: str
+) -> None:
+    outside = tmp_path / relative
+    outside.parent.mkdir(parents=True)
+    outside.write_text(source, encoding="utf-8")
+    monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+
+    with pytest.raises(AssertionError, match=relative):
+        test_inv2_write_confirmed_single_write_path()
+
+
+@pytest.mark.parametrize(
+    ("relative", "source"),
+    [
+        ("src/core/outside.py", "from .other_store import write_confirmed\n"),
+        ("src/core/other/outside.py", "from .snapshot_store import write_confirmed\n"),
+        ("src/commands/outside.py", "from .snapshot_store import write_confirmed\n"),
+        ("src/core/outside.py", "from .snapshot_store import read_snapshot\n"),
+        ("src/outside.py", "from ..core.snapshot_store import write_confirmed\n"),
+    ],
+)
+def test_inv2_allows_unrelated_relative_imports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str, source: str
+) -> None:
+    outside = tmp_path / relative
+    outside.parent.mkdir(parents=True)
+    outside.write_text(source, encoding="utf-8")
+    monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+
+    test_inv2_write_confirmed_single_write_path()
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "# from src.core.snapshot_store import write_confirmed\n",
+        'description = "from src.core.snapshot_store import write_confirmed"\n',
+        "from src.core.snapshot_store import read_snapshot\n",
+        "from src.core.other_store import write_confirmed\n",
+        "from .src.core.snapshot_store import write_confirmed\n",
+    ],
+)
+def test_inv2_allows_unrelated_imports_and_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    outside = tmp_path / "src" / "outside.py"
+    outside.parent.mkdir(parents=True)
+    outside.write_text(source, encoding="utf-8")
+    monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+
+    test_inv2_write_confirmed_single_write_path()
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from src.core.snapshot_store import (\n    write_confirmed as writer,\n)\n",
+        "from ..core.snapshot_store import write_confirmed\n",
+    ],
+)
+def test_inv2_allows_writer_import_in_confirm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    confirm = tmp_path / "src" / "commands" / "confirm.py"
+    confirm.parent.mkdir(parents=True)
+    confirm.write_text(source, encoding="utf-8")
+    monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+
+    test_inv2_write_confirmed_single_write_path()
+
+
+def test_inv2_rejects_invalid_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outside = tmp_path / "src" / "outside.py"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("from src.core.snapshot_store import (\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+
+    with pytest.raises(SyntaxError):
+        test_inv2_write_confirmed_single_write_path()
 
 
 # ---------------------------------------------------------------------------

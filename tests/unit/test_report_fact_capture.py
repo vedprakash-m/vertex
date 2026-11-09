@@ -11,7 +11,7 @@ from src.commands.report_pipeline.assemble_stage import _pin_program_fact_snapsh
 from src.core.edition_resolver import get_program_output_dir
 from src.core.exceptions import ConfigError
 from src.core.forecast_engine import ETAForecast
-from src.core.models import Confidence
+from src.core.models import Confidence, RiskLevel
 from src.core.gather_run_manifest import QueryResultEntry
 from src.core.manifest_writer import hash_jsonable
 from src.core.program_fact_store import ProgramFactInput, ProgramFactStore
@@ -155,7 +155,7 @@ def test_ordinary_report_persists_the_pre_acquisition_pin(
 
 @pytest.mark.parametrize("damage", [
     "retained", "gather", "rendered", "forecast", "foreign_risk", "duplicate_risk",
-    "foreign_milestone", "duplicate_milestone",
+    "foreign_milestone", "duplicate_milestone", "conflicting_judgment", "conflicting_workitem",
 ])
 def test_invalid_capture_stops_before_output_directory_creation(
     repo_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str,
@@ -188,6 +188,14 @@ def test_invalid_capture_stops_before_output_directory_creation(
 
             risk = _risk(program_id="foreign" if damage == "foreign_risk" else "acme")
             ctx = replace(ctx, risks=(risk, risk) if damage == "duplicate_risk" else (risk,))
+        elif damage in {"conflicting_judgment", "conflicting_workitem"}:
+            marker, scope, selectors = ctx.report_reality_scope
+            family = "judgment" if damage == "conflicting_judgment" else "workitem.state"
+            current = dict(selectors)[family]
+            other = "legacy" if current != "legacy" else "primary"
+            ctx = replace(ctx, report_reality_scope=(
+                marker, scope, tuple(sorted((*selectors, (family, other)))),
+            ))
         else:
             from tests.unit.test_program_verdict import _milestone
 
@@ -229,8 +237,84 @@ def test_unresolved_ordinary_output_preserves_absent_capture_compatibility(
     )
     assert "run_evidence_snapshot" not in result.manifest.metadata
     assert "program_verdict_observation" not in result.manifest.metadata
+    assert "program_verdict_comparison" not in result.manifest.metadata
     draft = json.loads((result.manifest_path.parent / "issue_001.draft.json").read_text(encoding="utf-8"))
     assert draft["run_evidence_snapshot_sha256"] is None
+
+
+@pytest.mark.parametrize("with_forecast", [False, True])
+def test_ordinary_report_compares_the_rendered_health_summary_without_promotion(
+    repo_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, with_forecast: bool,
+) -> None:
+    from dataclasses import asdict
+
+    from src.commands.confirm_stages.draft_loaders import load_confirm_draft_manifest
+    from src.core.stages import render_stage
+
+    reports = stage_v2_report_workspace(repo_root, tmp_path)
+    root = reports.parent / "programs"
+    disable_kusto_in_report_copy(reports)
+    monkeypatch.setenv("VERTEX_DB_PATH", str(tmp_path / "fact-db"))
+    build_health = render_stage._build_health_summary_with_risk_fallback
+    output = report_module._OutputStage.execute
+    health_summaries = []
+    rendered = []
+
+    def retain_health(*args, **kwargs):
+        health = build_health(*args, **kwargs)
+        health_summaries.append(health)
+        return health
+
+    def capture_output(stage, ctx):
+        rendered.append((
+            ctx.render_state.html_body, ctx.render_state.markdown_body,
+            dict(ctx.validation_state.manifest.qg_results),
+        ))
+        if with_forecast:
+            item = next(item for item in ctx.render_state.snapshot.items if item.target_date is not None)
+            ctx = replace(ctx, eta_forecasts={item.id: ETAForecast(
+                work_item_id=item.id, ado_target_date=item.target_date,
+                predicted_target_date=item.target_date, confidence=Confidence.HIGH,
+                slip_probability=0.8, reasoning="Synthetic", prior_slips=0,
+            )})
+        return output(stage, ctx)
+
+    monkeypatch.setattr(render_stage, "_build_health_summary_with_risk_fallback", retain_health)
+    monkeypatch.setattr(report_module._OutputStage, "execute", capture_output)
+    result = generate_report_draft(
+        edition_name="acme_weekly", reports_root=reports, programs_root=root,
+        archive_root=tmp_path / "archive", as_of=datetime(2026, 5, 5, 18, tzinfo=timezone.utc),
+        work_item_loader=lambda bundle, timestamp: (
+            tuple(replace(item, risk_level=RiskLevel.LOW, state="Active") for item in _sample_items(timestamp)), 0,
+        ),
+        open_browser=False,
+    )
+
+    health, = health_summaries
+    observation = result.manifest.metadata["program_verdict_observation"]
+    comparison = result.manifest.metadata["program_verdict_comparison"]
+    assert comparison.report_risk == health.overall_risk
+    assert comparison.report_health_state == health.health_state
+    assert comparison.verdict_risk == observation.verdict.health
+    assert comparison.risk_values_equal == (health.overall_risk == observation.verdict.health)
+    assert comparison.capture_sha256 == observation.verdict.snapshot_id
+    assert comparison.observation_inputs_sha256 == observation.inputs_sha256
+    persisted = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert persisted["metadata"]["program_verdict_comparison"] == asdict(comparison)
+    draft = json.loads((result.manifest_path.parent / "issue_001.draft.json").read_text(encoding="utf-8"))
+    captured = load_confirm_draft_manifest("acme_weekly", 1, draft_state=draft, programs_root=root)
+    assert captured.manifest_id == result.manifest.manifest_id
+    assert captured.run_evidence_snapshot is not None
+    assert captured.run_evidence_snapshot.sha256 == comparison.capture_sha256
+    assert (result.html_body, result.markdown_body) == rendered[0][:2]
+    assert result.manifest.qg_results == rendered[0][2]
+    assert not any("verdict" in gate for gate in result.manifest.qg_results)
+    assert comparison.schema_version not in result.html_body
+    assert comparison.schema_version not in result.markdown_body
+    if with_forecast:
+        assert observation.verdict.schedule_risk.value == "high"
+        assert comparison.report_risk != comparison.verdict_risk
+        assert comparison.risk_values_equal is False
 
 
 @pytest.mark.parametrize(("probability", "historical_target", "expected"), [
@@ -334,6 +418,7 @@ def test_real_risk_stage_feeds_observation_through_ordinary_report(
 ) -> None:
     from src.core.fact_sor_state import save_fact_sor_state
     from src.core.risk_register_engine import _risk_fact_payload
+    from src.core.stages.render_stage import RenderStage
     from src.core.stages.risk_stage import RiskStage
     from tests.unit.test_program_verdict import _risk
 
@@ -353,18 +438,29 @@ def test_real_risk_stage_feeds_observation_through_ordinary_report(
         recorded_at=as_of, recorded_by="synthetic", programs_root=root,
     )
     selected = []
+    rendered_health = []
     execute = RiskStage.execute
+    render = RenderStage.execute
 
     def retain_selected(stage, ctx):
         result = execute(stage, ctx)
         selected.append(result)
         return result
 
+    def retain_rendered_health(stage, ctx):
+        result = render(stage, ctx)
+        rendered_health.append(result.render_state.health)
+        return result
+
     monkeypatch.setattr(RiskStage, "execute", retain_selected)
+    monkeypatch.setattr(RenderStage, "execute", retain_rendered_health)
     result = generate_report_draft(
         edition_name="acme_weekly", reports_root=reports, programs_root=root,
         archive_root=tmp_path / "archive", as_of=as_of,
-        work_item_loader=lambda bundle, timestamp: (_sample_items(timestamp), 0), open_browser=False,
+        work_item_loader=lambda bundle, timestamp: (
+            tuple(replace(item, risk_level=RiskLevel.LOW, state="Active") for item in _sample_items(timestamp)), 0,
+        ),
+        open_browser=False,
     )
     stage, = selected
     observed = result.manifest.metadata["program_verdict_observation"]
@@ -379,6 +475,12 @@ def test_real_risk_stage_feeds_observation_through_ordinary_report(
         assert ask.entity_refs == ("RISK:risk-1",)
         assert ask.missing_fields == ("owner", "mitigation_eta")
         assert observed.verdict.health.value == "high"
+        comparison = result.manifest.metadata["program_verdict_comparison"]
+        assert comparison.report_risk == rendered_health[0].overall_risk
+        assert comparison.report_health_state == rendered_health[0].health_state
+        assert comparison.report_risk != RiskLevel.HIGH
+        assert comparison.verdict_risk == RiskLevel.HIGH
+        assert comparison.risk_values_equal is False
     else:
         assert observed.verdict.leadership_asks == ()
         assert "risk_register_high_floor" not in {reason.code for reason in observed.verdict.reasons}

@@ -18,12 +18,13 @@ from src.core.ledger.source_refs import OperatorAssertionRef
 from src.core.models import Confidence, DeltaSet, EditionType, FreshnessReport, ProgramContext, ReportData, ReviewSection, ReviewState, ReviewStatus, RiskLevel
 from src.core.models_v2 import Dependency, DependencyStatus, DependencyType, Milestone, MilestoneAssessment, MilestoneStatus, RiskCategory, RiskEntry, RiskImpact, RiskProbability, RiskStatus
 from src.core.pipeline import StageContext
-from src.core.program_fact_store import FactLineage, ProgramFactSnapshot
+from src.core.program_fact_store import FactLineage, ProgramFactInput, ProgramFactSnapshot, ProgramFactStore
 from src.core.program_reality import FactAssessment, ProgramReality
 from src.core.exceptions import ConfigError
 from src.core.stages import milestone_stage as milestone_stage_module
 from src.core.stages import render_stage as render_stage_module
 from src.core.stages import risk_stage as risk_stage_module
+from src.core.stages import validation_stage as validation_stage_module
 from src.core.stages.milestone_stage import MilestoneStage
 from src.core.stages.risk_stage import RiskStage
 from src.core.truth_levels import TruthLevel
@@ -252,6 +253,7 @@ def test_risk_stage_legacy_mode_preserves_legacy_behavior(monkeypatch, tmp_path:
     assert result.risk_assessments is None
     assert result.risk_lineage is None
     assert result.risk_warnings == ()
+    assert validation_stage_module._build_family_read_paths_metadata(result)["risk"] == "legacy"
 
 
 def test_risk_stage_non_legacy_surfaces_fact_assessment_metadata_into_render() -> None:
@@ -320,7 +322,7 @@ def test_risk_stage_empty_set_cross_check_warns_when_legacy_has_data(monkeypatch
         recorded_by="test",
         programs_root=programs_root,
     )
-    monkeypatch.setattr(risk_stage_module, "_load_current_risks", lambda *_a, **_kw: (_risk_entry("risk-legacy"),))
+    monkeypatch.setattr(risk_stage_module, "_load_legacy_risks", lambda *_a, **_kw: (_risk_entry("risk-legacy"),))
 
     ctx = StageContext(
         edition_name="example_weekly",
@@ -336,6 +338,154 @@ def test_risk_stage_empty_set_cross_check_warns_when_legacy_has_data(monkeypatch
     assert result.risk_assessments == ()
     assert len(result.risk_warnings) == 1
     assert "ProgramReality returned 0 risks" in result.risk_warnings[0]
+
+
+@pytest.mark.parametrize("program_mode", ("legacy", "primary"))
+@pytest.mark.parametrize("family_mode", ("primary", "shadow"))
+@pytest.mark.parametrize("operation", ("cross_check", "rollback"))
+def test_nonlegacy_risk_checks_and_rollback_use_only_authored_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, program_mode: str, family_mode: str, operation: str,
+) -> None:
+    monkeypatch.delenv("VERTEX_FACT_SOR", raising=False)
+    monkeypatch.setenv("VERTEX_DB_PATH", str(tmp_path / "database"))
+    monkeypatch.delenv("VERTEX_REPORT_ALLOW_LEGACY_RISK_ROLLBACK", raising=False)
+    if operation == "rollback":
+        monkeypatch.setenv("VERTEX_REPORT_ALLOW_LEGACY_RISK_ROLLBACK", "1")
+    programs_root = tmp_path / "programs"
+    _seed_program(programs_root, "acme")
+    save_fact_sor_state(
+        "acme", mode=program_mode, family_modes={"judgment": family_mode},
+        recorded_at=datetime(2020, 1, 1, tzinfo=timezone.utc), programs_root=programs_root,
+    )
+    risk_path = programs_root / "acme" / "risk_register.yaml"
+    risk_path.write_text(
+        "schema_version: '1.0'\nrisks:\n"
+        "  - id: shared-risk\n    title: Authored risk\n    description: Synthetic risk\n"
+        "    probability: likely\n    impact: high\n    category: dependency\n"
+        "    owner_alias: operator\n    status: open\n    identified_date: '2020-01-01'\n",
+        encoding="utf-8",
+    )
+    original = risk_path.read_bytes()
+    store = ProgramFactStore("acme", db_root=tmp_path / "database")
+    for risk_id in ("shared-risk", "stored-only"):
+        store.append_fact(
+            ProgramFactInput(
+                "risk.entry", (f"RISK:{risk_id}",),
+                {
+                    "id": risk_id, "program_id": "acme", "title": "Stored risk",
+                    "description": "Synthetic risk", "probability": "likely", "impact": "high",
+                    "category": "dependency", "owner_alias": "operator", "status": "open",
+                    "identified_date": "2020-01-01",
+                },
+            ),
+            recorded_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+        )
+
+    def load_reality(*_args, **_kwargs):
+        if operation == "rollback":
+            raise RuntimeError("Synthetic reality failure")
+        return _reality(when=datetime(2026, 7, 8, 18, 0, tzinfo=timezone.utc))
+
+    ctx = StageContext(
+        edition_name="example_weekly",
+        resolved_v2=SimpleNamespace(paths=SimpleNamespace(program_id="acme")),
+        programs_root=programs_root,
+        archive_root=tmp_path / "archive",
+        data_as_of=datetime(2026, 7, 8, 18, 0, tzinfo=timezone.utc),
+        stage_support=SimpleNamespace(load_program_reality=load_reality),
+    )
+    result = RiskStage().execute(ctx)
+
+    if operation == "cross_check":
+        assert result.risks == ()
+        assert "legacy source has 1" in result.risk_warnings[0]
+        assert validation_stage_module._build_family_read_paths_metadata(result)["risk"] == "reality"
+    else:
+        assert tuple(risk.title for risk in result.risks) == ("Authored risk",)
+        assert "audited rollback flag" in result.risk_warnings[0]
+        assert validation_stage_module._build_family_read_paths_metadata(result)["risk"] == "legacy"
+    assert risk_path.read_bytes() == original
+
+
+def test_primary_empty_risk_cross_check_does_not_ignore_authored_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("VERTEX_FACT_SOR", raising=False)
+    monkeypatch.setenv("VERTEX_DB_PATH", str(tmp_path / "database"))
+    programs_root = tmp_path / "programs"
+    _seed_program(programs_root, "acme")
+    save_fact_sor_state(
+        "acme", mode="primary", recorded_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+        programs_root=programs_root,
+    )
+    (programs_root / "acme" / "risk_register.yaml").write_text(
+        "schema_version: '1.0'\nrisks:\n"
+        "  - id: legacy-risk\n    title: Authored risk\n    description: Synthetic risk\n"
+        "    probability: likely\n    impact: high\n    category: dependency\n"
+        "    owner_alias: operator\n    status: open\n    identified_date: '2020-01-01'\n",
+        encoding="utf-8",
+    )
+    reality = ProgramReality.load(
+        "acme", programs_root=programs_root, archive_root=tmp_path / "archive",
+        require_committed_gather_run=False,
+    )
+    ctx = StageContext(
+        edition_name="example_weekly",
+        resolved_v2=SimpleNamespace(paths=SimpleNamespace(program_id="acme")),
+        programs_root=programs_root, data_as_of=datetime(2026, 7, 8, tzinfo=timezone.utc),
+        stage_support=SimpleNamespace(load_program_reality=lambda *_a, **_kw: reality),
+    )
+
+    result = RiskStage().execute(ctx)
+
+    assert result.risks == ()
+    assert "legacy source has 1" in result.risk_warnings[0]
+
+
+@pytest.mark.parametrize("source_state", ("missing", "invalid", "nonempty_reality"))
+def test_risk_comparison_handles_missing_or_invalid_authored_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, source_state: str,
+) -> None:
+    monkeypatch.delenv("VERTEX_FACT_SOR", raising=False)
+    monkeypatch.delenv("VERTEX_REPORT_ALLOW_LEGACY_RISK_ROLLBACK", raising=False)
+    monkeypatch.setenv("VERTEX_DB_PATH", str(tmp_path / "database"))
+    programs_root = tmp_path / "programs"
+    _seed_program(programs_root, "acme")
+    save_fact_sor_state(
+        "acme", mode="primary", recorded_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+        programs_root=programs_root,
+    )
+    if source_state != "missing":
+        (programs_root / "acme" / "risk_register.yaml").write_text(
+            "schema_version: '2.0'\nrisks: []\n", encoding="utf-8",
+        )
+    assessments = (
+        (_assessment(_risk_entry("live-risk"), truth_level=TruthLevel.SOURCE_VALIDATED),)
+        if source_state == "nonempty_reality" else ()
+    )
+    ctx = StageContext(
+        edition_name="example_weekly",
+        resolved_v2=SimpleNamespace(paths=SimpleNamespace(program_id="acme")),
+        programs_root=programs_root, data_as_of=datetime(2026, 7, 8, tzinfo=timezone.utc),
+        stage_support=SimpleNamespace(
+            load_program_reality=lambda *_a, **_kw: _reality(
+                when=datetime(2026, 7, 8, tzinfo=timezone.utc), risks=assessments,
+            ),
+        ),
+    )
+
+    result = RiskStage().execute(ctx)
+
+    if source_state == "invalid":
+        assert "risk legacy cross-check unavailable" in result.risk_warnings[0]
+        assert "Unsupported risk register schema_version" in result.risk_warnings[0]
+    else:
+        assert result.risk_warnings == ()
+    assert tuple(risk.id for risk in result.risks) == (
+        ("live-risk",) if source_state == "nonempty_reality" else ()
+    )
+    assert validation_stage_module._build_family_read_paths_metadata(result)["risk"] == "reality"
+    assert not (tmp_path / "database").exists()
 
 
 def test_risk_stage_requires_audited_rollback_flag_for_reality_failure(tmp_path: Path) -> None:
@@ -375,7 +525,7 @@ def test_risk_stage_audited_rollback_warns_and_uses_legacy(monkeypatch, tmp_path
     )
     monkeypatch.setenv("VERTEX_REPORT_ALLOW_LEGACY_RISK_ROLLBACK", "1")
     legacy_risk = _risk_entry("risk-rollback", title="Rollback risk")
-    monkeypatch.setattr(risk_stage_module, "_load_current_risks", lambda *_a, **_kw: (legacy_risk,))
+    monkeypatch.setattr(risk_stage_module, "_load_legacy_risks", lambda *_a, **_kw: (legacy_risk,))
 
     ctx = StageContext(
         edition_name="example_weekly",

@@ -10,6 +10,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 import portalocker
 
+from src.core.exceptions import StateError
 from src.core.jsonl_utils import (
     append_jsonl_line,
     read_jsonl_records,
@@ -31,6 +32,19 @@ _ACTIONS_MAX_BYTES = 10 * 1024 * 1024
 ActionLogEntry = ActionItem | ActionStatusUpdate
 _ACTIVE_ACTION_STATUSES = {ActionStatus.OPEN, ActionStatus.IN_PROGRESS}
 _RESOLVED_ACTION_STATUSES = {ActionStatus.DONE, ActionStatus.CANCELLED}
+
+
+class ActionJournalReadError(StateError):
+    """The selected action journal cannot be read safely."""
+
+
+def _read_action_records(path: Path, *, repair_corruption: bool) -> tuple[dict[str, Any], ...]:
+    try:
+        return read_jsonl_records(path, repair_corruption=repair_corruption)
+    except (OSError, ValueError):
+        if repair_corruption:
+            raise
+        raise ActionJournalReadError("Action journal cannot be read safely; review it before retrying.") from None
 
 
 def get_actions_path(program_id: str, programs_root: Path = PROGRAMS_ROOT) -> Path:
@@ -75,12 +89,14 @@ def append_action(
     return target
 
 
-def read_action_log(program_id: str, programs_root: Path = PROGRAMS_ROOT) -> tuple[ActionLogEntry, ...]:
+def read_action_log(
+    program_id: str, programs_root: Path = PROGRAMS_ROOT, *, repair_corruption: bool = True,
+) -> tuple[ActionLogEntry, ...]:
     path = get_actions_path(program_id, programs_root)
-    if not path.exists():
+    if repair_corruption and not path.exists():
         return ()
     entries: list[ActionLogEntry] = []
-    for record in read_jsonl_records(path):
+    for record in _read_action_records(path, repair_corruption=repair_corruption):
         raw_record_type = record.get("record_type", "action")
         if not isinstance(raw_record_type, str):
             raise TypeError("record_type must be a string")
@@ -94,20 +110,24 @@ def read_action_log(program_id: str, programs_root: Path = PROGRAMS_ROOT) -> tup
     return tuple(entries)
 
 
-def load_latest_action_statuses(program_id: str, programs_root: Path = PROGRAMS_ROOT) -> dict[str, ActionStatusUpdate]:
+def load_latest_action_statuses(
+    program_id: str, programs_root: Path = PROGRAMS_ROOT, *, repair_corruption: bool = True,
+) -> dict[str, ActionStatusUpdate]:
     latest: dict[str, ActionStatusUpdate] = {}
-    for entry in read_action_log(program_id, programs_root):
+    for entry in read_action_log(program_id, programs_root, repair_corruption=repair_corruption):
         if isinstance(entry, ActionStatusUpdate):
             latest[entry.action_id] = entry
     return latest
 
 
-def load_actions(program_id: str, programs_root: Path = PROGRAMS_ROOT) -> tuple[ActionItem, ...]:
+def load_actions(
+    program_id: str, programs_root: Path = PROGRAMS_ROOT, *, repair_corruption: bool = True,
+) -> tuple[ActionItem, ...]:
     path = get_actions_path(program_id, programs_root)
-    if not path.exists():
+    if repair_corruption and not path.exists():
         return ()
     base_entries: dict[str, ActionItem] = {}
-    for record in read_jsonl_records(path):
+    for record in _read_action_records(path, repair_corruption=repair_corruption):
         record_type = record.get("record_type", "action")
         if record_type != "action":
             continue
@@ -130,7 +150,7 @@ def load_actions(program_id: str, programs_root: Path = PROGRAMS_ROOT) -> tuple[
         action = _action_from_record(record, program_id=program_id)
         if action.id not in base_entries:
             base_entries[action.id] = action
-    latest_statuses = load_latest_action_statuses(program_id, programs_root)
+    latest_statuses = load_latest_action_statuses(program_id, programs_root, repair_corruption=repair_corruption)
     return tuple(
         _apply_status_update(entry, latest_statuses.get(entry.id))
         for entry in base_entries.values()
@@ -147,7 +167,7 @@ def update_action_status(
     updated_at: datetime | None = None,
     programs_root: Path = PROGRAMS_ROOT,
 ) -> Path:
-    current_actions = load_actions(program_id, programs_root)
+    current_actions = load_actions(program_id, programs_root, repair_corruption=False)
     current_action = next((action for action in current_actions if action.id == action_id), None)
     if current_action is None:
         raise ValueError(f"Unknown action '{action_id}' for program '{program_id}'.")
@@ -174,10 +194,10 @@ def associate_action_with_work_item(
     programs_root: Path = PROGRAMS_ROOT,
 ) -> None:
     path = get_actions_path(program_id, programs_root)
-    if not path.exists():
+    records = _read_action_records(path, repair_corruption=False)
+    if not records and not path.exists():
         return
     
-    records = read_jsonl_records(path)
     updated_records = []
     for record in records:
         if record.get("record_type", "action") == "action":
@@ -201,7 +221,10 @@ def associate_action_with_work_item(
         portalocker.unlock(handle)
     write_checksum_file(path)
 
-    updated_action = next((action for action in load_actions(program_id, programs_root) if action.id == action_id), None)
+    updated_action = next(
+        (action for action in load_actions(program_id, programs_root, repair_corruption=False) if action.id == action_id),
+        None,
+    )
     if updated_action is not None:
         _sync_action_fact(
             program_id,

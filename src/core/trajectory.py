@@ -95,12 +95,13 @@ def read_trajectory(
     start: date | None = None,
     end: date | None = None,
     programs_root: Path = PROGRAMS_ROOT,
+    repair_corruption: bool = True,
 ) -> tuple[TrajectoryPoint, ...]:
     path = get_trajectory_path(program_id, work_item_id, programs_root)
     if not path.exists():
         return ()
     points: list[TrajectoryPoint] = []
-    for record in _read_jsonl(path):
+    for record in _read_jsonl(path, repair_corruption=repair_corruption):
         point = _trajectory_point_from_record(record)
         if start is not None and point.date < start:
             continue
@@ -212,7 +213,7 @@ def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
     write_checksum_file(path)
 
 
-def _read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
+def _read_jsonl(path: Path, *, repair_corruption: bool = True) -> Iterator[dict[str, Any]]:
     valid_lines: list[str] = []
     invalid_found = False
     with path.open("r", encoding="utf-8") as handle:
@@ -223,9 +224,13 @@ def _read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
             try:
                 payload = parse_jsonl_line(line)
             except json.JSONDecodeError:
+                if not repair_corruption:
+                    raise ValueError("Invalid trajectory record.") from None
                 invalid_found = True
                 continue
             if not isinstance(payload, dict):
+                if not repair_corruption:
+                    raise ValueError("Invalid trajectory record.")
                 invalid_found = True
                 continue
             valid_lines.append(raw_line if raw_line.endswith("\n") else raw_line + "\n")

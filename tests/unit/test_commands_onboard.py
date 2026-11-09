@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -822,6 +823,120 @@ def test_onboard_cli_bootstraps_new_edition(monkeypatch, tmp_path: Path) -> None
     assert bundle.review.reviewers[0].name == "Lead PM"
 
 
+def test_synthetic_onboard_context_solicitation_and_stale_reply(monkeypatch, tmp_path: Path) -> None:
+    from email.message import EmailMessage
+    import json
+
+    from src.commands import doctor
+    from src.core.context_gap_store import load_context_gaps
+    from src.core.ncfl_proposal_store import load_proposals
+
+    reports_root, editions_root, programs_root = _prepare_v2_roots(tmp_path)
+    monkeypatch.setattr(onboard_module, "REPORTS_ROOT", reports_root)
+    monkeypatch.setenv("VERTEX_DB_PATH", str(tmp_path / "db"))
+    _stub_onboard_validation(monkeypatch, tmp_path)
+    for name, path in {
+        "PROGRAMS_ROOT": programs_root, "EDITIONS_ROOT": editions_root,
+        "REPORTS_ROOT": reports_root, "ARCHIVE_ROOT": tmp_path / "archive",
+        "REPO_ROOT": tmp_path,
+    }.items():
+        monkeypatch.setattr(doctor, name, path)
+
+    created = runner.invoke(
+        app, ["onboard", "--edition", "synthetic_weekly"], input="\n".join(_rich_cli_inputs()),
+    )
+    assert created.exit_code == 0, created.output + repr(created.exception)
+    program = programs_root / "storage_demo"
+    workstreams = (program / "workstreams.yaml").read_bytes()
+    registry = program / "workstream_registry.yaml"
+    assert not registry.exists()
+    doctor_args = ["--no-catchup", "doctor", "--context", "--edition", "synthetic_weekly", "--format", "json"]
+    initial = runner.invoke(app, doctor_args)
+    initial_payload = json.loads(initial.output)
+    assert initial.exit_code == (1 if initial_payload["failures"] else 0)
+    coverage, = [check for check in initial_payload["checks"] if check["label"] == "Registry coverage"]
+    assert coverage["status"] == "info" and "not evaluated" in coverage["detail"]
+    assert not registry.exists()
+    assert not any(
+        gap.field.startswith("deep_context.")
+        for gap in load_context_gaps("storage_demo", programs_root=programs_root)
+    )
+
+    registry.write_text(
+        'schema_version: "1.0"\nworkstreams:\n- id: platform\n  name: Platform\n  deep_context: {}\n',
+        encoding="utf-8",
+    )
+    original_registry = registry.read_bytes()
+    detected = runner.invoke(app, doctor_args)
+    detected_payload = json.loads(detected.output)
+    assert detected.exit_code == (1 if detected_payload["failures"] else 0)
+    assert not any(check["label"] == "Registry coverage" for check in detected_payload["checks"])
+    gaps = load_context_gaps("storage_demo", programs_root=programs_root)
+    assert any(
+        gap.feature == "doctor --context" and gap.lane == "platform" and gap.field == "deep_context.why"
+        for gap in gaps
+    )
+    fingerprint = "storage_demo:doctor --context:platform:deep_context.why"
+    solicit_args = [
+        "context", "solicit", "--edition", "synthetic_weekly", "--gap-fingerprint", fingerprint,
+        "--to", "reviewer@example.com", "--programs-root", str(programs_root),
+    ]
+
+    def files() -> dict[Path, bytes]:
+        return {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    before = files()
+    preview = runner.invoke(app, solicit_args + ["--dry-run"])
+    assert preview.exit_code == 0, preview.output + repr(preview.exception)
+    assert files() == before
+    request = runner.invoke(app, solicit_args)
+    assert request.exit_code == 0, request.output + repr(request.exception)
+    assert "pending" in request.output and "unverified" in request.output
+    record = json.loads((program / "_feedback" / "context_gap_solicitations.jsonl").read_text(encoding="utf-8"))
+    reply = EmailMessage()
+    reply["From"] = "unverified@example.com"
+    reply.set_content(f"Proposed purpose.\n\n> Reference: {record['solicitation_id']}\n")
+    source = program / "synthetic-reply.eml"
+    source.write_bytes(reply.as_bytes())
+    intake_args = [
+        "context", "import-reply", "--edition", "synthetic_weekly", "--issue", "1",
+        "--source", str(source), "--gap-fingerprint", fingerprint,
+        "--solicitation-id", record["solicitation_id"], "--programs-root", str(programs_root),
+    ]
+    before = files()
+    preview = runner.invoke(app, intake_args + ["--dry-run"])
+    assert preview.exit_code == 0, preview.output + repr(preview.exception)
+    assert files() == before
+    intake = runner.invoke(app, intake_args)
+    assert intake.exit_code == 0, intake.output + repr(intake.exception)
+    assert "pending" in intake.output and "unverified" in intake.output
+    proposal, = load_proposals("storage_demo", programs_root=programs_root)
+    assert proposal.status == "pending" and not proposal.decision_history and not proposal.batch_eligible
+    assert proposal.current_value_hash == record["current_value_hash"]
+    diff_args = [
+        "context", "manual-diff", "--edition", "synthetic_weekly", "--issue", "1",
+        "--proposal-id", proposal.proposal_id, "--programs-root", str(programs_root),
+    ]
+    before = files()
+    diff = runner.invoke(app, diff_args)
+    assert diff.exit_code == 0, diff.output + repr(diff.exception)
+    assert "unverified" in diff.output and "+    why:" in diff.output
+    assert files() == before
+    assert registry.read_bytes() == original_registry
+    assert (program / "workstreams.yaml").read_bytes() == workstreams
+
+    registry.write_text(
+        'schema_version: "1.0"\nworkstreams:\n- id: platform\n  name: Platform\n  deep_context: {why: Changed}\n',
+        encoding="utf-8",
+    )
+    before = files()
+    stale = runner.invoke(app, diff_args)
+    assert stale.exit_code == 2, stale.output + repr(stale.exception)
+    assert "stale" in stale.output
+    assert files() == before
+    assert load_proposals("storage_demo", programs_root=programs_root) == (proposal,)
+
+
 def test_onboard_cli_passes_ai_flag_to_create(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 
@@ -1619,11 +1734,14 @@ def test_onboard_update_unset_selection_preserves_legacy_context(monkeypatch, tm
 def test_onboard_update_continues_real_created_draft_without_rewriting_history(monkeypatch, tmp_path: Path) -> None:
     from dataclasses import replace
     import json
+    from unittest.mock import Mock
 
     from src.commands import report as report_module
     from src.core.config_loader import load_bundle
     from src.core.models import RiskLevel, WorkItem
 
+    tokenizer = Mock()
+    monkeypatch.setitem(sys.modules, "tiktoken", tokenizer)
     programs = tmp_path / "selected" / "programs"
     monkeypatch.setattr(onboard_module, "PROGRAMS_ROOT", programs)
     monkeypatch.setattr(onboard_module, "REPORTS_ROOT", tmp_path / "installation" / "reports")
@@ -1715,3 +1833,350 @@ def test_onboard_update_continues_real_created_draft_without_rewriting_history(m
             for path in (program / "archive").rglob("*") if path.is_file()} == archive_before
     assert {path.relative_to(program): path.read_bytes()
             for path in first_html.parent.rglob("*") if path.is_file()} == first
+    tokenizer.encoding_for_model.assert_not_called()
+    tokenizer.get_encoding.assert_not_called()
+
+
+@pytest.mark.parametrize("prepared_next", ["absent", "authored", "malformed"])
+def test_synthetic_onboard_repair_review_and_confirm_with_stale_fact(
+    monkeypatch, tmp_path: Path, prepared_next: str, capsys,
+) -> None:
+    from dataclasses import replace
+    from datetime import datetime, timezone
+    import json
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    import typer
+
+    from src.commands import gather, report as report_module, review_sections
+    from src.commands.confirm import confirm_issue
+    from src.commands.confirm_stages.post_confirm_support import render_confirm_result
+    from src.commands.diff import build_publish_diff_summary
+    from src.commands.doctor_checks.confirm_readiness_checks import run_confirm_readiness_doctor
+    from src.commands.gather_pipeline import channel_runtime
+    from src.core.ado_discovery import ADODiscoveryConfig, ADODiscoveryProvider
+    from src.core.gather_run_manifest import RequiredScopeStatus, resolve_latest_full_committed_manifest
+    from src.core.integration_types import ADOHydrationOutput, ChannelConfig, HydrationResult
+    from src.core.models import ReviewState, RiskLevel, WorkItem
+    from src.core.narrative_store import get_narratives_dir
+    from src.core.overrides_store import get_overrides_path
+    from src.core.program_fact_store import ProgramFactInput, ProgramFactStore
+    from src.core.review_status_store import load_review_status
+    from src.core.slice_contract_loader import load_slice_contract
+
+    tokenizer = Mock()
+    monkeypatch.setitem(sys.modules, "tiktoken", tokenizer)
+    workspace = tmp_path / "workspace"
+    programs = workspace / "programs"
+    reports = workspace / "reports"
+    archive = workspace / "archive"
+    edition = "synthetic_weekly"
+    monkeypatch.setenv("VERTEX_DB_PATH", str(workspace / "vertex-db"))
+    monkeypatch.setenv("VERTEX_AUTHOR", "Synthetic operator")
+    monkeypatch.setenv("VERTEX_OPERATOR_PRINCIPAL", "synthetic-principal")
+    monkeypatch.setenv("VERTEX_OPERATOR_MACHINE", "synthetic-host")
+    monkeypatch.setenv("VERTEX_OPERATOR_SESSION_ID", "synthetic-session")
+    monkeypatch.setattr(onboard_module, "PROGRAMS_ROOT", programs)
+    monkeypatch.setattr(onboard_module, "REPORTS_ROOT", reports)
+    monkeypatch.setattr(review_sections, "PROGRAMS_ROOT", programs)
+    monkeypatch.setattr(review_sections, "REPORTS_ROOT", reports)
+    monkeypatch.setattr(review_sections, "ARCHIVE_ROOT", archive)
+    monkeypatch.setattr("src.ai.ai_mode._CURRENT_MODE", AIMode.DISABLED)
+    monkeypatch.setattr(report_module.webbrowser, "open", lambda *_args, **_kwargs: False)
+    objectives = []
+
+    def item_at(timestamp):
+        return WorkItem(
+            id=900001, type="Feature", title="Synthetic delivery check", state="Active",
+            assigned_to="Synthetic Owner", assigned_to_email="owner@example.com",
+            area_path=r"One\Storage\Demo", iteration_path=r"One\Synthetic", target_date=None,
+            risk_level=RiskLevel.LOW, tags=["Safety"], custom_fields={}, fetched_at=timestamp,
+        )
+
+    def acquire(bundle, timestamp):
+        assert bundle.program_context is not None
+        objectives.append(bundle.program_context.objective)
+        return (item_at(timestamp),), 0
+
+    monkeypatch.setattr(report_module, "_load_live_work_items", acquire)
+    created = runner.invoke(app, ["onboard", "--edition", edition], input="\n".join(_rich_cli_inputs()))
+    assert created.exit_code == 0, created.output + repr(created.exception)
+    assert (programs / "storage_demo" / "program.yaml").is_file()
+
+    def repair(_edition, draft, assistant=None):
+        assert draft.identity is not None
+        return replace(draft, identity=replace(draft.identity, objective="Updated synthetic context."))
+
+    monkeypatch.setattr(onboard_module, "_collect_onboard_draft", repair)
+    monkeypatch.setattr(onboard_module.typer, "confirm", lambda *_args, **_kwargs: True)
+    run_onboard_update(edition)
+    as_of = datetime.now(timezone.utc)
+    contract_path = programs / "storage_demo" / "slice_contracts.yaml"
+    contract_path.write_text(yaml.safe_dump({
+        "schema_version": "1.0",
+        "slices": [
+            {
+                "id": name.lower(), "scorecard_name": "Delivery Scorecard", "section": name.lower(),
+                "workstream": "Platform", "slice_kind": "scorecard_dimension", "title": name,
+                "source_of_truth": "ado_primary", "owners": {"primary": "Synthetic Owner"},
+                "source_contract": {"ado": {
+                    "saved_queries": ["synthetic"], "tag_expression": {"all_of": ["Safety"]},
+                    "required_fields": ["state"], "explicit_work_item_ids": [900001],
+                }},
+                "freshness": {"warn_days": 5, "block_days": 10},
+                "degradation": {"blank_filter_is_error": True},
+            }
+            for name in ("Delivery", "Reliability")
+        ],
+    }), encoding="utf-8")
+
+    class SyntheticClient:
+        def get_saved_query(self, query_id):
+            return {"id": query_id, "wiql": "Select [System.Id] From WorkItems"}
+
+        def execute_wiql(self, wiql, top=None, **kwargs):
+            return [900001]
+
+    item = item_at(as_of)
+    binding = SimpleNamespace(
+        config=ChannelConfig(channel="ado", enabled=True, discovery_threshold_hours=24, ttl_days=30),
+        discovery_provider=ADODiscoveryProvider(SyntheticClient()),
+        discovery_config=ADODiscoveryConfig(load_slice_contract(contract_path)),
+        hydration_provider=SimpleNamespace(
+            hydrate=lambda *args, **kwargs: HydrationResult(
+                channel="ado", resources=ADOHydrationOutput(work_items=(item,), freshness_items=(item,)),
+                api_call_count=1, errors=(), hydrated_ref_ids=(("900001", "work_item"),), failed_ref_ids=(),
+            ),
+        ),
+        hydration_config=object(),
+    )
+    monkeypatch.setattr(
+        gather, "_resolve_uil_channel_binding_for_gather",
+        lambda program, workstreams, channel, **kwargs: binding if channel == "ado" else None,
+    )
+    monkeypatch.setattr(gather, "_gather_v2_enabled", lambda: False)
+    monkeypatch.setattr(channel_runtime, "load_arch_data_fix", lambda *args, **kwargs: None)
+    gathered = gather.gather_program("storage_demo", as_of=as_of, programs_root=programs, force_discovery=True)
+    committed = resolve_latest_full_committed_manifest("storage_demo", programs_root=programs)
+    assert committed is not None and committed.required_scope_status == RequiredScopeStatus.FULL
+    assert gathered.hydrated_work_item_ids == ("900001",)
+
+    store = ProgramFactStore("storage_demo", db_root=workspace / "vertex-db")
+    fact = ProgramFactInput(
+        fact_type="synthetic.marker", entity_refs=("PROGRAM:storage_demo",),
+        payload={"state": "initial"}, created_by="synthetic-operator",
+    )
+    initial = store.append_fact(fact).revision
+    report_module.generate_report_draft(
+        edition, issue_number=1, dry_run=True, as_of=as_of, programs_root=programs,
+        reports_root=reports, archive_root=archive, work_item_loader=acquire,
+    )
+    overrides_path = get_overrides_path(edition, reports, issue_number=1, programs_root=programs)
+    overrides = yaml.safe_load(overrides_path.read_text(encoding="utf-8"))
+    for scorecard in overrides["scorecards"].values():
+        for dimension in scorecard.values():
+            dimension["risk"] = "low"
+    overrides["decision_strip_ack"] = {"no_leadership_ask": True, "reason": "Synthetic review found no new ask."}
+    overrides_path.write_text(yaml.safe_dump(overrides, sort_keys=False), encoding="utf-8")
+    narratives = get_narratives_dir(edition, 1, reports, programs_root=programs)
+    (narratives / "exec_summary.md").write_text("Synthetic delivery remains on track.\n", encoding="utf-8")
+    for path in narratives.glob("ws_*.md"):
+        path.write_text("Synthetic delivery remains on track.\n", encoding="utf-8")
+    draft = report_module.generate_report_draft(
+        edition, issue_number=1, dry_run=True, as_of=as_of, programs_root=programs,
+        reports_root=reports, archive_root=archive, work_item_loader=acquire,
+    )
+    assert draft.html_path is not None and draft.html_path.is_file()
+    assert draft.manifest.gather_run_id == committed.run_id
+    assert draft.manifest.gather_run_hash == committed.manifest_hash
+    status = load_review_status(edition, reports, programs_root=programs)
+    assert status is not None
+    for section in status.sections:
+        if section.state != ReviewState.SKIPPED_NO_DELTA:
+            review_sections.set_review_section_command(
+                edition=edition, issue=1, section=section.section_id,
+                state="approved", note="Synthetic review.", reviewer="Synthetic reviewer",
+            )
+    status = load_review_status(edition, reports, programs_root=programs)
+    assert status is not None and status.all_approved
+    assert all(
+        section.manifest_id == draft.manifest.manifest_id
+        for section in status.sections if section.state == ReviewState.APPROVED
+    )
+
+    changed = store.append_fact(replace(fact, payload={"state": "changed"})).revision
+    assert changed.fact_id == initial.fact_id and changed.revision_id != initial.revision_id
+    stale = confirm_issue(
+        edition, 1, force=True, programs_root=programs, reports_root=reports, archive_root=archive,
+    )
+    assert stale.exit_code == 3, repr(stale.failures)
+    assert any("State Drift Warning" in failure for failure in stale.failures), repr(stale.failures)
+    assert stale.manifest.qg_results["QG-SG-20"] is False
+    assert stale.archive_paths is None
+    assert not (programs / "storage_demo" / "archive" / edition / "snapshots" / "issue_001.snapshot.json").exists()
+
+    refreshed = report_module.generate_report_draft(
+        edition, issue_number=1, dry_run=True, as_of=as_of, programs_root=programs,
+        reports_root=reports, archive_root=archive, work_item_loader=acquire,
+    )
+    assert refreshed.html_path is not None and refreshed.html_path.is_file()
+    assert refreshed.manifest.manifest_id != draft.manifest.manifest_id
+    status = load_review_status(edition, reports, programs_root=programs)
+    assert status is not None
+    for section in status.sections:
+        if section.state != ReviewState.SKIPPED_NO_DELTA:
+            assert section.manifest_id == draft.manifest.manifest_id
+            review_sections.set_review_section_command(
+                edition=edition, issue=1, section=section.section_id,
+                state="approved", note="Synthetic re-review.", reviewer="Synthetic reviewer",
+            )
+    future_path = get_overrides_path(edition, reports, issue_number=2, programs_root=programs)
+    future_bytes = b""
+    if prepared_next != "absent":
+        if prepared_next == "malformed":
+            future_bytes = b"issue_number: 2\nscorecards: [\n"
+        else:
+            future_overrides = dict(overrides)
+            future_overrides["issue_number"] = 2
+            future_overrides["edition_intro"] = "Synthetic future issue was prepared in advance."
+            future_bytes = yaml.safe_dump(future_overrides, sort_keys=False).encode("utf-8")
+        future_path.parent.mkdir(parents=True, exist_ok=True)
+        future_path.write_bytes(future_bytes)
+    preview = confirm_issue(
+        edition, 1, dry_run=True, programs_root=programs, reports_root=reports, archive_root=archive,
+    )
+    assert preview.exit_code == 0, repr(preview.failures)
+    assert preview.archive_paths is None
+    capsys.readouterr()
+    with pytest.raises(typer.Exit) as rendered_preview:
+        render_confirm_result(preview, edition=edition, dry_run=True)
+    assert rendered_preview.value.exit_code == 0
+    preview_output = capsys.readouterr().out
+    assert "prepare next-issue author state" in preview_output
+    assert "reset active author state" not in preview_output
+    result = confirm_issue(
+        edition, 1, programs_root=programs, reports_root=reports, archive_root=archive,
+    )
+    assert result.exit_code == 0, repr(result.failures)
+    assert result.next_issue_overrides_preserved is (prepared_next != "absent")
+    if prepared_next != "absent":
+        assert future_path.read_bytes() == future_bytes
+        assert any("Next-issue overrides already exist" in warning for warning in result.warnings)
+    else:
+        assert not any("Next-issue overrides already exist" in warning for warning in result.warnings)
+    capsys.readouterr()
+    with pytest.raises(typer.Exit) as rendered:
+        render_confirm_result(result, edition=edition, dry_run=False)
+    assert rendered.value.exit_code == 0
+    confirmation_output = capsys.readouterr().out
+    if prepared_next == "absent":
+        assert "Reset active state for issue 002." in confirmation_output
+    else:
+        assert "Prepared review and narratives for issue 002." in confirmation_output
+        assert "Reset active state for issue 002." not in confirmation_output
+        assert "Next-issue overrides already exist" in confirmation_output
+    assert result.archive_paths is not None
+    paths = result.archive_paths
+    assert all(path.is_file() for path in (paths.snapshot_path, paths.html_path, paths.md_path, paths.manifest_path))
+    archived_manifest = json.loads(paths.manifest_path.read_text(encoding="utf-8"))
+    assert archived_manifest["gather_run_id"] == committed.run_id
+    assert archived_manifest["gather_run_hash"] == committed.manifest_hash
+    assert archived_manifest["qg_results"]["QG-SG-20"] is True
+    snapshot = json.loads(paths.snapshot_path.read_text(encoding="utf-8"))
+    assert [item["id"] for item in snapshot["items"]] == [900001]
+    html = paths.html_path.read_text(encoding="utf-8")
+    assert "ADO#900001" in html and "/_workitems/edit/900001" in html
+    next_review = load_review_status(edition, reports, programs_root=programs)
+    assert next_review is not None and next_review.issue_number == 2
+    assert all(section.state == ReviewState.PENDING for section in next_review.sections)
+
+    archive_roots = (archive, programs / "storage_demo" / "archive")
+    archived_files = {
+        path: path.read_bytes()
+        for root in archive_roots for path in root.rglob("*") if path.is_file()
+    }
+    readiness = run_confirm_readiness_doctor(
+        edition_name=edition, program_id="storage_demo", programs_root=programs,
+        editions_root=workspace / "editions", archive_root=archive, now=as_of,
+    )
+    archive_check = next(check for check in readiness.checks if check.label == "Archive")
+    assert archive_check.status == "ok"
+    assert archive_check.metadata is not None
+    assert archive_check.metadata["confirmed_count"] == 1
+    assert {
+        path: path.read_bytes()
+        for root in archive_roots for path in root.rglob("*") if path.is_file()
+    } == archived_files
+    if prepared_next == "malformed":
+        with pytest.raises(yaml.YAMLError):
+            report_module.generate_report_draft(
+                edition, dry_run=True, as_of=as_of, programs_root=programs,
+                reports_root=reports, archive_root=archive, work_item_loader=acquire,
+            )
+        assert future_path.read_bytes() == future_bytes
+        assert {
+            path: path.read_bytes()
+            for root in archive_roots for path in root.rglob("*") if path.is_file()
+        } == archived_files
+        return
+
+    def acquire_next(bundle, timestamp):
+        items, calls = acquire(bundle, timestamp)
+        return (replace(
+            items[0], assigned_to="Synthetic next owner",
+            assigned_to_email="next-owner@example.com", risk_level=RiskLevel.UNKNOWN,
+        ),), calls
+
+    next_draft = report_module.generate_report_draft(
+        edition, dry_run=True, as_of=as_of, programs_root=programs,
+        reports_root=reports, archive_root=archive, work_item_loader=acquire_next,
+    )
+    assert next_draft.issue_number == 2
+    assert next_draft.html_path is not None and next_draft.html_path.is_file()
+    assert next_draft.manifest.gather_run_id == committed.run_id
+    assert next_draft.manifest.gather_run_hash == committed.manifest_hash
+    assert next_draft.report.deltas.previous_issue_number == 1
+    assert next_draft.report.deltas.new_items == ()
+    assert len(next_draft.report.deltas.owner_changes) == 1
+    owner_change = next_draft.report.deltas.owner_changes[0]
+    assert owner_change.work_item_id == 900001
+    assert owner_change.field_changes["assigned_to"] == ("Synthetic Owner", "next-owner@example.com")
+    diff_summary = build_publish_diff_summary(
+        edition_name=edition, issue_number=2, since="last-confirmed",
+        programs_root=programs, reports_root=reports, archive_root=archive,
+    )
+    assert (
+        'OWNER CHANGED: WI:900001 "Synthetic delivery check" '
+        "(Synthetic Owner -> next-owner@example.com)"
+    ) in diff_summary
+    assert next_draft.report.items[0].risk_level == RiskLevel.UNKNOWN
+    assert all(dimension.risk == RiskLevel.LOW for dimension in next_draft.report.scorecard)
+    assert next_draft.manifest.qg_results["QG-8"] is True
+    next_overrides_path = get_overrides_path(edition, reports, issue_number=2, programs_root=programs)
+    next_overrides = yaml.safe_load(next_overrides_path.read_text(encoding="utf-8"))
+    next_overrides["scorecards"]["Delivery Scorecard"]["Delivery"]["risk"] = None
+    next_overrides_path.write_text(yaml.safe_dump(next_overrides, sort_keys=False), encoding="utf-8")
+    blocked_draft = report_module.generate_report_draft(
+        edition, dry_run=True, as_of=as_of, programs_root=programs,
+        reports_root=reports, archive_root=archive, work_item_loader=acquire_next,
+    )
+    assert blocked_draft.manifest.qg_results["QG-8"] is False
+    assert any(dimension.risk == RiskLevel.UNKNOWN for dimension in blocked_draft.report.scorecard)
+    next_review = load_review_status(edition, reports, programs_root=programs)
+    assert next_review is not None and next_review.issue_number == 2
+    assert all(section.state != ReviewState.APPROVED for section in next_review.sections)
+    blocked = confirm_issue(
+        edition, 2, force=True, programs_root=programs, reports_root=reports, archive_root=archive,
+    )
+    assert blocked.exit_code == 3, repr(blocked.failures)
+    assert blocked.manifest.qg_results["QG-8"] is False
+    assert blocked.archive_paths is None
+    assert {
+        path: path.read_bytes()
+        for root in archive_roots for path in root.rglob("*") if path.is_file()
+    } == archived_files
+    assert "Provide a concise weekly readiness view." in objectives
+    assert objectives[-1] == "Updated synthetic context."
+    tokenizer.encoding_for_model.assert_not_called()
+    tokenizer.get_encoding.assert_not_called()

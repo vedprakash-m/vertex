@@ -48,6 +48,122 @@ def _diagnostic_doctor_cli(monkeypatch, tmp_path: Path, root: Path, format: str)
     ])
 
 
+def test_context_doctor_discloses_absent_optional_registry_without_changing_health(tmp_path: Path) -> None:
+    from src.commands.doctor_checks.models import DoctorReport
+    from src.core.context_gap_store import load_context_gaps
+
+    root = _diagnostic_workspace(tmp_path)
+    program = root / "test_prog"
+    registry = program / "workstream_registry.yaml"
+    registry.unlink()
+    authored = (program / "workstreams.yaml").read_bytes()
+
+    report = context_checks.run_context_doctor(
+        edition_name="test_weekly", programs_root=root, editions_root=program / "editions",
+    )
+
+    check, = [check for check in report.checks if check.label == "Registry coverage"]
+    assert check.status == "info"
+    assert check.detail == (
+        "Optional workstream_registry.yaml is absent; registry-based workstream gap checks were not evaluated."
+    )
+    baseline = DoctorReport(report.edition, tuple(c for c in report.checks if c is not check))
+    assert (report.warnings, report.failures, report.overall) == (
+        baseline.warnings, baseline.failures, baseline.overall,
+    )
+    assert any("[WS-02]" in check.detail for check in report.checks)
+    assert not registry.exists()
+    assert (program / "workstreams.yaml").read_bytes() == authored
+    assert not any(
+        gap.field.startswith("deep_context.")
+        for gap in load_context_gaps("test_prog", programs_root=root)
+    )
+
+
+@pytest.mark.parametrize("format", ["human", "json", "csv"])
+def test_context_doctor_absent_registry_is_visible_in_each_cli_format(
+    monkeypatch, tmp_path: Path, format: str,
+) -> None:
+    root = _diagnostic_workspace(tmp_path)
+    (root / "test_prog" / "workstream_registry.yaml").unlink()
+
+    result = _diagnostic_doctor_cli(monkeypatch, tmp_path, root, format)
+
+    assert result.exit_code == 0, (result.output, result.exception)
+    if format == "human":
+        assert "INFO Registry coverage" in result.output
+        assert "registry-based workstream gap checks were not evaluated" in result.output
+    elif format == "json":
+        payload = json.loads(result.output)
+        check, = [check for check in payload["checks"] if check["label"] == "Registry coverage"]
+        assert check["status"] == "info"
+        assert "gap checks were not evaluated" in check["detail"]
+    else:
+        import csv
+
+        rows = list(csv.DictReader(result.output.splitlines()))
+        check, = [row for row in rows if row["label"] == "Registry coverage"]
+        assert check["status"] == "info"
+        assert "gap checks were not evaluated" in check["detail"]
+    assert not (root / "test_prog" / "workstream_registry.yaml").exists()
+
+
+@pytest.mark.parametrize("selected_present", [False, True])
+def test_context_doctor_uses_selected_registry_not_ambient_registry(
+    monkeypatch, tmp_path: Path, selected_present: bool,
+) -> None:
+    selected = _diagnostic_workspace(tmp_path / "selected")
+    decoy = _diagnostic_workspace(tmp_path / "decoy")
+    (decoy if selected_present else selected).joinpath("test_prog", "workstream_registry.yaml").unlink()
+    monkeypatch.setattr(context_checks, "PROGRAMS_ROOT", decoy)
+
+    report = context_checks.run_context_doctor(
+        edition_name="test_weekly", programs_root=selected, editions_root=selected / "test_prog" / "editions",
+    )
+
+    assert any(check.label == "Registry coverage" for check in report.checks) is not selected_present
+    assert (selected / "test_prog" / "workstream_registry.yaml").exists() is selected_present
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_context_doctor_present_registry_keeps_existing_empty_failure(tmp_path: Path, empty: bool) -> None:
+    root = _diagnostic_workspace(tmp_path)
+    program = root / "test_prog"
+    if empty:
+        (program / "workstream_registry.yaml").write_text(
+            'schema_version: "1.0"\nworkstreams: []\n', encoding="utf-8",
+        )
+
+    report = context_checks.run_context_doctor(
+        edition_name="test_weekly", programs_root=root, editions_root=program / "editions",
+    )
+
+    assert not any(check.label == "Registry coverage" for check in report.checks)
+    if empty:
+        check, = [check for check in report.checks if check.label == "Registry" and check.status == "fail"]
+        assert "0 active workstreams" in check.detail
+        assert "populate" in check.detail.lower() and "manually" in check.detail.lower()
+        assert "registry scaffold" not in check.detail
+
+
+@pytest.mark.parametrize("content", ["workstreams: [\n", "[]\n", "null\n"])
+def test_context_doctor_invalid_registry_is_not_reported_as_optional_absence(
+    tmp_path: Path, content: str,
+) -> None:
+    root = _diagnostic_workspace(tmp_path)
+    program = root / "test_prog"
+    registry = program / "workstream_registry.yaml"
+    registry.write_text(content, encoding="utf-8")
+
+    report = context_checks.run_context_doctor(
+        edition_name="test_weekly", programs_root=root, editions_root=program / "editions",
+    )
+
+    assert report.failures
+    assert not any(check.label == "Registry coverage" for check in report.checks)
+    assert registry.read_text(encoding="utf-8") == content
+
+
 @pytest.mark.parametrize("format", ["human", "json", "csv"])
 def test_context_diagnostic_evaluation_does_not_add_a_warning(monkeypatch, tmp_path: Path, format: str) -> None:
     root = _diagnostic_workspace(tmp_path)
@@ -326,6 +442,270 @@ def test_actual_ranked_cli_preserves_gap_read_integrity(
     else:
         assert result.exit_code == 0, (result.output, result.exception)
         assert expected in result.output
+
+
+@pytest.mark.parametrize("damage", ["null", "array", "missing", "timestamp", "invalid-time", "overflow", "lane"])
+def test_actual_ranked_cli_reports_invalid_record_without_partial_output(
+    monkeypatch, tmp_path: Path, damage: str,
+) -> None:
+    from cli import app
+    from src.commands import doctor
+    from typer.testing import CliRunner
+
+    programs = tmp_path / "programs"
+    program = programs / "sample"
+    feedback = program / "_feedback"
+    feedback.mkdir(parents=True)
+    (program / "program.yaml").write_text("schema_version: 1\n", encoding="utf-8")
+    valid = {
+        "ts": "2026-10-26T12:00:00Z", "feature": "synthetic", "program": "sample",
+        "lane": None, "field": "purpose", "severity": "quality_degraded",
+        "message": "Valid observation", "impact_estimate": "high",
+    }
+    damaged = {
+        "null": None,
+        "array": ["synthetic_canary"],
+        "missing": {"message": "synthetic_canary"},
+        "timestamp": dict(valid, ts=None),
+        "invalid-time": dict(valid, ts="synthetic_canary"),
+        "overflow": dict(valid, ts="9999-12-31T23:59:59-11:00"),
+        "lane": dict(valid, lane=["synthetic_canary"]),
+    }[damage]
+    history = feedback / "context_gaps.jsonl"
+    history.write_text(json.dumps(valid) + "\n" + json.dumps(damaged) + "\n", encoding="utf-8")
+    before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    monkeypatch.setattr(doctor, "PROGRAMS_ROOT", programs)
+    monkeypatch.setattr(doctor, "EDITIONS_ROOT", tmp_path / "editions")
+
+    result = CliRunner().invoke(app, ["--no-catchup", "doctor", "--context", "--ranked"])
+
+    assert result.exit_code == 2, (result.output, result.exception)
+    assert "Context gap history contains an invalid record; repair it before retrying." in result.output
+    assert "Valid observation" not in result.output and "synthetic_canary" not in result.output
+    assert str(program) not in result.output and "No context gaps" not in result.output
+    assert {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+
+@pytest.mark.parametrize("history", ["none", "legacy", "unsupported", "why", "what"])
+def test_actual_ranked_cli_reports_missing_registry_only_when_projection_requires_it(
+    monkeypatch, tmp_path: Path, history: str,
+) -> None:
+    from cli import app
+    from src.commands import doctor
+    from typer.testing import CliRunner
+
+    programs = tmp_path / "selected" / "programs"
+    program = programs / "sample"
+    program.mkdir(parents=True)
+    (program / "program.yaml").write_text("schema_version: 1\n", encoding="utf-8")
+    if history != "none":
+        feedback = program / "_feedback"
+        feedback.mkdir()
+        (feedback / "context_gaps.jsonl").write_text(json.dumps({
+            "ts": "2026-10-26T12:00:00Z",
+            "feature": "gather" if history == "legacy" else "doctor --context",
+            "program": "sample",
+            "lane": "lane",
+            "field": {
+                "legacy": "deep_context.why",
+                "unsupported": "deep_context.how",
+                "why": "deep_context.why",
+                "what": "deep_context.what",
+            }[history],
+            "severity": "quality_degraded",
+            "message": "Synthetic retained content",
+            "impact_estimate": "medium",
+        }) + "\n", encoding="utf-8")
+    decoy = tmp_path / "decoy" / "sample"
+    decoy.mkdir(parents=True)
+    (decoy / "workstream_registry.yaml").write_text(
+        "workstreams:\n- id: lane\n  deep_context: {why: Decoy, what: Decoy}\n", encoding="utf-8",
+    )
+    monkeypatch.setattr(context_checks, "PROGRAMS_ROOT", decoy.parent)
+    for name, value in {
+        "PROGRAMS_ROOT": programs,
+        "EDITIONS_ROOT": tmp_path / "selected" / "editions",
+        "REPORTS_ROOT": tmp_path / "selected" / "reports",
+        "ARCHIVE_ROOT": tmp_path / "selected" / "archive",
+        "REPO_ROOT": tmp_path / "selected",
+    }.items():
+        monkeypatch.setattr(doctor, name, value)
+    before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+
+    result = CliRunner().invoke(app, ["--no-catchup", "doctor", "--context", "--ranked"])
+
+    assert {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+    assert not (program / "workstream_registry.yaml").exists()
+    if history in {"why", "what"}:
+        assert result.exit_code == 1
+        assert isinstance(result.exception, SystemExit)
+        assert (
+            "Context gap ranking unavailable: recorded structural gaps require the selected "
+            "workstream_registry.yaml, which is missing."
+        ) in result.output
+        assert "No context gaps" not in result.output and "No active context gaps" not in result.output
+        assert "Synthetic retained content" not in result.output and str(program) not in result.output
+    else:
+        assert result.exit_code == 0, (result.output, result.exception)
+        assert "ranking unavailable" not in result.output
+        if history == "none":
+            assert "No context gaps recorded yet." in result.output
+        else:
+            assert "1 unique gaps across 1 total observations" in result.output
+
+
+@pytest.mark.parametrize("registry", [
+    "workstreams: [\nsynthetic_canary\n",
+    "workstreams: !synthetic_canary []\n",
+    "workstreams: synthetic_canary\n",
+    "workstreams: [{id: another, deep_context: {}}]\n",
+    "workstreams: [{id: lane, deep_context: [synthetic_canary]}]\n",
+])
+def test_actual_ranked_cli_reports_unusable_registry_without_disclosure(
+    monkeypatch, tmp_path: Path, registry: str,
+) -> None:
+    from cli import app
+    from src.commands import doctor
+    from typer.testing import CliRunner
+
+    programs = tmp_path / "selected" / "programs"
+    program = programs / "sample"
+    feedback = program / "_feedback"
+    feedback.mkdir(parents=True)
+    (program / "program.yaml").write_text("schema_version: 1\n", encoding="utf-8")
+    (program / "workstream_registry.yaml").write_text(registry, encoding="utf-8")
+    (feedback / "context_gaps.jsonl").write_text(json.dumps({
+        "ts": "2026-10-26T12:00:00Z", "feature": "doctor --context", "program": "sample",
+        "lane": "lane", "field": "deep_context.why", "severity": "quality_degraded",
+        "message": "Synthetic retained content", "impact_estimate": "medium",
+    }) + "\n", encoding="utf-8")
+    decoy = tmp_path / "decoy" / "sample" / "workstream_registry.yaml"
+    decoy.parent.mkdir(parents=True)
+    decoy.write_text("workstreams: [{id: lane, deep_context: {why: Decoy}}]\n", encoding="utf-8")
+    monkeypatch.setattr(doctor, "PROGRAMS_ROOT", programs)
+    monkeypatch.setattr(doctor, "EDITIONS_ROOT", tmp_path / "selected" / "editions")
+    before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+
+    result = CliRunner().invoke(app, ["--no-catchup", "doctor", "--context", "--ranked"])
+
+    assert result.exit_code == 1 and isinstance(result.exception, SystemExit)
+    assert (
+        "Context gap ranking unavailable: inspect the selected workstream_registry.yaml "
+        "and recorded structural gap targets."
+    ) in result.output
+    assert "synthetic_canary" not in result.output and str(program) not in result.output
+    assert "Synthetic retained content" not in result.output
+    assert "No context gaps" not in result.output and "No active context gaps" not in result.output
+    assert {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+
+@pytest.mark.parametrize("history", ["none", "legacy"])
+def test_actual_ranked_cli_does_not_read_unused_malformed_registry(monkeypatch, tmp_path: Path, history: str) -> None:
+    from cli import app
+    from src.commands import doctor
+    from typer.testing import CliRunner
+
+    programs = tmp_path / "programs"
+    program = programs / "sample"
+    program.mkdir(parents=True)
+    (program / "program.yaml").write_text("schema_version: 1\n", encoding="utf-8")
+    registry = program / "workstream_registry.yaml"
+    registry.write_text("workstreams: [\nsynthetic_canary\n", encoding="utf-8")
+    if history == "legacy":
+        feedback = program / "_feedback"
+        feedback.mkdir()
+        (feedback / "context_gaps.jsonl").write_text(json.dumps({
+            "ts": "2026-10-26T12:00:00Z", "feature": "gather", "program": "sample",
+            "lane": "lane", "field": "deep_context.why", "severity": "quality_degraded",
+            "message": "Synthetic observation", "impact_estimate": "medium",
+        }) + "\n", encoding="utf-8")
+    monkeypatch.setattr(doctor, "PROGRAMS_ROOT", programs)
+    monkeypatch.setattr(doctor, "EDITIONS_ROOT", tmp_path / "editions")
+    before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+
+    result = CliRunner().invoke(app, ["--no-catchup", "doctor", "--context", "--ranked"])
+
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert "ranking unavailable" not in result.output
+    assert "synthetic_canary" not in result.output
+    assert {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+
+@pytest.mark.parametrize("feature", ["doctor --context", "gather"])
+@pytest.mark.parametrize("count", [1, 2])
+def test_actual_ranked_cli_labels_grouped_observations_without_inventing_cycles(
+    monkeypatch, tmp_path: Path, feature: str, count: int,
+) -> None:
+    from cli import app
+    from src.commands import doctor
+    from typer.testing import CliRunner
+
+    programs = tmp_path / "programs"
+    program = programs / "sample"
+    feedback = program / "_feedback"
+    feedback.mkdir(parents=True)
+    (program / "program.yaml").write_text("schema_version: 1\n", encoding="utf-8")
+    (program / "workstream_registry.yaml").write_text(
+        "workstreams:\n- id: lane\n  deep_context: {}\n", encoding="utf-8",
+    )
+    records = [
+        {
+            "ts": f"2026-10-{26 + index}T12:00:00Z",
+            "feature": feature,
+            "program": "sample",
+            "lane": "lane",
+            "field": "deep_context.why",
+            "severity": "quality_degraded",
+            "message": "Synthetic observation",
+            "impact_estimate": "medium",
+        }
+        for index in range(count)
+    ]
+    (feedback / "context_gaps.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8",
+    )
+    monkeypatch.setattr(doctor, "PROGRAMS_ROOT", programs)
+    monkeypatch.setattr(doctor, "EDITIONS_ROOT", tmp_path / "editions")
+    before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+
+    result = CliRunner().invoke(app, ["--no-catchup", "doctor", "--context", "--ranked"])
+
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert f"{count} recorded observation{'s' if count != 1 else ''}" in result.output
+    assert "gather cycle" not in result.output
+    assert f"1 unique gaps across {count} total observations" in result.output
+    assert {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+
+@pytest.mark.parametrize("kind", ["other-missing", "unscoped-missing", "permission", "value", "unexpected"])
+def test_ranked_gap_projection_propagates_unrelated_failures(monkeypatch, tmp_path: Path, capsys, kind: str) -> None:
+    from src.core.context_gap_store import ContextGapRecord
+
+    error = {
+        "other-missing": FileNotFoundError(2, "Synthetic missing", str(tmp_path / "other.yaml")),
+        "unscoped-missing": FileNotFoundError("Synthetic missing"),
+        "permission": PermissionError("Synthetic denied"),
+        "value": ValueError("Synthetic invalid"),
+        "unexpected": RuntimeError("Synthetic unexpected"),
+    }[kind]
+    record = ContextGapRecord(
+        ts=datetime(2026, 10, 26, tzinfo=timezone.utc), feature="doctor --context",
+        program="sample", lane="lane", field="deep_context.why", severity="quality_degraded",
+        message="Synthetic observation", impact_estimate="medium",
+    )
+    monkeypatch.setattr(context_checks, "_resolve_context_program_id", lambda **kwargs: "sample")
+    monkeypatch.setattr(context_checks, "load_context_gaps", lambda *args, **kwargs: [record])
+
+    def fail_projection(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(context_checks, "rank_context_gaps", fail_projection)
+    with pytest.raises(type(error)) as raised:
+        context_checks.run_ranked_gaps(
+            edition_name=None, programs_root=tmp_path / "programs", editions_root=tmp_path / "editions",
+        )
+    assert raised.value is error
+    assert not capsys.readouterr().out
 
 
 @pytest.mark.parametrize("error", [ValueError("timestamp"), KeyError("field"), OSError("read")])

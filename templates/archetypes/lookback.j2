@@ -25,6 +25,9 @@
 {% elif section.kind == "kusto" %}
 {% set ks = section.kusto_section %}
 {% include "partials/kusto_section.j2" %}
+{% elif section.kind == "kusto_group" %}
+{% set kusto_group = section.kusto_group_sections %}
+{% include "partials/kusto_group_section.j2" %}
 {% elif section.kind == "ado_vitality" %}
 {% include "partials/ado_vitality.j2" %}
 {% elif section.kind == "exec_summary" %}

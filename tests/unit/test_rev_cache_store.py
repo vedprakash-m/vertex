@@ -286,7 +286,7 @@ def _hydrated(text: str, *, subject: str = "s", program_id: str = "nova"):
     from src.core.rev.normalizer import chunk_canonical
     from src.core.rev.ports import HydratedContent
     identity = CanonicalItemIdentity(
-        source_type=EntityType.MESSAGE, tenant_id="t", principal_mailbox="u@x.com",
+        source_type=EntityType.MESSAGE, tenant_id="t", principal_mailbox="fixture-user-01@group-01.fixture.example.net",
         container="inbox", resource_id="msg-1",
     )
     return HydratedContent(

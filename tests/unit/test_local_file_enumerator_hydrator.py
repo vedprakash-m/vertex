@@ -230,7 +230,7 @@ class TestLocalFileEnumerator:
         enum = LocalFileEnumerator(
             inbox_root=inbox,
             mailbox_tenant_id="t",
-            principal_mailbox="u@x.com",
+            principal_mailbox="fixture-user-01@group-01.fixture.example.net",
             limit=4,
         )
         result = enum.enumerate(_make_intent(limit=4), correlation_id="d5")
@@ -355,7 +355,7 @@ class TestLocalFileHydrator:
             locator=HydrationLocator(
                 source_type=EntityType.DRIVE_ITEM,
                 tenant_id="t",
-                principal_mailbox="u@x.com",
+                principal_mailbox="fixture-user-01@group-01.fixture.example.net",
                 container="docs",
                 resource_id="sha256:abc",
             ),
@@ -423,11 +423,11 @@ class TestLocalFileEnumeratorHydratorEndToEnd:
         enumerator = LocalFileEnumerator(
             inbox_root=inbox,
             mailbox_tenant_id="t",
-            principal_mailbox="u@x.com",
+            principal_mailbox="fixture-user-01@group-01.fixture.example.net",
         )
         hydrator = LocalFileHydrator(
             mailbox_tenant_id="t",
-            principal_mailbox="u@x.com",
+            principal_mailbox="fixture-user-01@group-01.fixture.example.net",
         )
 
         enum_result = enumerator.enumerate(
@@ -453,11 +453,11 @@ class TestLocalFileEnumeratorHydratorEndToEnd:
         enumerator = LocalFileEnumerator(
             inbox_root=inbox,
             mailbox_tenant_id="t",
-            principal_mailbox="u@x.com",
+            principal_mailbox="fixture-user-01@group-01.fixture.example.net",
         )
         hydrator = LocalFileHydrator(
             mailbox_tenant_id="t",
-            principal_mailbox="u@x.com",
+            principal_mailbox="fixture-user-01@group-01.fixture.example.net",
         )
 
         enum_result = enumerator.enumerate(_make_intent(), correlation_id="e2e-2")

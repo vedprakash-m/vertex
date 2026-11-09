@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -58,11 +59,26 @@ def test_workstream_sub_program_requires_authored_binding(tmp_path: Path) -> Non
 def test_slice_contract_ids_match_scorecard_dimension_bindings() -> None:
     failures: list[str] = []
 
-    for program_dir in sorted(path for path in PROGRAMS_ROOT.iterdir() if path.is_dir()):
+    tracked = subprocess.run(
+        ["git", "ls-files", "--cached", "--", "programs/"],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    tracked_paths = {Path(path) for path in tracked}
+    tracked_files = {REPO_ROOT / path for path in tracked_paths}
+    tracked_programs = {
+        REPO_ROOT / path.parent
+        for path in tracked_paths
+        if path.name == "program.yaml" and path.parts[0] == "programs"
+    }
+
+    for program_dir in sorted(tracked_programs):
         scorecards_path = program_dir / "scorecards.yaml"
         slice_contracts_path = program_dir / "slice_contracts.yaml"
         program_path = program_dir / "program.yaml"
-        if not scorecards_path.exists() or not slice_contracts_path.exists():
+        if scorecards_path not in tracked_files or slice_contracts_path not in tracked_files:
             continue
 
         scorecards_doc = yaml.safe_load(scorecards_path.read_text(encoding="utf-8")) or {}
@@ -102,5 +118,12 @@ def test_slice_contract_ids_match_scorecard_dimension_bindings() -> None:
             if extra:
                 parts.append(f"extra {extra}")
             failures.append(f"{program_dir.name}: " + "; ".join(parts))
+
+    if not tracked_programs or not any(
+        (program_dir / "scorecards.yaml") in tracked_files
+        and (program_dir / "slice_contracts.yaml") in tracked_files
+        for program_dir in tracked_programs
+    ):
+        pytest.skip("No tracked program scorecard/slice-contract pair is available")
 
     assert failures == [], "Slice contract ids must match canonical scorecard dimension ids:\n" + "\n".join(failures)

@@ -14,7 +14,8 @@ import typer
 from src.commands import gather as gather_helpers
 from src.core.ado_client import ADOClient
 from src.core.edition_resolver import PROGRAMS_ROOT
-from src.core.exceptions import ConfigError, QueryError
+from src.core.exceptions import AuthError, ConfigError, CredentialExpired, QueryError, QueryTimeoutError
+from src.core.failure_taxonomy import safe_failure_suffix
 from src.core.hypothesis_models import AssertionOperator, TelemetryAssertion
 from src.core.kusto_client import KustoColumn
 from src.core.kusto_query_loader import load_kpi_queries
@@ -455,7 +456,9 @@ def validate_metric_bindings_command(
 
     now = datetime.now(timezone.utc)
     metric_definitions = load_metric_definition_map(metrics_root=METRICS_ROOT, as_of=now)
-    probe = _build_program_metric_binding_probe(program.strip(), programs_root=programs_root)
+    probe = _privacy_safe_metric_binding_probe(
+        _build_program_metric_binding_probe(program.strip(), programs_root=programs_root)
+    )
 
     if all_bindings:
         bindings = store.list_active_metric_source_bindings()
@@ -609,6 +612,46 @@ def _parse_optional_severity(value: str | None) -> "Literal['info', 'warn', 'ale
 
 def _default_binding_id(program_id: str, query_id: str) -> str:
     return str(uuid5(NAMESPACE_URL, f"{program_id}|metric_binding|{query_id}"))
+
+
+def _privacy_safe_metric_binding_probe(probe: MetricBindingProbe) -> MetricBindingProbe:
+    def safe_probe(binding: MetricSourceBinding) -> tuple[list[dict[str, object]], tuple[KustoColumn, ...]]:
+        safe_error: ConfigError | QueryError | ValueError | AuthError
+        try:
+            return probe(binding)
+        except (ConfigError, QueryError, ValueError) as error:
+            guidance = (
+                "Check access, query and current iteration settings."
+                if binding.source_kind == "wiql" else "Check access and query settings."
+            )
+            message = f"Metric binding probe failed{safe_failure_suffix(str(error))}. {guidance}"
+            if isinstance(error, ConfigError):
+                safe_error = ConfigError(message)
+            elif isinstance(error, QueryTimeoutError):
+                safe_error = QueryTimeoutError(message)
+            elif isinstance(error, QueryError):
+                safe_error = QueryError(message)
+            else:
+                safe_error = ValueError(message)
+        except AuthError as error:
+            message = (
+                f"Metric binding probe failed{safe_failure_suffix(str(error))}. "
+                "Refresh sign-in or check source access."
+            )
+            if isinstance(error, CredentialExpired):
+                safe_error = CredentialExpired(
+                    message, auth_method=error.auth_method, connector=error.connector,
+                )
+            else:
+                safe_error = AuthError(message)
+        try:
+            raise safe_error from None
+        except (ConfigError, QueryError, ValueError, AuthError) as sanitized:
+            # The caller may already be handling the original exception.
+            sanitized.__context__ = None
+            raise
+
+    return safe_probe
 
 
 def _build_program_metric_binding_probe(program_id: str, *, programs_root: Path) -> MetricBindingProbe:

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 
 from src.core.models import Confidence
 from src.core.models_v2 import Signal
-from src.core.signal_dedup import build_deterministic_signal_id, dedupe_signals
+from src.core.signal_dedup import build_deterministic_signal_id, dedupe_signals, signal_fingerprint
 
 
 def test_dedupe_signals_skips_same_signal_fingerprint() -> None:
@@ -382,3 +383,71 @@ def test_dedupe_signals_keeps_vertex_catchup_events_with_different_new_values() 
     kept = dedupe_signals((original, changed))
 
     assert kept == (original, changed)
+
+
+def test_dedupe_catchup_workiq_diagnostics_preserves_distinct_errors_and_legacy_replays() -> None:
+    original = Signal(
+        id="legacy-catchup-id", timestamp=datetime(2026, 10, 24, 12, 0, tzinfo=timezone.utc),
+        source="vertex/catchup", program_id="fixture", workstream_id=None, entity_refs=(),
+        text="Historical source diagnostic", raw_ref="system:workiq:synthetic", confidence=Confidence.NONE,
+        metadata={
+            "catchup_origin": "system", "integration_source": "workiq", "quarantined": True,
+            "quarantined_record_count": 1,
+            "error": "WorkIQ structured discovery: 1 inspected record occurrence(s) quarantined for missing or invalid source time.",
+        },
+    )
+    same = replace(original, id="new-catchup-id", timestamp=original.timestamp + timedelta(hours=1), text="New summary")
+    other_reason = replace(original, id="other-reason", metadata={
+        **original.metadata, "error": "WorkIQ structured discovery: 1 inspected record occurrence(s) quarantined for missing or invalid source identity.",
+    })
+    other_count = replace(original, id="other-count", metadata={
+        **original.metadata, "quarantined_record_count": 2,
+        "error": "WorkIQ structured discovery: 2 inspected record occurrence(s) quarantined for missing or invalid source time.",
+    })
+    next_day = replace(original, id="next-day", timestamp=original.timestamp + timedelta(days=1))
+    other_program = replace(original, id="other-program", program_id="other-fixture")
+    valid = replace(original, id="valid", metadata={"catchup_origin": "workiq/email"}, text="Synthetic valid observation")
+    offset_same_day = replace(
+        same, timestamp=datetime(2026, 10, 25, 1, 0, tzinfo=timezone(timedelta(hours=14))),
+    )
+    naive_same_day = replace(same, timestamp=datetime(2026, 10, 24, 13, 0))
+    discovery = replace(original, id="discovery", metadata={
+        "catchup_origin": "system", "integration_source": "workiq",
+        "workiq_structured_response_unusable": True, "error": original.metadata["error"],
+    })
+    malformed_error = replace(original, id="malformed", metadata={**original.metadata, "error": "Private \ud800 error"})
+
+    assert dedupe_signals((same,), existing_signals=(original,)) == ()
+    assert dedupe_signals((offset_same_day, naive_same_day), existing_signals=(original,)) == ()
+    assert dedupe_signals((original, other_reason, other_count, next_day, other_program, valid, discovery, malformed_error)) == (
+        original, other_reason, other_count, next_day, other_program, valid, discovery, malformed_error,
+    )
+    assert "missing or invalid source time" not in signal_fingerprint(original)
+    assert "private" not in signal_fingerprint(malformed_error)
+
+
+def test_dedupe_catchup_workiq_diagnostics_with_missing_error_keeps_distinct_ids() -> None:
+    original = Signal(
+        id="first", timestamp=datetime(2026, 10, 24, 12, 0, tzinfo=timezone.utc),
+        source="vertex/catchup", program_id="fixture", workstream_id=None, entity_refs=(),
+        text="First malformed diagnostic", raw_ref="system:workiq:synthetic", confidence=Confidence.NONE,
+        metadata={"catchup_origin": "system", "integration_source": "workiq", "quarantined": True},
+    )
+    other = replace(original, id="second", text="Second malformed diagnostic")
+
+    assert dedupe_signals((original, other)) == (original, other)
+    assert "first" not in signal_fingerprint(original)
+
+
+def test_workiq_diagnostic_markers_do_not_reclassify_other_catchup_origins() -> None:
+    signal = Signal(
+        id="ordinary", timestamp=datetime(2026, 10, 24, 12, 0, tzinfo=timezone.utc),
+        source="vertex/catchup", program_id="fixture", workstream_id=None, entity_refs=(),
+        text="Ordinary catchup", raw_ref="ado:synthetic", confidence=Confidence.HIGH,
+        metadata={"catchup_origin": "ado/revision"},
+    )
+    marked = replace(signal, metadata={
+        "catchup_origin": "ado/revision", "integration_source": "workiq", "quarantined": True, "error": "Private",
+    })
+
+    assert signal_fingerprint(marked) == signal_fingerprint(signal)

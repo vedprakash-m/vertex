@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en" data-demo="true">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Acme Platform Reliability — Setup Preview</title>
+  <style>
+    body { font-family: Segoe UI, Arial, sans-serif; color: #1a1a1a; background: #fafafa; margin: 0; padding: 20px; line-height: 1.5; }
+    .watermark { background: #fff3cd; color: #856404; padding: 12px 20px; border: 1px solid #ffc107; border-radius: 4px; margin-bottom: 20px; font-weight: bold; text-align: center; }
+    .container { max-width: 680px; margin: 0 auto; background: #fff; padding: 24px; border: 1px solid #e0e0e0; }
+    h1 { color: #1a1a1a; font-size: 1.4em; }
+    h2 { color: #333; font-size: 1.2em; border-bottom: 1px solid #e0e0e0; padding-bottom: 6px; }
+    h3 { color: #444; font-size: 1.05em; }
+    table { font-size: 0.9em; }
+    th { background: #f5f5f5; }
+    .health-banner { background: #e8f5e9; padding: 12px 20px; border-radius: 4px; margin-bottom: 16px; }
+    .health-banner.has-red { background: #ffebee; }
+    .footer { margin-top: 32px; padding-top: 12px; border-top: 1px solid #e0e0e0; font-size: 0.85em; color: #666; }
+    .config-summary { background: #f5f5f5; padding: 12px; border-radius: 4px; margin-top: 16px; font-size: 0.9em; }
+  </style>
+</head>
+<body>
+  <div class="watermark" role="alert">Preview — sample data only</div>
+  <div class="container">
+    <h1>Acme Platform Reliability Update</h1>
+    <p style="color:#666;">Edition: acme_platform_reliability_weekly | Sample Issue #000 | 2026-05-26 12:00 UTC</p>
+
+    <div class="health-banner has-red">
+      <strong>Health:</strong> 4 on track, 4 at risk, 4 blocked
+      <br><strong>BLUF:</strong> 4 blocked items need attention.
+      <br><em>Estimated read time: 3 min</em>
+    </div>
+
+    <h2>Scorecard</h2>
+
+    <h3>Infra Health</h3>
+    <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse; width:100%; max-width:640px;">
+      <thead>
+        <tr>
+          <th scope="col" style="text-align:left;">Dimension</th>
+          <th scope="col" style="text-align:left;">Status</th>
+          <th scope="col" style="text-align:left;">Detail</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>Infra Health Health</td><td>Needs Attention</td><td>Based on 12 tracked items.</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Feature Delivery</h3>
+    <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse; width:100%; max-width:640px;">
+      <thead>
+        <tr>
+          <th scope="col" style="text-align:left;">Dimension</th>
+          <th scope="col" style="text-align:left;">Status</th>
+          <th scope="col" style="text-align:left;">Detail</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>Feature Delivery Health</td><td>At Risk</td><td>Based on 14 tracked items.</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Risk &amp; Compliance</h3>
+    <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse; width:100%; max-width:640px;">
+      <thead>
+        <tr>
+          <th scope="col" style="text-align:left;">Dimension</th>
+          <th scope="col" style="text-align:left;">Status</th>
+          <th scope="col" style="text-align:left;">Detail</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>Risk &amp; Compliance Health</td><td>On Track</td><td>Based on 3 tracked items.</td></tr>
+      </tbody>
+    </table>
+
+
+    <h2>Workstream Deep Dive</h2>
+
+    <h3>Infra Health</h3>
+    <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse; width:100%; max-width:640px;">
+      <thead>
+        <tr>
+          <th scope="col" style="text-align:left;">Item</th>
+          <th scope="col" style="text-align:left;">Risk</th>
+          <th scope="col" style="text-align:left;">Owner</th>
+          <th scope="col" style="text-align:left;">ETA</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>Address security findings from latest pen test</td><td><span style="color:#2e7d32; font-weight:bold;">On Track</span></td><td>Synthetic owner A</td><td>2026-06-07</td></tr>
+        <tr><td>Review and update incident response runbook</td><td><span style="color:#2e7d32; font-weight:bold;">On Track</span></td><td>Synthetic owner E</td><td>2026-10-01</td></tr>
+        <tr><td>Migrate legacy storage to new platform</td><td><span style="color:#c62828; font-weight:bold;">Blocked</span></td><td>Synthetic owner B</td><td>2026-11-21</td></tr>
+        <tr><td>Optimize query performance for analytics dashboard</td><td><span style="color:#c62828; font-weight:bold;">Blocked</span></td><td>Synthetic owner E</td><td>2026-09-08</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Feature Delivery</h3>
+    <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse; width:100%; max-width:640px;">
+      <thead>
+        <tr>
+          <th scope="col" style="text-align:left;">Item</th>
+          <th scope="col" style="text-align:left;">Risk</th>
+          <th scope="col" style="text-align:left;">Owner</th>
+          <th scope="col" style="text-align:left;">ETA</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>Create onboarding guide for new team members</td><td><span style="color:#f9a825; font-weight:bold;">At Risk</span></td><td>Synthetic owner E</td><td>2026-08-26</td></tr>
+        <tr><td>Implement feature flag rollout for canary deployment</td><td><span style="color:#2e7d32; font-weight:bold;">On Track</span></td><td>Synthetic owner B</td><td>2026-11-14</td></tr>
+        <tr><td>Integrate partner API for data synchronization</td><td><span style="color:#f9a825; font-weight:bold;">At Risk</span></td><td>Synthetic owner C</td><td>2026-07-07</td></tr>
+        <tr><td>Resolve intermittent test failures in CI pipeline</td><td><span style="color:#f9a825; font-weight:bold;">At Risk</span></td><td>Synthetic owner A</td><td>2026-06-13</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Risk &amp; Compliance</h3>
+    <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse; width:100%; max-width:640px;">
+      <thead>
+        <tr>
+          <th scope="col" style="text-align:left;">Item</th>
+          <th scope="col" style="text-align:left;">Risk</th>
+          <th scope="col" style="text-align:left;">Owner</th>
+          <th scope="col" style="text-align:left;">ETA</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>Design capacity planning model for peak load</td><td><span style="color:#2e7d32; font-weight:bold;">On Track</span></td><td>Synthetic owner C</td><td>2026-12-12</td></tr>
+        <tr><td>Implement retry logic for service degradation</td><td><span style="color:#c62828; font-weight:bold;">Blocked</span></td><td>Synthetic owner C</td><td>2026-12-02</td></tr>
+        <tr><td>Update compliance documentation for Q3 audit</td><td><span style="color:#c62828; font-weight:bold;">Blocked</span></td><td>Synthetic owner D</td><td>2026-10-04</td></tr>
+        <tr><td>Set up monitoring alerts for SLA thresholds</td><td><span style="color:#f9a825; font-weight:bold;">At Risk</span></td><td>Synthetic owner A</td><td>2026-10-10</td></tr>
+      </tbody>
+    </table>
+
+
+    <div class="footer">
+      <p><strong>Provenance:</strong> Manifest ID: preview-acme_platform_reliability_weekly-000</p>
+      <p>Generated by Vertex setup preview. This is sample data — not from live sources.</p>
+    </div>
+
+    <div class="config-summary">
+      <strong>Config Summary:</strong> This preview was generated from your proposed
+      program configuration. 3 workstream(s) and
+      3 scorecard dimension(s) are configured.
+    </div>
+  </div>
+</body>
+</html>

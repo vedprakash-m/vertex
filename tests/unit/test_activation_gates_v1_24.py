@@ -57,12 +57,12 @@ def _build_deps(eml_inbox: Path) -> RevPipelineDeps:
         enumerator=EmlEnumerator(
             inbox_root=eml_inbox,
             mailbox_tenant_id="t",
-            principal_mailbox="u@x.com",
+            principal_mailbox="fixture-user-01@group-01.fixture.example.net",
             container="inbox",
         ),
         hydrator=EmlHydrator(
             mailbox_tenant_id="t",
-            principal_mailbox="u@x.com",
+            principal_mailbox="fixture-user-01@group-01.fixture.example.net",
             container="inbox",
             attachment_denied_path=eml_inbox / "attachment_denied.jsonl",
         ),
@@ -190,7 +190,7 @@ class TestEntityResolutionWiredIntoCycle:
             deps=deps,
             profile=RevRetrievalProfile(profile=REV_PROFILE_SEARCH_HYDRATE),
             mailbox_tenant_id="t",
-            mailbox_principal="u@x.com",
+            mailbox_principal="fixture-user-01@group-01.fixture.example.net",
             mailbox_container="inbox",
             correlation_id="ent-res",
             programs_root=tmp_path,
@@ -229,7 +229,7 @@ class TestProjectionPrivacyGate:
             source_ref=EmailRef(
                 subject="s",
                 sent_at=NOW,
-                sender="a@b.com",
+                sender="fixture-user-05@group-02.fixture.example.net",
                 message_id="m",
                 folder="inbox",
             ),

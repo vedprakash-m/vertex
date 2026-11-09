@@ -26,7 +26,10 @@ LIVE_PROGRAMS_ROOT = REPO_ROOT / "programs"
 # is tracked (rev. 326), so "any(iterdir())" is always True even on the fresh-clone CI.
 from tests.support.data_guards import live_program_data_available
 
-_LIVE_PROGRAMS_EXIST = live_program_data_available()
+_LIVE_CAPABILITY_STATUS_EXISTS = (
+    live_program_data_available()
+    and (LIVE_PROGRAMS_ROOT / "acme" / "capability_status.yaml").is_file()
+)
 
 
 def _write_all_complete_yaml(program_dir: Path) -> None:
@@ -77,7 +80,7 @@ def test_find_program_capability_status_returns_none_for_unknown_id(tmp_path: Pa
     assert find_program_capability_status(statuses, "nonexistent_cap") is None
 
 
-@pytest.mark.skipif(not _LIVE_PROGRAMS_EXIST, reason="Requires programs/ data")
+@pytest.mark.skipif(not _LIVE_CAPABILITY_STATUS_EXISTS, reason="Requires local capability_status.yaml")
 def test_live_capability_status_yaml_has_all_required_ids() -> None:
     """Live file must declare all three Phase-1 capability IDs (any status)."""
     statuses = load_program_capability_status("acme", programs_root=LIVE_PROGRAMS_ROOT)
@@ -90,7 +93,7 @@ def test_live_capability_status_yaml_has_all_required_ids() -> None:
         )
 
 
-@pytest.mark.skipif(not _LIVE_PROGRAMS_EXIST, reason="Requires programs/ data")
+@pytest.mark.skipif(not _LIVE_CAPABILITY_STATUS_EXISTS, reason="Requires local capability_status.yaml")
 def test_live_ado_activation_is_complete() -> None:
     """ado_activation must be complete (A8 done)."""
     statuses = load_program_capability_status("acme", programs_root=LIVE_PROGRAMS_ROOT)
@@ -99,7 +102,7 @@ def test_live_ado_activation_is_complete() -> None:
     assert status.status == "complete", f"ado_activation is {status.status!r} — A8 not yet done"
 
 
-@pytest.mark.skipif(not _LIVE_PROGRAMS_EXIST, reason="Requires programs/ data")
+@pytest.mark.skipif(not _LIVE_CAPABILITY_STATUS_EXISTS, reason="Requires local capability_status.yaml")
 def test_live_kusto_activation_is_complete() -> None:
     """kusto_activation must be complete (B15 closed 2026-05-19)."""
     statuses = load_program_capability_status("acme", programs_root=LIVE_PROGRAMS_ROOT)
@@ -108,7 +111,7 @@ def test_live_kusto_activation_is_complete() -> None:
     assert status.status == "complete", f"kusto_activation is {status.status!r} — B15 not yet closed"
 
 
-@pytest.mark.skipif(not _LIVE_PROGRAMS_EXIST, reason="Requires programs/ data")
+@pytest.mark.skipif(not _LIVE_CAPABILITY_STATUS_EXISTS, reason="Requires local capability_status.yaml")
 def test_live_m365_activation_is_complete() -> None:
     """m365_activation must be complete (E5 closed 2026-05-19)."""
     statuses = load_program_capability_status("acme", programs_root=LIVE_PROGRAMS_ROOT)

@@ -20,6 +20,7 @@ from typing import Callable, Sequence
 from src.ai.content_extractor import ContentExtractionAgent, ExtractionContext
 from src.core.evidence_models import WorkstreamEvidence
 from src.core.jsonl_utils import append_jsonl_line, read_jsonl_records
+from src.core.m365_payload_support import has_provisional_workiq_identity
 from src.core.models_v2 import Signal
 
 log = logging.getLogger(__name__)
@@ -168,6 +169,7 @@ def _filter_transcript_signals(signals: Sequence[Signal]) -> list[Signal]:
         s for s in signals
         if (s.metadata or {}).get("source_type") == "transcript"
         and s.workstream_id is not None
+        and not has_provisional_workiq_identity(s.metadata)
         and s.text
     ]
 

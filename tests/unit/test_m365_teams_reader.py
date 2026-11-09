@@ -34,12 +34,12 @@ def test_teams_reader_prefers_workiq_ask_json() -> None:
     bridge = _FakeBridge()
     bridge.workiq_responses.append(
         {
-            "response": '{"messages":[{"id":"msg-1","channel":"xInfraSWPM: Acme Weekly","from":{"user":{"displayName":"Vertex Maintainer"}},"createdDateTime":"2026-05-07T17:00:00Z","webUrl":"https://teams.microsoft.com/l/message/1","body":{"content":"Deployment velocity is slipping."}}],"next_cursor":"teams-2"}'
+            "response": '{"messages":[{"id":"msg-1","channel":"ExampleTeam: Acme Weekly","from":{"user":{"displayName":"Vertex Maintainer"}},"createdDateTime":"2026-05-07T17:00:00Z","webUrl":"https://teams.microsoft.com/l/message/1","body":{"content":"Deployment velocity is slipping."}}],"next_cursor":"teams-2"}'
         }
     )
     reader = TeamsReader(bridge)
 
-    page = reader.search_messages(channel="xInfraSWPM: Acme Weekly", query="deployment velocity", since="2026-05-01")
+    page = reader.search_messages(channel="ExampleTeam: Acme Weekly", query="deployment velocity", since="2026-05-01")
 
     assert len(bridge.workiq_questions) == 1
     assert bridge.calls == []
@@ -54,7 +54,7 @@ def test_teams_reader_searches_messages_via_workiq_ask() -> None:
             "messages": [
                 {
                     "id": "msg-1",
-                    "channel": "xInfraSWPM: Acme Weekly",
+                    "channel": "ExampleTeam: Acme Weekly",
                     "from": {"user": {"displayName": "Vertex Maintainer"}},
                     "createdDateTime": "2026-05-07T17:00:00Z",
                     "webUrl": "https://teams.microsoft.com/l/message/1",
@@ -66,7 +66,7 @@ def test_teams_reader_searches_messages_via_workiq_ask() -> None:
     )
     reader = TeamsReader(bridge)
 
-    page = reader.search_messages(channel="xInfraSWPM: Acme Weekly", query="deployment velocity", since="2026-05-01")
+    page = reader.search_messages(channel="ExampleTeam: Acme Weekly", query="deployment velocity", since="2026-05-01")
 
     assert len(bridge.workiq_questions) == 1
     assert bridge.calls == []
@@ -82,7 +82,7 @@ def test_teams_reader_retries_retryable_errors() -> None:
     sleep_calls: list[float] = []
     reader = TeamsReader(bridge, sleep_func=lambda delay: sleep_calls.append(delay))
 
-    page = reader.search_messages(channel="xInfraSWPM", query="newsletter")
+    page = reader.search_messages(channel="ExampleTeam", query="newsletter")
 
     assert len(bridge.workiq_questions) == 2
     assert page.records[0].source_id == "msg-2"

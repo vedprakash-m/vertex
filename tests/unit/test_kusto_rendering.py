@@ -9,6 +9,48 @@ from src.core.kusto_templates import KustoTemplateContext
 
 
 @pytest.mark.parametrize("fallback", [False, True])
+def test_actual_registry_chart_uses_surviving_series_in_report(fallback, monkeypatch):
+    from dataclasses import replace
+    from datetime import datetime, timezone
+    from src.core.chart_renderer_registry import ChartRendererRegistry
+    import src.core.kusto_rendering as rendering
+
+    pytest.importorskip("matplotlib")
+    monkeypatch.setattr(rendering, "_VERTEX_CHARTS_ENABLED", True)
+    query = KustoQuerySettings(
+        id="synthetic", cluster="synthetic", database="synthetic", kql="primary",
+        section="Synthetic", render_as="chart_image", confidence="high",
+        kusto_section_validates_slice=False, caveats=(), reference_url=None,
+        chart_config={"type": "line", "x_axis": "day", "y_axes": ["missing", "p50", "p75"]},
+        fallback_kql="fallback" if fallback else None,
+    )
+    rows = [{"day": f"d{i}", "p50": float(i + 1), "p75": float(i + 2)} for i in range(6)]
+
+    def execute(current):
+        return [] if fallback and current.kql == "primary" else rows
+
+    def render(current):
+        return build_kusto_sections(
+            KustoSettings(enabled=True, queries=(current,)), execute,
+            chart_registry=ChartRendererRegistry(),
+            observed_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+
+    sections, observations, warnings = render(query)
+    expected, _, expected_warnings = render(replace(
+        query, chart_config={"type": "line", "x_axis": "day", "y_axes": ["p50", "p75"]},
+    ))
+
+    assert warnings == expected_warnings == ()
+    assert observations[0].execution_state == "success"
+    assert sections[0].render_mode == "chart"
+    assert sections[0].message.startswith("p50 trending ")
+    assert sections[0].message == expected[0].message
+    assert sections[0].chart_png_base64 == expected[0].chart_png_base64
+    assert sections[0].chart_png_base64
+
+
+@pytest.mark.parametrize("fallback", [False, True])
 def test_actual_report_cache_write_binds_executed_definition(fallback, tmp_path, monkeypatch):
     from dataclasses import replace
     from datetime import datetime, timezone

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from src.core.integration_types import RegistryFeedbackEvent
 
-from src.core._db import open_program_db
+from src.core._db import SQLiteUnitOfWork, open_program_db
 from src.core.integration_types import (
     ChannelRegistration,
     DiscoveredRef,
@@ -1007,24 +1007,12 @@ class ChannelRegistryStore:
                     "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', ?)",
                     (SCHEMA_VERSION,),
                 )
-        # Explicitly close to release Windows file lock before raising, so callers that
-        # catch SchemaVersionError can delete/replace the file (e.g. schema-migrate --force).
-        conn.close()
         if version_error is not None:
             raise SchemaVersionError(f"Unsupported channel registry schema version {version_error}; run `vertex integration schema-migrate --program <id>`.")
 
-    def _connect(self, *, init: bool = False) -> sqlite3.Connection:
-        """INV-AF-13 (WO-2 item 9): routed through open_program_db() (its
-        context-manager sugar bypassed -- callers use the raw connection's
-        own ``with ... as conn:`` commit/rollback protocol). Dropping the
-        prior ``isolation_level=None`` autocommit mode means statements in
-        one ``with`` block now commit or roll back together atomically
-        instead of independently; see test_channel_registry_store.py's
-        ``test_connect_is_atomic_across_multiple_statements_in_one_block``.
-        ``durability="strict"`` preserves the prior always-FULL synchronous
-        default (never explicitly set before).
-        """
-        return open_program_db(self.db_path, durability="strict").connection
+    def _connect(self, *, init: bool = False) -> SQLiteUnitOfWork:
+        """INV-AF-13: use strict durability and close after the transaction."""
+        return open_program_db(self.db_path, durability="strict")
 
     def _load_registrations(
         self,

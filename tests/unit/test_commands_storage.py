@@ -17,7 +17,12 @@ def _seed_db(programs_root: Path, program_id: str = "acme") -> Path:
     """Create a healthy SQLite DB with one signal and one trajectory point."""
     with _connect_program_db(program_id, programs_root=programs_root) as conn:
         conn.execute(
-            "INSERT INTO signals VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            """
+            INSERT INTO signals (
+                program_id, signal_id, timestamp, source, workstream_id, entity_refs_json,
+                text, raw_ref, confidence, metadata_json, thread_id, review_policy
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
             (
                 program_id,
                 "sig-001",

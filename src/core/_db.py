@@ -52,18 +52,25 @@ def open_program_db(
 ) -> SQLiteUnitOfWork:
     if not read_only:
         path.parent.mkdir(parents=True, exist_ok=True)
-    connection_target = f"file:{path.as_posix()}?mode=ro" if read_only else str(path)
+    connection_target = f"{path.absolute().as_uri()}?mode=ro" if read_only else str(path)
     connection = sqlite3.connect(connection_target, uri=read_only)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
-    connection.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
-    if not read_only:
-        is_network_path = _is_network_filesystem_path(path)
-        journal_mode = "DELETE" if is_network_path else "WAL"
-        synchronous = "FULL" if is_network_path or durability == "strict" else "NORMAL"
-        connection.execute(f"PRAGMA journal_mode = {journal_mode}")
-        connection.execute(f"PRAGMA synchronous = {synchronous}")
-    return SQLiteUnitOfWork(connection=connection, read_only=read_only)
+    setup_complete = False
+    try:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
+        if not read_only:
+            is_network_path = _is_network_filesystem_path(path)
+            journal_mode = "DELETE" if is_network_path else "WAL"
+            synchronous = "FULL" if is_network_path or durability == "strict" else "NORMAL"
+            connection.execute(f"PRAGMA journal_mode = {journal_mode}")
+            connection.execute(f"PRAGMA synchronous = {synchronous}")
+        unit_of_work = SQLiteUnitOfWork(connection=connection, read_only=read_only)
+        setup_complete = True
+        return unit_of_work
+    finally:
+        if not setup_complete:
+            connection.close()
 
 
 def open_program_db_with_retry(

@@ -16,6 +16,7 @@ from src.core.work_item_states import TERMINAL_WORK_ITEM_STATES
 
 if TYPE_CHECKING:
     from src.core.program_reality import RealityConflict
+    from src.core.view_models import HealthSummary
 
 
 _RANK = {
@@ -86,6 +87,33 @@ class ProgramVerdictObservation:
     inputs: ProgramVerdictInputs
     inputs_sha256: str
     verdict: ProgramVerdict
+
+
+@dataclass(frozen=True, slots=True)
+class ReportVerdictComparison:
+    schema_version: str
+    mode: Literal["observe"]
+    capture_sha256: str
+    observation_inputs_sha256: str
+    report_risk: RiskLevel
+    report_health_state: str
+    verdict_risk: RiskLevel
+    risk_values_equal: bool
+
+
+def compare_report_health(
+    health: HealthSummary, observation: ProgramVerdictObservation,
+) -> ReportVerdictComparison:
+    return ReportVerdictComparison(
+        schema_version="report-verdict-comparison.v1",
+        mode="observe",
+        capture_sha256=observation.verdict.snapshot_id,
+        observation_inputs_sha256=observation.inputs_sha256,
+        report_risk=health.overall_risk,
+        report_health_state=health.health_state,
+        verdict_risk=observation.verdict.health,
+        risk_values_equal=health.overall_risk == observation.verdict.health,
+    )
 
 
 def observe_program_verdict(

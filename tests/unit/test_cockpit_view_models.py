@@ -231,7 +231,7 @@ def test_build_cockpit_snapshot_on_empty_fixture_program_never_raises(tmp_path: 
     assert any(finding.finding_id == "source.health.not_probed" for finding in snapshot.findings)
     assert any(finding.finding_id == "value.metrics.formula_derived_retired" for finding in snapshot.findings)
     assert any(finding.finding_id == "value.report_wall_time.insufficient_history" for finding in snapshot.findings)
-    assert any(finding.finding_id == "reliability.outbox.not_wired" for finding in snapshot.findings)
+    assert any(finding.finding_id == "reliability.outbox.unavailable" for finding in snapshot.findings)
     assert any(finding.finding_id == "intelligence.lineage.no_facts" for finding in snapshot.findings)
     assert snapshot.intelligence_summary.lineage_coverage is None
 

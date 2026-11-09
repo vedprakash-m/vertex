@@ -67,9 +67,9 @@ def test_row_timestamp_returns_none_when_missing() -> None:
 
 
 def test_row_contains_pii_detects_known_markers() -> None:
-    assert _row_contains_pii({"email": "a@b.com"}) is True
+    assert _row_contains_pii({"email": "fixture-user-05@group-02.fixture.example.net"}) is True
     assert _row_contains_pii({"person": "alice"}) is True
-    assert _row_contains_pii({"recipient_emails": ["a@b.com"]}) is True
+    assert _row_contains_pii({"recipient_emails": ["fixture-user-05@group-02.fixture.example.net"]}) is True
     assert _row_contains_pii({"id": "x"}) is False
 
 
@@ -77,7 +77,7 @@ def test_tombstone_row_redacts_pii_fields() -> None:
     redacted = _tombstone_row(
         {
             "id": "1",
-            "email": "a@b.com",
+            "email": "fixture-user-05@group-02.fixture.example.net",
             "body": "secret",
             "person": "alice",
             "created_at": "2026-01-01T00:00:00Z",
@@ -194,7 +194,7 @@ def test_run_purge_tombstones_pii_rows(tmp_path: Path) -> None:
     sidecar = tmp_path / "acme" / "journal" / "autonomy_audit.jsonl"
     # 2010 is 16 years before 2026 — well past SEVEN_YEARS retention
     pii_rows = [
-        {"id": "1", "created_at": "2010-01-01T00:00:00Z", "email": "a@b.com"},
+        {"id": "1", "created_at": "2010-01-01T00:00:00Z", "email": "fixture-user-05@group-02.fixture.example.net"},
         {"id": "2", "created_at": "2010-01-01T00:00:00Z", "note": "no PII"},
     ]
     _write_jsonl(sidecar, pii_rows)

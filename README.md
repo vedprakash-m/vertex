@@ -321,7 +321,7 @@ vertex doctor    --edition my_weekly        # config/schema/source-health valida
 vertex triage    --full --edition my_weekly # prioritized checklist of every attention item
 ```
 
-For the full weekly authoring loop (`gather` → `enrich` → `override` → `report` → `review-full` → `confirm`) and all flags, see [The Full Authoring Loop](#-the-full-authoring-loop) above and the `vertex --help` tree. The canonical command reference is regenerated from the live CLI into `specs/cli-reference.md` (local-only).
+For the full weekly authoring loop (`gather` → `enrich` → `override` → `report` → `review-full` → `confirm`) and all flags, see [The Full Authoring Loop](#-the-full-authoring-loop) above and the `vertex --help` tree. The generated [command reference](tests/contracts/cli_reference_snapshot.md) comes from the live CLI; CI checks it without rewriting it.
 
 ### Keeping it running: recurring operational tasks
 

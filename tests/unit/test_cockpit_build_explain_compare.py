@@ -80,6 +80,58 @@ def test_corrupt_proposal_cockpit_keeps_active_unknown_impact_gap(tmp_path) -> N
     assert "proposal" in diagnostic.summary.lower() and "private_canary" not in diagnostic.detail
     assert diagnostic.evidence_refs == ("context_proposals",)
 
+
+def test_cockpit_cli_preserves_pending_revision_for_gap_failures(tmp_path, monkeypatch) -> None:
+    from dataclasses import replace
+    import json
+    from typer.testing import CliRunner
+    from src.commands import cockpit
+    from src.core.ncfl_proposal_store import stage_extracted_proposals
+    from tests.unit.test_context_proposal_review import _proposal
+
+    for failure in ("registry", "foreign", "record"):
+        root = tmp_path / failure / "programs"
+        program = root / "fixture"
+        feedback = program / "_feedback"
+        feedback.mkdir(parents=True)
+        registry = program / "workstream_registry.yaml"
+        registry.write_text("workstreams: [\nsynthetic_canary\n", encoding="utf-8")
+        history = feedback / "context_gaps.jsonl"
+        history.write_text(json.dumps({
+            "ts": "2026-10-01T00:00:00Z",
+            "feature": "doctor --context" if failure == "registry" else "synthetic",
+            "program": "fixture" if failure == "registry" else "foreign_program",
+            "lane": "lane" if failure == "registry" else None,
+            "field": "deep_context.why" if failure == "registry" else "purpose",
+            "severity": "quality_degraded", "message": "synthetic_canary", "impact_estimate": "high",
+        }) + "\n", encoding="utf-8")
+        if failure == "record":
+            history.write_text(json.dumps({"ts": None, "message": "synthetic_canary"}) + "\n", encoding="utf-8")
+        proposal = replace(
+            _proposal("pending", issue_number=8, target_store="workstream_registry", conflict_key="registry"),
+            program_id="fixture", edition_id="fixture_weekly",
+        )
+        stage_extracted_proposals("fixture", 8, (proposal,), programs_root=root)
+        before = {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+        monkeypatch.setattr(cockpit, "PROGRAMS_ROOT", root)
+
+        result = CliRunner().invoke(cockpit.app, ["show", "--program", "fixture", "--format", "json", "--no-persist"])
+
+        assert result.exit_code == 0, repr(result.exception)
+        payload = json.loads(result.stdout)
+        finding = next(row for row in payload["findings"] if row["finding_id"] == "trust.context_gaps.unavailable")
+        assert finding["status"] == "warn"
+        expected = {
+            "registry": "workstream_registry.yaml",
+            "foreign": "foreign program",
+            "record": "Context gap history unavailable",
+        }[failure]
+        assert expected in finding["summary"]
+        assert any(row["finding_id"] == "trust.context_proposal.pending" for row in payload["findings"])
+        assert "synthetic_canary" not in result.output and str(program) not in result.output
+        assert {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()} == before
+
+
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock

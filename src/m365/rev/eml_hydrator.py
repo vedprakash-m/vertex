@@ -154,8 +154,8 @@ def _strip_html(html: str) -> str:
         for el in soup.find_all(["script", "style"]):
             el.decompose()
         return soup.get_text(separator=" ")
-    except Exception as exc:
-        log.debug("EmlHydrator: BeautifulSoup failed (%s) — stripping tags via fallback", exc)
+    except Exception:
+        log.debug("EmlHydrator: BeautifulSoup failed — stripping tags via fallback")
         return re.sub(r"<[^>]+>", " ", cleaned)
 
 
@@ -288,7 +288,7 @@ class EmlHydrator:
         if not eml_path.exists():
             return Unsupported(
                 entity_type=EntityType.MESSAGE.value,
-                reason=f"eml_not_found: {eml_path}",
+                reason="eml_not_found: local source is unavailable",
             )
 
         # Size guard (defensive backstop; EmlEnumerator quarantines at claim time).
@@ -302,7 +302,9 @@ class EmlHydrator:
                 reason=f"size_exceeded: {size} bytes > {_MAX_EML_BYTES}",
             )
 
-        message_id = str(candidate.partial_metadata.get("message_id", candidate.locator.resource_id))
+        message_id = candidate.partial_metadata.get("message_id", candidate.locator.resource_id)
+        if not isinstance(message_id, str) or not message_id.strip() or message_id != candidate.locator.resource_id:
+            return Unsupported(entity_type=EntityType.MESSAGE.value, reason="eml_identity_invalid")
 
         # Apply per-file timeout (POSIX only; SIGALRM not available on Windows).
         use_timeout = sys.platform != "win32" and hasattr(signal, "SIGALRM")
@@ -319,16 +321,16 @@ class EmlHydrator:
                 correlation_id=correlation_id,
             )
         except _TimeoutError:
-            log.warning("EmlHydrator: timeout after %ds on %s", self._timeout_seconds, eml_path)
+            log.warning("EmlHydrator: timeout after %ds", self._timeout_seconds)
             return Unsupported(
                 entity_type=EntityType.MESSAGE.value,
                 reason=f"hydration_timeout: exceeded {self._timeout_seconds}s",
             )
-        except Exception as exc:
-            log.warning("EmlHydrator: failed to hydrate %s: %s", eml_path, exc)
+        except Exception:
+            log.warning("EmlHydrator: failed to hydrate source")
             return Unsupported(
                 entity_type=EntityType.MESSAGE.value,
-                reason=f"hydration_error: {exc}",
+                reason="hydration_error: source could not be hydrated",
             )
         finally:
             if use_timeout:
@@ -337,6 +339,8 @@ class EmlHydrator:
                     signal.SIGALRM, signal.SIG_DFL  # type: ignore[attr-defined]
                 )
 
+        if isinstance(hydrated, Unsupported):
+            return hydrated
         return Success(hydrated)
 
     def _hydrate_path(
@@ -345,10 +349,14 @@ class EmlHydrator:
         *,
         message_id: str,
         correlation_id: str,
-    ) -> HydratedContent:
+    ) -> HydratedContent | Unsupported:
         """Parse + normalize one .eml file → HydratedContent."""
         with eml_path.open("rb") as fh:
             msg = email.message_from_binary_file(fh, policy=email.policy.compat32)
+
+        message_ids = msg.get_all("Message-ID", [])
+        if len(message_ids) != 1 or not str(message_ids[0]).strip() or str(message_ids[0]).strip() != message_id:
+            return Unsupported(entity_type=EntityType.MESSAGE.value, reason="eml_identity_invalid")
 
         text_parts: list[str] = []
         denied_types: list[str] = []
@@ -370,8 +378,8 @@ class EmlHydrator:
             try:
                 self._attachment_denied_path.parent.mkdir(parents=True, exist_ok=True)
                 append_jsonl_line(self._attachment_denied_path, record, max_bytes=10 * 1024 * 1024)
-            except OSError as exc:
-                log.warning("EmlHydrator: could not write attachment_denied.jsonl: %s", exc)
+            except OSError:
+                log.warning("EmlHydrator: could not write attachment_denied.jsonl")
 
         raw_body = " ".join(text_parts)
         full_canonical = normalize_whitespace(raw_body)
@@ -417,10 +425,11 @@ class EmlHydrator:
         scrubbed_subject = _scrub_pii(raw_subject) if raw_subject else raw_subject
 
         # Extract route metadata from headers.
+        dates = msg.get_all("Date", [])
         route_metadata: dict[str, object] = {
             "subject": scrubbed_subject,
             "sender": str(msg.get("From", "")).strip(),
-            "received_at": str(msg.get("Date", "")).strip(),
+            "received_at": str(dates[0]).strip() if len(dates) == 1 else "",
             "message_id": message_id,
             "conversation_id": str(msg.get("Thread-Index", message_id)).strip(),
             "low_unique_body": low_unique,

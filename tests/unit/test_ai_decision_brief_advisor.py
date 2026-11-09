@@ -21,15 +21,15 @@ def test_parse_advice_scrubs_pii_from_reasoning_and_suggested_text() -> None:
     advice = _parse_advice(
         {
             "verdict": "REVISE",
-            "reasoning": "Ask foo@gmail.com to confirm whether the risk is still open.",
-            "suggested_text": "Escalate the dependency owner at foo@gmail.com before Friday.",
+            "reasoning": "Ask foo@example.com to confirm whether the risk is still open.",
+            "suggested_text": "Escalate the dependency owner at foo@example.com before Friday.",
         }
     )
 
     assert advice is not None
     assert advice.verdict == "REVISE"
-    assert "foo@gmail.com" not in advice.reasoning
-    assert "foo@gmail.com" not in (advice.suggested_text or "")
+    assert "foo@example.com" not in advice.reasoning
+    assert "foo@example.com" not in (advice.suggested_text or "")
     assert "[PII-FILTERED-EMAIL]" in advice.reasoning
     assert "[PII-FILTERED-EMAIL]" in (advice.suggested_text or "")
 

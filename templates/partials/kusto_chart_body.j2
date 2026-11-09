@@ -1,0 +1,23 @@
+      {% if ks.render_mode == "chart" %}
+      {% if ks.is_degraded and ks.cache_captured_at %}
+      <div style="margin:0 0 10px 0; padding:8px 12px; background-color:#FFFBEB; border-left:3px solid #F59E0B;">
+        <p style="margin:0; font-size:12px; line-height:1.5; color:#92400E;">Chart data from gather run {{ ks.cache_captured_at | format_datetime if ks.cache_captured_at else "unknown" }} — live data unavailable</p>
+      </div>
+      {% endif %}
+      {% if ks.chart_png_base64 %}
+      <p style="margin:0 0 4px 0;">
+        {% if ks.reference_url %}<a href="{{ ks.reference_url }}" target="_blank" style="display:block; text-decoration:none;">{% endif %}
+        <img src="data:image/png;base64,{{ ks.chart_png_base64 }}" alt="{{ ks.title | forceescape }} chart{% if ks.message %}: {{ ks.message | forceescape }}{% endif %}" style="display:block; width:100%; max-width:608px; height:auto; border:1px solid #E5E7EB;" width="608" />
+        {% if ks.reference_url %}</a>{% endif %}
+      </p>
+      {% if ks.cache_captured_at %}
+      <p style="margin:0 0 10px 0; font-size:10px; line-height:1.4; color:#6B7280;">Source: {{ ks.source_label }} · query {{ ks.query_id }} · cached {{ ks.cache_captured_at | format_datetime if ks.cache_captured_at else "" }} (live unavailable)</p>
+      {% else %}
+      <p style="margin:0 0 10px 0; font-size:10px; line-height:1.4; color:#6B7280;">Source: {{ ks.source_label }} · query {{ ks.query_id }}{% if ks.captured_at %} · {{ ks.captured_at | format_datetime }}{% endif %}</p>
+      {% endif %}
+      {% else %}
+      <p style="margin:0 0 12px 0; font-size:13px; line-height:1.5; color:#6B7280; text-align:center; padding:20px 0;">No data available for this period.{% if ks.reference_url %} <a href="{{ ks.reference_url }}" style="color:#2563EB; text-decoration:underline;">View data →</a>{% endif %}</p>
+      {% endif %}
+      {% elif ks.render_mode == "chart_image" and ks.image_data_url %}
+      <p style="margin:0 0 12px 0;"><img src="{{ ks.image_data_url }}" alt="{{ ks.title | forceescape }} chart{% if ks.message %}: {{ ks.message | forceescape }}{% endif %}" style="display:block; width:100%; max-width:608px; height:auto; border:1px solid #E5E7EB;" /></p>
+      {% endif %}

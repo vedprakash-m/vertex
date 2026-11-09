@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
+import pytest
+
 from src.core.models import RiskLevel
 from src.core.models_v2 import TrajectoryPoint
 from src.core.trajectory import (
@@ -80,3 +82,23 @@ def test_read_trajectory_quarantines_invalid_jsonl_and_preserves_valid_points(tm
     assert len(points) == 2
     assert len(quarantines) == 1
     assert trajectory_checksum_matches("acme", 1234, programs_root) is True
+
+
+@pytest.mark.parametrize("invalid_line", ["synthetic-invalid-private", '["synthetic-invalid-private"]'])
+def test_read_trajectory_can_refuse_invalid_jsonl_without_repair(tmp_path: Path, invalid_line: str) -> None:
+    programs_root = tmp_path / "programs"
+    path = get_trajectory_path("acme", 1234, programs_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        '{"date":"2026-05-08","state":"Active","area_path":"Demo"}\n' + invalid_line + "\n",
+        encoding="utf-8",
+    )
+    checksum = get_trajectory_checksum_path("acme", 1234, programs_root)
+    checksum.write_text("unchanged\n", encoding="utf-8")
+    before = {file.relative_to(programs_root): file.read_bytes() for file in programs_root.rglob("*") if file.is_file()}
+
+    with pytest.raises(ValueError, match="Invalid trajectory record") as error:
+        read_trajectory("acme", 1234, programs_root=programs_root, repair_corruption=False)
+
+    assert "synthetic-invalid-private" not in str(error.value)
+    assert {file.relative_to(programs_root): file.read_bytes() for file in programs_root.rglob("*") if file.is_file()} == before

@@ -196,7 +196,9 @@ def watch_program_once(
         )
     analytics_ado_calls = 0
     if WatchSource.ANALYTICS in selected_sources:
-        analytics_signals, analytics_ado_calls = gather._load_analytics_signals(program, workstreams, current_time)
+        analytics_signals, analytics_ado_calls = gather._load_analytics_signals(
+            program, workstreams, current_time, programs_root=resolved_programs_root
+        )
         candidate_signals = (*candidate_signals, *analytics_signals)
     sprint_ado_calls = 0
     if WatchSource.SPRINTS in selected_sources:

@@ -402,7 +402,9 @@ def test_rollback_manifest_reverts_applied_entries_idempotently(tmp_path: Path, 
         comments_by_id={1001: [{"id": 900, "text": "Vertex demo_weekly issue #007\nRisk: high."}]},
     )
 
-    artifacts = ADOWriter(client).rollback_manifest(manifest_path, action_id="action-123", rolled_back_at=rollback_at)
+    artifacts = ADOWriter(client, programs_root=programs_root).rollback_manifest(
+        manifest_path, action_id="action-123", rolled_back_at=rollback_at,
+    )
 
     assert artifacts.rolled_back_count == 2
     assert artifacts.skipped_count == 1
@@ -414,7 +416,7 @@ def test_rollback_manifest_reverts_applied_entries_idempotently(tmp_path: Path, 
     assert client.session.calls[0]["method"] == "POST"
     assert client.session.calls[1]["method"] == "PATCH"
 
-    rerun = ADOWriter(client).rollback_manifest(
+    rerun = ADOWriter(client, programs_root=programs_root).rollback_manifest(
         manifest_path, action_id="action-123", rolled_back_at=rollback_at + timedelta(days=1),
     )
 
@@ -503,7 +505,7 @@ def test_rollback_comment_lookup_blocks_post_and_maps_disposition(
         comment_lookup_error=lookup_error,
     )
 
-    artifacts = ADOWriter(client).rollback_manifest(
+    artifacts = ADOWriter(client, programs_root=tmp_path / "programs").rollback_manifest(
         manifest_path, action_id="action-123", rolled_back_at=rolled_back_at
     )
 

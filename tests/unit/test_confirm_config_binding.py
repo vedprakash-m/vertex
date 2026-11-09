@@ -102,6 +102,38 @@ def test_forced_confirm_rechecks_fresh_config_after_archive_lock(
     assert narrative.read_bytes() == before_narrative
 
 
+@pytest.mark.parametrize(
+    "dependency",
+    ["load_bundle", "hash_jsonable", "evaluate_program_fact_drift_from_draft", "_validate_pinned_gather_run"],
+)
+def test_locked_recheck_resolves_dependencies_after_archive_lock(
+    repo_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dependency: str,
+) -> None:
+    reports_root, archive_root, _ = _prepare_confirmable_weekly_issue(repo_root, tmp_path)
+    programs_root = reports_root.parent / "programs"
+    lock = archive_transaction.ArchiveLock
+    checkpoints = Mock(wraps=archive_transaction.create_checkpoint_snapshot)
+    monkeypatch.setattr(archive_transaction, "create_checkpoint_snapshot", checkpoints)
+
+    def reject(*_args, **_kwargs):
+        raise ConfigError(f"Late-bound {dependency}")
+
+    @contextmanager
+    def replace_dependency_after_lock(path: Path):
+        with lock(path):
+            monkeypatch.setattr(confirm, dependency, reject)
+            yield
+
+    monkeypatch.setattr(archive_transaction, "ArchiveLock", replace_dependency_after_lock)
+    with pytest.raises(ConfigError, match=f"Late-bound {dependency}"):
+        confirm.confirm_issue(
+            EDITION_NAME, 1, force=True, ack_stale_approval=True,
+            reports_root=reports_root, archive_root=archive_root, programs_root=programs_root,
+        )
+    checkpoints.assert_not_called()
+    assert not tuple(archive_root.rglob("*.snapshot.json"))
+
+
 @pytest.mark.parametrize("reformat", [False, True])
 def test_unchanged_effective_config_preserves_post_draft_narrative_and_risk_edits(
     repo_root: Path, tmp_path: Path, reformat: bool,

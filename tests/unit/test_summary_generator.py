@@ -115,7 +115,7 @@ def test_summary_generator_rejects_overlong_output(tmp_path: Path) -> None:
 
 
 def test_summary_generator_runs_safety_pipeline(tmp_path: Path) -> None:
-    client = _FakeAIClient("Deployment moved due to vendor follow-up. Contact foo@gmail.com.")
+    client = _FakeAIClient("Deployment moved due to vendor follow-up. Contact foo@example.com.")
     generator = SummaryGenerator(client=client)
 
     result = generator.generate(

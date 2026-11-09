@@ -20,6 +20,128 @@ from src.m365.transcript_reader import TranscriptRecord
 runner = CliRunner()
 
 
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("bad_row", [b'{"synthetic-private"\n', b'["synthetic-private"]\n', b"\xff\n"])
+def test_meeting_close_action_queue_does_not_repair_corrupt_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dry_run: bool, bad_row: bytes,
+) -> None:
+    repo_root = _seed_repo(tmp_path)
+    programs_root = repo_root / "programs"
+    monkeypatch.setattr(meeting_close_command, "PROGRAMS_ROOT", programs_root)
+    monkeypatch.setattr(
+        meeting_close_command, "_build_transcript_reader",
+        lambda: _StubTranscriptReader(TranscriptRecord(
+            meeting_id="synthetic-meeting", title="Synthetic", captured_at="2026-05-21T12:00:00+00:00",
+            web_url=None, content="Review WI:101.",
+        )),
+    )
+    monkeypatch.setattr(meeting_close_command, "_extract_actions_from_transcript", _stub_extract_actions)
+    monkeypatch.setattr(meeting_close_command, "_build_ado_client", lambda program: _StubADOClient())
+    path = programs_root / "acme" / "journal" / "actions.jsonl"
+    path.parent.mkdir(parents=True)
+    original = bad_row
+    path.write_bytes(original)
+
+    args = ["meeting-close", "--program", "acme", "--transcript", "synthetic-meeting", "--promote-actions", "--format", "json"]
+    if dry_run:
+        args.append("--dry-run")
+    result = runner.invoke(cli.app, args)
+
+    if dry_run:
+        assert result.exit_code == 0, result.exception
+        assert json.loads(result.stdout)["queued_action_count"] == 0
+    else:
+        assert result.exit_code != 0
+        assert "Action journal" in result.output
+        assert "synthetic-private" not in result.output
+        assert str(path) not in result.output
+    assert path.read_bytes() == original
+    assert not (path.parent / "quarantine").exists()
+
+
+def test_meeting_close_action_queue_reports_unreadable_history_safely(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    programs_root = _seed_repo(tmp_path) / "programs"
+    monkeypatch.setattr(meeting_close_command, "PROGRAMS_ROOT", programs_root)
+    monkeypatch.setattr(
+        meeting_close_command, "_build_transcript_reader",
+        lambda: _StubTranscriptReader(TranscriptRecord(
+            meeting_id="synthetic-meeting", title="Synthetic", captured_at="2026-05-21T12:00:00+00:00",
+            web_url=None, content="Review WI:101.",
+        )),
+    )
+    monkeypatch.setattr(meeting_close_command, "_extract_actions_from_transcript", _stub_extract_actions)
+    monkeypatch.setattr(meeting_close_command, "_build_ado_client", lambda program: _StubADOClient())
+    path = programs_root / "acme" / "journal" / "actions.jsonl"
+    path.parent.mkdir(parents=True)
+    original = b'{"record_type":"action"}\n'
+    path.write_bytes(original)
+    original_read = Path.read_text
+
+    def unreadable(target: Path, *args: object, **kwargs: object) -> str:
+        if target == path:
+            raise PermissionError("synthetic-private failure")
+        return original_read(target, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", unreadable)
+    result = runner.invoke(cli.app, [
+        "meeting-close", "--program", "acme", "--transcript", "synthetic-meeting", "--promote-actions",
+    ])
+
+    assert result.exit_code != 0
+    assert "Action journal" in result.output
+    assert "synthetic-private" not in result.output
+    assert str(path) not in result.output
+    assert path.read_bytes() == original
+    assert not (path.parent / "quarantine").exists()
+
+
+def test_meeting_close_queue_failure_does_not_roll_back_earlier_effects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    programs_root = _seed_repo(tmp_path) / "programs"
+    monkeypatch.setattr(meeting_close_command, "PROGRAMS_ROOT", programs_root)
+    monkeypatch.setattr(
+        meeting_close_command, "_build_transcript_reader",
+        lambda: _StubTranscriptReader(TranscriptRecord(
+            meeting_id="synthetic-meeting", title="Synthetic", captured_at="2026-05-21T12:00:00+00:00",
+            web_url=None, content="Review WI:101.",
+        )),
+    )
+    monkeypatch.setattr(meeting_close_command, "_extract_actions_from_transcript", _stub_extract_actions)
+    monkeypatch.setattr(meeting_close_command, "_build_ado_client", lambda program: _StubADOClient())
+    path = programs_root / "acme" / "journal" / "actions.jsonl"
+    path.parent.mkdir(parents=True)
+    original = b'["synthetic-private"]\n'
+    path.write_bytes(original)
+    apply_calls: list[Path] = []
+
+    def apply_stub(proposal_reference: str, *, programs_root: Path) -> SimpleNamespace:
+        proposal_path = Path(proposal_reference)
+        apply_calls.append(proposal_path)
+        return SimpleNamespace(
+            manifest_path=proposal_path, applied_count=1, skipped_count=0, conflict_count=0, failed_count=0,
+        )
+
+    monkeypatch.setattr(meeting_close_command, "apply_ado_proposal", apply_stub)
+    result = runner.invoke(cli.app, [
+        "meeting-close", "--program", "acme", "--transcript", "synthetic-meeting",
+        "--approve-action", "1", "--approve-action", "2", "--apply-ado", "--promote-actions",
+    ])
+
+    publications = programs_root / "acme" / "publications" / "acme"
+    packet = publications / "meeting_close" / "synthetic-meeting.txt"
+    proposal = publications / "ado_proposals" / "meeting-action-synthetic-meeting.json"
+    assert result.exit_code != 0
+    assert "Action journal" in result.output
+    assert packet.exists()
+    assert proposal.exists()
+    assert apply_calls == [proposal]
+    assert path.read_bytes() == original
+    assert not (path.parent / "quarantine").exists()
+
+
 @pytest.mark.parametrize("peer", [
     "Action: Check release | owner=!!! | due=2026-05-15 | refs=WI:101",
     "Action: Check release | owner=alex | due=2026-05-15 | refs=invalid",
@@ -578,11 +700,20 @@ class _StubADOClient:
                     "System.Id": 101,
                     "System.Title": "UD chunking",
                     "System.AreaPath": "Acme\\UD",
-                    "System.AssignedTo": {"uniqueName": "alice@contoso.com"},
+                    "System.AssignedTo": {"uniqueName": "alice@example.com"},
                     "System.Rev": 17,
                 },
             }
         ]
+
+
+def test_stub_ado_assignee_uses_reserved_example_domain() -> None:
+    rows = _StubADOClient().query_work_items_batch([101], ("System.AreaPath",))
+    fields = rows[0]["fields"]
+    assert isinstance(fields, dict)
+    assignee = fields["System.AssignedTo"]
+    assert isinstance(assignee, dict)
+    assert assignee["uniqueName"] == "alice@example.com"
 
 
 def _stub_extract_actions(program, signal):

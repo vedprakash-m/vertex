@@ -12,7 +12,7 @@ _MISSING_AZURE_OPENAI_DEPLOYMENT_MESSAGE = (
 import os
 from typing import Any, Callable, TypeVar
 
-from src.ai.client import AIClient, AIClientError
+from src.ai.client import AIClient, AIClientError, BudgetExceeded
 from src.ai.llm_trace import AITraceContext
 from src.ai.provider import LLMProvider
 from src.core.policy_loader import load_ai_feature_policy
@@ -134,6 +134,8 @@ class FallbackAIClient:
                     max_tokens=max_tokens,
                     prompt_version=prompt_version,
                 )
+            except BudgetExceeded:
+                raise
             except self._retryable_exceptions as error:
                 last_error = error
                 continue
@@ -163,6 +165,8 @@ class FallbackAIClient:
                     max_tokens=max_tokens,
                     prompt_version=prompt_version,
                 )
+            except BudgetExceeded:
+                raise
             except self._retryable_exceptions as error:
                 last_error = error
                 continue

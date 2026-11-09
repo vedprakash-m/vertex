@@ -18,6 +18,7 @@ from src.core.channel_registry_store import (
 from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.gather_channel_support import append_integration_error_once, binding_provider_instance_id
 from src.core.exceptions import QueryError
+from src.core.failure_taxonomy import safe_failure_suffix
 from src.core.integration_types import DiscoveryCompleteness, HydrationMode, HydrationResult, RunContext, ScopeStatusKind
 from src.core.models_v2 import IntegrationError
 from src.core.gather_run_manifest import ChannelOutcomeEntry
@@ -158,6 +159,13 @@ class _SkipDiscoveryApplication(Exception):
     which would otherwise log a second, redundant integration error for the
     same degradation already reported at the timeout site.
     """
+
+
+def _runtime_error_message(channel: str, stage: str, error: Exception) -> str:
+    if channel not in ("ado", "icm", "kusto"):
+        return str(error)
+    label = {"ado": "ADO", "icm": "IcM", "kusto": "Kusto"}[channel]
+    return f"{label} {stage} runtime failed{safe_failure_suffix(str(error))}"
 
 
 _MAX_DESCRIBED_REMOVED_REFS = 10
@@ -358,9 +366,9 @@ def run_channel(
                 integration_error_sink,
                 source=channel,
                 stage="discovery",
-                error=str(error),
+                error=_runtime_error_message(channel, "discovery", error),
             )
-            discovery_degrade_reason = str(error)
+            discovery_degrade_reason = _runtime_error_message(channel, "discovery", error)
     try:
         registrations = store.pullable_registrations(channel, provider_instance_id=provider_instance_id)
         workstream_map = store.get_workstream_map(
@@ -420,9 +428,9 @@ def run_channel(
             integration_error_sink,
             source=channel,
             stage="hydration",
-            error=str(error),
+            error=_runtime_error_message(channel, "hydration", error),
         )
-        _record_outcome(degraded=True, reason=str(error))
+        _record_outcome(degraded=True, reason=_runtime_error_message(channel, "hydration", error))
         return None, delta
     if not run_ctx.dry_run and hydration_result.hydrated_ref_ids:
         store.mark_verified(

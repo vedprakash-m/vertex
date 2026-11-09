@@ -1,10 +1,12 @@
+"""Locally authored synthetic examples for the PII scrubber."""
+
 from __future__ import annotations
 
 from src.ai.safety.pii_scrubber import filter_text, scan_text
 
 
 def test_scan_text_redacts_all_emails_by_default() -> None:
-    result = scan_text("Contact alice@example.com and bob@corp.com for details.")
+    result = scan_text("Contact first@sample.example.net and second@sample.example.net for details.")
 
     assert result.pii_detected is True
     assert result.signal_types == ["email", "email"]
@@ -13,17 +15,17 @@ def test_scan_text_redacts_all_emails_by_default() -> None:
 
 def test_scan_text_preserves_allowed_email_domain() -> None:
     result = scan_text(
-        "Contact alice@external.com and bob@myorg.com for details.",
-        allowed_email_domains=("myorg.com",),
+        "Contact external@sample.example.net and allowed@trusted.example.org for details.",
+        allowed_email_domains=("trusted.example.org",),
     )
 
     assert result.pii_detected is True
     assert result.signal_types == ["email"]
-    assert result.scrubbed_text == "Contact [PII-FILTERED-EMAIL] and bob@myorg.com for details."
+    assert result.scrubbed_text == "Contact [PII-FILTERED-EMAIL] and allowed@trusted.example.org for details."
 
 
 def test_scan_text_redacts_phone_numbers() -> None:
-    result = scan_text("Call me at +1 (425) 555-0100 when the draft is ready.")
+    result = scan_text("Call the synthetic contact at +1 (202) 555-0101 when the draft is ready.")
 
     assert result.pii_detected is True
     assert "phone" in result.signal_types
@@ -31,7 +33,7 @@ def test_scan_text_redacts_phone_numbers() -> None:
 
 
 def test_scan_text_redacts_ssn_shaped_strings() -> None:
-    result = scan_text("Example SSN 123-45-6789 should never leave the machine.")
+    result = scan_text("Example SSN 000-00-0000 should never leave the machine.")
 
     assert result.pii_detected is True
     assert "ssn" in result.signal_types
@@ -39,14 +41,14 @@ def test_scan_text_redacts_ssn_shaped_strings() -> None:
 
 
 def test_filter_text_returns_scrubbed_text_only() -> None:
-    scrubbed = filter_text("Reach jane@yahoo.com or 206-555-0112.")
+    scrubbed = filter_text("Reach contact@sample.example.net or +1 (202) 555-0102.")
 
     assert scrubbed == "Reach [PII-FILTERED-EMAIL] or [PII-FILTERED-PHONE]."
 
 
 def test_scan_text_leaves_clean_text_unchanged() -> None:
-    result = scan_text("StorageX risk remains high and the owner is still Platform Infra.")
+    result = scan_text("Sample program risk remains high and the owner is still Platform Team.")
 
     assert result.pii_detected is False
     assert result.signals == ()
-    assert result.scrubbed_text == "StorageX risk remains high and the owner is still Platform Infra."
+    assert result.scrubbed_text == "Sample program risk remains high and the owner is still Platform Team."

@@ -208,7 +208,7 @@ def test_learning_distiller_rule_value_runs_through_full_safety_pipeline() -> No
                 {
                     "target": "banned_openings",
                     "action": "append",
-                    "value": "Removing generic openers led to clearer per-issue deltas for foo@gmail.com",
+                    "value": "Removing generic openers led to clearer per-issue deltas for foo@example.com",
                     "rationale": "Authors repeatedly rewrote this generic opener into direct deltas.",
                     "supporting_issue_numbers": [51],
                     "supporting_examples": ["Issue 051 accepted: removed generic opener."]
@@ -224,7 +224,7 @@ def test_learning_distiller_rule_value_runs_through_full_safety_pipeline() -> No
     assert len(distillation.proposals) == 1
     value = str(distillation.proposals[0].value)
     # (b) PII scrub
-    assert "foo@gmail.com" not in value
+    assert "foo@example.com" not in value
     assert "[PII-FILTERED-EMAIL]" in value
     # (c) Causality sanitize — the new stage. "led to" must not survive.
     assert "led to" not in value
@@ -238,7 +238,7 @@ def test_learning_distiller_scrubs_pii_from_append_value() -> None:
                         {
                             "target": "banned_openings",
                             "action": "append",
-                            "value": "Email foo@gmail.com for current status",
+                            "value": "Email foo@example.com for current status",
                             "rationale": "Authors repeatedly rewrote this generic opener into direct deltas.",
                             "supporting_issue_numbers": [51],
                             "supporting_examples": [
@@ -257,7 +257,7 @@ def test_learning_distiller_scrubs_pii_from_append_value() -> None:
         )
 
         assert len(distillation.proposals) == 1
-        assert "foo@gmail.com" not in str(distillation.proposals[0].value)
+        assert "foo@example.com" not in str(distillation.proposals[0].value)
         assert "[PII-FILTERED-EMAIL]" in str(distillation.proposals[0].value)
 
 
@@ -898,18 +898,18 @@ def test_tracking_outcome_from_payload_scrubs_pii_from_user_visible_fields() -> 
             "suggestion": {
                 "category": "structural",
                 "section_id": "exec_summary",
-                "suggestion_text": "Ask foo@gmail.com to replace the generic opener.",
+                "suggestion_text": "Ask foo@example.com to replace the generic opener.",
                 "confidence": "medium",
-                "reader_name": "foo@gmail.com",
+                "reader_name": "foo@example.com",
             },
             "outcome": "accepted",
-            "reason": "foo@gmail.com confirmed the updated wording in the final draft.",
+            "reason": "foo@example.com confirmed the updated wording in the final draft.",
         }
     )
 
-    assert "foo@gmail.com" not in outcome.suggestion.suggestion_text
-    assert "foo@gmail.com" not in (outcome.suggestion.reader_name or "")
-    assert "foo@gmail.com" not in outcome.reason
+    assert "foo@example.com" not in outcome.suggestion.suggestion_text
+    assert "foo@example.com" not in (outcome.suggestion.reader_name or "")
+    assert "foo@example.com" not in outcome.reason
     assert "[PII-FILTERED-EMAIL]" in outcome.suggestion.suggestion_text
     assert outcome.suggestion.reader_name == "[PII-FILTERED-EMAIL]"
     assert "[PII-FILTERED-EMAIL]" in outcome.reason

@@ -69,6 +69,16 @@ def reset_output_subdir_cache() -> None:
     _reset_output_subdir_cache()
 
 
+@pytest.fixture
+def isolated_cli_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "_maybe_register_tier_decision_sink",
+        "_maybe_run_scheduled_db_maintenance",
+        "_maybe_run_session_catchup",
+    ):
+        monkeypatch.setattr(f"cli.{name}", lambda *_args, **_kwargs: None)
+
+
 # Data-dependent tests that bypass the guarded `stage_v2_report_workspace` helper
 # and assume private programs/acme or editions/acme_weekly config directly. These are
 # gitignored, so on the fresh-clone CI these tests must skip rather than fail. (Tests
@@ -80,11 +90,6 @@ _REQUIRES_LIVE_PROGRAM_DATA: frozenset[str] = frozenset(
         "test_root_skip_issue_records_next_issue",
         "test_root_skip_issue_honors_vertex_default_edition",
         "test_root_skip_issue_falls_back_to_legacy_default_edition",
-        # tests/unit/test_commands_metric.py
-        "test_admin_metric_status_defaults_to_repo_vertex_db",
-        "test_admin_metric_validate_command_marks_wiql_binding_validated",
-        # tests/unit/test_commands_quickstart.py
-        "test_hypothesis_quickstart_requires_binding_inputs_for_missing_binding",
         # tests/unit/test_debt_baseline.py
         "test_build_debt_baseline_collects_expected_schema",
         # tests/golden/test_remediation_artifacts.py
@@ -94,6 +99,18 @@ _REQUIRES_LIVE_PROGRAM_DATA: frozenset[str] = frozenset(
         "test_gold_corpus_has_minimum_case_counts",
         # tests/contracts/test_schema_versions.py
         "test_schema_versions_match_contract",
+    }
+)
+_REQUIRES_GOLD_CORPUS: frozenset[str] = frozenset(
+    {
+        "test_gold_corpus_directories_exist",
+        "test_gold_corpus_has_minimum_case_counts",
+    }
+)
+_REQUIRES_FABRIKAM_EDITION: frozenset[str] = frozenset(
+    {
+        "test_root_skip_issue_honors_vertex_default_edition",
+        "test_root_skip_issue_falls_back_to_legacy_default_edition",
     }
 )
 
@@ -110,6 +127,15 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         for item in items:
             if item.name.split("[")[0] in _REQUIRES_LIVE_PROGRAM_DATA:
                 item.add_marker(skip_no_data)
+
+    gold_corpus = REPO_ROOT / "programs" / "acme" / "gold_corpus"
+    fabrikam_edition = REPO_ROOT / "programs" / "fabrikam" / "editions" / "fabrikam_weekly.yaml"
+    for item in items:
+        test_name = item.name.split("[")[0]
+        if test_name in _REQUIRES_GOLD_CORPUS and not gold_corpus.is_dir():
+            item.add_marker(pytest.mark.skip(reason="Requires local programs/acme/gold_corpus data"))
+        if test_name in _REQUIRES_FABRIKAM_EDITION and not fabrikam_edition.is_file():
+            item.add_marker(pytest.mark.skip(reason="Requires local programs/fabrikam edition data"))
 
     if config.getoption("--run-integration"):
         return

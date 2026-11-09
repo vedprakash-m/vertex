@@ -1,3 +1,4 @@
+{% from "partials/workstream_anchor.j2" import workstream_anchor %}
 <a id="{{ sc.scorecard_name | build_anchor }}"></a>
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 16px 0; background-color:transparent;">
   <tr>
@@ -13,7 +14,7 @@
           {% for dimension in sc.dimensions %}
           {% set packet = scorecard_packets.get(sc.scorecard_name, {}).get(dimension.name) %}
           {% set detail_anchor = (sc.scorecard_name ~ '-' ~ dimension.name) | build_anchor %}
-          {% set has_detail_link = detail_anchor in visible_detail_section_ids %}
+          {% set detail_section = ordered_sections | selectattr("kind", "equalto", "workstream") | selectattr("workstream.section_id", "equalto", detail_anchor) | first | default(none) %}
           {% set scorecard_label = dimension.display_name or dimension.name %}
           {% set status_label = dimension.risk | risk_label %}
           {% set tile_bg = dimension.risk | risk_bg %}
@@ -29,7 +30,7 @@
             <table role="presentation" width="100%" height="100%" cellpadding="0" cellspacing="0" border="0" title="{{ packet | evidence_tooltip if packet else '' }}" style="width:100%; height:100%; border-collapse:collapse; background-color:{{ tile_bg }}; border-top:3px solid {{ tile_border }}">
               <tr>
                 <td height="82" style="min-height:82px; padding:8px 4px 6px 4px; text-align:center; vertical-align:top;">
-                  <p style="margin:0 0 6px 0; font-size:10px; line-height:1.2; font-weight:700; letter-spacing:0.02em; text-transform:uppercase; color:{{ tile_fg }}; min-height:22px;">{% if has_detail_link %}<a href="#{{ detail_anchor }}" style="color:{{ tile_fg }}; text-decoration:none;">{{ scorecard_label | scorecard_short_label }}</a>{% else %}{{ scorecard_label | scorecard_short_label }}{% endif %}</p>
+                  <p style="margin:0 0 6px 0; font-size:10px; line-height:1.2; font-weight:700; letter-spacing:0.02em; text-transform:uppercase; color:{{ tile_fg }}; min-height:22px;">{% if detail_section %}<a href="#{{ workstream_anchor(detail_section.workstream) }}" style="color:{{ tile_fg }}; text-decoration:none;">{{ scorecard_label | scorecard_short_label }}</a>{% else %}{{ scorecard_label | scorecard_short_label }}{% endif %}</p>
                   <p style="margin:0 0 6px 0; font-size:11px; line-height:1.2; color:{{ tile_fg }}; min-height:22px;">{{ (secondary_label or '&nbsp;') | safe }}</p>
                   <p style="margin:0; font-size:13px; line-height:1.2; font-weight:700; color:{{ tile_fg }};">{{ status_label }}</p>
                 </td>

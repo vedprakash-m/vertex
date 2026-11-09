@@ -16,6 +16,7 @@ from src.core.program_paths import (
 
 
 _SKIP_VALUE = object()
+_MAX_JSON_NESTING_DEPTH = 1000
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,7 +83,9 @@ def load_gather_state(program_id: str, *, programs_root: Path) -> GatherState | 
         return None
 
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        raw_payload = path.read_text(encoding="utf-8")
+        _ensure_json_nesting_within_bounds(raw_payload)
+        payload = json.loads(raw_payload)
     except json.JSONDecodeError as error:
         raise StateError(f"Invalid gather state JSON in {path}") from error
     if not isinstance(payload, dict):
@@ -127,13 +130,38 @@ def load_gather_query_states(program_id: str, *, programs_root: Path) -> dict[st
         return {}
 
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        raw_payload = path.read_text(encoding="utf-8")
+        _ensure_json_nesting_within_bounds(raw_payload)
+        payload = json.loads(raw_payload)
     except json.JSONDecodeError as error:
         raise StateError(f"Invalid gather state JSON in {path}") from error
     if not isinstance(payload, dict):
         raise StateError(f"Invalid gather state payload in {path}")
 
     return _parse_nested_state(payload.get("queries"))
+
+
+def _ensure_json_nesting_within_bounds(value: str) -> None:
+    depth = 0
+    in_string = False
+    escaped = False
+    for character in value:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+        elif character in "[{":
+            depth += 1
+            if depth > _MAX_JSON_NESTING_DEPTH:
+                raise StateError("Gather state JSON exceeds the maximum nesting depth")
+        elif character in "]}":
+            depth -= 1
 
 
 def write_gather_state(

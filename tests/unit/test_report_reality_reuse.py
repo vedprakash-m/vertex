@@ -8,7 +8,7 @@ import pytest
 
 from src.core.exceptions import ConfigError
 from src.core.fact_sor_state import save_fact_sor_state
-from src.core.models import Confidence
+from src.core.models import Confidence, EditionType
 from src.core.models_v2 import Milestone, MilestoneAssessment, MilestoneStatus
 from src.core.pipeline import StageContext
 from src.core.program_fact_store import ProgramFactInput, ProgramFactSnapshot, ProgramFactStore
@@ -43,6 +43,7 @@ def report_context(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr(risk_stage, "resolve_family_sor_mode", family_mode)
     monkeypatch.setattr(risk_stage, "assess_risk_staleness", lambda *_: True)
     monkeypatch.setattr(risk_stage, "_load_current_risks", Mock(return_value=(risk,)))
+    monkeypatch.setattr(risk_stage, "_load_legacy_risks", Mock(return_value=(risk,)))
     monkeypatch.setattr(milestone_stage, "_load_current_milestones", Mock(return_value=()))
     monkeypatch.setattr(milestone_stage, "_load_current_dependencies", Mock(return_value=()))
     ctx = StageContext(
@@ -228,7 +229,7 @@ def test_empty_risk_cross_check_without_legacy_data_stays_quiet(
 ) -> None:
     ctx, loader, reality, _ = report_context
     reality.risks.return_value = ()
-    monkeypatch.setattr(risk_stage, "_load_current_risks", Mock(return_value=()))
+    monkeypatch.setattr(risk_stage, "_load_legacy_risks", Mock(return_value=()))
     result = risk_stage.RiskStage().execute(milestone_stage.MilestoneStage().execute(ctx))
     assert loader.call_count == 1
     assert result.risk_warnings == ()
@@ -302,6 +303,235 @@ def test_retrying_failed_milestone_does_not_leave_previous_retained_reality(
     assert sor_gated_load.report_family_selectors(retried) == (("workitem.state", "primary"),)
     risk_stage.RiskStage().execute(retried)
     assert loader.call_count == 3
+
+
+@pytest.mark.parametrize("retry", ["success", "typed_error", "legacy"])
+def test_retrying_milestone_clears_previous_rollback_read_paths(
+    report_context, monkeypatch: pytest.MonkeyPatch, retry: str,
+) -> None:
+    ctx, loader, reality, mode = report_context
+    monkeypatch.setenv("VERTEX_REPORT_ALLOW_LEGACY_MILESTONE_ROLLBACK", "1")
+    loader.side_effect = RuntimeError("synthetic reality failure")
+    first = milestone_stage.MilestoneStage().execute(ctx)
+    assert validation_stage._build_family_read_paths_metadata(first) == {
+        "milestone": "legacy", "dependency": "legacy",
+    }
+    assert milestone_stage.MilestoneStage().execute(first) is first
+
+    if retry == "legacy":
+        mode["default"] = "legacy"
+    else:
+        loader.side_effect = ConfigError("retry failed") if retry == "typed_error" else None
+        loader.return_value = reality
+    retried = milestone_stage.MilestoneStage().execute(replace(first, milestone_assessments=None))
+
+    expected = "legacy" if retry == "legacy" else "reality"
+    assert validation_stage._build_family_read_paths_metadata(retried) == {
+        "milestone": expected, "dependency": expected,
+    }
+    assert bool(retried.milestone_warnings) is (retry == "typed_error")
+
+
+@pytest.mark.parametrize("retry", [
+    "nonempty", "empty", "typed_error", "legacy", "lookback", "missing_context", "empty_rollback",
+])
+def test_retrying_risk_clears_previous_nonempty_rollback_path(
+    report_context, monkeypatch: pytest.MonkeyPatch, retry: str,
+) -> None:
+    ctx, loader, reality, mode = report_context
+    monkeypatch.setenv("VERTEX_REPORT_ALLOW_LEGACY_RISK_ROLLBACK", "1")
+    loader.side_effect = RuntimeError("synthetic reality failure")
+    first = risk_stage.RiskStage().execute(ctx)
+    assert validation_stage._build_family_read_paths_metadata(first)["risk"] == "legacy"
+    assert risk_stage.RiskStage().execute(first) is first
+
+    next_context = replace(first, risks=None)
+    if retry == "legacy":
+        mode["default"] = "legacy"
+    elif retry == "lookback":
+        next_context = replace(next_context, resolved_edition_type=EditionType.LOOKBACK)
+    elif retry == "missing_context":
+        next_context = replace(next_context, resolved_v2=None)
+    elif retry == "empty_rollback":
+        risk_stage._load_legacy_risks.return_value = ()
+    elif retry == "typed_error":
+        loader.side_effect = ConfigError("retry failed")
+    else:
+        loader.side_effect = None
+        loader.return_value = reality
+        if retry == "empty":
+            reality.risks.return_value = ()
+    retried = risk_stage.RiskStage().execute(next_context)
+
+    expected = "legacy" if retry == "legacy" else "reality"
+    assert validation_stage._build_family_read_paths_metadata(retried)["risk"] == expected
+
+
+@pytest.mark.parametrize("outcome", [
+    "empty", "cross_check", "unavailable_cross_check", "nonempty",
+    "typed_loader_error", "typed_accessor_error", "typed_partial_error", "empty_rollback",
+    "legacy_empty", "lookback", "missing_context",
+])
+def test_risk_stage_distinguishes_successful_empty_reality(
+    report_context, monkeypatch: pytest.MonkeyPatch, outcome: str,
+) -> None:
+    ctx, loader, reality, mode = report_context
+    monkeypatch.delenv("VERTEX_REPORT_ALLOW_LEGACY_RISK_ROLLBACK", raising=False)
+    if outcome in {"empty", "cross_check", "unavailable_cross_check"}:
+        reality.risks.return_value = ()
+        if outcome == "empty":
+            risk_stage._load_legacy_risks.return_value = ()
+        elif outcome == "unavailable_cross_check":
+            risk_stage._load_legacy_risks.side_effect = ConfigError("comparison unavailable")
+    elif outcome == "typed_loader_error":
+        loader.side_effect = ConfigError("selected reality unavailable")
+    elif outcome == "typed_accessor_error":
+        reality.risks.side_effect = ConfigError("selected risk accessor unavailable")
+    elif outcome == "typed_partial_error":
+        def partial():
+            yield SimpleNamespace(record=SimpleNamespace(id="partial-risk"))
+            raise ConfigError("selected risk accessor unavailable")
+
+        reality.risks.side_effect = partial
+    elif outcome == "empty_rollback":
+        monkeypatch.setenv("VERTEX_REPORT_ALLOW_LEGACY_RISK_ROLLBACK", "1")
+        loader.side_effect = RuntimeError("selected reality failed")
+        risk_stage._load_legacy_risks.return_value = ()
+    elif outcome == "legacy_empty":
+        mode["default"] = "legacy"
+        risk_stage._load_current_risks.return_value = ()
+    elif outcome == "lookback":
+        ctx = replace(ctx, resolved_edition_type=EditionType.LOOKBACK)
+    elif outcome == "missing_context":
+        ctx = replace(ctx, resolved_v2=None)
+
+    result = risk_stage.RiskStage().execute(ctx)
+
+    assert result.risk_reality_empty_selected is (
+        outcome in {"empty", "cross_check", "unavailable_cross_check"}
+    )
+    assert result.risk_legacy_empty_selected is (outcome == "legacy_empty")
+    if outcome == "cross_check":
+        assert "cross-check" in result.risk_warnings[0]
+    elif outcome == "unavailable_cross_check":
+        assert "cross-check unavailable" in result.risk_warnings[0]
+    elif outcome in {"typed_loader_error", "typed_accessor_error", "typed_partial_error"}:
+        assert "risk skipped (reality)" in result.risk_warnings[0]
+    elif outcome == "empty_rollback":
+        assert "audited rollback flag" in result.risk_warnings[0]
+
+
+@pytest.mark.parametrize("outcome", ["empty", "nonempty", "typed_error"])
+def test_risk_stage_distinguishes_successful_empty_legacy_read(
+    report_context, outcome: str,
+) -> None:
+    ctx, loader, _, mode = report_context
+    mode["default"] = "legacy"
+    if outcome == "empty":
+        risk_stage._load_current_risks.return_value = ()
+    elif outcome == "typed_error":
+        risk_stage._load_current_risks.side_effect = ConfigError("legacy read unavailable")
+
+    result = risk_stage.RiskStage().execute(ctx)
+
+    assert result.risk_legacy_empty_selected is (outcome == "empty")
+    assert result.risk_reality_empty_selected is False
+    assert result.risk_assessments is None
+    if outcome == "typed_error":
+        assert result.risks == ()
+        assert result.risk_warnings == ("risk skipped: legacy read unavailable",)
+    else:
+        assert bool(result.risks) is (outcome == "nonempty")
+        assert result.risk_warnings == ()
+    risk_stage._load_current_risks.assert_called_once_with(
+        "synthetic", programs_root=ctx.programs_root, archive_root=ctx.archive_root,
+    )
+    loader.assert_not_called()
+
+
+@pytest.mark.parametrize("error_type", [RuntimeError, ValueError])
+def test_unexpected_legacy_risk_read_failure_still_propagates(
+    report_context, error_type: type[Exception],
+) -> None:
+    ctx, loader, _, mode = report_context
+    mode["default"] = "legacy"
+    error = error_type("legacy risk read failed")
+    risk_stage._load_current_risks.side_effect = error
+
+    with pytest.raises(error_type) as raised:
+        risk_stage.RiskStage().execute(ctx)
+
+    assert raised.value is error
+    loader.assert_not_called()
+
+
+@pytest.mark.parametrize("retry", [
+    "empty_again", "nonempty", "typed_error", "reality_empty", "empty_rollback", "lookback", "missing_context",
+])
+def test_retrying_risk_clears_previous_successful_empty_legacy_selection(
+    report_context, monkeypatch: pytest.MonkeyPatch, retry: str,
+) -> None:
+    ctx, loader, reality, mode = report_context
+    mode["default"] = "legacy"
+    risk_stage._load_current_risks.return_value = ()
+    first = risk_stage.RiskStage().execute(ctx)
+    assert first.risk_legacy_empty_selected
+    assert risk_stage.RiskStage().execute(first) is first
+
+    next_context = replace(first, risks=None)
+    if retry == "nonempty":
+        risk_stage._load_current_risks.return_value = (SimpleNamespace(id="new-risk"),)
+    elif retry == "typed_error":
+        risk_stage._load_current_risks.side_effect = ConfigError("retry failed")
+    elif retry in {"reality_empty", "empty_rollback"}:
+        mode["default"] = "primary"
+        reality.risks.return_value = ()
+        if retry == "empty_rollback":
+            monkeypatch.setenv("VERTEX_REPORT_ALLOW_LEGACY_RISK_ROLLBACK", "1")
+            loader.side_effect = RuntimeError("retry failed")
+            risk_stage._load_legacy_risks.return_value = ()
+    elif retry == "lookback":
+        next_context = replace(next_context, resolved_edition_type=EditionType.LOOKBACK)
+    elif retry == "missing_context":
+        next_context = replace(next_context, resolved_v2=None)
+
+    retried = risk_stage.RiskStage().execute(next_context)
+
+    assert retried.risk_legacy_empty_selected is (retry == "empty_again")
+    assert retried.risk_reality_empty_selected is (retry == "reality_empty")
+
+
+@pytest.mark.parametrize("retry", [
+    "empty_again", "nonempty", "typed_error", "empty_rollback", "legacy", "lookback", "missing_context",
+])
+def test_retrying_risk_clears_previous_successful_empty_selection(
+    report_context, monkeypatch: pytest.MonkeyPatch, retry: str,
+) -> None:
+    ctx, loader, reality, mode = report_context
+    reality.risks.return_value = ()
+    first = risk_stage.RiskStage().execute(ctx)
+    assert first.risk_reality_empty_selected
+    assert risk_stage.RiskStage().execute(first) is first
+
+    next_context = replace(first, risks=None)
+    if retry == "empty_again":
+        pass
+    elif retry == "nonempty":
+        reality.risks.return_value = (SimpleNamespace(record=SimpleNamespace(id="new-risk")),)
+    elif retry == "typed_error":
+        loader.side_effect = ConfigError("retry failed")
+    elif retry == "empty_rollback":
+        monkeypatch.setenv("VERTEX_REPORT_ALLOW_LEGACY_RISK_ROLLBACK", "1")
+        loader.side_effect = RuntimeError("retry failed")
+        risk_stage._load_legacy_risks.return_value = ()
+    elif retry == "legacy":
+        mode["default"] = "legacy"
+    elif retry == "lookback":
+        next_context = replace(next_context, resolved_edition_type=EditionType.LOOKBACK)
+    else:
+        next_context = replace(next_context, resolved_v2=None)
+    retried = risk_stage.RiskStage().execute(next_context)
+    assert retried.risk_reality_empty_selected is (retry == "empty_again")
 
 
 def test_actual_stage_selectors_follow_family_overrides(report_context) -> None:

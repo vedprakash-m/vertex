@@ -14,7 +14,6 @@ from src.core.communication_plan import load_communication_plan_entries
 from src.core.config_loader import ReportBundle, ScorecardDimensionSettings, ScorecardSettings
 from src.core.continuation_contract import load_inherited_scorecard_dimensions
 from src.core.dependency_graph import compute_blast_radius, dependency_target_label
-from src.core.exceptions import ConfigError
 from src.core.jinja_filters import risk_label
 from src.core.models import AttributionTier, Confidence, DimensionRisk, EvidencePacket, RiskLevel, ScorecardDelta, ScorecardEvidencePacket, Snapshot, WorkItem
 from src.core.models_v2 import Dependency, Scorecard
@@ -394,23 +393,21 @@ def _load_reachable_dependency_network(
             continue
         visited_program_ids.add(current_program_id)
 
-        try:
-            # Deliberately not consolidated: this BFS discovers additional
-            # program_ids as it traverses the graph, so correctness requires one
-            # ProgramReality load per newly visited program. The .record strip is
-            # also intentional: blast-radius computation consumes only structural
-            # dependency fields (program ids, resolution path), never FactAssessment
-            # metadata — truth-level signals are surfaced in the newsletter's
-            # structured tables, not in this cross-program risk-uplift graph.
-            loaded_dependencies = tuple(
-                a.record for a in ProgramReality.load(
-                    current_program_id,
-                    programs_root=programs_root,
-                    **archive_options,
-                ).dependencies()
-            )
-        except ConfigError:
-            continue
+        # Deliberately not consolidated: this BFS discovers additional
+        # program_ids as it traverses the graph, so correctness requires one
+        # ProgramReality load per newly visited program. The .record strip is
+        # also intentional: blast-radius computation consumes only structural
+        # dependency fields (program ids, resolution path), never FactAssessment
+        # metadata — truth-level signals are surfaced in the newsletter's
+        # structured tables, not in this cross-program risk-uplift graph.
+        loaded_dependencies = tuple(
+            a.record for a in ProgramReality.load(
+                current_program_id,
+                programs_root=programs_root,
+                _shim_fact_types=("dependency.link",),
+                **archive_options,
+            ).dependencies()
+        )
 
         for dependency in loaded_dependencies:
             dependency_key = (dependency.from_program_id, dependency.id)

@@ -67,7 +67,7 @@ python -m pytest tests/ -q
 1. **Spec:** write `specs/<feature>.md` covering requirements, data model, alternatives considered, risks, assumptions, and acceptance criteria. Iterate with the user until approved; **no implementation before approval**.
 2. **TDD:** write failing tests first, then implement to pass.
 3. **Validate:** `pytest tests/`, coverage >= 95%, `python scripts/check_spec_drift.py`, `python scripts/verify_spec_citations.py`, and parity checks. Report pre-existing failures and excluded qualification explicitly; do not treat bounded checks as full-suite certification.
-4. **UAT:** generate real HTML (`python -m src run --view all`); visually confirm default and projector profiles.
+4. **UAT:** generate real HTML (`vertex report --edition <edition> --dry-run`); visually confirm default and projector profiles.
 5. **Finalize:**
    - Backfill the three canonical specs if the feature added components/rules.
    - Archive: `Move-Item specs/<feature>.md .archive/specs/`.

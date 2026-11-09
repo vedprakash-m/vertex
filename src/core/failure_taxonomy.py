@@ -115,6 +115,14 @@ def classify_exception(exc: BaseException | str) -> FailureClassification:
     )
 
 
+def safe_failure_suffix(error: str) -> str:
+    """Return only the taxonomy's fixed matched pattern, if any."""
+    failure = classify_exception(error)
+    if failure.category is FailureCategory.UNKNOWN:
+        return ""
+    return f"; {failure.detail}"
+
+
 def classify_message(message: str) -> FailureClassification:
     """Convenience for callers that already have a string (no exception)."""
     return classify_exception(message)

@@ -1,18 +1,23 @@
 from __future__ import annotations
 
+from contextlib import closing
 from datetime import date, datetime, timezone
+import hashlib
 import json
 from pathlib import Path
+import sqlite3
 
+import pytest
 from typer.testing import CliRunner
 import yaml
 
 from cli import app
 from src.commands import migrate
 from src.core.analytics_store import AnalyticsRebuildArtifacts
-from src.core.journal import append_review_decision, append_signal, append_signal_thread_link, append_usage_marker
+from src.core.journal import append_review_decision, append_signal, append_signal_thread_link, append_usage_marker, read_signals
 from src.core.models import Confidence, ConfirmedDimension, EditionType, RiskLevel, Snapshot, SnapshotItem
 from src.core.models_v2 import Signal, SignalReviewDecision, SignalThreadLink, SignalUsageMarker, TrajectoryPoint
+from src.core.program_paths import get_program_analytics_store_path
 from src.core.sqlite_stores import SQLiteSignalStore, SQLiteTrajectoryStore, get_program_sqlite_store_path
 from src.core.snapshot_store import write_confirmed
 from src.core.trajectory import append_trajectory_point
@@ -50,10 +55,43 @@ def test_run_storage_migration_copies_file_history_and_updates_backend(tmp_path:
     assert program_document["storage_backend"] == "sqlite"
 
 
+def test_forward_migration_preserves_gather_provenance_and_all_workstreams(tmp_path: Path) -> None:
+    programs_root = _seed_program_layout(tmp_path)
+    captured_at = datetime(2026, 5, 10, 18, 0, tzinfo=timezone.utc)
+    signal = Signal(
+        id="signal-shared",
+        timestamp=captured_at,
+        source="ado/revision",
+        program_id="demo",
+        workstream_id="ws_demo",
+        workstream_ids=("ws_demo", "ws_shared"),
+        gather_run_id="gather-synthetic",
+        entity_refs=("WI:1001",),
+        text="Synthetic signal.",
+        raw_ref=None,
+        confidence=Confidence.HIGH,
+    )
+    append_signal(signal, programs_root=programs_root, partition_at=captured_at)
+    expected = read_signals("demo", programs_root=programs_root)
+
+    migrate.run_storage_migration(
+        program_id="demo", target_backend="sqlite", programs_root=programs_root,
+    )
+
+    sqlite_store = SQLiteSignalStore(programs_root=programs_root)
+    assert sqlite_store.read("demo") == expected
+    assert sqlite_store.read("demo", workstream_id="ws_shared") == expected
+
+
 def test_migrate_cli_dry_run_previews_counts_without_writing(tmp_path: Path, monkeypatch) -> None:
     programs_root = _seed_program_layout(tmp_path)
     captured_at = datetime(2026, 5, 10, 18, 0, tzinfo=timezone.utc)
     _seed_file_history(programs_root, captured_at=captured_at)
+    before = {
+        path.relative_to(programs_root): path.read_bytes()
+        for path in programs_root.rglob("*")
+        if path.is_file()
+    }
 
     monkeypatch.setattr(migrate, "PROGRAMS_ROOT", programs_root)
 
@@ -62,14 +100,80 @@ def test_migrate_cli_dry_run_previews_counts_without_writing(tmp_path: Path, mon
     program_document = yaml.safe_load((programs_root / "demo" / "program.yaml").read_text(encoding="utf-8"))
 
     assert result.exit_code == 0
+    assert "Previewed migration of demo to sqlite" in result.stdout
     assert "signals: 2" in result.stdout
     assert "reviews: 1" in result.stdout
     assert "threads: 1" in result.stdout
     assert "trajectory points: 2" in result.stdout
     assert "usage markers: 1" in result.stdout
-    assert "Dry-run: sqlite database and program.yaml were not updated." in result.stdout
+    assert "Dry-run: storage backend was not switched." in result.stdout
     assert get_program_sqlite_store_path("demo", programs_root=programs_root).exists() is False
     assert "storage_backend" not in program_document
+    assert {
+        path.relative_to(programs_root): path.read_bytes()
+        for path in programs_root.rglob("*")
+        if path.is_file()
+    } == before
+
+
+@pytest.mark.parametrize(
+    "invalid_line",
+    [
+        "synthetic-invalid-private\n",
+        '["synthetic-invalid-private"]\n',
+        '{"date":"synthetic-invalid-private","state":"Active","area_path":"Demo"}\n',
+        '{"date":"2026-05-11","area_path":"Demo"}\n',
+        '{"date":"2026-05-11","state":"Active","area_path":"Demo","tags":42}\n',
+    ],
+)
+def test_migrate_cli_dry_run_refuses_corrupt_trajectories_without_repair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_line: str,
+) -> None:
+    programs_root = _seed_program_layout(tmp_path)
+    _seed_file_history(programs_root, captured_at=datetime(2026, 5, 10, 18, 0, tzinfo=timezone.utc))
+    trajectory_path = programs_root / "demo" / "trajectories" / "1001.jsonl"
+    with trajectory_path.open("a", encoding="utf-8") as handle:
+        handle.write(invalid_line)
+    before = {
+        path.relative_to(programs_root): path.read_bytes()
+        for path in programs_root.rglob("*")
+        if path.is_file()
+    }
+    monkeypatch.setattr(migrate, "PROGRAMS_ROOT", programs_root)
+
+    result = runner.invoke(app, ["migrate", "--program", "demo", "--to", "sqlite", "--dry-run"])
+
+    assert result.exit_code == 2, repr(result.exception)
+    assert "Invalid trajectory journal" in result.output
+    assert "synthetic-invalid-private" not in result.output
+    assert {
+        path.relative_to(programs_root): path.read_bytes()
+        for path in programs_root.rglob("*")
+        if path.is_file()
+    } == before
+
+
+def test_migrate_cli_preserves_normal_startup_and_success_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    programs_root = _seed_program_layout(tmp_path)
+    _seed_file_history(programs_root, captured_at=datetime(2026, 5, 10, 18, 0, tzinfo=timezone.utc))
+    monkeypatch.setattr(migrate, "PROGRAMS_ROOT", programs_root)
+    calls: list[str] = []
+    for name in (
+        "_maybe_register_tier_decision_sink",
+        "_maybe_run_scheduled_db_maintenance",
+        "_maybe_run_session_catchup",
+    ):
+        monkeypatch.setattr(f"cli.{name}", lambda *args, _name=name, **kwargs: calls.append(_name))
+
+    result = runner.invoke(app, ["migrate", "--program", "demo", "--to", "sqlite"])
+
+    assert result.exit_code == 0, repr(result.exception)
+    assert "Migrated demo to sqlite" in result.stdout
+    assert calls == [
+        "_maybe_register_tier_decision_sink",
+        "_maybe_run_scheduled_db_maintenance",
+        "_maybe_run_session_catchup",
+    ]
 
 
 def test_migrate_cli_rebuild_analytics_rebuilds_projection(tmp_path: Path, monkeypatch) -> None:
@@ -103,6 +207,116 @@ def test_migrate_cli_rebuild_analytics_rebuilds_projection(tmp_path: Path, monke
     assert "claims: 2" in result.stdout
     assert "decisions: 3" in result.stdout
     assert "Decision rebuild tiers: program_facts=1 | context_snapshot=1 | raw_fallback=1 | low_fidelity=2" in result.stdout
+
+
+@pytest.mark.parametrize("existing_database", [False, True])
+def test_migrate_cli_rejects_analytics_rebuild_dry_run_without_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, existing_database: bool,
+) -> None:
+    programs_root = _seed_program_layout(tmp_path)
+    monkeypatch.setattr(migrate, "PROGRAMS_ROOT", programs_root)
+    for name in (
+        "_maybe_register_tier_decision_sink",
+        "_maybe_run_scheduled_db_maintenance",
+        "_maybe_run_session_catchup",
+    ):
+        monkeypatch.setattr(f"cli.{name}", lambda *args, **kwargs: None)
+
+    database_path = get_program_analytics_store_path("demo", programs_root=programs_root)
+    if existing_database:
+        migrate.run_rebuild_analytics(program_id="demo", programs_root=programs_root)
+        with closing(sqlite3.connect(database_path)) as connection, connection:
+            connection.execute(
+                "INSERT INTO confirmed_risks VALUES (?, ?, ?, ?, ?, ?)",
+                ("synthetic", 1, "scope", "low", "2026-01-01T00:00:00+00:00", None),
+            )
+    audit_path = programs_root / "demo" / "journal" / "autonomy_audit.jsonl"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    audit_path.write_text('{"invalid": true}\n', encoding="utf-8")
+
+    def file_hashes() -> dict[Path, str]:
+        return {
+            path.relative_to(programs_root): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in programs_root.rglob("*")
+            if path.is_file()
+        }
+
+    before = file_hashes()
+    result = runner.invoke(app, ["migrate", "--program", "demo", "--rebuild-analytics", "--dry-run"])
+
+    assert file_hashes() == before
+    assert result.exit_code == 2, repr(result.exception)
+    assert "--dry-run cannot be combined with --rebuild-analytics" in result.output
+
+
+def test_migrate_help_explains_dry_run_rebuild_incompatibility() -> None:
+    result = runner.invoke(app, ["migrate", "--help"])
+
+    assert result.exit_code == 0
+    help_text = " ".join(result.output.replace("\u2502", " ").split())
+    assert "Target storage backend: sqlite or file." in help_text
+    assert "corrupt trajectories are refused without repair" in help_text
+    assert "reverse previews may initialize SQLite schema or touch sidecars" in help_text
+    assert "Cannot be combined with --rebuild-analytics" in help_text
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_exit"),
+    [
+        (["--program", "demo", "--rebuild-analytics", "--dry-run"], 2),
+        (["--dry-run", "--program", "demo", "--to", "sqlite"], 0),
+        (["--program", "demo", "--rebuild-analytics", "--dry-run=invalid"], 2),
+        (["--program", "demo", "--dry-run", "--unknown-option"], 2),
+        (["--dry-run", "--help"], 0),
+        (["--help", "--dry-run"], 0),
+    ],
+)
+def test_migrate_dry_run_skips_root_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arguments: list[str], expected_exit: int,
+) -> None:
+    programs_root = _seed_program_layout(tmp_path)
+    monkeypatch.setattr(migrate, "PROGRAMS_ROOT", programs_root)
+
+    def unexpected_startup(*args: object, **kwargs: object) -> None:
+        raise AssertionError("Migration dry-run must not run unrelated startup")
+
+    for name in (
+        "_maybe_register_tier_decision_sink",
+        "_maybe_run_scheduled_db_maintenance",
+        "_maybe_run_session_catchup",
+    ):
+        monkeypatch.setattr(f"cli.{name}", unexpected_startup)
+    result = runner.invoke(app, ["migrate", *arguments])
+
+    assert result.exit_code == expected_exit, repr(result.exception)
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--program", "--dry-run", "--to", "sqlite"],
+        ["--program=--dry-run", "--to", "sqlite"],
+        ["--program", "demo", "--to", "--dry-run"],
+    ],
+)
+def test_migrate_dry_run_option_values_keep_root_startup(
+    monkeypatch: pytest.MonkeyPatch, arguments: list[str],
+) -> None:
+    calls: list[str] = []
+    for name in (
+        "_maybe_register_tier_decision_sink",
+        "_maybe_run_scheduled_db_maintenance",
+        "_maybe_run_session_catchup",
+    ):
+        monkeypatch.setattr(f"cli.{name}", lambda *args, _name=name, **kwargs: calls.append(_name))
+    result = runner.invoke(app, ["migrate", *arguments])
+
+    assert result.exit_code != 0
+    assert calls == [
+        "_maybe_register_tier_decision_sink",
+        "_maybe_run_scheduled_db_maintenance",
+        "_maybe_run_session_catchup",
+    ]
 
 
 def _seed_program_layout(tmp_path: Path) -> Path:
@@ -410,6 +624,26 @@ def test_reverse_migration_dry_run_previews_without_writing(tmp_path: Path) -> N
     assert artifacts.signal_count == 10
     assert artifacts.dry_run is True
     assert artifacts.config_updated is False
+
+
+def test_migrate_cli_reverse_dry_run_reports_preview(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    programs_root = _seed_program_layout(tmp_path)
+    captured_at = datetime(2026, 5, 10, 18, 0, tzinfo=timezone.utc)
+    _seed_sqlite_signals(programs_root, n=2, captured_at=captured_at)
+    monkeypatch.setattr(migrate, "PROGRAMS_ROOT", programs_root)
+
+    result = runner.invoke(app, ["migrate", "--program", "demo", "--to", "file", "--dry-run"])
+
+    assert result.exit_code == 0, repr(result.exception)
+    assert "Previewed migration of demo to file" in result.stdout
+    assert "signals: 2" in result.stdout
+    assert "Dry-run: storage backend was not switched." in result.stdout
+    assert get_program_sqlite_store_path("demo", programs_root=programs_root).exists()
+    assert not list((programs_root / "demo").glob("vertex_store.sqlite3.pre-rollback-*"))
+    assert "storage_backend" not in yaml.safe_load(
+        (programs_root / "demo" / "program.yaml").read_text(encoding="utf-8")
+    )
+    assert not (programs_root / "demo" / "journal").exists()
 
 
 # ---------------------------------------------------------------------------

@@ -148,9 +148,9 @@ class ValueCockpitSummary:
 
 @dataclass(frozen=True, slots=True)
 class ReliabilityCockpitSummary:
-    outbox_pending: int
-    uncertain_remote_state: int
-    dead_letter_count: int
+    outbox_pending: int | None
+    uncertain_remote_state: int | None
+    dead_letter_count: int | None
     duplicate_preventions: int
     audit_coverage: float | None
 

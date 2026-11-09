@@ -1,13 +1,11 @@
 from __future__ import annotations
-import pytest
-from pathlib import Path
-pytestmark = pytest.mark.skipif(not (Path(__file__).resolve().parents[2] / "editions").exists(), reason="Requires private data")
 
 from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from typer.testing import CliRunner
 
 from cli import app
@@ -19,6 +17,7 @@ from src.core.reality_store import RealityStore
 from src.core.source_models import MaintenanceWindow, MetricBindingHealth
 
 
+pytestmark = pytest.mark.usefixtures("isolated_cli_startup")
 runner = CliRunner()
 
 
@@ -138,7 +137,10 @@ def test_reality_digest_command_renders_cached_digest(tmp_path: Path) -> None:
 
     result = runner.invoke(
         app,
-        ["reality", "digest", "--program", "acme", "--db-root", str(tmp_path / "db")],
+        [
+            "reality", "digest", "--program", "acme",
+            "--programs-root", str(tmp_path / "programs"), "--db-root", str(tmp_path / "db"),
+        ],
     )
 
     assert result.exit_code == 0
@@ -152,10 +154,15 @@ def test_reality_digest_command_refreshes_when_requested(tmp_path: Path) -> None
     store.initialize()
     _seed_threshold_breach(store)
 
-    result = runner.invoke(
-        app,
-        ["reality", "digest", "--program", "acme", "--refresh", "--db-root", str(tmp_path / "db"), "--format", "json"],
-    )
+    with patch("src.commands.reality._build_metric_definition_map", return_value={}):
+        result = runner.invoke(
+            app,
+            [
+                "reality", "digest", "--program", "acme", "--refresh",
+                "--programs-root", str(tmp_path / "programs"),
+                "--db-root", str(tmp_path / "db"), "--format", "json",
+            ],
+        )
 
     assert result.exit_code == 0
     assert '"program_id": "acme"' in result.output
@@ -251,7 +258,7 @@ def test_reality_digest_command_rolls_up_all_programs_in_json(tmp_path: Path) ->
     assert payload["program_count"] == 2
     assert payload["health"] == "red"
     assert payload["open_challenge_count"] == 1
-    assert [entry["program_id"] for entry in payload["programs"]] == ["fabrikam", "acme"]
+    assert [entry["program_id"] for entry in payload["programs"]] == ["acme", "fabrikam"]
 
 
 def test_reality_digest_command_rolls_up_all_programs_in_text(tmp_path: Path) -> None:
@@ -341,7 +348,10 @@ def test_reality_digest_command_marks_manual_freshness_entries(tmp_path: Path) -
 
     result = runner.invoke(
         app,
-        ["reality", "digest", "--program", "acme", "--db-root", str(tmp_path / "db")],
+        [
+            "reality", "digest", "--program", "acme",
+            "--programs-root", str(tmp_path / "programs"), "--db-root", str(tmp_path / "db"),
+        ],
     )
 
     assert result.exit_code == 0
@@ -529,7 +539,10 @@ def test_reality_digest_renders_maintenance_suppression_summary(tmp_path: Path) 
 
     result = runner.invoke(
         app,
-        ["reality", "digest", "--program", "acme", "--db-root", str(tmp_path / "db")],
+        [
+            "reality", "digest", "--program", "acme",
+            "--programs-root", str(tmp_path / "programs"), "--db-root", str(tmp_path / "db"),
+        ],
     )
 
     assert result.exit_code == 0
@@ -564,10 +577,13 @@ def test_reality_digest_refresh_renders_delivery_date_challenge(tmp_path: Path) 
             state="Active",
             target_date=date(2026, 5, 1),
         ),
-    ):
+    ), patch("src.commands.reality._build_metric_definition_map", return_value={}):
         result = runner.invoke(
             app,
-            ["reality", "digest", "--program", "acme", "--refresh", "--db-root", str(tmp_path / "db")],
+            [
+                "reality", "digest", "--program", "acme", "--refresh",
+                "--programs-root", str(tmp_path / "programs"), "--db-root", str(tmp_path / "db"),
+            ],
         )
 
     assert result.exit_code == 0
@@ -631,7 +647,10 @@ def test_reality_digest_refresh_renders_staleness_challenge(tmp_path: Path) -> N
     ):
         result = runner.invoke(
             app,
-            ["reality", "digest", "--program", "acme", "--refresh", "--db-root", str(tmp_path / "db")],
+            [
+                "reality", "digest", "--program", "acme", "--refresh",
+                "--programs-root", str(tmp_path / "programs"), "--db-root", str(tmp_path / "db"),
+            ],
         )
 
     assert result.exit_code == 0

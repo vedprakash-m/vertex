@@ -13,6 +13,7 @@ from src.core.ado_saved_query_helpers import append_wiql_clause as _append_wiql_
 from src.core.ado_saved_query_helpers import extract_saved_query_wiql as _extract_saved_query_wiql
 from src.core.config_loader import PROGRAMS_ROOT
 from src.core.exceptions import QueryError
+from src.core.failure_taxonomy import safe_failure_suffix
 from src.core.integration_types import (
     ChannelConfig,
     ChannelRegistration,
@@ -405,13 +406,14 @@ class ADODiscoveryProvider:
                         ),
                     )
             except QueryError as error:
+                message = f"ADO discovery failed{safe_failure_suffix(str(error))}"
                 for scope in group_scopes:
                     statuses[scope.scope_id] = ScopeStatus(
                         scope_id=scope.scope_id,
                         status=ScopeStatusKind.ERROR,
                         completeness=DiscoveryCompleteness.PARTIAL,
                         item_count=0,
-                        error_message=str(error),
+                        error_message=message,
                     )
                     query_results.append(
                         DiscoveryQueryResult(

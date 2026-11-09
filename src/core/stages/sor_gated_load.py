@@ -133,6 +133,7 @@ def sor_gated_family_load(
     fact_snapshot: ProgramFactSnapshot | None = None,
     reality: Any = None,
     sor_mode: str | None = None,
+    legacy_comparison_loader: Callable[[], tuple[Any, ...]] | None = None,
 ) -> tuple[tuple[Any, ...], tuple[Any, ...] | None, tuple[str, ...], dict[str, dict[str, str | None]] | None]:
     """Load one fact family through the SoR-gated overlay pattern.
 
@@ -154,11 +155,14 @@ def sor_gated_family_load(
     legacy_loader:
         Zero-arg callable returning the family's current legacy-path records
         (e.g. ``lambda: _load_current_risks(program_id, programs_root=programs_root)``).
-        Called both for the legacy-mode primary path and for the non-legacy
-        empty-set cross-check / rollback fallback.
+        Used in legacy mode and, unless supplied separately, for non-legacy
+        empty-set cross-checks and rollback.
+    legacy_comparison_loader:
+        Optional authored-source loader for non-legacy cross-checks and
+        audited rollback, independent of the current legacy-mode reader.
     allow_legacy_rollback_env:
         Name of the per-family env var that, when truthy, permits falling
-        back to ``legacy_loader`` on an unexpected (non-``ConfigError``)
+        back to the comparison loader on an unexpected (non-``ConfigError``)
         reality-read exception (e.g. ``"VERTEX_REPORT_ALLOW_LEGACY_RISK_ROLLBACK"``).
     cross_check_label:
         Short, human-readable family label used in warning text (e.g. ``"risk"``).
@@ -182,6 +186,7 @@ def sor_gated_family_load(
             return (), None, (f"{cross_check_label} skipped: {exc}",), None
         return records, None, (), None
 
+    comparison_loader = legacy_comparison_loader if legacy_comparison_loader is not None else legacy_loader
     try:
         if reality is None and load_program_reality is None:
             from src.core.program_reality import ProgramReality  # noqa: PLC0415
@@ -208,16 +213,7 @@ def sor_gated_family_load(
             )
         assessments = tuple(reality_accessor(reality))
         records = tuple(assessment.record for assessment in assessments)
-        warnings: tuple[str, ...] = ()
-        if not records:
-            legacy_records = legacy_loader()
-            if legacy_records:
-                warnings = (
-                    f"[{cross_check_label} cross-check] ProgramReality returned 0 {cross_check_label}s "
-                    f"but the legacy source has {len(legacy_records)} — check whether "
-                    f"{cross_check_label} facts have actually been bridged for this program.",
-                )
-        return records, assessments, warnings, _lineage_map(assessments)
+        lineage = _lineage_map(assessments)
     except ConfigError as exc:
         return (), (), (f"{cross_check_label} skipped (reality): {exc}",), {}
     except Exception as exc:  # noqa: BLE001 — deliberately broad: any reality-read failure triggers rollback
@@ -226,7 +222,7 @@ def sor_gated_family_load(
                 f"ProgramReality {cross_check_label} read failed while {family} SoR is non-legacy. "
                 f"Set {allow_legacy_rollback_env}=1 to use the audited legacy rollback path."
             ) from exc
-        fallback_records = legacy_loader()
+        fallback_records = comparison_loader()
         return (
             fallback_records,
             (),
@@ -236,6 +232,20 @@ def sor_gated_family_load(
             ),
             {},
         )
+
+    warnings: tuple[str, ...] = ()
+    if not records:
+        try:
+            legacy_records = comparison_loader()
+        except ConfigError as exc:
+            return records, assessments, (f"{cross_check_label} legacy cross-check unavailable: {exc}",), lineage
+        if legacy_records:
+            warnings = (
+                f"[{cross_check_label} cross-check] ProgramReality returned 0 {cross_check_label}s "
+                f"but the legacy source has {len(legacy_records)} — check whether "
+                f"{cross_check_label} facts have actually been bridged for this program.",
+            )
+    return records, assessments, warnings, lineage
 
 
 def _lineage_map(assessments: tuple[Any, ...]) -> dict[str, dict[str, str | None]]:

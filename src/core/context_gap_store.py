@@ -33,6 +33,10 @@ from src.core.manual_registry_diff import _read_registry_value
 # ---------------------------------------------------------------------------
 
 
+class ContextGapRecordError(ValueError):
+    """A retained observation cannot be parsed or grouped."""
+
+
 @dataclass(frozen=True, slots=True)
 class ContextGapRecord:
     """A single feature-to-context gap signal."""
@@ -60,11 +64,28 @@ class ContextGapRecord:
 
     @staticmethod
     def from_json(d: dict[str, Any]) -> ContextGapRecord:
+        if not isinstance(d, dict) or not {
+            "ts", "feature", "program", "field", "severity", "message",
+        }.issubset(d):
+            raise ContextGapRecordError("Context gap record is invalid.")
+        if not isinstance(d["ts"], str):
+            raise ContextGapRecordError("Context gap record timestamp is invalid.")
+        try:
+            ts = _parse_datetime(d["ts"])
+        except (ValueError, OverflowError):
+            raise ContextGapRecordError(
+                "ts must include timezone information and be a valid ISO-8601 timestamp."
+            ) from None
+        lane = d.get("lane") or None
+        try:
+            hash(lane)
+        except TypeError:
+            raise ContextGapRecordError("Context gap record lane is invalid.") from None
         return ContextGapRecord(
-            ts=_parse_datetime(d["ts"]),
+            ts=ts,
             feature=str(d["feature"]),
             program=str(d["program"]),
-            lane=d.get("lane") or None,
+            lane=lane,
             field=str(d["field"]),
             severity=str(d["severity"]),
             message=str(d["message"]),
@@ -200,7 +221,7 @@ class RankedGap:
     field: str
     severity: str
     impact_estimate: str
-    count: int  # number of consecutive or total appearances
+    count: int  # number of grouped observations
     first_seen: datetime
     last_seen: datetime
     message: str

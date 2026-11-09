@@ -465,6 +465,80 @@ def test_brief_retained_synthesis_failure_is_visible_without_losing_other_eviden
     assert str(tmp_path) not in rendered
 
 
+@pytest.mark.parametrize("damage", ["envelope", "payload"])
+def test_brief_does_not_render_synthesis_from_damaged_release_ledger(tmp_path: Path, damage: str) -> None:
+    from src.core.ledger.event_log import get_event_logs_dir
+    from src.core.program_synthesis import persist_program_synthesis
+    from src.core.quality_gates.ai_release_audit import ReleaseTerminal, record_ai_release_decision
+    from tests.unit.test_program_synthesis import _synthesis
+
+    programs_root = tmp_path / "programs"
+    _seed_brief_workspace(programs_root, "acme")
+    synthesis = _synthesis(program_id="acme")
+    persist_program_synthesis(synthesis, programs_root=programs_root)
+    record_ai_release_decision(
+        program_id="acme", ai_run_id=synthesis.ai_run_id, terminal=ReleaseTerminal.RELEASED,
+        reason="synthetic control", validator_finding_count=0, programs_root=programs_root,
+    )
+    event_dir = get_event_logs_dir("acme", programs_root=programs_root)
+    path = next(event_dir.glob("*.events.jsonl"))
+    if damage == "envelope":
+        path.write_bytes(path.read_bytes() + b'{"broken":')
+    else:
+        row = json.loads(path.read_text(encoding="utf-8"))
+        del row["payload"]["validator_finding_count"]
+        path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    before = {p.relative_to(event_dir): p.read_bytes() if p.is_file() else None for p in event_dir.rglob("*")}
+
+    report = build_brief("acme", programs_root=programs_root, as_of=datetime(2026, 5, 21, 9, tzinfo=timezone.utc))
+    rendered = render_brief(report, programs_root=programs_root)
+
+    assert report.program_narrative_lines == ()
+    assert "Program Narrative" not in rendered
+    assert synthesis.through_line not in rendered
+    assert any("synthesis unavailable" in line for line in report.now_lines)
+    assert "Claim c-1" in rendered and "Contradiction WI:123" in rendered
+    assert {p.relative_to(event_dir): p.read_bytes() if p.is_file() else None for p in event_dir.rglob("*")} == before
+
+
+def test_brief_rejects_foreign_synthesis_without_losing_other_evidence(tmp_path: Path) -> None:
+    from tests.unit.test_program_synthesis import _persist_foreign_synthesis
+
+    programs_root = tmp_path / "programs"
+    _seed_brief_workspace(programs_root, "acme")
+    _persist_foreign_synthesis(programs_root, program_id="acme")
+    before = {p.relative_to(programs_root): p.read_bytes() if p.is_file() else None for p in programs_root.rglob("*")}
+
+    report = build_brief("acme", programs_root=programs_root, as_of=datetime(2026, 7, 2, tzinfo=timezone.utc))
+    rendered = render_brief(report, programs_root=programs_root)
+
+    assert report.program_narrative_lines == ()
+    assert "Program Narrative" not in rendered and "SYNTHETIC-FOREIGN" not in rendered
+    assert any("synthesis unavailable" in line and "ConfigError" in line for line in report.now_lines)
+    assert "Claim c-1" in rendered and "Contradiction WI:123" in rendered
+    assert str(tmp_path) not in rendered
+    assert {p.relative_to(programs_root): p.read_bytes() if p.is_file() else None for p in programs_root.rglob("*")} == before
+
+
+def test_brief_reports_incomparable_released_synthesis_without_losing_other_evidence(tmp_path: Path) -> None:
+    from tests.unit.test_program_synthesis import _persist_timestamp_pair
+
+    programs_root = tmp_path / "programs"
+    _seed_brief_workspace(programs_root, "acme")
+    _persist_timestamp_pair(programs_root, program_id="acme")
+    before = {p.relative_to(programs_root): p.read_bytes() if p.is_file() else None for p in programs_root.rglob("*")}
+
+    report = build_brief("acme", programs_root=programs_root, as_of=datetime(2026, 7, 2, tzinfo=timezone.utc))
+    rendered = render_brief(report, programs_root=programs_root)
+
+    assert report.program_narrative_lines == ()
+    assert "Program Narrative" not in rendered and "SYNTHETIC-CANARY" not in rendered
+    assert any("synthesis unavailable" in line and "ConfigError" in line for line in report.now_lines)
+    assert "Claim c-1" in rendered and "Contradiction WI:123" in rendered
+    assert str(tmp_path) not in rendered
+    assert {p.relative_to(programs_root): p.read_bytes() if p.is_file() else None for p in programs_root.rglob("*")} == before
+
+
 def test_brief_unreleased_retained_synthesis_keeps_empty_compatibility(tmp_path: Path) -> None:
     from src.core.program_synthesis import persist_program_synthesis
     from tests.unit.test_program_synthesis import _synthesis

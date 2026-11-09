@@ -370,7 +370,7 @@ class TestRVVP1VerificationGate:
 
 def _hydrated(canonical_text: str, *, source_type: EntityType = EntityType.MESSAGE) -> HydratedContent:
     identity = CanonicalItemIdentity(
-        source_type=source_type, tenant_id="t", principal_mailbox="u@x.com",
+        source_type=source_type, tenant_id="t", principal_mailbox="fixture-user-01@group-01.fixture.example.net",
         container="inbox", resource_id="msg-1",
     )
     chunks = chunk_canonical(canonical_text)
@@ -578,7 +578,7 @@ class TestZoneBoundary:
 class TestIdentityResolution:
     def test_mail_route_binds_via_conversation_id(self) -> None:
         item = CanonicalItemIdentity(
-            source_type=EntityType.MESSAGE, tenant_id="t", principal_mailbox="u@x.com",
+            source_type=EntityType.MESSAGE, tenant_id="t", principal_mailbox="fixture-user-01@group-01.fixture.example.net",
             container="inbox", resource_id="msg-1", immutable_id="imm-1",
         )
         route = ItemToRouteBinder().bind(item, RouteMetadata(conversation_id="conv-1"))
@@ -587,7 +587,7 @@ class TestIdentityResolution:
 
     def test_calendar_route_uses_series_master_id(self) -> None:
         item = CanonicalItemIdentity(
-            source_type=EntityType.EVENT, tenant_id="t", principal_mailbox="u@x.com",
+            source_type=EntityType.EVENT, tenant_id="t", principal_mailbox="fixture-user-01@group-01.fixture.example.net",
             container="calendar", resource_id="evt-1",
         )
         route = ItemToRouteBinder().bind(item, RouteMetadata(series_master_id="series-1"))
@@ -625,7 +625,7 @@ class TestIdentityResolution:
 
     def test_missing_route_field_raises(self) -> None:
         item = CanonicalItemIdentity(
-            source_type=EntityType.MESSAGE, tenant_id="t", principal_mailbox="u@x.com",
+            source_type=EntityType.MESSAGE, tenant_id="t", principal_mailbox="fixture-user-01@group-01.fixture.example.net",
             container="inbox", resource_id="msg-1",
         )
         with pytest.raises(IdentityResolutionError):
@@ -633,7 +633,7 @@ class TestIdentityResolution:
 
     def test_cache_key_prefers_immutable_id(self) -> None:
         item = CanonicalItemIdentity(
-            source_type=EntityType.MESSAGE, tenant_id="t", principal_mailbox="u@x.com",
+            source_type=EntityType.MESSAGE, tenant_id="t", principal_mailbox="fixture-user-01@group-01.fixture.example.net",
             container="inbox", resource_id="msg-1", immutable_id="imm-1",
         )
         assert "imm-1" in item.cache_key
@@ -665,7 +665,7 @@ class TestQueryPlanner:
 
         intent = RetrievalIntent(
             entity_type=EntityType.CHAT_MESSAGE,
-            senders=("a@x.com",),
+            senders=("fixture-user-02@group-01.fixture.example.net",),
             from_date=date(2026, 1, 1),
         )
         plan = TeamsQueryCompiler().compile(intent)
@@ -693,11 +693,11 @@ class TestQueryPlanner:
 
 class TestPrivacyGate:
     def test_pii_scrub_redacts_email_and_phone(self) -> None:
-        text = "Contact owner@example.com or call +1-555-123-4567."
+        text = "Contact owner@example.com or call +1-202-555-0133."
         scrubbed = scrub_pii(text)
         assert "owner@example.com" not in scrubbed
         assert "[EMAIL_REDACTED]" in scrubbed
-        assert "+1-555-123-4567" not in scrubbed
+        assert "+1-202-555-0133" not in scrubbed
 
     def test_iso_date_surives_phone_scrub(self) -> None:
         """Date-protected regex: ISO dates are signal, not PII (§5.7)."""
@@ -961,7 +961,7 @@ class TestEvidenceVault:
         excerpt = "deployment completed on 2026-06-23"
         full_source = f"Subject: Update\n\n{excerpt}\n\nRegards,\nThe team."
         meta = build_metadata_defaults(
-            tenant_id="t", principal_mailbox="u@x.com", container="inbox",
+            tenant_id="t", principal_mailbox="fixture-user-01@group-01.fixture.example.net", container="inbox",
             canonical_item_id="msg-1", canonical_route_id="conv-1",
             retrieval_timestamp=NOW, profile=None,
             extraction_model=DETERMINISTIC_MODEL,
@@ -1091,7 +1091,7 @@ class TestDeterministicExtractor:
     def test_metadata_only_yields_empty(self) -> None:
         hydrated = HydratedContent(
             identity=CanonicalItemIdentity(
-                source_type=EntityType.MESSAGE, tenant_id="t", principal_mailbox="u@x.com",
+                source_type=EntityType.MESSAGE, tenant_id="t", principal_mailbox="fixture-user-01@group-01.fixture.example.net",
                 container="inbox", resource_id="msg-1",
             ),
             canonical_text="", normalized_source_hash="sha256:x", chunks=(),
@@ -1399,7 +1399,7 @@ class TestMultiClaimStaging:
         identity = CanonicalItemIdentity(
             source_type=EntityType.MESSAGE,
             tenant_id="t",
-            principal_mailbox="u@x.com",
+            principal_mailbox="fixture-user-01@group-01.fixture.example.net",
             container="inbox",
             resource_id="msg-001",
         )
@@ -1408,7 +1408,7 @@ class TestMultiClaimStaging:
             canonical_text="Deployment completed.",
             normalized_source_hash="sha256:test",
             chunks=(),
-            route_metadata={"subject": "Update", "sender": "x@x.com", "received_at": "2026-06-24T10:00:00Z"},
+            route_metadata={"subject": "Update", "sender": "fixture-user-03@group-01.fixture.example.net", "received_at": "2026-06-24T10:00:00Z"},
         )
         claims = self._make_claims(["deployment.completed"])
         evidence_ref = self._fake_evidence_ref()
@@ -1429,7 +1429,7 @@ class TestMultiClaimStaging:
         identity = CanonicalItemIdentity(
             source_type=EntityType.MESSAGE,
             tenant_id="t",
-            principal_mailbox="u@x.com",
+            principal_mailbox="fixture-user-01@group-01.fixture.example.net",
             container="inbox",
             resource_id="msg-empty",
         )
@@ -1599,14 +1599,14 @@ class TestKI4ShieldBypassBlocked:
             identity=CanonicalItemIdentity(
                 source_type=EntityType.MESSAGE,
                 tenant_id="t",
-                principal_mailbox="u@x.com",
+                principal_mailbox="fixture-user-01@group-01.fixture.example.net",
                 container="inbox",
-                resource_id="<ki4-msg@x.com>",
+                resource_id="<fixture-user-04@group-01.fixture.example.net>",
             ),
             canonical_text=canonical,
             normalized_source_hash="sha256:ki4",
             chunks=(chunk_public, chunk_secret),
-            route_metadata={"subject": "KI4 test", "sender": "a@x.com", "received_at": "2026-06-24T10:00:00+00:00"},
+            route_metadata={"subject": "KI4 test", "sender": "fixture-user-02@group-01.fixture.example.net", "received_at": "2026-06-24T10:00:00+00:00"},
             hydration_rung="unique_body",
             metadata_only=False,
             retrieved_at=NOW,
@@ -1660,9 +1660,9 @@ class TestKI4ShieldBypassBlocked:
             locator=HydrationLocator(
                 source_type=EntityType.MESSAGE,
                 tenant_id="t",
-                principal_mailbox="u@x.com",
+                principal_mailbox="fixture-user-01@group-01.fixture.example.net",
                 container="inbox",
-                resource_id="<ki4-msg@x.com>",
+                resource_id="<fixture-user-04@group-01.fixture.example.net>",
             ),
             relevance_score=0.9,
             partial_metadata={},  # no eml_path → file finalization is a no-op
@@ -1695,7 +1695,7 @@ class TestKI4ShieldBypassBlocked:
             deps=deps,
             profile=RevRetrievalProfile(profile=REV_PROFILE_SEARCH_HYDRATE),
             mailbox_tenant_id="t",
-            mailbox_principal="u@x.com",
+            mailbox_principal="fixture-user-01@group-01.fixture.example.net",
             mailbox_container="inbox",
             correlation_id="ki4",
             programs_root=tmp_path,
@@ -1864,14 +1864,14 @@ class TestUnknownEventTypeDisposition:
 
         identity = CanonicalItemIdentity(
             source_type=EntityType.MESSAGE, tenant_id="t",
-            principal_mailbox="u@x.com", container="inbox", resource_id="msg-1",
+            principal_mailbox="fixture-user-01@group-01.fixture.example.net", container="inbox", resource_id="msg-1",
         )
         hydrated = HydratedContent(
             identity=identity,
             canonical_text="some text",
             normalized_source_hash="sha256:x",
             chunks=(),
-            route_metadata={"subject": "test", "sender": "a@b.com"},
+            route_metadata={"subject": "test", "sender": "fixture-user-05@group-02.fixture.example.net"},
         )
         result = _shape_ledger_event(_FakeClaim(), hydrated, NOW)
         assert result is None, (
@@ -1884,7 +1884,7 @@ class TestUnknownEventTypeDisposition:
 
         identity = CanonicalItemIdentity(
             source_type=EntityType.MESSAGE, tenant_id="t",
-            principal_mailbox="u@x.com", container="inbox", resource_id="msg-unknown",
+            principal_mailbox="fixture-user-01@group-01.fixture.example.net", container="inbox", resource_id="msg-unknown",
         )
         hydrated = HydratedContent(
             identity=identity,
@@ -1893,7 +1893,7 @@ class TestUnknownEventTypeDisposition:
             chunks=(),
             route_metadata={
                 "subject": "test",
-                "sender": "a@b.com",
+                "sender": "fixture-user-05@group-02.fixture.example.net",
                 "received_at": "2026-06-25T10:00:00Z",
             },
         )
@@ -1925,14 +1925,14 @@ class TestUnknownEventTypeDisposition:
 
         identity = CanonicalItemIdentity(
             source_type=EntityType.MESSAGE, tenant_id="t",
-            principal_mailbox="u@x.com", container="inbox", resource_id="msg-1",
+            principal_mailbox="fixture-user-01@group-01.fixture.example.net", container="inbox", resource_id="msg-1",
         )
         hydrated = HydratedContent(
             identity=identity,
             canonical_text="Deployment completed on 2026-06-25.",
             normalized_source_hash="sha256:x",
             chunks=(),
-            route_metadata={"subject": "Update", "sender": "a@b.com", "conversation_id": "c1"},
+            route_metadata={"subject": "Update", "sender": "fixture-user-05@group-02.fixture.example.net", "conversation_id": "c1"},
         )
         for claim_type in _CLAIM_TO_LEDGER_EVENT:
             class _Claim:
@@ -1985,10 +1985,10 @@ class TestPIIInterceptionContract:
 
         prompt = _build_rev_extractor_user_prompt(
             "Deployment completed.",
-            subject="Call +1-555-123-4567 for status",
+            subject="Call +1-202-555-0133 for status",
             program_id="nova",
         )
-        assert "+1-555-123-4567" not in prompt, (
+        assert "+1-202-555-0133" not in prompt, (
             "G-pii / W1-5: phone number in subject leaked into LLM user prompt"
         )
 
@@ -1997,15 +1997,15 @@ class TestPIIInterceptionContract:
         from src.ai.rev.extractor import _build_rev_extractor_user_prompt
 
         pii_subject = (
-            "Contact alice@corp.com or +1-555-987-6543; "
-            "SSN 123-45-6789; card 4111-1111-1111-1111"
+            "Contact fixture-user-06@group-03.fixture.example.net or +1-202-555-0134; "
+            "SSN 000-00-0000; card 4111-1111-1111-1111"
         )
         prompt = _build_rev_extractor_user_prompt(
             "Status update.",
             subject=pii_subject,
             program_id="nova",
         )
-        for pii in ("alice@corp.com", "+1-555-987-6543", "123-45-6789", "4111-1111-1111-1111"):
+        for pii in ("fixture-user-06@group-03.fixture.example.net", "+1-202-555-0134", "000-00-0000", "4111-1111-1111-1111"):
             assert pii not in prompt, (
                 f"G-pii / W1-5: {pii!r} from subject leaked into LLM user prompt"
             )
@@ -2020,13 +2020,14 @@ class TestPIIInterceptionContract:
         from src.m365.rev.eml_hydrator import EmlHydrator
 
         eml_content = (
-            "From: sender@external.com\r\n"
-            "Subject: Update from alice@corp.com\r\n"
+            "From: fixture-user-07@group-04.fixture.example.net\r\n"
+            "Subject: Update from fixture-user-06@group-03.fixture.example.net\r\n"
             "Date: Wed, 25 Jun 2026 10:00:00 +0000\r\n"
+            "Message-ID: <msg-pii-001@fixture.example.net>\r\n"
             "Content-Type: text/plain; charset=utf-8\r\n"
             "\r\n"
             "Deployment completed on 2026-06-25. "
-            "Call +1-555-123-4567 for details. "
+            "Call +1-202-555-0133 for details. "
             "Contact bob@example.com if questions.\r\n"
         )
         eml_path = tmp_path / "pii_test.eml"
@@ -2042,10 +2043,10 @@ class TestPIIInterceptionContract:
                 tenant_id="t",
                 principal_mailbox="tpm@example.com",
                 container="inbox",
-                resource_id="msg-pii-001",
+                resource_id="<msg-pii-001@fixture.example.net>",
             ),
             relevance_score=0.9,
-            partial_metadata={"eml_path": str(eml_path), "message_id": "msg-pii-001"},
+            partial_metadata={"eml_path": str(eml_path), "message_id": "<msg-pii-001@fixture.example.net>"},
             correlation_id="pii-test",
             enumerator="test",
             received_at=NOW,
@@ -2055,7 +2056,7 @@ class TestPIIInterceptionContract:
         hydrated = result.value
 
         # Body PII must be scrubbed in canonical_text.
-        assert "+1-555-123-4567" not in hydrated.canonical_text, (
+        assert "+1-202-555-0133" not in hydrated.canonical_text, (
             "W1-4 / PS-24: phone number leaked into canonical_text"
         )
         assert "bob@example.com" not in hydrated.canonical_text, (
@@ -2071,9 +2072,10 @@ class TestPIIInterceptionContract:
         from src.m365.rev.eml_hydrator import EmlHydrator
 
         eml_content = (
-            "From: sender@external.com\r\n"
-            "Subject: Meeting with alice@corp.com on 2026-06-25\r\n"
+            "From: fixture-user-07@group-04.fixture.example.net\r\n"
+            "Subject: Meeting with fixture-user-06@group-03.fixture.example.net on 2026-06-25\r\n"
             "Date: Wed, 25 Jun 2026 10:00:00 +0000\r\n"
+            "Message-ID: <msg-subj-001@fixture.example.net>\r\n"
             "Content-Type: text/plain; charset=utf-8\r\n"
             "\r\n"
             "Deployment completed on 2026-06-25.\r\n"
@@ -2091,10 +2093,10 @@ class TestPIIInterceptionContract:
                 tenant_id="t",
                 principal_mailbox="tpm@example.com",
                 container="inbox",
-                resource_id="msg-subj-001",
+                resource_id="<msg-subj-001@fixture.example.net>",
             ),
             relevance_score=0.9,
-            partial_metadata={"eml_path": str(eml_path), "message_id": "msg-subj-001"},
+            partial_metadata={"eml_path": str(eml_path), "message_id": "<msg-subj-001@fixture.example.net>"},
             correlation_id="subj-test",
             enumerator="test",
             received_at=NOW,
@@ -2104,7 +2106,7 @@ class TestPIIInterceptionContract:
         hydrated = result.value
 
         subject_in_meta = hydrated.route_metadata.get("subject", "")
-        assert "alice@corp.com" not in subject_in_meta, (
+        assert "fixture-user-06@group-03.fixture.example.net" not in subject_in_meta, (
             "W1-4 / PS-24: email address leaked into route_metadata['subject']"
         )
         # Date in subject is preserved (dates are signal, not PII).
@@ -2127,10 +2129,11 @@ class TestPseudonymizationContract:
         from src.m365.rev.eml_hydrator import EmlHydrator
 
         eml_content = (
-            "From: Alice Johnson <alice.johnson@contoso.com>\r\n"
-            "To: Bob Williams <bob.williams@contoso.com>\r\n"
+            "From: Alice Johnson <fixture-user-08@group-05.fixture.example.net>\r\n"
+            "To: Bob Williams <fixture-user-09@group-05.fixture.example.net>\r\n"
             "Subject: Deployment update\r\n"
             "Date: Wed, 25 Jun 2026 10:00:00 +0000\r\n"
+            "Message-ID: <msg-pseudo-001@fixture.example.net>\r\n"
             "Content-Type: text/plain; charset=utf-8\r\n"
             "\r\n"
             "Alice Johnson approved the milestone on 2026-06-25. "
@@ -2149,10 +2152,10 @@ class TestPseudonymizationContract:
                 tenant_id="t",
                 principal_mailbox="tpm@example.com",
                 container="inbox",
-                resource_id="msg-pseudo-001",
+                resource_id="<msg-pseudo-001@fixture.example.net>",
             ),
             relevance_score=0.9,
-            partial_metadata={"eml_path": str(eml_path), "message_id": "msg-pseudo-001"},
+            partial_metadata={"eml_path": str(eml_path), "message_id": "<msg-pseudo-001@fixture.example.net>"},
             correlation_id="pseudo-test",
             enumerator="test",
             received_at=NOW,
@@ -2182,10 +2185,11 @@ class TestPseudonymizationContract:
         from src.m365.rev.eml_hydrator import EmlHydrator
 
         eml_content = (
-            "From: Carol Davis <carol.davis@contoso.com>\r\n"
-            "To: Dave Evans <dave.evans@contoso.com>\r\n"
+            "From: Carol Davis <fixture-user-10@group-05.fixture.example.net>\r\n"
+            "To: Dave Evans <fixture-user-11@group-05.fixture.example.net>\r\n"
             "Subject: Status\r\n"
             "Date: Wed, 25 Jun 2026 10:00:00 +0000\r\n"
+            "Message-ID: <msg-pseudo-002@fixture.example.net>\r\n"
             "Content-Type: text/plain; charset=utf-8\r\n"
             "\r\n"
             "Carol Davis raised a risk for Dave Evans to review.\r\n"
@@ -2203,10 +2207,10 @@ class TestPseudonymizationContract:
                 tenant_id="t",
                 principal_mailbox="tpm@example.com",
                 container="inbox",
-                resource_id="msg-pseudo-002",
+                resource_id="<msg-pseudo-002@fixture.example.net>",
             ),
             relevance_score=0.9,
-            partial_metadata={"eml_path": str(eml_path), "message_id": "msg-pseudo-002"},
+            partial_metadata={"eml_path": str(eml_path), "message_id": "<msg-pseudo-002@fixture.example.net>"},
             correlation_id="pseudo-meta",
             enumerator="test",
             received_at=NOW,

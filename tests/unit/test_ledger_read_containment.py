@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +13,8 @@ import src.commands.cockpit as cockpit_command
 import src.core.cockpit_builder as cockpit_builder
 import src.core.ledger.event_log as event_log
 import src.core.outcome_metrics as outcome_metrics
+from src.commands.cockpit_tui import run_cockpit_tui_loop
+from src.core.cockpit_html import render_cockpit_html
 from src.core.cockpit_models import ValueConfidence
 from src.core.exceptions import ConfigError
 from src.core.ledger.source_refs import OperatorAssertionRef
@@ -262,6 +265,373 @@ def test_invalid_consumed_terminal_is_not_reported_as_measured(tmp_path: Path) -
         outcome_metrics.compute_om4_audit_coverage(
             PROGRAM, programs_root=tmp_path, events=(*records, malformed),
         )
+
+
+@pytest.mark.parametrize("payload", [
+    pytest.param({}, id="missing-fields"),
+    pytest.param({"ai_run_id": "run", "receipt": None}, id="null-receipt"),
+    pytest.param({"ai_run_id": "run", "receipt": 7}, id="numeric-receipt"),
+    pytest.param({"ai_run_id": "run", "receipt": []}, id="list-receipt"),
+    pytest.param({"ai_run_id": "run", "receipt": {}}, id="object-receipt"),
+    pytest.param({"ai_run_id": "run", "receipt": "synthetic-private-canary"}, id="unknown-receipt"),
+    pytest.param({"receipt": "rendered"}, id="missing-run-id"),
+    pytest.param({"ai_run_id": "", "receipt": "applied"}, id="empty-consumed-run-id"),
+    pytest.param({"ai_run_id": "", "receipt": "failed"}, id="empty-nonconsumed-run-id"),
+    pytest.param({"ai_run_id": None, "receipt": "proposed"}, id="null-run-id"),
+    pytest.param({"ai_run_id": 7, "receipt": "rendered"}, id="numeric-run-id"),
+    pytest.param({"ai_run_id": [], "receipt": "applied"}, id="list-run-id"),
+])
+@pytest.mark.parametrize("include_valid_run", [False, True])
+def test_om4_invalid_receipt_never_measures_a_subset(
+    tmp_path: Path, payload: dict[str, object], include_valid_run: bool,
+) -> None:
+    _record_run(tmp_path)
+    records = event_log.read_events(PROGRAM, programs_root=tmp_path, repair_corruption=False)
+    receipt = next(event for event in records if event.event_type == "ai.application_receipt.v1")
+    invalid = replace(receipt, payload=payload)
+    before = _files(tmp_path)
+
+    result = outcome_metrics.compute_om4_audit_coverage(
+        PROGRAM, programs_root=tmp_path, events=(*records, invalid) if include_valid_run else (invalid,),
+    )
+
+    assert result.confidence is ValueConfidence.UNAVAILABLE
+    assert result.value is None
+    assert "receipt" in result.detail.lower()
+    assert "synthetic-private-canary" not in result.detail
+    assert result.evidence_refs == ()
+    assert _files(tmp_path) == before
+
+
+@pytest.mark.parametrize("receipt", list(ApplicationReceipt))
+def test_om4_recognized_receipts_keep_existing_measurement(
+    tmp_path: Path, receipt: ApplicationReceipt,
+) -> None:
+    run_id = "synthetic-valid-run"
+    record_ai_release_decision(
+        program_id=PROGRAM, ai_run_id=run_id, terminal=ReleaseTerminal.RELEASED, reason="Synthetic decision",
+        validator_finding_count=0, programs_root=tmp_path,
+    )
+    record_ai_application_receipt(
+        program_id=PROGRAM, ai_run_id=run_id, receipt=receipt, programs_root=tmp_path,
+    )
+    before = _files(tmp_path)
+
+    result = outcome_metrics.compute_om4_audit_coverage(PROGRAM, programs_root=tmp_path)
+
+    if receipt in (ApplicationReceipt.RENDERED, ApplicationReceipt.PROPOSED, ApplicationReceipt.APPLIED):
+        assert result.confidence is ValueConfidence.MEASURED
+        assert result.value == 1.0
+    else:
+        assert result.confidence is ValueConfidence.UNAVAILABLE
+        assert result.value is None
+        assert "No AI outputs have been consumed" in result.detail
+    assert _files(tmp_path) == before
+
+
+@pytest.mark.parametrize("damage", ["missing_reason", "missing_count", "bad_reason", "bool_count", "bad_hash"])
+@pytest.mark.parametrize("route", ["direct", "composite", "tuple"])
+def test_om4_matching_schema_invalid_release_is_unavailable(
+    tmp_path: Path, damage: str, route: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _record_run(tmp_path)
+    records = event_log.read_events(PROGRAM, programs_root=tmp_path, repair_corruption=False)
+    release = next(event for event in records if event.event_type == "ai.release_decision.v1")
+    payload = dict(release.payload)
+    if damage == "missing_reason":
+        del payload["reason"]
+    elif damage == "missing_count":
+        del payload["validator_finding_count"]
+    elif damage == "bad_reason":
+        payload["reason"] = ["synthetic-private-canary"]
+    elif damage == "bool_count":
+        payload["validator_finding_count"] = True
+    else:
+        payload["released_content_hash"] = []
+    invalid = replace(release, payload=payload)
+    modified = tuple(invalid if event.event_id == release.event_id else event for event in records)
+    if route != "tuple":
+        path = _event_path(tmp_path)
+        path.write_text("".join(json.dumps(event.to_dict()) + "\n" for event in modified), encoding="utf-8")
+    before = _files(tmp_path)
+
+    if route == "tuple":
+        reader = Mock(side_effect=AssertionError("Shared event tuples must not reread the ledger"))
+        monkeypatch.setattr(outcome_metrics, "read_events", reader)
+        result = outcome_metrics.compute_om4_audit_coverage(PROGRAM, programs_root=tmp_path, events=modified)
+        reader.assert_not_called()
+    elif route == "composite":
+        composite = outcome_metrics.compute_all_outcome_metrics(PROGRAM, programs_root=tmp_path)
+        assert "0 search-before-create prevention" in composite[1].detail
+        result = composite[2]
+    else:
+        result = outcome_metrics.compute_om4_audit_coverage(PROGRAM, programs_root=tmp_path)
+
+    assert result.confidence is ValueConfidence.UNAVAILABLE
+    assert result.value is None
+    assert "release decision" in result.detail.lower()
+    assert "synthetic-private-canary" not in result.detail
+    assert result.evidence_refs == ()
+    assert _files(tmp_path) == before
+
+
+@pytest.mark.parametrize("invalid_first", [False, True])
+def test_om4_cannot_hide_a_matching_invalid_release(
+    tmp_path: Path, invalid_first: bool,
+) -> None:
+    _record_run(tmp_path)
+    records = event_log.read_events(PROGRAM, programs_root=tmp_path, repair_corruption=False)
+    release = next(event for event in records if event.event_type == "ai.release_decision.v1")
+    payload = dict(release.payload)
+    del payload["validator_finding_count"]
+    invalid = replace(release, payload=payload)
+    events = (invalid, *records) if invalid_first else (*records, invalid)
+
+    result = outcome_metrics.compute_om4_audit_coverage(PROGRAM, programs_root=tmp_path, events=events)
+
+    assert result.confidence is ValueConfidence.UNAVAILABLE
+    assert result.value is None
+    assert "release decision" in result.detail.lower()
+    assert result.evidence_refs == ()
+
+
+def test_om4_release_payload_validation_propagates_unexpected_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _record_run(tmp_path)
+    error = RuntimeError("validator implementation error")
+    monkeypatch.setattr(outcome_metrics, "validate_event_payload", Mock(side_effect=error))
+
+    with pytest.raises(RuntimeError) as raised:
+        outcome_metrics.compute_om4_audit_coverage(PROGRAM, programs_root=tmp_path)
+
+    assert raised.value is error
+
+
+def test_om4_no_consumption_stays_unavailable_with_an_invalid_release(tmp_path: Path) -> None:
+    record_ai_release_decision(
+        program_id=PROGRAM, ai_run_id="synthetic-run", terminal=ReleaseTerminal.RELEASED,
+        reason="synthetic control", validator_finding_count=0, programs_root=tmp_path,
+    )
+    path = _event_path(tmp_path)
+    row = json.loads(path.read_text(encoding="utf-8"))
+    del row["payload"]["validator_finding_count"]
+    path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    before = _files(tmp_path)
+
+    result = outcome_metrics.compute_om4_audit_coverage(PROGRAM, programs_root=tmp_path)
+
+    assert result.confidence is ValueConfidence.UNAVAILABLE
+    assert result.value is None
+    assert "No AI outputs have been consumed" in result.detail
+    assert _files(tmp_path) == before
+
+
+def test_om4_unknown_matching_terminal_retains_existing_value_error(tmp_path: Path) -> None:
+    _record_run(tmp_path)
+    records = event_log.read_events(PROGRAM, programs_root=tmp_path, repair_corruption=False)
+    release = next(event for event in records if event.event_type == "ai.release_decision.v1")
+    payload = {**release.payload, "terminal": "unknown-terminal"}
+    invalid = replace(release, payload=payload)
+    modified = tuple(invalid if event.event_id == release.event_id else event for event in records)
+
+    with pytest.raises(ValueError):
+        outcome_metrics.compute_om4_audit_coverage(PROGRAM, programs_root=tmp_path, events=modified)
+
+
+def test_om4_matching_invalid_release_is_unavailable_in_fresh_cockpit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _record_run(tmp_path)
+    path = _event_path(tmp_path)
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    release = next(row for row in rows if row["event_type"] == "ai.release_decision.v1")
+    del release["payload"]["validator_finding_count"]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    before = path.read_bytes()
+
+    snapshot = cockpit_builder.build_cockpit_snapshot(PROGRAM, programs_root=tmp_path)
+
+    assert snapshot.reliability_summary.audit_coverage is None
+    finding = next(f for f in snapshot.findings if f.finding_id == "reliability.om4_audit_coverage")
+    assert "unavailable" in finding.summary.lower()
+    assert "release decision" in finding.detail.lower()
+    assert finding.evidence_refs == ()
+    monkeypatch.setattr(cockpit_command, "PROGRAMS_ROOT", tmp_path)
+    rendered = CliRunner().invoke(
+        cockpit_command.app, ["show", "--program", PROGRAM, "--format", "json", "--no-persist"],
+    )
+    assert rendered.exit_code == 0, repr(rendered.exception)
+    payload = json.loads(rendered.stdout)
+    assert payload["reliability_summary"]["audit_coverage"] is None
+    rendered_finding = next(row for row in payload["findings"] if row["finding_id"] == "reliability.om4_audit_coverage")
+    assert "release decision" in rendered_finding["detail"].lower()
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("invalid", ["empty-id", "unknown-receipt"])
+def test_om4_invalid_writer_receipt_is_unavailable_in_direct_and_composite_results(
+    tmp_path: Path, invalid: str,
+) -> None:
+    _record_run(tmp_path)
+    if invalid == "empty-id":
+        record_ai_application_receipt(
+            program_id=PROGRAM, ai_run_id="", receipt=ApplicationReceipt.RENDERED, programs_root=tmp_path,
+        )
+    else:
+        now = datetime.now(timezone.utc)
+        event = event_log.build_event_envelope(
+            program_id=PROGRAM, event_type="ai.application_receipt.v1",
+            occurred_at=now, recorded_at=now, temporal_confidence=event_log.TemporalConfidence.EXACT,
+            confidence=event_log.ConfidenceTier.SOURCE_AUTHORITATIVE, actor="synthetic",
+            payload={"ai_run_id": "synthetic-private-canary", "receipt": "synthetic-private-canary"},
+            source_ref=OperatorAssertionRef(asserted_by="synthetic", asserted_at=now),
+        )
+        event_log.write_event(event, programs_root=tmp_path)
+    before = _files(tmp_path)
+
+    direct = outcome_metrics.compute_om4_audit_coverage(PROGRAM, programs_root=tmp_path)
+    composite = outcome_metrics.compute_all_outcome_metrics(PROGRAM, programs_root=tmp_path)
+
+    for result in (direct, composite[2]):
+        assert result.confidence is ValueConfidence.UNAVAILABLE
+        assert result.value is None
+        assert "receipt" in result.detail.lower()
+        assert "synthetic-private-canary" not in result.detail
+        assert result.evidence_refs == ()
+    assert "0 search-before-create prevention" in composite[1].detail
+    assert _files(tmp_path) == before
+
+
+@pytest.mark.parametrize("payload", [
+    pytest.param({"ai_run_id": "run"}, id="missing-receipt"),
+    pytest.param({"ai_run_id": "run", "receipt": []}, id="list-receipt"),
+    pytest.param({"ai_run_id": None, "receipt": "applied"}, id="null-run-id"),
+])
+def test_om4_invalid_persisted_receipt_does_not_change_ledger(
+    tmp_path: Path, payload: dict[str, object],
+) -> None:
+    _record_run(tmp_path)
+    records = event_log.read_events(PROGRAM, programs_root=tmp_path, repair_corruption=False)
+    receipt = next(event for event in records if event.event_type == "ai.application_receipt.v1")
+    invalid = replace(receipt, event_id="synthetic-invalid-receipt", payload=payload)
+    path = _event_path(tmp_path)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(invalid.to_dict()) + "\n")
+    before = _files(tmp_path)
+
+    result = outcome_metrics.compute_om4_audit_coverage(PROGRAM, programs_root=tmp_path)
+
+    assert result.confidence is ValueConfidence.UNAVAILABLE
+    assert result.value is None
+    assert "receipt" in result.detail.lower()
+    assert result.evidence_refs == ()
+    assert _files(tmp_path) == before
+
+
+@pytest.mark.parametrize(("released", "total", "expected", "status"), [
+    (0, 1, 0.0, "info"),
+    (1, 1, 1.0, "ok"),
+    (1, 3, 0.3333, "info"),
+    (1, 10000, 0.0001, "info"),
+    (9999, 10000, 0.9999, "info"),
+    (1, 20001, 1 / 20001, "info"),
+    (20000, 20001, 20000 / 20001, "info"),
+])
+def test_om4_partial_ratios_do_not_round_to_false_endpoints(
+    tmp_path: Path, released: int, total: int, expected: float, status: str,
+) -> None:
+    _record_run(tmp_path)
+    records = event_log.read_events(PROGRAM, programs_root=tmp_path, repair_corruption=False)
+    receipt = next(event for event in records if event.event_type == "ai.application_receipt.v1")
+    decision = next(event for event in records if event.event_type == "ai.release_decision.v1")
+    events = tuple(
+        [replace(receipt, payload={"ai_run_id": str(index), "receipt": "applied"}) for index in range(total)]
+        + [
+            replace(decision, payload={**decision.payload, "ai_run_id": str(index)})
+            for index in range(released)
+        ]
+    )
+    before = _files(tmp_path)
+
+    result = outcome_metrics.compute_om4_audit_coverage(PROGRAM, programs_root=tmp_path, events=events)
+    summary, findings = cockpit_builder._build_reliability_summary(
+        PROGRAM, programs_root=tmp_path, observed_at=datetime.now(timezone.utc), events=events,
+    )
+
+    assert result.confidence is ValueConfidence.MEASURED
+    assert result.value == expected
+    assert summary.audit_coverage == expected
+    finding = next(row for row in findings if row.finding_id == "reliability.om4_audit_coverage")
+    assert finding.status == status
+    assert finding.detail == result.detail
+    assert _files(tmp_path) == before
+
+
+@pytest.mark.parametrize("terminal", [ReleaseTerminal.RELEASED, ReleaseTerminal.REJECTED])
+def test_om4_detail_describes_recorded_consumption_and_latest_terminal(
+    tmp_path: Path, terminal: ReleaseTerminal,
+) -> None:
+    _record_run(tmp_path, terminal)
+
+    result = outcome_metrics.compute_om4_audit_coverage(PROGRAM, programs_root=tmp_path)
+
+    assert "recorded as consumed" in result.detail
+    assert "latest" in result.detail
+
+
+def test_om4_invalid_receipt_is_unavailable_on_fresh_cockpit_surfaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _record_run(tmp_path)
+    now = datetime.now(timezone.utc)
+    event = event_log.build_event_envelope(
+        program_id=PROGRAM, event_type="ai.application_receipt.v1",
+        occurred_at=now, recorded_at=now, temporal_confidence=event_log.TemporalConfidence.EXACT,
+        confidence=event_log.ConfidenceTier.SOURCE_AUTHORITATIVE, actor="synthetic",
+        payload={"ai_run_id": "synthetic-private-canary", "receipt": "synthetic-private-canary"},
+        source_ref=OperatorAssertionRef(asserted_by="synthetic", asserted_at=now),
+    )
+    event_log.write_event(event, programs_root=tmp_path)
+    ledger_before = _event_path(tmp_path).read_bytes()
+    monkeypatch.setattr(cockpit_command, "PROGRAMS_ROOT", tmp_path)
+
+    result = CliRunner().invoke(
+        cockpit_command.app, ["show", "--program", PROGRAM, "--format", "json", "--no-persist"],
+    )
+
+    assert result.exit_code == 0, repr(result.exception)
+    payload = json.loads(result.stdout)
+    assert payload["reliability_summary"]["audit_coverage"] is None
+    finding = next(row for row in payload["findings"] if row["finding_id"] == "reliability.om4_audit_coverage")
+    detail = "Audit coverage is unavailable because an application receipt is invalid or unrecognized."
+    assert "unavailable" in finding["summary"].lower()
+    assert finding["detail"] == detail
+    assert "synthetic-private-canary" not in result.stdout
+
+    explain = CliRunner().invoke(
+        cockpit_command.app,
+        ["explain", "--program", PROGRAM, "--finding", "reliability.om4_audit_coverage"],
+    )
+    assert explain.exit_code == 0, repr(explain.exception)
+    assert detail in explain.stdout
+    assert "synthetic-private-canary" not in explain.stdout
+
+    snapshot = cockpit_builder.build_cockpit_snapshot(PROGRAM, programs_root=tmp_path)
+    assert snapshot.reliability_summary.audit_coverage is None
+    html = render_cockpit_html(snapshot, retained=True)
+    assert detail in html
+    assert "synthetic-private-canary" not in html
+    finding_number = next(
+        index for index, row in enumerate(snapshot.findings, start=1)
+        if row.finding_id == "reliability.om4_audit_coverage"
+    )
+    replies = iter((str(finding_number), "q"))
+    output: list[str] = []
+    run_cockpit_tui_loop(PROGRAM, programs_root=tmp_path, input_fn=lambda _: next(replies), output_fn=output.append)
+    assert detail in "\n".join(output)
+    assert "synthetic-private-canary" not in "\n".join(output)
+    assert _event_path(tmp_path).read_bytes() == ledger_before
 
 
 def test_cockpit_reuses_observed_events_for_duplicate_and_audit_metrics(

@@ -28,6 +28,7 @@ def test_build_bridge_status_report_marks_missing_historical_readiness_unavailab
     editions_root = reports_root.parent / "editions"
     programs_root = reports_root.parent / "programs"
 
+    _write_bridge_issue(tmp_path, archive_root, issue_number=77, source_issue=None, readiness_score=90)
     advance_trusted_baseline(
         EDITION_NAME,
         77,
@@ -36,7 +37,6 @@ def test_build_bridge_status_report_marks_missing_historical_readiness_unavailab
         editions_root=editions_root,
         programs_root=programs_root,
     )
-    _write_bridge_issue(tmp_path, archive_root, issue_number=77, source_issue=None, readiness_score=90)
     _write_bridge_issue(tmp_path, archive_root, issue_number=78, source_issue=77, readiness_score=None)
     _write_bridge_issue(tmp_path, archive_root, issue_number=79, source_issue=78, readiness_score=None)
 
@@ -65,6 +65,7 @@ def test_bridge_status_cli_graduate_marks_trusted_baseline(
     editions_root = reports_root.parent / "editions"
     programs_root = reports_root.parent / "programs"
 
+    _write_bridge_issue(tmp_path, archive_root, issue_number=77, source_issue=None, readiness_score=90)
     advance_trusted_baseline(
         EDITION_NAME,
         77,
@@ -73,7 +74,6 @@ def test_bridge_status_cli_graduate_marks_trusted_baseline(
         editions_root=editions_root,
         programs_root=programs_root,
     )
-    _write_bridge_issue(tmp_path, archive_root, issue_number=77, source_issue=None, readiness_score=90)
     for issue_number in range(78, 83):
         _write_bridge_issue(
             tmp_path,
@@ -121,6 +121,7 @@ def test_build_bridge_status_report_flags_passive_acceptance_risk(
     editions_root = reports_root.parent / "editions"
     programs_root = reports_root.parent / "programs"
 
+    _write_bridge_issue(tmp_path, archive_root, issue_number=77, source_issue=None, readiness_score=90)
     advance_trusted_baseline(
         EDITION_NAME,
         77,
@@ -129,7 +130,6 @@ def test_build_bridge_status_report_flags_passive_acceptance_risk(
         editions_root=editions_root,
         programs_root=programs_root,
     )
-    _write_bridge_issue(tmp_path, archive_root, issue_number=77, source_issue=None, readiness_score=90)
     _write_bridge_issue(tmp_path, archive_root, issue_number=78, source_issue=77, readiness_score=60)
     _write_bridge_issue(tmp_path, archive_root, issue_number=79, source_issue=78, readiness_score=92)
     _write_bridge_issue(tmp_path, archive_root, issue_number=80, source_issue=79, readiness_score=92)
@@ -158,6 +158,7 @@ def test_build_bridge_status_report_tolerates_malformed_archived_manifest(
     editions_root = reports_root.parent / "editions"
     programs_root = reports_root.parent / "programs"
 
+    _write_bridge_issue(tmp_path, archive_root, issue_number=77, source_issue=None, readiness_score=90)
     advance_trusted_baseline(
         EDITION_NAME,
         77,
@@ -166,7 +167,6 @@ def test_build_bridge_status_report_tolerates_malformed_archived_manifest(
         editions_root=editions_root,
         programs_root=programs_root,
     )
-    _write_bridge_issue(tmp_path, archive_root, issue_number=77, source_issue=None, readiness_score=90)
     archived_paths = _write_bridge_issue(tmp_path, archive_root, issue_number=78, source_issue=77, readiness_score=92)
 
     manifest_path = archived_paths.manifest_path
@@ -194,6 +194,7 @@ def test_bridge_status_cli_export_metrics_writes_json_file(
     editions_root = reports_root.parent / "editions"
     programs_root = reports_root.parent / "programs"
 
+    _write_bridge_issue(tmp_path, archive_root, issue_number=77, source_issue=None, readiness_score=90)
     advance_trusted_baseline(
         EDITION_NAME,
         77,
@@ -202,7 +203,6 @@ def test_bridge_status_cli_export_metrics_writes_json_file(
         editions_root=editions_root,
         programs_root=programs_root,
     )
-    _write_bridge_issue(tmp_path, archive_root, issue_number=77, source_issue=None, readiness_score=90)
 
     monkeypatch.setattr("src.commands.bridge_status.EDITIONS_ROOT", editions_root)
     monkeypatch.setattr("src.commands.bridge_status.PROGRAMS_ROOT", programs_root)

@@ -7,6 +7,8 @@
 
 ## Changelog
 
+- Last updated: 2026-11-08 — WorkIQ FQ-01 adds no reader-visible newsletter chrome; only native-identity-backed signals use pending-review and source-health surfaces. Semantic-only previews remain in memory and are not exposed as reviewable signals.
+
 - Last updated: 2026-07-08 — Incorporated `specs/fix-data-flow.md` (v1.0→v1.13, archived to `.archive/specs/fix-data-flow.md`) findings and closure. **Correction to the 2026-06-10 entry below**: direct code investigation during that spec's work found no trust-badge rendering markup existed anywhere in the codebase (not for risk, not even for milestone) — the 2026-06-10 claim that §3.6b/§3.6c were "already implemented" was verified false. Trust badges are genuinely implemented for the first time as of 2026-07-08: `templates/partials/truth_badge.j2` renders the `[DISPUTED ⚠]` marker (§3.6b) and the 5-level truth vocabulary (§3.6c) for risk (`health_banner.j2`, `continuity_exec_summary.j2`), milestone (`milestone_rows.j2`), and assumption (`lookback.j2`) sections. §3.6b/§3.6c's rendering rule updated below to match the actual, verified implementation convention: inline `style="..."` attributes, not `<span class="...">` CSS classes — this codebase's HTML surfaces have no `<style>` blocks anywhere (Outlook-safe rendering constraint), so a literal CSS-class instruction was never implementable as written.
 
 - Last updated: 2026-07-07 — Incorporated `specs/activation.md` (archived to `.archive/specs/activation.md`) UX-relevant surfaces into §12.10: the REV triage queue's `why:` EXPLAIN-min sub-line (extraction rationale, so an operator can verify a claim without opening the source EML) and the milestone section's degraded-to-legacy banner (no silent fallback when the `ProgramReality` read path is rolled back). Both surfaces already existed structurally (rationale field, rollback env flag); this is the first time they are documented as binding UX contract. No newsletter-body layout changes — both surfaces are triage-CLI/section-banner only.
@@ -266,6 +268,7 @@ Three nested `<table role="presentation">`:
 **Nav items:** Health → Decisions → Scorecards → Changes → Details
 
 Jump links use `#anchor` references. They work in browser/OWA but fail in Outlook reading pane — the nav bar serves as a visual TOC regardless.
+Navigation links and scorecard detail links target sections actually selected for rendering. When a target is suppressed, its label remains unlinked; chapter links use the rendered chapter anchor.
 
 ### 3.3 Health Banner (`partials/health_banner.j2`)
 
@@ -329,6 +332,8 @@ Author-curated — **never auto-generated**. Max 3 items, ≤25 words each. Sour
 - Item padding: `12px 16px`
 - Row separator: `border-top: 1px solid #E5E7EB`
 
+When an item's anchor matches a workstream section ID or its chapter-form anchor, the Details link uses the rendered anchor and is omitted if that workstream is not rendered. Other authored anchors remain unchanged.
+
 **Auto-suggestions:** System-generated top items shown with dashed border. Author acknowledges or replaces.
 
 **Forwarding context:** Optional manager note at top: label in 700-weight uppercase, quote in 14px/400 body.
@@ -350,6 +355,9 @@ Author-curated — **never auto-generated**. Max 3 items, ≤25 words each. Sour
 - Cell padding: `8px 12px`
 
 **Sort order:** risk_up → new → ETA shifts → risk_down → closed.
+
+Within a change-priority category, Blocked items rank ahead of High items.
+Blocked changes retain the same visible-row limit and ADO link behavior.
 
 **Date reference rule:** Always human dates ("vs May 5"), never issue numbers.
 
@@ -948,6 +956,7 @@ If `trend_description` (mapped from `KustoSectionData.message`) is absent:
 ```
 
 When `reference_url` is absent, `#` is used as the fallback. Charts are never inlined as images in Teams output.
+The same summary applies to chart members of the existing Fleet Parity group.
 
 
 ## §11 Freshness Report
@@ -984,6 +993,32 @@ Per-DRI message with item list, ADO links including "Edit in ADO" deep links.
 
 When catchup is enabled and unseen items exist, the CLI may emit a short session-start catchup banner before the requested command output. The banner is advisory, bounded, and summarizes the highest-salience unseen changes rather than replaying full history.
 
+`vertex ask` help explains that either the command's `--edition` or `--program` is required. An unscoped request exits 2 and directs the operator to `vertex list editions`, without running startup, routing or miss-log work. Edition errors give correction guidance; conflicting layouts are reported without exposing their paths. Template editions are refused for `ask`, not modified. The top-level `--edition` remains the default for natural-language fallback rather than an implicit option to an explicit `ask` child.
+
+When the default Kusto auth probe reports failed targets, `doctor --check-auth` displays a failed Kusto Access check and exits 1 in human, JSON and CSV formats; the existing Kusto operator gate also receives the failure. The detail names up to two failed targets, counts any others and gives generic access guidance without provider exception text. Target metadata still lists all probed targets rather than identifying every failure (RELO-W2.5b).
+
+Caught Kusto auth-probe exceptions also remain failures in doctor and operator-gate output, but expose only a fixed message and any fixed matched taxonomy pattern, not the exception text (RELO-W2.4u).
+
+For `doctor --kusto`, caught lightweight query-probe errors retain the query ID and failure status but show a fixed message and any fixed matched taxonomy pattern instead of exception text. Configured query IDs and targets remain visible in existing output and metadata (RELO-W2.4v).
+
+The default ADO probe in both `doctor` and `doctor --check-auth` reports caught failures with access guidance and any fixed matched taxonomy pattern, without exception text. The ADO Access and Token checks still fail; successful and caller-injected probe details remain unchanged (RELO-W2.4w).
+
+`doctor --metric-bindings` and `admin metric validate` retain binding IDs and failure status while replacing caught query/value errors from selected probes with fixed guidance and any fixed matched taxonomy pattern. WIQL guidance includes current iteration settings; specific missing-iteration detail is no longer displayed. Validator-generated field/schema diagnostics remain detailed, and other exception paths are unchanged (RELO-W2.4x).
+
+Selected-probe authentication failures still stop these commands, but the new exception uses fixed sign-in/access guidance and any fixed matched taxonomy pattern; the original provider message and chain are omitted. Credential-expiry metadata remains available to callers and is not sanitized (RELO-W2.4y).
+
+Selected-probe configuration errors use the same fixed diagnostic and taxonomy pattern rather than exposing parser content or local paths. Validator-generated field/schema details and configuration errors outside the probe remain unchanged (RELO-W2.4z).
+
+Selected-probe configuration, query and value errors also omit their original exception chain when a later failure propagates. Other traceback details and rich locals are not sanitized by this change (RELO-W2.11).
+
+For `doctor --metric-bindings`, malformed YAML during edition resolution now produces fixed syntax/value guidance without the parser excerpt, local file path or original exception chain. Unrelated doctor paths, non-parser configuration errors and unrelated traceback details remain unchanged. Operator gates can reach the binding resolver; selected earlier stages are handled separately (RELO-W2.12, RELO-W2.15).
+
+The same guidance applies to YAML parser errors wrapped as configuration errors during the metric-binding doctor's KPI-query load. Unrelated doctor paths remain unchanged; operator gates can reach this shared check after its earlier stages (RELO-W2.13).
+
+Malformed metric-registry YAML at that binding check produces fixed registry syntax guidance without the original parser chain. Direct registry loading remains unchanged (RELO-W2.14).
+
+For `doctor --operator-gates`, malformed YAML at the selected edition preflight and early resolution/auth/channel stages produces fixed operator-gates syntax guidance without the original parser chain. Standalone auth/channel, later stages and unrelated traceback details remain unchanged; earlier stage effects may already have occurred (RELO-W2.15).
+
 Backup creation failures, including SQLite capture failures, return exit 2 with an explicit error in the selected human/JSON/CSV format rather than a success count or an unformatted traceback (RELO-W0.13c). A verified checksum establishes the captured files' integrity, not complete workspace scope or operational recovery readiness.
 
 Actuation execute, including dry-run, refuses disabled/missing/mismatched rule admission, unapproved/gap-blocked proposals and invalid/future/stale proposal times before rendering an execution payload. Review and execute report invalid policy enablement or retained approval/time/TTL as blocked, exit 2, with correction-before-review guidance and no raw malformed payload. Dry-run remains write-free. Expiry detected at actual dispatch after CLI admission reports failure, exit 3, with review guidance rather than success or automatic renewal. Existing not-found/expired exclusion behavior remains exit 1. These bounded checks preserve the default live-write kill switch; a successful preview is not authority to enable it or evidence of generalized effectively-once delivery.
@@ -1006,6 +1041,8 @@ Recovery also refuses a marker/title match when other requested create fields ar
 
 New create attempts retain their original outbox reference in the manifest. Changed intent, destination, proposal/payload or missing retained rows report reconciliation-required failure before provider lookup, adoption audit or a new create. An attempted/referenced entry with missing intent cannot regenerate one; invalid supplied references fail explicitly. Legacy reference-free manifests remain supported without claiming retained binding. The new reference is local evidence, not authenticated approval or automatic recovery authority.
 
+When local action association raises after an ADO create is applied, expected errors emit a content-free warning while the entry remains applied; the warning is retained in its manifest reason and emitted again on replay. Unexpected errors propagate after an attempt to persist the applied outcome. No retry or association repair is inferred, and a missing or unmatched action identity is not detected by this exception warning (RELO-W4.9d).
+
 Verified create recovery restores a missing audit review after a partial signal/review write without duplicating or rewriting the visible signal. Existing operator review decisions remain unchanged, including dismissed/deferred decisions. Repair failure remains an explicit error and the manifest remains attempted; changed remote evidence refuses before repair. The recovered review uses recovery time, not an invented original review time; no historical sweep or atomic recovery certification.
 
 Repository backup output explicitly identifies its bounded subset and recovery as not assessed. Version 1.1 verification distinguishes listed-file integrity and declared canonical database capture obligations; absent stores and legacy scope remain unassessed. Restore with skipped preflight reports unchecked scope, not verification success. Existing JSON keys and CSV columns retain their order, with scope/qualification fields appended; unsupported mappings and malformed manifests fail explicitly (RELO-W0.13d).
@@ -1024,7 +1061,7 @@ Milestone assessment displays explicit dependency date margins once per selected
 
 Report/escalation descriptive risk trends require two known-risk observations with explicit increasing timezone-aware publication/assessment clocks. Otherwise omit the sparkline/trend rather than inventing dates, repeated samples or elapsed weeks. A valid comparison keeps the surface's existing two-observation labels; independent consecutive-high rule inputs remain unchanged. Publication time is not source-event time.
 
-New onboarding/setup creation requires a safe explicitly configured external workspace; unsafe, missing, conflicting or unsupported report mappings fail before creation state access. Setup output directories select only preview/session artifacts, never another production program home. Setup/onboard run without unrelated startup maintenance/catchup; setup demo/write-free dry-run stay offline, with no AI/ADO discovery. Existing explicit updates/migrations remain supported. Arbitrarily named programs roots remain blocked by the existing report mapper until its remaining selected-root consumers are wired; no state is moved automatically.
+New onboarding/setup creation requires a safe explicitly configured external workspace; unsafe, missing, conflicting or unsupported report mappings fail before creation state access. Setup output directories select only preview/session artifacts, never another production program home. Proposed and sample values in the HTML preview display as literal text, including markup characters; the existing layout and optional browser opening remain unchanged. Setup/onboard run without unrelated startup maintenance/catchup; setup demo/write-free dry-run stay offline, with no AI/ADO discovery. Existing explicit updates/migrations remain supported. Arbitrarily named programs roots remain blocked by the existing report mapper until its remaining selected-root consumers are wired; no state is moved automatically.
 
 Automatic onboarding validation requests the documented report dry-run, retaining output artifacts and gate results. It does not imply offline acquisition, write-free program initialization or suppressed browser opening (RELO-W0.70).
 
@@ -1069,6 +1106,8 @@ Installed review-sections and standalone apply-overrides also reject invalid wor
 - DraftState written for `--diff` comparison on next run
 - Edit locators shown in rendered HTML (file paths for `vertex edit`)
 
+`vertex migrate --dry-run` labels storage counts as a preview and reports that the backend was not switched. Forward previews refuse corrupt trajectory journals without repairing them; help warns that reverse preview may initialize SQLite schema or touch sidecars. Combining `--dry-run` with `--rebuild-analytics` is rejected rather than running a rebuild.
+
 ### 12.3 Exit Codes
 
 | Code | Meaning | Typical Trigger |
@@ -1100,6 +1139,8 @@ Optional summary ≤50 words. Backup to `.bak` before each write.
 
 `vertex doctor` validates: config files, template presence, ADO connectivity, archive index integrity, knowledge base referential integrity (`--kb`), override YAML validity, token freshness (<10 min → warn).
 
+**`vertex doctor --confirm-readiness`** reports unresolved risk override paths and safely fails when the selected YAML, inspected scorecard data or gather state cannot be read, or inspected names are missing, blank or contain terminal controls, line separators or surrogate code points. If it finds no visible risk overrides, it warns rather than asserting that all risks are confirmed. Gather freshness uses the selected edition's cadence. The archive check counts confirmed, not skipped, entries and warns when the selected index or an explicit entry kind cannot be assessed; it does not check archive integrity. The check is limited to selected local prerequisites; its result does not guarantee that the chosen issue will pass confirmation.
+
 **`vertex doctor --context`** validates the 20 Plane 1 program YAML files and emits:
 
 ```
@@ -1115,9 +1156,13 @@ Optional summary ≤50 words. Backup to `.bak` before each write.
 
 **`vertex doctor --context --fix-hints`** appends one `[Fix hint]` line per invariant violation and one per staleness flag with actionable remediation text. Fix hints are informational; exit code is unchanged.
 
-Selected-root context-gap ranking hides doctor `deep_context.why/what` missing-field observations once a current string is populated; clearing the field reopens the same fingerprint without deleting history. These detector fingerprints can be selected for the existing revision-bound solicitation and pending reply workflow. A repaired structural field is not an authenticated reply, semantic review, renewed review date or business-resolution approval; legacy change requests retain their meaning. When only historical observations remain, ranked-gap output explicitly reports no active context gaps.
+When the optional workstream registry is absent, the full context doctor report (without `--ranked`) displays an informational `Registry coverage` check in human, JSON and CSV output: registry-based workstream gap checks were not evaluated. Existing health and exit behavior remain unchanged. An existing empty registry retains its failure and manual population guidance; the doctor does not create or populate one. The separate ranked-history view does not run the gap detectors or display that check. If recorded structural gaps require a missing or unparseable registry, or their targets are incompatible with it, the view reports ranking unavailable without exposing the path or treating history as resolved, and exits nonzero.
 
-**Context Maintenance attention (RELO-W4.11x):** Triage human/JSON/CSV, cockpit findings/JSON and reviewer HTML expose active gaps even before a candidate exists, separately labeled from pending revisions. Show selected scope, observation/evaluation time, observation count, unknown impact/owner/due and next safe action. CSV gap/unavailable rows retain evaluation and safe-guidance metadata. Preserve existing proposal IDs, conflicts, exact revision evidence and origin-unverified manual-diff guidance. Proposal/gap-read failures display separately labeled fixed unavailable diagnostics, not an empty-success message; a proposal failure does not suppress valid gaps. Executable edition-specific guidance is offered only when the caller knows the edition; no guessed edition, automatic solicitation/apply or business-health color change.
+Malformed retained observations report a fixed gap-history repair diagnostic instead of partial or empty-success output; the ranked doctor exits nonzero. Independent pending revisions remain visible in context-maintenance views. Solicitation and reply intake refuse invalid observations without writing or exposing their contents.
+
+Selected-root context-gap ranking hides doctor `deep_context.why/what` missing-field observations once a current string is populated; clearing the field reopens the same fingerprint without deleting history. These detector fingerprints can be selected for the existing revision-bound solicitation and pending reply workflow. A repaired structural field is not an authenticated reply, semantic review, renewed review date or business-resolution approval; legacy change requests retain their meaning. Ranked counts describe recorded observations, not gather cycles or elapsed time. When only historical observations remain, ranked-gap output explicitly reports no active context gaps.
+
+**Context Maintenance attention (RELO-W4.11x):** Triage human/JSON/CSV, cockpit findings/JSON and reviewer HTML expose active gaps even before a candidate exists, separately labeled from pending revisions. Show selected scope, observation/evaluation time, observation count, unknown impact/owner/due and next safe action. CSV gap/unavailable rows retain evaluation and safe-guidance metadata. Preserve existing proposal IDs, conflicts, exact revision evidence and origin-unverified manual-diff guidance. Proposal, gap-history and registry-dependent ranking failures display fixed unavailable diagnostics, not an empty-success message; a failure in one projection does not suppress valid results from the other. Foreign-program observations invalidate the gap view before ranking rather than appearing as selected-program gaps. Ranking diagnostics name the selected registry and recorded targets, while the gap-history reference identifies the observations; the reviewer uses a general gap-evaluation heading. Executable edition-specific guidance is offered only when the caller knows the edition; no guessed edition, automatic solicitation/apply or business-health color change.
 
 **Authored review-rule coverage (RELO-W4.11y):** Inventory human/JSON output distinguishes an existing compatibility review rule from unassessed/unclassified authored files. State that containers and unenumerated shared/entity/field scope do not establish reviewed-document coverage. Preserve deterministic metadata-only reporting and existing error/exit behavior; do not display unknown review currency as current or healthy.
 
@@ -1133,6 +1178,8 @@ Metric and hypothesis histories label observed units, semantic-definition revisi
 
 Ordinary program-backed confirmation refuses source-selector drift and v1/absent captures with regenerate-and-review guidance, including when force is requested. Historical reads remain available; their availability is not confirmation eligibility. Rechecking under the archive lock preserves the same refusal if selectors change after the initial check (RELO-W2.8u).
 
+If a cooperating fact or source-selector operation holds a required confirmation fence, confirmation exits with a bounded retry message before checkpoint or archive mutation, even with force. A successful fence protects only the resources checked by that confirmation, not all draft inputs.
+
 Human CLI surfaces that consume confidence-bearing Zone A records must preserve that confidence inline rather than flattening the row to source/status text only.
 
 - `vertex signals --program <prog>` pending rows show: signal id, timestamp, source, workstream, review state, and confidence.
@@ -1140,6 +1187,8 @@ Human CLI surfaces that consume confidence-bearing Zone A records must preserve 
 - `vertex actions list|review --program <prog>` meeting-close summary blocks surface recurring cross-meeting patterns ahead of item-by-item review so operators can see repeated ownership and due-date threads before acting.
 
 `meeting-close` preserves valid exact-marker identity when a malformed peer triggers fallback. Reacquisition reports existing unchanged commitments as skipped rather than new queued identities; malformed/nonmarker content retains existing review behavior (RELO-W4.5a).
+
+When an action-history read used by `actions` or the `meeting-close` review queue encounters invalid or unreadable JSONL, the command exits nonzero with a fixed diagnostic that omits record contents and paths rather than reporting an empty successful queue. Historical snapshots and primary action families do not read the legacy action shim. A meeting-close queue failure does not roll back packet/proposal writes or an already-authorized ADO attempt that occurred earlier; dry-run does not queue actions (RELO-W4.9c).
 
 `risks history --program <prog> [--risk-id <id>]` labels **ARCHIVE OCCURRENCES** separately from **STATUS UPDATES**. Archive rows retain source links, recorded archive time/path and content hash, not current-risk judgment or a fabricated review date. Journal-only and archive-only matches succeed; empty unfiltered history is explicit, missing explicit risk IDs fail visibly. Invalid/incomplete archive or corrupt journal evidence fails before successful history output; reads never repair or rewrite retained artifacts (RELO-W4.3a).
 
@@ -1221,6 +1270,30 @@ Rich per-thread evidence remains opt-in and invisible to readers until its sourc
 
 Identity-rejected rich candidates produce a bounded count-only enrichment warning while valid native candidates continue (RELO-W3.3a). Do not print rejected identifiers, subjects or participants; a rejected-only result is not a successful empty collection.
 
+When a higher-priority structured identity is unusable, use a supported native thread or message fallback before resorting to the existing provisional preview (RELO-W3.3i). Unusable grouping fields must not redirect or crash gather, or become rich extraction identities after URL normalization. A no-native preview remains in memory and is not shown as a reviewable signal; it cannot contribute persisted provenance, evidence, actions, feedback context or corroboration. A supported thread fallback remains distinct from a native message ID. These boundaries do not establish provider identity or source completeness.
+
+Implementation and synthetic regression coverage now enforce these boundaries, but full-suite, provider and operational qualification remains open; do not infer that a preview is a verified source or that historical provisional records were migrated.
+
+Structured records rejected before admission because neither source identity nor the existing preview fallback is available also produce count-only diagnostics (RELO-W3.3h). Gather retains the quarantine through degraded cached prefetch, while enrichment combines it with later rich-identity rejections and does not advance zero-yield state for rejected-only results. The counts describe examined occurrences, not unique sources or mailbox completeness; accepted preview and valid partial results remain unchanged.
+
+Missing or invalid source times encountered during structured validation likewise produce count-only gather and enrichment diagnostics (RELO-W3.3f). Counts describe inspected record occurrences, not the entire mailbox or unique sources; ordinary out-of-window exclusions are not errors. Gather retains distinct diagnostics through cached prefetch, whose affected snapshot is degraded. If rejected candidates produce no rich evidence, do not advance the lane's zero-yield state; continue to show valid partial evidence. No rejected identifiers, subjects or participants appear in these diagnostics.
+
+An unavailable or malformed structured response is reported separately from a valid empty list (RELO-W3.3g). Gather counts affected attempted plans; prefetch caches a degraded diagnostic and restores the retryable discovery error on replay. Enrichment warns without advancing zero-yield state. Do not display response contents or query identifiers, infer a rejected-record count, or treat a valid empty response as proof of mailbox completeness.
+
+Malformed record shapes, terminal controls and disallowed mail URLs rejected by the existing structured validator also produce count-only diagnostics (RELO-W3.3l). Gather and cached prefetch retain the quarantine and appropriate safe operator guidance; enrichment warns and does not advance zero-yield state when no evidence survives. Valid partial evidence remains available. Counts describe examined occurrences, not unique sources or mailbox completeness, and do not expose rejected content or query identifiers.
+
+Catchup retains distinct WorkIQ quarantine and unusable-response diagnostics as pending signals without suppressing valid same-day observations (RELO-W3.3m). New event, banner and cached-result summaries identify WorkIQ and use static reason/count wording instead of fabricated ADO changes or raw query text. The existing three-summary limit remains; older cached summaries and previously dropped diagnostics are not repaired.
+
+When the existing query-plan budget prevents a plan from starting, gather reports optional WorkIQ degradation and watch/catchup retain a distinct pending notice that a plan was not attempted (RELO-W3.3n). Valid partial results remain available, and notices do not expose plan names or source contents. This notice does not mean that the entire WorkIQ phase has a hard deadline; prefetch does not currently apply this particular budget.
+
+Malformed WorkIQ snapshot payload shapes produce a generic warning and use the existing live fallback rather than appearing as an empty result or crashing (RELO-W3.3o). Valid empty snapshots remain usable; this does not establish source completeness or repair stored snapshots.
+
+An inconsistent prefetch snapshot identity or content address produces a generic warning instead of serving the mismatched payload (RELO-W3.3p). WorkIQ uses its existing live fallback. A mismatched manifest uses schedule-health's existing missing/info status with an explanation that the snapshot may be invalid; freshness does not certify payload integrity.
+
+Unreadable or invalid prefetch pointer and manifest metadata produces a generic warning and uses the same live fallback and missing/info schedule-health handling (RELO-W3.3q). No metadata contents or paths are included in the warning; ordinary missing pointers and uncommitted directories remain absence, and cached files are not repaired.
+
+An excessively nested WorkIQ cached payload produces a generic warning and uses the existing live fallback (RELO-W3.3r). The warning excludes payload and exception details, and stored files are not repaired.
+
 Qualification tooling is operator-only. It may show private subjects and previews only in the local interactive session and writes captures solely to an ignored/restricted directory. Committed documentation, examples, diagnostics, and test fixtures must not reveal mailbox identity, real participants, private subjects, or internal permalinks.
 
 ### 12.6.5 REV — Program-Context Intelligence Pipeline
@@ -1228,6 +1301,23 @@ Qualification tooling is operator-only. It may show private subjects and preview
 REV adds two operator-facing CLI surfaces:
 
 **`vertex rev run --program <id> --mailbox <upn> [--eml-inbox <dir>] [--ics-inbox <dir>] [--mock-fixture <path>]`** — runs one retrieval cycle and stages verified candidates in the existing `vertex ledger triage` queue. Output: one line per stage (enumerate → hydrate → extract → vault → stage → verify; stop=complete). `--eml-inbox <dir>` processes locally-exported `.eml` files from the given inbox directory (3-dir atomicity: inbox → claimed → processed). `--ics-inbox <dir>` processes exported `.ics` calendar files. `--mock-fixture` exercises the full P1 value chain with a JSON fixture. Neither flag provided exits 2 with the ADR-008 pivot reference (live Graph API permanently blocked by IT). No reader-visible newsletter chrome: staged candidates enter PENDING and follow the standard triage → project → draft pipeline. **EML privacy (W1-4 + W5-3):** the EML hydrator routes all email body text through `normalizer.normalize()` (PII scrub: emails/phones/SSNs/cards replaced with `[…_REDACTED]` tokens) then replaces person display names from From/To/Cc/Bcc headers with stable `PERSON_N` tokens before extraction. Raw names never reach the external model. The `PERSON_N`→original mapping is available in the hydrated content's route metadata for entity binding.
+
+If the selected enumerator is unsupported, the run reports `stop=unsupported`
+and exits 1. Its structured report does not copy provider-supplied entity or
+reason text. The last-cycle health view shows this outcome when the best-effort
+checkpoint succeeds; a checkpoint-write warning means an older summary may
+remain. The health report warns about the unsupported source and, for zero
+enumerated items, says that no items were scanned and shield availability was
+not assessed. `doctor --rev-health` exits 2 for this outcome; its existing
+shield-only exit 1 and other category exits are unchanged. Existing source
+logging is unchanged. For an unsupported last cycle, missing or invalid
+history, including an uninterpretable fallback count, is reported as
+unavailable; invalid retained history is not repaired or rewritten on this path.
+If the last-cycle write fails, health may instead
+follow the older category's existing history-recovery behavior.
+`doctor --rev-health` does not run unrelated root startup maintenance,
+catchup or tier-sink registration; this does not change its diagnostic output
+or guarantee that every existing reader is free of recovery side effects.
 
 **`vertex doctor --rev-health`** — REV subsystem diagnostic block appended to standard doctor output. Reports:
 - Enumeration-completion distribution (complete / truncated_by_budget / provider_limited / failed / unsupported — **categorical**, never a percentage of a theoretical total).
@@ -1443,6 +1533,10 @@ Full taxonomy, per-command flag reference, and rationale for the remaining `vert
 
 The `gather-run.v1` manifest lifecycle (§11.3, Tech Spec) is invisible to programs that leave `gather.run_manifest_mode` at its default `off`; once a program opts into `shadow`/`enforce`, `vertex gather` and `vertex doctor --storage` gain the surfaces below. Full per-flag reference is `tests/contracts/cli_reference_snapshot.md`; this section captures the binding UX contracts.
 
+Independently of manifest mode, a failed sprint-capacity fetch appears in gather's optional integration failures as `sprints/capacity` with safe retry guidance and exit 2 unless required-scope degradation takes precedence; usable sprint summaries remain available (RELO-W2.4e). The diagnostic omits provider error text and team/iteration identities. A successful empty capacity response is not a failure. Watch currently provides only a generic warning, not a structured capacity-failure result.
+
+An analytics channel failure also marks its `ado/analytics` ingestion record failed with a generic explanation (RELO-W2.4f). New failures caught by gather show a safe message and retry guidance instead of provider details; snapshot retry warnings omit provider text and field names (RELO-W2.4g). Replaying the same diagnostic at the same timestamp does not add another signal, but each gather still reports its failure (RELO-W2.4h). Historical records and direct loader exceptions are unchanged.
+
 **`vertex gather --program <id> --source-export <scope_id>=<count>`** (repeatable): records an operator-verified ADO source-export/UI membership count for one full-scope binding, reconciling that scope's committed `query_results` entry beyond the weak same-endpoint-rerun default. This is the order-2 completeness-oracle proof (§4.3); order-1 (an independent Kusto/OData validation query) remains explicitly deferred and is never fabricated from order-2 evidence.
 
 **`vertex doctor --storage --program <id>`** — Gather Completeness Oracle check (never blocks; `warn`/`ok` only):
@@ -1517,12 +1611,23 @@ Charts in email HTML are rendered as PNG images within a constrained frame:
 |----------|-------|
 | Max width | `608px` (matches content area) |
 | Border | `1px solid #E5E7EB` |
-| Alt text | `{title} chart` (required; must be insight-bearing when `message` is set) |
+| Alt text | `{title} chart`, followed by `: {message}` when a message is present |
 | Provenance footer | Query ID + source label + capture timestamp at 11px secondary text |
 | Degraded banner | Shown when `is_degraded=True` and `cache_captured_at` is set: `⚠️ Using cached data from {date}` |
 | Placeholder (zero rows) | 608×200px card, `#F3F4F6` background, `#6B7280` text, centered message |
 
 No MSO conditional branches for charts. No client-side script. No dark-mode CSS overrides.
+
+Chart title and message are rendered as literal text, including in alt
+attributes; capture and cached timestamps use the existing UTC formatter.
+This is not a general HTML sanitization or client-accessibility audit.
+Chart members of the existing Fleet Parity group use the same presentation;
+lookback email renders the group without changing its visibility rules.
+
+For declarative charts, legends and generated trend/alt text name the
+surviving plotted series when configured columns are missing. Missing
+columns are logged and skipped, not certified complete. Configured goal
+lines remain on the reduced-height retry.
 
 
 ## §15 Accessibility
@@ -1699,7 +1804,9 @@ Pass condition: the generated nudge EML renders within the standard email width,
 - Condensation rule: inline attribution chains are collapsed into short evidence phrases rather than repeated source lists.
 - Teams delivery compatibility is mandatory: if a brief is reposted into Teams or chat surfaces, it must remain legible as wrapped plain text with no dependency on HTML tables, color, or hover affordances.
 - **Program Narrative section (added `.archive/specs/arch-data-fix.md` v1.77):** a new, always-last section surfaces the latest QG-29-released `ProgramSynthesis` through-line plus its long-pole lines, when one exists for the program — same plain-text-first rendering as every other section, appended after `Now`/`Watch`/`Staged`/`Reference Docs`. Degrades to fully omitted (not an empty header) when no synthesis has been released yet, preserving today's exact output for every program that hasn't wired the synthesis pipeline in.
-- **Retained synthesis read failure (RELO-W2.8q):** Failed reads are not no-release omission: show a bounded operator diagnostic in the existing Now section without presenting it as narrative evidence. Cockpit shows a blocked synthesis-read finding and `synthesis unavailable (read failed)` terminal qualifier while preserving independent high risk/lineage. Guidance identifies source, affected program and safe reason with inspect-before-retry action; no raw exception/path/payload, automatic regeneration or new gate policy. Genuine absent/empty/unreleased behavior remains unchanged.
+- **Retained synthesis read failure (RELO-W2.8q):** Failed reads are not no-release omission: show a bounded operator diagnostic in the existing Now section without presenting it as narrative evidence. Cockpit shows a blocked synthesis-read finding and `synthesis unavailable (read failed)` terminal qualifier while preserving independent high risk/lineage. Guidance identifies source, affected program and safe reason with inspect-before-retry action; no raw exception/path/payload, automatic regeneration or new gate policy. Genuine absent/empty and valid unreleased behavior remains unchanged.
+- **Retained synthesis identity (RELO-W0.15u):** A candidate whose explicit program ID differs from the selected program uses the same read-failure diagnostics, without showing its identity or narrative. Missing IDs retain existing compatibility; this does not verify released-content hashes.
+- **Incomparable synthesis times (RELO-W0.15t):** Mixed naive/aware timestamps among released candidates use the same read-failure diagnostics instead of crashing either surface or showing a selected narrative. Do not expose timestamps or synthesis contents in the diagnostic; compatible single, uniform and unreleased cases remain unchanged.
 - **Brief synthesis editorial refusal (RELO-W2.8s):** Omit Program Narrative when its through-line or long poles violate built-in or selected-program editorial rules; show a safe Now diagnostic without repeating rejected wording. Missing optional extension files retain built-in checks. Invalid or unreadable present rules get a distinct configuration diagnostic, not silent defaults or a synthesis-read error. Preserve independent sections and retained release history; this does not certify every other rendered brief field.
 - **Complete brief editorial refusal (RELO-W2.8t):** Prohibited text anywhere in the final brief, or invalid/unreadable selected editorial rules, blocks brief display and artifact creation/replacement with a safe exit-2 diagnostic. Do not echo rejected wording or silently remove business findings. Clean formatting and retained evidence remain unchanged; dry runs produce no artifact.
 - **Blocked report preview (RELO-W0.2b):** Failed regular-report gates leave the draft available for review, with no EML recipients, a blocked subject marker and actual gate reasons in text/HTML. Clean and warning-only previews remain compatible; this does not authorize publication or sending.
@@ -1743,6 +1850,8 @@ Pass condition: generated cards stay within body/action limits, preserve risk em
 - Value/time-savings figures always render their confidence tier (`measured`/`calibrated`/`proxy`/`unavailable`) alongside the number — a figure is never presented as a bare percentage without its evidence tier visible.
 - A failed lineage read is not "no facts": terminal data trust shows `lineage unavailable (read failed)`, while JSON and HTML retain unknown coverage with the blocked `intelligence.lineage.read_failed` explanation and manual diagnostic guidance. Successful-empty lineage remains `not measured yet` with an informational finding. Known program risk and independently released synthesis remain visible; raw exception messages are not rendered.
 - Failed earned-autonomy state is unavailable trust with the blocked `trust.autonomy_ladder.read_failed` explanation, not L0, zero reviews or "not evaluated." Fresh and retained JSON/terminal/HTML/TUI keep the finding and independent business risk; guidance is manual inspection, not automatic repair or promotion (RELO-W0.15n).
+- Fresh actuation-journal diagnostics distinguish observed exact-status counts from unavailable evidence: the three reliability counts are JSON `null` when the selected journal is absent or cannot be inspected safely. Under the strict no-write policy, WAL-mode journals and any journal with SQLite sidecars are left unread and shown as unavailable. Absence is informational; unsafe or invalid evidence and observed uncertain, dead-letter, terminal-failure or compensation-required states use existing warnings. Findings omit payloads, failure reasons, raw exceptions and private paths. They do not imply provider reconciliation or a complete current exception inbox (RELO-W4.12c).
+- Invalid or unrecognized application receipts, or a schema-invalid release decision matched to a consumed run, make OM-4 audit coverage unavailable, with a content-free explanation in the existing cockpit finding rather than a measured subset. A partial ratio must not round to false zero or perfect coverage, and measured explanations identify recorded consumption and latest terminals. Valid no-consumption presentation is unchanged (RELO-W0.15q, RELO-W0.15s).
 - No formal §17 acceptance-mapping ID exists for this surface yet. Golden snapshots (`tests/golden/test_cockpit_html_golden.py`) and automated accessibility checks provide regression coverage, not independent audit certification. Record actual client-validation evidence, audit results, and any approved limitations privately; do not imply that automated coverage satisfies an independent human audit.
 - Retained show/explain (`--as-of`, with `explain --finding <id>`) labels the actual snapshot time and “Current source and action state not evaluated.” Blocked findings precede warnings in stable recorded order; every exception ID and its evidence remain reachable, including findings without a command. The action glance has at most three distinct commands; other findings remain available separately. No exceptions means “No blocked/warn findings in this retained snapshot,” not current clearance. Commands are historical guidance requiring current CLI revalidation; absent confidence, current authority, expiry/escalation, diff and expected effect are explicitly unavailable. Missing history differs from unreadable/inconsistent history, which fails without fallback. System-status borders are neutral, long evidence/commands wrap, and HTML has no action controls. These bounded synthetic checks do not certify a current inbox, independent accessibility audit or operator proficiency (RELO-W4.12b).
 Pass condition: the HTML render opens safely from a local file with no external requests, risk color is never reused for system-health state, every finding's explanation is either real data or an honest "not yet available" label, and no evidence-derived string can inject markup.

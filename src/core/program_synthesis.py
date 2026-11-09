@@ -321,6 +321,8 @@ def _synthesis_to_dict(synthesis: ProgramSynthesis) -> dict:
 
 
 def _synthesis_from_dict(payload: dict, *, program_id: str) -> ProgramSynthesis:
+    if "program_id" in payload and payload["program_id"] != program_id:
+        raise ValueError("Retained program synthesis program ID mismatch.")
     return ProgramSynthesis(
         program_id=program_id,
         ai_run_id=payload["ai_run_id"],
@@ -370,6 +372,8 @@ def load_latest_released_program_synthesis(
     ]
     if not released:
         return None
+    if len({candidate.generated_at.tzinfo is None for candidate in released}) > 1:
+        raise ConfigError("Retained program synthesis timestamps cannot be compared.")
     return max(released, key=lambda candidate: candidate.generated_at)
 
 

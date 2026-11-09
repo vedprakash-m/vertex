@@ -33,6 +33,7 @@ from src.core.ledger.verification_assertions import (
     load_verification_assertions,
 )
 from src.core.rev.run_state import RunState, load_run_states, state_distribution
+from src.core.rev.cycle_history import InvalidCycleHistory, read_cycle_history_without_repair
 from src.core.reality_completeness import (
     RealityCompletenessVector,
     compute_reality_completeness_vector,
@@ -368,7 +369,19 @@ def build_rev_health_report(
 
     # ----- REV-G8b local-import telemetry (P2-7) -----
     last_cycle = _read_last_cycle(program_id, programs_root)
-    history = _read_cycle_history(program_id, programs_root)
+    history_unavailable = False
+    if last_cycle is not None and last_cycle.stop_category == "unsupported":
+        history_path = _rev_dir(program_id, programs_root) / "cycle_history.jsonl"
+        try:
+            history = read_cycle_history_without_repair(history_path)
+            if history is None:
+                history = []
+                history_unavailable = True
+        except (InvalidCycleHistory, OSError):
+            history = []
+            history_unavailable = True
+    else:
+        history = _read_cycle_history(program_id, programs_root)
     # Fallback trend = last ≤3 cycles' llm_fallback_count (oldest→newest).
     fallback_trend = tuple(
         int(r.get(_HIST_FALLBACK_KEY, 0) or 0)
@@ -403,6 +416,13 @@ def build_rev_health_report(
     vault_size_warn = vault_count > VAULT_COUNT_WARN_THRESHOLD
 
     warnings: list[str] = []
+    if history_unavailable:
+        warnings.append("cycle_history_unavailable: history-based diagnostics were not assessed")
+    if last_cycle is not None and last_cycle.stop_category == "unsupported":
+        warning = "enumeration_unsupported: the selected source could not be enumerated"
+        if last_cycle.enumerated == 0:
+            warning += "; no items were scanned and shield availability was not assessed"
+        warnings.append(warning)
     if circuit_breaker:
         warnings.append(
             "circuit_breaker: LLM fallback is runaway (>50% last cycle or ≥3 consecutive "

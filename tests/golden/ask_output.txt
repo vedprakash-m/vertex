@@ -1,5 +1,5 @@
 Suggested command:
-vertex report --edition  --issue 12 --dry-run
+vertex report --edition acme_weekly --issue 12 --dry-run
 Routing: deterministic
 Warnings:
 - Current CLI does not support scoped reruns for "fabrikam only"; routing the nearest full-command equivalent instead.

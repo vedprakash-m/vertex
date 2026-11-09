@@ -10,6 +10,7 @@ import typer
 from src.commands.doctor_checks.models import ADOProbeResult, DoctorCheck
 from src.core.ado_client import ADOClient, ADO_RESOURCE
 from src.core.exceptions import AuthError, ConfigError, QueryError, QueryTimeoutError
+from src.core.failure_taxonomy import safe_failure_suffix
 from src.core.knowledge_store import get_shared_knowledge_root
 from src.core.query_builder import build_odata_filter
 from src.core.snapshot_store import read_snapshot
@@ -113,7 +114,9 @@ def probe_ado_access(bundle: Any) -> ADOProbeResult:
         )
         return ADOProbeResult(True, client.auth_method, len(rows), token_minutes_remaining, detail)
     except (AuthError, QueryError, QueryTimeoutError) as error:
-        return ADOProbeResult(False, "unknown", None, None, f"ADO probe failed: {error}")
+        diagnostic = f"ADO probe failed: {error}"
+        detail = f"ADO probe failed{safe_failure_suffix(diagnostic)}. Check access and retry."
+        return ADOProbeResult(False, "unknown", None, None, detail)
 
 
 def token_check(probe_result: ADOProbeResult) -> DoctorCheck:

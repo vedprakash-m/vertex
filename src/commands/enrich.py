@@ -132,7 +132,7 @@ def enrich_command(
             continue
 
         if per_thread_enabled and retrieval_config is not None:
-            per_thread_evidence = _extract_per_thread_evidence(
+            per_thread_evidence, has_incomplete_discovery = _extract_per_thread_evidence(
                 bridge=bridge,
                 entry=entry,
                 since_dt=since_dt,
@@ -141,15 +141,16 @@ def enrich_command(
                 edition=edition,
                 programs_root=programs_root,
             )
-            _record_workiq_lane_result(
-                lane_id=lane_id,
-                edition=edition,
-                program_id=program_id,
-                programs_root=programs_root,
-                observed_yield=len(per_thread_evidence),
-                as_of=as_of,
-                last_result="per_thread_evidence" if per_thread_evidence else "no_structured_evidence",
-            )
+            if per_thread_evidence or not has_incomplete_discovery:
+                _record_workiq_lane_result(
+                    lane_id=lane_id,
+                    edition=edition,
+                    program_id=program_id,
+                    programs_root=programs_root,
+                    observed_yield=len(per_thread_evidence),
+                    as_of=as_of,
+                    last_result="per_thread_evidence" if per_thread_evidence else "no_structured_evidence",
+                )
             for evidence in per_thread_evidence:
                 results.append({
                     "lane_id": lane_id,
@@ -397,8 +398,8 @@ def _extract_per_thread_evidence(
     retrieval_config: Any,
     edition: str,
     programs_root: Path,
-) -> tuple["WorkstreamEvidence", ...]:
-    """Run source-keyed FQ-02 retrieval without mixing approval across threads."""
+) -> tuple[tuple["WorkstreamEvidence", ...], bool]:
+    """Return source-keyed evidence and whether discovery was incomplete."""
 
     from dataclasses import replace
     from src.ai.content_extractor import ContentExtractionAgent, ExtractionContext
@@ -410,7 +411,7 @@ def _extract_per_thread_evidence(
     lane_name = str(entry.get("name") or lane_id).strip()
     terms = _per_thread_lane_terms(entry)
     if not lane_id or not terms:
-        return ()
+        return (), False
     request = DiscoveryRequest(
         lane_name=lane_name,
         terms=terms,
@@ -433,6 +434,18 @@ def _extract_per_thread_evidence(
             f" [WorkIQ: rejected {retrieval.rejected_identity_count} record(s) without stable source identity]",
             err=True,
         )
+    if retrieval.rejected_source_time_count:
+        typer.echo(
+            f" [WorkIQ: {retrieval.rejected_source_time_count} inspected record occurrence(s) rejected for missing or invalid source time]",
+            err=True,
+        )
+    if retrieval.rejected_invalid_record_count:
+        typer.echo(
+            f" [WorkIQ: {retrieval.rejected_invalid_record_count} inspected record occurrence(s) rejected for malformed or unsafe content]",
+            err=True,
+        )
+    if not retrieval.response_usable:
+        typer.echo(" [WorkIQ: structured discovery response unavailable or invalid]", err=True)
     evidences: list[WorkstreamEvidence] = []
     for enrichment in retrieval.enrichments:
         # The retriever already requested structured extraction. Reuse the parser
@@ -459,7 +472,10 @@ def _extract_per_thread_evidence(
             verification_state=VerificationState.MODEL_SELF_ATTESTED,
         )
         evidences.append(evidence)
-    return tuple(evidences)
+    return tuple(evidences), bool(
+        retrieval.rejected_identity_count or retrieval.rejected_source_time_count
+        or retrieval.rejected_invalid_record_count or not retrieval.response_usable
+    )
 
 
 def _per_thread_lane_terms(entry: dict[str, Any]) -> tuple[str, ...]:

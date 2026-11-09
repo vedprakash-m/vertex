@@ -174,7 +174,7 @@ def ingest_update_command(
     programs_root: Path = typer.Option(PROGRAMS_ROOT, hidden=True),
     reports_root: Path = typer.Option(REPORTS_ROOT, hidden=True),
 ) -> None:
-    """Parse a compact-update EML and stage ContextUpdateProposals (γ-Read Phase 3).
+    """Parse a compact-update EML and stage ContextUpdateProposals (Gamma-Read Phase 3).
 
     Apply proposals with: vertex context apply --edition EDITION --proposal-id ID
     """

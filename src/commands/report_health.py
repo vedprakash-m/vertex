@@ -143,6 +143,7 @@ def _build_health_summary(
     milestones: tuple[Milestone, ...] = (),
     milestone_assessments: tuple[MilestoneAssessment, ...] = (),
     risks: tuple[RiskEntry, ...] = (),
+    use_selected_empty_risks: bool = False,
     risk_assessments: tuple[FactAssessment, ...] = (),
     stale_risk_ids: tuple[str, ...] = (),
     program_id: str | None = None,
@@ -223,7 +224,7 @@ def _build_health_summary(
     resolved_risks = risks
     resolved_stale_risk_ids = stale_risk_ids
     resolved_risk_assessments: tuple[FactAssessment, ...] = risk_assessments
-    if not resolved_risks and program_id is not None and programs_root is not None:
+    if not resolved_risks and not use_selected_empty_risks and program_id is not None and programs_root is not None:
         archive_options: _ArchiveOptions = {"archive_root": archive_root} if archive_root is not None else {}
         resolved_reality = reality or ProgramReality.load(
             program_id, programs_root=programs_root,

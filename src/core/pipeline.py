@@ -167,6 +167,10 @@ class StageContext:
     gather_run_id: str | None = None
     gather_run_hash: str | None = None
     gather_run_manifest: GatherRunManifest | None = None
+    milestone_legacy_rollback: bool = False
+    risk_legacy_rollback_nonempty: bool = False
+    risk_reality_empty_selected: bool = False
+    risk_legacy_empty_selected: bool = False
 
 
 class PipelineStage(Protocol):

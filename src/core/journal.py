@@ -346,6 +346,11 @@ def _read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
             yield payload
 
 
+def _signal_workstream_ids_for_storage(signal: Signal) -> list[str] | None:
+    default_ids = (signal.workstream_id,) if signal.workstream_id is not None else ()
+    return list(signal.workstream_ids) if signal.workstream_ids != default_ids else None
+
+
 def _signal_to_record(signal: Signal) -> dict[str, Any]:
     return {
         "id": signal.id,
@@ -353,11 +358,8 @@ def _signal_to_record(signal: Signal) -> dict[str, Any]:
         "src": signal.source,
         "prog": signal.program_id,
         "ws": signal.workstream_id,
-        # BL-F2: only written when genuinely plural, so a record produced by
-        # this exact code stays byte-for-byte identical to before this field
-        # existed for the overwhelmingly common single-workstream case --
-        # __post_init__ derives it back from "ws" on read either way.
-        "ws_ids": list(signal.workstream_ids) if len(signal.workstream_ids) > 1 else None,
+        # Preserve the legacy representation when "ws" determines the full set.
+        "ws_ids": _signal_workstream_ids_for_storage(signal),
         "refs": list(signal.entity_refs),
         "text": signal.text,
         "raw_ref": signal.raw_ref,
@@ -392,9 +394,7 @@ def _signal_from_record(record: dict[str, Any]) -> Signal:
             else None
         ),
         gather_run_id=_optional_string(record.get("gather_run_id")),
-        # BL-F2: absent (old records) or null (single-workstream records,
-        # per _signal_to_record's own space-saving choice) both correctly
-        # fall through to Signal.__post_init__'s workstream_id-derived default.
+        # Absent or null falls through to the workstream_id-derived default.
         workstream_ids=tuple(str(entry) for entry in record["ws_ids"]) if record.get("ws_ids") else (),
     ))
 

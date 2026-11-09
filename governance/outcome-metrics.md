@@ -24,13 +24,13 @@ measurement.
 - **OM-5** — operator can complete a weekly cycle with zero forced
   overrides in the steady state.
 
-## Live measurement status (2026-07-22)
+## Measurement status
 
 | Metric | Confidence tier | Why |
 |---|---|---|
 | OM-1 | `unavailable` | Depends on BL-C2's AI safety boundary (semantic validation / hallucination detection) actually covering the REV extractor/judge path — the highest-consequence path, and the one BL-C2's own reopening found bypasses the gateway entirely. **OM-1 is unmeasurable on the path that matters until BL-C2 closes; that is itself the finding**, not a placeholder to paper over. |
-| OM-2 | `unavailable` | `src/core/actuation_outbox.py`'s outbox is not yet wired to a live ADO mutation domain (per `cockpit_builder.py`'s own `_build_reliability_summary` docstring) — there is currently no real create-task traffic to compute a duplicate-detection ratio from. The **related but distinct** `duplicate_preventions` counter (real, counts `actuation.duplicate_prevented.v1` ledger events from the search-before-create safeguard) is already surfaced in the reliability cockpit summary — it measures prevention *attempts*, not the OM-2 outcome itself. |
-| OM-4 | **`measured`** | `src/core/quality_gates/ai_release_audit.py`'s ledger events (`ai.application_receipt.v1`, `ai.release_decision.v1`) are real, `SOURCE_AUTHORITATIVE` records written on every AI consumption BL-C3 covers. `audit_coverage = (consumed AI runs with a durable 'released' terminal) / (all consumed AI runs)`. `1.0` = fully compliant. Wired into `ReliabilityCockpitSummary.audit_coverage` (previously a hardcoded `None` placeholder). |
+| OM-2 | `unavailable` | The create-task writer uses `src/core/actuation_outbox.py`, but wiring and local status counts do not establish provider traffic or measure duplicate entities. The **related but distinct** `duplicate_preventions` counter counts `actuation.duplicate_prevented.v1` events from the search-before-create safeguard; it measures prevention *attempts*, not the OM-2 outcome. |
+| OM-4 | `measured` or `unavailable` | For recognized application receipts with nonempty run IDs, `audit_coverage` is the fraction of observed consumed runs whose latest recorded terminal is `released`. Ordinary ratios are rounded to four decimals; a partial ratio retains its precision if rounding would falsely report zero or one. No consumed runs, an invalid/unrecognized receipt or run ID, or a schema-invalid release decision matched to a consumed run yields `unavailable`. Release decisions for unrelated or unidentifiable runs are outside this check. The observed-ledger result does not establish complete receipt collection, event-chain integrity or authorization at the time of consumption. It is surfaced through `ReliabilityCockpitSummary.audit_coverage`. |
 | OM-5 | `unavailable` | No measurement protocol is defined yet — "operator friction" needs an explicit answer to *what is timed, for whom, against what baseline* before anything can be counted. This is a product/protocol design decision (mirroring BL-D3's own pre-registration requirement), not something inferable from existing telemetry. See "What OM-5 needs" below. |
 
 **Never silently promote a tier.** `ValueConfidence.PROXY`/`UNAVAILABLE`
@@ -49,12 +49,11 @@ facts lacking a grounding record over the trailing 8 weeks.
 
 ## What OM-2 needs to become measurable
 
-An actual live mutation domain wired through `src/core/actuation_outbox.py`
-(tracked separately, not a BL-C7 item) so `remote_response_hash` values
-exist to correlate. Once real create-task traffic flows through the
-outbox, `compute_om2_duplicate_entities` (not yet written) can group
-succeeded outbox entries by `remote_response_hash` and flag any hash
-shared by more than one distinct `outbox_id`.
+A validated measurement protocol and qualified provider-correlated evidence
+are needed to determine duplicate ADO entities over the specified window.
+Outbox status, response hashes and prevention events alone do not establish
+complete provider outcomes or the absence of duplicates. No protocol or live
+traffic is established by the current unavailable result.
 
 ## What OM-5 needs
 
@@ -78,7 +77,7 @@ instruction to "specify what is timed, for whom, against what baseline."
 This document (and `src/core/outcome_metrics.py`) close when: (1) all four
 OM-1/2/4/5 metrics have a live, queryable value with an honest confidence
 tier surfaced in `vertex cockpit`/`vertex doctor` — **done as of 2026-07-22**
-(OM-4 measured; OM-1/2/5 honestly unavailable with a stated path to
+(OM-4 measurable for qualifying observed receipts; OM-1/2/5 honestly unavailable with a stated path to
 measurability) — and (2) before BL-C6's canary window is declared started,
 someone re-reads this table and confirms which metrics have flipped from
 `unavailable`/`proxy` to `measured` in the interim.

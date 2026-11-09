@@ -13,6 +13,7 @@ import yaml
 
 from src.core.catchup_scan import PROGRAMS_ROOT, WatchPollResult, WatchSource
 from src.core.catchup_state_store import CatchupState, get_catchup_lock_path, load_catchup_state, write_catchup_state
+from src.core.gather_channel_support import is_workiq_catchup_diagnostic, workiq_catchup_diagnostic_identity, workiq_catchup_diagnostic_summary
 from src.core.models_v2 import ReviewPolicy, Signal
 
 
@@ -297,10 +298,15 @@ def _require_scan_func(scan_func: ScanFunc | None) -> ScanFunc:
 
 def _build_catchup_signal(signal: Signal) -> Signal:
     raw_ref = signal.raw_ref or signal.id
+    identity = f"{signal.program_id}|vertex/catchup|{raw_ref}|{signal.timestamp.isoformat()}"
+    diagnostic = is_workiq_catchup_diagnostic(signal)
+    if diagnostic:
+        identity = f"{identity}|{workiq_catchup_diagnostic_identity(signal)}"
     return replace(
         signal,
-        id=str(uuid5(NAMESPACE_URL, f"{signal.program_id}|vertex/catchup|{raw_ref}|{signal.timestamp.isoformat()}")),
+        id=str(uuid5(NAMESPACE_URL, identity)),
         source="vertex/catchup",
+        text=workiq_catchup_diagnostic_summary(signal) if diagnostic else signal.text,
         metadata={
             **(signal.metadata or {}),
             "catchup_origin": signal.source,

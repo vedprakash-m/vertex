@@ -83,7 +83,7 @@ def test_decision_assumption_dependency_folds(tmp_path) -> None:
     )
 
     projection_path = tmp_path / "entities.sqlite3"
-    project_events_to_sqlite("acme", events, projection_path=projection_path)
+    project_events_to_sqlite("acme", events, projection_path=projection_path, programs_root=tmp_path / "programs")
     dump = canonical_projection_dump(projection_path)
 
     assert dump["proj_decision"][0]["decision_id"] == "decision:d1"

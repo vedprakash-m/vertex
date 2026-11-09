@@ -1,8 +1,67 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
-from src.core.models_v2 import IntegrationError
+from src.core.models_v2 import IntegrationError, Signal
+
+
+WORKIQ_INVALID_RECORD_OPERATOR_ACTION = (
+    "Check record format, remove terminal controls and verify permitted mail URLs before retrying."
+)
+WORKIQ_PLAN_BUDGET_MESSAGE = "WorkIQ query-plan budget exhausted; at least one plan was not attempted."
+WORKIQ_PLAN_BUDGET_OPERATOR_ACTION = "Review the WorkIQ query-plan time budget and retry."
+
+
+def is_workiq_catchup_diagnostic(signal: Signal) -> bool:
+    metadata = signal.metadata or {}
+    return (
+        (signal.source == "system" or (
+            signal.source == "vertex/catchup" and metadata.get("catchup_origin") == "system"
+        ))
+        and metadata.get("integration_source") == "workiq"
+        and (
+            metadata.get("quarantined") is True
+            or metadata.get("workiq_structured_response_unusable") is True
+            or metadata.get("workiq_plan_budget_exhausted") is True
+        )
+    )
+
+
+def workiq_catchup_diagnostic_identity(signal: Signal) -> str:
+    metadata = signal.metadata or {}
+    error = metadata.get("error")
+    value = error.strip() if isinstance(error, str) and error.strip() else signal.id
+    category = (
+        "quarantine" if metadata.get("quarantined") is True
+        else "budget" if metadata.get("workiq_plan_budget_exhausted") is True
+        else "discovery"
+    )
+    return hashlib.sha256(f"{category}\x1f{value}".encode("utf-8", errors="surrogatepass")).hexdigest()
+
+
+def workiq_catchup_diagnostic_summary(signal: Signal) -> str:
+    metadata = signal.metadata or {}
+    if metadata.get("quarantined") is not True:
+        if metadata.get("workiq_plan_budget_exhausted") is True:
+            return "WorkIQ: query-plan time budget exhausted; at least one plan was not attempted."
+        return "WorkIQ: structured discovery response unavailable or invalid."
+
+    count = metadata.get("quarantined_record_count")
+    description = (
+        f"{count} inspected record occurrence(s)"
+        if isinstance(count, int) and not isinstance(count, bool) and count > 0 else "records"
+    )
+    error = metadata.get("error")
+    reason = ""
+    if metadata.get("workiq_structured_record_invalid") is True:
+        reason = " for malformed or unsafe content"
+    elif isinstance(error, str):
+        if error.endswith("for missing or invalid source time."):
+            reason = " for missing or invalid source time"
+        elif error.endswith("for missing or invalid source identity."):
+            reason = " for missing or invalid source identity"
+    return f"WorkIQ: {description} quarantined{reason}."
 
 
 def integration_operator_action(source: str) -> str | None:

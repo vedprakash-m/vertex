@@ -35,7 +35,7 @@ def test_map_actions_to_work_items_resolves_workstream_and_owner() -> None:
                     "System.Id": 101,
                     "System.Title": "UD chunking",
                     "System.AreaPath": "Acme\\UD",
-                    "System.AssignedTo": {"uniqueName": "alice@contoso.com"},
+                    "System.AssignedTo": {"uniqueName": "alice@synthetic-02.example"},
                     "System.Rev": 17,
                 },
             }

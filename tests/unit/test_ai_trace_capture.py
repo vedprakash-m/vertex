@@ -59,12 +59,14 @@ def test_various_truthy_env_values(monkeypatch) -> None:
     assert not is_full_io_capture_enabled()
 
 
-def test_capture_failure_does_not_raise(monkeypatch) -> None:
+def test_capture_failure_does_not_raise(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("VERTEX_AI_TRACE_FULL_IO", "1")
     # An unwritable path (a directory component that's actually a file)
     # should be swallowed, not raised — corpus capture must never break a
     # live AI call.
-    bogus_parent = Path(__file__)  # a file, not a directory
+    bogus_parent = tmp_path / "capture_parent"
+    bogus_parent.write_text("unchanged", encoding="utf-8")
+    assert bogus_parent.is_relative_to(tmp_path)
     capture_ai_io(
         edition="acme_weekly",
         run_id="run-1",
@@ -73,3 +75,4 @@ def test_capture_failure_does_not_raise(monkeypatch) -> None:
         response_text="y",
         capture_file=bogus_parent / "sub" / "llm_trace_full_io.jsonl",
     )
+    assert bogus_parent.read_text(encoding="utf-8") == "unchanged"

@@ -1561,7 +1561,7 @@ def _generate_lookback_draft(
         edition_name,
         programs_root=programs_root,
     )
-    assumption_lifecycle = _build_lookback_assumption_lifecycle(
+    assumption_lifecycle, assumption_warnings = _build_lookback_assumption_lifecycle(
         program_id=resolved_edition.program.id if resolved_edition is not None else "",
         snapshots=snapshots,
         as_of=data_as_of,
@@ -1862,7 +1862,7 @@ def _generate_lookback_draft(
         for result in qg_report.failing_results
         if result.gate_id not in {"QG-4", "QG-5"}
     )
-    non_blocking_warnings = tuple(dict.fromkeys(tuple(hygiene_warnings) + gate_warnings))
+    non_blocking_warnings = tuple(dict.fromkeys(tuple(hygiene_warnings) + gate_warnings + assumption_warnings))
     has_blockers = bool(blocking_warnings)
     has_warnings = bool(non_blocking_warnings)
     diff_summary = None

@@ -96,8 +96,8 @@ def test_projection_order_independence(tmp_path) -> None:
 
     first_path = tmp_path / "first.sqlite3"
     second_path = tmp_path / "second.sqlite3"
-    project_events_to_sqlite("acme", events, projection_path=first_path)
-    project_events_to_sqlite("acme", tuple(reversed(events)), projection_path=second_path)
+    project_events_to_sqlite("acme", events, projection_path=first_path, programs_root=tmp_path / "programs")
+    project_events_to_sqlite("acme", tuple(reversed(events)), projection_path=second_path, programs_root=tmp_path / "programs")
 
     assert canonical_projection_dump(first_path) == canonical_projection_dump(second_path)
 
@@ -138,6 +138,7 @@ def test_correction_time_semantics(tmp_path) -> None:
         projection_path=current_path,
         as_of=datetime(2021, 12, 31, tzinfo=timezone.utc),
         knowledge_as_of=datetime(2026, 12, 31, tzinfo=timezone.utc),
+        programs_root=tmp_path / "programs",
     )
     project_events_to_sqlite(
         "acme",
@@ -145,6 +146,7 @@ def test_correction_time_semantics(tmp_path) -> None:
         projection_path=prior_knowledge_path,
         as_of=datetime(2021, 12, 31, tzinfo=timezone.utc),
         knowledge_as_of=datetime(2025, 12, 31, tzinfo=timezone.utc),
+        programs_root=tmp_path / "programs",
     )
 
     current_dump = canonical_projection_dump(current_path)
@@ -171,9 +173,9 @@ def test_replay_idempotence(tmp_path) -> None:
     projection_path = tmp_path / "current.sqlite3"
     second_projection_path = tmp_path / "current_second.sqlite3"
 
-    project_events_to_sqlite("acme", (event,), projection_path=projection_path)
+    project_events_to_sqlite("acme", (event,), projection_path=projection_path, programs_root=tmp_path / "programs")
     first_dump = canonical_projection_dump(projection_path)
-    project_events_to_sqlite("acme", (event,), projection_path=second_projection_path)
+    project_events_to_sqlite("acme", (event,), projection_path=second_projection_path, programs_root=tmp_path / "programs")
     second_dump = canonical_projection_dump(second_projection_path)
 
     assert first_dump == second_dump
@@ -209,6 +211,7 @@ def test_bitemporal_slice_hides_later_domain_events(tmp_path) -> None:
         (early, later),
         projection_path=projection_path,
         as_of=datetime(2025, 1, 31, tzinfo=timezone.utc),
+        programs_root=tmp_path / "programs",
     )
     dump = canonical_projection_dump(projection_path)
 
@@ -236,6 +239,7 @@ def test_knowledge_as_of_hides_later_recorded_backfill(tmp_path) -> None:
         projection_path=visible_path,
         as_of=datetime(2025, 1, 31, tzinfo=timezone.utc),
         knowledge_as_of=datetime(2026, 12, 31, tzinfo=timezone.utc),
+        programs_root=tmp_path / "programs",
     )
     project_events_to_sqlite(
         "acme",
@@ -243,6 +247,7 @@ def test_knowledge_as_of_hides_later_recorded_backfill(tmp_path) -> None:
         projection_path=hidden_path,
         as_of=datetime(2025, 1, 31, tzinfo=timezone.utc),
         knowledge_as_of=datetime(2025, 12, 31, tzinfo=timezone.utc),
+        programs_root=tmp_path / "programs",
     )
 
     assert [row["risk_id"] for row in canonical_projection_dump(visible_path)["proj_risk"]] == ["risk:r1"]
@@ -276,7 +281,7 @@ def test_in_memory_projection_matches_sqlite_projection(tmp_path) -> None:
     )
 
     projection_path = tmp_path / "projection.sqlite3"
-    project_events_to_sqlite("acme", events, projection_path=projection_path)
+    project_events_to_sqlite("acme", events, projection_path=projection_path, programs_root=tmp_path / "programs")
 
     assert project_events_to_memory("acme", events) == canonical_projection_dump(projection_path)
 

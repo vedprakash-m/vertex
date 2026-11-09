@@ -28,6 +28,15 @@ class DiscoveryRequest:
     limit: int = 8
 
 
+@dataclass(frozen=True, slots=True)
+class StructuredDiscoveryResult:
+    payload: dict[str, Any]
+    rejected_source_time_count: int
+    response_usable: bool
+    rejected_identity_count: int = 0
+    rejected_invalid_record_count: int = 0
+
+
 def build_structured_discovery_question(request: DiscoveryRequest) -> str:
     """Render the GA-S1 Probe-1 shape without allowing prompt control bytes."""
 
@@ -77,41 +86,94 @@ def validate_structured_discovery_payload(
     boundary test above should move with it.
     """
 
+    return validate_structured_discovery_payload_with_diagnostics(
+        payload, window_start=window_start, window_end=window_end,
+        limit=limit, allowed_web_hosts=allowed_web_hosts,
+    ).payload
+
+
+def validate_structured_discovery_payload_with_diagnostics(
+    payload: dict[str, Any] | None,
+    *,
+    window_start: date,
+    window_end: date,
+    limit: int,
+    allowed_web_hosts: frozenset[str] = _DEFAULT_MAIL_WEB_HOSTS,
+) -> StructuredDiscoveryResult:
+    """Return bounded records and count-only validation diagnostics."""
+
     if not 1 <= limit <= 50:
         raise ValueError("WorkIQ discovery limit must be from 1 through 50")
     parsed = coerce_workiq_json_payload(payload, root_key="emails")
     raw_records = parsed.get("emails") if isinstance(parsed, dict) else None
     if not isinstance(raw_records, list):
-        return {"emails": []}
+        return StructuredDiscoveryResult({"emails": []}, 0, False)
     start_at = datetime.combine(window_start, time.min, tzinfo=timezone.utc)
     end_at = datetime.combine(window_end, time.max, tzinfo=timezone.utc)
     valid: list[dict[str, Any]] = []
     seen_identities: set[str] = set()
+    rejected_source_time_count = 0
+    rejected_identity_count = 0
+    rejected_invalid_record_count = 0
     for raw in raw_records:
         if not isinstance(raw, dict) or _contains_terminal_escape(raw):
+            rejected_invalid_record_count += 1
             continue
         received_at = _parse_iso_datetime(raw.get("receivedDateTime"))
-        if received_at is None or not start_at <= received_at <= end_at:
+        if received_at is None:
+            rejected_source_time_count += 1
             continue
-        durable_identity = normalize_thread_id(_nonempty_string(raw.get("conversationId") or raw.get("threadId") or raw.get("id")))
-        if durable_identity is not None and _TRANSIENT_WORKIQ_ID_RE.fullmatch(durable_identity):
-            durable_identity = None
-        message_identity = normalize_thread_id(_nonempty_string(raw.get("id")))
-        if message_identity is not None and _TRANSIENT_WORKIQ_ID_RE.fullmatch(message_identity):
+        if not start_at <= received_at <= end_at:
+            continue
+        previous_identity = _normalize_discovery_identity(
+            raw.get("conversationId") or raw.get("threadId") or raw.get("id"),
+        )
+        native_identity = None
+        native_thread_identity = None
+        for field in ("conversationId", "threadId", "id"):
+            candidate = _normalize_discovery_identity(raw.get(field))
+            if candidate is not None and _is_native_workiq_identity(candidate):
+                native_identity = candidate
+                if field in ("conversationId", "threadId"):
+                    native_thread_identity = candidate
+                break
+        durable_identity = native_identity or previous_identity
+        message_identity = _normalize_discovery_identity(raw.get("id"))
+        if (
+            native_identity is not None and native_identity != previous_identity
+            and message_identity is not None and not _is_native_workiq_identity(message_identity)
+        ):
             message_identity = None
         identity = durable_identity or _semantic_email_identity(raw, received_at=received_at)
-        if identity is None or identity in seen_identities:
+        if identity is None:
+            rejected_identity_count += 1
+            continue
+        if identity in seen_identities:
             continue
         web_url = _nonempty_string(raw.get("webUrl"))
         if web_url is not None and not _is_allowed_web_url(web_url, allowed_hosts=allowed_web_hosts):
+            rejected_invalid_record_count += 1
             continue
         record = dict(raw)
-        record["id"] = message_identity or identity
-        if durable_identity is not None:
-            record["conversationId"] = durable_identity
-        elif not _nonempty_string(record.get("conversationId")):
-            record.pop("conversationId", None)
+        thread_identity = _normalize_discovery_identity(raw.get("threadId"))
+        if thread_identity is None or (
+            native_identity is not None and not _is_native_workiq_identity(thread_identity)
+        ):
             record.pop("threadId", None)
+        if message_identity is not None:
+            record["id"] = message_identity
+        elif native_identity is None:
+            record["id"] = identity
+        else:
+            record.pop("id", None)
+        if native_thread_identity is not None:
+            record["conversationId"] = native_thread_identity
+        elif native_identity is None and previous_identity is not None:
+            record["conversationId"] = previous_identity
+        else:
+            record.pop("conversationId", None)
+            if not _nonempty_string(raw.get("conversationId")):
+                record.pop("threadId", None)
         record["receivedDateTime"] = received_at.isoformat().replace("+00:00", "Z")
         if web_url is not None:
             record["webUrl"] = web_url
@@ -119,7 +181,9 @@ def validate_structured_discovery_payload(
         seen_identities.add(identity)
         if len(valid) >= limit:
             break
-    return {"emails": valid}
+    return StructuredDiscoveryResult(
+        {"emails": valid}, rejected_source_time_count, True, rejected_identity_count, rejected_invalid_record_count,
+    )
 
 
 def _clean_prompt_value(value: str, *, field_name: str) -> str:
@@ -137,6 +201,21 @@ def _nonempty_string(value: Any) -> str | None:
     return normalized or None
 
 
+def _normalize_discovery_identity(value: Any) -> str | None:
+    try:
+        identity = normalize_thread_id(_nonempty_string(value))
+    except ValueError:
+        return None
+    if identity is not None and _TRANSIENT_WORKIQ_ID_RE.fullmatch(identity):
+        return None
+    return identity
+
+
+def _is_native_workiq_identity(value: str) -> bool:
+    value = value.strip()
+    return bool(value) and not value.casefold().startswith("semantic:") and not _TRANSIENT_WORKIQ_ID_RE.fullmatch(value)
+
+
 def _contains_terminal_escape(value: Any) -> bool:
     if isinstance(value, str):
         return _TERMINAL_ESCAPE_RE.search(value) is not None
@@ -152,11 +231,11 @@ def _parse_iso_datetime(value: Any) -> datetime | None:
         return None
     try:
         parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
-    except ValueError:
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except (ValueError, OverflowError):
         return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
 
 
 def _semantic_email_identity(record: dict[str, Any], *, received_at: datetime) -> str | None:

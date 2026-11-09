@@ -68,6 +68,31 @@ def _build_manifest(issue_number: int = 78) -> RunManifest:
     )
 
 
+def test_read_archive_index_retains_legacy_empty_payload_compatibility(tmp_path: Path) -> None:
+    archive_root = tmp_path / "archive"
+    archive_dir = archive_root / EDITION_NAME
+    archive_dir.mkdir(parents=True)
+    for payload in ({}, {"issues": []}, {"issues": {}}, {"issues": ""}):
+        (archive_dir / "index.json").write_text(json.dumps(payload), encoding="utf-8")
+        assert read_archive_index(EDITION_NAME, archive_root).issues == ()
+
+
+def test_read_archive_index_retains_legacy_kind_coercion(tmp_path: Path) -> None:
+    archive_root = tmp_path / "archive"
+    archive_dir = archive_root / EDITION_NAME
+    archive_dir.mkdir(parents=True)
+    (archive_dir / "index.json").write_text(json.dumps({
+        "issues": [
+            {"issue_number": 1, "generated_at": "2030-01-01T00:00:00Z"},
+            {"issue_number": 2, "generated_at": "2030-01-01T00:00:00Z", "kind": "legacy"},
+        ],
+    }), encoding="utf-8")
+
+    assert tuple(entry.kind for entry in read_archive_index(EDITION_NAME, archive_root).issues) == (
+        "confirmed", "confirmed",
+    )
+
+
 def test_write_confirmed_issue_archives_outputs_and_updates_index(tmp_path: Path) -> None:
     archive_root = tmp_path / "archive"
     overrides_source = tmp_path / "overrides.yaml"
@@ -362,4 +387,3 @@ def test_get_all_green_streak_counts_only_consecutive_confirmed_issues(tmp_path:
 
     assert get_all_green_streak(EDITION_NAME, archive_root=archive_root, before_issue_number=3) == 2
     assert get_all_green_streak(EDITION_NAME, archive_root=archive_root, before_issue_number=4) == 0
-

@@ -5,9 +5,9 @@ from pathlib import Path
 from typing import Any
 
 from src.core import archive_store, journal, trajectory
-from src.core.models import ArchiveIndex, Snapshot
+from src.core.models import ArchiveIndex
 from src.core.models_v2 import Signal, SignalReviewDecision, SignalThreadLink, SignalUsageMarker, TrajectoryPoint
-from src.core.snapshot_store import ARCHIVE_ROOT, write_confirmed
+from src.core.snapshot_store import ARCHIVE_ROOT
 
 
 class FileSignalStore:
@@ -110,21 +110,6 @@ class FileArchiveStore:
 
     def read_index(self, edition: str) -> ArchiveIndex:
         return archive_store.read_archive_index(edition, archive_root=self._archive_root)
-
-    def write_confirmed(
-        self,
-        edition: str,
-        issue_number: int,
-        snapshot: Snapshot,
-        acquire_lock: bool = True,
-    ) -> None:
-        write_confirmed(
-            edition,
-            issue_number,
-            snapshot,
-            archive_root=self._archive_root,
-            acquire_lock=acquire_lock,
-        )
 
     def read_scorecard_history(self, edition: str) -> tuple[dict[str, Any], ...]:
         return archive_store.read_scorecard_history(edition, archive_root=self._archive_root)

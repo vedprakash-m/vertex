@@ -18,7 +18,7 @@ def test_parse_ai_workstreams_runs_text_through_safety_pipeline() -> None:
             "workstreams": [
                 {
                     "name": "Reliability",
-                    "description": "Track platform health with foo@gmail.com.",
+                    "description": "Track platform health with foo@example.com.",
                 }
             ]
         }

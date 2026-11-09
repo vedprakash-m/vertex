@@ -26,7 +26,7 @@ def test_dependency_walk_preserves_archive_context_for_every_visited_program(
     )
     assert result == (dependency,)
     assert boundary.call_args_list == [
-        call("first", programs_root=tmp_path / "programs", **options),
-        call("second", programs_root=tmp_path / "programs", **options),
+        call("first", programs_root=tmp_path / "programs", _shim_fact_types=("dependency.link",), **options),
+        call("second", programs_root=tmp_path / "programs", _shim_fact_types=("dependency.link",), **options),
     ]
     assert not list(tmp_path.iterdir())

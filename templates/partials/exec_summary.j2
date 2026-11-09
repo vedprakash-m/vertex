@@ -13,13 +13,13 @@
     <td style="padding:0 0 12px 0;">
       {% if exec_summary_chart.is_degraded and exec_summary_chart.cache_captured_at %}
       <div style="margin:0 0 8px 0; padding:6px 10px; background-color:#FFFBEB; border-left:3px solid #F59E0B;">
-        <p style="margin:0; font-size:11px; line-height:1.4; color:#92400E;">Chart data from {{ exec_summary_chart.cache_captured_at | datetimeformat if exec_summary_chart.cache_captured_at else "a prior gather" }} — live data unavailable</p>
+        <p style="margin:0; font-size:11px; line-height:1.4; color:#92400E;">Chart data from {{ exec_summary_chart.cache_captured_at | format_datetime if exec_summary_chart.cache_captured_at else "a prior gather" }} — live data unavailable</p>
       </div>
       {% endif %}
       {% if exec_summary_chart.reference_url %}<a href="{{ exec_summary_chart.reference_url }}" target="_blank" style="display:block; text-decoration:none;">{% endif %}
-      <img src="data:image/png;base64,{{ exec_summary_chart.chart_png_base64 }}" alt="{{ exec_summary_chart.title }} chart" style="display:block; width:100%; max-width:608px; height:auto; border:1px solid #E5E7EB;" width="608" />
+      <img src="data:image/png;base64,{{ exec_summary_chart.chart_png_base64 }}" alt="{{ exec_summary_chart.title | forceescape }} chart{% if exec_summary_chart.message %}: {{ exec_summary_chart.message | forceescape }}{% endif %}" style="display:block; width:100%; max-width:608px; height:auto; border:1px solid #E5E7EB;" width="608" />
       {% if exec_summary_chart.reference_url %}</a>{% endif %}
-      <p style="margin:4px 0 0 0; font-size:10px; line-height:1.4; color:#6B7280;">Source: {{ exec_summary_chart.source_label }} · query {{ exec_summary_chart.query_id }}{% if exec_summary_chart.cache_captured_at %} · cached {{ exec_summary_chart.cache_captured_at | datetimeformat }}{% elif exec_summary_chart.captured_at %} · {{ exec_summary_chart.captured_at | datetimeformat }}{% endif %}</p>
+      <p style="margin:4px 0 0 0; font-size:10px; line-height:1.4; color:#6B7280;">Source: {{ exec_summary_chart.source_label }} · query {{ exec_summary_chart.query_id }}{% if exec_summary_chart.cache_captured_at %} · cached {{ exec_summary_chart.cache_captured_at | format_datetime }}{% elif exec_summary_chart.captured_at %} · {{ exec_summary_chart.captured_at | format_datetime }}{% endif %}</p>
     </td>
   </tr>
   {% endif %}

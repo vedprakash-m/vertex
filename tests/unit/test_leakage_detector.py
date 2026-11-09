@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timezone
+from types import SimpleNamespace
 
 from src.core.models import Comment
-from src.core.leakage_detector import detect_leakage
+from src.core.leakage_detector import detect_leakage, load_approved_workiq_signals
 from src.core.models import Confidence, RiskLevel, WorkItem
 from src.core.models_v2 import Signal, TrajectoryPoint
 
@@ -65,6 +67,65 @@ def test_detect_leakage_flags_workiq_signals_without_post_signal_ado_update() ->
     assert len(report.events) == 2
     assert tuple(event.work_item_id for event in report.events) == (1001, 1002)
     assert report.owner_leakage_ratios == {"operator": 1.0}
+
+
+def test_detect_leakage_ignores_preview_only_workiq_signals() -> None:
+    signal = Signal(
+        id="preview",
+        timestamp=datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc),
+        source="workiq/email",
+        program_id="acme",
+        workstream_id=None,
+        entity_refs=("WI:1001",),
+        text="Provisional preview",
+        raw_ref="workiq:email:semantic:preview",
+        confidence=Confidence.MEDIUM,
+        metadata={
+            "entity_link_confidence": "high",
+            "message_id": "semantic:preview",
+            "native_message_id": "semantic:preview",
+        },
+    )
+
+    report = detect_leakage(
+        (_item(1001, area_path="One\\Adventure\\Acme", changed_at=datetime(2026, 5, 7, tzinfo=timezone.utc), owner="operator@example.com"),),
+        (signal,),
+        trajectory_loader=lambda work_item_id: (),
+    )
+
+    assert report.signal_counts_by_item == {}
+    assert report.leakage_counts_by_item == {}
+    assert report.events == ()
+
+
+def test_load_approved_workiq_signals_excludes_legacy_preview_identity(
+    monkeypatch,
+) -> None:
+    preview = Signal(
+        id="preview",
+        timestamp=datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc),
+        source="workiq/email",
+        program_id="acme",
+        workstream_id=None,
+        entity_refs=("WI:1001",),
+        text="Provisional preview",
+        raw_ref="workiq:email:semantic:preview",
+        confidence=Confidence.MEDIUM,
+        metadata={"message_id": "semantic:preview", "native_message_id": "semantic:preview"},
+    )
+    native = replace(preview, id="native", raw_ref="workiq:email:native", metadata={"native_message_id": "native"})
+    approved = SimpleNamespace(decision="approved")
+    store = type("Store", (), {
+        "read_reviews": lambda self, program_id: {"preview": approved, "native": approved},
+        "read": lambda self, program_id, start, end: (preview, native),
+    })()
+    monkeypatch.setattr("src.core.store_factory.build_signal_store_for_program_id", lambda *args, **kwargs: store)
+
+    signals = load_approved_workiq_signals(
+        "acme", as_of=datetime(2026, 5, 10, tzinfo=timezone.utc),
+    )
+
+    assert tuple(signal.id for signal in signals) == ("native",)
 
 
 def test_detect_leakage_cancels_when_ado_update_happens_after_signal_within_window() -> None:

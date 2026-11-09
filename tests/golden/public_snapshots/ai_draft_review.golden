@@ -1,0 +1,91 @@
+{
+  "counts": {
+    "cross_issue_flags": 1,
+    "data_gaps": 2,
+    "leadership_questions": 1,
+    "structural_notes": 6
+  },
+  "info_messages": [],
+  "suggestions": [
+    {
+      "action": "add_ado:301",
+      "category": "data_gap",
+      "confidence": "medium",
+      "reader_name": null,
+      "section_id": "exec_summary",
+      "suggestion_text": "\"Cache warmup safeguard\" is called out as a live risk without a quantified status update. Add the current blocker count, ETA, or direct ADO link so the claim is easier to defend."
+    },
+    {
+      "action": "add_kusto:velocity-p50",
+      "category": "data_gap",
+      "confidence": "medium",
+      "reader_name": null,
+      "section_id": "exec_summary",
+      "suggestion_text": "The draft does not surface the configured Deployment Velocity evidence. Add Kusto query velocity-p50 to back the narrative with a metric or chart."
+    },
+    {
+      "action": null,
+      "category": "leadership_question",
+      "confidence": "medium",
+      "reader_name": "Executive Reader",
+      "section_id": "exec_summary",
+      "suggestion_text": "Executive Reader will likely ask how the draft addresses accuracy. Match the answer to their preferred framing: Lead with wins + deltas."
+    },
+    {
+      "action": null,
+      "category": "cross_issue",
+      "confidence": "medium",
+      "reader_name": null,
+      "section_id": "exec_summary",
+      "suggestion_text": "\"Cache warmup safeguard\" has remained active since Issue 001. Add a resolution path, owner checkpoint, or escalation framing so the theme does not feel stalled."
+    },
+    {
+      "action": null,
+      "category": "structural",
+      "confidence": "high",
+      "reader_name": null,
+      "section_id": "exec_summary",
+      "suggestion_text": "The draft does not surface a concrete delta from the prior issue. Add what changed or trim the section so readers are not asked to reread static status."
+    },
+    {
+      "action": null,
+      "category": "structural",
+      "confidence": "high",
+      "reader_name": null,
+      "section_id": "exec_summary",
+      "suggestion_text": "Configured executive summary must open with the blocking lane or the key decision delta, not a generic status recap."
+    },
+    {
+      "action": null,
+      "category": "structural",
+      "confidence": "high",
+      "reader_name": null,
+      "section_id": "exec_summary",
+      "suggestion_text": "Configured authentic voice requires a concrete checkpoint, ETA, gate, or dated decision signal in each authored summary block."
+    },
+    {
+      "action": null,
+      "category": "structural",
+      "confidence": "high",
+      "reader_name": null,
+      "section_id": "exec_summary",
+      "suggestion_text": "Configured authentic voice requires concrete lane and dependency terms, not generic status prose."
+    },
+    {
+      "action": null,
+      "category": "structural",
+      "confidence": "high",
+      "reader_name": null,
+      "section_id": "ws:deployment",
+      "suggestion_text": "Configured authentic voice requires a concrete checkpoint, ETA, gate, or dated decision signal in each authored summary block."
+    },
+    {
+      "action": null,
+      "category": "structural",
+      "confidence": "high",
+      "reader_name": null,
+      "section_id": "ws:deployment",
+      "suggestion_text": "Configured authentic voice requires concrete lane and dependency terms, not generic status prose."
+    }
+  ]
+}

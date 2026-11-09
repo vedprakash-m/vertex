@@ -9,7 +9,7 @@
     {"id": 101, "fields": {
       "System.Id": 101, "System.WorkItemType": "Feature",
       "System.Title": "Acme release validation", "System.State": "Active",
-      "System.AssignedTo": {"displayName": "Release Owner", "uniqueName": "release@nudge-synth.local"},
+      "System.AssignedTo": {"displayName": "Release Owner", "uniqueName": "release@nudge-synth.example.net"},
       "System.AreaPath": "ExampleProject\\Acme", "System.IterationPath": "Example Sprint",
       "System.ChangedDate": "2026-06-18T18:00:00+00:00",
       "Microsoft.VSTS.Scheduling.TargetDate": "2026-07-01",
@@ -20,7 +20,7 @@
     {"id": 102, "fields": {
       "System.Id": 102, "System.WorkItemType": "Feature",
       "System.Title": "Acme release checklist", "System.State": "Active",
-      "System.AssignedTo": {"displayName": "Checklist Owner", "uniqueName": "checklist@nudge-synth.local"},
+      "System.AssignedTo": {"displayName": "Checklist Owner", "uniqueName": "checklist@nudge-synth.example.net"},
       "System.AreaPath": "ExampleProject\\Acme", "System.IterationPath": "Example Sprint",
       "System.ChangedDate": "2026-06-10T18:00:00+00:00",
       "Microsoft.VSTS.Scheduling.TargetDate": "2026-07-02",
@@ -30,7 +30,7 @@
     {"id": 103, "fields": {
       "System.Id": 103, "System.WorkItemType": "Feature",
       "System.Title": "Acme release schedule", "System.State": "Active",
-      "System.AssignedTo": {"displayName": "Schedule Owner", "uniqueName": "schedule@nudge-synth.local"},
+      "System.AssignedTo": {"displayName": "Schedule Owner", "uniqueName": "schedule@nudge-synth.example.net"},
       "System.AreaPath": "ExampleProject\\Acme", "System.IterationPath": "Example Sprint",
       "System.ChangedDate": "2026-06-09T18:00:00+00:00",
       "System.Tags": "RELEASE-ALT", "Custom.RiskAssessment": "On Track",
@@ -39,7 +39,7 @@
     {"id": 104, "fields": {
       "System.Id": 104, "System.WorkItemType": "Feature",
       "System.Title": "Acme release dependency", "System.State": "Active",
-      "System.AssignedTo": {"displayName": "Dependency Owner", "uniqueName": "dependency@nudge-synth.local"},
+      "System.AssignedTo": {"displayName": "Dependency Owner", "uniqueName": "dependency@nudge-synth.example.net"},
       "System.AreaPath": "ExampleProject\\Acme", "System.IterationPath": "Example Sprint",
       "System.ChangedDate": "2026-06-19T18:00:00+00:00",
       "Microsoft.VSTS.Scheduling.TargetDate": "2026-07-03",
@@ -50,7 +50,7 @@
     {"id": 105, "fields": {
       "System.Id": 105, "System.WorkItemType": "Feature",
       "System.Title": "Acme follow-up testing", "System.State": "Active",
-      "System.AssignedTo": {"displayName": "Testing Owner", "uniqueName": "testing@nudge-synth.local"},
+      "System.AssignedTo": {"displayName": "Testing Owner", "uniqueName": "testing@nudge-synth.example.net"},
       "System.AreaPath": "ExampleProject\\Acme", "System.IterationPath": "Example Sprint",
       "System.ChangedDate": "2026-06-08T18:00:00+00:00",
       "Microsoft.VSTS.Scheduling.TargetDate": "2026-07-10",
@@ -60,7 +60,7 @@
     {"id": 106, "fields": {
       "System.Id": 106, "System.WorkItemType": "Feature",
       "System.Title": "Acme follow-up documentation", "System.State": "Active",
-      "System.AssignedTo": {"displayName": "Documentation Owner", "uniqueName": "documentation@nudge-synth.local"},
+      "System.AssignedTo": {"displayName": "Documentation Owner", "uniqueName": "documentation@nudge-synth.example.net"},
       "System.AreaPath": "ExampleProject\\Acme", "System.IterationPath": "Example Sprint",
       "System.ChangedDate": "2026-06-18T18:00:00+00:00",
       "Microsoft.VSTS.Scheduling.TargetDate": "2026-07-11",
@@ -71,7 +71,7 @@
     {"id": 110, "fields": {
       "System.Id": 110, "System.WorkItemType": "Feature",
       "System.Title": "Acme priority review", "System.State": "Active",
-      "System.AssignedTo": {"displayName": "Review Owner", "uniqueName": "review@nudge-synth.local"},
+      "System.AssignedTo": {"displayName": "Review Owner", "uniqueName": "review@nudge-synth.example.net"},
       "System.AreaPath": "ExampleProject\\Acme", "System.IterationPath": "Example Sprint",
       "System.ChangedDate": "2026-06-17T18:00:00+00:00",
       "Microsoft.VSTS.Scheduling.TargetDate": "2026-07-01",

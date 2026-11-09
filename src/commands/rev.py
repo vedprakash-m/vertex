@@ -470,7 +470,7 @@ def rev_rotate_processed(
         PROGRAMS_ROOT, "--programs-root", help="Programs root directory.",
     ),
 ) -> None:
-    """Rotate stale/surplus files from ``processed/`` → ``processed/archive/`` (P2-14).
+    """Rotate stale/surplus files from ``processed/`` to ``processed/archive/`` (P2-14).
 
     Runs the same OA-4 retention rotation that fires automatically at the end of
     each ``vertex rev run`` cycle, but as a standalone housekeeping command so

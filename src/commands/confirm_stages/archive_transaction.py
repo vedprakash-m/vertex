@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from src.core.analytics_store import mark_analytics_dirty, project_confirmed_issue, record_override
 from src.core.archive_signing import (
@@ -15,6 +16,7 @@ from src.core.archive_signing import (
 from src.core.archive_store import ConfirmedIssueArchivePaths
 from src.core.archive_store import find_latest_confirmed_entry, read_archive_index
 from src.core.checkpoint_store import create_checkpoint_snapshot
+from src.core.exceptions import ConfigError
 from src.core.measurement_spine import IssueMetrics, write_issue_metrics
 from src.core.program_fact_store import _resolve_fact_db_root, load_program_facts, persist_program_fact_snapshot, resolve_fact_sor_mode
 from src.core.ledger.event_log import ConfidenceTier, TemporalConfidence, build_event_envelope, read_events, write_event
@@ -27,6 +29,12 @@ from src.core.signal_classification import SignalClass
 from src.core.snapshot_store import ArchiveLock, get_archive_root
 from src.core.gather_state_store import load_gather_state
 from src.core.maturity_engine import try_advance_earned_autonomy
+from src.core.workspace_lease import cooperative_capture_fence
+
+if TYPE_CHECKING:
+    from src.commands.confirm_stages.draft_loaders import ConfirmDraftManifest
+    from src.core.config_loader import ReportBundle
+    from src.core.quality_gates import QualityGateReport
 
 
 Artifacts = tuple[Any, ...]
@@ -57,6 +65,53 @@ class ArchiveTransactionResult:
     warnings: tuple[str, ...]
 
 
+def revalidate_evidence(
+    *,
+    edition_name: str,
+    issue_number: int,
+    reports_root: Path,
+    programs_root: Path,
+    program_id: str | None,
+    draft_state: Mapping[str, Any],
+    draft_manifest: ConfirmDraftManifest,
+    db_root: Path | None,
+    effective_family_modes: tuple[tuple[str, str], ...] | None,
+    load_bundle_fn: Callable[..., ReportBundle],
+    hash_jsonable_fn: Callable[[Any], str],
+    evaluate_fact_drift_fn: Callable[..., QualityGateReport],
+    validate_pinned_gather_run_fn: Callable[..., tuple[str, ...]],
+) -> None:
+    current_bundle = load_bundle_fn(
+        edition_name, reports_root=reports_root, programs_root=programs_root,
+    )
+    if hash_jsonable_fn(current_bundle.config) != draft_manifest.config_hash:
+        raise ConfigError(
+            "Confirmation configuration changed before archive write. "
+            "Re-run `vertex report --dry-run` and review the updated draft before confirming."
+        )
+    fact_drift = evaluate_fact_drift_fn(
+        draft_state=draft_state,
+        program_id=program_id,
+        db_root=db_root,
+        edition_name=edition_name,
+        issue_number=issue_number,
+        milestone_assessments=draft_manifest.milestone_assessments,
+        milestone_trajectory_snapshot=draft_manifest.milestone_trajectory_snapshot,
+        programs_root=programs_root,
+        effective_family_modes=effective_family_modes,
+    )
+    evidence_failures = tuple(result.message for result in fact_drift.failing_results)
+    if program_id is not None:
+        evidence_failures += validate_pinned_gather_run_fn(
+            program_id,
+            gather_run_id=draft_state.get("gather_run_id"),
+            gather_run_hash=draft_state.get("gather_run_hash"),
+            programs_root=programs_root,
+        )
+    if evidence_failures:
+        raise ConfigError("Confirmation evidence changed before archive write: " + "; ".join(evidence_failures))
+
+
 def execute_archive_transaction(
     *,
     edition_name: str,
@@ -80,6 +135,7 @@ def execute_archive_transaction(
     legacy_regex_extractor: bool,
     extraction_result: Any,
     extraction_mode: str,
+    evidence_fence_resources: tuple[Path, ...],
     revalidate_evidence_fn: Callable[[], None],
     build_confirmed_eml_bytes_fn: ConfirmedEmlBuilder,
     write_confirmed_fn: SnapshotWriter,
@@ -107,55 +163,56 @@ def execute_archive_transaction(
 
     selected_root_kwargs = {"programs_root": programs_root} if resolved_v2 is not None else {}
     with ArchiveLock(get_archive_root(edition_name, archive_root, **selected_root_kwargs)):
-        revalidate_evidence_fn()
-        create_checkpoint_snapshot(program_id, issue_number, programs_root=programs_root) if program_id is not None else None
+        with cooperative_capture_fence(*evidence_fence_resources):
+            revalidate_evidence_fn()
+            create_checkpoint_snapshot(program_id, issue_number, programs_root=programs_root) if program_id is not None else None
 
-        staged_snapshot_path = write_confirmed_fn(
-            edition=edition_name,
-            issue_number=issue_number,
-            snapshot=artifacts[2],
-            archive_root=archive_root,
-            promote=False,
-            acquire_lock=False,
-            **selected_root_kwargs,
-        )
-        archive_paths = write_confirmed_issue_fn(
-            edition=edition_name,
-            issue_number=issue_number,
-            snapshot=artifacts[2],
-            eml_bytes=build_confirmed_eml_bytes_fn(
-                bundle,
+            staged_snapshot_path = write_confirmed_fn(
+                edition=edition_name,
                 issue_number=issue_number,
-                as_of=artifacts[6].ado_data_as_of,
+                snapshot=artifacts[2],
+                archive_root=archive_root,
+                promote=False,
+                acquire_lock=False,
+                **selected_root_kwargs,
+            )
+            archive_paths = write_confirmed_issue_fn(
+                edition=edition_name,
+                issue_number=issue_number,
+                snapshot=artifacts[2],
+                eml_bytes=build_confirmed_eml_bytes_fn(
+                    bundle,
+                    issue_number=issue_number,
+                    as_of=artifacts[6].ado_data_as_of,
+                    html_body=artifacts[4],
+                    markdown_body=artifacts[5],
+                    suggested_subject=str(manifest.metadata.get("suggested_subject") or ""),
+                    generated_at=confirmed_at,
+                ),
                 html_body=artifacts[4],
                 markdown_body=artifacts[5],
-                suggested_subject=str(manifest.metadata.get("suggested_subject") or ""),
-                generated_at=confirmed_at,
-            ),
-            html_body=artifacts[4],
-            markdown_body=artifacts[5],
-            manifest=manifest,
-            overrides_source=get_overrides_path_fn(
-                edition_name,
-                reports_root,
-                issue_number=issue_number,
-                **({"programs_root": programs_root} if resolved_v2 is not None else {}),
-            ),
-            review_status_source=(review_status_path if review_status_path.exists() else None),
-            narratives_source_dir=(narrative_dir if narrative_dir.exists() else None),
-            continuation_contract_source=load_draft_continuation_contract_path_fn(
-                edition_name,
-                issue_number,
-                programs_root=programs_root,
-            ),
-            vitality_record=vitality_archive_entry,
-            chart_cache_entries=chart_cache_entries,
-            archive_root=archive_root,
-            snapshot_source=staged_snapshot_path,
-            snapshot_is_staged=True,
-            acquire_lock=False,
-            **selected_root_kwargs,
-        )
+                manifest=manifest,
+                overrides_source=get_overrides_path_fn(
+                    edition_name,
+                    reports_root,
+                    issue_number=issue_number,
+                    **({"programs_root": programs_root} if resolved_v2 is not None else {}),
+                ),
+                review_status_source=(review_status_path if review_status_path.exists() else None),
+                narratives_source_dir=(narrative_dir if narrative_dir.exists() else None),
+                continuation_contract_source=load_draft_continuation_contract_path_fn(
+                    edition_name,
+                    issue_number,
+                    programs_root=programs_root,
+                ),
+                vitality_record=vitality_archive_entry,
+                chart_cache_entries=chart_cache_entries,
+                archive_root=archive_root,
+                snapshot_source=staged_snapshot_path,
+                snapshot_is_staged=True,
+                acquire_lock=False,
+                **selected_root_kwargs,
+            )
 
         if resolved_v2 is not None:
             write_context_snapshot_for_issue_fn(

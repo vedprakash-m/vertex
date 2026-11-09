@@ -1,7 +1,7 @@
 from __future__ import annotations
 import pytest
 from pathlib import Path
-pytestmark = pytest.mark.skipif(not (Path(__file__).resolve().parents[2] / "editions").exists(), reason="Requires private data")
+pytestmark = pytest.mark.usefixtures("isolated_cli_startup")
 
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -66,6 +66,8 @@ metrics:
             str(tmp_path / "db"),
             "--metrics-root",
             str(metrics_root),
+            "--programs-root",
+            str(tmp_path / "programs"),
         ],
     )
 
@@ -145,6 +147,10 @@ def test_hypothesis_quickstart_rejects_duplicate_active_metric_hypothesis(tmp_pa
             "99.9",
             "--db-root",
             str(tmp_path / "db"),
+            "--programs-root",
+            str(tmp_path / "programs"),
+            "--metrics-root",
+            str(tmp_path / "metrics"),
         ],
     )
 
@@ -181,6 +187,10 @@ def test_hypothesis_quickstart_rejects_binding_metric_mismatch(tmp_path: Path) -
             "99.9",
             "--db-root",
             str(tmp_path / "db"),
+            "--programs-root",
+            str(tmp_path / "programs"),
+            "--metrics-root",
+            str(tmp_path / "metrics"),
         ],
     )
 
@@ -236,6 +246,8 @@ metrics:
             str(tmp_path / "db"),
             "--metrics-root",
             str(metrics_root),
+            "--programs-root",
+            str(tmp_path / "programs"),
         ],
     )
 
@@ -299,6 +311,8 @@ metrics:
             str(tmp_path / "db"),
             "--metrics-root",
             str(metrics_root),
+            "--programs-root",
+            str(tmp_path / "programs"),
         ],
     )
 
@@ -313,6 +327,11 @@ metrics:
 
 
 def test_hypothesis_quickstart_requires_binding_inputs_for_missing_binding(tmp_path: Path) -> None:
+    metrics_root = tmp_path / "metrics"
+    metrics_root.mkdir(parents=True)
+    (metrics_root / "acme.yaml").write_text(
+        "metrics:\n  - id: acme.availability\n    title: Acme availability\n" + "    unit: percent\n    aggregation: last\n", encoding="utf-8",
+    )
     result = runner.invoke(
         app,
         [
@@ -330,6 +349,10 @@ def test_hypothesis_quickstart_requires_binding_inputs_for_missing_binding(tmp_p
             "99.9",
             "--db-root",
             str(tmp_path / "db"),
+            "--programs-root",
+            str(tmp_path / "programs"),
+            "--metrics-root",
+            str(tmp_path / "metrics"),
         ],
     )
 
@@ -395,6 +418,8 @@ metrics:
             str(tmp_path / "db"),
             "--metrics-root",
             str(metrics_root),
+            "--programs-root",
+            str(tmp_path / "programs"),
         ],
     )
 
@@ -435,6 +460,8 @@ def test_hypothesis_quickstart_requires_metric_definition_before_inline_binding_
             str(tmp_path / "db"),
             "--metrics-root",
             str(tmp_path / "knowledge" / "metrics"),
+            "--programs-root",
+            str(tmp_path / "programs"),
         ],
     )
 
@@ -480,6 +507,8 @@ def test_hypothesis_quickstart_creates_metric_definition_inline_when_missing(tmp
             str(tmp_path / "db"),
             "--metrics-root",
             str(metrics_root),
+            "--programs-root",
+            str(tmp_path / "programs"),
         ],
     )
 
@@ -530,6 +559,8 @@ def test_hypothesis_quickstart_derives_binding_id_when_omitted(tmp_path: Path) -
             str(tmp_path / "db"),
             "--metrics-root",
             str(metrics_root),
+            "--programs-root",
+            str(tmp_path / "programs"),
         ],
     )
 
@@ -774,6 +805,8 @@ kpis:
             str(tmp_path / "db"),
             "--programs-root",
             str(programs_root),
+            "--metrics-root",
+            str(tmp_path / "metrics"),
         ],
     )
 
@@ -840,6 +873,8 @@ kpis:
             str(tmp_path / "db"),
             "--programs-root",
             str(programs_root),
+            "--metrics-root",
+            str(tmp_path / "metrics"),
         ],
     )
 
@@ -1225,6 +1260,8 @@ def test_hypothesis_quickstart_requires_unit_before_inline_metric_definition_cre
             str(tmp_path / "db"),
             "--metrics-root",
             str(tmp_path / "knowledge" / "metrics"),
+            "--programs-root",
+            str(tmp_path / "programs"),
         ],
     )
 

@@ -1,7 +1,4 @@
 from __future__ import annotations
-import pytest
-from pathlib import Path
-pytestmark = pytest.mark.skipif(not (Path(__file__).resolve().parents[2] / "editions").exists(), reason="Requires private data")
 
 from pathlib import Path
 
@@ -9,24 +6,50 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
+import cli
+import src.ai.intent_router as intent_router
 from cli import app
 from src.ai.intent_router import IntentRouter, IntentRouterError, RoutedInvocation
+from src.core.ledger.event_log import read_events
+
+
+pytestmark = pytest.mark.usefixtures("isolated_cli_startup")
 
 
 runner = CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def configured_editions(monkeypatch, tmp_path: Path) -> None:
+    for program in ("acme", "fabrikam"):
+        edition_dir = tmp_path / program / "editions"
+        edition_dir.mkdir(parents=True)
+        (edition_dir / f"{program}_weekly.yaml").write_text(
+            f"id: {program}_weekly\nprogram_id: {program}\n", encoding="utf-8"
+        )
+    monkeypatch.setattr(intent_router, "PROGRAMS_ROOT", tmp_path)
+    monkeypatch.setattr(cli, "PROGRAMS_ROOT", tmp_path)
+
+
 def test_ask_command_renders_deterministic_route_from_golden(monkeypatch, repo_root: Path) -> None:
     monkeypatch.setattr("src.commands.ask.IntentRouter.from_environment", classmethod(lambda cls: (_ for _ in ()).throw(IntentRouterError("VERTEX_AI_DEPLOYMENT or AZURE_OPENAI_DEPLOYMENT not set. Configure Azure OpenAI or use only supported deterministic intent routes."))))
 
-    result = runner.invoke(app, ["ask", "redo issue 12 with fabrikam only"])
+    result = runner.invoke(app, ["ask", "--edition", "acme_weekly", "redo issue 12 with fabrikam only"])
 
     expected = (repo_root / "tests" / "golden" / "ask_output.txt").read_text(encoding="utf-8")
     assert result.exit_code == 0
     assert result.stdout == expected
 
 
-def test_ask_command_uses_ai_fallback_when_router_is_available(monkeypatch) -> None:
+def test_ask_command_uses_ai_fallback_when_router_is_available(monkeypatch, tmp_path: Path) -> None:
+    route = IntentRouter.route
+    monkeypatch.setattr(
+        IntentRouter,
+        "route",
+        lambda self, request, *, default_edition="": route(
+            self, request, default_edition=default_edition, programs_root=tmp_path
+        ),
+    )
     monkeypatch.setattr(
         "src.commands.ask._build_router",
         lambda: IntentRouter(
@@ -48,17 +71,21 @@ def test_ask_command_uses_ai_fallback_when_router_is_available(monkeypatch) -> N
         ),
     )
 
-    result = runner.invoke(app, ["ask", "help me sanity-check the edition before I do anything else"])
+    result = runner.invoke(app, ["ask", "--edition", "acme_weekly", "help me sanity-check the edition before I do anything else"])
 
     assert result.exit_code == 0
     assert "vertex doctor --edition acme_weekly" in result.stdout
     assert "Routing: ai (intent_router.v1)" in result.stdout
+    events = read_events("acme", programs_root=tmp_path, repair_corruption=False)
+    assert [event.payload["terminal"] for event in events if event.event_type == "ai.release_decision.v1"] == [
+        "released",
+    ]
 
 
 def test_ask_command_surfaces_routing_failure(monkeypatch) -> None:
     monkeypatch.setattr("src.commands.ask._build_router", lambda: IntentRouter())
 
-    result = runner.invoke(app, ["ask", "do something entirely unsupported"])
+    result = runner.invoke(app, ["ask", "--edition", "acme_weekly", "do something entirely unsupported"])
 
     assert result.exit_code == 1
     assert "Intent routing failed:" in result.stdout
@@ -81,7 +108,7 @@ def test_route_request_raises_bad_parameter_on_failure(monkeypatch) -> None:
     monkeypatch.setattr("src.commands.ask._build_router", lambda: IntentRouter())
 
     with pytest.raises(typer.BadParameter, match="Intent routing failed:"):
-        route_request("do something entirely unsupported")
+        route_request("do something entirely unsupported", edition="acme_weekly")
 
 
 def test_root_cli_routes_default_nl_request(monkeypatch) -> None:

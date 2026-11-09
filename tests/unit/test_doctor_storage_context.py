@@ -1,3 +1,4 @@
+from contextlib import closing
 from pathlib import Path
 import sqlite3
 from unittest.mock import Mock
@@ -9,7 +10,7 @@ import src.commands.doctor_checks.storage_checks as storage
 
 def _seed_database(path: Path, *, rows: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         connection.execute("CREATE TABLE program_fact_revisions (id INTEGER PRIMARY KEY)")
         connection.executemany("INSERT INTO program_fact_revisions VALUES (?)", [(index,) for index in range(rows)])
 
@@ -113,7 +114,7 @@ def test_storage_row_count_does_not_initialize_or_repair_database(
 ) -> None:
     database = tmp_path / "vertex.sqlite3"
     if state == "no_table":
-        with sqlite3.connect(database) as connection:
+        with closing(sqlite3.connect(database)) as connection, connection:
             connection.execute("CREATE TABLE unrelated (id INTEGER)")
     elif state == "invalid":
         database.write_text("not a sqlite database", encoding="utf-8")

@@ -30,11 +30,11 @@ def _seed(knowledge_root: Path) -> None:
     write_people_directory(
         knowledge_root / "people_directory.yaml",
         (
-            PersonDirectory(entity_id="person:fresh", alias="fresh", status=PersonStatus.ACTIVE, contacts=(_contact("fresh@acme.com"),)),
-            PersonDirectory(entity_id="person:external", alias="external", status=PersonStatus.ACTIVE, contacts=(_contact("external@other.com"),)),
-            PersonDirectory(entity_id="person:optedout", alias="optedout", status=PersonStatus.ACTIVE, contacts=(_contact("optedout@acme.com"),)),
-            PersonDirectory(entity_id="person:inactive", alias="inactive", status=PersonStatus.DEPARTED, contacts=(_contact("inactive@acme.com"),)),
-            PersonDirectory(entity_id="person:externalinactive", alias="externalinactive", status=PersonStatus.DEPARTED, contacts=(_contact("externalinactive@other.com"),)),
+            PersonDirectory(entity_id="person:fresh", alias="fresh", status=PersonStatus.ACTIVE, contacts=(_contact("fresh@synthetic-01.example"),)),
+            PersonDirectory(entity_id="person:external", alias="external", status=PersonStatus.ACTIVE, contacts=(_contact("external@synthetic-08.example"),)),
+            PersonDirectory(entity_id="person:optedout", alias="optedout", status=PersonStatus.ACTIVE, contacts=(_contact("optedout@synthetic-01.example"),)),
+            PersonDirectory(entity_id="person:inactive", alias="inactive", status=PersonStatus.DEPARTED, contacts=(_contact("inactive@synthetic-01.example"),)),
+            PersonDirectory(entity_id="person:externalinactive", alias="externalinactive", status=PersonStatus.DEPARTED, contacts=(_contact("externalinactive@synthetic-08.example"),)),
         ),
     )
 
@@ -45,7 +45,7 @@ def test_fresh_candidate_passes_every_stage(tmp_path: Path) -> None:
 
     remaining, exclusions, _ = apply_precedence_pipeline(
         ("person:fresh",), knowledge_root=knowledge_root, scope_allow_external_guests=False,
-        allowed_domains=frozenset({"acme.com"}), opt_out_aliases=frozenset(),
+        allowed_domains=frozenset({"synthetic-01.example"}), opt_out_aliases=frozenset(),
     )
 
     assert remaining == ("person:fresh",)
@@ -58,7 +58,7 @@ def test_external_domain_excluded_at_tenant_guest_stage(tmp_path: Path) -> None:
 
     remaining, exclusions, _ = apply_precedence_pipeline(
         ("person:external",), knowledge_root=knowledge_root, scope_allow_external_guests=False,
-        allowed_domains=frozenset({"acme.com"}), opt_out_aliases=frozenset(),
+        allowed_domains=frozenset({"synthetic-01.example"}), opt_out_aliases=frozenset(),
     )
 
     assert remaining == ()
@@ -71,7 +71,7 @@ def test_external_domain_passes_when_scope_allows_external_guests(tmp_path: Path
 
     remaining, exclusions, _ = apply_precedence_pipeline(
         ("person:external",), knowledge_root=knowledge_root, scope_allow_external_guests=True,
-        allowed_domains=frozenset({"acme.com"}), opt_out_aliases=frozenset(),
+        allowed_domains=frozenset({"synthetic-01.example"}), opt_out_aliases=frozenset(),
     )
 
     assert remaining == ("person:external",)
@@ -84,7 +84,7 @@ def test_opted_out_person_excluded_at_opt_outs_stage(tmp_path: Path) -> None:
 
     remaining, exclusions, _ = apply_precedence_pipeline(
         ("person:optedout",), knowledge_root=knowledge_root, scope_allow_external_guests=False,
-        allowed_domains=frozenset({"acme.com"}), opt_out_aliases=frozenset({"optedout"}),
+        allowed_domains=frozenset({"synthetic-01.example"}), opt_out_aliases=frozenset({"optedout"}),
     )
 
     assert remaining == ()
@@ -97,7 +97,7 @@ def test_inactive_person_excluded_at_inactive_status_stage(tmp_path: Path) -> No
 
     remaining, exclusions, _ = apply_precedence_pipeline(
         ("person:inactive",), knowledge_root=knowledge_root, scope_allow_external_guests=False,
-        allowed_domains=frozenset({"acme.com"}), opt_out_aliases=frozenset(),
+        allowed_domains=frozenset({"synthetic-01.example"}), opt_out_aliases=frozenset(),
     )
 
     assert remaining == ()
@@ -110,7 +110,7 @@ def test_ambiguous_identity_excluded_when_no_directory_record_exists(tmp_path: P
 
     remaining, exclusions, _ = apply_precedence_pipeline(
         ("person:ghost",), knowledge_root=knowledge_root, scope_allow_external_guests=False,
-        allowed_domains=frozenset({"acme.com"}), opt_out_aliases=frozenset(),
+        allowed_domains=frozenset({"synthetic-01.example"}), opt_out_aliases=frozenset(),
     )
 
     assert remaining == ()
@@ -123,7 +123,7 @@ def test_a_candidate_matching_two_stages_is_excluded_only_at_the_earlier_one(tmp
 
     remaining, exclusions, _ = apply_precedence_pipeline(
         ("person:externalinactive",), knowledge_root=knowledge_root, scope_allow_external_guests=False,
-        allowed_domains=frozenset({"acme.com"}), opt_out_aliases=frozenset(),
+        allowed_domains=frozenset({"synthetic-01.example"}), opt_out_aliases=frozenset(),
     )
 
     assert remaining == ()
@@ -137,7 +137,7 @@ def test_multiple_candidates_are_independently_evaluated(tmp_path: Path) -> None
 
     remaining, exclusions, _ = apply_precedence_pipeline(
         ("person:fresh", "person:external", "person:inactive"), knowledge_root=knowledge_root,
-        scope_allow_external_guests=False, allowed_domains=frozenset({"acme.com"}), opt_out_aliases=frozenset(),
+        scope_allow_external_guests=False, allowed_domains=frozenset({"synthetic-01.example"}), opt_out_aliases=frozenset(),
     )
 
     assert remaining == ("person:fresh",)
@@ -171,7 +171,7 @@ def test_active_delegation_routes_without_excluding_the_original_person(tmp_path
 
     remaining, exclusions, routings = apply_precedence_pipeline(
         ("person:fresh",), knowledge_root=knowledge_root, scope_allow_external_guests=False,
-        allowed_domains=frozenset({"acme.com"}), opt_out_aliases=frozenset(), as_of=_NOW,
+        allowed_domains=frozenset({"synthetic-01.example"}), opt_out_aliases=frozenset(), as_of=_NOW,
     )
 
     assert remaining == ("person:fresh",)
@@ -187,7 +187,7 @@ def test_kill_switch_off_leaves_stage_three_a_true_pass_through(tmp_path: Path) 
 
     remaining, exclusions, routings = apply_precedence_pipeline(
         ("person:fresh",), knowledge_root=knowledge_root, scope_allow_external_guests=False,
-        allowed_domains=frozenset({"acme.com"}), opt_out_aliases=frozenset(), as_of=_NOW,
+        allowed_domains=frozenset({"synthetic-01.example"}), opt_out_aliases=frozenset(), as_of=_NOW,
     )
 
     assert remaining == ("person:fresh",)
@@ -200,7 +200,7 @@ def test_unbootstrapped_registry_leaves_stage_three_a_true_pass_through(tmp_path
 
     remaining, exclusions, routings = apply_precedence_pipeline(
         ("person:fresh",), knowledge_root=knowledge_root, scope_allow_external_guests=False,
-        allowed_domains=frozenset({"acme.com"}), opt_out_aliases=frozenset(), as_of=_NOW,
+        allowed_domains=frozenset({"synthetic-01.example"}), opt_out_aliases=frozenset(), as_of=_NOW,
     )
 
     assert remaining == ("person:fresh",)
@@ -215,7 +215,7 @@ def test_revoked_delegation_produces_no_routing(tmp_path: Path) -> None:
 
     remaining, exclusions, routings = apply_precedence_pipeline(
         ("person:fresh",), knowledge_root=knowledge_root, scope_allow_external_guests=False,
-        allowed_domains=frozenset({"acme.com"}), opt_out_aliases=frozenset(), as_of=_NOW,
+        allowed_domains=frozenset({"synthetic-01.example"}), opt_out_aliases=frozenset(), as_of=_NOW,
     )
 
     assert remaining == ("person:fresh",)

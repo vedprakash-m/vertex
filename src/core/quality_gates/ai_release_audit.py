@@ -29,7 +29,9 @@ from enum import Enum
 from pathlib import Path
 
 from src.core.edition_resolver import PROGRAMS_ROOT
+from src.core.exceptions import ConfigError
 from src.core.ledger.event_log import ConfidenceTier, TemporalConfidence, build_event_envelope, read_events, write_event
+from src.core.ledger.event_types import validate_event_payload
 from src.core.ledger.source_refs import OperatorAssertionRef
 from src.core.quality_gates.models import GateEvaluation
 
@@ -176,13 +178,17 @@ def released_terminal_for_run(
 ) -> ReleaseTerminal | None:
     """The most recently recorded ``ai.release_decision.v1`` terminal for
     this run, or ``None`` if no terminal decision has been recorded yet."""
-    events = read_events(program_id, programs_root=programs_root)
+    events = read_events(program_id, programs_root=programs_root, repair_corruption=False)
     latest: ReleaseTerminal | None = None
     for event in events:
         if event.event_type != "ai.release_decision.v1":
             continue
         if event.payload.get("ai_run_id") != ai_run_id:
             continue
+        try:
+            validate_event_payload(event.event_type, event.payload)
+        except ValueError as error:
+            raise ConfigError("Invalid AI release decision payload for this run.") from error
         latest = ReleaseTerminal(event.payload["terminal"])
     return latest
 

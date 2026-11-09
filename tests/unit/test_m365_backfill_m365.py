@@ -25,7 +25,7 @@ def test_m365_backfiller_discovers_structured_and_summary_results() -> None:
         AgencyCapabilities(available=True, has_workiq=True, tier="msft"),
         responses=[
             {"items": [{"id": "mail-1", "subject": "Issue 051", "webUrl": "https://outlook.office.com/mail/1"}]},
-            {"response": "Found 3 feedback threads involving Rushi and newsletter drafts."},
+            {"response": "Found 3 feedback threads involving ExampleUser and newsletter drafts."},
         ],
     )
     backfiller = M365Backfiller(bridge)
@@ -69,7 +69,7 @@ def test_m365_backfiller_discovers_structured_and_summary_results() -> None:
     ]
     assert discoveries["newsletters"][0].source_id == "mail-1"
     assert discoveries["newsletters"][0].permalink == "https://outlook.office.com/mail/1"
-    assert discoveries["feedback"][0].summary == "Found 3 feedback threads involving Rushi and newsletter drafts."
+    assert discoveries["feedback"][0].summary == "Found 3 feedback threads involving ExampleUser and newsletter drafts."
 
 
 def test_m365_backfiller_requires_workiq_access() -> None:

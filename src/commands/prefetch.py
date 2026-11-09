@@ -100,7 +100,17 @@ def prefetch_command(
         from src.commands.gather_pipeline.workiq_prefetch_stage import workiq_signals_to_payload
         from src.core.prefetch_store import write_prefetch_snapshot
 
-        completeness = "complete" if error is None and signals else ("degraded" if error is not None else "partial")
+        has_workiq_diagnostic = any(
+            signal.source == "system"
+            and (signal.metadata or {}).get("integration_source") == "workiq"
+            and (
+                (signal.metadata or {}).get("quarantined") is True
+                or (signal.metadata or {}).get("workiq_structured_response_unusable") is True
+                or (signal.metadata or {}).get("workiq_plan_budget_exhausted") is True
+            )
+            for signal in signals
+        )
+        completeness = "degraded" if error is not None or has_workiq_diagnostic else ("complete" if signals else "partial")
         manifest = write_prefetch_snapshot(
             program_id=program,
             channel=channel,

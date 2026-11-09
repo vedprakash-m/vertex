@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+from contextlib import closing
 from datetime import date, datetime
 from pathlib import Path
 import sqlite3
+
+import pytest
 
 from src.ai.cost_guard import CostGuard
 from src.commands.doctor_checks.models import directory_size, format_bytes
 from src.commands.doctor_checks.storage_checks import (
     _ai_proposal_queue_check,
     _tag_hygiene_check,
+    _count_fact_store_rows,
     _cost_ledger_storage_check,
     _dc01_root_cleanliness_check,
     _dc02_runtime_layout_check,
@@ -73,7 +77,7 @@ def test_program_sqlite_storage_check_missing_db_is_ok_without_confirmed_issues(
 
 def test_sqlite_storage_check_warns_when_journal_mode_is_not_wal(tmp_path: Path) -> None:
     db_path = tmp_path / "demo.db"
-    with sqlite3.connect(db_path) as connection:
+    with closing(sqlite3.connect(db_path)) as connection, connection:
         connection.execute("PRAGMA journal_mode=DELETE")
         connection.execute("CREATE TABLE sample(id INTEGER PRIMARY KEY)")
         connection.commit()
@@ -92,7 +96,7 @@ def test_sqlite_storage_check_warns_when_journal_mode_is_not_wal(tmp_path: Path)
 def test_sqlite_storage_check_warns_when_path_is_outside_expected_root(tmp_path: Path) -> None:
     db_path = tmp_path / "custom-root" / "demo.db"
     db_path.parent.mkdir(parents=True)
-    with sqlite3.connect(db_path) as connection:
+    with closing(sqlite3.connect(db_path)) as connection, connection:
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("CREATE TABLE sample(id INTEGER PRIMARY KEY)")
         connection.commit()
@@ -106,6 +110,80 @@ def test_sqlite_storage_check_warns_when_path_is_outside_expected_root(tmp_path:
 
     assert result.status == "warn"
     assert "outside" in result.detail
+
+
+@pytest.mark.parametrize(
+    ("reader", "contents", "expected"),
+    [
+        ("count", "rows", 2),
+        ("count", "no_table", 0),
+        ("count", "invalid", 0),
+        ("storage", "rows", "warn"),
+        ("storage", "invalid", "fail"),
+    ],
+)
+def test_storage_doctor_closes_sqlite_read_connections(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reader: str, contents: str, expected: int | str,
+) -> None:
+    db_path = tmp_path / "demo.db"
+    if contents == "invalid":
+        db_path.write_bytes(b"not a sqlite database")
+    else:
+        with closing(sqlite3.connect(db_path)) as connection, connection:
+            if contents == "rows":
+                connection.execute("CREATE TABLE program_fact_revisions (id TEXT)")
+                connection.executemany("INSERT INTO program_fact_revisions VALUES (?)", [("one",), ("two",)])
+            else:
+                connection.execute("CREATE TABLE other (id TEXT)")
+
+    before = db_path.read_bytes()
+    original_connect = sqlite3.connect
+    opened = []
+
+    def tracked_connect(*args, **kwargs):
+        assert kwargs.get("uri") is True
+        assert args[0].endswith("?mode=ro")
+        connection = original_connect(*args, **kwargs)
+        opened.append(connection)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", tracked_connect)
+    try:
+        if reader == "count":
+            result = _count_fact_store_rows(db_path)
+        else:
+            check = _sqlite_storage_check("SQLite", db_path, expected_location=None, prefix="")
+            result = check.status
+            assert check.label == "SQLite"
+            if contents == "rows":
+                assert check.metadata == {
+                    "db_path": str(db_path),
+                    "integrity_check": "ok",
+                    "journal_mode": "delete",
+                    "location_warning": False,
+                    "size_bytes": len(before),
+                    "wal_size_bytes": 0,
+                }
+            else:
+                assert "Unable to read" in check.detail
+        assert result == expected
+        assert db_path.read_bytes() == before
+        assert len(opened) == 1
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            opened[0].execute("SELECT 1")
+    finally:
+        for connection in opened:
+            connection.close()
+
+
+def test_storage_doctor_does_not_open_missing_fact_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def unexpected_connect(*args, **kwargs):
+        raise AssertionError("Missing database must not be opened")
+
+    monkeypatch.setattr(sqlite3, "connect", unexpected_connect)
+    db_path = tmp_path / "missing.db"
+    assert _count_fact_store_rows(db_path) == 0
+    assert not db_path.exists()
 
 
 def test_cost_ledger_storage_check_reports_dual_written_state(tmp_path: Path) -> None:

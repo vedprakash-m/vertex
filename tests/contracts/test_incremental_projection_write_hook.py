@@ -383,3 +383,48 @@ def test_auto_projection_rebuild_failure_does_not_block_writes(monkeypatch, tmp_
     events = read_events("acme", programs_root=programs_root)
     assert events[-1].event_id == persisted.event_id
     assert any("projection: incremental rebuild raised for program=acme" in record.message for record in caplog.records)
+
+
+@pytest.mark.parametrize("fail_replace", [False, True])
+def test_write_hook_full_rebuild_preserves_projection_through_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, fail_replace: bool,
+) -> None:
+    programs_root = tmp_path / "programs"
+    program_id = "acme"
+    _persist_event(
+        _risk_raised(program_id, "risk:r1", datetime(2025, 1, 1, tzinfo=timezone.utc)),
+        programs_root=programs_root,
+    )
+    path = get_current_projection_path(program_id, programs_root=programs_root)
+    old_bytes = path.read_bytes()
+    old_projection = canonical_projection_dump(path)
+    original_replace = Path.replace
+    observed: list[tuple[bool, bool]] = []
+
+    def replacement(source: Path, target: Path) -> Path:
+        if source == path.with_suffix(".sqlite3.tmp") and target == path:
+            exists = path.exists()
+            observed.append((exists, path.read_bytes() == old_bytes if exists else False))
+            if fail_replace:
+                raise OSError("Synthetic hook replacement failure")
+        return original_replace(source, target)
+
+    with monkeypatch.context() as patch, caplog.at_level(logging.ERROR):
+        patch.setattr(Path, "replace", replacement)
+        persisted = _persist_event(
+            _workstream_created(program_id, "workstream:w1", datetime(2025, 1, 2, tzinfo=timezone.utc)),
+            programs_root=programs_root,
+        )
+
+    assert observed == [(True, True)]
+    assert read_events(program_id, programs_root=programs_root)[-1].event_id == persisted.event_id
+    if fail_replace:
+        assert path.read_bytes() == old_bytes
+        assert canonical_projection_dump(path) == old_projection
+        assert any("projection: incremental rebuild raised" in record.message for record in caplog.records)
+        _maybe_rebuild_program_projection(program_id, programs_root=programs_root)
+    else:
+        assert not any("projection: incremental rebuild raised" in record.message for record in caplog.records)
+    _assert_projection_matches_full_rebuild(
+        program_id, programs_root=programs_root, expected_path=tmp_path / "expected.sqlite3",
+    )

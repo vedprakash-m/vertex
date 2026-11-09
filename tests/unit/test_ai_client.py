@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
@@ -13,7 +14,17 @@ from src.ai.deployment_fallback import FallbackAIClient, FallbackStructuredClien
 from src.ai.llm_trace import AITraceContext
 from src.ai.provider import LLMProvider
 from src.ai.request_router import AIRequestRouter
+from src.core.ai_telemetry import AiTelemetryRecord, append_ai_telemetry, read_ai_telemetry
 from src.core.policy_loader import AIFeaturePolicy, AIRequestRouterPolicy
+
+
+@pytest.fixture(autouse=True)
+def isolate_ai_telemetry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def append_to_temporary_root(record: AiTelemetryRecord) -> None:
+        append_ai_telemetry(record, programs_root=tmp_path / "telemetry")
+
+    monkeypatch.setattr("src.core.ai_telemetry.PROGRAMS_ROOT", tmp_path / "live-programs")
+    monkeypatch.setattr("src.core.ai_telemetry.append_ai_telemetry", append_to_temporary_root)
 
 
 def _unique_run_id() -> str:
@@ -145,6 +156,10 @@ def test_ai_client_retries_on_429_and_5xx_and_tracks_usage(monkeypatch, caplog, 
     assert client.usage_stats.completion_tokens == 400
     assert client.usage_stats.total_tokens == 1400
     assert client.spent_usd == pytest.approx(0.0007)
+    telemetry = read_ai_telemetry("acme_weekly", programs_root=tmp_path / "telemetry")
+    assert len(telemetry) == 1
+    assert telemetry[0].feature == "test"
+    assert telemetry[0].deployment_id == "blurb-model"
     assert _FakeAzureOpenAI.created_kwargs == {
         "azure_endpoint": "https://example.openai.azure.com",
         "api_key": "test-key",
@@ -365,6 +380,9 @@ def test_ai_client_emits_llm_trace_record_when_trace_context_is_configured(
     assert record["cost_usd"] == pytest.approx(0.000115)
     assert record["metadata"] == {"task": "report"}
     assert record["latency_ms"] >= 0.0
+    telemetry = read_ai_telemetry("acme_weekly", programs_root=tmp_path / "telemetry")
+    assert len(telemetry) == 1
+    assert telemetry[0].deployment_id == "trace-model"
 
 
 def test_ai_client_blocks_frontier_calls_in_observe_only_mode_and_writes_trace(
@@ -407,6 +425,9 @@ def test_ai_client_blocks_frontier_calls_in_observe_only_mode_and_writes_trace(
     assert len(records) == 1
     assert records[0]["error"] == "AI request router is in observe-only mode; frontier calls are blocked."
     assert records[0]["prompt_version"] == "observe.v1"
+    telemetry = read_ai_telemetry("acme_weekly", programs_root=tmp_path / "telemetry")
+    assert len(telemetry) == 1
+    assert telemetry[0].feature == "unit-test"
 
 
 def test_ai_client_enforces_shared_run_budget_via_trace_context(

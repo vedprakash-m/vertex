@@ -10,7 +10,7 @@ from src.core.models import RiskLevel, WorkItem
 
 def test_process_generated_text_scrubs_pii_sanitizes_causality_and_grounds() -> None:
     result = process_generated_text(
-        "Cache warmup safeguard moved due to vendor follow-up from foo@gmail.com.",
+        "Cache warmup safeguard moved due to vendor follow-up from foo@example.com.",
         allowed_items=(_item(101, "Cache warmup safeguard"),),
     )
 

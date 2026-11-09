@@ -252,7 +252,7 @@ class TestThreadMessage:
         msg = ThreadMessage(
             message_id="m2",
             thread_id="t2",
-            sender="s@s.com",
+            sender="s@synthetic-09.example",
             sent_at=_NOW,
             text="hi",
             workstream_ids=("ws-1", "ws-2"),

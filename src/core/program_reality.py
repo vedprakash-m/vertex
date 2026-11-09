@@ -781,6 +781,8 @@ class ProgramReality:
         require_committed_gather_run: bool | None = None,
         fact_snapshot: ProgramFactSnapshot | None = None,
         assessment_as_of: datetime | None = None,
+        _shim_fact_types: tuple[str, ...] | None = None,
+        _omit_action_shim: bool = False,
     ) -> "ProgramReality":
         """Load program reality from disk. The ONLY disk-touching point.
 
@@ -795,6 +797,8 @@ class ProgramReality:
             fact_snapshot: Retained facts for fully-primary programs only.
                 Other reality inputs remain live; this is not whole-reality replay.
             assessment_as_of: Assessment clock only; does not select historical facts.
+            _shim_fact_types: Limit legacy shim builders, not stored facts.
+            _omit_action_shim: Omit legacy actions for a consumer that does not read them.
         """
         store = ProgramFactStore(program_id, db_root=_resolve_fact_db_root(programs_root))
         with cooperative_capture_fence(
@@ -846,6 +850,8 @@ class ProgramReality:
                     archive_root=archive_root,
                     sor_state=_sor_state,
                     require_committed_gather_run=require_committed_gather_run,
+                    fact_types=_shim_fact_types,
+                    _omit_action_shim=_omit_action_shim,
                 )
 
             # Project domain views from snapshot

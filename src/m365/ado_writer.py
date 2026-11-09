@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
+import sqlite3
 import time
 import uuid
 from contextlib import contextmanager
@@ -12,11 +14,13 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Iterator
 
+import portalocker
+
 from src.core.actuation_outbox import DispatchResult, create_task_idempotency_key, dispatch_leased_create_task, enqueue_create_task_intent, outbox_db_path
 from src.core.ledger.durable_outbox_store import load_entry
 from src.core.ado_client import ADOClient
 from src.core.ado_proposal import ADOUpdateEntry, ADOUpdateProposal, open_locked_proposal_manifest, read_proposal_manifest_from_handle, write_proposal_manifest_to_handle
-from src.core.exceptions import AuthError, CredentialExpired, MutationOutcomeUnknown, QueryError, QueryTimeoutError
+from src.core.exceptions import AuthError, ConfigError, CredentialExpired, MutationOutcomeUnknown, QueryError, QueryTimeoutError, StateError
 from src.core.integration_types import PaginationOutcome
 from src.core.journal import PROGRAMS_ROOT
 from src.core.models import Confidence
@@ -25,6 +29,12 @@ from src.core.signal_dedup import is_duplicate_signal
 from src.core.signal_classification import classify_signal as _classify_signal
 from src.core.store_factory import build_signal_store_for_program_id
 from src.core.workspace_lease import ACTUATION_DISPATCH_DOMAIN, LeaseHeldByAnotherOwner, acquire_lease, release_lease
+
+
+log = logging.getLogger(__name__)
+_ACTION_ASSOCIATION_WARNING = (
+    "ADO entry is applied; local action association may be incomplete. Review the action history."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +119,12 @@ class ADOWriter:
             for index, entry in enumerate(proposal.entries):
                 if entry.entry_status not in processable_statuses:
                     updated_entries.append(entry)
+                    if (
+                        entry.action == "create_task"
+                        and entry.entry_status == "applied"
+                        and _ACTION_ASSOCIATION_WARNING in (entry.status_reason or "")
+                    ):
+                        log.warning(_ACTION_ASSOCIATION_WARNING)
                     continue
 
                 # ADF-W1.2: lets _apply_entry persist attempted_at (and the
@@ -143,23 +159,37 @@ class ADOWriter:
                         entry, entry_status="failed", status_reason=f"actuation dispatch lease busy, retry later: {error}"
                     )
                 updated_entries.append(updated_entry)
-                if updated_entry.action == "create_task" and updated_entry.entry_status == "applied" and updated_entry.work_item_id:
-                    from src.core.action_tracker import associate_action_with_work_item
-                    try:
-                        associate_action_with_work_item(
-                            program_id=proposal.program_id,
-                            action_id=updated_entry.reason,
-                            work_item_id=updated_entry.work_item_id,
-                            programs_root=self._programs_root,
+                association_unverified = False
+                try:
+                    if updated_entry.action == "create_task" and updated_entry.entry_status == "applied" and updated_entry.work_item_id:
+                        association_unverified = True
+                        from src.core.action_tracker import associate_action_with_work_item
+                        try:
+                            associate_action_with_work_item(
+                                program_id=proposal.program_id,
+                                action_id=updated_entry.reason,
+                                work_item_id=updated_entry.work_item_id,
+                                programs_root=self._programs_root,
+                            )
+                        except (
+                            StateError, ConfigError, OSError, sqlite3.Error,
+                            portalocker.exceptions.LockException, ValueError, TypeError, KeyError,
+                        ):
+                            log.warning(_ACTION_ASSOCIATION_WARNING)
+                        else:
+                            association_unverified = False
+                finally:
+                    if association_unverified:
+                        updated_entries[-1] = replace(
+                            updated_entry,
+                            status_reason="; ".join(filter(None, (updated_entry.status_reason, _ACTION_ASSOCIATION_WARNING))),
                         )
-                    except Exception:
-                        pass
-                current_proposal = replace(
-                    proposal,
-                    entries=tuple(updated_entries + list(proposal.entries[index + 1 :])),
-                )
-                current_status = _derive_proposal_status(current_proposal.entries, expired=False)
-                write_proposal_manifest_to_handle(manifest_handle, current_proposal, proposal_status=current_status)
+                    current_proposal = replace(
+                        proposal,
+                        entries=tuple(updated_entries + list(proposal.entries[index + 1 :])),
+                    )
+                    current_status = _derive_proposal_status(current_proposal.entries, expired=False)
+                    write_proposal_manifest_to_handle(manifest_handle, current_proposal, proposal_status=current_status)
 
             finalized_proposal = replace(proposal, entries=tuple(updated_entries))
             finalized_status = _derive_proposal_status(finalized_proposal.entries, expired=False)

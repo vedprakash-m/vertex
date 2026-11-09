@@ -10,7 +10,7 @@ import sqlite3
 from typing import Any, Literal, cast
 
 from src.core._db import open_program_db
-from src.core.journal import PROGRAMS_ROOT
+from src.core.journal import PROGRAMS_ROOT, _signal_workstream_ids_for_storage
 from src.core.models import Confidence, RiskLevel
 from src.core.models_v2 import ReviewPolicy, Signal, SignalReviewDecision, SignalThreadLink, SignalUsageMarker, TrajectoryPoint
 
@@ -27,6 +27,8 @@ class SQLiteSignalStore:
         self._programs_root = programs_root
 
     def append(self, signal: Signal) -> None:
+        workstream_ids = _signal_workstream_ids_for_storage(signal)
+        workstream_ids_json = json.dumps(workstream_ids) if workstream_ids is not None else None
         with _connect_program_db(signal.program_id, programs_root=self._programs_root) as connection:
             connection.execute(
                 """
@@ -42,8 +44,10 @@ class SQLiteSignalStore:
                     confidence,
                     metadata_json,
                     thread_id,
-                    review_policy
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    review_policy,
+                    gather_run_id,
+                    workstream_ids_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     signal.program_id,
@@ -58,6 +62,8 @@ class SQLiteSignalStore:
                     json.dumps(signal.metadata, sort_keys=True) if signal.metadata is not None else None,
                     signal.thread_id,
                     signal.review_policy.value if signal.review_policy is not None else None,
+                    signal.gather_run_id,
+                    workstream_ids_json,
                 ),
             )
 
@@ -83,24 +89,42 @@ class SQLiteSignalStore:
             clauses.append("timestamp <= ?")
             params.append(_encode_datetime(_normalize_datetime(end)))
         workstream_id = filters.get("workstream_id")
-        if workstream_id is not None:
-            clauses.append("workstream_id = ?")
-            params.append(workstream_id)
-
-        query = (
-            "SELECT signal_id, timestamp, source, workstream_id, entity_refs_json, text, raw_ref, confidence, metadata_json, thread_id, review_policy "
-            "FROM signals WHERE " + " AND ".join(clauses) + " ORDER BY timestamp ASC, signal_id ASC"
-        )
         with _connect_program_db(
             program_id,
             programs_root=self._programs_root,
             read_only=read_only,
         ) as connection:
+            signal_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(signals)")}
+            gather_column = "gather_run_id" if "gather_run_id" in signal_columns else "NULL AS gather_run_id"
+            workstreams_column = (
+                "workstream_ids_json" if "workstream_ids_json" in signal_columns else "NULL AS workstream_ids_json"
+            )
+            if workstream_id is not None:
+                clauses.append(
+                    "(workstream_id = ? OR workstream_ids_json IS NOT NULL)"
+                    if "workstream_ids_json" in signal_columns
+                    else "workstream_id = ?"
+                )
+                params.append(workstream_id)
+            query = (
+                "SELECT signal_id, timestamp, source, workstream_id, entity_refs_json, text, raw_ref, "
+                f"confidence, metadata_json, thread_id, review_policy, {gather_column}, {workstreams_column} "
+                "FROM signals WHERE " + " AND ".join(clauses) + " ORDER BY timestamp ASC, signal_id ASC"
+            )
             rows = connection.execute(query, params).fetchall()
             thread_links = self.read_threads(program_id, read_only=read_only)
 
         signals: list[Signal] = []
         for row in rows:
+            workstream_ids: tuple[str, ...] = ()
+            if row["workstream_ids_json"] is not None:
+                try:
+                    workstream_values = json.loads(str(row["workstream_ids_json"]))
+                except json.JSONDecodeError:
+                    raise ValueError("Invalid workstream IDs in SQLite signal.") from None
+                if not isinstance(workstream_values, list):
+                    raise ValueError("Invalid workstream IDs in SQLite signal.")
+                workstream_ids = tuple(str(value) for value in workstream_values)
             signal = Signal(
                 id=str(row["signal_id"]),
                 timestamp=_parse_datetime(row["timestamp"]),
@@ -118,7 +142,11 @@ class SQLiteSignalStore:
                     if row["review_policy"] is not None
                     else None
                 ),
+                gather_run_id=_optional_string(row["gather_run_id"]),
+                workstream_ids=workstream_ids,
             )
+            if workstream_id is not None and workstream_id not in signal.workstream_ids:
+                continue
             thread_link = thread_links.get(signal.id)
             if thread_link is not None and signal.thread_id != thread_link.thread_id:
                 signal = replace(signal, thread_id=thread_link.thread_id)
@@ -415,6 +443,8 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             metadata_json TEXT,
             thread_id TEXT,
             review_policy TEXT,
+            gather_run_id TEXT,
+            workstream_ids_json TEXT,
             PRIMARY KEY (program_id, signal_id)
         );
         CREATE INDEX IF NOT EXISTS idx_signals_program_timestamp ON signals(program_id, timestamp, signal_id);
@@ -467,9 +497,15 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             ON trajectory_points(program_id, work_item_id, point_date, inserted_at);
         """
     )
+    required_signal_columns = ("review_policy", "gather_run_id", "workstream_ids_json")
     signal_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(signals)").fetchall()}
-    if "review_policy" not in signal_columns:
-        connection.execute("ALTER TABLE signals ADD COLUMN review_policy TEXT")
+    if any(column not in signal_columns for column in required_signal_columns):
+        connection.execute("BEGIN IMMEDIATE")
+        signal_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(signals)").fetchall()}
+        for column in required_signal_columns:
+            if column not in signal_columns:
+                connection.execute(f"ALTER TABLE signals ADD COLUMN {column} TEXT")
+        connection.commit()
 
 
 def _trajectory_point_from_row(row: sqlite3.Row) -> TrajectoryPoint:

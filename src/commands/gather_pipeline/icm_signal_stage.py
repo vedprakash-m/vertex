@@ -131,16 +131,16 @@ def build_direct_icm_signals(
         payload = client.list_incidents()
     except (AuthError, QueryError) as exc:
         if warn_fn is not None:
-            warn_fn("Direct IcM incident access unavailable for %s: %s Falling back to Agency/Kusto.", program_id, exc)
+            if isinstance(exc, AuthError):
+                warn_fn("Direct IcM authentication failed; attempting Agency/Kusto fallback.")
+            else:
+                warn_fn("Direct IcM query failed; attempting Agency/Kusto fallback.")
         return None
 
     records = agency_icm_payload_records(payload)
     if records is None:
         if warn_fn is not None:
-            warn_fn(
-                "Direct IcM incident access returned an unexpected payload for %s; falling back to Agency/Kusto.",
-                program_id,
-            )
+            warn_fn("Direct IcM incident access returned an unexpected payload; falling back to Agency/Kusto.")
         return None
 
     return build_agency_icm_record_signals(
@@ -181,13 +181,13 @@ def build_agency_icm_signals(
     payload = bridge_client.invoke_mcp_tool("icm", "list_incidents", {})
     if payload is None:
         if warn_fn is not None:
-            warn_fn("IcM Agency list_incidents returned no payload for %s; falling back to Kusto.", program_id)
+            warn_fn("IcM Agency list_incidents returned no payload; falling back to Kusto.")
         return None
 
     records = agency_icm_payload_records(payload)
     if records is None:
         if warn_fn is not None:
-            warn_fn("IcM Agency list_incidents returned an unexpected payload for %s; falling back to Kusto.", program_id)
+            warn_fn("IcM Agency list_incidents returned an unexpected payload; falling back to Kusto.")
         return None
 
     return build_agency_icm_record_signals(

@@ -189,8 +189,10 @@ def write_calibration_prior(
     issue_number: int,
     calibrations: tuple[WorkstreamCalibration, ...],
     archive_root: Path = ARCHIVE_ROOT,
+    *,
+    programs_root: Path | None = None,
 ) -> Path:
-    edition_archive = get_archive_root(edition, archive_root)
+    edition_archive = get_archive_root(edition, archive_root, programs_root=programs_root)
     review_dir = edition_archive / "review"
     review_dir.mkdir(parents=True, exist_ok=True)
     path = review_dir / f"issue_{issue_number:03d}.calibration.json"
@@ -223,8 +225,10 @@ def read_calibration_prior(
     edition: str,
     issue_number: int,
     archive_root: Path = ARCHIVE_ROOT,
+    *,
+    programs_root: Path | None = None,
 ) -> tuple[WorkstreamCalibration, ...] | None:
-    path = get_archive_root(edition, archive_root) / "review" / f"issue_{issue_number:03d}.calibration.json"
+    path = get_archive_root(edition, archive_root, programs_root=programs_root) / "review" / f"issue_{issue_number:03d}.calibration.json"
     if not path.exists():
         return None
     payload = json.loads(path.read_text(encoding="utf-8"))

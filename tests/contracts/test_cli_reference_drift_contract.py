@@ -13,12 +13,17 @@ Rules enforced:
   2. `python scripts/generate_cli_reference.py --check` MUST exit 0.
   3. The snapshot must not leak operator-local filesystem paths.
   4. The legacy `specs/cli-reference.md` (now gitignored) must not be tracked.
+  5. CI must check the reference before tests without regenerating it.
+  6. A stale snapshot must fail the check without being rewritten.
 """
 from __future__ import annotations
 
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
+import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -83,3 +88,39 @@ def test_cli_reference_avoids_local_absolute_paths() -> None:
         "tests/contracts/cli_reference_snapshot.md leaks a local absolute path. "
         "Regenerate after sanitizing defaults in scripts/generate_cli_reference.py."
     )
+
+
+def test_ci_checks_cli_reference_before_running_tests() -> None:
+    workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["validate"]["steps"]
+    reference_commands = [
+        (index, line.strip())
+        for index, step in enumerate(steps)
+        for line in step.get("run", "").splitlines()
+        if "scripts/generate_cli_reference.py" in line and not line.lstrip().startswith("#")
+    ]
+    test_step = next(index for index, step in enumerate(steps) if "python -m pytest" in step.get("run", ""))
+
+    assert len(reference_commands) == 1
+    index, command = reference_commands[0]
+    assert command == "python scripts/generate_cli_reference.py --check"
+    assert index < test_step
+
+
+def test_cli_reference_check_rejects_stale_snapshot_without_rewriting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import generate_cli_reference
+
+    snapshot = tmp_path / "snapshot.md"
+    snapshot.write_text("stale reference\n", encoding="utf-8")
+    before = snapshot.read_bytes()
+    monkeypatch.setattr(generate_cli_reference, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(generate_cli_reference, "OUTPUT_PATH", snapshot)
+    monkeypatch.setattr(sys, "argv", ["generate_cli_reference.py", "--check"])
+
+    with pytest.raises(SystemExit) as error:
+        generate_cli_reference.main()
+
+    assert error.value.code == 1
+    assert snapshot.read_bytes() == before

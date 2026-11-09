@@ -64,9 +64,9 @@ class TestCollectUnresolvedEntityRefs:
 
     def test_returns_unresolvable_refs(self) -> None:
         registry = _make_registry("person:alice", "Alice", "alice@example.com")
-        snapshot = _make_facts_snapshot([("alice@example.com", "bob@unknown.com")])
+        snapshot = _make_facts_snapshot([("alice@example.com", "bob@synthetic-11.example")])
         result = collect_unresolved_entity_refs(snapshot, registry)
-        assert result == frozenset({"bob@unknown.com"})
+        assert result == frozenset({"bob@synthetic-11.example"})
 
     def test_empty_snapshot_gives_empty(self) -> None:
         registry = _make_registry("person:alice", "Alice")

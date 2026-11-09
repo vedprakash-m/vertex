@@ -339,7 +339,7 @@ def test_incremental_equals_full_for_supported_delta(tmp_path) -> None:
     full_path = tmp_path / "full.sqlite3"
 
     project_events_incremental_to_sqlite("acme", (*base_events, *delta_events), projection_path=incremental_path, programs_root=programs_root)
-    project_events_to_sqlite("acme", (*base_events, *delta_events), projection_path=full_path)
+    project_events_to_sqlite("acme", (*base_events, *delta_events), projection_path=full_path, programs_root=programs_root)
 
     assert canonical_projection_dump(incremental_path) == canonical_projection_dump(full_path)
 
@@ -374,7 +374,7 @@ def test_two_call_incremental_equals_full(tmp_path) -> None:
     result = project_events_incremental_to_sqlite(prog, (*base_events, *delta), projection_path=incr_path, programs_root=programs_root)
 
     # Full rebuild for comparison
-    project_events_to_sqlite(prog, (*base_events, *delta), projection_path=full_path)
+    project_events_to_sqlite(prog, (*base_events, *delta), projection_path=full_path, programs_root=programs_root)
 
     incr_dump = canonical_projection_dump(incr_path)
     full_dump = canonical_projection_dump(full_path)
@@ -437,7 +437,7 @@ def test_large_delta_falls_through_to_full_rebuild(tmp_path) -> None:
 
     project_events_incremental_to_sqlite(prog, base_events, projection_path=incr_path, programs_root=programs_root)
     project_events_incremental_to_sqlite(prog, (*base_events, *delta), projection_path=incr_path, programs_root=programs_root)
-    project_events_to_sqlite(prog, (*base_events, *delta), projection_path=full_path)
+    project_events_to_sqlite(prog, (*base_events, *delta), projection_path=full_path, programs_root=programs_root)
 
     incr_dump = canonical_projection_dump(incr_path)
     full_dump = canonical_projection_dump(full_path)
@@ -475,7 +475,7 @@ def test_correction_event_triggers_full_rebuild(tmp_path) -> None:
     project_events_incremental_to_sqlite(prog, (*base, correction), projection_path=incr_path, programs_root=programs_root)
 
     full_path = tmp_path / "full.sqlite3"
-    project_events_to_sqlite(prog, (*base, correction), projection_path=full_path)
+    project_events_to_sqlite(prog, (*base, correction), projection_path=full_path, programs_root=programs_root)
 
     incr_dump = canonical_projection_dump(incr_path)
     full_dump = canonical_projection_dump(full_path)
@@ -616,12 +616,13 @@ def test_incremental_entity_families_match_full_projection(
         _projection_event(event_type, 2, payload)
         for event_type, payload in delta_specs
     ))
+    programs_root = tmp_path / "programs"
     incremental_path = tmp_path / "incremental.sqlite3"
     full_path = tmp_path / "full.sqlite3"
 
-    project_events_incremental_to_sqlite("acme", base_events, projection_path=incremental_path)
-    result = project_events_incremental_to_sqlite("acme", events, projection_path=incremental_path)
-    project_events_to_sqlite("acme", events, projection_path=full_path)
+    project_events_incremental_to_sqlite("acme", base_events, projection_path=incremental_path, programs_root=programs_root)
+    result = project_events_incremental_to_sqlite("acme", events, projection_path=incremental_path, programs_root=programs_root)
+    project_events_to_sqlite("acme", events, projection_path=full_path, programs_root=programs_root)
 
     assert result.event_watermark == events[-1].event_id
     assert result.event_count == len(events)
@@ -732,3 +733,79 @@ def test_old_projector_rebuilds_stale_dependency_links_without_new_events(
     assert result.event_watermark == replacement.event_id
     assert canonical_projection_dump(incremental_path) == canonical_projection_dump(full_path)
     assert canonical_projection_dump(incremental_path)["projection_meta"][0]["projector_version"] == "5"
+
+
+@pytest.mark.parametrize("via_incremental", [False, True])
+@pytest.mark.parametrize("fail_replace", [False, True])
+def test_full_rebuild_preserves_existing_projection_through_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, via_incremental: bool, fail_replace: bool,
+) -> None:
+    events = (
+        _risk_raised("acme", "risk:r1", datetime(2025, 3, 20, tzinfo=timezone.utc)),
+        _risk_status("acme", "risk:r1", datetime(2025, 3, 21, tzinfo=timezone.utc)),
+    )
+    path = tmp_path / "projection.sqlite3"
+    expected_path = tmp_path / "expected.sqlite3"
+    programs_root = tmp_path / "programs"
+    project_events_to_sqlite("acme", events[:1], projection_path=path, programs_root=programs_root)
+    old_bytes = path.read_bytes()
+    old_projection = canonical_projection_dump(path)
+    as_of = datetime(2025, 3, 22, tzinfo=timezone.utc)
+    project_events_to_sqlite(
+        "acme", events, projection_path=expected_path, programs_root=programs_root, as_of=as_of,
+    )
+    expected = canonical_projection_dump(expected_path)
+    original_replace = Path.replace
+    observed: list[tuple[bool, bool]] = []
+
+    def replacement(source: Path, target: Path) -> Path:
+        if source == path.with_suffix(".sqlite3.tmp") and target == path:
+            exists = path.exists()
+            observed.append((exists, path.read_bytes() == old_bytes if exists else False))
+            if fail_replace:
+                raise OSError("Synthetic replacement failure")
+        return original_replace(source, target)
+
+    builder = project_events_incremental_to_sqlite if via_incremental else project_events_to_sqlite
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "replace", replacement)
+        if fail_replace:
+            with pytest.raises(OSError, match="Synthetic replacement failure"):
+                builder("acme", events, projection_path=path, programs_root=programs_root, as_of=as_of)
+        else:
+            builder("acme", events, projection_path=path, programs_root=programs_root, as_of=as_of)
+
+    assert observed == [(True, True)]
+    if fail_replace:
+        assert path.read_bytes() == old_bytes
+        assert canonical_projection_dump(path) == old_projection
+        builder("acme", events, projection_path=path, programs_root=programs_root, as_of=as_of)
+    assert canonical_projection_dump(path) == expected
+
+
+@pytest.mark.parametrize("via_incremental", [False, True])
+def test_first_projection_replacement_failure_is_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, via_incremental: bool,
+) -> None:
+    event = _risk_raised("acme", "risk:r1", datetime(2025, 3, 20, tzinfo=timezone.utc))
+    path = tmp_path / "projection.sqlite3"
+    programs_root = tmp_path / "programs"
+    builder = project_events_incremental_to_sqlite if via_incremental else project_events_to_sqlite
+    original_replace = Path.replace
+    calls: list[Path] = []
+
+    def replacement(source: Path, target: Path) -> Path:
+        if source == path.with_suffix(".sqlite3.tmp") and target == path:
+            calls.append(source)
+            raise OSError("Synthetic first replacement failure")
+        return original_replace(source, target)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "replace", replacement)
+        with pytest.raises(OSError, match="Synthetic first replacement failure"):
+            builder("acme", (event,), projection_path=path, programs_root=programs_root)
+
+    assert calls == [path.with_suffix(".sqlite3.tmp")]
+    assert not path.exists()
+    builder("acme", (event,), projection_path=path, programs_root=programs_root)
+    assert canonical_projection_dump(path)["proj_risk"][0]["risk_id"] == "risk:r1"

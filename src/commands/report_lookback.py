@@ -30,7 +30,7 @@ from src.core.incident_journal_store import read_incident_entries
 from src.core.jinja_filters import risk_label
 from src.core.models import AttributionTier, Confidence, ConfirmedDimension, DeltaKind, DimensionRisk, EvidencePacket, RiskLevel, ScorecardDelta, ScorecardEvidencePacket, Snapshot, SnapshotItem, WorkItem
 from src.core.models_v2 import Assumption, AssumptionStatus
-from src.core.program_fact_store import load_current_assumptions
+from src.core.program_fact_store import build_legacy_program_fact_snapshot, load_current_assumptions, project_assumptions
 from src.core.program_reality import FactAssessment, ProgramReality
 from src.core.stages.sor_gated_load import sor_gated_family_load
 from src.core.truth_levels import TruthLevel
@@ -793,8 +793,8 @@ def _build_lookback_assumption_lifecycle(
     edition_name: str | None = None,
     archive_root: Path | None = None,
     load_program_reality: Callable[..., ProgramReality] | None = None,
-) -> AssumptionLifecycleSummary | None:
-    assumptions, assumption_assessments, _, _ = _load_lookback_assumptions(
+) -> tuple[AssumptionLifecycleSummary | None, tuple[str, ...]]:
+    assumptions, assumption_assessments, warnings, _ = _load_lookback_assumptions(
         program_id=program_id,
         as_of=as_of,
         programs_root=programs_root,
@@ -803,7 +803,7 @@ def _build_lookback_assumption_lifecycle(
         load_program_reality=load_program_reality,
     )
     if not assumptions:
-        return None
+        return None, warnings
 
     window_start = snapshots[0].ado_data_as_of.date()
     window_end = snapshots[-1].ado_data_as_of.date()
@@ -813,7 +813,7 @@ def _build_lookback_assumption_lifecycle(
         if _assumption_is_in_lookback_window(entry, window_start=window_start, window_end=window_end)
     )
     if not relevant_entries:
-        return None
+        return None, warnings
 
     overdue_ids = {entry.id for entry in check_validation_due(assumptions, as_of.date())}
     render_warning: str | None = None
@@ -854,12 +854,20 @@ def _build_lookback_assumption_lifecycle(
                 ),
                 overdue_ids=overdue_ids,
             )
-            includes_unconfirmed_sources = False
+            includes_unconfirmed_sources = any(
+                assessment.truth_level == TruthLevel.RAW_OBSERVED
+                and _assumption_is_in_lookback_window(
+                    assessment.record,
+                    window_start=window_start,
+                    window_end=window_end,
+                )
+                for assessment in assumption_assessments
+            )
             render_warning = (
                 "This section is temporarily rendering from the older assumption source "
                 "because live assumption metadata rendering failed."
             )
-    return AssumptionLifecycleSummary(
+    summary = AssumptionLifecycleSummary(
         window_start=window_start,
         window_end=window_end,
         identified_count=sum(1 for entry in assumptions if window_start <= entry.identified_date <= window_end),
@@ -886,6 +894,7 @@ def _build_lookback_assumption_lifecycle(
         includes_unconfirmed_sources=includes_unconfirmed_sources,
         render_warning=render_warning,
     )
+    return summary, warnings
 
 
 def _load_lookback_assumptions(
@@ -908,12 +917,26 @@ def _load_lookback_assumptions(
         programs_root=programs_root,
         reality_accessor=lambda reality: reality.assumptions(),
         legacy_loader=lambda: load_current_assumptions(program_id, programs_root=programs_root),
+        legacy_comparison_loader=lambda: _load_legacy_assumptions(
+            program_id, programs_root=programs_root, archive_root=archive_root,
+        ),
         allow_legacy_rollback_env=_ALLOW_LEGACY_ASSUMPTION_ROLLBACK_ENV,
         cross_check_label="assumption",
         load_program_reality=load_program_reality,
         as_of=as_of,
         edition_name=edition_name,
         archive_root=archive_root,
+    )
+
+
+def _load_legacy_assumptions(
+    program_id: str, *, programs_root: Path, archive_root: Path | None = None,
+) -> tuple[Assumption, ...]:
+    return project_assumptions(
+        build_legacy_program_fact_snapshot(
+            program_id, programs_root=programs_root, archive_root=archive_root,
+            fact_types=("assumption.entry",),
+        )
     )
 
 

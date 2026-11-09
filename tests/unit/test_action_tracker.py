@@ -8,10 +8,183 @@ from pathlib import Path
 import pytest
 
 from src.core.action_tracker import assess_action_staleness, append_action, associate_action_with_work_item, build_action_id, load_actions, match_action_to_ado_update, update_action_status
+from src.core.exceptions import StateError
 from src.core.fact_lineage_coverage import has_fact_provenance
 from src.core.models_v2 import ActionItem, ActionSourceType, ActionStatus, TrajectoryPoint
 from src.core.operation_trace import load_operation_trace
 from src.core.program_fact_store import load_program_facts, project_action_items
+
+
+@pytest.mark.parametrize("operation", ["log", "latest", "load", "status", "associate"])
+@pytest.mark.parametrize("bad_row", [b'{"synthetic-private"\n', b'["synthetic-private"]\n', b"\xff\n"])
+def test_selected_action_reads_and_updates_refuse_corrupt_history(
+    tmp_path: Path, operation: str, bad_row: bytes,
+) -> None:
+    from src.core.action_tracker import _action_to_record, load_latest_action_statuses, read_action_log
+
+    action = _sample_action(status=ActionStatus.OPEN)
+    path = tmp_path / "demo" / "journal" / "actions.jsonl"
+    path.parent.mkdir(parents=True)
+    original = (json.dumps(_action_to_record(action)) + "\n").encode() + bad_row
+    path.write_bytes(original)
+
+    with pytest.raises(StateError, match="Action journal") as error:
+        if operation == "log":
+            read_action_log("demo", programs_root=tmp_path, repair_corruption=False)
+        elif operation == "latest":
+            load_latest_action_statuses("demo", programs_root=tmp_path, repair_corruption=False)
+        elif operation == "load":
+            load_actions("demo", programs_root=tmp_path, repair_corruption=False)
+        elif operation == "status":
+            update_action_status("demo", action.id, ActionStatus.DONE, None, updated_by="owner", programs_root=tmp_path)
+        else:
+            associate_action_with_work_item("demo", action.id, 2002, programs_root=tmp_path)
+
+    assert "synthetic-private" not in str(error.value)
+    assert path.read_bytes() == original
+    assert not (path.parent / "quarantine").exists()
+    assert not path.with_suffix(".sha256").exists()
+    assert sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*") if p.is_file()) == ["demo/journal/actions.jsonl"]
+
+
+@pytest.mark.parametrize("operation", ["log", "load", "status", "associate"])
+@pytest.mark.parametrize("failure", [PermissionError, FileNotFoundError])
+def test_nonrepairing_action_read_reports_unreadable_history_safely(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, failure: type[OSError],
+) -> None:
+    from src.core.action_tracker import _action_to_record, read_action_log
+
+    action = _sample_action(status=ActionStatus.OPEN)
+    path = tmp_path / "demo" / "journal" / "actions.jsonl"
+    path.parent.mkdir(parents=True)
+    original = (json.dumps(_action_to_record(action)) + "\n").encode()
+    path.write_bytes(original)
+    original_read = Path.read_text
+
+    def unreadable(target: Path, *args: object, **kwargs: object) -> str:
+        if target == path:
+            raise failure("synthetic-private failure")
+        return original_read(target, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", unreadable)
+    with pytest.raises(StateError, match="Action journal") as error:
+        if operation == "log":
+            read_action_log("demo", programs_root=tmp_path, repair_corruption=False)
+        elif operation == "load":
+            load_actions("demo", programs_root=tmp_path, repair_corruption=False)
+        elif operation == "status":
+            update_action_status("demo", action.id, ActionStatus.DONE, None, updated_by="owner", programs_root=tmp_path)
+        else:
+            associate_action_with_work_item("demo", action.id, 2002, programs_root=tmp_path)
+    assert "synthetic-private" not in str(error.value)
+    assert str(path) not in str(error.value)
+    assert path.read_bytes() == original
+    assert not (path.parent / "quarantine").exists()
+
+
+def test_default_action_read_preserves_original_read_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "demo" / "journal" / "actions.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text("", encoding="utf-8")
+    original_read = Path.read_text
+
+    def unreadable(target: Path, *args: object, **kwargs: object) -> str:
+        if target == path:
+            raise PermissionError("original read error")
+        return original_read(target, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", unreadable)
+    with pytest.raises(PermissionError, match="original read error"):
+        load_actions("demo", programs_root=tmp_path)
+
+
+def test_default_action_read_still_short_circuits_missing_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.core.action_tracker import read_action_log
+
+    def unexpected_read(*args: object, **kwargs: object) -> None:
+        raise AssertionError("A missing journal should not reach the JSONL reader.")
+
+    monkeypatch.setattr("src.core.action_tracker.read_jsonl_records", unexpected_read)
+    assert read_action_log("demo", programs_root=tmp_path) == ()
+    assert load_actions("demo", programs_root=tmp_path) == ()
+
+
+def test_nonrepairing_action_read_preserves_absent_and_valid_history(tmp_path: Path) -> None:
+    from src.core.action_tracker import read_action_log
+
+    assert load_actions("demo", programs_root=tmp_path, repair_corruption=False) == ()
+    associate_action_with_work_item("demo", "missing", 2002, programs_root=tmp_path)
+    assert tuple(tmp_path.iterdir()) == ()
+    path = tmp_path / "demo" / "journal" / "actions.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text("", encoding="utf-8")
+    assert load_actions("demo", programs_root=tmp_path, repair_corruption=False) == ()
+    action = _sample_action()
+    append_action("demo", action, programs_root=tmp_path)
+    assert load_actions("demo", programs_root=tmp_path, repair_corruption=False) == (action,)
+    assert read_action_log("demo", programs_root=tmp_path, repair_corruption=False) == (action,)
+
+
+def test_associate_preserves_existing_empty_journal_behavior(tmp_path: Path) -> None:
+    path = tmp_path / "demo" / "journal" / "actions.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"")
+
+    associate_action_with_work_item("demo", "missing", 2002, programs_root=tmp_path)
+
+    assert path.read_bytes() == b""
+    assert path.with_suffix(".sha256").exists()
+
+
+def test_nonrepairing_action_load_checks_the_status_read_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.core.action_tracker import _action_to_record
+
+    path = tmp_path / "demo" / "journal" / "actions.jsonl"
+    path.parent.mkdir(parents=True)
+    original = json.dumps(_action_to_record(_sample_action())) + "\n"
+    path.write_bytes(original.encode())
+    original_read = Path.read_text
+    reads = 0
+
+    def change_on_second_read(target: Path, *args: object, **kwargs: object) -> str:
+        nonlocal reads
+        if target == path:
+            reads += 1
+            if reads == 2:
+                return original + '["synthetic-private"]\n'
+        return original_read(target, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", change_on_second_read)
+    with pytest.raises(StateError, match="Action journal") as error:
+        load_actions("demo", programs_root=tmp_path, repair_corruption=False)
+    assert reads == 2
+    assert "synthetic-private" not in str(error.value)
+    assert path.read_bytes() == original.encode()
+    assert not (path.parent / "quarantine").exists()
+
+
+def test_nonrepairing_action_load_uses_only_selected_program_root(tmp_path: Path) -> None:
+    from src.core.action_tracker import _action_to_record
+
+    selected_root = tmp_path / "selected" / "programs"
+    other_root = tmp_path / "other" / "programs"
+    action = _sample_action()
+    selected_path = selected_root / "demo" / "journal" / "actions.jsonl"
+    other_path = other_root / "demo" / "journal" / "actions.jsonl"
+    selected_path.parent.mkdir(parents=True)
+    other_path.parent.mkdir(parents=True)
+    selected_path.write_text(json.dumps(_action_to_record(action)) + "\n", encoding="utf-8")
+    other_path.write_bytes(b'["synthetic-private"]\n')
+
+    assert load_actions("demo", programs_root=selected_root, repair_corruption=False) == (action,)
+    assert other_path.read_bytes() == b'["synthetic-private"]\n'
+    assert not (other_path.parent / "quarantine").exists()
 
 
 def test_append_action_rejects_foreign_program_before_writes(tmp_path: Path) -> None:

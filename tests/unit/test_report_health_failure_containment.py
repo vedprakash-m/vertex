@@ -70,6 +70,23 @@ def test_successful_empty_risk_register_preserves_valid_low_health(
     assert not list(tmp_path.iterdir())
 
 
+def test_selected_empty_risk_result_does_not_reload_current_reality(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loader = Mock(side_effect=AssertionError("Use the selected empty result"))
+    monkeypatch.setattr(report_health.ProgramReality, "load", loader)
+    health = report_health._build_health_summary(
+        (_dimension(RiskLevel.LOW),), None, risks=(), use_selected_empty_risks=True,
+        program_id="fixture", programs_root=tmp_path / "programs",
+        archive_root=tmp_path / "archive", as_of=AS_OF, healthy_streak=5,
+    )
+    assert health.overall_risk is RiskLevel.LOW
+    assert health.healthy_streak == 5
+    assert health.risk_register_summary is None
+    loader.assert_not_called()
+    assert not list(tmp_path.iterdir())
+
+
 def test_explicit_known_risk_and_assessment_do_not_trigger_an_unrelated_reload(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -85,6 +102,66 @@ def test_explicit_known_risk_and_assessment_do_not_trigger_an_unrelated_reload(
     assert health.risk_register_disputed is True
     loader.assert_not_called()
     assert not list(tmp_path.iterdir())
+
+
+def test_risk_render_fallback_keeps_its_existing_empty_reload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assessment = _risk_assessment()
+    loader = Mock(return_value=SimpleNamespace(risks=lambda: (assessment,)))
+    monkeypatch.setattr(report_health.ProgramReality, "load", loader)
+    legacy = Mock(return_value=())
+    monkeypatch.setattr(render_stage, "_load_current_risks", legacy)
+    calls = []
+
+    def build_health(*args, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise ValueError("Synthetic render-shaping failure")
+        return report_health._build_health_summary(*args, **kwargs)
+
+    ctx = StageContext(
+        programs_root=tmp_path / "programs", archive_root=tmp_path / "archive",
+        data_as_of=AS_OF, risk_assessments=(),
+        resolved_v2=SimpleNamespace(program=SimpleNamespace(id="fixture")),
+    )
+    health = render_stage._build_health_summary_with_risk_fallback(
+        ctx, SimpleNamespace(build_health_summary=build_health), (_dimension(RiskLevel.LOW),), None,
+        risks=(), use_selected_empty_risks=True, program_id="fixture",
+        programs_root=tmp_path / "programs", archive_root=tmp_path / "archive", as_of=AS_OF,
+    )
+    assert health.risk_render_warning == render_stage._RISK_RENDER_WARNING
+    assert health.risk_register_summary is not None
+    assert not calls[1].get("use_selected_empty_risks", False)
+    legacy.assert_called_once_with("fixture", programs_root=tmp_path / "programs", archive_root=tmp_path / "archive")
+    loader.assert_called_once_with("fixture", programs_root=tmp_path / "programs", archive_root=tmp_path / "archive")
+
+
+@pytest.mark.parametrize("selected_empty", [False, True])
+def test_legacy_risk_render_shaping_failure_still_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selected_empty: bool,
+) -> None:
+    failure = ValueError("Synthetic legacy render-shaping failure")
+    legacy = Mock(side_effect=AssertionError("Legacy render failure must not activate fallback"))
+    monkeypatch.setattr(render_stage, "_load_current_risks", legacy)
+    ctx = StageContext(
+        programs_root=tmp_path / "programs", archive_root=tmp_path / "archive",
+        data_as_of=AS_OF, risk_assessments=None,
+        resolved_v2=SimpleNamespace(program=SimpleNamespace(id="fixture")),
+        risk_legacy_empty_selected=selected_empty,
+    )
+    support = SimpleNamespace(build_health_summary=Mock(side_effect=failure))
+
+    with pytest.raises(ValueError) as raised:
+        render_stage._build_health_summary_with_risk_fallback(
+            ctx, support, (_dimension(RiskLevel.LOW),), None, risks=(),
+            **({"use_selected_empty_risks": True} if selected_empty else {}),
+            program_id="fixture", programs_root=tmp_path / "programs",
+            archive_root=tmp_path / "archive", as_of=AS_OF,
+        )
+
+    assert raised.value is failure
+    legacy.assert_not_called()
 
 
 @pytest.mark.parametrize("error_type", [ConfigError, StateError, RuntimeError])

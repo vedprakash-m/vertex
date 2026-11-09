@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -65,8 +66,10 @@ def lint_specification(path: Path) -> CheckResult:
     """Validate RELO document identity and references without editing it."""
     try:
         content = path.read_text(encoding="utf-8")
-    except OSError as error:
-        return CheckResult("RELO-SPEC-LINT", False, f"Unable to read specification: {error}")
+    except UnicodeDecodeError:
+        return CheckResult("RELO-SPEC-LINT", False, "Unable to read specification: invalid UTF-8.")
+    except OSError:
+        return CheckResult("RELO-SPEC-LINT", False, "Unable to read specification: file read failed.")
     findings: list[str] = []
     version_match = _VERSION_RE.search(content)
     changelog_match = _CHANGELOG_VERSION_RE.search(content)
@@ -92,18 +95,27 @@ def lint_specification(path: Path) -> CheckResult:
     duplicates = _duplicates(defined_ids)
     if duplicates:
         findings.append(f"duplicate defined RELO ID(s): {', '.join(duplicates)}")
+    visible_content = _markdown_visible_content(content)
     traceability = re.search(
-        r"^### 19\.2\s[^\n]*\n(.*?)(?=^#{1,3}\s|\Z)", content,
+        r"^### 19\.2\s[^\n]*\n(.*?)(?=^#{1,3}\s|\Z)", visible_content,
         flags=re.MULTILINE | re.DOTALL,
     )
     if traceability is not None:
+        rows = _markdown_table_rows(
+            traceability.group(1),
+            ("Requirement", "Work items", "Gate", "Primary test/evidence", "Phase"),
+            exact=True,
+        )
+        if rows is None:
+            findings.append("requirement traceability table is missing or malformed")
+            rows = []
         definitions = set(re.findall(
             r"^\|\s*(?:\*\*)?(RELO-(?:FR-\d+|NFR-\d+|W\d+\.\d+[a-z]?|QG-\d+))(?=\s|\*\*|\|)",
-            content[:traceability.start()] + content[traceability.end():],
+            visible_content[:traceability.start()] + visible_content[traceability.end():],
             flags=re.MULTILINE,
         ))
         declared_requirements: set[str] = set()
-        for line in traceability.group(1).splitlines():
+        for line in rows:
             if not re.match(r"^\|\s*RELO-(?:FR|NFR)-\d+\s*\|", line):
                 continue
             declared_requirements.add(line.split("|")[1].strip())
@@ -112,9 +124,15 @@ def lint_specification(path: Path) -> CheckResult:
                 identifier = line.split("|")[1].strip()
                 findings.append(f"{identifier}: declared traceability row requires five nonempty columns")
                 continue
+            phase = re.fullmatch(r"RELO-([0-6])(?:(?:/[0-6])+|[-–]([0-6]))?", columns[4])
+            if phase is None or (phase[2] is not None and phase[1] > phase[2]):
+                findings.append(f"{columns[0]}: requirement mapping requires valid phase references")
             references = {columns[0]}
             try:
                 references.update(_traceability_references(" ".join(columns[1:3]), definitions))
+                work_references = _traceability_references(columns[1], definitions)
+                if not any(reference.startswith("RELO-W") for reference in work_references):
+                    findings.append(f"{columns[0]}: requirement mapping requires a work-item reference")
             except ValueError as error:
                 findings.append(f"{columns[0]}: {error}")
             unresolved_references = sorted(references - definitions)
@@ -126,6 +144,7 @@ def lint_specification(path: Path) -> CheckResult:
         )
         if missing_requirements:
             findings.append(f"missing requirement traceability row(s): {', '.join(missing_requirements)}")
+    findings.extend(_goal_traceability_findings(content))
     return CheckResult(
         "RELO-SPEC-LINT",
         not findings,
@@ -135,39 +154,292 @@ def lint_specification(path: Path) -> CheckResult:
     )
 
 
-def _traceability_references(value: str, definitions: set[str]) -> set[str]:
+def _has_invalid_traceability_candidates(value: str, *, goal_targets: bool) -> bool:
+    if goal_targets:
+        candidates = r"W\d+\.\d+\w*|(?:FR|NFR)-\d+\w*|O\d+\w*|F\d+\w*"
+        valid = r"W\d+\.\d+[a-z]?|(?:FR|NFR)-\d+|O\d+|F\d+"
+    else:
+        candidates = r"W\d+\.\d+\w*|QG-\d+\w*"
+        valid = r"W\d+\.\d+[a-z]?|QG-\d+"
+    return any(
+        re.fullmatch(rf"(?:RELO-)?(?:{valid})", match.group()) is None
+        for match in re.finditer(rf"(?<![\w-])(?:RELO-)?(?:{candidates})(?:\.+\w+)*", value)
+    )
+
+
+def _traceability_references(
+    value: str, definitions: set[str], *, goal_targets: bool = False,
+) -> set[str]:
+    if not goal_targets and _has_invalid_traceability_candidates(value, goal_targets=False):
+        raise ValueError("unsupported traceability reference")
     references: set[str] = set()
-    pattern = r"(?<![\w-])(?:RELO-)?(W\d+\.\d+[a-z]?|QG-\d+)(?:\s*[-–]\s*(?:RELO-)?(W\d+\.\d+[a-z]?|QG-\d+))?"
+    families = (
+        r"(?:W\d+\.\d+[a-z]?|(?:FR|NFR)-\d+|O\d+|F\d+)(?![\w])"
+        if goal_targets else r"W\d+\.\d+[a-z]?|QG-\d+"
+    )
+    pattern = rf"(?<![\w-])(?:RELO-)?({families})(?:\s*[-–]\s*(?:RELO-)?({families}))?"
     for match in re.finditer(pattern, value):
         start, end = match.groups()
+        if goal_targets and re.match(r"\s*[-–—]", value[match.end():]):
+            raise ValueError(f"invalid traceability range after: {match.group(0)}")
         if end is None:
             references.add(f"RELO-{start}")
             continue
-        first = re.fullmatch(r"(W\d+\.|QG-)(\d+)", start)
-        last = re.fullmatch(r"(W\d+\.|QG-)(\d+)", end)
+        first = re.fullmatch(r"(W\d+\.|QG-|FR-|NFR-|O|F)(\d+)", start)
+        last = re.fullmatch(r"(W\d+\.|QG-|FR-|NFR-|O|F)(\d+)", end)
         if first is None or last is None or first[1] != last[1] or int(first[2]) > int(last[2]):
             raise ValueError(f"invalid traceability range: {match.group(0)}")
         for number in range(int(first[2]), int(last[2]) + 1):
-            reference = f"RELO-{first[1]}{number:02d}" if first[1] == "QG-" else f"RELO-{first[1]}{number}"
+            reference = (
+                f"RELO-{first[1]}{number:02d}"
+                if first[1] in {"QG-", "FR-", "NFR-"} else f"RELO-{first[1]}{number}"
+            )
             if reference not in definitions:
                 raise ValueError(f"unresolved traceability reference: {reference}")
             references.add(reference)
     return references
 
 
+def _markdown_visible_content(specification: str) -> str:
+    visible_lines = []
+    fence: str | None = None
+    in_comment = False
+    for line in specification.splitlines(keepends=True):
+        if fence is not None:
+            closing = re.fullmatch(r" {0,3}(`+|~+)[ \t]*\n?", line)
+            if closing and closing[1][0] == fence[0] and len(closing[1]) >= len(fence):
+                fence = None
+            visible_lines.append("\n" if line.endswith("\n") else "")
+            continue
+        if not in_comment:
+            opening = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+            if opening:
+                fence = opening[1]
+                visible_lines.append("\n" if line.endswith("\n") else "")
+                continue
+        fragments = []
+        remainder = line
+        while remainder:
+            if in_comment:
+                _, marker, remainder = remainder.partition("-->")
+                if not marker:
+                    break
+                fragments.append(" ")
+                in_comment = False
+            else:
+                text, marker, remainder = remainder.partition("<!--")
+                fragments.append(text)
+                if not marker:
+                    break
+                fragments.append(" ")
+                in_comment = True
+        visible_line = "".join(fragments)
+        if line.endswith("\n") and not visible_line.endswith("\n"):
+            visible_line += "\n"
+        visible_lines.append(visible_line)
+    return "".join(visible_lines)
+
+
+def _traceability_section(content: str, number: str) -> str | None:
+    parent, _, child = number.partition(".")
+    section = re.search(
+        rf"^##[ \t]+{re.escape(parent)}(?:\.[ \t]|[ \t])[^\n]*\n(.*?)(?=^#{{1,2}}[ \t]|\Z)",
+        content, re.MULTILINE | re.DOTALL,
+    )
+    if section is None:
+        return None
+    if not child:
+        return section.group(1)
+    section = re.search(
+        rf"^###[ \t]+{re.escape(number)}[ \t][^\n]*\n(.*?)(?=^#{{1,3}}[ \t]|\Z)",
+        section.group(1), re.MULTILINE | re.DOTALL,
+    )
+    return section.group(1) if section is not None else None
+
+
+def _markdown_table_rows(
+    section: str | None, header: tuple[str, ...], *, exact: bool = False,
+) -> list[str] | None:
+    if section is None:
+        return None
+    lines = section.splitlines()
+    for index, line in enumerate(lines):
+        columns = _markdown_table_cells(line)
+        if columns is None or tuple(columns[:len(header)]) != header:
+            continue
+        if exact and len(columns) != len(header):
+            return None
+        if index + 1 >= len(lines):
+            return None
+        separator = _markdown_table_cells(lines[index + 1])
+        if separator is None or len(separator) != len(columns) or any(
+            not re.fullmatch(r":?-+:?", cell) for cell in separator
+        ):
+            return None
+        rows = []
+        for row in lines[index + 2:]:
+            if not row.lstrip().startswith("|"):
+                break
+            rows.append(row)
+        return rows
+    return None
+
+
+def _markdown_table_cells(line: str) -> list[str] | None:
+    text = line.strip()
+    if not text.startswith("|") or not text.endswith("|"):
+        return None
+    return [cell.strip() for cell in text.split("|")[1:-1]]
+
+
+def _traceability_definition_ids(rows: list[str] | None, pattern: str) -> list[str]:
+    if rows is None:
+        return []
+    identifiers = []
+    for row in rows:
+        columns = _markdown_table_cells(row)
+        match = re.match(rf"(?:\*\*)?({pattern})(?=\s|\*\*|$)", columns[0]) if columns else None
+        if match is not None:
+            identifiers.append(match.group(1))
+    return identifiers
+
+
+def _goal_traceability_findings(content: str) -> list[str]:
+    visible = _markdown_visible_content(content)
+    if re.search(r"^###[ \t]+19\.1[ \t]", visible, re.MULTILINE) is None:
+        return []
+    trace = _traceability_section(visible, "19.1")
+    if trace is None:
+        return ["goal traceability table is missing or malformed"]
+    rows = _markdown_table_rows(
+        trace, ("Goal", "Objectives", "Primary requirements/workstreams"), exact=True,
+    )
+    if rows is None:
+        return ["goal traceability table is missing or malformed"]
+
+    findings: list[str] = []
+    goal_rows = _markdown_table_rows(_traceability_section(visible, "3.2"), ("ID", "Goal"))
+    objective_rows = _markdown_table_rows(
+        _traceability_section(visible, "3.3"), ("ID", "Objective", "Required evidence"),
+    )
+    goals = _traceability_definition_ids(goal_rows, r"RELO-G\d+")
+    objectives = _traceability_definition_ids(objective_rows, r"RELO-O\d+")
+    for label, identifiers, definition_rows in (
+        ("goal", goals, goal_rows), ("objective", objectives, objective_rows),
+    ):
+        if not identifiers or definition_rows is None or len(identifiers) != len(definition_rows):
+            findings.append(f"{label} definition table is missing or malformed")
+        if len(identifiers) != len(set(identifiers)):
+            findings.append(f"duplicate {label} definition(s)")
+
+    requirement_ids = set()
+    for section, pattern in (("5.5", r"RELO-FR-\d+"), ("5.6", r"RELO-NFR-\d+")):
+        requirement_ids.update(_traceability_definition_ids(
+            _markdown_table_rows(_traceability_section(visible, section), ("ID", "Requirement")), pattern,
+        ))
+    work_ids = set()
+    for phase in range(1, 8):
+        work_ids.update(_traceability_definition_ids(
+            _markdown_table_rows(_traceability_section(visible, f"11.{phase}"), ("ID", "Work item")),
+            r"RELO-W\d+\.\d+[a-z]?",
+        ))
+    features = _traceability_section(visible, "8")
+    feature_ids = set(re.findall(
+        r"^###\s+8\.\d+\s+(RELO-F\d+)\b", features or "", re.MULTILINE,
+    ))
+    definitions = set(objectives) | requirement_ids | work_ids | feature_ids
+    declared_goals: set[str] = set()
+    referenced_objectives: set[str] = set()
+    token = r"(?:W\d+\.\d+[a-z]?|(?:FR|NFR)-\d+|O\d+|F\d+)(?![\w])"
+    for row in rows:
+        columns = _markdown_table_cells(row)
+        if columns is None or len(columns) != 3 or not all(columns):
+            findings.append("goal traceability row requires three nonempty columns")
+            continue
+        match = re.fullmatch(r"(?:\*\*(RELO-G\d+)\*\*|(RELO-G\d+))", columns[0])
+        if match is None:
+            findings.append("goal traceability row has an invalid goal ID")
+            continue
+        goal = match.group(1) or match.group(2)
+        if goal not in goals:
+            findings.append(f"{goal}: unresolved goal traceability reference")
+        else:
+            declared_goals.add(goal)
+        for index, label in ((1, "objective"), (2, "requirement")):
+            value = columns[index]
+            if (
+                any(re.match(token, value[marker.end():]) is None for marker in re.finditer(r"\bRELO-", value))
+                or _has_invalid_traceability_candidates(value, goal_targets=True)
+            ):
+                findings.append(f"{goal}: unsupported {label} traceability reference")
+            try:
+                references = _traceability_references(value, definitions, goal_targets=True)
+            except ValueError as error:
+                findings.append(f"{goal}: {error}")
+                continue
+            unresolved = sorted(references - definitions)
+            if unresolved:
+                findings.append(f"{goal}: unresolved traceability reference(s): {', '.join(unresolved)}")
+            if index == 1:
+                if not references or any(not ref.startswith("RELO-O") for ref in references):
+                    findings.append(f"{goal}: objective mapping requires objective references")
+                if goal in goals:
+                    referenced_objectives.update(references & set(objectives))
+            elif not any(ref.startswith(("RELO-FR-", "RELO-NFR-")) for ref in references):
+                findings.append(f"{goal}: requirement mapping requires a requirement reference")
+            elif any(ref.startswith("RELO-O") for ref in references):
+                findings.append(f"{goal}: requirement mapping contains an objective reference")
+
+    missing_goals = sorted(set(goals) - declared_goals)
+    if missing_goals:
+        findings.append(f"missing goal traceability row(s): {', '.join(missing_goals)}")
+    missing_objectives = sorted(set(objectives) - referenced_objectives)
+    if missing_objectives:
+        findings.append(f"unreferenced objective(s): {', '.join(missing_objectives)}")
+    return findings
+
+
+def _decision_table_ids(specification: str) -> set[str]:
+    section = re.search(
+        r"^##[ \t]+20\.[ \t]+[^\n]*\n(.*?)(?=^#{1,2}[ \t]+|\Z)",
+        _markdown_visible_content(specification), re.MULTILINE | re.DOTALL,
+    )
+    if section is None:
+        return set()
+    table = re.search(
+        r"^\|[ \t]*ID[ \t]*\|[ \t]*Decision[ \t]*\|[^\n]*\n"
+        r"\|[ \t]*:?-+:?[ \t]*\|[ \t]*:?-+:?[ \t]*\|(?:[ \t]*:?-+:?[ \t]*\|)*[ \t]*\n"
+        r"((?:\|[^\n]*(?:\n|\Z))*)",
+        section.group(1), re.MULTILINE,
+    )
+    if table is None:
+        return set()
+    return {
+        bold or plain
+        for bold, plain in re.findall(
+            r"^\|[ \t]*(?:\*\*(RELO-D\d+[a-z]?)\*\*|(RELO-D\d+[a-z]?))[ \t]*\|",
+            table.group(1), re.MULTILINE,
+        )
+    }
+
+
 def lint_work_packages(repo_root: Path, *, spec_path: Path) -> CheckResult:
-    """Validate RELO-0/1 readiness records without interpreting their design.
+    """Validate RELO readiness records without interpreting their design.
 
     This enforces the issuance rules that are mechanically knowable: coverage,
-    unique IDs, valid class/status combinations, resolving AGENT_READY paths,
-    and named §20 blockers for NEEDS_DECISION work.  It never upgrades a card.
+    unique IDs, valid classes and dependencies, resolving AGENT_READY paths,
+    and named §20 blockers for NEEDS_DECISION work. It never upgrades a card.
     """
     work_packages_path = repo_root / "governance" / "relo-work-packages.yaml"
     try:
         document = yaml.safe_load(work_packages_path.read_text(encoding="utf-8"))
         specification = spec_path.read_text(encoding="utf-8")
-    except (OSError, yaml.YAMLError) as error:
-        return CheckResult("RELO-WORK-PACKAGES", False, f"Unable to read work-package evidence: {error}")
+    except UnicodeDecodeError:
+        return CheckResult("RELO-WORK-PACKAGES", False, "Unable to read work-package evidence: invalid UTF-8.")
+    except yaml.YAMLError:
+        return CheckResult("RELO-WORK-PACKAGES", False, "Unable to read work-package evidence: invalid YAML.")
+    except OSError:
+        return CheckResult("RELO-WORK-PACKAGES", False, "Unable to read work-package evidence: file read failed.")
     if not isinstance(document, dict) or document.get("schema_version") != "1":
         return CheckResult("RELO-WORK-PACKAGES", False, "work-package schema_version must be '1'")
     cards = document.get("work_items")
@@ -185,33 +457,52 @@ def lint_work_packages(repo_root: Path, *, spec_path: Path) -> CheckResult:
     )
     ids = [card.get("id") for card in cards if isinstance(card, dict)]
     findings: list[str] = []
-    duplicates = _duplicates([identifier for identifier in ids if isinstance(identifier, str)])
+    duplicates = set(_duplicates([identifier for identifier in ids if isinstance(identifier, str)]))
     if duplicates:
-        findings.append(f"duplicate card ID(s): {', '.join(duplicates)}")
+        positions = [
+            str(position) for position, card in enumerate(cards, start=1)
+            if isinstance(card, dict) and isinstance(card.get("id"), str) and card["id"] in duplicates
+        ]
+        findings.append(f"duplicate card ID(s) at entries: {', '.join(positions)}")
     actual = {identifier for identifier in ids if isinstance(identifier, str)}
     missing = sorted(expected - actual)
-    extra = sorted(actual - expected)
+    extra = actual - expected
     if missing:
         findings.append(f"missing work-package card(s): {', '.join(missing)}")
     if extra:
-        findings.append(f"unknown work-package card(s): {', '.join(extra)}")
+        positions = [
+            str(position) for position, card in enumerate(cards, start=1)
+            if isinstance(card, dict) and isinstance(card.get("id"), str) and card["id"] in extra
+        ]
+        findings.append(f"unknown work-package card(s) at entries: {', '.join(positions)}")
 
+    decision_ids = _decision_table_ids(specification)
     allowed_classes = {"AGENT_READY", "NEEDS_DECISION", "NEEDS_JUDGMENT"}
-    for card in cards:
+    for position, card in enumerate(cards, start=1):
         if not isinstance(card, dict):
             findings.append("work-package card is not a mapping")
             continue
-        identifier = card.get("id", "<missing id>")
+        identifier = card.get("id")
+        if not isinstance(identifier, str) or not identifier:
+            findings.append("work-package card has invalid id")
+            identifier = "<invalid id>"
+        elif identifier not in expected:
+            identifier = f"<unknown card at entry {position}>"
         card_class = card.get("class")
-        if card_class not in allowed_classes:
-            findings.append(f"{identifier}: invalid class {card_class!r}")
+        if not isinstance(card_class, str) or card_class not in allowed_classes:
+            detail = "(not an allowed class)" if isinstance(card_class, str) else "(must be a string)"
+            findings.append(f"{identifier}: invalid class {detail}")
             continue
         dependencies = card.get("depends_on")
-        if not isinstance(dependencies, list) or any(dependency not in actual for dependency in dependencies):
+        if not isinstance(dependencies, list) or any(
+            not isinstance(dependency, str) or dependency not in actual for dependency in dependencies
+        ):
             findings.append(f"{identifier}: unresolved depends_on")
         if card_class == "NEEDS_DECISION":
             decisions = card.get("blocking_decisions")
-            if not isinstance(decisions, list) or not decisions or any(not isinstance(decision, str) or decision not in specification for decision in decisions):
+            if not isinstance(decisions, list) or not decisions or any(
+                not isinstance(decision, str) or decision not in decision_ids for decision in decisions
+            ):
                 findings.append(f"{identifier}: NEEDS_DECISION must name existing §20 decision(s)")
         if card_class == "AGENT_READY":
             for required in ("read_first", "change", "acceptance", "forbidden", "rollback"):
@@ -220,9 +511,33 @@ def lint_work_packages(repo_root: Path, *, spec_path: Path) -> CheckResult:
             read_first = card.get("read_first", [])
             if not isinstance(read_first, list) or len(read_first) > 3:
                 findings.append(f"{identifier}: read_first must contain one to three paths")
-            for relative_path in list(read_first) + list(card.get("change", [])):
-                if not isinstance(relative_path, str) or not (repo_root / relative_path).is_file():
-                    findings.append(f"{identifier}: unresolved file path {relative_path!r}")
+            if not isinstance(read_first, list):
+                read_first = []
+            change = card.get("change", [])
+            if not isinstance(change, list):
+                findings.append(f"{identifier}: change must be a list of paths")
+                change = []
+            root = Path(os.path.abspath(repo_root))
+            resolved_root = Path(os.path.realpath(root))
+            for field, paths in (("read_first", read_first), ("change", change)):
+                for position, relative_path in enumerate(paths, start=1):
+                    unresolved = f"{identifier}: unresolved file path in {field} at entry {position}"
+                    if not isinstance(relative_path, str):
+                        findings.append(unresolved)
+                        continue
+                    try:
+                        candidate = root / relative_path
+                        lexical = Path(os.path.abspath(candidate))
+                        if not lexical.is_relative_to(root) and not lexical.is_relative_to(resolved_root):
+                            findings.append(f"{identifier}: {field} path is outside selected repository")
+                            continue
+                        resolved = Path(os.path.realpath(candidate, strict=True))
+                        if not resolved.is_relative_to(resolved_root):
+                            findings.append(f"{identifier}: {field} path is outside selected repository")
+                        elif not resolved.is_file():
+                            findings.append(unresolved)
+                    except (OSError, ValueError):
+                        findings.append(unresolved)
     return CheckResult(
         "RELO-WORK-PACKAGES",
         not findings,
@@ -248,8 +563,10 @@ def _duplicates(values: list[str]) -> list[str]:
 def _check(identifier: str, predicate: Callable[[], bool], success: str) -> CheckResult:
     try:
         passed = predicate()
-    except OSError as error:
-        return CheckResult(identifier, False, f"Unable to read baseline evidence: {error}")
+    except UnicodeDecodeError:
+        return CheckResult(identifier, False, "Unable to read baseline evidence: invalid UTF-8.")
+    except OSError:
+        return CheckResult(identifier, False, "Unable to read baseline evidence: file read failed.")
     return CheckResult(identifier, passed, success if passed else f"{success} Check failed.")
 
 
@@ -264,18 +581,22 @@ def _check_deployment_vars(program_path: Path) -> CheckResult:
     success = "Selected program uses documented VERTEX deployment variables."
     try:
         document = yaml.safe_load(program_path.read_text(encoding="utf-8")) or {}
-    except (yaml.YAMLError, OSError, UnicodeDecodeError) as error:
-        return CheckResult(identifier, False, f"{success} Check failed: {program_path} is not valid YAML ({error}).")
+    except yaml.YAMLError:
+        return CheckResult(identifier, False, f"{success} Check failed: selected program is not valid YAML.")
+    except UnicodeDecodeError:
+        return CheckResult(identifier, False, f"{success} Check failed: selected program has invalid UTF-8.")
+    except OSError:
+        return CheckResult(identifier, False, f"{success} Check failed: Unable to read selected program configuration.")
     ai_block = document.get("ai") if isinstance(document, dict) else None
     if not isinstance(ai_block, dict):
-        return CheckResult(identifier, False, f"{success} Check failed: no `ai:` mapping found in {program_path}.")
+        return CheckResult(identifier, False, f"{success} Check failed: no `ai:` mapping found.")
     expected = {
         "blurb_deployment": "${VERTEX_AI_DEPLOYMENT}",
         "exec_summary_deployment": "${VERTEX_EXEC_DEPLOYMENT}",
     }
-    mismatches = {key: ai_block.get(key) for key, want in expected.items() if ai_block.get(key) != want}
+    mismatches = [key for key, want in expected.items() if ai_block.get(key) != want]
     if mismatches:
-        return CheckResult(identifier, False, f"{success} Check failed: unexpected values {mismatches!r}.")
+        return CheckResult(identifier, False, f"{success} Check failed: unexpected values for {', '.join(mismatches)}.")
     return CheckResult(identifier, True, success)
 
 
@@ -300,8 +621,10 @@ def _check_spec_size_budget(spec_path: Path, *, repo_root: Path, budgets_path: P
     identifier = "RELO-SPEC-SIZE-BUDGET"
     try:
         content = spec_path.read_text(encoding="utf-8")
-    except OSError as error:
-        return CheckResult(identifier, False, f"Unable to read specification: {error}")
+    except UnicodeDecodeError:
+        return CheckResult(identifier, False, "Unable to read specification: invalid UTF-8.")
+    except OSError:
+        return CheckResult(identifier, False, "Unable to read specification: file read failed.")
 
     import sys
 
@@ -309,16 +632,22 @@ def _check_spec_size_budget(spec_path: Path, *, repo_root: Path, budgets_path: P
         sys.path.insert(0, str(repo_root))
     try:
         from src.core.nfr_budgets import load_nfr_budgets
-    except ImportError as error:
-        return CheckResult(identifier, False, f"Unable to load NFR budget registry: {error}")
+    except ImportError:
+        return CheckResult(identifier, False, "Unable to load NFR budget registry: loader unavailable.")
 
     budgets_path = budgets_path if budgets_path is not None else repo_root / "governance" / "nfr-budgets.yaml"
     if not budgets_path.exists():
         return CheckResult(identifier, False, "No NFR budget registry present; spec size ceilings cannot be assessed.")
     try:
         budgets = {b.id: b for b in load_nfr_budgets(budgets_path)}
-    except Exception as error:  # noqa: BLE001 - surface any registry load failure as a finding
-        return CheckResult(identifier, False, f"Unable to load NFR budget registry: {error}")
+    except UnicodeDecodeError:
+        return CheckResult(identifier, False, "Unable to load NFR budget registry: invalid UTF-8.")
+    except yaml.YAMLError:
+        return CheckResult(identifier, False, "Unable to load NFR budget registry: invalid YAML.")
+    except OSError:
+        return CheckResult(identifier, False, "Unable to load NFR budget registry: file read failed.")
+    except Exception:  # noqa: BLE001 - surface any registry load failure as a finding
+        return CheckResult(identifier, False, "Unable to load NFR budget registry: check failed.")
 
     line_count = content.count("\n") + 1
     obligation_count = _spec_obligation_count(content)

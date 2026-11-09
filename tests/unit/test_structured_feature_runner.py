@@ -1,10 +1,20 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
+from dataclasses import replace
 from pathlib import Path
+import sqlite3
+from threading import Barrier, Lock
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
-from src.ai.client import BudgetExceeded
+from src.ai.ai_mode import AIMode
+from src.ai.client import AIClient, BudgetExceeded
+from src.ai.cost_guard import CostGuard
+from src.ai.llm_trace import AITraceContext
 from src.ai.structured_feature_runner import (
     BatchProviderResult,
     CacheIdentity,
@@ -23,7 +33,9 @@ from src.ai.structured_feature_runner import (
     call_ceiling_ledger_path,
 )
 from src.ai.tiered_router import Tier, TierResult
+from src.core.ai_telemetry import append_ai_telemetry
 from src.core.context_compiler import CompiledContext, ContextCompileRejected, ContextManifest
+from src.core.exceptions import StateError
 from datetime import datetime, timezone
 
 
@@ -173,7 +185,7 @@ def test_missing_build_context_or_call_provider_falls_back(tmp_path: Path) -> No
 def test_fallback_returning_abstained_is_never_relabeled_as_released(tmp_path: Path) -> None:
     # RELO-W1.13: blocked/unavailable/partial/abstained can never masquerade
     # as released -- _fallback() only ever relabels a RELEASED outcome (to
-    # DETERMINISTIC_FALLBACK); every other status passes through untouched.
+    # DETERMINISTIC_FALLBACK); this non-ceiling fallback passes through untouched.
     spec = _spec(
         tmp_path,
         fallback_handler=lambda r: FeatureOutcome(
@@ -809,3 +821,491 @@ def test_batch_ceiling_exhausted_falls_back_for_whole_chunk_without_calling_prov
     results = runner.run_batch(spec, ["item-a", "item-b"])
     assert calls["n"] == 0
     assert all(outcome.status == FeatureOutcomeStatus.DETERMINISTIC_FALLBACK for outcome in results.values())
+
+
+@pytest.mark.parametrize("first_is_local", [False, True])
+def test_batch_rejects_colliding_item_ids_before_work(tmp_path: Path, first_is_local: bool) -> None:
+    handler = Mock(side_effect=lambda r: TierResult("local", 1.0) if first_is_local and r == "same:1" else None)
+    build = Mock(return_value=ContextBuildResult(compiled=_compiled()))
+    provider = Mock(return_value=BatchProviderResult(responses={"same": "remote", "other": "remote"}))
+    decisions = Mock()
+    spec = _batchable_spec(
+        tmp_path, call_provider_batch=provider,
+        item_id=lambda r: r.split(":")[0], build_batch_context=build,
+        deterministic_handler=handler, max_batch_size=1,
+        request_hash=lambda r: r, deterministic_engine_version="v1",
+        serialize_response=str, deserialize_response=str,
+    )
+    runner = _runner(tmp_path, decision_sink=decisions)
+
+    with pytest.raises(StateError, match="unique") as error:
+        runner.run_batch(spec, ["same:1", "other:2", "same:3"])
+
+    assert "same" not in str(error.value)
+    handler.assert_not_called()
+    build.assert_not_called()
+    provider.assert_not_called()
+    decisions.assert_not_called()
+    assert not list(tmp_path.iterdir())
+
+
+def test_fallback_batch_rejects_colliding_request_hashes_before_work(tmp_path: Path) -> None:
+    handler = Mock(return_value=TierResult("local", 1.0))
+    decisions = Mock()
+    spec = _spec(
+        tmp_path, deterministic_handler=handler, request_hash=lambda r: "private-hash",
+        deterministic_engine_version="v1", serialize_response=str, deserialize_response=str,
+    )
+    runner = _runner(tmp_path, decision_sink=decisions)
+
+    with pytest.raises(StateError, match="unique") as error:
+        runner.run_batch(spec, ["first", "second"])
+
+    assert "private-hash" not in str(error.value)
+    handler.assert_not_called()
+    decisions.assert_not_called()
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("mode", ["batch", "fallback"])
+@pytest.mark.parametrize("bad_key", [None, "", "  ", 17, []], ids=["null", "empty", "blank", "number", "list"])
+def test_batch_rejects_invalid_result_keys_before_work(tmp_path: Path, mode: str, bad_key: object) -> None:
+    handler = Mock(return_value=TierResult("local", 1.0))
+    build = Mock(return_value=ContextBuildResult(compiled=_compiled()))
+    provider = Mock(return_value=BatchProviderResult(responses={}))
+    decisions = Mock()
+    key = lambda r: "valid" if r == "first" else bad_key
+    options = dict(
+        deterministic_handler=handler, deterministic_engine_version="v1",
+        serialize_response=str, deserialize_response=str,
+    )
+    if mode == "batch":
+        spec = _batchable_spec(
+            tmp_path, call_provider_batch=provider, item_id=key, build_batch_context=build,
+            request_hash=lambda r: r, **options,
+        )
+    else:
+        spec = _spec(tmp_path, request_hash=key, **options)
+    runner = _runner(tmp_path, decision_sink=decisions)
+
+    with pytest.raises(StateError, match="nonblank"):
+        runner.run_batch(spec, ["first", "second"])
+
+    handler.assert_not_called()
+    build.assert_not_called()
+    provider.assert_not_called()
+    decisions.assert_not_called()
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("limit", [0, -1, True, 1.5, "2"], ids=["zero", "negative", "bool", "float", "string"])
+@pytest.mark.parametrize("local_hit", [False, True])
+def test_batch_rejects_invalid_size_before_work(tmp_path: Path, limit: object, local_hit: bool) -> None:
+    handler = Mock(return_value=TierResult("local", 1.0) if local_hit else None)
+    build = Mock(return_value=ContextBuildResult(compiled=_compiled()))
+    provider = Mock(return_value=BatchProviderResult(responses={"one": "remote", "two": "remote"}))
+    decisions = Mock()
+    spec = _batchable_spec(
+        tmp_path, call_provider_batch=provider, build_batch_context=build,
+        deterministic_handler=handler, max_batch_size=limit,
+        request_hash=lambda r: r, deterministic_engine_version="v1",
+        serialize_response=str, deserialize_response=str,
+    )
+    runner = _runner(tmp_path, decision_sink=decisions)
+
+    with pytest.raises(StateError, match="max_batch_size"):
+        runner.run_batch(spec, ["one", "two"])
+
+    handler.assert_not_called()
+    build.assert_not_called()
+    provider.assert_not_called()
+    decisions.assert_not_called()
+    assert not list(tmp_path.iterdir())
+
+
+def test_fallback_batch_keeps_index_keys_for_repeated_requests(tmp_path: Path) -> None:
+    handler = Mock(side_effect=[TierResult("first", 1.0), TierResult("second", 1.0)])
+    spec = _spec(tmp_path, deterministic_handler=handler, max_batch_size=0)
+
+    outcomes = _runner(tmp_path).run_batch(spec, ["repeated", "repeated"])
+
+    assert list(outcomes) == ["0", "1"]
+    assert [outcome.value for outcome in outcomes.values()] == ["first", "second"]
+
+
+def test_fallback_batch_keeps_distinct_request_hash_keys(tmp_path: Path) -> None:
+    handler = Mock(side_effect=lambda request: TierResult(f"value:{request}", 1.0))
+    spec = _spec(tmp_path, deterministic_handler=handler, request_hash=lambda request: f"hash:{request}")
+
+    outcomes = _runner(tmp_path).run_batch(spec, ["first", "second"])
+
+    assert list(outcomes) == ["hash:first", "hash:second"]
+    assert [outcome.value for outcome in outcomes.values()] == ["value:first", "value:second"]
+
+
+def test_batch_keeps_exact_distinct_keys_across_chunks(tmp_path: Path) -> None:
+    provider = Mock(side_effect=lambda requests, compiled: BatchProviderResult(
+        responses={request: f"value:{request}" for request in requests},
+    ))
+    spec = _batchable_spec(tmp_path, call_provider_batch=provider, max_batch_size=1)
+
+    outcomes = _runner(tmp_path).run_batch(spec, [" item ", "item"])
+
+    assert list(outcomes) == [" item ", "item"]
+    assert [outcome.value for outcome in outcomes.values()] == ["value: item ", "value:item"]
+    assert provider.call_count == 2
+
+
+@pytest.mark.parametrize("batchable", [False, True])
+def test_empty_batch_does_not_process_items(tmp_path: Path, batchable: bool) -> None:
+    handler = Mock()
+    provider = Mock()
+    if batchable:
+        spec = _batchable_spec(tmp_path, call_provider_batch=provider, deterministic_handler=handler)
+    else:
+        spec = _spec(tmp_path, deterministic_handler=handler)
+
+    assert _runner(tmp_path).run_batch(spec, []) == {}
+    handler.assert_not_called()
+    provider.assert_not_called()
+    assert not list(tmp_path.iterdir())
+
+
+def _frontier_test_spec(
+    tmp_path: Path, batch: bool, provider: Mock, remote: int | None, frontier: int | None,
+) -> StructuredFeatureSpec[str, str]:
+    limits = dict(max_remote_calls_per_run=remote, max_frontier_calls_per_run=frontier)
+    if batch:
+        return _batchable_spec(tmp_path, call_provider_batch=provider, **limits)
+    return _spec(tmp_path, build_context=lambda _: ContextBuildResult(compiled=_compiled()), call_provider=provider, **limits)
+
+
+def _dispatch_frontier(
+    runner: StructuredFeatureRunner, spec: StructuredFeatureSpec[str, str], batch: bool,
+) -> list[FeatureOutcome[str]]:
+    if batch:
+        return list(runner.run_batch(spec, ["first", "second"]).values())
+    return [runner.run(spec, "first")]
+
+
+def _ceiling_counts(path: Path, scope_key: str) -> dict[str, int]:
+    if not path.exists():
+        return {}
+    with closing(sqlite3.connect(path)) as connection:
+        return dict(connection.execute(
+            "SELECT kind, call_count FROM call_ceiling_counters WHERE scope_key = ?", (scope_key,),
+        ))
+
+
+@pytest.mark.parametrize("batch", [False, True])
+@pytest.mark.parametrize(
+    ("remote", "frontier", "reason"),
+    [(0, 1, "remote_cap_exhausted"), (1, 0, "frontier_cap_exhausted")],
+)
+def test_exhausted_frontier_call_reserves_no_slots(
+    tmp_path: Path, batch: bool, remote: int, frontier: int, reason: str,
+) -> None:
+    provider = Mock(return_value=BatchProviderResult(responses={}) if batch else "remote")
+    spec = _frontier_test_spec(tmp_path, batch, provider, remote, frontier)
+    runner = _runner(tmp_path)
+
+    outcomes = _dispatch_frontier(runner, spec, batch)
+
+    assert all(outcome.status == FeatureOutcomeStatus.DETERMINISTIC_FALLBACK for outcome in outcomes)
+    assert all(outcome.limitations == (reason,) for outcome in outcomes)
+    provider.assert_not_called()
+    assert _ceiling_counts(tmp_path / "ceilings.sqlite3", "acme:run-1:test_feature:v1") == {}
+
+
+@pytest.mark.parametrize("batch", [False, True])
+@pytest.mark.parametrize(
+    ("remote", "frontier", "reason"),
+    [(0, 1, "remote_cap_exhausted"), (1, 0, "frontier_cap_exhausted")],
+)
+@pytest.mark.parametrize(
+    "status",
+    [
+        FeatureOutcomeStatus.DETERMINISTIC_FALLBACK,
+        FeatureOutcomeStatus.ABSTAINED,
+        FeatureOutcomeStatus.PARTIAL,
+        FeatureOutcomeStatus.BLOCKED,
+        FeatureOutcomeStatus.UNAVAILABLE,
+        FeatureOutcomeStatus.EVIDENCE_GAP,
+    ],
+)
+def test_exhausted_ceiling_preserves_nonreleased_fallback_and_reports_reason(
+    tmp_path: Path, batch: bool, remote: int, frontier: int, reason: str, status: FeatureOutcomeStatus,
+) -> None:
+    fallback = FeatureOutcome(
+        status=status,
+        value="partial" if status in {FeatureOutcomeStatus.PARTIAL, FeatureOutcomeStatus.DETERMINISTIC_FALLBACK} else None,
+        tier=Tier.LOCAL,
+        limitations=("existing limitation",),
+        evidence_refs=("evidence-1",),
+        retryable=True,
+        next_action="Existing next action.",
+    )
+    handler = Mock(return_value=fallback)
+    provider = Mock()
+    spec = replace(_frontier_test_spec(tmp_path, batch, provider, remote, frontier), fallback_handler=handler)
+
+    outcomes = _dispatch_frontier(_runner(tmp_path), spec, batch)
+
+    assert outcomes == [replace(fallback, limitations=("existing limitation", reason))] * (2 if batch else 1)
+    assert handler.call_count == (2 if batch else 1)
+    provider.assert_not_called()
+    assert _ceiling_counts(tmp_path / "ceilings.sqlite3", "acme:run-1:test_feature:v1") == {}
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_ineligible_failure_preserves_nonreleased_fallback(tmp_path: Path, batch: bool) -> None:
+    fallback = FeatureOutcome(
+        status=FeatureOutcomeStatus.ABSTAINED, value=None, tier=Tier.NONE,
+        limitations=("existing limitation",), evidence_refs=("evidence-1",),
+        retryable=True, next_action="Existing next action.",
+    )
+    provider = Mock()
+    spec = replace(_frontier_test_spec(tmp_path, batch, provider, 1, 1), fallback_handler=lambda _: fallback)
+
+    outcomes = _dispatch_frontier(_runner(tmp_path, frontier_eligible=False), spec, batch)
+
+    assert all(outcome is fallback for outcome in outcomes)
+    provider.assert_not_called()
+
+
+@pytest.mark.parametrize("batch", [False, True])
+@pytest.mark.parametrize("retryable", [False, True])
+@pytest.mark.parametrize(
+    "status",
+    [
+        FeatureOutcomeStatus.DETERMINISTIC_FALLBACK,
+        FeatureOutcomeStatus.ABSTAINED,
+        FeatureOutcomeStatus.PARTIAL,
+        FeatureOutcomeStatus.BLOCKED,
+        FeatureOutcomeStatus.UNAVAILABLE,
+        FeatureOutcomeStatus.EVIDENCE_GAP,
+    ],
+)
+def test_budget_failure_preserves_nonreleased_fallback_but_is_not_retryable(
+    tmp_path: Path, batch: bool, retryable: bool, status: FeatureOutcomeStatus,
+) -> None:
+    fallback = FeatureOutcome(
+        status=status,
+        value="partial" if status in {FeatureOutcomeStatus.PARTIAL, FeatureOutcomeStatus.DETERMINISTIC_FALLBACK} else None,
+        tier=Tier.LOCAL,
+        limitations=("existing limitation",),
+        evidence_refs=("evidence-1",),
+        retryable=retryable,
+        next_action="Existing next action.",
+    )
+    provider = Mock(side_effect=BudgetExceeded("synthetic budget"))
+    spec = replace(_frontier_test_spec(tmp_path, batch, provider, 1, 1), fallback_handler=lambda _: fallback)
+
+    outcomes = _dispatch_frontier(_runner(tmp_path), spec, batch)
+
+    expected = replace(fallback, limitations=("existing limitation", "budget_exceeded"), retryable=False)
+    assert outcomes == [expected] * (2 if batch else 1)
+    provider.assert_called_once()
+    assert _ceiling_counts(tmp_path / "ceilings.sqlite3", "acme:run-1:test_feature:v1") == {"remote": 1, "frontier": 1}
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_budget_failure_keeps_released_fallback_mapping(tmp_path: Path, batch: bool) -> None:
+    provider = Mock(side_effect=BudgetExceeded("synthetic budget"))
+    spec = _frontier_test_spec(tmp_path, batch, provider, 1, 1)
+
+    outcomes = _dispatch_frontier(_runner(tmp_path), spec, batch)
+
+    assert all(outcome.status == FeatureOutcomeStatus.DETERMINISTIC_FALLBACK for outcome in outcomes)
+    assert all(outcome.limitations == ("budget_exceeded",) and not outcome.retryable for outcome in outcomes)
+    provider.assert_called_once()
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_actual_client_budget_refusal_is_nonretryable_without_provider_dispatch(
+    tmp_path: Path, batch: bool, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    router = Mock()
+    monkeypatch.setattr("src.ai.client.AIRequestRouter", Mock(return_value=router))
+    monkeypatch.setattr("src.ai.client.get_ai_mode", lambda: AIMode.ACTIVE)
+    monkeypatch.setattr("src.ai.cost_guard.PROGRAMS_ROOT", tmp_path / "programs")
+    client = AIClient(
+        "summary-model", 0.2, 0.5, endpoint="https://example.invalid", api_key="test-key",
+        trace_context=AITraceContext(
+            edition="acme_weekly", run_id="budget-refusal", caller="test",
+            metadata={"run_budget_usd": 0.000001},
+        ),
+    )
+    provider = Mock(side_effect=lambda *_: client.chat("system", "user"))
+    fallback = FeatureOutcome(
+        status=FeatureOutcomeStatus.ABSTAINED, value=None, tier=Tier.NONE, retryable=True,
+    )
+    spec = replace(_frontier_test_spec(tmp_path, batch, provider, 1, 1), fallback_handler=lambda _: fallback)
+
+    outcomes = _dispatch_frontier(_runner(tmp_path), spec, batch)
+
+    provider.assert_called_once()
+    router.route.assert_not_called()
+    state = CostGuard(
+        edition="acme_weekly", run_id="budget-refusal", budget_usd=0.000001,
+        programs_root=tmp_path / "programs",
+    ).current_state()
+    assert state.spent_usd == 0.0 and state.reserved_usd == 0.0 and state.ai_calls == 0
+    assert _ceiling_counts(tmp_path / "ceilings.sqlite3", "acme:run-1:test_feature:v1") == {"remote": 1, "frontier": 1}
+    assert all(outcome.status == FeatureOutcomeStatus.ABSTAINED for outcome in outcomes)
+    assert all(outcome.limitations == ("budget_exceeded",) and not outcome.retryable for outcome in outcomes)
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_actual_client_post_usage_budget_failure_retains_consumed_call_slots(
+    tmp_path: Path, batch: bool, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    router = Mock()
+    router.route.return_value = SimpleNamespace(
+        usage=SimpleNamespace(prompt_tokens=10000, completion_tokens=10000),
+        choices=[SimpleNamespace(message=SimpleNamespace(content="response"))],
+    )
+    monkeypatch.setattr("src.ai.client.AIRequestRouter", Mock(return_value=router))
+    monkeypatch.setattr("src.ai.client.get_ai_mode", lambda: AIMode.ACTIVE)
+    monkeypatch.setattr("src.ai.cost_guard.PROGRAMS_ROOT", tmp_path / "programs")
+    monkeypatch.setattr(
+        "src.core.ai_telemetry.append_ai_telemetry",
+        lambda record: append_ai_telemetry(record, programs_root=tmp_path / "programs"),
+    )
+    monkeypatch.delenv("VERTEX_LLM_TRACE", raising=False)
+    client = AIClient(
+        "summary-model", 0.2, 0.5, endpoint="https://example.invalid", api_key="test-key",
+        trace_context=AITraceContext(
+            edition="acme_weekly", run_id="budget-overspend", caller="test",
+            metadata={"run_budget_usd": 0.01},
+        ),
+    )
+    provider = Mock(side_effect=lambda *_: client.chat("system", "user"))
+    fallback = FeatureOutcome(
+        status=FeatureOutcomeStatus.ABSTAINED, value=None, tier=Tier.NONE, retryable=True,
+    )
+    spec = replace(_frontier_test_spec(tmp_path, batch, provider, 1, 1), fallback_handler=lambda _: fallback)
+
+    outcomes = _dispatch_frontier(_runner(tmp_path), spec, batch)
+
+    provider.assert_called_once()
+    router.route.assert_called_once()
+    state = CostGuard(
+        edition="acme_weekly", run_id="budget-overspend", budget_usd=0.01,
+        programs_root=tmp_path / "programs",
+    ).current_state()
+    assert state.spent_usd > 0.01 and state.reserved_usd == 0.0 and state.ai_calls == 1
+    assert _ceiling_counts(tmp_path / "ceilings.sqlite3", "acme:run-1:test_feature:v1") == {"remote": 1, "frontier": 1}
+    assert all(outcome.status == FeatureOutcomeStatus.ABSTAINED for outcome in outcomes)
+    assert all(outcome.limitations == ("budget_exceeded",) and not outcome.retryable for outcome in outcomes)
+
+
+@pytest.mark.parametrize("batch", [False, True])
+@pytest.mark.parametrize(
+    ("remote", "frontier", "expected"),
+    [(None, None, {}), (1, None, {"remote": 1}), (None, 1, {"frontier": 1}), (1, 1, {"remote": 1, "frontier": 1})],
+)
+def test_successful_frontier_call_reserves_only_bounded_slots(
+    tmp_path: Path, batch: bool, remote: int | None, frontier: int | None, expected: dict[str, int],
+) -> None:
+    response = BatchProviderResult(responses={"first": "first", "second": "second"}) if batch else "first"
+    provider = Mock(return_value=response)
+    spec = _frontier_test_spec(tmp_path, batch, provider, remote, frontier)
+
+    outcomes = _dispatch_frontier(_runner(tmp_path), spec, batch)
+
+    assert all(outcome.status == FeatureOutcomeStatus.RELEASED for outcome in outcomes)
+    provider.assert_called_once()
+    assert _ceiling_counts(tmp_path / "ceilings.sqlite3", "acme:run-1:test_feature:v1") == expected
+
+
+@pytest.mark.parametrize("batch", [False, True])
+@pytest.mark.parametrize(
+    ("remote", "frontier", "reason"),
+    [(1, 2, "remote_cap_exhausted"), (2, 1, "frontier_cap_exhausted")],
+)
+def test_exhausted_frontier_call_preserves_prior_counts(
+    tmp_path: Path, batch: bool, remote: int, frontier: int, reason: str,
+) -> None:
+    response = BatchProviderResult(responses={"first": "first", "second": "second"}) if batch else "first"
+    provider = Mock(return_value=response)
+    spec = _frontier_test_spec(tmp_path, batch, provider, remote, frontier)
+    runner = _runner(tmp_path)
+
+    assert all(outcome.status == FeatureOutcomeStatus.RELEASED for outcome in _dispatch_frontier(runner, spec, batch))
+    outcomes = _dispatch_frontier(runner, spec, batch)
+
+    assert all(outcome.status == FeatureOutcomeStatus.DETERMINISTIC_FALLBACK for outcome in outcomes)
+    assert all(outcome.limitations == (reason,) for outcome in outcomes)
+    provider.assert_called_once()
+    assert _ceiling_counts(tmp_path / "ceilings.sqlite3", "acme:run-1:test_feature:v1") == {"remote": 1, "frontier": 1}
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_frontier_counter_write_failure_rolls_back_remote_slot(tmp_path: Path, batch: bool) -> None:
+    path = tmp_path / "ceilings.sqlite3"
+    CallCeilingLedger(path).reserve_call(scope_key="setup", kind="remote", ceiling=1)
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute(
+            "CREATE TRIGGER fail_frontier BEFORE INSERT ON call_ceiling_counters "
+            "WHEN NEW.kind = 'frontier' BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END"
+        )
+        connection.commit()
+    provider = Mock()
+    spec = _frontier_test_spec(tmp_path, batch, provider, 2, 2)
+
+    with pytest.raises(StateError, match="call-ceiling ledger"):
+        _dispatch_frontier(_runner(tmp_path), spec, batch)
+
+    provider.assert_not_called()
+    assert _ceiling_counts(path, "acme:run-1:test_feature:v1") == {}
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_uncertain_frontier_call_keeps_reserved_slots(tmp_path: Path, batch: bool) -> None:
+    provider = Mock(side_effect=TimeoutError("synthetic timeout"))
+    spec = _frontier_test_spec(tmp_path, batch, provider, 1, 1)
+    runner = _runner(tmp_path)
+
+    first = _dispatch_frontier(runner, spec, batch)
+    second = _dispatch_frontier(runner, spec, batch)
+
+    assert all(outcome.status == FeatureOutcomeStatus.UNAVAILABLE for outcome in first)
+    assert all(outcome.retryable for outcome in first)
+    assert all(outcome.status == FeatureOutcomeStatus.DETERMINISTIC_FALLBACK for outcome in second)
+    assert all(outcome.limitations == ("remote_cap_exhausted",) for outcome in second)
+    provider.assert_called_once()
+    assert _ceiling_counts(tmp_path / "ceilings.sqlite3", "acme:run-1:test_feature:v1") == {"remote": 1, "frontier": 1}
+
+
+def test_concurrent_frontier_calls_do_not_consume_unavailable_remote_slots(tmp_path: Path) -> None:
+    path = tmp_path / "ceilings.sqlite3"
+    CallCeilingLedger(path).reserve_call(scope_key="setup", kind="remote", ceiling=1)
+    ready = Barrier(8)
+    lock = Lock()
+    calls: list[str] = []
+
+    def provider(request: str, compiled: CompiledContext) -> str:
+        with lock:
+            calls.append(request)
+        return request
+
+    spec = _spec(
+        tmp_path, build_context=lambda _: ContextBuildResult(compiled=_compiled()),
+        call_provider=provider, max_remote_calls_per_run=8, max_frontier_calls_per_run=1,
+    )
+    runner = _runner(tmp_path)
+
+    def dispatch(index: int) -> FeatureOutcome[str]:
+        ready.wait(timeout=15)
+        return runner.run(spec, str(index))
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        outcomes = list(executor.map(dispatch, range(8)))
+
+    assert len(calls) == 1
+    assert sum(outcome.status == FeatureOutcomeStatus.RELEASED for outcome in outcomes) == 1
+    rejected = [outcome for outcome in outcomes if outcome.status == FeatureOutcomeStatus.DETERMINISTIC_FALLBACK]
+    assert len(rejected) == 7
+    assert all(outcome.limitations == ("frontier_cap_exhausted",) for outcome in rejected)
+    assert _ceiling_counts(path, "acme:run-1:test_feature:v1") == {"remote": 1, "frontier": 1}

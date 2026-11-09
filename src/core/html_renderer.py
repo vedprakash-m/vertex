@@ -155,6 +155,7 @@ def build_render_payload(context: RenderContext) -> dict[str, Any]:
         "scorecard_totals": scorecard_totals,
         "scorecard_urls": context.scorecard_urls,
         "workstreams": workstreams,
+        "all_workstreams": context.workstreams,
         "visible_detail_section_ids": visible_detail_section_ids,
         "focused_unchanged_dimension_counts": focused_unchanged_dimension_counts,
         "workstream_urls": context.workstream_urls,
@@ -940,6 +941,7 @@ def _delta_category_priority(category: str) -> int:
 
 def _risk_rank(level: RiskLevel) -> int:
     ranks = {
+        RiskLevel.BLOCKED: 5,
         RiskLevel.HIGH: 4,
         RiskLevel.MEDIUM: 3,
         RiskLevel.UNKNOWN: 2,
@@ -951,6 +953,7 @@ def _risk_rank(level: RiskLevel) -> int:
 
 def _risk_contribution(level: RiskLevel) -> int:
     weights = {
+        RiskLevel.BLOCKED: 3,
         RiskLevel.HIGH: 3,
         RiskLevel.MEDIUM: 1,
         RiskLevel.UNKNOWN: 2,

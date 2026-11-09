@@ -1,0 +1,3 @@
+{% macro workstream_anchor(ws) -%}
+{% if ws.edit_path and 'chapter_' in ws.edit_path %}chapter-{{ ws.section_id }}{% else %}{{ ws.section_id }}{% endif %}
+{%- endmacro %}

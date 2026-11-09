@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
 from pathlib import Path
-from shutil import rmtree
 from typing import Any
-from uuid import uuid4
 import sqlite3
 
 import pytest
@@ -33,14 +30,15 @@ def _seed(root: Path, program_id: str = "fixture") -> Path:
 
 
 @pytest.fixture
-def programs_root() -> Iterator[Path]:
-    workspace = Path.cwd() / f".test-context-refs-{uuid4().hex}"
-    root = workspace / "programs"
+def programs_root(tmp_path: Path) -> Path:
+    root = tmp_path / "programs"
     _seed(root)
-    try:
-        yield root
-    finally:
-        rmtree(workspace)
+    return root
+
+
+def test_programs_root_uses_pytest_temporary_directory(programs_root: Path, tmp_path: Path) -> None:
+    assert programs_root == tmp_path / "programs"
+    assert (programs_root / "fixture" / "program.yaml").is_file()
 
 
 def _milestone(**fields: Any) -> dict[str, Any]:

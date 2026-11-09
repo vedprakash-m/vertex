@@ -38,7 +38,7 @@ def test_projection_rows_carry_min_confidence_and_temporal_confidence(tmp_path) 
     )
 
     projection_path = tmp_path / "prov.sqlite3"
-    project_events_to_sqlite("acme", events, projection_path=projection_path)
+    project_events_to_sqlite("acme", events, projection_path=projection_path, programs_root=tmp_path / "programs")
     dump = canonical_projection_dump(projection_path)
 
     assert dump["proj_risk"][0]["min_confidence"] == "ai_extracted"

@@ -529,6 +529,7 @@ def load_program_facts(
     archive_root: Path | None = None,
     sor_state: FactSorState | None = None,
     require_committed_gather_run: bool = False,
+    _omit_action_shim: bool = False,
 ) -> ProgramFactSnapshot:
     program_mode = (
         resolve_fact_sor_mode(program_id=program_id, programs_root=programs_root)
@@ -587,6 +588,8 @@ def load_program_facts(
         editions_root=editions_root,
         archive_root=archive_root,
         source_diagnostics=source_diagnostics,
+        primary_families=primary_families,
+        _omit_action_shim=_omit_action_shim,
     )
     if not shim_facts:
         return replace(snapshot, source_diagnostics=tuple(source_diagnostics)) if source_diagnostics else snapshot
@@ -2179,6 +2182,8 @@ def _load_current_state_shim_facts(
     editions_root: Path | None,
     archive_root: Path | None,
     source_diagnostics: list[FactSourceDiagnostic],
+    primary_families: frozenset[str] = frozenset(),
+    _omit_action_shim: bool = False,
 ) -> tuple[ProgramFactRevision, ...]:
     requested_fact_types = {
         fact_type.strip().lower()
@@ -2202,10 +2207,14 @@ def _load_current_state_shim_facts(
             )
         )
     }
+    requested_fact_types = {
+        fact_type for fact_type in requested_fact_types
+        if _FACT_TYPE_TO_FAMILY.get(fact_type) not in primary_families
+    }
     shim_facts = [
         *(
             _build_action_item_facts(program_id, recorded_at=recorded_at, programs_root=programs_root)
-            if "action.item" in requested_fact_types
+            if "action.item" in requested_fact_types and not _omit_action_shim
             else ()
         ),
         *(
@@ -2301,11 +2310,8 @@ def _build_action_item_facts(
     programs_root: Path | None,
 ) -> tuple[ProgramFactRevision, ...]:
     root = programs_root or PROGRAMS_ROOT
-    try:
-        from src.core.action_tracker import load_actions  # lazy to break import cycle
-        actions = load_actions(program_id, programs_root=root)
-    except ConfigError:
-        return ()
+    from src.core.action_tracker import load_actions  # lazy to break import cycle
+    actions = load_actions(program_id, programs_root=root, repair_corruption=False)
     return tuple(
         _shim_fact_revision(
             program_id=program_id,

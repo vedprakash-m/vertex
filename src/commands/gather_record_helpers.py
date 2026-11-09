@@ -204,10 +204,11 @@ def record_workiq_provenance(
 ) -> None:
     """Best-effort lane-level evidence provenance; never blocks gather."""
     from src.core.evidence_provenance import make_provenance_record, record_provenance
+    from src.core.m365_payload_support import has_provisional_workiq_identity
 
     lanes: dict[str, list[Signal]] = {}
     for signal in workiq_signals:
-        if signal.workstream_id:
+        if signal.workstream_id and not has_provisional_workiq_identity(signal.metadata):
             lanes.setdefault(signal.workstream_id, []).append(signal)
     for lane_id, signals in lanes.items():
         source_counts: dict[str, int] = {}

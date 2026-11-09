@@ -36,7 +36,7 @@ def _envelope(*, event_type: str, payload: dict, confidence: ConfidenceTier) -> 
         confidence=confidence,
         actor="operator@example.com",
         payload=payload,
-        source_ref=EmailRef(subject="s", sent_at=NOW, sender="a@b.com", message_id="m1", vault_hash="sha256:v1"),
+        source_ref=EmailRef(subject="s", sent_at=NOW, sender="fixture-user-05@group-02.fixture.example.net", message_id="m1", vault_hash="sha256:v1"),
     )
 
 

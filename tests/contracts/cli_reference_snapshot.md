@@ -38,7 +38,7 @@ Vertex hybrid journal automation CLI.
 | `bridge-status` |  |
 | `brief` |  |
 | `catchup` |  |
-| `capture-lt-deck` | Validate and write an LT deck snapshot (γ-Read Phase 3). |
+| `capture-lt-deck` | Validate and write an LT deck snapshot (Gamma-Read Phase 3). |
 | `confirm` |  |
 | `deck-companion` |  |
 | `diff` |  |
@@ -53,7 +53,7 @@ Vertex hybrid journal automation CLI.
 | `prefetch` |  |
 | `history` |  |
 | `investigate` |  |
-| `ingest-update` | Parse a compact-update EML and stage ContextUpdateProposals (γ-Read Phase 3). |
+| `ingest-update` | Parse a compact-update EML and stage ContextUpdateProposals (Gamma-Read Phase 3). |
 | `manifest` |  |
 | `meeting-close` |  |
 | `maturity-check` |  |
@@ -192,8 +192,8 @@ sidecar (legacy / pre-signing archive, or signing skipped).
 
 | Option | Type | Required | Default | Description |
 |---|---|---|---|---|
-| --edition TEXT | text | No |  | Default edition for routed command. |
-| --program TEXT | text | No |  | Program id. Enables named-intent answering. |
+| --edition TEXT | text | No |  | Edition for routed commands; required unless --program is set. |
+| --program TEXT | text | No |  | Program for named intents; required unless --edition is set. |
 | --cluster-misses | boolean | No | False | Cluster unroutable questions from the miss log and propose new intent routes. |
 
 ### `vertex apply-proposals`
@@ -313,7 +313,7 @@ sidecar (legacy / pre-signing archive, or signing skipped).
 
 **Usage:** `vertex capture-lt-deck [OPTIONS]`
 
-Validate and write an LT deck snapshot (γ-Read Phase 3).
+Validate and write an LT deck snapshot (Gamma-Read Phase 3).
 
 The snapshot is used by QG-ED-LT to check LT deck freshness.
 Run vertex doctor --context to see the LT deck freshness status.
@@ -412,7 +412,7 @@ Run vertex doctor --context to see the LT deck freshness status.
 | --fact-parity | boolean | No | False | Check whether enough dual-read parity cycles have been logged for the resolved program (reads fact_store.dual_read_cycles from platform_state.yaml, default 5). |
 | --fact-bridge | boolean | No | False | Check the ledger->fact-store bridge posture: whether it is enabled for a REV-configured program, and whether a persistent bridge-failure backlog exists (fix-data-flow.md Track A / PS-2). |
 | --fact-deserialization | boolean | No | False | Confirm existing persisted facts still deserialize against the current schema, not just newly-bridged ones (fix-data-flow.md Track L). |
-| --confirm-readiness | boolean | No | False | Enumerate exact live blockers that would prevent a non-forced confirm. Returns 0 only when confirm would succeed. |
+| --confirm-readiness | boolean | No | False | Inspect selected local confirmation prerequisites without running confirmation. |
 | --adapter-cert | boolean | No | False | Audit UIL adapter certification per WS-3: checks which channels are enabled/certified and probes WorkIQ verb availability. |
 | --issue INTEGER | integer | No |  | Issue number required by --flip-parity. |
 | --charts | boolean | No | False | Validate chart cache TTL vs edition cadence, attachment targets, exec-summary uniqueness, and renderer IDs. |
@@ -596,7 +596,7 @@ Extract structured evidence from emails and transcripts via WorkIQ.
 
 **Usage:** `vertex ingest-update [OPTIONS]`
 
-Parse a compact-update EML and stage ContextUpdateProposals (γ-Read Phase 3).
+Parse a compact-update EML and stage ContextUpdateProposals (Gamma-Read Phase 3).
 
 Apply proposals with: vertex context apply --edition EDITION --proposal-id ID
 
@@ -665,9 +665,9 @@ Apply proposals with: vertex context apply --edition EDITION --proposal-id ID
 | Option | Type | Required | Default | Description |
 |---|---|---|---|---|
 | --program TEXT | text | No |  | Program id, e.g. myprogram. |
-| --to TEXT | text | No |  | Target storage backend. Currently only sqlite is supported. |
+| --to TEXT | text | No |  | Target storage backend: sqlite or file. |
 | --rebuild-analytics | boolean | No | False | Rebuild the per-program analytics projection database from archive and journal primaries. |
-| --dry-run | boolean | No | False | Preview migrated counts without writing SQLite data or updating program.yaml. |
+| --dry-run | boolean | No | False | Cannot be combined with --rebuild-analytics. Preview storage-migration counts without switching backends; corrupt trajectories are refused without repair; reverse previews may initialize SQLite schema or touch sidecars. |
 
 ### `vertex notify`
 
@@ -1601,7 +1601,7 @@ Vertex operator and debug commands.
 | --fact-parity | boolean | No | False | Check whether enough dual-read parity cycles have been logged for the resolved program (reads fact_store.dual_read_cycles from platform_state.yaml, default 5). |
 | --fact-bridge | boolean | No | False | Check the ledger->fact-store bridge posture: whether it is enabled for a REV-configured program, and whether a persistent bridge-failure backlog exists (fix-data-flow.md Track A / PS-2). |
 | --fact-deserialization | boolean | No | False | Confirm existing persisted facts still deserialize against the current schema, not just newly-bridged ones (fix-data-flow.md Track L). |
-| --confirm-readiness | boolean | No | False | Enumerate exact live blockers that would prevent a non-forced confirm. Returns 0 only when confirm would succeed. |
+| --confirm-readiness | boolean | No | False | Inspect selected local confirmation prerequisites without running confirmation. |
 | --adapter-cert | boolean | No | False | Audit UIL adapter certification per WS-3: checks which channels are enabled/certified and probes WorkIQ verb availability. |
 | --issue INTEGER | integer | No |  | Issue number required by --flip-parity. |
 | --charts | boolean | No | False | Validate chart cache TTL vs edition cadence, attachment targets, exec-summary uniqueness, and renderer IDs. |
@@ -2646,7 +2646,7 @@ Inspect historical claim calibration.
 | Command | Description |
 |---|---|
 | `report` |  |
-| `edit-distance-trend` | Show draft↔confirm edit distance trend per task type (WS-22 learning-loop efficacy). |
+| `edit-distance-trend` | Show draft-to-confirm edit distance trend per task type (WS-22 learning-loop efficacy). |
 
 #### `vertex calibration report`
 
@@ -2664,7 +2664,7 @@ Inspect historical claim calibration.
 
 **Usage:** `vertex calibration edit-distance-trend [OPTIONS]`
 
-Show draft↔confirm edit distance trend per task type (WS-22 learning-loop efficacy).
+Show draft-to-confirm edit distance trend per task type (WS-22 learning-loop efficacy).
 
 **Options**
 
@@ -6197,7 +6197,7 @@ Print the privacy & data governance matrix.
 Sections:
   - channels: per-channel read/write classification, retention, RBAC model
   - sidecars: per-sidecar classification + retention
-  - retention: retention-class → days mapping
+  - retention: retention-class to days mapping
 
 **Options**
 
@@ -6828,7 +6828,7 @@ Program-Context Intelligence (REV) retrieval + verification.
 |---|---|
 | `run` | Run one REV retrieval cycle and stage candidates for triage. |
 | `init-inbox` | Scaffold the local-import inbox directory tree + write a local README (P1-5). |
-| `rotate-processed` | Rotate stale/surplus files from ``processed/`` → ``processed/archive/`` (P2-14). |
+| `rotate-processed` | Rotate stale/surplus files from ``processed/`` to ``processed/archive/`` (P2-14). |
 | `export-corpus` | Export a PII-scrubbed REV corpus bundle (P2-5). |
 | `label-corpus` | Import or bootstrap the REV labeled corpus for quality gating (S-9c). |
 
@@ -6887,7 +6887,7 @@ three fall back to the same program default when none is given.
 
 **Usage:** `vertex rev rotate-processed [OPTIONS]`
 
-Rotate stale/surplus files from ``processed/`` → ``processed/archive/`` (P2-14).
+Rotate stale/surplus files from ``processed/`` to ``processed/archive/`` (P2-14).
 
 Runs the same OA-4 retention rotation that fires automatically at the end of
 each ``vertex rev run`` cycle, but as a standalone housekeeping command so

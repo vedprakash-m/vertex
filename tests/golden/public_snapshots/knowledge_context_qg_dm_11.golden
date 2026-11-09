@@ -1,0 +1,157 @@
+[
+  {
+    "checkpoint": "2025_06_period_correct",
+    "context": {
+      "as_of": "2025-06-01T00:00:00+00:00",
+      "entries": [
+        {
+          "claims": [
+            {
+              "claim_id": "01ORGGEN8",
+              "confidence": "source_authoritative",
+              "overridden_claim_ids": [],
+              "predicate": "status",
+              "recorded_at": "2024-01-15T00:00:00+00:00",
+              "scope": "org",
+              "source_document_key": "knowledge_document:sha256:kb-gen8:line:10",
+              "subject": "sku_generation:gen8",
+              "tombstoned": false,
+              "valid_from": "2023-01-01T00:00:00+00:00",
+              "valid_until": null,
+              "value": "retiring"
+            }
+          ],
+          "entity_id": "sku_generation:gen8",
+          "projection_coverage": "absent"
+        },
+        {
+          "claims": [
+            {
+              "claim_id": "01DOMAINGEN9",
+              "confidence": "source_authoritative",
+              "overridden_claim_ids": [],
+              "predicate": "status",
+              "recorded_at": "2025-02-01T00:00:00+00:00",
+              "scope": "domain:storage-platform",
+              "source_document_key": "knowledge_document:sha256:kb-gen9-pilot:line:20",
+              "subject": "sku_generation:gen9",
+              "tombstoned": false,
+              "valid_from": "2025-01-01T00:00:00+00:00",
+              "valid_until": "2025-10-01T00:00:00+00:00",
+              "value": "pilot"
+            }
+          ],
+          "entity_id": "sku_generation:gen9",
+          "projection_coverage": "present"
+        }
+      ],
+      "knowledge_as_of": "2025-06-01T00:00:00+00:00",
+      "scope_chain": [
+        "program:acme",
+        "domain:storage-platform",
+        "org"
+      ]
+    },
+    "gate_id": "QG-DM-11"
+  },
+  {
+    "checkpoint": "2026_02_current_knowledge",
+    "context": {
+      "as_of": "2026-02-01T00:00:00+00:00",
+      "entries": [
+        {
+          "claims": [
+            {
+              "claim_id": "01PROGRAMBLOCKER",
+              "confidence": "operator_confirmed",
+              "overridden_claim_ids": [
+                "01DOMAINBLOCKER"
+              ],
+              "predicate": "launch_blocker",
+              "recorded_at": "2026-01-16T00:00:00+00:00",
+              "scope": "program:acme",
+              "source_document_key": "operator_assertion:operator:2026-01-16T00:00:00Z",
+              "subject": "sku_generation:gen9",
+              "tombstoned": true,
+              "valid_from": "2026-01-15T00:00:00+00:00",
+              "valid_until": null,
+              "value": null
+            },
+            {
+              "claim_id": "01DOMAINGEN9OP",
+              "confidence": "operator_confirmed",
+              "overridden_claim_ids": [],
+              "predicate": "status",
+              "recorded_at": "2026-01-10T00:00:00+00:00",
+              "scope": "domain:storage-platform",
+              "source_document_key": "operator_assertion:operator:2026-01-10T00:00:00Z",
+              "subject": "sku_generation:gen9",
+              "tombstoned": false,
+              "valid_from": "2025-10-01T00:00:00+00:00",
+              "valid_until": null,
+              "value": "launch_ready"
+            }
+          ],
+          "entity_id": "sku_generation:gen9",
+          "projection_coverage": "present"
+        }
+      ],
+      "knowledge_as_of": "2026-02-01T00:00:00+00:00",
+      "scope_chain": [
+        "program:acme",
+        "domain:storage-platform",
+        "org"
+      ]
+    },
+    "gate_id": "QG-DM-11"
+  },
+  {
+    "checkpoint": "2026_02_prior_knowledge",
+    "context": {
+      "as_of": "2026-02-01T00:00:00+00:00",
+      "entries": [
+        {
+          "claims": [
+            {
+              "claim_id": "01DOMAINBLOCKER",
+              "confidence": "operator_confirmed",
+              "overridden_claim_ids": [],
+              "predicate": "launch_blocker",
+              "recorded_at": "2025-09-20T00:00:00+00:00",
+              "scope": "domain:storage-platform",
+              "source_document_key": "operator_assertion:operator:2025-09-20T00:00:00Z",
+              "subject": "sku_generation:gen9",
+              "tombstoned": false,
+              "valid_from": "2025-09-01T00:00:00+00:00",
+              "valid_until": null,
+              "value": "synthetic-blocker"
+            },
+            {
+              "claim_id": "01PROGRAMGEN9",
+              "confidence": "ai_extracted",
+              "overridden_claim_ids": [],
+              "predicate": "status",
+              "recorded_at": "2025-12-15T00:00:00+00:00",
+              "scope": "program:acme",
+              "source_document_key": "lt_deck:fixtures/synthetic-review.pptx:2025-03-20:14",
+              "subject": "sku_generation:gen9",
+              "tombstoned": false,
+              "valid_from": "2025-10-01T00:00:00+00:00",
+              "valid_until": null,
+              "value": "delayed"
+            }
+          ],
+          "entity_id": "sku_generation:gen9",
+          "projection_coverage": "present"
+        }
+      ],
+      "knowledge_as_of": "2025-12-31T00:00:00+00:00",
+      "scope_chain": [
+        "program:acme",
+        "domain:storage-platform",
+        "org"
+      ]
+    },
+    "gate_id": "QG-DM-11"
+  }
+]

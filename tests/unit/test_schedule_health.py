@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
+
+import pytest
 
 from src.core.prefetch_store import write_prefetch_snapshot
 from src.core.schedule_health import (
@@ -18,6 +21,7 @@ def test_prefetch_missing_when_no_snapshot(tmp_path: Path) -> None:
     finding = evaluate_prefetch_schedule_health("samplealpha", programs_root=tmp_path, now=_NOW)
     assert finding.status == "missing"
     assert finding.age_hours is None
+    assert "may not have run" in finding.detail
 
 
 def test_prefetch_ok_when_fresh(tmp_path: Path) -> None:
@@ -30,6 +34,49 @@ def test_prefetch_ok_when_fresh(tmp_path: Path) -> None:
     )
     assert finding.status == "ok"
     assert finding.age_hours == 1.0
+
+
+def test_prefetch_manifest_mismatch_is_not_reported_fresh(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    manifest = write_prefetch_snapshot(
+        program_id="samplealpha", channel="workiq", payload={"signals": []}, watermark=None,
+        completeness="complete", latency_ms=0, ttl_seconds=3600, programs_root=tmp_path, now=_NOW,
+    )
+    manifest_path = tmp_path / "samplealpha" / "runtime" / "prefetch" / "workiq" / manifest.snapshot_id / "manifest.json"
+    manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_data["snapshot_id"] = "f" * 64
+    manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
+    manifest_bytes = manifest_path.read_bytes()
+
+    finding = evaluate_prefetch_schedule_health("samplealpha", programs_root=tmp_path, now=_NOW)
+    assert finding.status == "missing"
+    assert finding.age_hours is None
+    assert "latest snapshot may be invalid" in finding.detail
+    assert "Prefetch snapshot manifest does not match the selected snapshot" in caplog.text
+    assert manifest.snapshot_id not in caplog.text
+    assert manifest_path.read_bytes() == manifest_bytes
+
+
+@pytest.mark.parametrize("target", ["pointer", "manifest"])
+def test_unreadable_prefetch_selection_is_not_reported_fresh(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, target: str,
+) -> None:
+    manifest = write_prefetch_snapshot(
+        program_id="samplealpha", channel="workiq", payload={"signals": []}, watermark=None,
+        completeness="complete", latency_ms=0, ttl_seconds=3600, programs_root=tmp_path, now=_NOW,
+    )
+    channel_dir = tmp_path / "samplealpha" / "runtime" / "prefetch" / "workiq"
+    selected_path = channel_dir / "latest.json" if target == "pointer" else channel_dir / manifest.snapshot_id / "manifest.json"
+    selected_path.write_bytes(b"\xff")
+
+    finding = evaluate_prefetch_schedule_health("samplealpha", programs_root=tmp_path, now=_NOW)
+    assert finding.status == "missing"
+    assert finding.age_hours is None
+    assert "latest snapshot may be invalid" in finding.detail
+    assert f"Prefetch snapshot {target} is unreadable or invalid." in caplog.text
+    assert manifest.snapshot_id not in caplog.text
+    assert selected_path.read_bytes() == b"\xff"
 
 
 def test_prefetch_warn_when_stale(tmp_path: Path) -> None:

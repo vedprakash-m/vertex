@@ -7,6 +7,7 @@ logic itself (that lives in ``tests/unit/test_schedule_health.py``).
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ import pytest
 from src.commands.doctor_checks.schedule_health_checks import (
     run_schedule_health_doctor,
 )
+from src.core.prefetch_store import write_prefetch_snapshot
 from src.core.schedule_health import ScheduleHealthFinding
 
 _NOW = datetime(2026, 7, 14, 12, 0, 0, tzinfo=timezone.utc)
@@ -79,6 +81,49 @@ def test_fresh_artifacts_report_ok(programs_root: Path) -> None:
     assert summary.status == "ok"
     assert _check(report, "Scheduled Prefetch").status == "ok"
     assert _check(report, "Scheduled Cockpit").status == "ok"
+
+
+def test_invalid_prefetch_manifest_is_not_reported_fresh(
+    programs_root: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    manifest = write_prefetch_snapshot(
+        program_id="samplealpha", channel="workiq", payload={"signals": []}, watermark=None,
+        completeness="complete", latency_ms=0, ttl_seconds=3600, programs_root=programs_root, now=_NOW,
+    )
+    manifest_path = programs_root / "samplealpha" / "runtime" / "prefetch" / "workiq" / manifest.snapshot_id / "manifest.json"
+    manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_data["snapshot_id"] = "f" * 64
+    manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
+    manifest_bytes = manifest_path.read_bytes()
+
+    report = run_schedule_health_doctor(program_id="samplealpha", programs_root=programs_root, now=_NOW)
+    row = _check(report, "Scheduled Prefetch")
+    assert row.status == "info"
+    assert "latest snapshot may be invalid" in row.detail
+    assert "Prefetch snapshot manifest does not match the selected snapshot" in caplog.text
+    assert manifest.snapshot_id not in caplog.text
+    assert manifest_path.read_bytes() == manifest_bytes
+
+
+@pytest.mark.parametrize("target", ["pointer", "manifest"])
+def test_unreadable_prefetch_selection_uses_existing_info_status(
+    programs_root: Path, caplog: pytest.LogCaptureFixture, target: str,
+) -> None:
+    manifest = write_prefetch_snapshot(
+        program_id="samplealpha", channel="workiq", payload={"signals": []}, watermark=None,
+        completeness="complete", latency_ms=0, ttl_seconds=3600, programs_root=programs_root, now=_NOW,
+    )
+    channel_dir = programs_root / "samplealpha" / "runtime" / "prefetch" / "workiq"
+    selected_path = channel_dir / "latest.json" if target == "pointer" else channel_dir / manifest.snapshot_id / "manifest.json"
+    selected_path.write_bytes(b"\xff")
+
+    report = run_schedule_health_doctor(program_id="samplealpha", programs_root=programs_root, now=_NOW)
+    row = _check(report, "Scheduled Prefetch")
+    assert row.status == "info"
+    assert "latest snapshot may be invalid" in row.detail
+    assert f"Prefetch snapshot {target} is unreadable or invalid." in caplog.text
+    assert manifest.snapshot_id not in caplog.text
+    assert selected_path.read_bytes() == b"\xff"
 
 
 def test_evaluator_failure_is_reported_as_fail_not_raised(programs_root: Path) -> None:

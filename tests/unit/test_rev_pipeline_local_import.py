@@ -36,7 +36,7 @@ from src.core.rev.pipeline import RevPipelineDeps, run_rev_cycle
 from src.core.rev.ports import EnumeratedCandidate, HydratedContent
 from src.core.rev.prompt_shields import LocalOnlyPromptShields
 from src.core.rev.query_planner import RetrievalIntent
-from src.core.rev.result import Incomplete, RateLimited, Success
+from src.core.rev.result import Incomplete, RateLimited, Success, Unsupported
 from src.m365.rev.eml_enumerator import EmlEnumerator
 from src.m365.rev.eml_hydrator import EmlHydrator
 
@@ -65,6 +65,22 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=utf-8
 
 """
+
+_CORRUPT_HISTORY_CASES = (
+    b"\xffsynthetic-private-content\n",
+    b'{"stop_category":"complete"}\n{"private":"synthetic-private-content"\n',
+    b'["synthetic-private-content"]\n',
+    b'{"llm_fallback_count":"synthetic-private-content"}\n',
+    b'{"llm_fallback_count":[1]}\n',
+    b'{"llm_fallback_count":NaN}\n',
+    b'{"llm_fallback_count":Infinity}\n',
+    b'{"llm_fallback_count":' + b"9" * 5000 + b"}\n",
+    b'{"llm_fallback_count":' + b"[" * 1100 + b"0" + b"]" * 1100 + b"}\n",
+)
+_CORRUPT_HISTORY_IDS = (
+    "invalid-utf8", "malformed-json", "non-object", "invalid-count", "list-count",
+    "nan-count", "infinite-count", "oversize-number", "excessive-nesting",
+)
 
 _ATTACHMENT_EML = """\
 From: sender@example.com
@@ -99,12 +115,12 @@ def _build_deps(eml_inbox: Path) -> RevPipelineDeps:
     enumerator = EmlEnumerator(
         inbox_root=eml_inbox,
         mailbox_tenant_id="t",
-        principal_mailbox="u@x.com",
+        principal_mailbox="operator@example.com",
         container="inbox",
     )
     hydrator = EmlHydrator(
         mailbox_tenant_id="t",
-        principal_mailbox="u@x.com",
+        principal_mailbox="operator@example.com",
         container="inbox",
         attachment_denied_path=eml_inbox / "attachment_denied.jsonl",
     )
@@ -132,13 +148,494 @@ def _run_cycle(
         deps=deps,
         profile=RevRetrievalProfile(profile=REV_PROFILE_SEARCH_HYDRATE),
         mailbox_tenant_id="t",
-        mailbox_principal="u@x.com",
+        mailbox_principal="operator@example.com",
         mailbox_container="inbox",
         correlation_id=correlation_id,
         programs_root=programs_root,
         budget_limits=BudgetLimits(),
         set_at=set_at,
     )
+
+
+class _UnsupportedEnumerator:
+    def enumerate(self, intent, *, correlation_id: str) -> Unsupported:
+        return Unsupported(entity_type="private-entity-detail", reason="private-provider-detail")
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        "",
+        "Date: \n",
+        "Date: private-synthetic-invalid-time\n",
+        "Date: 2026-06-24T10:00:00\n",
+        "Date: Wed, 24 Jun 2026 10:00:00 -0000\n",
+        "Date: 2026-06-24T10:00:00-00:00\n",
+        "Date: 2026-06-24T10:00:00+12:60\n",
+        "Date: 2026-06-24T10:00:00+1260\n",
+        "Date: 2026-06-24T10:00:00+12:00:60\n",
+        "Date: Wed, 24 Jun 2026 10:00:00 +1260\n",
+        "Date: Wed, 24 Jun 2026 10:00:00 +1260 (synthetic comment)\n",
+        "Date: Wed, 24 Jun 2026 10:0:00 +1260\n",
+        "Date: Wed, 24 Jun 2026 10:00:00 1200\n",
+        "Date: Wed, 24 Jun 2026 10:00:00 +1\n",
+        "Date: Wed, 24 Jun 2026 10:00:00 1_200\n",
+        "Date: Wed, 24 Jun 2026 10:00:00, +1260\n",
+        "Date: Wed, 24 Jun 2026 10:00:00, +12\n",
+        "Date: Wed, 24 Jun 2026 10:00:00, +1_200\n",
+        "Date: Wed, 24 Jun 2026 10:00:00, 1260\n",
+        "Date: Wed, 24 Jun 2026 10:00:00,+1260\n",
+        "Date: Wed, 24 Jun 2026 1_0:00 +1260\n",
+        "Date: Wed, 24 Jun 2026 10:-00 +1260\n",
+        "Date: 0001-01-01T00:00:00+14:00\n",
+        "Date: Tue, 24 Jun 2026 10:00:00 +0000\nDate: Tue, 24 Jun 2026 11:00:00 +0000\n",
+    ],
+    ids=[
+        "missing", "blank", "malformed", "naive-iso", "unknown-rfc-zone",
+        "unknown-iso-zone", "invalid-iso-minute", "invalid-iso-basic-minute",
+        "invalid-iso-second", "invalid-rfc-minute", "invalid-rfc-minute-comment",
+        "invalid-rfc-minute-short-time", "unsigned-rfc-zone", "short-rfc-zone",
+        "noncanonical-rfc-zone", "invalid-rfc-minute-comma", "short-rfc-zone-comma",
+        "noncanonical-rfc-zone-comma", "unsigned-rfc-zone-comma",
+        "invalid-rfc-minute-attached-comma", "unrecognized-rfc-time-underscore",
+        "unrecognized-rfc-time-sign",
+        "utc-overflow", "duplicate",
+    ],
+)
+def test_local_mail_missing_or_invalid_source_time_is_quarantined(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, replacement: str,
+) -> None:
+    inbox = tmp_path / "rev_inbox"
+    inbox.mkdir()
+    content = _SIMPLE_EML.replace("Date: Tue, 24 Jun 2026 10:00:00 +0000\n", replacement)
+    _write_eml(inbox / "invalid-time.eml", content)
+
+    report = _run_cycle(deps=_build_deps(inbox), programs_root=tmp_path)
+
+    assert report.quarantined == 1
+    assert report.candidates_staged == 0
+    assert report.assertions_written == 0
+    assert report.date_parse_failures == 1
+    assert (inbox / "quarantine" / "invalid-time.eml").exists()
+    assert not (inbox / "processed" / "invalid-time.eml").exists()
+    assert "private-synthetic-invalid-time" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    ["", "Message-ID: \n"],
+    ids=["missing", "blank"],
+)
+def test_local_mail_without_native_id_is_quarantined(tmp_path: Path, replacement: str) -> None:
+    inbox = tmp_path / "rev_inbox"
+    inbox.mkdir()
+    content = _SIMPLE_EML.replace("Message-ID: <test-001@example.com>\n", replacement)
+    _write_eml(inbox / "missing-id.eml", content)
+
+    report = _run_cycle(deps=_build_deps(inbox), programs_root=tmp_path)
+
+    assert report.quarantined == 1
+    assert report.candidates_staged == 0
+    assert report.assertions_written == 0
+    assert (inbox / "quarantine" / "missing-id.eml").exists()
+    assert not (inbox / "processed" / "missing-id.eml").exists()
+
+
+@pytest.mark.parametrize(
+    "source_date",
+    [
+        "Tue, 24 Jun 2026 10:00:00 +0000",
+        "Wed, 24 Jun 2026 12:00:00 +0200",
+        "Wed, 24 Jun 2026 12:0:0 +0200",
+        "Wed, 24 Jun 2026 11:59:00 +0159 (synthetic +1260)",
+        "Wed, 24 Jun 2026 11:59:00, +0159",
+        "Wed, 24 Jun 2026 11.59, +0159",
+        "2026-06-24T10:00:00Z",
+        "2026-06-24T11:59:00+01:59",
+        "2026-06-24T08:30:00-0130",
+    ],
+    ids=[
+        "rfc-utc", "rfc-offset", "rfc-short-time", "rfc-comment", "rfc-comma",
+        "rfc-dot-time-comma",
+        "iso-utc", "iso-offset", "iso-negative-offset",
+    ],
+)
+def test_local_mail_with_native_id_and_source_time_still_stages(
+    tmp_path: Path, source_date: str,
+) -> None:
+    from src.core.ledger.candidate_store import load_pending_candidates
+
+    inbox = tmp_path / "rev_inbox"
+    inbox.mkdir()
+    content = _SIMPLE_EML.replace("Tue, 24 Jun 2026 10:00:00 +0000", source_date)
+    _write_eml(inbox / "valid.eml", content)
+
+    report = _run_cycle(deps=_build_deps(inbox), programs_root=tmp_path)
+
+    assert report.quarantined == 0
+    assert report.candidates_staged == 1
+    assert report.date_parse_failures == 0
+    candidate, = load_pending_candidates("prog-local", programs_root=tmp_path)
+    assert candidate.source_ref.message_id == "<test-001@example.com>"
+    assert candidate.source_ref.sent_at == NOW
+    assert (inbox / "processed" / "valid.eml").exists()
+
+
+def test_invalid_mail_time_does_not_prevent_independent_valid_mail(tmp_path: Path) -> None:
+    from src.core.ledger.candidate_store import load_pending_candidates
+
+    inbox = tmp_path / "rev_inbox"
+    inbox.mkdir()
+    _write_eml(
+        inbox / "invalid.eml",
+        _SIMPLE_EML.replace("Date: Tue, 24 Jun 2026 10:00:00 +0000\n", ""),
+    )
+    _write_eml(
+        inbox / "valid.eml",
+        _SIMPLE_EML.replace("<test-001@example.com>", "<test-valid@example.com>"),
+    )
+
+    report = _run_cycle(deps=_build_deps(inbox), programs_root=tmp_path)
+
+    assert report.enumerated == 2
+    assert report.quarantined == 1
+    assert report.candidates_staged == 1
+    assert report.date_parse_failures == 1
+    assert report.cycle_integrity_ok
+    assert report.extraction_degraded
+    candidate, = load_pending_candidates("prog-local", programs_root=tmp_path)
+    assert candidate.source_ref.message_id == "<test-valid@example.com>"
+    assert (inbox / "quarantine" / "invalid.eml").exists()
+    assert (inbox / "processed" / "valid.eml").exists()
+
+
+def test_rev_run_cli_reports_mail_source_rejections(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cli
+    import src.commands.rev as command
+    from src.core.ledger.candidate_store import load_pending_candidates
+    from typer.testing import CliRunner
+
+    inbox = tmp_path / "rev_inbox"
+    inbox.mkdir()
+    _write_eml(
+        inbox / "invalid-time.eml",
+        _SIMPLE_EML.replace(
+            "Date: Tue, 24 Jun 2026 10:00:00 +0000",
+            "Date: private-synthetic-invalid-time",
+        ),
+    )
+    _write_eml(
+        inbox / "missing-id.eml",
+        _SIMPLE_EML.replace("Message-ID: <test-001@example.com>\n", ""),
+    )
+    _write_eml(
+        inbox / "valid.eml",
+        _SIMPLE_EML.replace("<test-001@example.com>", "<test-valid@example.com>"),
+    )
+    monkeypatch.setattr(command, "_resolve_shields", LocalOnlyPromptShields)
+    for name in (
+        "_maybe_register_tier_decision_sink",
+        "_maybe_run_scheduled_db_maintenance",
+        "_maybe_run_session_catchup",
+    ):
+        monkeypatch.setattr(cli, name, lambda *args, **kwargs: None)
+    programs_root = tmp_path / "programs"
+
+    result = CliRunner().invoke(cli.app, [
+        "rev", "run", "--program", "prog-local", "--mailbox", "operator@example.com",
+        "--eml-inbox", str(inbox), "--programs-root", str(programs_root),
+    ])
+
+    assert result.exit_code == 0, repr(result.exception)
+    payload, _ = json.JSONDecoder().raw_decode(result.output)
+    assert payload["enumerated"] == 3
+    assert payload["quarantined"] == 2
+    assert payload["date_parse_failures"] == 1
+    assert payload["candidates_staged"] == 1
+    assert payload["extraction_degraded"] is True
+    assert payload["cycle_integrity_ok"] is True
+    assert "private-synthetic-invalid-time" not in result.output
+    assert (inbox / "quarantine" / "invalid-time.reason.txt").read_text(
+        encoding="utf-8"
+    ) == "source_time_invalid"
+    assert (inbox / "quarantine" / "missing-id.reason.txt").read_text(
+        encoding="utf-8"
+    ) == "eml_identity_invalid"
+    candidate, = load_pending_candidates("prog-local", programs_root=programs_root)
+    assert candidate.source_ref.message_id == "<test-valid@example.com>"
+    assert (inbox / "processed" / "valid.eml").exists()
+    last_cycle = programs_root / "prog-local" / "_rev" / "last_cycle.json"
+    assert json.loads(last_cycle.read_text(encoding="utf-8"))["extraction_degraded"] is True
+
+
+def test_undated_metadata_only_mail_is_quarantined(tmp_path: Path) -> None:
+    inbox = tmp_path / "rev_inbox"
+    inbox.mkdir()
+    content = _EMPTY_BODY_EML.replace("Date: Tue, 24 Jun 2026 15:00:00 +0000\n", "")
+    _write_eml(inbox / "undated-empty.eml", content)
+
+    report = _run_cycle(deps=_build_deps(inbox), programs_root=tmp_path)
+
+    assert report.quarantined == 1
+    assert report.date_parse_failures == 1
+    assert report.metadata_only == 0
+    assert report.candidates_staged == 0
+    assert (inbox / "quarantine" / "undated-empty.eml").exists()
+
+
+def test_hydration_failure_quarantine_omits_private_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    inbox = tmp_path / "synthetic-private-inbox"
+    inbox.mkdir()
+    _write_eml(inbox / "synthetic-private-name.eml", _SIMPLE_EML)
+    deps = _build_deps(inbox)
+    marker = "SYNTHETIC_PRIVATE_EXCEPTION_CONTENT"
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise OSError(marker)
+
+    monkeypatch.setattr(deps.hydrator, "_hydrate_path", fail)
+    report = _run_cycle(deps=deps, programs_root=tmp_path)
+
+    assert report.quarantined == 1
+    assert report.candidates_staged == 0
+    assert (inbox / "quarantine" / "synthetic-private-name.eml").exists()
+    reason = (inbox / "quarantine" / "synthetic-private-name.reason.txt").read_text(
+        encoding="utf-8"
+    )
+    assert reason == "hydration_error: source could not be hydrated"
+    assert marker not in reason
+    assert marker not in caplog.text
+    assert str(inbox) not in caplog.text
+
+
+def test_rev_run_cli_hydration_failure_omits_private_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    import cli
+    import src.commands.rev as command
+    from typer.testing import CliRunner
+
+    inbox = tmp_path / "synthetic-private-inbox"
+    inbox.mkdir()
+    _write_eml(inbox / "synthetic-private-name.eml", _SIMPLE_EML)
+    marker = "SYNTHETIC_PRIVATE_EXCEPTION_CONTENT"
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise OSError(marker)
+
+    monkeypatch.setattr(EmlHydrator, "_hydrate_path", fail)
+    monkeypatch.setattr(command, "_resolve_shields", LocalOnlyPromptShields)
+    for name in (
+        "_maybe_register_tier_decision_sink",
+        "_maybe_run_scheduled_db_maintenance",
+        "_maybe_run_session_catchup",
+    ):
+        monkeypatch.setattr(cli, name, lambda *args, **kwargs: None)
+    result = CliRunner().invoke(cli.app, [
+        "rev", "run", "--program", "prog-local", "--mailbox", "operator@example.com",
+        "--eml-inbox", str(inbox), "--programs-root", str(tmp_path / "programs"),
+    ])
+
+    assert result.exit_code == 0, repr(result.exception)
+    payload, _ = json.JSONDecoder().raw_decode(result.output)
+    assert payload["quarantined"] == 1
+    assert payload["candidates_staged"] == 0
+    assert (inbox / "quarantine" / "synthetic-private-name.reason.txt").read_text(
+        encoding="utf-8"
+    ) == "hydration_error: source could not be hydrated"
+    assert marker not in result.output
+    assert marker not in caplog.text
+    assert str(inbox) not in result.output
+    assert str(inbox) not in caplog.text
+
+
+def test_invalid_mail_time_never_reaches_extractor_or_vault(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    from src.core.rev import pipeline
+
+    inbox = tmp_path / "rev_inbox"
+    inbox.mkdir()
+    _write_eml(
+        inbox / "invalid-time.eml",
+        _SIMPLE_EML.replace(
+            "Date: Tue, 24 Jun 2026 10:00:00 +0000",
+            "Date: private-synthetic-invalid-time",
+        ),
+    )
+    deps = _build_deps(inbox)
+
+    def reject_admission(*args: object, **kwargs: object) -> None:
+        pytest.fail("invalid source time reached extraction or vaulting")
+
+    monkeypatch.setattr(deps.extractor, "extract", reject_admission)
+    monkeypatch.setattr(pipeline, "_vault_evidence", reject_admission)
+    report = _run_cycle(deps=deps, programs_root=tmp_path)
+
+    assert report.quarantined == 1
+    assert (inbox / "quarantine" / "invalid-time.reason.txt").read_text(
+        encoding="utf-8"
+    ) == "source_time_invalid"
+    assert "private-synthetic-invalid-time" not in caplog.text
+
+
+def test_invalid_mail_still_consumes_hydration_budget(tmp_path: Path) -> None:
+    inbox = tmp_path / "rev_inbox"
+    inbox.mkdir()
+    _write_eml(
+        inbox / "invalid-time.eml",
+        _SIMPLE_EML.replace("Date: Tue, 24 Jun 2026 10:00:00 +0000\n", ""),
+    )
+    report = run_rev_cycle(
+        program_id="prog-local",
+        intent=RetrievalIntent(entity_type=EntityType.MESSAGE, limit=25),
+        deps=_build_deps(inbox),
+        profile=RevRetrievalProfile(profile=REV_PROFILE_SEARCH_HYDRATE),
+        mailbox_tenant_id="t", mailbox_principal="operator@example.com", mailbox_container="inbox",
+        correlation_id="budget-invalid", programs_root=tmp_path,
+        budget_limits=BudgetLimits(max_hydrated_bytes_per_cycle=1), set_at=NOW,
+    )
+
+    assert report.stop_category == "truncated_by_budget"
+    assert report.breached_budget == "max_hydrated_bytes_per_cycle"
+    assert report.quarantined == 0
+    assert report.date_parse_failures == 0
+    assert report.candidates_staged == 0
+    assert (inbox / "claimed" / "invalid-time.eml").exists()
+
+
+@pytest.mark.parametrize("kind", ["quarantined", "date-parse"])
+def test_accounted_source_rejection_cannot_run_complete_only_gates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str,
+) -> None:
+    from src.core.rev import pipeline
+
+    counts = dict(
+        enumerated=1,
+        hydrated=0,
+        quarantined=int(kind == "quarantined"),
+        metadata_only=0,
+        candidates_staged=0,
+        assertions_written=0,
+        date_parse_failures=int(kind == "date-parse"),
+        gap_transitions=0,
+        processed_successfully=0,
+        policy_denied=0,
+        explicitly_skipped=0,
+        terminal_failures=int(kind == "date-parse"),
+    )
+    calls: list[object] = []
+    monkeypatch.setattr(pipeline, "_compute_family_divergence", lambda *args: {})
+    monkeypatch.setattr(pipeline, "_run_cross_source_conflict_check", lambda *args: {})
+    monkeypatch.setattr(pipeline, "_run_family_flip_gates", lambda *args: calls.append(args) or {})
+
+    report = pipeline._finalize_report(
+        program_id="prog-local",
+        correlation_id="source-rejection",
+        counts=counts,
+        stop_reason="",
+        stop_category="complete",
+        breached="",
+        shield_degrade=False,
+        wall_seconds=0,
+        deps=_build_deps(tmp_path / "rev_inbox"),
+        programs_root=tmp_path,
+    )
+
+    assert report.cycle_status == "extraction_degraded"
+    assert calls == []
+
+
+@pytest.mark.parametrize("kind", ["source-time", "native-id"])
+def test_source_rejection_cannot_run_complete_only_family_gates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str,
+) -> None:
+    from src.core.rev import pipeline
+
+    inbox = tmp_path / "rev_inbox"
+    inbox.mkdir()
+    content = _SIMPLE_EML
+    if kind == "source-time":
+        content = content.replace("Date: Tue, 24 Jun 2026 10:00:00 +0000\n", "")
+    else:
+        content = content.replace("Message-ID: <test-001@example.com>\n", "")
+    _write_eml(inbox / "rejected.eml", content)
+    calls: list[object] = []
+    monkeypatch.setattr(pipeline, "_run_family_flip_gates", lambda *args: calls.append(args) or {})
+
+    report = _run_cycle(deps=_build_deps(inbox), programs_root=tmp_path)
+
+    assert report.quarantined == 1
+    assert calls == []
+
+
+@pytest.mark.parametrize("source_type", [EntityType.MESSAGE, EntityType.EVENT, EntityType.DRIVE_ITEM])
+def test_direct_staging_applies_mail_time_check_only_to_mail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_type: EntityType,
+) -> None:
+    from src.ai.rev.extractor import ExtractedClaim
+    from src.core.ledger.rev_evidence import EvidenceRef
+    from src.core.rev import pipeline
+    from src.core.rev.identity import CanonicalItemIdentity
+
+    hydrated = HydratedContent(
+        identity=CanonicalItemIdentity(
+            source_type=source_type,
+            tenant_id="t",
+            principal_mailbox="operator@example.com",
+            container="inbox",
+            resource_id="native-id",
+        ),
+        canonical_text="The deployment completed.",
+        normalized_source_hash="sha256:synthetic",
+        chunks=(),
+        route_metadata={
+            "subject": "Synthetic deployment",
+            "sender": "owner@example.com",
+            "received_at": "private-synthetic-invalid-time",
+        },
+    )
+    claim = ExtractedClaim(
+        event_type="deployment.completed",
+        payload={"date": "2026-06-24"},
+        evidence_spans=(),
+        extraction_confidence=0.9,
+        extraction_model="synthetic",
+        material=True,
+    )
+    evidence_ref = EvidenceRef(
+        vault_hash="sha256:synthetic-vault",
+        representation_version="1",
+        start_codepoint=0,
+        end_codepoint=10,
+        excerpt_hash="sha256:synthetic-excerpt",
+        normalized_source_hash="sha256:synthetic",
+    )
+    fallback_values: list[str] = []
+
+    def non_mail_time(value: str) -> tuple[datetime, bool]:
+        fallback_values.append(value)
+        return NOW, False
+
+    monkeypatch.setattr(pipeline, "_parse_iso", non_mail_time)
+    staged, failures = pipeline._stage_candidates(
+        program_id="prog-local", hydrated=hydrated, claims=(claim,),
+        evidence_refs=(evidence_ref,), set_at=NOW, programs_root=tmp_path,
+    )
+
+    if source_type is EntityType.MESSAGE:
+        assert staged == []
+        assert failures == 1
+        assert fallback_values == []
+        assert not (tmp_path / "prog-local" / "ledger").exists()
+    else:
+        assert len(staged) == 1
+        assert failures == 0
+        assert fallback_values == ["private-synthetic-invalid-time"]
 
 
 class TestLocalImportFileFinalization:
@@ -296,7 +793,7 @@ class TestLocalImportReportTelemetry:
             deps=deps,
             profile=RevRetrievalProfile(profile=REV_PROFILE_SEARCH_HYDRATE),
             mailbox_tenant_id="t",
-            mailbox_principal="u@x.com",
+            mailbox_principal="operator@example.com",
             mailbox_container="inbox",
             correlation_id="budget-stop",
             programs_root=tmp_path,
@@ -334,6 +831,557 @@ class TestLocalImportReportTelemetry:
         hist_path = tmp_path / "prog-local" / "_rev" / "cycle_history.jsonl"
         history = [json.loads(line) for line in hist_path.read_text(encoding="utf-8").splitlines()]
         assert history[-1]["source_unreachable"] is True
+
+    def test_unsupported_enumeration_replaces_prior_health_without_finalization(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import src.core.rev.pipeline as pipeline
+        from scripts.verify_activation import is_clean_cycle
+        from src.core.rev.health import build_rev_health_report, render_rev_health_human
+
+        eml_inbox = tmp_path / "rev_inbox"
+        eml_inbox.mkdir()
+        deps = _build_deps(eml_inbox)
+        monkeypatch.setattr(pipeline, "_compute_family_divergence", lambda *args: {})
+        monkeypatch.setattr(pipeline, "_run_cross_source_conflict_check", lambda *args: {})
+        monkeypatch.setattr(pipeline, "_run_family_flip_gates", lambda *args: {})
+        prior = _run_cycle(deps=deps, programs_root=tmp_path, correlation_id="prior-empty")
+        assert prior.stop_category == "complete"
+        assert prior.cycle_status == "acquisition_complete"
+
+        def unexpected_finalization(*args: object, **kwargs: object) -> None:
+            pytest.fail("Unsupported enumeration must not run fact readers or authority gates")
+
+        monkeypatch.setattr(pipeline, "_compute_family_divergence", unexpected_finalization)
+        monkeypatch.setattr(pipeline, "_run_cross_source_conflict_check", unexpected_finalization)
+        monkeypatch.setattr(pipeline, "_run_family_flip_gates", unexpected_finalization)
+        deps = replace(deps, enumerator=_UnsupportedEnumerator())
+        report = _run_cycle(deps=deps, programs_root=tmp_path, correlation_id="unsupported")
+
+        assert report.stop_category == "unsupported"
+        assert report.stop_reason == "enumeration_unsupported"
+        assert report.cycle_status == "unsupported"
+        assert report.source_unreachable is False
+        assert report.enumerated == report.candidates_staged == 0
+        assert report.cycle_integrity_ok is True
+        assert "private-provider-detail" not in json.dumps(report.to_dict())
+        assert "private-entity-detail" not in json.dumps(report.to_dict())
+
+        rev_dir = tmp_path / "prog-local" / "_rev"
+        last = json.loads((rev_dir / "last_cycle.json").read_text(encoding="utf-8"))
+        history = [
+            json.loads(line)
+            for line in (rev_dir / "cycle_history.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        assert last["correlation_id"] == "unsupported"
+        assert last["stop_category"] == last["cycle_status"] == "unsupported"
+        assert [entry["stop_category"] for entry in history] == ["complete", "unsupported"]
+        assert not is_clean_cycle(last, eml_present=True)
+        health = build_rev_health_report("prog-local", programs_root=tmp_path)
+        assert health.last_cycle is not None
+        assert health.last_cycle.stop_category == "unsupported"
+        assert any("enumeration_unsupported" in warning for warning in health.warnings)
+        assert any("shield availability was not assessed" in warning for warning in health.warnings)
+        assert "stop=unsupported" in render_rev_health_human(health)
+        assert "private-provider-detail" not in json.dumps(health.to_dict())
+
+    def test_unsupported_enumeration_cli_is_nonzero_and_private(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from typer.testing import CliRunner
+        import src.commands.rev as command
+
+        fixture = tmp_path / "messages.json"
+        fixture.write_text("[]", encoding="utf-8")
+        monkeypatch.setattr(command, "CollectionSearchEnumerator", lambda *args: _UnsupportedEnumerator())
+        monkeypatch.setattr(command, "_resolve_shields", LocalOnlyPromptShields)
+        result = CliRunner().invoke(command.app, [
+            "run", "--program", "prog-local", "--mailbox", "test@example.com",
+            "--mock-fixture", str(fixture), "--programs-root", str(tmp_path / "programs"),
+        ])
+
+        assert result.exit_code == 1, result.output
+        payload, _ = json.JSONDecoder().raw_decode(result.output)
+        assert payload["stop_category"] == payload["cycle_status"] == "unsupported"
+        assert payload["stop_reason"] == "enumeration_unsupported"
+        assert "private-provider-detail" not in result.output
+        assert "private-entity-detail" not in result.output
+        last_path = tmp_path / "programs" / "prog-local" / "_rev" / "last_cycle.json"
+        assert json.loads(last_path.read_text(encoding="utf-8"))["stop_category"] == "unsupported"
+
+    def test_rev_run_root_cli_keeps_normal_startup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import cli
+        import src.commands.rev as command
+        from typer.testing import CliRunner
+
+        calls: list[str] = []
+        for name in (
+            "_maybe_register_tier_decision_sink",
+            "_maybe_run_scheduled_db_maintenance",
+            "_maybe_run_session_catchup",
+        ):
+            monkeypatch.setattr(cli, name, lambda *args, _name=name, **kwargs: calls.append(_name))
+        fixture = tmp_path / "messages.json"
+        fixture.write_text("[]", encoding="utf-8")
+        monkeypatch.setattr(command, "CollectionSearchEnumerator", lambda *args: _UnsupportedEnumerator())
+        monkeypatch.setattr(command, "_resolve_shields", LocalOnlyPromptShields)
+
+        result = CliRunner().invoke(cli.app, [
+            "rev", "run", "--program", "prog-local", "--mailbox", "test@example.com",
+            "--mock-fixture", str(fixture), "--programs-root", str(tmp_path / "programs"),
+        ])
+
+        assert result.exit_code == 1, repr(result.exception)
+        assert json.JSONDecoder().raw_decode(result.output)[0]["stop_category"] == "unsupported"
+        assert calls == [
+            "_maybe_register_tier_decision_sink", "_maybe_run_scheduled_db_maintenance",
+            "_maybe_run_session_catchup",
+        ]
+
+    @pytest.mark.parametrize("inbox_option", ["--eml-inbox", "--ics-inbox", "--docs-inbox"])
+    def test_unavailable_local_inbox_reports_unsupported_in_actual_cli(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, inbox_option: str,
+    ) -> None:
+        from typer.testing import CliRunner
+        import src.commands.rev as command
+
+        inbox = tmp_path / "not-a-directory"
+        inbox.write_text("synthetic", encoding="utf-8")
+        monkeypatch.setattr(command, "_resolve_shields", LocalOnlyPromptShields)
+        result = CliRunner().invoke(command.app, [
+            "run", "--program", "prog-local", "--mailbox", "test@example.com",
+            inbox_option, str(inbox), "--programs-root", str(tmp_path / "programs"),
+        ])
+
+        assert result.exit_code == 1, result.output
+        payload, _ = json.JSONDecoder().raw_decode(result.output)
+        assert payload["stop_category"] == payload["cycle_status"] == "unsupported"
+        assert payload["stop_reason"] == "enumeration_unsupported"
+        assert str(inbox) not in json.dumps(payload)
+        assert inbox.read_text(encoding="utf-8") == "synthetic"
+        last_path = tmp_path / "programs" / "prog-local" / "_rev" / "last_cycle.json"
+        assert json.loads(last_path.read_text(encoding="utf-8"))["stop_category"] == "unsupported"
+
+    @pytest.mark.parametrize("output_format", ["human", "json"])
+    @pytest.mark.parametrize(
+        "history_content", [None, "missing", *_CORRUPT_HISTORY_CASES],
+        ids=["valid", "missing", *_CORRUPT_HISTORY_IDS],
+    )
+    def test_unsupported_enumeration_is_nonzero_in_doctor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, output_format: str,
+        history_content: bytes | str | None,
+    ) -> None:
+        import cli
+        from src.commands import doctor
+        from typer.testing import CliRunner
+
+        eml_inbox = tmp_path / "rev_inbox"
+        eml_inbox.mkdir()
+        deps = replace(_build_deps(eml_inbox), enumerator=_UnsupportedEnumerator())
+        report = _run_cycle(deps=deps, programs_root=tmp_path)
+        assert report.stop_category == "unsupported"
+        history = tmp_path / "prog-local" / "_rev" / "cycle_history.jsonl"
+        if isinstance(history_content, bytes):
+            history.write_bytes(history_content)
+        elif history_content == "missing":
+            history.unlink()
+
+        for name, path in {
+            "PROGRAMS_ROOT": tmp_path, "EDITIONS_ROOT": tmp_path / "editions",
+            "REPORTS_ROOT": tmp_path / "reports", "ARCHIVE_ROOT": tmp_path / "archive",
+            "REPO_ROOT": tmp_path,
+        }.items():
+            monkeypatch.setattr(doctor, name, path)
+        def unexpected_startup(*args: object, **kwargs: object) -> None:
+            raise AssertionError("REV health must not run unrelated root startup")
+
+        for name in (
+            "_maybe_register_tier_decision_sink",
+            "_maybe_run_scheduled_db_maintenance",
+            "_maybe_run_session_catchup",
+        ):
+            monkeypatch.setattr(cli, name, unexpected_startup)
+        result = CliRunner().invoke(cli.app, [
+            "--no-catchup", "doctor", "--rev-health", "--rev-program", "prog-local",
+            "--format", output_format,
+        ])
+
+        assert result.exit_code == 2, result.output
+        output = result.output
+        if output_format == "json":
+            payload = json.loads(output)
+            assert payload["last_cycle"]["stop_category"] == "unsupported"
+            assert any("shield availability was not assessed" in warning for warning in payload["warnings"])
+            assert any("cycle_history_unavailable" in warning for warning in payload["warnings"]) is (history_content is not None)
+        else:
+            assert "stop=unsupported" in output
+            assert "shield availability was not assessed" in output
+            assert ("cycle_history_unavailable" in output) is (history_content is not None)
+        if isinstance(history_content, bytes):
+            assert history.read_bytes() == history_content
+            assert not (history.parent / "quarantine").exists()
+        elif history_content == "missing":
+            assert not history.exists()
+        assert "synthetic-private-content" not in output
+
+    def test_rev_health_does_not_compact_an_unselected_workspace(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import cli
+        from src.commands import doctor
+        from typer.testing import CliRunner
+
+        rev_dir = tmp_path / "selected" / "programs" / "prog-local" / "_rev"
+        rev_dir.mkdir(parents=True)
+        (rev_dir / "last_cycle.json").write_text(json.dumps({
+            "stop_category": "unsupported", "enumerated": 0, "shield_degrade": False,
+        }), encoding="utf-8")
+        (rev_dir / "cycle_history.jsonl").write_text("{}\n", encoding="utf-8")
+        for name, folder in {
+            "PROGRAMS_ROOT": "programs", "EDITIONS_ROOT": "editions",
+            "REPORTS_ROOT": "reports", "ARCHIVE_ROOT": "archive",
+        }.items():
+            monkeypatch.setattr(doctor, name, tmp_path / "selected" / folder)
+        monkeypatch.setattr(doctor, "REPO_ROOT", tmp_path / "selected")
+        sentinel = tmp_path / "unselected-compaction"
+        monkeypatch.setattr(cli, "_resolve_program_for_session_catchup", lambda argv: "other-program")
+        monkeypatch.setattr(cli, "_maybe_register_tier_decision_sink", lambda ctx: None)
+        monkeypatch.setattr(cli, "_maybe_run_session_catchup", lambda ctx, no_catchup: None)
+        monkeypatch.setattr(cli, "maybe_run_scheduled_compaction", lambda program: sentinel.write_text(program))
+        result = CliRunner().invoke(cli.app, [
+            "doctor", "--edition", "synthetic_weekly", "--rev-health",
+            "--rev-program", "prog-local", "--format", "json",
+        ])
+
+        assert result.exit_code == 2, repr(result.exception)
+        assert not sentinel.exists()
+        assert "enumeration_unsupported" in result.output
+
+    @pytest.mark.parametrize(
+        "arguments,expected_exit",
+        [
+            (["--rev-health", "--rev-program"], 2),
+            (["--rev-health=invalid"], 2),
+            (["--rev-health", "--unknown-option"], 2),
+            (["--issue", "not-an-integer", "--rev-health"], 2),
+            (["--context=invalid", "--rev-health"], 2),
+            (["--rev-health", "--help"], 0),
+            (["--help", "--rev-health"], 0),
+        ],
+    )
+    def test_rev_health_argument_errors_do_not_run_root_startup(
+        self, monkeypatch: pytest.MonkeyPatch, arguments: list[str], expected_exit: int,
+    ) -> None:
+        import cli
+        from typer.testing import CliRunner
+
+        def unexpected_startup(*args: object, **kwargs: object) -> None:
+            raise AssertionError("Invalid REV health invocation ran root startup")
+
+        for name in (
+            "_maybe_register_tier_decision_sink",
+            "_maybe_run_scheduled_db_maintenance",
+            "_maybe_run_session_catchup",
+        ):
+            monkeypatch.setattr(cli, name, unexpected_startup)
+        result = CliRunner().invoke(cli.app, ["doctor", *arguments])
+        assert result.exit_code == expected_exit, repr(result.exception)
+
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            ["--edition", "--rev-health"],
+            ["--edition=--rev-health"],
+            ["--format=--rev-health"],
+            ["--source", "--rev-health"],
+            ["--rev-program", "--rev-health"],
+        ],
+    )
+    def test_rev_health_as_an_option_value_keeps_other_doctor_startup(
+        self, monkeypatch: pytest.MonkeyPatch, arguments: list[str],
+    ) -> None:
+        import cli
+        from src.commands import doctor
+        from typer.testing import CliRunner
+
+        calls: list[str] = []
+        for name in (
+            "_maybe_register_tier_decision_sink",
+            "_maybe_run_scheduled_db_maintenance",
+            "_maybe_run_session_catchup",
+        ):
+            monkeypatch.setattr(cli, name, lambda *args, _name=name, **kwargs: calls.append(_name))
+        report = type("RefactorReport", (), {"failures": []})()
+        monkeypatch.setattr(doctor, "build_refactor_status_report", lambda **kwargs: report)
+        monkeypatch.setattr(doctor, "render_refactor_status_output", lambda *args, **kwargs: "ordinary doctor\n")
+        result = CliRunner().invoke(cli.app, ["doctor", *arguments, "--refactor-status"])
+
+        assert result.exit_code == 0, repr(result.exception)
+        assert result.output == "ordinary doctor\n"
+        assert calls == [
+            "_maybe_register_tier_decision_sink", "_maybe_run_scheduled_db_maintenance",
+            "_maybe_run_session_catchup",
+        ]
+
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            ["--edition", "--rev-health", "--issue", "not-an-integer"],
+            ["--source", "--rev-health=invalid", "--issue", "not-an-integer"],
+            ["--edition", "--rev-health", "--rev-program"],
+            ["--context=invalid", "--edition", "--rev-health"],
+            ["--refactor-status", "--", "--rev-health"],
+        ],
+    )
+    def test_rev_health_as_an_option_value_with_error_keeps_other_doctor_startup(
+        self, monkeypatch: pytest.MonkeyPatch, arguments: list[str],
+    ) -> None:
+        import cli
+        from typer.testing import CliRunner
+
+        calls: list[str] = []
+        for name in (
+            "_maybe_register_tier_decision_sink",
+            "_maybe_run_scheduled_db_maintenance",
+            "_maybe_run_session_catchup",
+        ):
+            monkeypatch.setattr(cli, name, lambda *args, _name=name, **kwargs: calls.append(_name))
+        result = CliRunner().invoke(cli.app, ["doctor", *arguments])
+
+        assert result.exit_code == 2, repr(result.exception)
+        assert calls == [
+            "_maybe_register_tier_decision_sink", "_maybe_run_scheduled_db_maintenance",
+            "_maybe_run_session_catchup",
+        ]
+
+    @pytest.mark.parametrize("other_flags", [("--refactor-status",), ("--context", "--fix")])
+    def test_rev_health_takes_priority_over_other_doctor_flags_without_startup(
+        self, monkeypatch: pytest.MonkeyPatch, other_flags: tuple[str, ...],
+    ) -> None:
+        import cli
+        import typer
+        from src.commands import doctor
+        from typer.testing import CliRunner
+
+        def unexpected_startup(*args: object, **kwargs: object) -> None:
+            raise AssertionError("REV health must not run unrelated root startup")
+
+        for name in (
+            "_maybe_register_tier_decision_sink",
+            "_maybe_run_scheduled_db_maintenance",
+            "_maybe_run_session_catchup",
+        ):
+            monkeypatch.setattr(cli, name, unexpected_startup)
+
+        def run_health(**kwargs: object) -> None:
+            assert kwargs["rev_program"] == "prog-local"
+            typer.echo("selected REV health")
+            raise typer.Exit(2)
+
+        monkeypatch.setattr(doctor, "_run_rev_health", run_health)
+        result = CliRunner().invoke(cli.app, [
+            "doctor", *other_flags, "--rev-health", "--rev-program", "prog-local",
+        ])
+
+        assert result.exit_code == 2, repr(result.exception)
+        assert result.output == "selected REV health\n"
+
+    def test_unsupported_enumeration_health_reports_history_disappearing_during_read(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from src.core.rev.health import build_rev_health_report
+
+        rev_dir = tmp_path / "prog-local" / "_rev"
+        rev_dir.mkdir(parents=True)
+        history = rev_dir / "cycle_history.jsonl"
+        history.write_text('{"llm_fallback_count":1}\n', encoding="utf-8")
+        (rev_dir / "last_cycle.json").write_text(json.dumps({
+            "stop_category": "unsupported", "enumerated": 0, "shield_degrade": False,
+        }), encoding="utf-8")
+
+        original_exists = Path.exists
+        original_read_text = Path.read_text
+        disappeared = False
+
+        def raced_exists(path: Path) -> bool:
+            nonlocal disappeared
+            if path == history and not disappeared:
+                path.unlink()
+                disappeared = True
+                return True
+            return original_exists(path)
+
+        def raced_read_text(path: Path, *args: object, **kwargs: object) -> str:
+            nonlocal disappeared
+            if path == history:
+                if not disappeared:
+                    path.unlink()
+                    disappeared = True
+                raise FileNotFoundError
+            return original_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "exists", raced_exists)
+        monkeypatch.setattr(Path, "read_text", raced_read_text)
+        report = build_rev_health_report("prog-local", programs_root=tmp_path)
+
+        assert disappeared
+        assert any("cycle_history_unavailable" in warning for warning in report.warnings)
+
+    @pytest.mark.parametrize(
+        "stop_category,shield_degrade,expected_exit",
+        [
+            ("complete", False, 0),
+            ("provider_limited", False, 0),
+            ("truncated_by_budget", False, 0),
+            ("complete", True, 1),
+            ("unsupported", True, 2),
+            (None, None, 1),
+        ],
+    )
+    def test_rev_doctor_preserves_other_exit_behavior(
+        self, tmp_path: Path, stop_category: str | None, shield_degrade: bool | None,
+        expected_exit: int, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import typer
+        from src.commands.doctor_checks.context_checks import run_rev_health
+
+        rev_dir = tmp_path / "prog-local" / "_rev"
+        rev_dir.mkdir(parents=True)
+        if stop_category is not None:
+            (rev_dir / "last_cycle.json").write_text(json.dumps({
+                "stop_category": stop_category, "shield_degrade": shield_degrade,
+            }), encoding="utf-8")
+        with pytest.raises(typer.Exit) as exc:
+            run_rev_health(
+                edition=None, rev_program="prog-local", programs_root=tmp_path,
+                editions_root=tmp_path / "editions", format="json",
+                resolve_edition_paths_fn=lambda *args: None,
+            )
+        assert exc.value.exit_code == expected_exit
+        warnings = json.loads(capsys.readouterr().out)["warnings"]
+        if stop_category == "unsupported":
+            assert any("enumeration_unsupported" in warning for warning in warnings)
+            assert all("shield availability was not assessed" not in warning for warning in warnings)
+        else:
+            assert all("enumeration_unsupported" not in warning for warning in warnings)
+
+    @pytest.mark.parametrize("failed_target", ["last_cycle.json", "cycle_history.jsonl"])
+    def test_unsupported_enumeration_keeps_failure_visible_if_checkpoint_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+        failed_target: str,
+    ) -> None:
+        import src.core.rev.pipeline as pipeline
+
+        eml_inbox = tmp_path / "rev_inbox"
+        eml_inbox.mkdir()
+        deps = replace(_build_deps(eml_inbox), enumerator=_UnsupportedEnumerator())
+        rev_dir = tmp_path / "prog-local" / "_rev"
+        rev_dir.mkdir(parents=True)
+        last_path = rev_dir / "last_cycle.json"
+        last_path.write_text('{"stop_category": "complete"}\n', encoding="utf-8")
+        history_path = rev_dir / "cycle_history.jsonl"
+        history_path.write_text('{"stop_category": "complete"}\n', encoding="utf-8")
+        real_replace = pipeline.os.replace
+
+        def fail_checkpoint_replace(src: object, dst: object) -> None:
+            if Path(dst).name == failed_target:
+                raise OSError("synthetic checkpoint failure")
+            real_replace(src, dst)
+
+        monkeypatch.setattr(pipeline.os, "replace", fail_checkpoint_replace)
+        report = _run_cycle(deps=deps, programs_root=tmp_path, correlation_id="unsupported")
+
+        assert report.stop_category == "unsupported"
+        last = json.loads(last_path.read_text(encoding="utf-8"))
+        history = [json.loads(line) for line in history_path.read_text(encoding="utf-8").splitlines()]
+        assert last["stop_category"] == ("complete" if failed_target == "last_cycle.json" else "unsupported")
+        assert history[-1]["stop_category"] == (
+            "complete" if failed_target == "cycle_history.jsonl" else "unsupported"
+        )
+        assert f"could not write {failed_target}" in caplog.text
+
+    @pytest.mark.parametrize("history_content", _CORRUPT_HISTORY_CASES, ids=_CORRUPT_HISTORY_IDS)
+    def test_unsupported_enumeration_preserves_invalid_history(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+        history_content: bytes,
+    ) -> None:
+        from typer.testing import CliRunner
+        import src.commands.rev as command
+
+        fixture = tmp_path / "messages.json"
+        fixture.write_text("[]", encoding="utf-8")
+        programs = tmp_path / "programs"
+        rev_dir = programs / "prog-local" / "_rev"
+        rev_dir.mkdir(parents=True)
+        history = rev_dir / "cycle_history.jsonl"
+        history.write_bytes(history_content)
+        monkeypatch.setattr(command, "CollectionSearchEnumerator", lambda *args: _UnsupportedEnumerator())
+        monkeypatch.setattr(command, "_resolve_shields", LocalOnlyPromptShields)
+
+        result = CliRunner().invoke(command.app, [
+            "run", "--program", "prog-local", "--mailbox", "test@example.com",
+            "--mock-fixture", str(fixture), "--programs-root", str(programs),
+        ])
+
+        assert result.exit_code == 1, result.output
+        payload, _ = json.JSONDecoder().raw_decode(result.output)
+        assert payload["stop_category"] == payload["cycle_status"] == "unsupported"
+        assert history.read_bytes() == history_content
+        assert not (rev_dir / "quarantine").exists()
+        last = json.loads((rev_dir / "last_cycle.json").read_text(encoding="utf-8"))
+        assert last["stop_category"] == "unsupported"
+        assert "cycle_history.jsonl" in caplog.text
+        assert "synthetic-private-content" not in caplog.text + result.output
+
+    def test_unsupported_enumeration_keeps_valid_history_bounded(self, tmp_path: Path) -> None:
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+        rev_dir = tmp_path / "prog-local" / "_rev"
+        rev_dir.mkdir(parents=True)
+        history = rev_dir / "cycle_history.jsonl"
+        history.write_text(
+            "\n" + "\n".join(json.dumps({
+                "correlation_id": f"prior-{i}", "llm_fallback_count": str(i % 3),
+            }) for i in range(12)) + "\n",
+            encoding="utf-8",
+        )
+
+        report = _run_cycle(
+            deps=replace(_build_deps(inbox), enumerator=_UnsupportedEnumerator()),
+            programs_root=tmp_path, correlation_id="unsupported",
+        )
+
+        assert report.stop_category == "unsupported"
+        records = [json.loads(line) for line in history.read_text(encoding="utf-8").splitlines()]
+        assert [record["correlation_id"] for record in records] == [
+            *(f"prior-{i}" for i in range(3, 12)), "unsupported",
+        ]
+        from src.core.rev.health import build_rev_health_report
+        health = build_rev_health_report("prog-local", programs_root=tmp_path)
+        assert health.llm_fallback_trend == (1, 2, 0)
+        assert not (rev_dir / "quarantine").exists()
+
+    def test_unsupported_health_reports_history_read_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import src.core.rev.health as health
+
+        rev_dir = tmp_path / "prog-local" / "_rev"
+        rev_dir.mkdir(parents=True)
+        (rev_dir / "last_cycle.json").write_text(json.dumps({
+            "stop_category": "unsupported", "enumerated": 0, "shield_degrade": False,
+        }), encoding="utf-8")
+        (rev_dir / "cycle_history.jsonl").write_text("{}\n", encoding="utf-8")
+
+        def fail_history_read(path: Path) -> list[dict[str, object]]:
+            raise OSError("synthetic-private-content")
+
+        monkeypatch.setattr(health, "read_cycle_history_without_repair", fail_history_read)
+        report = health.build_rev_health_report("prog-local", programs_root=tmp_path)
+        assert any("cycle_history_unavailable" in warning for warning in report.warnings)
+        assert "synthetic-private-content" not in json.dumps(report.to_dict())
 
     def test_attachment_denied_sidecar_written(self, tmp_path: Path) -> None:
         eml_inbox = tmp_path / "rev_inbox"
@@ -489,7 +1537,7 @@ class TestHighVolumeBatchedDrain:
         report = run_rev_cycle(
             program_id="prog-local", intent=intent, deps=deps,
             profile=RevRetrievalProfile(profile=REV_PROFILE_SEARCH_HYDRATE),
-            mailbox_tenant_id="t", mailbox_principal="u@x.com", mailbox_container="inbox",
+            mailbox_tenant_id="t", mailbox_principal="operator@example.com", mailbox_container="inbox",
             correlation_id="vol-1", programs_root=tmp_path,
             budget_limits=BudgetLimits(), set_at=NOW,
         )
@@ -517,7 +1565,7 @@ class TestHighVolumeBatchedDrain:
             return run_rev_cycle(
                 program_id="prog-local", intent=intent, deps=deps,
                 profile=RevRetrievalProfile(profile=REV_PROFILE_SEARCH_HYDRATE),
-                mailbox_tenant_id="t", mailbox_principal="u@x.com", mailbox_container="inbox",
+                mailbox_tenant_id="t", mailbox_principal="operator@example.com", mailbox_container="inbox",
                 correlation_id=correlation_id, programs_root=tmp_path,
                 budget_limits=BudgetLimits(), set_at=NOW,
             )
@@ -545,7 +1593,7 @@ class TestCrashLoopGuard:
         return EmlEnumerator(
             inbox_root=inbox,
             mailbox_tenant_id="t",
-            principal_mailbox="u@x.com",
+            principal_mailbox="operator@example.com",
             container="inbox",
         )
 

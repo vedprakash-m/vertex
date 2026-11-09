@@ -28,6 +28,7 @@ from src.commands.confirm_stages.claim_resolution import evaluate_claim_extracti
 from src.commands.confirm_stages.claim_resolution import record_confirmed_claims_for_v2 as _record_confirmed_claims_for_v2_impl
 from src.commands.confirm_stages.baseline_followthrough import apply_baseline_followthrough as _apply_baseline_followthrough
 from src.commands.confirm_stages.archive_transaction import execute_archive_transaction as _execute_archive_transaction_impl
+from src.commands.confirm_stages.archive_transaction import revalidate_evidence as _revalidate_evidence
 from src.commands.confirm_stages.signal_metrics import compute_provenance_confidence as _compute_provenance_confidence
 from src.commands.confirm_stages.signal_metrics import compute_source_health_pct as _compute_source_health_pct
 from src.commands.confirm_stages.optimization_proposals import write_optimization_proposals as _write_optimization_proposals
@@ -65,6 +66,7 @@ from src.core.delta_engine import build_deltas
 from src.core.edition_resolver import get_program_output_dir, resolve_edition, resolve_edition_paths as _resolve_edition_paths
 from src.core.evidence_engine import build_evidence
 from src.core.exceptions import ConfigError, ConfirmError, StateError as _AlertStateError
+from src.core.fact_sor_state import get_fact_sor_state_path
 from src.core.workspace_paths import REPO_ROOT, resolve_report_workspace_roots, validate_report_workspace
 from src.core.forecast_engine import build_forecast_assessment
 from src.core.freshness_engine import build_freshness_report
@@ -77,6 +79,7 @@ from src.core.models import Confidence, EditionType, ProgramContext, ReportData,
 from src.core.models import ReviewStatus, RiskLevel, RunManifest, Snapshot, WorkItem
 from src.core.narrative_store import find_unresolved_scaffold_placeholders, get_narratives_dir, load_narratives, reset_narratives_for_next_issue, strip_scaffold_comments
 from src.core.overrides_store import OverridesDocument, get_overrides_path, reset_overrides_for_next_issue
+from src.core.program_fact_store import ProgramFactStore
 from src.core.quality_gates import QualityGateReport, combine_gate_reports, evaluate_bridge_gates, evaluate_continuity_gates, evaluate_context_integrity_gates, evaluate_phase_1a_gates
 from src.core.quality_gates import evaluate_phase_1b_gates, evaluate_phase_1c_gates, evaluate_contradiction_gate, evaluate_program_fact_drift_from_draft, evaluate_readiness_gates, evaluate_source_health_gates
 from src.core.quality_gates import evaluate_workiq_confirm_gates
@@ -145,6 +148,7 @@ class ConfirmResult:
     # returned failures before reaching this computation.
     risk_delta_preview: tuple[RiskDeltaPreviewEntry, ...] = ()
     risk_delta_preview_hash: str | None = None
+    next_issue_overrides_preserved: bool = False
 
 
 def _validate_decision_strip_ack(overrides_document: OverridesDocument) -> tuple[str, ...]:
@@ -708,39 +712,29 @@ def confirm_issue(
     if chart_cache_entries:
         manifest = add_chart_index(manifest, chart_cache_entries, kusto_sections)
 
+    fact_db_root = _runtime_db_root_for_reports(resolved_reports_root)
+    effective_family_modes = (
+        draft_manifest.run_evidence_snapshot.effective_family_modes
+        if draft_manifest.run_evidence_snapshot is not None else None
+    )
+    evidence_fence_resources: list[Path] = []
+    if program_id is not None:
+        if "program_fact_snapshot" in draft_state:
+            evidence_fence_resources.append(ProgramFactStore(program_id, db_root=fact_db_root).db_path)
+        if draft_state.get("edition_type") != "lookback" and effective_family_modes is not None:
+            evidence_fence_resources.append(get_fact_sor_state_path(program_id, programs_root=programs_root))
+
     def revalidate_evidence() -> None:
-        current_bundle = load_bundle(
-            edition_name, reports_root=resolved_reports_root, programs_root=programs_root,
+        _revalidate_evidence(
+            edition_name=edition_name, issue_number=issue_number,
+            reports_root=resolved_reports_root, programs_root=programs_root,
+            program_id=program_id, draft_state=draft_state,
+            draft_manifest=draft_manifest, db_root=fact_db_root,
+            effective_family_modes=effective_family_modes,
+            load_bundle_fn=load_bundle, hash_jsonable_fn=hash_jsonable,
+            evaluate_fact_drift_fn=evaluate_program_fact_drift_from_draft,
+            validate_pinned_gather_run_fn=_validate_pinned_gather_run,
         )
-        if hash_jsonable(current_bundle.config) != draft_manifest.config_hash:
-            raise ConfigError(
-                "Confirmation configuration changed before archive write. "
-                "Re-run `vertex report --dry-run` and review the updated draft before confirming."
-            )
-        fact_drift = evaluate_program_fact_drift_from_draft(
-            draft_state=draft_state,
-            program_id=program_id,
-            db_root=_runtime_db_root_for_reports(resolved_reports_root),
-            edition_name=edition_name,
-            issue_number=issue_number,
-            milestone_assessments=draft_manifest.milestone_assessments,
-            milestone_trajectory_snapshot=draft_manifest.milestone_trajectory_snapshot,
-            programs_root=programs_root,
-            effective_family_modes=(
-                draft_manifest.run_evidence_snapshot.effective_family_modes
-                if draft_manifest.run_evidence_snapshot is not None else None
-            ),
-        )
-        evidence_failures = tuple(result.message for result in fact_drift.failing_results)
-        if program_id is not None:
-            evidence_failures += _validate_pinned_gather_run(
-                program_id,
-                gather_run_id=draft_state.get("gather_run_id"),
-                gather_run_hash=draft_state.get("gather_run_hash"),
-                programs_root=programs_root,
-            )
-        if evidence_failures:
-            raise ConfigError("Confirmation evidence changed before archive write: " + "; ".join(evidence_failures))
 
     archive_transaction = _execute_archive_transaction_impl(
         edition_name=edition_name,
@@ -764,6 +758,7 @@ def confirm_issue(
         legacy_regex_extractor=legacy_regex_extractor,
         extraction_result=extraction_result,
         extraction_mode=extraction_mode,
+        evidence_fence_resources=tuple(evidence_fence_resources),
         revalidate_evidence_fn=revalidate_evidence,
         build_confirmed_eml_bytes_fn=_build_confirmed_eml_bytes,
         write_confirmed_fn=write_confirmed,
@@ -792,7 +787,7 @@ def confirm_issue(
         confirmed_at=confirmed_at,
         confirmed_by=confirmed_by,
         warnings=warnings,
-        archive_root=archive_root or ARCHIVE_ROOT,
+        archive_root=resolved_archive_root,
         editions_root=editions_root,
         programs_root=programs_root,
         resolved_v2=resolved_v2,
@@ -802,13 +797,15 @@ def confirm_issue(
     )
 
     next_issue_number = issue_number + 1
-    reset_overrides_for_next_issue(
+    next_overrides = reset_overrides_for_next_issue(
         edition=edition_name,
         next_issue_number=next_issue_number,
         confirmed_dimensions=artifacts[2].scorecards,
         reports_root=resolved_reports_root,
         **artifact_root_kwargs,
     )
+    if next_overrides is None:
+        warnings = warnings + ("Next-issue overrides already exist and were preserved without validation; review them before use.",)
     reset_narratives_for_next_issue(
         edition=edition_name,
         next_issue_number=next_issue_number,
@@ -943,6 +940,7 @@ def confirm_issue(
         weekly_summary_card_path=weekly_summary_card_path,
         posted_weekly_summary_card=posted_weekly_summary_card,
         workstream_association_log_path=workstream_association_log_path,
+        next_issue_overrides_preserved=next_overrides is None,
     )
 
 

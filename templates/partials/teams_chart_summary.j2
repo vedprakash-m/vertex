@@ -1,0 +1,3 @@
+{% if ks.message %}{{ ks.title }}: {{ ks.message }}. [View chart →]({{ ks.reference_url if ks.reference_url else "#" }})
+{% else %}{{ ks.title }}. [View chart →]({{ ks.reference_url if ks.reference_url else "#" }})
+{% endif %}

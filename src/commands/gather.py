@@ -64,6 +64,9 @@ from src.commands.gather_pipeline.m365_discovery_stage import (
     build_current_m365_promotion_blocked_artifacts as _stage_build_current_m365_promotion_blocked_artifacts,
     build_current_m365_promotion_candidates as _stage_build_current_m365_promotion_candidates,
     build_m365_discovery_state as _stage_build_m365_discovery_state,
+    configured_m365_artifact_ids as _configured_m365_artifact_ids_impl,
+    count_chat_thread_state as _count_chat_thread_state,
+    count_transcript_series_state as _count_transcript_series_state,
 )
 from src.commands.gather_pipeline.projection_stage import (
     background_synthesis_enabled,
@@ -108,7 +111,7 @@ from src.commands.gather_pipeline.channel_runtime import run_channel as _run_cha
 from src.commands.gather_pipeline.channel_runtime import run_channel_with_extraction as _run_channel_with_extraction_impl
 from src.commands.gather_pipeline.uil_binding_stage import resolve_uil_channel_binding_for_gather as _resolve_uil_channel_binding_for_gather_impl
 from src.commands.gather_pipeline.workiq_prefetch_stage import resolve_workiq_signals as _resolve_workiq_signals
-from src.commands.gather_workiq_helpers import WorkIQQueryPlan as _WorkIQQueryPlan, _truncate_signal_text, apply_structured_workiq_discovery as _apply_structured_workiq_discovery, build_workiq_fragment_signal_text as _build_workiq_fragment_signal_text, build_workiq_signal_text as _build_workiq_signal_text, extract_work_item_refs as _extract_work_item_refs, workiq_fragment_message_id as _workiq_fragment_message_id, workiq_message_id as _workiq_message_id, workiq_signal_fragments as _workiq_signal_fragments, workiq_source_type as _workiq_source_type, workiq_timestamp as _workiq_timestamp
+from src.commands.gather_workiq_helpers import WorkIQQueryPlan as _WorkIQQueryPlan, _truncate_signal_text, apply_structured_workiq_discovery as _apply_structured_workiq_discovery, build_workiq_fragment_signal_text as _build_workiq_fragment_signal_text, build_workiq_signal_text as _build_workiq_signal_text, dedupe_workiq_signals as _dedupe_workiq_signals, extract_work_item_refs as _extract_work_item_refs, workiq_fragment_message_id as _workiq_fragment_message_id, workiq_message_identity as _workiq_message_identity, workiq_signal_fragments as _workiq_signal_fragments, workiq_source_type as _workiq_source_type, workiq_timestamp as _workiq_timestamp
 from src.ai.m365_topic_router import M365TopicRouter, M365TopicRouterError
 from src.core.ado_enrichment import ADO_ANALYTICS_HISTORY_FIELDS, ADO_CHILD_BATCH_FIELDS, ADO_RISK_ASSESSMENT_COMMENT_FIELD, ADO_RISK_ASSESSMENT_FIELD, build_analytics_history, build_child_work_items, build_significant_findings, extract_child_ids_by_parent, infer_ado_risk_level, normalize_risk_assessment, serialize_trajectory_points
 from src.commands.gather_pipeline.provider_facade import ADOClient
@@ -116,6 +119,9 @@ from src.commands.gather_auxiliary import (
     archive_stale_weekly_journal_files as _archive_stale_weekly_journal_files,
     build_engms_signals as _build_engms_signals,
     build_integration_error_signal as _build_integration_error_signal,
+    build_workiq_discovery_failure_signal as _build_workiq_discovery_failure_signal,
+    build_workiq_plan_budget_signal as _build_workiq_plan_budget_signal,
+    build_workiq_quarantine_signal as _build_workiq_quarantine_signal,
     compute_adaptive_window_days as _compute_adaptive_window_days,
     run_sharepoint_ingest as _run_sharepoint_ingest,
 )
@@ -233,6 +239,7 @@ from src.core.m365_discovery_support import (
     use_match_aliases,
 )
 from src.core.m365_payload_support import (
+    has_provisional_workiq_identity,
     optional_string as _optional_string,
     sender_alias as _sender_alias,
     workiq_participant_aliases as _workiq_participant_aliases,
@@ -245,6 +252,7 @@ from src.core.m365_payload_support import (
 from src.core.m365_router_interface import IM365TopicRouter, M365ReassignCorrection
 from src.core.context_gap_store import append_context_gap
 from src.core.exceptions import AuthError, ConfigError, CredentialExpired, QueryError, StateError
+from src.core.failure_taxonomy import safe_failure_suffix
 from src.core.leakage_detector import LeakageReport, detect_leakage, load_approved_workiq_signals
 from src.core.m365_signal_corpus import build_m365_corpus_texts_by_workstream, build_m365_reassign_corrections_by_workstream, build_m365_rejected_texts_by_workstream, load_approved_m365_corpus_signals
 from src.core.m365_identifiers import normalize_meeting_id, normalize_thread_id
@@ -274,6 +282,7 @@ from src.core.reality_store import RealityStore
 from src.core.signal_review import signal_can_be_auto_approved, signal_is_approved_for_evidence, compute_auto_approval_policies, write_autonomy_audit_entries
 from src.core.signal_ref_utils import merge_entity_refs, widen_ws_wi_refs
 from src.core.signal_dedup import dedupe_signals, dedupe_signals_with_audit
+from src.core.signal_classification import classify_signal
 from src.core.source_candidate_store import (
     CANDIDATE_REJECTION_SUPPRESSION_DAYS,
     SourceCandidateStore,
@@ -303,7 +312,7 @@ from src.m365.registry_id_discovery import (
 )
 from src.m365.teams_reader import TeamsReader
 from src.m365.transcript_reader import TranscriptReader
-from src.m365.workiq_ask_support import validate_structured_discovery_payload
+from src.m365.workiq_ask_support import validate_structured_discovery_payload_with_diagnostics
 
 
 _BATCH_FIELDS = (
@@ -1242,12 +1251,11 @@ def _gather_program_impl(
     if include_workiq:
         workiq_started_at = perf_counter()
         workiq_error_start = len(integration_error_details)
-        # Bound the *whole* WorkIQ phase (all query plans combined) by the
-        # program's configured retrieval budget -- without this, a live run
-        # with N query plans could take up to WORKIQ_TIMEOUT (or the slower
-        # ~90-180s CLI fallback) *per plan* with no overall cap, stalling
-        # gather for tens of minutes. Falls back to WorkIQRetrievalConfig's
-        # own default (600s) when the program has no explicit m365.retrieval.
+        # Bound query-plan scheduling by the program's configured retrieval
+        # budget. A call may overrun its timeout, and seeded resolution and
+        # discovery passes below run outside this check. This is not a
+        # whole-phase deadline. Fall back to WorkIQRetrievalConfig's default
+        # (600s) when the program has no explicit m365.retrieval.
         workiq_retrieval = program.m365.retrieval if program.m365 is not None else None
         workiq_total_budget_seconds = (
             workiq_retrieval.max_wall_clock_seconds if workiq_retrieval is not None else 600
@@ -1460,18 +1468,26 @@ def _gather_program_impl(
                 previous_query_states=previous_query_states,
             )
         except (AuthError, QueryError, TimeoutError, typer.BadParameter) as exc:
-            _emit_credential_expired_banner(exc, "kusto")
-            integration_error_details.append(_build_integration_error(source="kusto", stage="gather", error=str(exc)))
+            if isinstance(exc, CredentialExpired):
+                typer.echo(
+                    "[ACTION REQUIRED] A credential for Kusto gathering expired. "
+                    "Renew the token and re-run gather. Run: vertex doctor --adapter-cert",
+                    err=True,
+                )
+            message = f"Kusto gather failed{safe_failure_suffix(str(exc))}"
+            integration_error_details.append(_build_integration_error(source="kusto", stage="gather", error=message))
             kusto_signals = (
-                _build_integration_error_signal(
-                    program_id=program_id,
-                    source="kusto",
-                    error=str(exc),
-                    as_of=current_time,
+                classify_signal(
+                    _build_integration_error_signal(
+                        program_id=program_id,
+                        source="kusto",
+                        error=message,
+                        as_of=current_time,
+                    )
                 ),
             )
             kusto_kpi_signals = ()
-            log.warning("Kusto gather failed for %s: %s", program_id, exc)
+            log.warning(message)
         candidate_signals = (
             *candidate_signals,
             *kusto_signals,
@@ -1542,17 +1558,27 @@ def _gather_program_impl(
                     workstreams,
                     current_time,
                 )
-        except (QueryError, TimeoutError, typer.BadParameter) as exc:
-            integration_error_details.append(_build_integration_error(source="analytics", stage="gather", error=str(exc)))
-            analytics_signals = (
-                _build_integration_error_signal(
-                    program_id=program_id,
+        except (QueryError, TimeoutError, typer.BadParameter):
+            message = "ADO Analytics gather failed"
+            integration_error_details.append(
+                _build_integration_error(
                     source="analytics",
-                    error=str(exc),
-                    as_of=current_time,
+                    stage="gather",
+                    error=message,
+                    operator_action="Verify Azure DevOps Analytics access and saved-query configuration before retrying gather.",
+                )
+            )
+            analytics_signals = (
+                classify_signal(
+                    _build_integration_error_signal(
+                        program_id=program_id,
+                        source="analytics",
+                        error=message,
+                        as_of=current_time,
+                    )
                 ),
             )
-            log.warning("ADO Analytics gather failed for %s: %s", program_id, exc)
+            log.warning("%s", message)
         candidate_signals = (*candidate_signals, *analytics_signals)
         _record_channel_outcome(
             "analytics",
@@ -1569,14 +1595,25 @@ def _gather_program_impl(
     if include_sprints:
         sprints_started_at = perf_counter()
         sprints_error_start = len(integration_error_details)
-        sprint_signals, sprint_ado_calls = (sprint_signal_loader or _load_sprint_signals)(
-            program,
-            workstreams,
-            freshness_items,
-            current_time,
+        if sprint_signal_loader is None:
+            sprint_signals, sprint_ado_calls = _load_sprint_signals(
+                program,
+                workstreams,
+                freshness_items,
+                current_time,
                 query_state_sink=query_states,
                 previous_query_states=previous_query_states,
-        )
+                integration_error_sink=integration_error_details,
+            )
+        else:
+            sprint_signals, sprint_ado_calls = sprint_signal_loader(
+                program,
+                workstreams,
+                freshness_items,
+                current_time,
+                query_state_sink=query_states,
+                previous_query_states=previous_query_states,
+            )
         candidate_signals = (*candidate_signals, *sprint_signals)
         _record_channel_outcome(
             "sprints",
@@ -1646,17 +1683,25 @@ def _gather_program_impl(
                     icm_client_factory=icm_client_factory,
                 )
         except (AuthError, QueryError, TimeoutError, typer.BadParameter) as exc:
-            _emit_credential_expired_banner(exc, "icm")
-            integration_error_details.append(_build_integration_error(source="icm", stage="gather", error=str(exc)))
+            if isinstance(exc, CredentialExpired):
+                typer.echo(
+                    "[ACTION REQUIRED] A credential for IcM gathering expired. "
+                    "Renew the token and re-run gather. Run: vertex doctor --adapter-cert",
+                    err=True,
+                )
+            message = f"IcM gather failed{safe_failure_suffix(str(exc))}"
+            integration_error_details.append(_build_integration_error(source="icm", stage="gather", error=message))
             icm_signals = (
-                _build_integration_error_signal(
-                    program_id=program_id,
-                    source="icm",
-                    error=str(exc),
-                    as_of=current_time,
+                classify_signal(
+                    _build_integration_error_signal(
+                        program_id=program_id,
+                        source="icm",
+                        error=message,
+                        as_of=current_time,
+                    )
                 ),
             )
-            log.warning("IcM gather failed for %s: %s", program_id, exc)
+            log.warning(message)
         candidate_signals = (
             *candidate_signals,
             *icm_signals,
@@ -2474,6 +2519,7 @@ def _load_sprint_signals(
     as_of: datetime,
     query_state_sink: dict[str, dict[str, Any]] | None = None,
     previous_query_states: dict[str, dict[str, Any]] | None = None,
+    integration_error_sink: list[IntegrationError] | None = None,
 ) -> tuple[tuple[Signal, ...], int]:
     return _load_sprint_signals_impl(
         program,
@@ -2482,6 +2528,7 @@ def _load_sprint_signals(
         as_of,
         query_state_sink=query_state_sink,
         previous_query_states=previous_query_states,
+        integration_error_sink=integration_error_sink,
         ado_client_factory=ADOClient,
         normalize_ado_team_name_fn=_normalize_ado_team_name,
         date_to_sk_fn=_date_to_sk,
@@ -2961,10 +3008,7 @@ def _build_icm_signals(
         warn_fn=log.warning,
     )
     if not signals and (program.kusto is None or not program.kusto.enabled):
-        log.warning(
-            "IcM gather unavailable for %s: Agency direct path is unavailable and no Kusto-backed IcM queries are enabled.",
-            program_id,
-        )
+        log.warning("IcM gather returned no signals; no Kusto-backed IcM queries are enabled.")
     return signals
 
 
@@ -3424,55 +3468,8 @@ def _build_current_m365_promotion_blocked_artifacts(
     )
 
 
-def _count_transcript_series_state(workstreams: tuple[Workstream, ...]) -> tuple[int, int]:
-    total = 0
-    missing = 0
-    for workstream in workstreams:
-        signal_sources = workstream.signal_sources
-        if signal_sources is None:
-            continue
-        for series in signal_sources.teams_meeting_series:
-            if not series.include_transcripts:
-                continue
-            total += 1
-            if not series.series_id:
-                missing += 1
-    return total, missing
-
-
-def _count_chat_thread_state(workstreams: tuple[Workstream, ...]) -> tuple[int, int]:
-    total = 0
-    missing = 0
-    for workstream in workstreams:
-        signal_sources = workstream.signal_sources
-        if signal_sources is None:
-            continue
-        for chat in signal_sources.teams_chats:
-            total += 1
-            if not chat.thread_id:
-                missing += 1
-    return total, missing
-
-
 def _configured_m365_artifact_ids(workstreams: tuple[Workstream, ...]) -> set[str]:
-    configured_ids: set[str] = set()
-    for workstream in workstreams:
-        signal_sources = workstream.signal_sources
-        if signal_sources is None:
-            continue
-        for series in signal_sources.teams_meeting_series:
-            normalized_series_id = normalize_thread_id(series.series_id)
-            if normalized_series_id:
-                configured_ids.add(normalized_series_id)
-        for chat in signal_sources.teams_chats:
-            normalized_thread_id = normalize_thread_id(chat.thread_id)
-            if normalized_thread_id:
-                configured_ids.add(normalized_thread_id)
-        for email_thread in signal_sources.email_threads:
-            normalized_thread_id = normalize_thread_id(email_thread.thread_id)
-            if normalized_thread_id:
-                configured_ids.add(normalized_thread_id)
-    return configured_ids
+    return _configured_m365_artifact_ids_impl(workstreams, normalize_thread_id=normalize_thread_id)
 
 
 def _configured_work_item_entity_refs_by_m365_id(
@@ -3561,7 +3558,7 @@ def _observed_m365_thread_ids(signals: tuple[Signal, ...]) -> set[str]:
     observed_ids: set[str] = set()
     for signal in signals:
         thread_id = _signal_thread_id(signal)
-        if thread_id is not None:
+        if thread_id is not None and not has_provisional_workiq_identity(signal.metadata):
             observed_ids.add(thread_id)
     return observed_ids
 
@@ -3571,6 +3568,7 @@ def _observed_m365_series_ids(signals: tuple[Signal, ...]) -> set[str]:
         observed_id
         for signal in signals
         if signal.source == "workiq/transcript"
+        and not has_provisional_workiq_identity(signal.metadata)
         for observed_id in (_signal_thread_id(signal),)
         if observed_id is not None
     }
@@ -3678,11 +3676,17 @@ def _build_workiq_signals(
         feedback_events=feedback_events if programs_root is not None else (),
         as_of=as_of,
     )
+    rejected_source_time_count = 0
+    rejected_identity_count = 0
+    rejected_invalid_record_count = 0
+    unusable_response_count = 0
     for plan in query_plans:
         effective_timeout = timeout_seconds
         if total_budget_seconds is not None:
             remaining_budget = total_budget_seconds - (monotonic() - started_at)
             if remaining_budget <= 0:
+                signals.append(_build_workiq_plan_budget_signal(
+                    program_id=program_id, as_of=as_of, integration_error_sink=integration_error_sink))
                 break
             budget_capped_timeout = max(1, int(remaining_budget))
             effective_timeout = budget_capped_timeout if effective_timeout is None else min(effective_timeout, budget_capped_timeout)
@@ -3699,12 +3703,17 @@ def _build_workiq_signals(
                 except TypeError:
                     payload = bridge_client.ask_workiq(plan.question or "")
             if plan.structured_window_start is not None and plan.structured_window_end is not None:
-                payload = validate_structured_discovery_payload(
+                validation = validate_structured_discovery_payload_with_diagnostics(
                     payload,
                     window_start=plan.structured_window_start,
                     window_end=plan.structured_window_end,
                     limit=plan.structured_result_limit or 8,
                 )
+                payload = validation.payload
+                rejected_source_time_count += validation.rejected_source_time_count
+                rejected_identity_count += validation.rejected_identity_count
+                rejected_invalid_record_count += validation.rejected_invalid_record_count
+                unusable_response_count += int(not validation.response_usable)
         elif plan.query_name.startswith("meeting_series:") or plan.mcp_tool == "calendar_gather":
             calendar_client = create_graph_calendar_client(bridge_client)
             page = calendar_client.search_events(
@@ -3777,6 +3786,22 @@ def _build_workiq_signals(
                 integration_error_sink=integration_error_sink,
             )
         )
+    for count, reason, invalid_record in (
+        (rejected_source_time_count, "missing or invalid source time", False),
+        (rejected_identity_count, "missing or invalid source identity", False),
+        (rejected_invalid_record_count, "malformed or unsafe content", True),
+    ):
+        if count:
+            error = f"WorkIQ structured discovery: {count} inspected record occurrence(s) quarantined for {reason}."
+            signals.append(_build_workiq_quarantine_signal(
+                program_id=program_id, error=error, count=count, as_of=as_of,
+                integration_error_sink=integration_error_sink, invalid_structured_record=invalid_record,
+            ))
+    if unusable_response_count:
+        error = f"WorkIQ structured discovery: {unusable_response_count} attempted plan(s) returned unavailable or invalid responses."
+        signals.append(_build_workiq_discovery_failure_signal(
+            program_id=program_id, error=error, as_of=as_of, integration_error_sink=integration_error_sink,
+        ))
     deduped_signals = _dedupe_workiq_signals(tuple(signals))
     if programs_root is not None:
         for seeded_resolution_error in _run_seeded_source_resolution_pass(
@@ -5204,7 +5229,7 @@ def _signals_from_workiq_payload(
         if _workiq_record_matches_exclusions(raw_text, exclude_keywords=exclude_keywords):
             continue
         timestamp = _workiq_timestamp(record)
-        message_id = _workiq_message_id(record)
+        message_id, source_identity_kind = _workiq_message_identity(record)
         if timestamp is None or message_id is None:
             missing = []
             if message_id is None:
@@ -5266,9 +5291,14 @@ def _signals_from_workiq_payload(
             metadata: dict[str, Any] = {
                 "source_type": source_type,
                 "message_id": fragment_message_id,
-                "parent_message_id": message_id,
-                "native_message_id": message_id,
-                "message_id_kind": "native" if len(fragments) == 1 else "derived_fragment",
+                "parent_message_id": message_id if source_identity_kind == "native_message" else None,
+                "native_message_id": message_id if source_identity_kind == "native_message" else None,
+                "message_id_kind": (
+                    "native" if len(fragments) == 1 and source_identity_kind == "native_message"
+                    else "thread_fallback" if len(fragments) == 1
+                    else "derived_fragment"
+                ),
+                "source_identity_kind": source_identity_kind,
                 "source_event_time": timestamp.isoformat(),
                 "retrieved_at": as_of.isoformat(),
                 "temporal_confidence": "source_reported",
@@ -5321,21 +5351,10 @@ def _signals_from_workiq_payload(
             )
     for reason, count in quarantined.items():
         error = f"WorkIQ query {query_name}: {count} record(s) quarantined for missing or invalid {reason}."
-        _append_integration_error_once(
-            integration_error_sink, source="workiq", stage="quarantine", error=error,
-            retryable=False,
-            operator_action="Obtain native observation IDs and timezone-qualified source times before reviewing these records.",
-        )
-        diagnostic = _build_integration_error_signal(
-            program_id=program_id, source="workiq", error=error, as_of=as_of,
-        )
-        assert diagnostic.metadata is not None
-        signals.append(replace(diagnostic, metadata={
-            **diagnostic.metadata, "quarantined": True, "quarantined_record_count": count,
-            "source_event_time": None, "retrieved_at": as_of.isoformat(),
-            "temporal_confidence": "unknown",
-        }))
-        log.warning("%s", error)
+        signals.append(_build_workiq_quarantine_signal(
+            program_id=program_id, error=error, count=count, as_of=as_of,
+            integration_error_sink=integration_error_sink,
+        ))
     return tuple(signals)
 
 
@@ -5375,25 +5394,6 @@ def _workiq_record_matches_exclusions(value: str, *, exclude_keywords: tuple[str
         return False
     normalized = value.lower()
     return any(keyword.strip().lower() in normalized for keyword in exclude_keywords if keyword.strip())
-
-
-def _dedupe_workiq_signals(signals: tuple[Signal, ...]) -> tuple[Signal, ...]:
-    deduped: list[Signal] = []
-    seen: set[tuple[str, str | None, str | None]] = set()
-    for signal in signals:
-        metadata = signal.metadata or {}
-        raw_message_id = metadata.get("message_id") if isinstance(metadata, dict) else None
-        message_id_for_key = str(raw_message_id) if isinstance(raw_message_id, str) else None
-        key = (
-            signal.source,
-            message_id_for_key,
-            signal.workstream_id,
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(signal)
-    return tuple(deduped)
 
 
 def _resolve_workiq_signal_workstream_id(

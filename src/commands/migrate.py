@@ -45,15 +45,17 @@ class MigrationArtifacts:
 
 def migrate_command(
     program: str | None = typer.Option(None, "--program", help="Program id, e.g. myprogram."),
-    to: str | None = typer.Option(None, "--to", help="Target storage backend. Currently only sqlite is supported."),
+    to: str | None = typer.Option(None, "--to", help="Target storage backend: sqlite or file."),
     rebuild_analytics: bool = typer.Option(False, "--rebuild-analytics", help="Rebuild the per-program analytics projection database from archive and journal primaries."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Preview migrated counts without writing SQLite data or updating program.yaml."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Cannot be combined with --rebuild-analytics. Preview storage-migration counts without switching backends; corrupt trajectories are refused without repair; reverse previews may initialize SQLite schema or touch sidecars."),
 ) -> None:
     if rebuild_analytics:
         if to is not None:
             raise typer.BadParameter("--to cannot be combined with --rebuild-analytics.")
         if program is None:
             raise typer.BadParameter("--program is required with --rebuild-analytics.")
+        if dry_run:
+            raise typer.BadParameter("--dry-run cannot be combined with --rebuild-analytics.")
         artifacts = run_rebuild_analytics(
             program_id=program,
             programs_root=PROGRAMS_ROOT,
@@ -85,13 +87,14 @@ def migrate_command(
         programs_root=PROGRAMS_ROOT,
         dry_run=dry_run,
     )
+    action = "Previewed migration of" if migration_artifacts.dry_run else "Migrated"
     typer.echo(
-        f"Migrated {migration_artifacts.program_id} to {migration_artifacts.target_backend} | signals: {migration_artifacts.signal_count} | "
+        f"{action} {migration_artifacts.program_id} to {migration_artifacts.target_backend} | signals: {migration_artifacts.signal_count} | "
         f"reviews: {migration_artifacts.review_count} | threads: {migration_artifacts.thread_link_count} | "
         f"trajectory points: {migration_artifacts.trajectory_point_count} | usage markers: {migration_artifacts.usage_marker_count}"
     )
     if migration_artifacts.dry_run:
-        typer.echo("Dry-run: sqlite database and program.yaml were not updated.")
+        typer.echo("Dry-run: storage backend was not switched.")
     else:
         typer.echo(f"SQLite store: {migration_artifacts.database_path}")
         typer.echo(f"Program storage_backend updated to {migration_artifacts.target_backend}.")
@@ -135,7 +138,7 @@ def run_storage_migration(
     review_decisions = tuple(entry for entry in review_log if isinstance(entry, SignalReviewDecision))
     usage_markers = tuple(entry for entry in review_log if isinstance(entry, SignalUsageMarker))
     thread_links = read_signal_thread_log(program_id, programs_root=programs_root)
-    trajectory_points_by_item = _load_file_trajectory_points(program_id, programs_root=programs_root)
+    trajectory_points_by_item = _load_file_trajectory_points(program_id, programs_root=programs_root, dry_run=dry_run)
     trajectory_point_count = sum(len(points) for points in trajectory_points_by_item.values())
     database_path = get_program_sqlite_store_path(program_id, programs_root=programs_root)
 
@@ -245,7 +248,7 @@ def _is_runtime_yaml(path: Path) -> bool:
     return False
 
 
-def _load_file_trajectory_points(program_id: str, *, programs_root: Path) -> dict[int, tuple]:
+def _load_file_trajectory_points(program_id: str, *, programs_root: Path, dry_run: bool) -> dict[int, tuple]:
     trajectory_points_by_item: dict[int, tuple] = {}
     trajectory_dir = get_program_trajectory_dir(program_id, programs_root=programs_root)
     if not trajectory_dir.exists():
@@ -255,7 +258,14 @@ def _load_file_trajectory_points(program_id: str, *, programs_root: Path) -> dic
             work_item_id = int(path.stem)
         except ValueError:
             continue
-        points = read_trajectory(program_id, work_item_id, programs_root=programs_root)
+        try:
+            points = read_trajectory(
+                program_id, work_item_id, programs_root=programs_root, repair_corruption=not dry_run,
+            )
+        except (ValueError, KeyError, TypeError):
+            if not dry_run:
+                raise
+            raise typer.BadParameter("Invalid trajectory journal; dry-run stopped without repairing it.") from None
         if points:
             trajectory_points_by_item[work_item_id] = points
     return trajectory_points_by_item

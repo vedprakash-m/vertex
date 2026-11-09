@@ -7,6 +7,8 @@
 
 ## Changelog
 
+- Last updated: 2026-11-08 — WorkIQ FQ-01 now keeps semantic-only discovery records as in-memory previews; only native-identity-backed WorkIQ signals enter persistence, evidence, actions, provenance, AI feedback context, or source-family corroboration.
+
 - Last updated: 2026-07-08 — Incorporated `specs/fix-data-flow.md` (v1.0→v1.13, archived to `.archive/specs/fix-data-flow.md`) into the canonical PRD/tech-spec. All 13 tracks (A–M) closed: the newsletter's risk and dependency read paths now route through `ProgramReality` (Track B), with the platform's first-ever trust-badge rendering markup (`templates/partials/truth_badge.j2`) live for risk, milestone, and assumption facts; `fact_bridge_enabled` now defaults to `true` with a visible doctor warning when it doesn't (Track A, ADR-0011); the incremental event-projection fold is now wired as an automatic post-write hook under WAL-mode concurrency (Track D, ADR-0010); all 7 render-pipeline `ProgramReality.load()` call sites are consolidated or documented (Track E); the AI-generated executive summary and workstream blurbs now draw on a token-budgeted reality-substrate summary (`src/commands/reality_context.py`) instead of the narrative-only `bundle.program_context`, so structured trust badges and AI prose can no longer silently contradict each other (Track J, PR-11b — closed ahead of this spec's own "next priority after Track C" schedule); a substrate health monitor (gather-freshness, bridge backlog, SoR-vs-actual-read-path consistency via a per-issue render manifest, fact-store location/schema-version consistency) is live in `vertex doctor --storage` (Track K). Per-family investigation found action/decision/commitment have no current main-newsletter read path and workstream's newsletter content is narrative-driven, not fact-per-row — reported honestly rather than force-migrated (§1.1 updated). Two operator-paced follow-ups moved to `specs/bklg.md`: deployment-specific stray-database cleanup (BL-B1) and Track D Step 2's conditional production-observation gate (BL-B2). Full suite: 6922 passed, 901 skipped, 0 failed; Deployment activation results remain private and are not certified by these implementation checks.
 
 - Last updated: 2026-07-07 — Incorporated `specs/activation.md` (ACTIVATION-1 v1.0→v1.29, archived to `.archive/specs/activation.md`) into the canonical PRD. §12.7.8 added: **the REV activation sentence has fired on real data** — a human-approved fact from a real program email now appears, cited and reverse-linkable, in a real render, proven by a counterfactual render diff. Getting there surfaced and fixed five previously-undetected code gaps on first real contact (see [tech-spec §13.6.7](vertex-tech-spec.md#1367-activation--real-data-proof-hardening-contracts-and-self-verification-2026-07-07) for the technical detail). `scripts/verify_activation.py --program <id>` now reports 51/56 checks passing for the pilot program; the remaining 5 are documented as `specs/bklg.md` (Azure Content Safety provisioning; corpus dual-annotation) — the only remaining work is external/human-paced, not engineering.
@@ -1102,7 +1104,11 @@ The `PROVIDER_REGISTRY` in `channel_wiring.py` maps channel names to their provi
 - Edit patterns captured (draft vs. confirmed narrative diff → `edit_patterns.jsonl`)
 - Signal usage markers appended to `reviews.jsonl`
 - Vitality archive entry written to `vitality.json`
-- Override and narrative files reset for next issue
+- Next-issue review and narratives are prepared after confirmation. A missing
+  program-backed override file is initialized; an existing next-issue override
+  file is preserved without validation and reported as a warning. The legacy
+  single active override file retains its reset behavior. Later draft seeding
+  and review still apply; preservation is not approval.
 - Where a program has activated `gather-run.v1` manifests (see Tech Spec §11.3), confirm binds to exactly one pinned committed gather run (run id + content hash) and computes a non-mutating risk-delta preview (new/updated/no-change rows, plus a stable preview hash) before any real archive write. A stale, partial, or hash-mismatched pinned run blocks confirm rather than silently drafting off unverified evidence; the first trusted confirm for a program is a non-destructive but effectively irreversible baseline commit — later corrections happen through new governed records, not rollback.
 
 ### 9.6 Freshness Report (`vertex freshness`)
@@ -1298,6 +1304,8 @@ When no meaningful ADO source timestamp is known, source age is unknown—not th
 - Per-entry result tracking: `applied`, `failed`, `conflict`, `skipped`
 - Re-run applies only `pending`/`failed` entries (idempotent)
 
+An applied create retains its remote outcome when a subsequent local action-association operation fails. Expected local errors produce a content-free warning retained in the entry and repeated on replay; unexpected errors propagate after an attempt to persist that applied outcome. This does not certify that an action identity was present or matched, repair an association, or guarantee an atomic manifest write (RELO-W4.9d).
+
 **ADO status (`vertex ado status`):** Area path coverage, orphaned items, coverage gaps, last gather stats.
 
 **ADO reconciliation (`vertex ado reconcile`):** Read-only diagnostic comparing Vertex overrides/claims against ADO state.
@@ -1338,7 +1346,7 @@ When no meaningful ADO source timestamp is known, source age is unknown—not th
 
 **Reference modes:** `--since last-confirmed`, `--since last-draft`, `--since issue-N`
 
-**Diff content:** Item deltas (new/closed/risk changes), scorecard risk movements, narrative section diffs, approved signal changes, drift pattern changes.
+**Diff content:** Item deltas (new/closed/risk/ETA/owner changes), scorecard risk movements, narrative section diffs, approved signal changes, drift pattern changes.
 
 ### 9.14 Coverage Gap Detection
 
@@ -1395,7 +1403,7 @@ Discovers historical newsletters via M365 search and extracts structured data us
 
 ### 9.24 Onboarding
 
-**`vertex setup`** — Conversational, AI-assisted onboarding for first-time users. Discovers plausible workstreams and scorecard dimensions from live ADO data (or guided manual mode when ADO is unavailable), renders a live HTML preview before writing any files, and supports session save/resume. Falls back to deterministic heuristics if AI is unavailable. Produces a valid, doctor-passing program in under 10 minutes. Additive to `vertex onboard`.
+**`vertex setup`** — Conversational, AI-assisted onboarding for first-time users. Discovers plausible workstreams and scorecard dimensions from live ADO data (or guided manual mode when ADO is unavailable), renders a live HTML preview before writing any files, and supports session save/resume. Proposed and sample values in the preview are literal text, not executable markup. Falls back to deterministic heuristics if AI is unavailable. Produces a valid, doctor-passing program in under 10 minutes. Additive to `vertex onboard`.
 
 **`vertex onboard`** — Interactive form wizard to scaffold a new program/edition. Generates `editions/<id>.yaml`, `programs/<prog>/program.yaml`, workstreams, scorecards, editorial rules, review config. Supports V2 update-mode merges. Power-user path for explicit, deterministic config generation.
 
@@ -1453,9 +1461,11 @@ The L1 engine provides a typed telemetry substrate for hypothesis-driven program
 
 **Composition:** a `CockpitSnapshot` (see Glossary) aggregates program status, source health, AI-generated intelligence (release-gated `ProgramSynthesis` through-line, when one exists), operational economics (AI spend/tier routing), earned autonomy/trust state per proposal class, and time-savings value — each built by its own best-effort reader so one subsystem's failure never blanks the whole cockpit.
 
+**Local actuation evidence (RELO-W4.12c, in progress):** Fresh cockpit reliability counts describe the selected program's existing actuation journal, not all unfinished work or provider outcomes. Missing or unsafe journal evidence is unavailable rather than zero; observed uncertain, dead-letter, terminal-failure and compensation-required states remain visible as warnings. SQLite may create or update a WAL shared-memory sidecar during a read; its acceptability remains unresolved. This does not complete the current exception inbox or establish reconciliation or operational readiness.
+
 **Value measurement is honesty-gated**, not aspirational: a workflow may only claim a `measured` time-savings figure after 8+ real, timer-based before/after `WorkflowMeasurement` pairs clear a bootstrap statistical confidence interval (`TimeSavingsCertification`). Below that evidence bar, value renders as `proxy` or `calibrated`, explicitly labeled — never silently presented as a hard number a leader could cite without caveat.
 
-**Outcome metrics OM-1/2/4/5** (`governance/outcome-metrics.md`, `src/core/outcome_metrics.py`, shipped 2026-07-22) apply the same honesty discipline to the platform's own safety/reliability claims, not just time-savings: OM-1 (zero hallucinated facts reach a published newsletter, 8-week window), OM-2 (zero duplicate ADO entities created, 6 months), OM-4 (zero unaudited AI outputs consumed), and OM-5 (a weekly cycle completes with zero forced overrides in steady state) are the platform's own MVP acceptance bar for the reliability canary window (§9.7). Each carries an explicit confidence tier (`measured`/`unavailable`) surfaced in `vertex cockpit`/`vertex doctor` — a tier is never silently promoted. As of the last measurement, OM-4 is `measured` (real audit-ledger coverage) while OM-1/2/5 are honestly `unavailable`, each for a stated, structural reason (OM-1 needs the AI safety boundary to cover the REV extractor/judge path; OM-2 needs a live ADO mutation domain to correlate against; OM-5 needs a pre-registered "what is timed, for whom, against what baseline" protocol) — see the governance doc for current status and what each metric needs to become measurable.
+**Outcome metrics OM-1/2/4/5** (`governance/outcome-metrics.md`, `src/core/outcome_metrics.py`, shipped 2026-07-22) apply the same honesty discipline to the platform's own safety/reliability claims, not just time-savings: OM-1 (zero hallucinated facts reach a published newsletter, 8-week window), OM-2 (zero duplicate ADO entities created, 6 months), OM-4 (zero unaudited AI outputs consumed), and OM-5 (a weekly cycle completes with zero forced overrides in steady state) are the platform's own MVP acceptance bar for the reliability canary window (§9.7). Each carries an explicit confidence tier (`measured`/`unavailable`) surfaced in `vertex cockpit`/`vertex doctor` — a tier is never silently promoted. OM-4 can be measured from recognized, identifiable recorded receipts; absent consumption, invalid receipt evidence or a matching schema-invalid release decision is unavailable, and the result does not prove complete collection or authorization at consumption time. OM-1/2/5 are `unavailable` for stated structural reasons (OM-1 needs the AI safety boundary to cover the REV extractor/judge path; OM-2 lacks qualified provider-correlated duplicate-outcome measurement; OM-5 needs a pre-registered "what is timed, for whom, against what baseline" protocol) — see the governance doc for current status and what each metric needs to become measurable.
 
 **Interactive review surface:** `vertex cockpit tui` is also the review-and-launch point for every human-reviewable AI proposal type (risk promotions and all AISchemaGateway-generated proposal classes) — approve/reject a staged proposal without leaving the cockpit.
 
@@ -1490,7 +1500,7 @@ vertex <command> [options]
 
 Installed entry points: `vertex = "cli:app"` and `vx = "cli:app"` in `pyproject.toml`. Built with Typer.
 
-The generated operator reference lives at [specs/cli-reference.md](specs/cli-reference.md) and is refreshed from the live Typer command tree via `scripts/generate_cli_reference.py`.
+The generated operator reference lives at [tests/contracts/cli_reference_snapshot.md](../tests/contracts/cli_reference_snapshot.md) and is refreshed from the live Typer command tree via `scripts/generate_cli_reference.py`. CI checks the committed reference with `--check` without rewriting it.
 
 ### 10.2 Command Summary
 
@@ -1522,7 +1532,7 @@ The generated operator reference lives at [specs/cli-reference.md](specs/cli-ref
 | `deck-companion` | Markdown deck output | `--edition`, `--issue` |
 | `meeting-close` | Transcript-to-action closure packet with inline review/apply handoff | `--program`, `--transcript`, `--meeting-id`, `--html`, `--teams`, `--promote-actions`, `--apply-ado` |
 | `notify` | DRI freshness notifications | `--edition`, `--issue`, `--channel`, `--dry-run` |
-| `ask` | Advisory natural-language command router | freeform request, `--program`, `--edition` |
+| `ask` | Program-scoped named-intent answers or advisory natural-language routing | freeform request and at least one of `--program`, `--edition` |
 | `list editions/workstreams/dris` | List configured resources | `--edition` |
 | `setup` | Conversational AI-assisted onboarding concierge | `--from-description`, `--demo`, `--preview`, `--auto`, `--manual`, `--resume`, `--update`, `--dry-run` |
 | `onboard` | Interactive form wizard (power-user path) | `--edition`, `--update`, `--ai` |
@@ -1555,7 +1565,7 @@ The generated operator reference lives at [specs/cli-reference.md](specs/cli-ref
 | `config` | Governed program-config inspection, schema validation, migration, and mutation | `get`, `set`, `validate`, `migrate`, `--program`, `--edition`, `--format`, `--dry-run` |
 | `policy` | Promote learned local approval policy into active rules | `promote`, `--program`, `--rule`, `--dry-run` |
 | `audit archive` | Archive autonomy-audit history by explicit cutoff date or configured retention window | `--program`, `--before`, `--retention`, `--format` |
-| `migrate` | Storage migration and analytics rebuild | `--program`, `--to`, `--rebuild-analytics`, `--dry-run` |
+| `migrate` | Storage migration preview or execution; analytics rebuild cannot be combined with `--dry-run` | `--program`, `--to`, `--rebuild-analytics`, `--dry-run` |
 | `probe-ado` | ADO connectivity probe | |
 | `ado status` | ADO coverage report | `--program` |
 | `ado propose` | Generate ADO update manifest | `--program`, `--type`, `--edition`, `--issue` |

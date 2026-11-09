@@ -198,23 +198,39 @@ def rotate_jsonl_if_oversize(
     return True
 
 
-def read_jsonl_records(path: Path) -> tuple[dict[str, Any], ...]:
-    """Read JSONL records with corruption quarantine."""
-    if not path.exists():
+def read_jsonl_records(
+    path: Path, *, repair_corruption: bool = True,
+) -> tuple[dict[str, Any], ...]:
+    """Read JSONL records, optionally refusing corruption without repairing it."""
+    if repair_corruption and not path.exists():
         return ()
+    try:
+        contents = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        if repair_corruption:
+            raise
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return ()
+        raise
     entries: list[dict[str, Any]] = []
     valid_lines: list[str] = []
     invalid_found = False
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
+    for raw_line in contents.splitlines():
         stripped = raw_line.strip()
         if not stripped:
             continue
         try:
             payload = json.loads(stripped)
         except json.JSONDecodeError:
+            if not repair_corruption:
+                raise ValueError("Invalid JSONL record.") from None
             invalid_found = True
             continue
         if not isinstance(payload, dict):
+            if not repair_corruption:
+                raise ValueError("Invalid JSONL record.")
             invalid_found = True
             continue
         entries.append(payload)

@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import sqlite3
+from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -1405,7 +1406,7 @@ def test_operator_gate_m365_ids_degrades_cleanly_when_discovery_tables_are_missi
         )
         registry_path = program_dir / "channel_registry.sqlite3"
         ChannelRegistryStore(registry_path, "demo")
-        with sqlite3.connect(registry_path) as conn:
+        with closing(sqlite3.connect(registry_path)) as conn, conn:
                 conn.execute("DROP TABLE IF EXISTS source_intents")
                 conn.execute("DROP TABLE IF EXISTS source_candidates")
                 conn.execute("DROP TABLE IF EXISTS candidate_intent_matches")
@@ -1475,7 +1476,7 @@ def test_operator_gate_m365_ids_prioritizes_auth_blocker_over_missing_schema(tmp
         )
         registry_path = program_dir / "channel_registry.sqlite3"
         ChannelRegistryStore(registry_path, "demo")
-        with sqlite3.connect(registry_path) as conn:
+        with closing(sqlite3.connect(registry_path)) as conn, conn:
                 conn.execute("DROP TABLE IF EXISTS source_intents")
                 conn.execute("DROP TABLE IF EXISTS source_candidates")
                 conn.execute("DROP TABLE IF EXISTS candidate_intent_matches")
@@ -3940,7 +3941,7 @@ def test_run_doctor_channels_ignores_stale_removed_kusto_target_degradation(repo
                                 "expected_min": 10,
                                 "meets_expected_min": True,
                                 "reason_not_active": None,
-                                "last_error": "Kusto pre-flight failed for https://example.kusto.windows.net/ExampleDb. Run 'vertex admin auth setup' and verify cluster access or JIT.",
+                                "last_error": "Kusto pre-flight failed for https://example.kusto.invalid/ExampleDb. Run 'vertex admin auth setup' and verify cluster access or JIT.",
                         },
                         "workiq": {"active": False, "signal_count": 0, "expected_min": 0, "meets_expected_min": False, "reason_not_active": "flag_not_passed", "last_error": None},
                         "transcript": {"active": False, "signal_count": 0, "expected_min": 0, "meets_expected_min": False, "reason_not_active": "flag_not_passed", "last_error": None},
@@ -5157,14 +5158,15 @@ def test_run_doctor_warns_when_hygiene_nudge_edition_is_not_email_configured(mon
         assert hygiene_check.metadata["author_email"] is None
 
 
-def _pin_check_auth_kusto_targets(knowledge_root: Path) -> None:
+def _pin_check_auth_kusto_targets(knowledge_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("src.commands.doctor_checks.kusto_checks._ICM_KUSTO_CLUSTER", "https://icmcluster.example.invalid")
         golden_queries_path = knowledge_root / "golden_queries.yaml"
         golden_queries_doc = yaml.safe_load(golden_queries_path.read_text(encoding="utf-8"))
         for query in golden_queries_doc["queries"]:
                 if query.get("id") == "velocity-p50":
-                        query.update(cluster="https://example.kusto.windows.net", database="ExampleDb")
+                        query.update(cluster="https://example.kusto.invalid", database="ExampleDb")
                 elif query.get("id") in {"icm-active", "icm-mttr"}:
-                        query["cluster"] = "https://icmcluster.kusto.windows.net"
+                        query["cluster"] = "https://icmcluster.example.invalid"
         golden_queries_path.write_text(
                 yaml.safe_dump(golden_queries_doc, sort_keys=False, allow_unicode=False),
                 encoding="utf-8",
@@ -5173,7 +5175,7 @@ def _pin_check_auth_kusto_targets(knowledge_root: Path) -> None:
 
 def test_run_doctor_check_auth_reports_ado_graph_and_agency_status(monkeypatch, repo_root: Path, tmp_path: Path) -> None:
         reports_root = stage_v2_report_workspace(repo_root, tmp_path)
-        _pin_check_auth_kusto_targets(reports_root.parent / "knowledge")
+        _pin_check_auth_kusto_targets(reports_root.parent / "knowledge", monkeypatch)
         programs_root = reports_root.parent / "programs"
         knowledge_root = reports_root.parent / "knowledge"
 
@@ -5241,8 +5243,8 @@ def test_run_doctor_check_auth_reports_ado_graph_and_agency_status(monkeypatch, 
         assert checks["WorkIQ Access"].status == "ok"
         assert checks["Kusto Access"].status == "ok"
         assert checks["Kusto Access"].metadata is not None
-        assert "https://example.kusto.windows.net/ExampleDb" in checks["Kusto Access"].metadata["cluster_targets"]
-        assert "https://icmcluster.kusto.windows.net/IcMDataWarehouse" in checks["Kusto Access"].metadata["cluster_targets"]
+        assert "https://example.kusto.invalid/ExampleDb" in checks["Kusto Access"].metadata["cluster_targets"]
+        assert "https://icmcluster.example.invalid/IcMDataWarehouse" in checks["Kusto Access"].metadata["cluster_targets"]
         assert checks["Kusto Validation"].status == "warn"
         assert "icm-mttr" in checks["Kusto Validation"].metadata["excluded_query_ids"]
         assert "icm-mttr" not in checks["Kusto Validation"].metadata["unvalidated_query_ids"]
@@ -5255,7 +5257,7 @@ def test_run_doctor_check_auth_reports_ado_graph_and_agency_status(monkeypatch, 
 
 def test_doctor_cli_check_auth(monkeypatch, repo_root: Path, tmp_path: Path) -> None:
         reports_root = stage_v2_report_workspace(repo_root, tmp_path)
-        _pin_check_auth_kusto_targets(reports_root.parent / "knowledge")
+        _pin_check_auth_kusto_targets(reports_root.parent / "knowledge", monkeypatch)
         programs_root = reports_root.parent / "programs"
 
         (programs_root / "acme" / "capability_status.yaml").write_text(
@@ -5319,7 +5321,7 @@ def test_doctor_cli_check_auth(monkeypatch, repo_root: Path, tmp_path: Path) -> 
 
 def test_run_doctor_check_auth_reports_kusto_probe_failure(monkeypatch, repo_root: Path, tmp_path: Path) -> None:
         reports_root = stage_v2_report_workspace(repo_root, tmp_path)
-        _pin_check_auth_kusto_targets(reports_root.parent / "knowledge")
+        _pin_check_auth_kusto_targets(reports_root.parent / "knowledge", monkeypatch)
         write_pending_kusto_capability(reports_root.parent / "programs")
         knowledge_root = reports_root.parent / "knowledge"
 
@@ -5360,7 +5362,7 @@ def test_run_doctor_check_auth_reports_kusto_probe_failure(monkeypatch, repo_roo
         checks = {check.label: check for check in report.checks}
         assert checks["WorkIQ Access"].status == "ok"
         assert checks["Kusto Access"].status == "fail"
-        assert "auth timeout" in checks["Kusto Access"].detail
+        assert checks["Kusto Access"].detail == "Kusto access probe failed; matched pattern: 'auth'. Check access and retry."
         assert checks["Kusto Validation"].status == "warn"
         assert "icm-mttr" in checks["Kusto Validation"].metadata["excluded_query_ids"]
         assert "icm-mttr" not in checks["Kusto Validation"].metadata["unvalidated_query_ids"]
@@ -5627,7 +5629,7 @@ def test_doctor_refactor_status_json_and_csv(monkeypatch) -> None:
 
 def test_doctor_check_auth_json_and_csv_include_capability_review_metadata(monkeypatch, repo_root: Path, tmp_path: Path) -> None:
         reports_root = stage_v2_report_workspace(repo_root, tmp_path)
-        _pin_check_auth_kusto_targets(reports_root.parent / "knowledge")
+        _pin_check_auth_kusto_targets(reports_root.parent / "knowledge", monkeypatch)
         programs_root = reports_root.parent / "programs"
         knowledge_root = reports_root.parent / "knowledge"
 
@@ -5691,8 +5693,8 @@ def test_doctor_check_auth_json_and_csv_include_capability_review_metadata(monke
         workiq_check = next(check for check in payload["checks"] if check["label"] == "WorkIQ Access")
         assert workiq_check["status"] == "ok"
         kusto_access = next(check for check in payload["checks"] if check["label"] == "Kusto Access")
-        assert "https://example.kusto.windows.net/ExampleDb" in kusto_access["metadata"]["cluster_targets"]
-        assert "https://icmcluster.kusto.windows.net/IcMDataWarehouse" in kusto_access["metadata"]["cluster_targets"]
+        assert "https://example.kusto.invalid/ExampleDb" in kusto_access["metadata"]["cluster_targets"]
+        assert "https://icmcluster.example.invalid/IcMDataWarehouse" in kusto_access["metadata"]["cluster_targets"]
         validation_check = next(check for check in payload["checks"] if check["label"] == "Kusto Validation")
         assert validation_check["status"] == "warn"
         assert "icm-mttr" in validation_check["metadata"]["excluded_query_ids"]
@@ -5714,8 +5716,8 @@ def test_doctor_check_auth_json_and_csv_include_capability_review_metadata(monke
         assert workiq_row["status"] == "ok"
         kusto_access_row = next(row for row in rows if row["label"] == "Kusto Access")
         kusto_access_metadata = json.loads(kusto_access_row["metadata_json"])
-        assert "https://example.kusto.windows.net/ExampleDb" in kusto_access_metadata["cluster_targets"]
-        assert "https://icmcluster.kusto.windows.net/IcMDataWarehouse" in kusto_access_metadata["cluster_targets"]
+        assert "https://example.kusto.invalid/ExampleDb" in kusto_access_metadata["cluster_targets"]
+        assert "https://icmcluster.example.invalid/IcMDataWarehouse" in kusto_access_metadata["cluster_targets"]
         validation_row = next(row for row in rows if row["label"] == "Kusto Validation")
         validation_metadata = json.loads(validation_row["metadata_json"])
         assert "icm-mttr" in validation_metadata["excluded_query_ids"]
@@ -7200,7 +7202,7 @@ def test_run_doctor_kb_reports_engms_page_counts(monkeypatch, tmp_path: Path) ->
                         'pages:\n'
                         '  - id: acme-readiness\n'
                         '    title: Acme Readiness\n'
-                        '    url: https://eng.ms/acme-readiness\n'
+                        '    url: https://docs.example.invalid/reference\n'
                 ),
                 encoding="utf-8",
         )
@@ -7239,7 +7241,7 @@ def test_run_doctor_kb_prefers_program_local_engms_pages_over_shared_root(monkey
                         'pages:\n'
                         '  - id: acme-readiness\n'
                         '    title: Acme Readiness\n'
-                        '    url: https://eng.ms/acme-readiness\n'
+                        '    url: https://docs.example.invalid/reference\n'
                 ),
                 encoding="utf-8",
         )
@@ -7557,7 +7559,7 @@ def test_run_doctor_metric_bindings_revalidates_stale_bindings_and_warns_on_drif
                         metric_id="demo.cluster_count",
                         program_id="demo",
                         source_kind="kusto",
-                        cluster="https://example.kusto.windows.net",
+                        cluster="https://example.kusto.invalid",
                         database="ExampleDb",
                         kql_template="DemoMetrics | summarize Count=count()",
                         result_column="Count",
@@ -7571,7 +7573,7 @@ def test_run_doctor_metric_bindings_revalidates_stale_bindings_and_warns_on_drif
                         metric_id="demo.cluster_count",
                         program_id="demo",
                         source_kind="kusto",
-                        cluster="https://example.kusto.windows.net",
+                        cluster="https://example.kusto.invalid",
                         database="ExampleDb",
                         kql_template="DemoMetrics | summarize Count=count()",
                         result_column="Count",
@@ -7623,7 +7625,7 @@ def test_run_doctor_metric_bindings_marks_failed_revalidation_unvalidated(tmp_pa
                         metric_id="demo.cluster_count",
                         program_id="demo",
                         source_kind="kusto",
-                        cluster="https://example.kusto.windows.net",
+                        cluster="https://example.kusto.invalid",
                         database="ExampleDb",
                         kql_template="DemoMetrics | summarize Count=count()",
                         result_column="Count",
@@ -7684,7 +7686,7 @@ kpis:
     assertion_ids: [assertion-demo-cluster-count]
     workstream_ids: [demo]
     program_ids: [demo]
-    cluster: https://example.kusto.windows.net
+    cluster: https://example.kusto.invalid
     database: ExampleDb
     kql: DemoMetrics | summarize Count=count()
     section: Demo
@@ -7732,7 +7734,7 @@ kpis:
     assertion_ids: [assertion-demo-cluster-count]
     workstream_ids: [demo]
     program_ids: [demo]
-    cluster: https://example.kusto.windows.net
+    cluster: https://example.kusto.invalid
     database: ExampleDb
     kql: DemoMetrics | summarize Count=count()
     section: Demo
@@ -7752,7 +7754,7 @@ kpis:
                         metric_id="demo.cluster_count",
                         program_id="demo",
                         source_kind="kusto",
-                        cluster="https://example.kusto.windows.net",
+                        cluster="https://example.kusto.invalid",
                         database="ExampleDb",
                         kql_template="DemoMetrics | summarize Count=count()",
                         result_column="Count",
@@ -8686,13 +8688,13 @@ def test_run_doctor_kusto_ok_when_queries_probe_successfully(tmp_path: Path) -> 
         assert checks["Kusto Queries"].status == "ok"
         assert "Loaded 1 applicable Kusto query" in checks["Kusto Queries"].detail
         assert checks["Kusto Queries"].metadata is not None
-        assert checks["Kusto Queries"].metadata["cluster_targets"] == ["https://example.kusto.windows.net/ExampleDb"]
+        assert checks["Kusto Queries"].metadata["cluster_targets"] == ["https://example.kusto.invalid/ExampleDb"]
         assert checks["Kusto Validation"].status == "ok"
         assert checks["Kusto Probe"].status == "ok"
         assert "lightweight take-0 execution" in checks["Kusto Probe"].detail
-        assert "https://example.kusto.windows.net/ExampleDb" in checks["Kusto Probe"].detail
+        assert "https://example.kusto.invalid/ExampleDb" in checks["Kusto Probe"].detail
         assert checks["Kusto Probe"].metadata is not None
-        assert checks["Kusto Probe"].metadata["cluster_targets"] == ["https://example.kusto.windows.net/ExampleDb"]
+        assert checks["Kusto Probe"].metadata["cluster_targets"] == ["https://example.kusto.invalid/ExampleDb"]
 
 
 def test_run_doctor_kusto_warns_on_unvalidated_queries_and_includes_kpis(tmp_path: Path) -> None:
@@ -8715,7 +8717,7 @@ def test_run_doctor_kusto_warns_on_unvalidated_queries_and_includes_kpis(tmp_pat
                         'schema_version: "1.0"\n'
                         'kpis:\n'
                         '  - id: fleet-health\n'
-                        '    cluster: https://example.kusto.windows.net\n'
+                        '    cluster: https://example.kusto.invalid\n'
                         '    database: ExampleDb\n'
                         '    kql: Fleet | take 1\n'
                         '    section: Fleet Health\n'
@@ -8749,7 +8751,7 @@ def test_run_doctor_kusto_warns_on_unvalidated_queries_and_includes_kpis(tmp_pat
         assert checks["Kusto Validation"].metadata["unvalidated_query_ids"] == ["velocity-p50", "fleet-health"]
         assert checks["Kusto Probe"].status == "ok"
         assert checks["Kusto Probe"].metadata is not None
-        assert checks["Kusto Probe"].metadata["cluster_targets"] == ["https://example.kusto.windows.net/ExampleDb"]
+        assert checks["Kusto Probe"].metadata["cluster_targets"] == ["https://example.kusto.invalid/ExampleDb"]
 
 
 @pytest.mark.parametrize("identity", ["matching", "missing", "mismatched"])
@@ -8813,7 +8815,8 @@ def test_run_doctor_kusto_warns_when_wired_query_freshness_is_stale(tmp_path: Pa
                 assert checks["Kusto Freshness"].metadata["stale_query_ids"] == []
 
 
-def test_run_doctor_kusto_surfaces_icm_query_readiness(tmp_path: Path) -> None:
+def test_run_doctor_kusto_surfaces_icm_query_readiness(monkeypatch, tmp_path: Path) -> None:
+        monkeypatch.setattr("src.commands.doctor_checks.kusto_checks._ICM_KUSTO_CLUSTER", "https://icmcluster.example.invalid")
         editions_root, programs_root = _seed_kb_layout(tmp_path, query_ids=())
         program_path = programs_root / "demo" / "program.yaml"
         program_doc = yaml.safe_load(program_path.read_text(encoding="utf-8"))
@@ -8825,7 +8828,7 @@ def test_run_doctor_kusto_surfaces_icm_query_readiness(tmp_path: Path) -> None:
         queries_doc["queries"].append(
                 {
                         "id": "icm-active",
-                        "cluster": "https://icmcluster.kusto.windows.net",
+                        "cluster": "https://icmcluster.example.invalid",
                         "database": "IcMDataWarehouse",
                         "kql": "Incidents | take 1",
                         "section": "Incidents",
@@ -8852,11 +8855,11 @@ def test_run_doctor_kusto_surfaces_icm_query_readiness(tmp_path: Path) -> None:
         assert "icm-active" in checks["IcM via Kusto"].detail
         assert checks["IcM via Kusto"].metadata is not None
         assert checks["IcM via Kusto"].metadata["icm_query_ids"] == ["icm-active"]
-        assert checks["IcM via Kusto"].metadata["cluster_targets"] == ["https://icmcluster.kusto.windows.net/IcMDataWarehouse"]
+        assert checks["IcM via Kusto"].metadata["cluster_targets"] == ["https://icmcluster.example.invalid/IcMDataWarehouse"]
         assert checks["Kusto Probe"].metadata is not None
         assert checks["Kusto Probe"].metadata["cluster_targets"] == [
-                "https://example.kusto.windows.net/ExampleDb",
-                "https://icmcluster.kusto.windows.net/IcMDataWarehouse",
+                "https://example.kusto.invalid/ExampleDb",
+                "https://icmcluster.example.invalid/IcMDataWarehouse",
         ]
 
 
@@ -8943,7 +8946,8 @@ def test_run_doctor_kusto_fails_on_probe_error(tmp_path: Path) -> None:
         checks = {check.label: check for check in report.checks}
         assert checks["Kusto Probe"].status == "fail"
         assert "velocity-p50" in checks["Kusto Probe"].detail
-        assert "invalid syntax near summarize" in checks["Kusto Probe"].detail
+        assert "Kusto query probe failed" in checks["Kusto Probe"].detail
+        assert "invalid syntax near summarize" not in checks["Kusto Probe"].detail
 
 
 def test_doctor_cli_kusto(monkeypatch, tmp_path: Path) -> None:
@@ -9265,7 +9269,7 @@ def _seed_kb_layout(tmp_path: Path, *, query_ids: tuple[str, ...]) -> tuple[Path
                         'schema_version: "1.0"\n'
                         'queries:\n'
                         '  - id: velocity-p50\n'
-                        '    cluster: https://example.kusto.windows.net\n'
+                        '    cluster: https://example.kusto.invalid\n'
                         '    database: ExampleDb\n'
                         '    kql: Demo | take 1\n'
                         '    section: Demo Telemetry\n'

@@ -1261,7 +1261,7 @@ def _build_context_revision_rows(
         ),)
     if review.gap_diagnostic:
         rows += (ReviewerTrackedEntryRow(
-            title="Context gap history unavailable",
+            title="Context gap evaluation unavailable",
             summary=f"{review.gap_diagnostic} Evidence: _feedback/context_gaps.jsonl. {next_action}",
             detail=f"Evaluated: {review.evaluated_at.isoformat()} (not a review renewal); owner=unknown / due=unknown.",
         ),)

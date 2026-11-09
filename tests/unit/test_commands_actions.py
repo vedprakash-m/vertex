@@ -24,6 +24,132 @@ from src.core.trajectory import backfill_trajectory_points
 runner = CliRunner()
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["list", "--format", "human"],
+        ["list", "--format", "json"],
+        ["list", "--format", "csv"],
+        ["review", "--reviewer", "owner", "--apply-ado"],
+        ["resolve", "--id", "action-demo-1", "--resolver", "owner"],
+    ],
+)
+@pytest.mark.parametrize("valid_prefix", [False, True])
+@pytest.mark.parametrize("bad_row", [b'{"synthetic-private"\n', b'["synthetic-private"]\n', b"\xff\n"])
+def test_actions_cli_refuses_incomplete_action_history_without_repair(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, command: list[str], valid_prefix: bool, bad_row: bytes,
+) -> None:
+    programs_root = tmp_path / "programs"
+    monkeypatch.setattr("src.commands.actions.PROGRAMS_ROOT", programs_root)
+    path = programs_root / "demo" / "journal" / "actions.jsonl"
+    if valid_prefix:
+        _seed_action(programs_root, status=ActionStatus.PROPOSED)
+        before = path.read_bytes()
+    else:
+        path.parent.mkdir(parents=True)
+        before = b""
+    original = before + bad_row
+    path.write_bytes(original)
+    checksum = path.with_suffix(".sha256")
+    checksum_before = checksum.read_bytes() if checksum.exists() else None
+    apply_calls: list[object] = []
+    monkeypatch.setattr("src.commands.actions.apply_ado_proposal", lambda *args, **kwargs: apply_calls.append(args))
+
+    result = runner.invoke(app, ["actions", command[0], "--program", "demo", *command[1:]], input="a\n\n")
+
+    assert result.exit_code != 0
+    assert "Action journal" in result.output
+    assert "synthetic-private" not in result.output
+    assert str(path) not in result.output
+    assert "No proposed actions" not in result.output
+    assert "Resolved action" not in result.output
+    assert path.read_bytes() == original
+    assert (checksum.read_bytes() if checksum.exists() else None) == checksum_before
+    assert not (path.parent / "quarantine").exists()
+    assert apply_calls == []
+
+
+def test_actions_default_command_refuses_corrupt_history(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    programs_root = tmp_path / "programs"
+    monkeypatch.setattr("src.commands.actions.PROGRAMS_ROOT", programs_root)
+    path = programs_root / "demo" / "journal" / "actions.jsonl"
+    path.parent.mkdir(parents=True)
+    original = b'["synthetic-private"]\n'
+    path.write_bytes(original)
+
+    result = runner.invoke(app, ["actions", "--program", "demo"])
+    assert result.exit_code != 0
+    assert "Action journal" in result.output
+    assert "synthetic-private" not in result.output
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("command", ["list", "review", "resolve"])
+def test_actions_cli_reports_unreadable_history_safely(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, command: str,
+) -> None:
+    programs_root = tmp_path / "programs"
+    monkeypatch.setattr("src.commands.actions.PROGRAMS_ROOT", programs_root)
+    path = programs_root / "demo" / "journal" / "actions.jsonl"
+    path.parent.mkdir(parents=True)
+    original = b'{"record_type":"action"}\n'
+    path.write_bytes(original)
+    original_read = Path.read_text
+
+    def unreadable(target: Path, *args: object, **kwargs: object) -> str:
+        if target == path:
+            raise PermissionError("synthetic-private failure")
+        return original_read(target, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", unreadable)
+    args = ["actions", command, "--program", "demo"]
+    if command == "resolve":
+        args += ["--id", "action-demo-1", "--resolver", "owner"]
+    result = runner.invoke(app, args)
+
+    assert result.exit_code != 0
+    assert "Action journal" in result.output
+    assert "synthetic-private" not in result.output
+    assert str(path) not in result.output
+    assert path.read_bytes() == original
+    assert not (path.parent / "quarantine").exists()
+
+
+def test_actions_review_surfaces_read_failure_during_status_update(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    programs_root = tmp_path / "programs"
+    monkeypatch.setattr("src.commands.actions.PROGRAMS_ROOT", programs_root)
+    _seed_action(programs_root, status=ActionStatus.PROPOSED)
+    path = programs_root / "demo" / "journal" / "actions.jsonl"
+    original = path.read_bytes()
+    original_read = Path.read_text
+    reads = 0
+
+    def fail_after_review_read(target: Path, *args: object, **kwargs: object) -> str:
+        nonlocal reads
+        if target == path:
+            reads += 1
+            if reads >= 3:
+                raise PermissionError("synthetic-private failure")
+        return original_read(target, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_after_review_read)
+    apply_calls: list[object] = []
+    monkeypatch.setattr("src.commands.actions.apply_ado_proposal", lambda *args, **kwargs: apply_calls.append(args))
+    result = runner.invoke(
+        app, ["actions", "review", "--program", "demo", "--reviewer", "owner", "--apply-ado"], input="a\n\n",
+    )
+
+    assert result.exit_code != 0
+    assert "Action journal" in result.output
+    assert "synthetic-private" not in result.output
+    assert path.read_bytes() == original
+    assert apply_calls == []
+
+
 def test_actions_list_cli(monkeypatch, tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     monkeypatch.setattr("src.commands.actions.PROGRAMS_ROOT", programs_root)

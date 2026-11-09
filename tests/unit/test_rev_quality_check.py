@@ -58,7 +58,7 @@ def _stage(program_id: str, programs_root: Path, bodies: list[str]) -> list:
         for i, b in enumerate(bodies)
     )
     graph = FakeRevGraphClient(msgs)
-    mailbox = MailboxContext(tenant_id="t", principal_mailbox="u@x.com", container="inbox")
+    mailbox = MailboxContext(tenant_id="t", principal_mailbox="fixture-user-01@group-01.fixture.example.net", container="inbox")
     deps = RevPipelineDeps(
         enumerator=CollectionSearchEnumerator(graph, mailbox),
         hydrator=MailHydrator(graph, mailbox),
@@ -71,7 +71,7 @@ def _stage(program_id: str, programs_root: Path, bodies: list[str]) -> list:
         intent=RetrievalIntent(entity_type=EntityType.MESSAGE, limit=25),
         deps=deps,
         profile=RevRetrievalProfile(profile=REV_PROFILE_SEARCH_HYDRATE),
-        mailbox_tenant_id="t", mailbox_principal="u@x.com", mailbox_container="inbox",
+        mailbox_tenant_id="t", mailbox_principal="fixture-user-01@group-01.fixture.example.net", mailbox_container="inbox",
         correlation_id="qc", programs_root=programs_root,
         budget_limits=BudgetLimits(), set_at=NOW,
     )

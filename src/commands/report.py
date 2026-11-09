@@ -258,7 +258,7 @@ from src.core.overrides_store import apply_pending_overrides, get_overrides_path
 from src.core.pipeline import StageContext, run_pipeline
 from src.core.program_fact_store import ProgramFactSnapshot, ProgramFactStore
 from src.core.program_reality import ProgramReality
-from src.core.program_verdict import observe_program_verdict
+from src.core.program_verdict import compare_report_health, observe_program_verdict
 from src.core.quality_gates import combine_gate_reports, evaluate_continuity_gates, evaluate_phase_1a_gates, evaluate_phase_1b_gates, evaluate_phase_1c_gates
 from src.core.quality_matrix_engine import QualityMatrix, build_quality_matrix, render_quality_matrix_markdown
 from src.core.query_builder import build_odata_filter
@@ -1310,10 +1310,10 @@ class _OutputStage:
                 milestone_warnings=ctx.milestone_warnings,
             )
             validation_state = replace(validation_state, manifest=replace(
-                validation_state.manifest,
-                metadata={
+                validation_state.manifest, metadata={
                     **validation_state.manifest.metadata, "run_evidence_snapshot": capture,
                     "program_verdict_observation": verdict_observation,
+                    "program_verdict_comparison": compare_report_health(render_state.health, verdict_observation),
                 },
             ))
         diff_summary = None

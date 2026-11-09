@@ -11,12 +11,14 @@ owns it. No field is ever a fabricated or formula-guessed placeholder
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
 from src.core.adf_config import ArchDataFixConfig, load_arch_data_fix
+from src.core.actuation_outbox import outbox_db_path
 from src.core.ai_telemetry import read_ai_telemetry
 from src.core.cockpit_models import (
     COCKPIT_SCHEMA_VERSION,
@@ -44,10 +46,13 @@ from src.core.maturity_engine import load_earned_autonomy_state
 from src.core.outcome_metrics import canary_window_status, compute_om4_audit_coverage
 from src.core.program_synthesis import load_latest_released_program_synthesis
 from src.core.ledger.event_log import EventEnvelope, read_events
+from src.core.ledger.durable_outbox_store import OutboxError, read_status_counts
 from src.core.measurement_store import read_measurements, tier_decision_store_path
 from src.core.proposal_autonomy_ladder import PROPOSAL_CLASSES, resolve_ceiling
 from src.core.risk_register_engine import HIGH_RISK_SCORE_THRESHOLD, compute_risk_score, load_risk_register
 from src.core.run_telemetry import read_run_telemetry
+from src.core.workspace_lease import ACTUATION_DISPATCH_DOMAIN
+from src.core.workspace_paths import is_bare_identifier
 
 #: Section 8.15.1's "Authority" column, by ladder level.
 _AUTONOMY_LEVEL_PERMITTED_ACTION = {
@@ -658,45 +663,126 @@ def _build_intelligence_summary(
     return summary, findings
 
 
+def _read_actuation_status_counts(program_id: str, *, programs_root: Path) -> dict[str, int] | None:
+    if not is_bare_identifier(program_id) or Path(program_id).is_reserved():
+        raise OutboxError("Invalid program selection")
+    try:
+        root = programs_root.resolve()
+        program = (root / program_id).resolve()
+        if program != root / program_id:
+            raise OutboxError("Program selection is not isolated")
+        db_path = outbox_db_path(program_id, programs_root=programs_root)
+        paths = (db_path, *(db_path.with_name(db_path.name + suffix) for suffix in ("-wal", "-shm", "-journal")))
+        if any(not path.resolve().is_relative_to(program) for path in paths):
+            raise OutboxError("Outbox selection leaves the program")
+    except RuntimeError as error:
+        raise OutboxError("Outbox selection cannot be resolved") from error
+    return read_status_counts(db_path, ACTUATION_DISPATCH_DOMAIN)
+
+
 def _build_reliability_summary(
     program_id: str, *, programs_root: Path, observed_at: datetime, events: tuple[EventEnvelope, ...],
 ) -> tuple[ReliabilityCockpitSummary, list[CockpitFinding]]:
-    """ADF-W1.11: actuation safety state. ``duplicate_preventions`` is real
-    (counts ``actuation.duplicate_prevented.v1`` ledger events emitted by the
-    ADF-W1.2 search-before-create safeguard); the outbox-derived counts stay
-    at 0 until ADF-W1.3 wires a live mutation domain through it.
-
-    specs/backlog.md BL-C7: ``audit_coverage`` is now OM-4's live value
-    (``src.core.outcome_metrics.compute_om4_audit_coverage``) rather than a
-    hardcoded ``None`` placeholder -- see governance/outcome-metrics.md.
-    """
+    """Project local actuation status counts and existing ledger-based metrics."""
     findings: list[CockpitFinding] = []
     duplicate_preventions = sum(1 for event in events if event.event_type == "actuation.duplicate_prevented.v1")
+    try:
+        counts = _read_actuation_status_counts(program_id, programs_root=programs_root)
+    except (sqlite3.InternalError, sqlite3.NotSupportedError, sqlite3.ProgrammingError):
+        raise
+    except (OSError, sqlite3.DatabaseError, OutboxError):
+        counts = None
+        outbox_status = "warn"
+        outbox_detail = (
+            "The selected actuation journal could not be inspected safely. Under the strict no-write policy, "
+            "WAL-mode journals and journals with SQLite sidecars are left unread; other access or structure "
+            "failures also make counts unavailable. Check access and structure before drawing conclusions. "
+            "No provider or recovery action was performed."
+        )
+    else:
+        outbox_status = "info"
+        outbox_detail = (
+            "No selected actuation journal was found. Counts are unavailable, not zero; no journal was created."
+        )
 
-    om4 = compute_om4_audit_coverage(program_id, programs_root=programs_root, events=events)
-    summary = ReliabilityCockpitSummary(
-        outbox_pending=0,
-        uncertain_remote_state=0,
-        dead_letter_count=0,
-        duplicate_preventions=duplicate_preventions,
-        audit_coverage=om4.value,
-    )
-    findings.append(
-        CockpitFinding(
-            finding_id="reliability.outbox.not_wired",
+    if counts is None:
+        findings.append(CockpitFinding(
+            finding_id="reliability.outbox.unavailable",
+            area="reliability",
+            status=outbox_status,
+            summary="Actuation journal status unavailable.",
+            detail=outbox_detail,
+            owner=None,
+            next_command=(
+                f"vertex cockpit explain --program {program_id} --finding reliability.outbox.unavailable"
+                if outbox_status == "warn" and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", program_id)
+                else None
+            ),
+            evidence_refs=(),
+            observed_at=observed_at,
+        ))
+    else:
+        findings.append(CockpitFinding(
+            finding_id="reliability.outbox.observed",
             area="reliability",
             status="info",
-            summary="Actuation outbox is not yet wired to a live mutation domain.",
+            summary="Actuation journal status counts observed.",
             detail=(
-                "outbox_pending/uncertain_remote_state/dead_letter_count stay at 0 (ADF-W1.3 is not done). "
-                f"duplicate_preventions ({duplicate_preventions}) is real: it counts "
-                "actuation.duplicate_prevented.v1 ledger events from the ADF-W1.2 search-before-create safeguard."
+                "Counts cover exact pending, uncertain_remote_state and dead_letter statuses in the selected "
+                "local actuation journal only. Other statuses and outboxes are not pending counts; "
+                "provider outcomes and journal integrity were not verified."
             ),
             owner=None,
             next_command=None,
-            evidence_refs=(),
+            evidence_refs=("actuation journal",),
             observed_at=observed_at,
+        ))
+        warning_details = (
+            (
+                "uncertain_remote_state", "Remote outcome unknown",
+                "The journal cannot establish whether the provider completed these intents. "
+                "Do not retry until their outcomes are reviewed using the approved process.",
+            ),
+            (
+                "dead_letter", "Dead-letter actuation intents",
+                "These intents will not automatically continue. Review them using the approved process.",
+            ),
+            (
+                "failed_terminal", "Terminally failed actuation intents",
+                "Automatic processing stopped for these intents. Review them using the approved process.",
+            ),
+            (
+                "compensation_required", "Actuation intents requiring compensation",
+                "Automatic processing stopped for these intents. This inspection performed no compensation; "
+                "review them using the approved process.",
+            ),
         )
+        for state, label, detail in warning_details:
+            count = counts.get(state, 0)
+            if count:
+                finding_id = f"reliability.outbox.{state}"
+                findings.append(CockpitFinding(
+                    finding_id=finding_id,
+                    area="reliability",
+                    status="warn",
+                    summary=f"{label}: {count}.",
+                    detail=detail,
+                    owner=None,
+                    next_command=(
+                        f"vertex cockpit explain --program {program_id} --finding {finding_id}"
+                        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", program_id)
+                        else None
+                    ),
+                    evidence_refs=("actuation journal",),
+                    observed_at=observed_at,
+                ))
+    om4 = compute_om4_audit_coverage(program_id, programs_root=programs_root, events=events)
+    summary = ReliabilityCockpitSummary(
+        outbox_pending=counts.get("pending", 0) if counts is not None else None,
+        uncertain_remote_state=counts.get("uncertain_remote_state", 0) if counts is not None else None,
+        dead_letter_count=counts.get("dead_letter", 0) if counts is not None else None,
+        duplicate_preventions=duplicate_preventions,
+        audit_coverage=om4.value,
     )
     findings.append(
         CockpitFinding(

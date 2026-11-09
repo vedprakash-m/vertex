@@ -1,7 +1,5 @@
 from __future__ import annotations
 import pytest
-from pathlib import Path
-pytestmark = pytest.mark.skipif(not (Path(__file__).resolve().parents[2] / "editions").exists(), reason="Requires private data")
 
 import json
 from datetime import datetime, timezone
@@ -13,6 +11,8 @@ from cli import app
 from src.core.kusto_client import KustoColumn
 from src.core.metric_models import MetricAggregation, MetricObservation, MetricQualityState, MetricSourceBinding, ObservationWindow
 from src.core.reality_store import RealityStore
+
+pytestmark = pytest.mark.usefixtures("isolated_cli_startup")
 
 
 runner = CliRunner()
@@ -174,6 +174,8 @@ kpis:
             "--all-eligible",
             "--programs-root",
             str(programs_root),
+            "--metrics-root",
+            str(metrics_root),
             "--format",
             "json",
         ],
@@ -708,6 +710,8 @@ workstreams:
             "binding-wiql",
             "--db-root",
             str(tmp_path / "db"),
+            "--programs-root",
+            str(programs_root),
         ],
     )
 
@@ -786,6 +790,8 @@ def test_admin_metric_history_command_flags_corrected_rows(tmp_path: Path) -> No
             "json",
             "--db-root",
             str(tmp_path / "db"),
+            "--programs-root",
+            str(tmp_path / "programs"),
         ],
     )
 
@@ -850,6 +856,8 @@ metrics:
             "binding-001",
             "--db-root",
             str(tmp_path / "db"),
+            "--programs-root",
+            str(tmp_path / "programs"),
         ],
     )
 
@@ -920,6 +928,8 @@ metrics:
             "binding-001",
             "--db-root",
             str(tmp_path / "db"),
+            "--programs-root",
+            str(tmp_path / "programs"),
         ],
     )
 

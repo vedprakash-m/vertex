@@ -327,7 +327,7 @@ def test_direct_report_api_uses_selected_external_workspace_roots(
     assert context.archive_root == root.parent / "archive"
 
 
-def test_installed_report_command_runs_offline_dry_run_in_external_workspace(
+def test_report_command_runs_offline_dry_run_in_external_workspace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from tests.unit.test_commands_report import _sample_items
@@ -347,10 +347,12 @@ def test_installed_report_command_runs_offline_dry_run_in_external_workspace(
     milestones_path.write_text(yaml.safe_dump(milestones), encoding="utf-8")
     disable_kusto_in_report_copy(reports_root)
     reset_overrides_to_seed_state(reports_root)
+    monkeypatch.setenv("VERTEX_DB_PATH", str(workspace / "vertex-db"))
+    issue = 77
 
     seeded = report.generate_report_draft(
         "acme_weekly",
-        issue_number=7,
+        issue_number=issue,
         reports_root=reports_root,
         archive_root=archive_root,
         programs_root=programs_root,
@@ -359,40 +361,49 @@ def test_installed_report_command_runs_offline_dry_run_in_external_workspace(
         open_browser=False,
     )
     assert seeded.snapshot_path is not None and seeded.snapshot_path.is_file()
-    snapshot_before = seeded.snapshot_path.read_bytes()
-    assert not archive_root.exists()
+    assert seeded.html_path is not None and seeded.html_path.is_file()
+    snapshot_before = json.loads(seeded.snapshot_path.read_text(encoding="utf-8"))
+    seeded.html_path.unlink()
+    archive_roots = (archive_root, programs_root / "acme" / "archive")
+    assert not any(path.is_file() for root in archive_roots for path in root.rglob("*"))
 
     monkeypatch.setattr(report, "PROGRAMS_ROOT", programs_root)
     app = Typer()
     app.command()(report.report_command)
     result = CliRunner().invoke(
         app,
-        ["--edition", "acme_weekly", "--issue", "7", "--dry-run", "--offline", "--stdout"],
+        ["--edition", "acme_weekly", "--issue", str(issue), "--dry-run", "--offline", "--stdout"],
     )
 
-    assert result.exit_code == 0, result.output + repr(result.exception)
-    assert result.stdout
-    assert not archive_root.exists()
-    assert seeded.snapshot_path.read_bytes() == snapshot_before
+    assert result.exit_code == 3, result.output + repr(result.exception)
+    payload = json.loads(result.stdout)
+    assert payload["issue_number"] == issue
+    assert payload["qg_results"]["QG-8"] is False
+    assert Path(payload["paths"]["html"]) == seeded.html_path
+    assert seeded.html_path.is_file()
+    snapshot_after = json.loads(seeded.snapshot_path.read_text(encoding="utf-8"))
+    assert snapshot_after["items"] == snapshot_before["items"]
+    assert snapshot_after["ado_data_as_of"] == snapshot_before["ado_data_as_of"]
+    assert not any(path.is_file() for root in archive_roots for path in root.rglob("*"))
 
     from src.core.narrative_store import get_narratives_dir
 
     narrative_dir = get_narratives_dir(
-        "acme_weekly", 7, reports_root, programs_root=programs_root,
+        "acme_weekly", issue, reports_root, programs_root=programs_root,
     )
     (narrative_dir / "exec_summary.md").write_text("Synthetic offline summary.\n", encoding="utf-8")
-    overrides_path = get_overrides_path("acme_weekly", reports_root, issue_number=7)
+    overrides_path = get_overrides_path("acme_weekly", reports_root, issue_number=issue)
     overrides_payload = yaml.safe_load(overrides_path.read_text(encoding="utf-8"))
     for scorecard in overrides_payload["scorecards"].values():
         for dimension in scorecard.values():
             dimension["risk"] = "low"
     overrides_path.write_text(yaml.safe_dump(overrides_payload, sort_keys=False), encoding="utf-8")
     confirm_result = confirm.confirm_issue(
-        "acme_weekly", 7, dry_run=True, reports_root=reports_root,
+        "acme_weekly", issue, dry_run=True, reports_root=reports_root,
         archive_root=archive_root, programs_root=programs_root, force=True,
     )
     assert confirm_result.exit_code == 0, confirm_result.failures
-    assert not archive_root.exists()
+    assert not any(path.is_file() for root in archive_roots for path in root.rglob("*"))
     assert (workspace / "vertex-db" / "acme" / "vertex.sqlite3").is_file()
 
 

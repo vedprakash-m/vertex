@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -852,6 +852,70 @@ def test_ai_stage_disabled_mode_preserves_existing_narratives(monkeypatch, repo_
     assert ai_ctx.render_workstream_blurbs == narrative_ctx.workstream_blurbs
 
 
+@pytest.mark.parametrize("pipeline", ["staged", "legacy"])
+@pytest.mark.parametrize("condition", ["offline", "runtime_disabled"])
+def test_ai_enabled_report_skips_reality_summary_without_ai_synthesis(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pipeline: str, condition: str,
+) -> None:
+    from dataclasses import replace
+    from unittest.mock import Mock
+
+    from src.commands.report_pipeline import assemble_stage as assembly
+    from tests.unit.test_commands_report import _enable_v2_program_ai
+
+    reports_root = _stage_pipeline_workspace(tmp_path)
+    _enable_v2_program_ai(tmp_path / "programs")
+    summary_builder = Mock(side_effect=AssertionError("AI summary must not be built"))
+    monkeypatch.setattr("src.commands.report_ai.build_reality_assessment_summary", summary_builder)
+    request = report_module._build_stage_request_context(
+        edition_name=EDITION_NAME, issue_number=1, reseed=False, no_seed=False, dry_run=True,
+        offline=False, diff_mode=False, as_of=datetime(2026, 5, 5, tzinfo=timezone.utc),
+        edition_type_override=None, lookback_range=None, section_filter_ids=(),
+        reports_root=reports_root, archive_root=tmp_path / "archive", programs_root=tmp_path / "programs",
+        work_item_loader=lambda bundle, timestamp: (_sample_items(timestamp), 0),
+        kusto_query_executor=None, open_browser=False,
+    )
+    ctx = ResolutionStage().execute(request)
+    for stage in (FetchStage(), ComputeStage(), MilestoneStage(), NarrativeStage()):
+        ctx = stage.execute(ctx)
+    ctx = replace(ctx, offline=condition == "offline")
+    assert ctx.bundle.config.ai.enabled
+
+    mode = AIMode.DISABLED if condition == "runtime_disabled" else AIMode.ACTIVE
+    set_ai_mode(mode)
+    try:
+        if pipeline == "staged":
+            draft_loader = Mock(wraps=ctx.stage_support.load_draft_ai_context)
+            ctx = replace(ctx, stage_support=replace(ctx.stage_support, load_draft_ai_context=draft_loader))
+            result = AIStage().execute(ctx).ai_synthesis
+            draft_loader.assert_not_called()
+        else:
+            draft_loader = Mock(wraps=assembly._load_draft_ai_context)
+            monkeypatch.setattr(assembly, "_load_draft_ai_context", draft_loader)
+            captured = []
+
+            class _StopAtRender:
+                def execute(self, render_ctx):
+                    captured.append(render_ctx.ai_synthesis)
+                    raise RuntimeError("AI synthesis boundary")
+
+            monkeypatch.setattr(assembly, "RenderStage", _StopAtRender)
+            with pytest.raises(RuntimeError, match="AI synthesis boundary"):
+                assembly._generate_report_draft_from_context(ctx)
+            result = captured[0]
+            assert draft_loader.call_count == (1 if condition == "runtime_disabled" else 0)
+    finally:
+        set_ai_mode(AIMode.ACTIVE)
+
+    assert result.exec_summary_text == ctx.exec_summary_text
+    assert result.workstream_blurbs == ctx.workstream_blurbs
+    assert result.warnings == (
+        ("AI synthesis disabled by --no-ai / AIMode.DISABLED.",)
+        if condition == "runtime_disabled" else ()
+    )
+    summary_builder.assert_not_called()
+
+
 def test_render_stage_populates_render_outputs(repo_root: Path, tmp_path: Path) -> None:
     reports_root = _stage_pipeline_workspace(tmp_path)
     archive_root = tmp_path / "archive"
@@ -1449,8 +1513,22 @@ def test_milestone_stage_audited_rollback_warns_and_uses_legacy(monkeypatch, tmp
     )
 
     monkeypatch.setenv("VERTEX_REPORT_ALLOW_LEGACY_MILESTONE_ROLLBACK", "1")
-    monkeypatch.setattr(milestone_stage_module, "_load_current_milestones", lambda *_a, **_kw: (milestone,))
-    monkeypatch.setattr(milestone_stage_module, "_load_current_dependencies", lambda *_a, **_kw: ())
+    (programs_root / "contoso" / "milestones.yaml").write_text(
+        yaml.safe_dump({
+            "schema_version": "1.0",
+            "milestones": [{
+                "id": milestone.id,
+                "name": milestone.name,
+                "target_date": milestone.target_date.isoformat(),
+                "owner_alias": milestone.owner_alias,
+                "status": milestone.status.value,
+                "exit_criteria": [],
+                "linked_workstream_ids": [],
+                "linked_work_item_ids": [],
+            }],
+        }),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(
         milestone_stage_module,
         "assess_milestone_health",
@@ -1481,6 +1559,475 @@ def test_milestone_stage_audited_rollback_warns_and_uses_legacy(monkeypatch, tmp
     assert result.milestone_lineage == {}
     assert len(result.milestone_warnings) == 1
     assert "degraded to legacy milestone source via audited rollback flag" in result.milestone_warnings[0]
+
+
+def test_report_draft_retains_authored_milestone_rollback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from unittest.mock import Mock
+
+    from src.commands.doctor_checks.storage_checks import _render_manifest_sor_consistency_check
+    from src.core.manifest_writer import write_run_manifest
+    from src.core.program_fact_store import (
+        ProgramFactInput, ProgramFactStore, build_legacy_program_fact_snapshot,
+    )
+
+    reports_root = _stage_pipeline_workspace(tmp_path)
+    programs_root = tmp_path / "programs"
+    monkeypatch.delenv("VERTEX_FACT_SOR", raising=False)
+    monkeypatch.setenv("VERTEX_DB_PATH", str(tmp_path / "database"))
+    monkeypatch.setenv("VERTEX_AUTHOR", "Synthetic operator")
+    monkeypatch.setenv("VERTEX_REPORT_ALLOW_LEGACY_MILESTONE_ROLLBACK", "1")
+    authored = build_legacy_program_fact_snapshot(
+        "acme", programs_root=programs_root, fact_types=("milestone.entry",),
+    ).facts[0]
+    payload = {**authored.payload, "name": "Stored conflicting milestone"}
+    ProgramFactStore("acme").append_fact(ProgramFactInput(
+        fact_type=authored.fact_type, entity_refs=authored.entity_refs, payload=payload,
+        scope=authored.scope, natural_key=authored.natural_key,
+    ))
+    save_fact_sor_state(
+        "acme", mode="legacy", family_modes={"workitem.state": "primary"},
+        recorded_at=datetime(2026, 5, 5, tzinfo=timezone.utc), programs_root=programs_root,
+    )
+    loader = Mock(side_effect=RuntimeError("Synthetic reality failure"))
+    monkeypatch.setattr(report_module, "_load_program_reality", loader)
+
+    artifacts = generate_report_draft(
+        edition_name=EDITION_NAME, reports_root=reports_root, programs_root=programs_root,
+        archive_root=tmp_path / "archive", as_of=datetime(2026, 5, 5, 18, tzinfo=timezone.utc),
+        dry_run=True, work_item_loader=lambda _bundle, timestamp: (_sample_items(timestamp), 0),
+        open_browser=False,
+    )
+
+    assert "Synthetic code complete" in artifacts.html_body
+    assert "Stored conflicting milestone" not in artifacts.html_body
+    assert any("audited rollback flag" in warning for warning in artifacts.warnings)
+    observed = artifacts.manifest.metadata["program_verdict_observation"]
+    assert [milestone.name for milestone in observed.inputs.milestones] == ["Synthetic code complete"]
+    assert any("audited rollback flag" in warning for warning in observed.inputs.milestone_warnings)
+    assert "milestone_input_degraded" in {gap.code for gap in observed.verdict.evidence_gaps}
+    assert dict(observed.inputs.capture.effective_family_modes)["workitem.state"] == "primary"
+    write_run_manifest(EDITION_NAME, artifacts.manifest.issue_number, artifacts.manifest, programs_root=programs_root)
+    check = _render_manifest_sor_consistency_check(
+        "acme", edition_name=EDITION_NAME, programs_root=programs_root,
+        latest_confirmed_issue_number=artifacts.manifest.issue_number,
+    )
+    assert check.status == "warn"
+    assert check.metadata["mismatches"] == {
+        "milestone": {"manifest_recorded": "legacy", "current": "reality"},
+        "dependency": {"manifest_recorded": "legacy", "current": "reality"},
+    }
+    assert artifacts.manifest.metadata["family_read_paths"]["milestone"] == "legacy"
+    assert artifacts.manifest.metadata["family_read_paths"]["dependency"] == "legacy"
+    loader.assert_called_once()
+
+
+def test_report_draft_records_nonempty_authored_risk_rollback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from unittest.mock import Mock
+
+    from src.commands.doctor_checks.storage_checks import _render_manifest_sor_consistency_check
+    from src.core.manifest_writer import write_run_manifest
+    from src.core.program_fact_store import (
+        ProgramFactInput, ProgramFactStore, build_legacy_program_fact_snapshot,
+    )
+
+    reports_root = _stage_pipeline_workspace(tmp_path)
+    programs_root = tmp_path / "programs"
+    monkeypatch.delenv("VERTEX_FACT_SOR", raising=False)
+    monkeypatch.setenv("VERTEX_DB_PATH", str(tmp_path / "database"))
+    monkeypatch.setenv("VERTEX_AUTHOR", "Synthetic operator")
+    monkeypatch.setenv("VERTEX_REPORT_ALLOW_LEGACY_RISK_ROLLBACK", "1")
+    risk_path = programs_root / "acme" / "risk_register.yaml"
+    risk_path.write_text(yaml.safe_dump({
+        "schema_version": "1.0",
+        "risks": [{
+            "id": "risk-1", "title": "Authored risk source", "description": "Synthetic risk",
+            "probability": "likely", "impact": "high", "category": "schedule",
+            "owner_alias": "operator", "status": "open", "identified_date": "2026-05-01",
+        }],
+    }), encoding="utf-8")
+    authored = build_legacy_program_fact_snapshot(
+        "acme", programs_root=programs_root, fact_types=("risk.entry",),
+    ).facts[0]
+    ProgramFactStore("acme").append_fact(ProgramFactInput(
+        fact_type=authored.fact_type, entity_refs=authored.entity_refs,
+        payload={**authored.payload, "title": "Stored conflicting risk"},
+        scope=authored.scope, natural_key=authored.natural_key,
+    ))
+    save_fact_sor_state(
+        "acme", mode="legacy", family_modes={"judgment": "primary"},
+        recorded_at=datetime(2026, 5, 5, tzinfo=timezone.utc), programs_root=programs_root,
+    )
+    loader = Mock(side_effect=RuntimeError("Synthetic reality failure"))
+    monkeypatch.setattr(report_module, "_load_program_reality", loader)
+
+    artifacts = generate_report_draft(
+        edition_name=EDITION_NAME, reports_root=reports_root, programs_root=programs_root,
+        archive_root=tmp_path / "archive", as_of=datetime(2026, 5, 5, 18, tzinfo=timezone.utc),
+        dry_run=True, work_item_loader=lambda _bundle, timestamp: (_sample_items(timestamp), 0),
+        open_browser=False,
+    )
+
+    assert "Authored risk source" in artifacts.html_body
+    assert "Stored conflicting risk" not in artifacts.html_body
+    assert any("audited rollback flag" in warning for warning in artifacts.warnings)
+    observed = artifacts.manifest.metadata["program_verdict_observation"]
+    assert [risk.title for risk in observed.inputs.risks] == ["Authored risk source"]
+    assert any("audited rollback flag" in warning for warning in observed.inputs.risk_warnings)
+    assert "risk_input_degraded" in {gap.code for gap in observed.verdict.evidence_gaps}
+    assert dict(observed.inputs.capture.effective_family_modes)["judgment"] == "primary"
+    assert artifacts.manifest.metadata["family_read_paths"]["risk"] == "legacy"
+    write_run_manifest(EDITION_NAME, artifacts.manifest.issue_number, artifacts.manifest, programs_root=programs_root)
+    check = _render_manifest_sor_consistency_check(
+        "acme", edition_name=EDITION_NAME, programs_root=programs_root,
+        latest_confirmed_issue_number=artifacts.manifest.issue_number,
+    )
+    assert check.status == "warn"
+    assert check.metadata["mismatches"] == {"risk": {"manifest_recorded": "legacy", "current": "reality"}}
+    loader.assert_called_once()
+
+
+@pytest.mark.parametrize("comparison", ["empty", "nonempty", "unavailable", "invalid"])
+def test_report_draft_reuses_successful_empty_risks_at_selected_time(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, comparison: str,
+) -> None:
+    from unittest.mock import Mock
+
+    from src.commands import report_health
+    from src.core.program_fact_store import ProgramFactStore
+    from tests.unit.test_reality_pinned_facts import _risk
+
+    reports_root = _stage_pipeline_workspace(tmp_path)
+    programs_root = tmp_path / "programs"
+    archive_root = tmp_path / "archive"
+    as_of = datetime(2026, 5, 5, 18, tzinfo=timezone.utc)
+    monkeypatch.delenv("VERTEX_FACT_SOR", raising=False)
+    monkeypatch.setenv("VERTEX_DB_PATH", str(tmp_path / "database"))
+    monkeypatch.setenv("VERTEX_AUTHOR", "Synthetic operator")
+    monkeypatch.delenv("VERTEX_REPORT_ALLOW_LEGACY_RISK_ROLLBACK", raising=False)
+    save_fact_sor_state(
+        "acme", mode="legacy", family_modes={"judgment": "primary"},
+        recorded_at=as_of, programs_root=programs_root,
+    )
+    ProgramFactStore("acme").append_fact(
+        _risk("Risk recorded after the selected time"), recorded_at=as_of + timedelta(days=1),
+    )
+    risk_path = programs_root / "acme" / "risk_register.yaml"
+    if comparison == "nonempty":
+        risk_path.write_text(yaml.safe_dump({
+            "schema_version": "1.0", "risks": [{
+                "id": "authored-risk", "title": "Authored comparison risk", "description": "Synthetic risk",
+                "probability": "likely", "impact": "high", "category": "schedule",
+                "owner_alias": "operator", "status": "open", "identified_date": "2026-05-01",
+            }],
+        }), encoding="utf-8")
+    elif comparison == "invalid":
+        risk_path.write_text("schema_version: '2.0'\nrisks: []\n", encoding="utf-8")
+    elif comparison == "unavailable":
+        monkeypatch.setattr(
+            risk_stage_module, "_load_legacy_risks",
+            Mock(side_effect=ConfigError("Synthetic comparison unavailable")),
+        )
+
+    stage_loader = Mock(wraps=report_module._load_program_reality)
+    monkeypatch.setattr(report_module, "_load_program_reality", stage_loader)
+    health_loader = Mock(wraps=report_health.ProgramReality.load)
+    monkeypatch.setattr(report_health, "ProgramReality", SimpleNamespace(load=health_loader))
+    health_results = []
+
+    def observe_health(*args, **kwargs):
+        health = report_health._build_health_summary(*args, **kwargs)
+        health_results.append(health)
+        return health
+
+    monkeypatch.setattr(report_module, "_build_health_summary", observe_health)
+    def run_draft():
+        return generate_report_draft(
+            edition_name=EDITION_NAME, reports_root=reports_root, programs_root=programs_root,
+            archive_root=archive_root, as_of=as_of, dry_run=True,
+            work_item_loader=lambda _bundle, timestamp: (_sample_items(timestamp), 0), open_browser=False,
+        )
+
+    if comparison == "invalid":
+        with pytest.raises(ConfigError, match="Unsupported risk register schema_version"):
+            run_draft()
+        assert len(health_results) == 1
+        assert health_results[0].risk_register_summary is None
+        health_loader.assert_not_called()
+        return
+    artifacts = run_draft()
+
+    stage_loader.assert_called_once_with(
+        "acme", programs_root=programs_root, as_of=as_of,
+        edition_name=EDITION_NAME, archive_root=archive_root,
+    )
+    assert len(health_results) == 1
+    assert health_results[0].risk_register_summary is None
+    assert "Risk recorded after the selected time" not in artifacts.html_body
+    observed = artifacts.manifest.metadata["program_verdict_observation"]
+    assert observed.inputs.risks == ()
+    assert artifacts.manifest.metadata["family_read_paths"]["risk"] == "reality"
+    if comparison == "nonempty":
+        assert any("cross-check" in warning for warning in observed.inputs.risk_warnings)
+    elif comparison == "unavailable":
+        assert any("cross-check unavailable" in warning for warning in observed.inputs.risk_warnings)
+    else:
+        assert observed.inputs.risk_warnings == ()
+    health_loader.assert_not_called()
+
+
+@pytest.mark.parametrize("change_after_selection", ["none", "add", "invalidate"])
+def test_report_draft_reuses_successful_empty_legacy_risks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, change_after_selection: str,
+) -> None:
+    from unittest.mock import Mock
+
+    from src.commands import report_health
+    from src.core import quality_gates
+
+    reports_root = _stage_pipeline_workspace(tmp_path)
+    programs_root = tmp_path / "programs"
+    archive_root = tmp_path / "archive"
+    as_of = datetime(2026, 5, 5, 18, tzinfo=timezone.utc)
+    monkeypatch.delenv("VERTEX_FACT_SOR", raising=False)
+    monkeypatch.setenv("VERTEX_DB_PATH", str(tmp_path / "database"))
+    monkeypatch.setenv("VERTEX_AUTHOR", "Synthetic operator")
+    save_fact_sor_state("acme", mode="legacy", recorded_at=as_of, programs_root=programs_root)
+    original_risks = risk_stage_module._load_current_risks
+    selections = []
+
+    def select_then_maybe_add(*args, **kwargs):
+        records = original_risks(*args, **kwargs)
+        selections.append(records)
+        if change_after_selection == "add":
+            (programs_root / "acme" / "risk_register.yaml").write_text(yaml.safe_dump({
+                "schema_version": "1.0", "risks": [{
+                    "id": "late-risk", "title": "Risk added after successful legacy selection",
+                    "description": "Synthetic risk", "probability": "likely", "impact": "high",
+                    "category": "schedule", "owner_alias": "operator", "status": "open",
+                    "identified_date": "2026-05-01",
+                }],
+            }), encoding="utf-8")
+        elif change_after_selection == "invalidate":
+            (programs_root / "acme" / "risk_register.yaml").write_text(
+                "schema_version: '2.0'\nrisks: []\n", encoding="utf-8",
+            )
+        return records
+
+    monkeypatch.setattr(risk_stage_module, "_load_current_risks", select_then_maybe_add)
+    health_loader = Mock(wraps=report_health.ProgramReality.load)
+    monkeypatch.setattr(report_health, "ProgramReality", SimpleNamespace(load=health_loader))
+    gate_loader = Mock(wraps=quality_gates._load_current_risks)
+    monkeypatch.setattr(quality_gates, "_load_current_risks", gate_loader)
+    health_results = []
+
+    def observe_health(*args, **kwargs):
+        health = report_health._build_health_summary(*args, **kwargs)
+        health_results.append(health)
+        return health
+
+    monkeypatch.setattr(report_module, "_build_health_summary", observe_health)
+    def run_draft():
+        return generate_report_draft(
+            edition_name=EDITION_NAME, reports_root=reports_root, programs_root=programs_root,
+            archive_root=archive_root, as_of=as_of, dry_run=True,
+            work_item_loader=lambda _bundle, timestamp: (_sample_items(timestamp), 0), open_browser=False,
+        )
+
+    if change_after_selection == "invalidate":
+        with pytest.raises(ConfigError, match="Unsupported risk register schema_version"):
+            run_draft()
+        assert selections == [()]
+        assert len(health_results) == 1
+        assert health_results[0].risk_register_summary is None
+        health_loader.assert_not_called()
+        gate_loader.assert_called_once_with("acme", programs_root=programs_root)
+        return
+    artifacts = run_draft()
+
+    assert selections == [()]
+    assert len(health_results) == 1
+    assert health_results[0].risk_register_summary is None
+    assert "Risk added after successful legacy selection" not in artifacts.html_body
+    observed = artifacts.manifest.metadata["program_verdict_observation"]
+    assert observed.inputs.risks == ()
+    assert observed.inputs.risk_warnings == ()
+    assert artifacts.manifest.metadata["family_read_paths"]["risk"] == "legacy"
+    health_loader.assert_not_called()
+    gate_loader.assert_called_once_with("acme", programs_root=programs_root)
+
+
+@pytest.mark.parametrize("outcome", ["typed_loader_error", "typed_accessor_error", "empty_rollback", "legacy_error"])
+def test_report_draft_keeps_existing_empty_risk_fallback_behavior(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, outcome: str,
+) -> None:
+    from unittest.mock import Mock
+
+    from src.commands import report_health
+    from tests.unit.test_report_deck_reality_consolidation import _risk_assessment
+
+    reports_root = _stage_pipeline_workspace(tmp_path)
+    programs_root = tmp_path / "programs"
+    archive_root = tmp_path / "archive"
+    as_of = datetime(2026, 5, 5, 18, tzinfo=timezone.utc)
+    monkeypatch.delenv("VERTEX_FACT_SOR", raising=False)
+    monkeypatch.setenv("VERTEX_DB_PATH", str(tmp_path / "database"))
+    monkeypatch.setenv("VERTEX_AUTHOR", "Synthetic operator")
+    monkeypatch.delenv("VERTEX_REPORT_ALLOW_LEGACY_RISK_ROLLBACK", raising=False)
+    family_modes = {} if outcome == "legacy_error" else {"judgment": "primary"}
+    save_fact_sor_state("acme", mode="legacy", family_modes=family_modes, recorded_at=as_of, programs_root=programs_root)
+    if outcome == "empty_rollback":
+        monkeypatch.setenv("VERTEX_REPORT_ALLOW_LEGACY_RISK_ROLLBACK", "1")
+        stage_loader = Mock(side_effect=RuntimeError("Synthetic risk failure"))
+    elif outcome == "typed_accessor_error":
+        stage_loader = Mock(return_value=SimpleNamespace(risks=Mock(side_effect=ConfigError("Synthetic risk failure"))))
+    else:
+        stage_loader = Mock(side_effect=ConfigError("Synthetic risk failure"))
+    if outcome == "legacy_error":
+        monkeypatch.setattr(
+            risk_stage_module, "_load_current_risks", Mock(side_effect=ConfigError("Synthetic legacy risk failure")),
+        )
+    monkeypatch.setattr(report_module, "_load_program_reality", stage_loader)
+    assessment = _risk_assessment()
+    health_loader = Mock(return_value=SimpleNamespace(risks=lambda: (assessment,)))
+    monkeypatch.setattr(report_health, "ProgramReality", SimpleNamespace(load=health_loader))
+    health_results = []
+
+    def observe_health(*args, **kwargs):
+        health = report_health._build_health_summary(*args, **kwargs)
+        health_results.append(health)
+        return health
+
+    monkeypatch.setattr(report_module, "_build_health_summary", observe_health)
+    artifacts = generate_report_draft(
+        edition_name=EDITION_NAME, reports_root=reports_root, programs_root=programs_root,
+        archive_root=archive_root, as_of=as_of, dry_run=True,
+        work_item_loader=lambda _bundle, timestamp: (_sample_items(timestamp), 0), open_browser=False,
+    )
+
+    assert health_results[0].risk_register_summary is not None
+    observed = artifacts.manifest.metadata["program_verdict_observation"]
+    assert observed.inputs.risks == ()
+    if outcome.startswith("typed_"):
+        assert any("risk skipped (reality)" in warning for warning in observed.inputs.risk_warnings)
+    elif outcome == "empty_rollback":
+        assert any("audited rollback flag" in warning for warning in observed.inputs.risk_warnings)
+    else:
+        assert observed.inputs.risk_warnings == ("risk skipped: Synthetic legacy risk failure",)
+    health_loader.assert_called_once_with("acme", programs_root=programs_root, archive_root=archive_root)
+    assert stage_loader.call_count == (0 if outcome == "legacy_error" else 1)
+
+
+def test_report_draft_still_refuses_invalid_legacy_risk_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    reports_root = _stage_pipeline_workspace(tmp_path)
+    programs_root = tmp_path / "programs"
+    as_of = datetime(2026, 5, 5, 18, tzinfo=timezone.utc)
+    monkeypatch.delenv("VERTEX_FACT_SOR", raising=False)
+    monkeypatch.setenv("VERTEX_DB_PATH", str(tmp_path / "database"))
+    monkeypatch.setenv("VERTEX_AUTHOR", "Synthetic operator")
+    save_fact_sor_state("acme", mode="legacy", recorded_at=as_of, programs_root=programs_root)
+    (programs_root / "acme" / "risk_register.yaml").write_text(
+        "schema_version: '2.0'\nrisks: []\n", encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="Unsupported risk register schema_version"):
+        generate_report_draft(
+            edition_name=EDITION_NAME, reports_root=reports_root, programs_root=programs_root,
+            archive_root=tmp_path / "archive", as_of=as_of, dry_run=True,
+            work_item_loader=lambda _bundle, timestamp: (_sample_items(timestamp), 0), open_browser=False,
+        )
+
+
+def test_report_still_refuses_fact_added_after_successful_empty_capture(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from unittest.mock import Mock
+
+    from src.commands import report_health
+    from src.core.program_fact_store import ProgramFactStore
+    from tests.unit.test_reality_pinned_facts import _risk
+
+    reports_root = _stage_pipeline_workspace(tmp_path)
+    programs_root = tmp_path / "programs"
+    archive_root = tmp_path / "archive"
+    as_of = datetime(2026, 5, 5, 18, tzinfo=timezone.utc)
+    monkeypatch.delenv("VERTEX_FACT_SOR", raising=False)
+    monkeypatch.setenv("VERTEX_DB_PATH", str(tmp_path / "database"))
+    monkeypatch.setenv("VERTEX_AUTHOR", "Synthetic operator")
+    save_fact_sor_state("acme", mode="primary", recorded_at=as_of, programs_root=programs_root)
+    stage_calls = []
+    original_loader = report_module._load_program_reality
+
+    def add_fact_after_capture(*args, **kwargs):
+        reality = original_loader(*args, **kwargs)
+        if not stage_calls:
+            ProgramFactStore("acme").append_fact(
+                _risk("Risk added after capture"), recorded_at=datetime.now(timezone.utc),
+            )
+        stage_calls.append(kwargs)
+        return reality
+
+    monkeypatch.setattr(report_module, "_load_program_reality", add_fact_after_capture)
+    health_loader = Mock(wraps=report_health.ProgramReality.load)
+    monkeypatch.setattr(report_health, "ProgramReality", SimpleNamespace(load=health_loader))
+    health_results = []
+
+    def observe_health(*args, **kwargs):
+        health = report_health._build_health_summary(*args, **kwargs)
+        health_results.append(health)
+        return health
+
+    monkeypatch.setattr(report_module, "_build_health_summary", observe_health)
+    with pytest.raises(ConfigError, match="snapshot changed during report generation"):
+        generate_report_draft(
+            edition_name=EDITION_NAME, reports_root=reports_root, programs_root=programs_root,
+            archive_root=archive_root, as_of=as_of, dry_run=True,
+            work_item_loader=lambda _bundle, timestamp: (_sample_items(timestamp), 0), open_browser=False,
+        )
+    assert stage_calls and stage_calls[0]["fact_snapshot"].facts == ()
+    assert stage_calls[0]["as_of"] == as_of
+    assert stage_calls[0]["edition_name"] == EDITION_NAME
+    assert health_results[0].risk_register_summary is None
+    health_loader.assert_not_called()
+
+
+@pytest.mark.parametrize("invalid", ["milestones.yaml", "dependencies.yaml"])
+def test_report_draft_refuses_invalid_milestone_rollback_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, invalid: str,
+) -> None:
+    from unittest.mock import Mock
+
+    reports_root = _stage_pipeline_workspace(tmp_path)
+    programs_root = tmp_path / "programs"
+    monkeypatch.delenv("VERTEX_FACT_SOR", raising=False)
+    monkeypatch.setenv("VERTEX_DB_PATH", str(tmp_path / "database"))
+    monkeypatch.setenv("VERTEX_AUTHOR", "Synthetic operator")
+    monkeypatch.setenv("VERTEX_REPORT_ALLOW_LEGACY_MILESTONE_ROLLBACK", "1")
+    save_fact_sor_state(
+        "acme", mode="legacy", family_modes={"workitem.state": "primary"},
+        recorded_at=datetime(2026, 5, 5, tzinfo=timezone.utc), programs_root=programs_root,
+    )
+    path = programs_root / "acme" / invalid
+    path.write_text("schema_version: '2.0'\n", encoding="utf-8")
+    original = path.read_bytes()
+    loader = Mock(side_effect=RuntimeError("Synthetic reality failure"))
+    monkeypatch.setattr(report_module, "_load_program_reality", loader)
+
+    with pytest.raises(ConfigError, match="schema_version"):
+        generate_report_draft(
+            edition_name=EDITION_NAME, reports_root=reports_root, programs_root=programs_root,
+            archive_root=tmp_path / "archive", as_of=datetime(2026, 5, 5, 18, tzinfo=timezone.utc),
+            dry_run=True, work_item_loader=lambda _bundle, timestamp: (_sample_items(timestamp), 0),
+            open_browser=False,
+        )
+
+    assert path.read_bytes() == original
+    loader.assert_called_once()
 
 
 def test_report_milestone_rows_carry_activation_lineage(tmp_path: Path) -> None:

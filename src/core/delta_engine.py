@@ -102,9 +102,8 @@ def build_deltas(
             emitted_change = True
 
         previous_owner = previous.assigned_to or ""
-        current_owner_name = item.assigned_to or ""
-        current_owner_email = item.assigned_to_email or ""
-        if previous_owner not in {current_owner_name, current_owner_email}:
+        current_owners = {owner for owner in (item.assigned_to, item.assigned_to_email) if owner}
+        if previous_owner not in current_owners and (previous_owner or current_owners):
             owner_changes.append(
                 ItemDelta(
                     work_item_id=item.id,

@@ -9,8 +9,11 @@ from src.ai.safety.pii_scrubber import filter_text
 from src.core.m365_payload_support import optional_string as _optional_string
 from src.core.signal_fragment_utils import fragment_resource_id, split_signal_fragments
 from src.core.signal_ref_utils import extract_work_item_refs as _extract_work_item_refs
-from src.core.models_v2 import WORKIQ_DISCOVERY_MODE_STRUCTURED, Program, WorkIQRetrievalConfig, Workstream
-from src.m365.workiq_ask_support import DiscoveryRequest, build_structured_discovery_question
+from src.core.models_v2 import WORKIQ_DISCOVERY_MODE_STRUCTURED, Program, Signal, WorkIQRetrievalConfig, Workstream
+from src.m365.workiq_ask_support import (
+    DiscoveryRequest, _is_native_workiq_identity, _normalize_discovery_identity,
+    build_structured_discovery_question,
+)
 
 
 _WORKIQ_SIGNAL_TEXT_LIMIT = 4000
@@ -32,6 +35,24 @@ class WorkIQQueryPlan:
     structured_window_end: date | None = None
     structured_result_limit: int | None = None
     bypass_ask_cache: bool = False
+
+
+def dedupe_workiq_signals(signals: tuple[Signal, ...]) -> tuple[Signal, ...]:
+    deduped: list[Signal] = []
+    seen: set[tuple[str, str | None, str | None]] = set()
+    for signal in signals:
+        metadata = signal.metadata or {}
+        raw_message_id = metadata.get("message_id") if isinstance(metadata, dict) else None
+        message_id_for_key = (
+            signal.id if signal.source == "system"
+            else str(raw_message_id) if isinstance(raw_message_id, str) else None
+        )
+        key = (signal.source, message_id_for_key, signal.workstream_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(signal)
+    return tuple(deduped)
 
 
 def apply_structured_workiq_discovery(
@@ -118,12 +139,27 @@ def workiq_timestamp(record: dict[str, Any]) -> datetime | None:
     )
 
 
-def workiq_message_id(record: dict[str, Any]) -> str | None:
-    value = (
-        record.get("id") or record.get("messageId") or record.get("emailId")
-        or record.get("eventId") or record.get("transcriptId")
-    )
-    return value if isinstance(value, str) and value.strip() else None
+def workiq_message_identity(record: dict[str, Any]) -> tuple[str | None, str | None]:
+    thread_identity = None
+    for field in ("conversationId", "threadId"):
+        candidate = _normalize_discovery_identity(record.get(field))
+        if candidate is not None and _is_native_workiq_identity(candidate):
+            thread_identity = candidate
+            break
+    for field in ("id", "messageId", "emailId", "eventId", "transcriptId"):
+        value = record.get(field)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        if value.strip().casefold().startswith(("http://", "https://")):
+            continue
+        normalized = _normalize_discovery_identity(value)
+        if normalized is not None and _is_native_workiq_identity(normalized):
+            if normalized == thread_identity:
+                return normalized, "native_thread"
+            return value, "native_message"
+    if thread_identity is not None:
+        return thread_identity, "native_thread"
+    return None, None
 
 
 def build_workiq_signal_text(*, source_type: str, subject: str | None, preview: str | None) -> str:
@@ -168,10 +204,10 @@ def _truncate_signal_text(value: str, *, limit: int = 240) -> str:
 def _parse_datetime(value: Any) -> datetime | None:
     if value in (None, ""):
         return None
-    if isinstance(value, datetime):
-        return value.astimezone(timezone.utc) if value.tzinfo is not None else None
     try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
+        parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            return None
+        return parsed.astimezone(timezone.utc)
+    except (ValueError, OverflowError):
         return None
-    return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else None

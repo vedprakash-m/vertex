@@ -32,7 +32,7 @@ def test_transcript_reader_prefers_workiq_ask_json() -> None:
     bridge = _FakeBridge()
     bridge.workiq_responses.append(
         {
-            "response": '{"meetingId":"meeting-1","title":"Acme Weekly","createdDateTime":"2026-05-07T17:00:00Z","webUrl":"https://teams.microsoft.com/l/transcript/1","segments":[{"text":"Operator: Deployment velocity is improving."},{"text":"Rushi: Call out the blocker explicitly."}]}'
+            "response": '{"meetingId":"meeting-1","title":"Acme Weekly","createdDateTime":"2026-05-07T17:00:00Z","webUrl":"https://teams.microsoft.com/l/transcript/1","segments":[{"text":"Operator: Deployment velocity is improving."},{"text":"ExampleUser: Call out the blocker explicitly."}]}'
         }
     )
     reader = TranscriptReader(bridge)
@@ -42,7 +42,7 @@ def test_transcript_reader_prefers_workiq_ask_json() -> None:
     assert len(bridge.workiq_questions) == 1
     assert bridge.calls == []
     assert transcript is not None
-    assert transcript.content == "Operator: Deployment velocity is improving.\nRushi: Call out the blocker explicitly."
+    assert transcript.content == "Operator: Deployment velocity is improving.\nExampleUser: Call out the blocker explicitly."
 
 
 def test_transcript_reader_extracts_text_via_bluebird() -> None:
@@ -55,7 +55,7 @@ def test_transcript_reader_extracts_text_via_bluebird() -> None:
             "webUrl": "https://teams.microsoft.com/l/transcript/1",
             "segments": [
                 {"text": "Operator: Deployment velocity is improving."},
-                {"text": "Rushi: Call out the blocker explicitly."},
+                {"text": "ExampleUser: Call out the blocker explicitly."},
             ],
         }
     )
@@ -66,7 +66,7 @@ def test_transcript_reader_extracts_text_via_bluebird() -> None:
     assert bridge.calls == [("workiq", "get_transcript", {"meeting_id": "meeting-1"})]
     assert transcript is not None
     assert transcript.meeting_id == "meeting-1"
-    assert transcript.content == "Operator: Deployment velocity is improving.\nRushi: Call out the blocker explicitly."
+    assert transcript.content == "Operator: Deployment velocity is improving.\nExampleUser: Call out the blocker explicitly."
 
 
 def test_transcript_reader_retries_retryable_errors() -> None:

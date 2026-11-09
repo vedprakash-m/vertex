@@ -5,8 +5,6 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-import pytest
-
 from src.ai.synthesizer import WorkstreamSynthesizer
 from src.core.models import Confidence
 from src.core.models_v2 import Program, Signal, Workstream
@@ -74,12 +72,11 @@ def test_workstream_synthesis_snapshot(update_golden: bool, tmp_path: Path) -> N
 
 
 def _compare_with_snapshot(actual: str, update: bool) -> None:
-    if update or not SNAPSHOT_PATH.exists():
+    if update:
         SNAPSHOT_PATH.write_text(actual, encoding="utf-8")
-        if not update:
-            pytest.skip(f"Created new golden file: {SNAPSHOT_PATH.name}")
         return
 
+    assert SNAPSHOT_PATH.exists(), f"Missing public golden baseline: {SNAPSHOT_PATH.name}; regenerate explicitly with --update-golden."
     expected = SNAPSHOT_PATH.read_text(encoding="utf-8")
     if not expected.endswith("\n"):
         expected += "\n"

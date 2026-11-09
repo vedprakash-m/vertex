@@ -34,6 +34,7 @@ from src.core.evidence_conflict_detector import detect_evidence_conflicts
 from src.core.evidence_store import load_approved_evidence_by_lane
 from src.core.forecast_engine import ETAForecast, forecast_etas
 from src.core.knowledge_store import load_program_knowledge
+from src.core.m365_payload_support import has_provisional_workiq_identity
 from src.core.models import DeltaSet, DimensionRisk, EditionType, EvidencePacket, ItemDelta, RiskLevel, ScorecardEvidencePacket, Snapshot, WorkItem
 from src.core.models_v2 import PersonDirectory, Signal as JournalSignal, Workstream, WorkstreamEvidenceBundle
 from src.core.overrides_store import OverridesDocument
@@ -155,6 +156,7 @@ class _ReportSignalContext:
     as_of: datetime | None = None
     top_3_now_candidates: tuple[JournalSignal, ...] = ()  # FR-SG-33: signal-priority candidates
     reality_assessments: RealityAssessmentSummary | None = None  # Track J (PR-11b)
+    program_reality: ProgramReality | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -449,20 +451,20 @@ def _load_report_signal_context(
         if points
     }
     drift_patterns = analyze_trajectories(populated_trajectories, as_of=as_of.date()) if populated_trajectories else ()
-    # Track J (PR-11b): load ProgramReality once and reuse it for both the
-    # dependency-cascade computation and the reality-substrate context summary
-    # fed to the AI drafters (avoids a redundant load; Track E discipline).
+    # Track J (PR-11b): reuse this snapshot for dependency cascades and, when
+    # needed, the AI reality summary without another load.
     archive_options: _ArchiveOptions = {"archive_root": archive_root} if archive_root is not None else {}
     program_reality = ProgramReality.load(
         resolved.program.id,
         programs_root=programs_root,
+        _omit_action_shim=True,
         **archive_options,
     )
     dependency_cascades = detect_dependency_cascades(
         # .record strip is intentional: cascade detection consumes only structural
         # dependency fields (program/workstream ids, resolution path), never
         # FactAssessment metadata. Truth/dispute signals for the AI drafters are
-        # surfaced separately via build_reality_assessment_summary() below.
+        # surfaced separately in the draft context.
         dependencies=tuple(a.record for a in program_reality.dependencies()),
         signals=approved_signals,
         drift_patterns=drift_patterns,
@@ -470,7 +472,6 @@ def _load_report_signal_context(
         scorecards=resolved.scorecards,
         workstreams=active_workstreams,
     )
-    reality_assessments = build_reality_assessment_summary(program_reality)
     # FR-SG-33: compute signal-priority top_3_now candidates
     top_3_now_candidates = populate_top_3_now_candidates(approved_signals, {}, as_of=as_of)
     # Write candidates to disk so reviewers can inspect them
@@ -486,7 +487,7 @@ def _load_report_signal_context(
         source_confidence_order=getattr(resolved.program, "source_confidence_order", ()),
         as_of=as_of,
         top_3_now_candidates=top_3_now_candidates,
-        reality_assessments=reality_assessments,
+        program_reality=program_reality,
     )
 
 
@@ -750,6 +751,10 @@ def _load_draft_ai_context(
         for workstream in signal_context.workstreams
         if (summary := load_summary(signal_context.program_id, workstream.id, programs_root=programs_root)) is not None and summary.text.strip()
     }
+    reality_assessments = signal_context.reality_assessments
+    program_reality = getattr(signal_context, "program_reality", None)
+    if reality_assessments is None and program_reality is not None and get_ai_mode() != AIMode.DISABLED:
+        reality_assessments = build_reality_assessment_summary(program_reality)
     return _DraftAIContext(
         program_id=signal_context.program_id,
         programs_root=programs_root,
@@ -761,7 +766,7 @@ def _load_draft_ai_context(
         people_directory=signal_context.people_directory,
         source_confidence_order=signal_context.source_confidence_order,
         as_of=signal_context.as_of,
-        reality_assessments=signal_context.reality_assessments,
+        reality_assessments=reality_assessments,
     )
 
 
@@ -995,15 +1000,16 @@ def _section_ai_context_lines(
     item_ids = {item.id for item in section_items}
     workstream_ids = _matching_program_workstream_ids(section_items, ai_context.workstreams)
     lines: list[str] = []
+    # Keep the trust directive ahead of the blurb generator's supplemental-context cap.
+    reality_lines = _reality_context_lines(ai_context.reality_assessments)
+    lines.extend(reality_lines[:1])
     lines.extend(
         f"Rolling summary [{workstream_id}]: {ai_context.rolling_summaries[workstream_id]}"
         for workstream_id in workstream_ids
         if workstream_id in ai_context.rolling_summaries
     )
     lines.extend(_leadership_reader_context_lines(program_context))
-    # Track J (PR-11b): reality-substrate confidence so the workstream blurb does
-    # not contradict the structured tables' trust badges.
-    lines.extend(_reality_context_lines(ai_context.reality_assessments))
+    lines.extend(reality_lines[1:])
     lines.extend(
         _edit_pattern_context_lines(
             ai_context.program_id,
@@ -1878,6 +1884,7 @@ def _feedback_context_lines(
         signal
         for signal in signals
         if signal.source == "workiq/email"
+        and not has_provisional_workiq_identity(signal.metadata)
         and (
             _signal_matches_item_ids(signal, item_ids)
             or (signal.workstream_id is not None and signal.workstream_id in workstream_ids)

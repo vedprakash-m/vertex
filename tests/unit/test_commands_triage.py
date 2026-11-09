@@ -101,6 +101,81 @@ def test_triage_active_context_gap_projection_and_corrupt_history(tmp_path: Path
     assert "private_canary" not in triage.render_triage_output(artifacts, format="csv")
 
 
+@pytest.mark.parametrize("failure", ["registry", "foreign", "record"])
+def test_actual_triage_keeps_pending_revision_when_gap_projection_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    from src.core.ncfl_proposal_store import stage_extracted_proposals
+    from tests.unit.test_context_proposal_review import _proposal
+
+    reports, archive, root = _seed_v2_triage_layout(tmp_path, tmp_path)
+    program = root / "acme"
+    program_path = program / "program.yaml"
+    config = yaml.safe_load(program_path.read_text(encoding="utf-8"))
+    config["vitality"] = {"enabled": False}
+    program_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    registry = program / "workstream_registry.yaml"
+    registry.write_text("workstreams: [\nsynthetic_canary\n", encoding="utf-8")
+    feedback = program / "_feedback"
+    feedback.mkdir(exist_ok=True)
+    history = feedback / "context_gaps.jsonl"
+    history.write_text(json.dumps({
+        "ts": "2026-10-01T00:00:00Z",
+        "feature": "doctor --context" if failure == "registry" else "synthetic",
+        "program": "acme" if failure == "registry" else "foreign_program",
+        "lane": "lane" if failure == "registry" else None,
+        "field": "deep_context.why" if failure == "registry" else "purpose",
+        "severity": "quality_degraded", "message": "synthetic_canary", "impact_estimate": "high",
+    }) + "\n", encoding="utf-8")
+    if failure == "record":
+        history.write_text(json.dumps({"ts": None, "message": "synthetic_canary"}) + "\n", encoding="utf-8")
+    proposal = replace(
+        _proposal("pending", issue_number=8, target_store="workstream_registry", conflict_key="registry"),
+        program_id="acme", edition_id="acme_weekly",
+    )
+    stage_extracted_proposals("acme", 8, (proposal,), programs_root=root)
+    queue = program / "context_proposals" / "issue_008.proposals.json"
+    before = {path: path.read_bytes() for path in (registry, history, queue)}
+    now = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    expected = (
+        "Context gap ranking unavailable; inspect the selected workstream_registry.yaml "
+        "and recorded gap targets before retrying."
+        if failure == "registry" else (
+            "Context gap history unavailable: observations contain a foreign program."
+            if failure == "foreign" else
+            "Context gap history unavailable; inspect and repair it before retrying."
+        )
+    )
+
+    artifacts = triage.generate_triage_report(
+        "acme_weekly", issue_number=1, as_of=now, reports_root=reports, archive_root=archive,
+        work_item_loader=lambda *args: ((), 0), vitality_loader=lambda *args: ((), 0),
+    )
+    json_output = triage.render_triage_output(artifacts, format="json")
+    csv_output = triage.render_triage_output(artifacts, format="csv")
+    human_output = triage.render_triage_report(artifacts.report)
+    payload = json.loads(json_output)
+    assert payload["context_gap_diagnostic"] == expected and payload["context_gaps"] == []
+    assert [row["proposal_id"] for row in payload["context_revisions"]] == ["pending"]
+    for output in (json_output, csv_output, human_output):
+        assert expected in output and "pending" in output
+        assert "synthetic_canary" not in output and str(program) not in output
+
+    generate = triage.generate_triage_report
+    monkeypatch.setattr(triage.report_command_helpers, "_load_live_work_items", lambda *args: ((), 0))
+    monkeypatch.setattr(triage, "PROGRAMS_ROOT", root)
+    monkeypatch.setattr(triage, "REPORTS_ROOT", reports)
+    monkeypatch.setattr(triage, "ARCHIVE_ROOT", archive)
+    monkeypatch.setattr(triage, "generate_triage_report", partial(generate, reports_root=reports, archive_root=archive))
+    result = runner.invoke(app, ["--no-catchup", "triage", "--edition", "acme_weekly", "--format", "json"])
+    assert result.exit_code in {0, 1, 2, 3}, repr(result.exception)
+    command_payload = json.loads(result.stdout)
+    assert command_payload["context_gap_diagnostic"] == expected
+    assert [row["proposal_id"] for row in command_payload["context_revisions"]] == ["pending"]
+    assert "synthetic_canary" not in result.output and str(program) not in result.output
+    assert {path: path.read_bytes() for path in (registry, history, queue)} == before
+
+
 def test_triage_corrupt_proposals_unknown_impact_and_csv_metadata(tmp_path: Path) -> None:
     import csv
     from io import StringIO
@@ -207,7 +282,7 @@ def test_triage_cli_supports_json_and_csv(monkeypatch) -> None:
                         summary='WI:1001 "Blocked shiproom item" — blocked in ADO',
                         owner_alias="maintainer",
                         workstream_id="deployment_readiness",
-                        ado_url="https://example/1001",
+                        ado_url="https://ado.example.invalid/workitems/1001",
                         linked_entity_ids=("claim-1",),
                         confidence=Confidence.HIGH,
                     ),

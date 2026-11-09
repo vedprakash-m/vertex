@@ -47,7 +47,7 @@ def capture_lt_deck_command(
     dry_run: bool = typer.Option(False, "--dry-run", help="Validate only; do not write."),
     programs_root: Path = typer.Option(PROGRAMS_ROOT, hidden=True),
 ) -> None:
-    """Validate and write an LT deck snapshot (γ-Read Phase 3).
+    """Validate and write an LT deck snapshot (Gamma-Read Phase 3).
 
     The snapshot is used by QG-ED-LT to check LT deck freshness.
     Run vertex doctor --context to see the LT deck freshness status.

@@ -65,6 +65,158 @@ def test_goal_lines_in_config():
     assert result is not None
 
 
+@pytest.mark.parametrize("chart_type", ["line", "bar", "stacked_bar", "scatter", "combined"])
+@pytest.mark.parametrize("missing_index", [0, 1, 2])
+def test_missing_y_axis_keeps_rendered_series_and_metadata_aligned(chart_type, missing_index, caplog, monkeypatch):
+    from matplotlib.figure import Figure
+
+    original_savefig = Figure.savefig
+    legends = []
+
+    def capture_legend(figure, buffer, *args, **kwargs):
+        legend = figure.axes[0].get_legend()
+        legends.append([text.get_text() for text in legend.get_texts()] if legend else [])
+        return original_savefig(figure, buffer, *args, **kwargs)
+
+    monkeypatch.setattr(Figure, "savefig", capture_legend)
+    rows = tuple(_ROWS[:6])
+    valid_axes = ["p50", "p75"]
+    partial_axes = valid_axes.copy()
+    partial_axes.insert(missing_index, "unavailable")
+    config = {"type": chart_type, "x_axis": "day", "y_axes": valid_axes}
+
+    expected = _BUILDER.build("valid", config, rows, _COLS, _THEME)
+    actual = _BUILDER.build("partial", {**config, "y_axes": partial_axes}, rows, _COLS, _THEME)
+
+    assert expected is not None and actual is not None
+    assert legends == [valid_axes, valid_axes]
+    assert actual[1]["series"] == valid_axes
+    assert actual[1]["trend_description"].startswith("p50 trending ")
+    assert "unavailable" not in actual[1]["alt_text"]
+    assert actual[1] == expected[1]
+    assert actual[0] == expected[0]
+    assert "y_axis column 'unavailable' not found" in caplog.text
+
+
+def test_missing_y_axis_preserves_explicit_alt_text():
+    config = {
+        "type": "line",
+        "x_axis": "day",
+        "y_axes": ["unavailable", "p50"],
+        "alt_text": "Authored chart description",
+    }
+
+    result = _BUILDER.build("partial", config, tuple(_ROWS[:6]), _COLS, _THEME)
+
+    assert result is not None
+    assert result[1]["alt_text"] == "Authored chart description"
+    assert result[1]["series"] == ["p50"]
+
+
+@pytest.mark.parametrize("chart_type", ["line", "bar", "scatter"])
+def test_goal_lines_survive_reduced_height_render(chart_type, monkeypatch):
+    from importlib import import_module
+    from matplotlib.figure import Figure
+
+    declarative = import_module("src.core.charts.declarative")
+    original_savefig = Figure.savefig
+    goal_values = []
+
+    def capture_goals(figure, buffer, *args, **kwargs):
+        goal_values.append([
+            tuple(line.get_ydata())
+            for line in figure.axes[0].lines
+            if line.get_linestyle() == "--"
+        ])
+        return original_savefig(figure, buffer, *args, **kwargs)
+
+    monkeypatch.setattr(declarative, "PNG_TARGET_BYTES", 1)
+    monkeypatch.setattr(Figure, "savefig", capture_goals)
+    config = {
+        "type": chart_type,
+        "x_axis": "day",
+        "y_axes": ["p50"],
+        "goal_lines": [
+            {"label": "Target", "value": 2.5},
+            {"label": "Stretch", "value": 4.5},
+            {"label": "Missing value"},
+        ],
+    }
+
+    result = _BUILDER.build("goals", config, tuple(_ROWS[:6]), _COLS, _THEME)
+
+    assert result is not None
+    assert len(result[0]) <= PNG_HARD_GATE_BYTES
+    assert goal_values == [[(2.5, 2.5), (4.5, 4.5)], [(2.5, 2.5), (4.5, 4.5)]]
+
+
+@pytest.mark.parametrize("chart_type", ["stacked_bar", "combined"])
+def test_non_resizable_charts_keep_their_original_goal_lines(chart_type, monkeypatch):
+    from importlib import import_module
+    from matplotlib.figure import Figure
+
+    declarative = import_module("src.core.charts.declarative")
+    original_savefig = Figure.savefig
+    goal_values = []
+
+    def capture_goals(figure, buffer, *args, **kwargs):
+        goal_values.append([
+            tuple(line.get_ydata())
+            for line in figure.axes[0].lines
+            if line.get_linestyle() == "--"
+        ])
+        return original_savefig(figure, buffer, *args, **kwargs)
+
+    monkeypatch.setattr(declarative, "PNG_TARGET_BYTES", 1)
+    monkeypatch.setattr(Figure, "savefig", capture_goals)
+    config = {
+        "type": chart_type,
+        "x_axis": "day",
+        "y_axes": ["p50", "p75"],
+        "goal_lines": [{"label": "Target", "value": 2.5}],
+    }
+
+    result = _BUILDER.build("goals", config, tuple(_ROWS[:6]), _COLS, _THEME)
+
+    assert result is not None
+    assert goal_values == [[(2.5, 2.5)]]
+
+
+@pytest.mark.parametrize("chart_type", ["line", "bar", "scatter"])
+@pytest.mark.parametrize(
+    ("sizes", "expected_size"),
+    [
+        ((PNG_TARGET_BYTES,), PNG_TARGET_BYTES),
+        ((PNG_TARGET_BYTES + 1, PNG_HARD_GATE_BYTES), PNG_HARD_GATE_BYTES),
+        ((PNG_TARGET_BYTES + 1, PNG_HARD_GATE_BYTES + 1), None),
+        ((PNG_HARD_GATE_BYTES, PNG_TARGET_BYTES), PNG_TARGET_BYTES),
+        ((PNG_HARD_GATE_BYTES + 1,), None),
+    ],
+)
+def test_final_png_respects_existing_size_gate(chart_type, sizes, expected_size, monkeypatch, caplog):
+    from matplotlib.figure import Figure
+
+    calls = []
+
+    def save_sized_png(_figure, buffer, *args, **kwargs):
+        size = sizes[len(calls)]
+        calls.append(size)
+        buffer.write(b"\x89PNG" + b"x" * (size - 4))
+
+    monkeypatch.setattr(Figure, "savefig", save_sized_png)
+    config = {"type": chart_type, "x_axis": "day", "y_axes": ["p50"]}
+
+    result = _BUILDER.build("size", config, tuple(_ROWS[:6]), _COLS, _THEME)
+
+    assert calls == list(sizes)
+    if expected_size is None:
+        assert result is None
+        assert "exceeds hard gate" in caplog.text
+    else:
+        assert result is not None
+        assert len(result[0]) == expected_size
+
+
 # ---------------------------------------------------------------------------
 # Zero rows returns None
 # ---------------------------------------------------------------------------

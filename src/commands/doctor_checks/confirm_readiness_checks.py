@@ -1,13 +1,12 @@
-"""WS-6 coding stub: doctor --confirm-readiness check.
+"""WS-6 doctor --confirm-readiness check.
 
-Enumerates exact live blockers that would prevent a non-forced
-``vertex confirm`` from succeeding.  Reads existing static files
-(overrides, gather state, archive index) — no pipeline re-run.
+Inspects selected local prerequisites without re-running confirmation or
+evaluating every quality gate.
 
 Blockers checked (and remediation commands):
   B-1  No overrides file found               → vertex report
-  B-2  One or more dimensions have           → vertex doctor --ids --edition <name>
-       '❓ Needs Input' risk level            →   then edit overrides/<prog>/issue_NNN.yaml
+  B-2  One or more override risks are        → vertex doctor --ids --edition <name>
+       unresolved                           →   then edit overrides/<prog>/issue_NNN.yaml
   B-3  Gather state absent (never gathered)  → vertex gather --edition <name>
   B-4  Gather state stale (> 2 × cadence)    → vertex gather --edition <name>
   B-5  No confirmed issue yet (first run     → confirms after report + overrides
@@ -16,15 +15,25 @@ Blockers checked (and remediation commands):
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
 
 import yaml
 
 from src.commands.doctor_checks.models import DoctorCheck, DoctorReport
+from src.core.archive_store import _parse_archive_index_payload
+from src.core.edition_resolver import resolve_edition_paths
+from src.core.exceptions import ConfigError, StateError, VertexMigrationError
 from src.core.gather_state_store import load_gather_state
-from src.core.overrides_store import NEEDS_INPUT_VALUE
+from src.core.models import RiskLevel
+from src.core.overrides_store import (
+    _detect_latest_v2_issue_number,
+    _parse_dimension_override,
+    _parse_scorecards,
+)
+from src.core.snapshot_store import get_archive_root
+from src.core.workspace_paths import validate_report_workspace
 
 _STALE_MULTIPLIER = 2   # gather is "stale" when older than 2× edition cadence
 _CADENCE_DAYS: dict[str, int] = {
@@ -34,9 +43,7 @@ _CADENCE_DAYS: dict[str, int] = {
     "monthly": 30,
     "quarterly": 90,
 }
-_NEEDS_INPUT_MARKERS = frozenset(
-    {NEEDS_INPUT_VALUE, "needs_input", "unknown", ""}
-)
+_UNSAFE_OVERRIDE_NAME = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff]")
 
 
 def run_confirm_readiness_doctor(
@@ -49,11 +56,13 @@ def run_confirm_readiness_doctor(
     cadence: str = "weekly",
     now: datetime | None = None,
 ) -> DoctorReport:
-    """Return a DoctorReport summarising what would block a non-forced confirm.
+    """Return a DoctorReport on selected local confirmation prerequisites.
 
     Exit-code mapping (via ``DoctorReport.failures``):
-    - 0 failures → confirm would succeed  (overall = "ok" or "warn")
-    - ≥1 failure → confirm is blocked      (overall = "fail")
+    - 0 failures → these checks found no blocking condition
+    - ≥1 failure → at least one selected check failed
+
+    The result does not establish that confirmation or all its gates will pass.
     """
     now = now or datetime.now(timezone.utc)
     checks: list[DoctorCheck] = []
@@ -63,129 +72,228 @@ def run_confirm_readiness_doctor(
     # ------------------------------------------------------------------
     program_dir = programs_root / program_id
     overrides_dir = program_dir / "overrides"
-    overrides_path = _latest_overrides_path(overrides_dir)
-
-    if overrides_path is None or not overrides_path.exists():
-        checks.append(DoctorCheck(
-            label="Overrides",
-            status="fail",
-            detail=(
-                f"No overrides file found for program '{program_id}'. "
-                "Run: vertex report --edition <name>  to generate one."
-            ),
-            metadata={"program_id": program_id, "overrides_dir": str(overrides_dir)},
-        ))
-    else:
-        needs_input = _find_needs_input_dimensions(overrides_path)
-        if needs_input:
-            joined = ", ".join(needs_input)
+    try:
+        overrides_path = _latest_overrides_path(overrides_dir)
+        if overrides_path is None or not overrides_path.exists():
             checks.append(DoctorCheck(
                 label="Overrides",
                 status="fail",
                 detail=(
-                    f"{len(needs_input)} dimension(s) have '❓ Needs Input' risk level: {joined}. "
-                    f"Edit {overrides_path} and set a valid risk level for each."
+                    f"No overrides file found for program '{program_id}'. "
+                    "Run: vertex report --edition <name>  to generate one."
                 ),
-                metadata={
-                    "program_id": program_id,
-                    "overrides_path": str(overrides_path),
-                    "needs_input_dimensions": list(needs_input),
-                    "action_category": "pm-decision-required",
-                    "owner": ["pm"],
-                    "evidence_to_gather": [
-                        "A reviewed risk level for each listed scorecard dimension",
-                        "The rationale/evidence used for each human-authored risk decision",
-                    ],
-                    "llm_support": (
-                        "Can summarize current evidence and draft a risk-decision brief, "
-                        "but cannot assign or approve the risk levels."
-                    ),
-                },
+                metadata={"program_id": program_id, "overrides_dir": str(overrides_dir)},
             ))
         else:
-            checks.append(DoctorCheck(
-                label="Overrides",
-                status="ok",
-                detail=f"All dimensions have confirmed risk levels in {overrides_path.name}.",
-                metadata={"program_id": program_id},
-            ))
+            needs_input, inspected_count = _find_needs_input_dimensions(overrides_path)
+            if needs_input:
+                joined = ", ".join(needs_input)
+                checks.append(DoctorCheck(
+                    label="Overrides",
+                    status="fail",
+                    detail=(
+                        f"{len(needs_input)} dimension(s) have '❓ Needs Input' or invalid override risk: {joined}. "
+                        f"Review {overrides_path}; confirmation also evaluates derived risks."
+                    ),
+                    metadata={
+                        "program_id": program_id,
+                        "overrides_path": str(overrides_path),
+                        "needs_input_dimensions": list(needs_input),
+                        "action_category": "pm-decision-required",
+                        "owner": ["pm"],
+                        "evidence_to_gather": [
+                            "A reviewed risk level for each listed scorecard dimension",
+                            "The rationale/evidence used for each human-authored risk decision",
+                        ],
+                        "llm_support": (
+                            "Can summarize current evidence and draft a risk-decision brief, "
+                            "but cannot assign or approve the risk levels."
+                        ),
+                    },
+                ))
+            elif inspected_count == 0:
+                checks.append(DoctorCheck(
+                    label="Overrides",
+                    status="warn",
+                    detail=(
+                        "No visible risk overrides were available to inspect; "
+                        "confirmation still evaluates the configured scorecard."
+                    ),
+                    metadata={"program_id": program_id},
+                ))
+            else:
+                checks.append(DoctorCheck(
+                    label="Overrides",
+                    status="ok",
+                    detail=(
+                        f"No unresolved visible risk overrides found in {overrides_path.name}; "
+                        "confirmation still evaluates the full scorecard."
+                    ),
+                    metadata={"program_id": program_id},
+                ))
+    except (OSError, UnicodeError, yaml.YAMLError, ConfigError, RecursionError):
+        checks.append(DoctorCheck(
+            label="Overrides",
+            status="fail",
+            detail=(
+                "The selected overrides could not be read or validated. "
+                "Preserve the file, correct its access or YAML structure, and retry."
+            ),
+            metadata={"program_id": program_id},
+        ))
 
     # ------------------------------------------------------------------
     # B-3 / B-4: gather state freshness
     # ------------------------------------------------------------------
-    gather_state = load_gather_state(program_id, programs_root=programs_root)
-    if gather_state is None:
+    try:
+        gather_state = load_gather_state(program_id, programs_root=programs_root)
+    except (StateError, OSError, UnicodeError, ValueError, OverflowError, RecursionError):
         checks.append(DoctorCheck(
             label="Gather State",
             status="fail",
             detail=(
-                f"No gather state found for program '{program_id}'. "
-                f"Run: vertex gather --edition {edition_name}"
+                "Gather state could not be read or validated. "
+                "Preserve it and check access or structure before retrying."
             ),
             metadata={"program_id": program_id},
         ))
     else:
-        cadence_days = _CADENCE_DAYS.get(cadence, 7)
-        stale_threshold = timedelta(days=cadence_days * _STALE_MULTIPLIER)
-        age = now - gather_state.gathered_at.replace(tzinfo=timezone.utc) if gather_state.gathered_at.tzinfo is None else now - gather_state.gathered_at
-        if age > stale_threshold:
+        if gather_state is None:
             checks.append(DoctorCheck(
                 label="Gather State",
-                status="warn",
+                status="fail",
                 detail=(
-                    f"Gather state is {age.days}d old (stale after {stale_threshold.days}d for {cadence} cadence). "
+                    f"No gather state found for program '{program_id}'. "
                     f"Run: vertex gather --edition {edition_name}"
                 ),
-                metadata={
-                    "program_id": program_id,
-                    "gathered_at": gather_state.gathered_at.isoformat(),
-                    "age_days": age.days,
-                    "stale_threshold_days": stale_threshold.days,
-                },
+                metadata={"program_id": program_id},
             ))
         else:
-            checks.append(DoctorCheck(
-                label="Gather State",
-                status="ok",
-                detail=f"Gather state is {age.days}d old ({gather_state.gathered_at.isoformat()[:10]}).",
-                metadata={
-                    "program_id": program_id,
-                    "gathered_at": gather_state.gathered_at.isoformat(),
-                    "age_days": age.days,
-                },
-            ))
+            cadence_days = _CADENCE_DAYS.get(cadence, 7)
+            stale_threshold = timedelta(days=cadence_days * _STALE_MULTIPLIER)
+            age = now - gather_state.gathered_at.replace(tzinfo=timezone.utc) if gather_state.gathered_at.tzinfo is None else now - gather_state.gathered_at
+            if age > stale_threshold:
+                checks.append(DoctorCheck(
+                    label="Gather State",
+                    status="warn",
+                    detail=(
+                        f"Gather state is {age.days}d old (stale after {stale_threshold.days}d for {cadence} cadence). "
+                        f"Run: vertex gather --edition {edition_name}"
+                    ),
+                    metadata={
+                        "program_id": program_id,
+                        "gathered_at": gather_state.gathered_at.isoformat(),
+                        "age_days": age.days,
+                        "stale_threshold_days": stale_threshold.days,
+                    },
+                ))
+            else:
+                checks.append(DoctorCheck(
+                    label="Gather State",
+                    status="ok",
+                    detail=f"Gather state is {age.days}d old ({gather_state.gathered_at.isoformat()[:10]}).",
+                    metadata={
+                        "program_id": program_id,
+                        "gathered_at": gather_state.gathered_at.isoformat(),
+                        "age_days": age.days,
+                    },
+                ))
 
     # ------------------------------------------------------------------
     # B-5: confirmed issue exists (info-only)
     # ------------------------------------------------------------------
-    archive_index_path = archive_root / edition_name / "archive_index.json"
-    if not archive_index_path.exists():
-        checks.append(DoctorCheck(
-            label="Archive",
-            status="info",
-            detail=(
-                f"No confirmed issues yet for edition '{edition_name}' "
-                "(this is expected for the very first confirm)."
-            ),
-            metadata={"edition_name": edition_name},
-        ))
-    else:
+    try:
+        paths = resolve_edition_paths(
+            edition_name, editions_root=editions_root, programs_root=programs_root,
+        )
+        selected_programs_root = None
+        if paths is not None:
+            if (
+                paths.program_id != program_id
+                or not paths.program_dir.resolve().is_relative_to(programs_root.resolve())
+            ):
+                raise ConfigError("Archive edition does not belong to the selected program")
+            if paths.edition_path.is_relative_to(programs_root):
+                selected_programs_root = programs_root
+        if selected_programs_root is None:
+            validate_report_workspace(
+                programs_root=programs_root,
+                reports_root=programs_root.parent / "reports",
+                archive_root=archive_root,
+            )
+        archive_index_path = get_archive_root(
+            edition_name, archive_root, programs_root=selected_programs_root,
+        ) / "index.json"
+        selected_home = (
+            paths.program_dir
+            if paths is not None and (
+                selected_programs_root is not None or archive_index_path.is_relative_to(paths.program_dir)
+            )
+            else archive_root
+        )
+        if not archive_index_path.resolve().is_relative_to(selected_home.resolve()):
+            raise ConfigError("Archive index escapes its selected workspace")
         try:
-            index_payload = json.loads(archive_index_path.read_text(encoding="utf-8"))
-            confirmed_count = len(index_payload.get("issues", []))
+            index_text = archive_index_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            try:
+                archive_index_path.lstat()
+            except FileNotFoundError:
+                confirmed_count = 0
+            else:
+                raise
+        else:
+            index_payload = json.loads(index_text)
+            if (
+                not isinstance(index_payload, dict)
+                or not isinstance(index_payload.get("issues"), list)
+                or any(not isinstance(entry, dict) for entry in index_payload["issues"])
+                or any(
+                    "kind" in entry and (
+                        not isinstance(entry["kind"], str)
+                        or entry["kind"].strip().lower() not in ("confirmed", "skipped")
+                    )
+                    for entry in index_payload["issues"]
+                )
+            ):
+                raise ConfigError("Archive index has an invalid shape")
+            index = _parse_archive_index_payload(edition_name, index_payload)
+            if index.edition != edition_name:
+                raise ConfigError("Archive index edition does not match the selected edition")
+            confirmed_count = sum(entry.kind == "confirmed" for entry in index.issues)
+        if confirmed_count:
             checks.append(DoctorCheck(
                 label="Archive",
                 status="ok",
-                detail=f"{confirmed_count} confirmed issue(s) in archive for edition '{edition_name}'.",
+                detail=(
+                    f"Confirmed archive entries: {confirmed_count} in the selected archive index "
+                    f"for edition '{edition_name}'; archive integrity was not assessed."
+                ),
                 metadata={"edition_name": edition_name, "confirmed_count": confirmed_count},
             ))
-        except (json.JSONDecodeError, KeyError):
+        else:
             checks.append(DoctorCheck(
                 label="Archive",
-                status="warn",
-                detail=f"Archive index at {archive_index_path.name} could not be parsed.",
+                status="info",
+                detail=(
+                    f"No confirmed entries were found in the selected archive index for edition '{edition_name}' "
+                    "(expected before the first confirm); archive integrity was not assessed."
+                ),
                 metadata={"edition_name": edition_name},
             ))
+    except (
+        ConfigError, VertexMigrationError, OSError, UnicodeError, ValueError, TypeError,
+        KeyError, OverflowError, RecursionError, RuntimeError,
+    ):
+        checks.append(DoctorCheck(
+            label="Archive",
+            status="warn",
+            detail=(
+                "The selected archive index could not be read or assessed. "
+                "Preserve it and check its access, structure and workspace."
+            ),
+            metadata={"edition_name": edition_name},
+        ))
 
     return DoctorReport(edition=edition_name, checks=tuple(checks))
 
@@ -197,56 +305,74 @@ def run_confirm_readiness_doctor(
 
 def _latest_overrides_path(overrides_dir: Path) -> Path | None:
     """Return the overrides YAML with the highest issue number, or None."""
-    if not overrides_dir.is_dir():
-        return None
-    candidates = sorted(overrides_dir.glob("issue_*.yaml"))
-    return candidates[-1] if candidates else None
+    issue_number = _detect_latest_v2_issue_number(overrides_dir.parent)
+    return overrides_dir / f"issue_{issue_number:03d}.yaml" if issue_number is not None else None
 
 
-def _find_needs_input_dimensions(overrides_path: Path) -> list[str]:
-    """Return every risk-bearing override path still awaiting a decision.
+def _is_inspectable_override_name(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip()) and _UNSAFE_OVERRIDE_NAME.search(value) is None
 
-    Legacy overrides use a flat ``dimensions.<name>.risk`` shape while
-    program scorecards use ``scorecards.<scorecard>.<dimension>.risk``.  The
-    previous one-level scan reported the scorecard itself when its nested
-    dimension mappings did not have a direct ``risk`` key, masking the actual
-    individual PM decisions required for a safe first confirm.
-    """
-    try:
-        doc = yaml.safe_load(overrides_path.read_text(encoding="utf-8")) or {}
-    except yaml.YAMLError:
-        return []
+
+def _find_needs_input_dimensions(overrides_path: Path) -> tuple[list[str], int]:
+    """Return unresolved visible paths and the number of visible overrides checked."""
+    doc = yaml.safe_load(overrides_path.read_text(encoding="utf-8"))
+    if doc is None:
+        return [], 0
     if not isinstance(doc, dict):
-        return []
-    dimensions = doc.get("dimensions") or doc.get("scorecards") or {}
-    if not isinstance(dimensions, dict):
-        return []
+        raise ConfigError("Overrides must be a mapping")
+
+    if "scorecards" in doc:
+        raw_scorecards = doc["scorecards"]
+        if raw_scorecards is None:
+            return [], 0
+        if isinstance(raw_scorecards, dict):
+            for name, card in raw_scorecards.items():
+                if (
+                    not _is_inspectable_override_name(name)
+                    or not isinstance(card, dict)
+                    or any(not _is_inspectable_override_name(dimension_name) for dimension_name in card)
+                ):
+                    raise ConfigError("Scorecard names and dimension keys must be inspectable")
+        elif isinstance(raw_scorecards, list):
+            for card in raw_scorecards:
+                if (
+                    not isinstance(card, dict)
+                    or not _is_inspectable_override_name(card.get("name"))
+                    or not isinstance(card.get("dimensions", []), list)
+                ):
+                    raise ConfigError("Scorecard dimensions must be a list")
+                if any(
+                    not isinstance(dimension, dict)
+                    or not _is_inspectable_override_name(dimension.get("name"))
+                    for dimension in card.get("dimensions", [])
+                ):
+                    raise ConfigError("Scorecard dimensions must have inspectable names")
+        else:
+            raise ConfigError("Scorecards must be a mapping or list")
+        dimensions = (
+            (f"{card.name} / {dimension.name}", dimension)
+            for card in _parse_scorecards(raw_scorecards)
+            for dimension in card.dimensions
+        )
+    else:
+        raw_dimensions = doc.get("dimensions")
+        if raw_dimensions is None:
+            return [], 0
+        if not isinstance(raw_dimensions, dict) or any(
+            not _is_inspectable_override_name(name) for name in raw_dimensions
+        ):
+            raise ConfigError("Dimensions must have inspectable keys")
+        dimensions = (
+            (str(name), _parse_dimension_override(str(name), value))
+            for name, value in raw_dimensions.items()
+        )
+
     blocked: list[str] = []
-
-    def collect(path: str, body: Any) -> None:
-        if not isinstance(body, dict):
-            return
-        if "risk" in body:
-            risk_value = str(body.get("risk", "") or "").strip()
-            if risk_value in _NEEDS_INPUT_MARKERS:
-                blocked.append(path)
-            return
-
-        child_mappings = [
-            (str(name), value)
-            for name, value in body.items()
-            if isinstance(value, dict)
-        ]
-        if child_mappings:
-            for child_name, child_body in child_mappings:
-                collect(f"{path} / {child_name}", child_body)
-            return
-
-        # A direct dimension mapping without a risk is as unresolved as a
-        # visible `Needs Input` marker; retain that established validation
-        # behavior for malformed or incomplete flat overrides.
-        blocked.append(path)
-
-    for dim_name, dim_body in dimensions.items():
-        collect(str(dim_name), dim_body)
-    return blocked
+    inspected_count = 0
+    for path, dimension in dimensions:
+        if dimension.hide_from_scorecard:
+            continue
+        inspected_count += 1
+        if dimension.risk is None or dimension.risk == RiskLevel.UNKNOWN:
+            blocked.append(path)
+    return blocked, inspected_count

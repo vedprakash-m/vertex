@@ -2,14 +2,37 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, Literal, NoReturn
 
 import yaml
 
+from src.core.exceptions import ConfigError
 from src.core.program_paths import resolve_m365_registry_path_for_read
 
 
 _SCHEMA_VERSION_RE = re.compile(r"^\s*(\d+)\.(\d+)\s*$")
+
+
+def _raise_with_cleared_context(error: ConfigError | yaml.YAMLError) -> NoReturn:
+    try:
+        raise error from None
+    except (ConfigError, yaml.YAMLError) as safe_error:
+        safe_error.__context__ = None
+        raise
+
+
+def _raise_if_unsafe_doctor_yaml(
+    error: ConfigError, *, mode: Literal["metric-binding", "operator-gates"] = "metric-binding",
+) -> None:
+    if not isinstance(error.__cause__, yaml.YAMLError):
+        return
+    del error
+    message = (
+        "Cannot parse selected operator-gates YAML; check syntax and values."
+        if mode == "operator-gates"
+        else "Cannot parse selected metric-binding edition or program YAML; check syntax and values."
+    )
+    _raise_with_cleared_context(ConfigError(message))
 
 
 def load_yaml_document(path: Path) -> dict[str, Any]:

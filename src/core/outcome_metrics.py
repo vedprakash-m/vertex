@@ -20,12 +20,17 @@ from src.core.cockpit_models import ValueConfidence
 from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.exceptions import ConfigError
 from src.core.ledger.event_log import EventEnvelope, read_events
-from src.core.quality_gates.ai_release_audit import ReleaseTerminal
+from src.core.ledger.event_types import validate_event_payload
+from src.core.quality_gates.ai_release_audit import ApplicationReceipt, ReleaseTerminal
 
 #: ai.application_receipt.v1 receipt values that mean the AI output was
 #: genuinely consumed (as opposed to "not_applied"/"failed", where nothing
 #: reached a published artifact or written fact).
-_CONSUMED_RECEIPTS = frozenset({"rendered", "proposed", "applied"})
+_CONSUMED_RECEIPTS = frozenset({
+    ApplicationReceipt.RENDERED.value, ApplicationReceipt.PROPOSED.value, ApplicationReceipt.APPLIED.value,
+})
+_NON_CONSUMED_RECEIPTS = frozenset({ApplicationReceipt.NOT_APPLIED.value, ApplicationReceipt.FAILED.value})
+_KNOWN_RECEIPTS = _CONSUMED_RECEIPTS | _NON_CONSUMED_RECEIPTS
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,13 +94,11 @@ def compute_om2_duplicate_entities(
 ) -> OutcomeMetricResult:
     """OM-2: zero duplicate ADO entities created.
 
-    Unavailable: src/core/actuation_outbox.py is not yet wired to a live
-    ADO mutation domain (cockpit_builder.py's own _build_reliability_summary
-    docstring), so there is no real create-task traffic to compute a
-    duplicate-detection ratio from. The related-but-distinct
-    duplicate_preventions counter (real; counts
+    Unavailable: the create-task writer uses the actuation outbox, but
+    outbox statuses and prevention events do not measure duplicate ADO
+    entities. The related-but-distinct duplicate_preventions counter counts
     actuation.duplicate_prevented.v1 events from the search-before-create
-    safeguard) is surfaced separately in ReliabilityCockpitSummary -- it
+    safeguard and is surfaced separately in ReliabilityCockpitSummary; it
     measures prevention attempts, not this outcome.
     """
     try:
@@ -109,10 +112,9 @@ def compute_om2_duplicate_entities(
         unit="count",
         confidence=ValueConfidence.UNAVAILABLE,
         detail=(
-            "No live ADO mutation domain is wired through the actuation outbox yet, so there is no real "
-            f"create-task traffic to compute a duplicate-entity count from ({duplicate_preventions} "
-            "search-before-create prevention(s) recorded, a related but distinct signal). See "
-            "governance/outcome-metrics.md."
+            "Duplicate outcomes are not measured; outbox status and prevention events do not establish "
+            f"whether duplicate ADO entities were created ({duplicate_preventions} search-before-create "
+            "prevention(s) recorded, a related but distinct signal). See governance/outcome-metrics.md."
         ),
         evidence_refs=(),
     )
@@ -123,11 +125,12 @@ def compute_om4_audit_coverage(
 ) -> OutcomeMetricResult:
     """OM-4: zero unaudited AI outputs consumed.
 
-    Measured: ai.application_receipt.v1 / ai.release_decision.v1 are real,
-    SOURCE_AUTHORITATIVE ledger events BL-C3 writes on every AI consumption
-    it covers. audit_coverage = (consumed AI runs with a durable 'released'
-    terminal) / (all consumed AI runs). 1.0 == fully compliant.
-    Reuse a supplied event tuple, or read without repairing the ledger.
+    For recognized, identifiable application receipts, measure the fraction
+    of recorded consumed runs with a latest 'released' terminal. Invalid
+    receipts or matching schema-invalid release decisions make this result
+    unavailable. This does not establish complete receipt coverage or
+    authorization at the time of consumption. Reuse a supplied event tuple,
+    or read without repairing the ledger.
     """
     try:
         events = _metric_events(program_id, programs_root=programs_root, events=events)
@@ -140,7 +143,21 @@ def compute_om4_audit_coverage(
             continue
         receipt = event.payload.get("receipt")
         ai_run_id = event.payload.get("ai_run_id")
-        if receipt in _CONSUMED_RECEIPTS and isinstance(ai_run_id, str) and ai_run_id:
+        if (
+            not isinstance(receipt, str)
+            or receipt not in _KNOWN_RECEIPTS
+            or not isinstance(ai_run_id, str)
+            or not ai_run_id
+        ):
+            return OutcomeMetricResult(
+                metric_id="om4_audit_coverage",
+                value=None,
+                unit="ratio",
+                confidence=ValueConfidence.UNAVAILABLE,
+                detail="Audit coverage is unavailable because an application receipt is invalid or unrecognized.",
+                evidence_refs=(),
+            )
+        if receipt in _CONSUMED_RECEIPTS:
             consumed_run_ids.add(ai_run_id)
 
     if not consumed_run_ids:
@@ -159,21 +176,35 @@ def compute_om4_audit_coverage(
             continue
         ai_run_id = event.payload.get("ai_run_id")
         if isinstance(ai_run_id, str) and ai_run_id in consumed_run_ids:
+            try:
+                validate_event_payload(event.event_type, event.payload)
+            except ValueError:
+                return OutcomeMetricResult(
+                    metric_id="om4_audit_coverage",
+                    value=None,
+                    unit="ratio",
+                    confidence=ValueConfidence.UNAVAILABLE,
+                    detail="Audit coverage is unavailable because a matching release decision payload is invalid.",
+                    evidence_refs=(),
+                )
             latest_terminals[ai_run_id] = ReleaseTerminal(event.payload["terminal"])
     released_count = sum(latest_terminals.get(run_id) is ReleaseTerminal.RELEASED for run_id in consumed_run_ids)
     coverage = released_count / len(consumed_run_ids)
     unaudited = len(consumed_run_ids) - released_count
+    reported_coverage = round(coverage, 4)
+    if 0.0 < coverage < 1.0 and reported_coverage in (0.0, 1.0):
+        reported_coverage = coverage
     detail = (
-        f"All {len(consumed_run_ids)} consumed AI output(s) have a durable 'released' authorization."
+        f"All {len(consumed_run_ids)} AI output(s) recorded as consumed have a latest 'released' terminal."
         if unaudited == 0
         else (
-            f"{released_count}/{len(consumed_run_ids)} consumed AI outputs have a durable 'released' "
-            f"authorization ({unaudited} unaudited)."
+            f"{released_count}/{len(consumed_run_ids)} AI outputs recorded as consumed have a latest 'released' "
+            f"terminal ({unaudited} unaudited by this measure)."
         )
     )
     return OutcomeMetricResult(
         metric_id="om4_audit_coverage",
-        value=round(coverage, 4),
+        value=reported_coverage,
         unit="ratio",
         confidence=ValueConfidence.MEASURED,
         detail=detail,

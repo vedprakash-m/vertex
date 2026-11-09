@@ -93,7 +93,9 @@ def test_run_channel_preserves_discovery_degradation(
         assert outcomes[0].degrade_reason == "Hydration warning"
     elif degraded:
         assert outcomes[0].degrade_reason
-        if discovery_state in {"exception", "returned_error"}:
+        if discovery_state == "exception":
+            assert outcomes[0].degrade_reason == "ADO discovery runtime failed"
+        elif discovery_state == "returned_error":
             assert outcomes[0].degrade_reason == "Discovery unavailable"
     else:
         assert outcomes[0].degrade_reason is None

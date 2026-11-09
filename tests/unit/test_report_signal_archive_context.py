@@ -39,7 +39,9 @@ def test_shared_report_signal_readers_preserve_selected_and_legacy_archive_conte
             )), items=(), as_of=datetime(2026, 5, 24, tzinfo=timezone.utc),
             previous_snapshot=None, reports_root=tmp_path / "reports", **archive_options,
         )
-    reality.assert_called_once_with("fixture", programs_root=tmp_path / "programs", **archive_options)
+    reality.assert_called_once_with(
+        "fixture", programs_root=tmp_path / "programs", _omit_action_shim=True, **archive_options,
+    )
     assert not list(tmp_path.iterdir())
 
 

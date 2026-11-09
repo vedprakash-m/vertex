@@ -30,27 +30,29 @@ multiplied across every fact in a program, which would risk token-limit
 exhaustion and uncontrolled per-issue LLM cost. Instead this module renders a
 **minimalist per-fact summary line** (truth-level glyph + one-line title + a
 short risk/status marker), prioritises the facts the AI is most likely to
-mis-narrate (disputed, stale, low-truth), and enforces a hard token ceiling via
-``src.ai.context_budget.estimate_tokens``. No ``FactAssessment`` JSON is ever
-dumped into a prompt.
+mis-narrate (disputed, stale, low-truth), and enforces an estimated token
+ceiling via ``src.ai.context_budget.estimate_tokens``. No ``FactAssessment``
+JSON is ever dumped into a prompt.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import logging
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from src.ai.context_budget import estimate_tokens
 from src.core.program_reality import FactAssessment, ProgramReality
 from src.core.truth_levels import TruthLevel
 
+log = logging.getLogger(__name__)
+
 # Token-budget ceiling for the entire reality-substrate context payload injected
 # into one AI drafter prompt. Measured against the pre-Track-J baseline (zero
 # reality payload) — chosen to be materially smaller than a typical workstream
 # blurb's existing supplemental context so it cannot dominate the prompt, while
-# still large enough to surface every disputed/stale/low-truth fact plus a
-# representative sample of the rest. This is the hard ceiling mandated by §6.10
-# item 6 / R18; the condensation logic below never exceeds it.
+# still large enough to surface a bounded sample. This is the estimated ceiling
+# mandated by §6.10 item 6 / R18, including the rendered bullet formatting.
 REALITY_CONTEXT_MAX_TOKENS = 900
 
 # Within the token ceiling, how many facts from each "attention" bucket to show.
@@ -111,6 +113,7 @@ class RealityAssessmentSummary:
     # confirmation status it cannot verify, rather than silently omitting the
     # topic.
     empty: bool = False
+    unavailable_families: tuple[str, ...] = ()
 
 
 def _fact_title(record: Any) -> str:
@@ -161,8 +164,8 @@ def _status_marker(record: Any) -> str:
 def _fact_attention_line(family: str, assessment: FactAssessment) -> str:
     """Render one FactAssessment as a single, compact, prompt-safe line.
 
-    Format: ``{glyph} {family}: {title}{marker}{flags}`` — e.g.
-    ``◆ risk: API migration timeline slips [open, likely/high] [DISPUTED]``.
+    Format: ``{glyph} {family}:{flags} {title}{marker}`` — e.g.
+    ``◆ risk: [DISPUTED] API migration timeline slips [open, likely/high]``.
     Deliberately omits full evidence URIs and lineage metadata (token budget).
     """
     glyph = _TRUTH_GLYPH.get(assessment.truth_level, "○")
@@ -177,7 +180,7 @@ def _fact_attention_line(family: str, assessment: FactAssessment) -> str:
     if assessment.provisional_inputs:
         flags.append("PROVISIONAL")
     flag_text = f" [{'/'.join(flags)}]" if flags else ""
-    return f"{glyph} {family}: {title}{marker}{flag_text}"
+    return f"{glyph} {family}:{flag_text} {title}{marker}"
 
 
 def _prioritised_facts(
@@ -213,6 +216,7 @@ def _render_attention_lines(
     representative: tuple[FactAssessment, ...],
     *,
     max_tokens: int,
+    total_remaining: int,
 ) -> tuple[str, ...]:
     """Render attention lines, disputed/stale/low-truth first, under the token ceiling."""
     lines: list[str] = []
@@ -227,15 +231,13 @@ def _render_attention_lines(
         for assessment in bucket[:cap]:
             line = _fact_attention_line(family, assessment)
             cost = estimate_tokens(line)
+            if cost > total_remaining:
+                continue
             if cost > remaining and lines:
-                # Token ceiling reached: stop adding lines rather than overflow.
-                break
+                continue
             lines.append(line)
             remaining -= cost
-        else:
-            continue
-        # Inner break triggered (budget exhausted mid-bucket): stop all buckets.
-        break
+            total_remaining -= cost
     return tuple(lines)
 
 
@@ -265,8 +267,12 @@ def build_reality_assessment_summary(
     attention buckets (disputed > stale > low-truth > representative), and
     renders per-family attention lines until the token ceiling is hit. The
     result is safe to append to any AI drafter's supplemental context: it is
-    bounded, prioritised, and carries no raw evidence/lineage payload.
+    bounded, prioritised, and carries no raw evidence/lineage payload. A budget
+    too small for the required summary raises ``ValueError``.
     """
+    if max_tokens <= 0:
+        raise ValueError("max_tokens must be positive")
+
     # Family accessors in newsletter-relevance order. Disputed/stale facts in
     # the earlier-listed families win the shared token budget over later ones.
     accessors: tuple[tuple[str, Any], ...] = (
@@ -281,6 +287,7 @@ def build_reality_assessment_summary(
     stale_counts: dict[str, int] = {}
     low_truth_counts: dict[str, int] = {}
     all_attention: list[str] = []
+    unavailable_families: list[str] = []
 
     any_content = False
     remaining_tokens = max_tokens
@@ -288,8 +295,10 @@ def build_reality_assessment_summary(
     for accessor_name, accessor in accessors:
         try:
             assessments = accessor()
-        except Exception:
-            # A single family failing to load must not poison the whole summary.
+        except Exception as exc:
+            family = _family_key(accessor_name)
+            unavailable_families.append(family)
+            log.warning("Reality summary unavailable for %s (%s)", family, type(exc).__name__)
             continue
         if not assessments:
             continue
@@ -298,8 +307,8 @@ def build_reality_assessment_summary(
         disputed, stale, low_truth, representative = _prioritised_facts(assessments)
         family_totals[family_label] = len(assessments)
         disputed_counts[family_label] = len(disputed)
-        stale_counts[family_label] = len(stale)
-        low_truth_counts[family_label] = len(low_truth)
+        stale_counts[family_label] = sum(a.stale for a in assessments)
+        low_truth_counts[family_label] = sum(a.truth_level in _LOW_TRUTH_LEVELS for a in assessments)
         # Give each family a fair slice of the remaining budget rather than
         # letting the first family consume it all.
         family_budget = max(0, remaining_tokens // _families_remaining(accessors, accessor_name))
@@ -310,20 +319,25 @@ def build_reality_assessment_summary(
             low_truth,
             representative,
             max_tokens=family_budget,
+            total_remaining=remaining_tokens,
         )
         all_attention.extend(lines)
         remaining_tokens -= sum(estimate_tokens(line) for line in lines)
-        if remaining_tokens <= 0:
-            break
 
-    return RealityAssessmentSummary(
+    summary = RealityAssessmentSummary(
         family_totals=family_totals,
         disputed_counts=disputed_counts,
         stale_counts=stale_counts,
         low_truth_counts=low_truth_counts,
         attention_lines=tuple(all_attention),
         empty=not any_content,
+        unavailable_families=tuple(unavailable_families),
     )
+    while estimate_tokens("\n".join(f"- {line}" for line in reality_context_lines(summary))) > max_tokens:
+        if not summary.attention_lines:
+            raise ValueError("max_tokens is too small for the required reality summary")
+        summary = replace(summary, attention_lines=summary.attention_lines[:-1])
+    return summary
 
 
 def _families_remaining(accessors: tuple[tuple[str, Any], ...], current_name: str) -> int:
@@ -337,13 +351,18 @@ def _families_remaining(accessors: tuple[tuple[str, Any], ...], current_name: st
 def reality_context_lines(summary: RealityAssessmentSummary) -> tuple[str, ...]:
     """Render a RealityAssessmentSummary as supplemental-context prompt lines.
 
-    Emits a header line stating the truth/dispute/staleness denominators per
-    family (cheap, high-signal), followed by the prioritised per-fact attention
-    lines. The output is a ``tuple[str, ...]`` matching the shape every existing
-    ``_*_context_lines`` helper in ``report_ai.py`` already returns, so it drops
-    cleanly into the existing ``supplemental_context`` plumbing.
+    The first line carries the family counts and trust directive; subsequent
+    lines carry the prioritised per-fact details and any omission notice. The
+    tuple matches the existing ``supplemental_context`` plumbing.
     """
     if summary.empty:
+        if summary.unavailable_families:
+            return (
+                "Reality substrate: unavailable for "
+                + ", ".join(summary.unavailable_families)
+                + ". Do not assert that risks/decisions are confirmed or settled; "
+                "state their status as unverified.",
+            )
         # No reality content: instruct the AI not to assert confirmation status
         # it cannot verify, rather than silently ignoring the topic.
         return (
@@ -369,23 +388,22 @@ def reality_context_lines(summary: RealityAssessmentSummary) -> tuple[str, ...]:
             flags.append(f"{low_truth} low-truth")
         flag_text = f" ({'; '.join(flags)})" if flags else ""
         family_parts.append(f"{total} {family}{flag_text}")
-    lines.append("Reality substrate confidence: " + "; ".join(family_parts) + ".")
+    if summary.unavailable_families:
+        family_parts.append("unavailable: " + ", ".join(summary.unavailable_families))
+    lines.append(
+        "Reality substrate confidence: " + "; ".join(family_parts) + ". "
+        "Do not state any flagged fact as settled/confirmed in prose or assume "
+        "unlisted facts are confirmed; honor the truth-level and "
+        "DISPUTED/STALE/PROVISIONAL markers in this summary consistently "
+        "with the newsletter's structured tables."
+    )
 
     # Attention lines: the specific facts the AI must not mis-narrate.
     if summary.attention_lines:
+        if sum(summary.family_totals.values()) > len(summary.attention_lines):
+            lines.append("Some observed facts are omitted from this summary.")
         lines.append("Facts requiring care in narration (truth-level, flags):")
         lines.extend(summary.attention_lines)
     else:
-        lines.append(
-            "All reconciled facts are human-confirmed or above with no disputes or "
-            "staleness; narrate normally but do not overstate corroboration."
-        )
-
-    # Closing instruction: the core anti-contradiction directive (closes the
-    # §6.10 item 4 gap — structured tables and AI prose must not contradict).
-    lines.append(
-        "Do not state any flagged fact as settled/confirmed in prose; honor the "
-        "truth-level and DISPUTED/STALE/PROVISIONAL markers above consistently "
-        "with the newsletter's structured tables."
-    )
+        lines.append("Fact details are not included in this summary.")
     return tuple(lines)

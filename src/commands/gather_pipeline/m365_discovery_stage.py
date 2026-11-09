@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from src.commands.gather_pipeline.models import (
     M365DiscoveryStageInput,
@@ -20,6 +20,61 @@ from src.core.m365_registry_store import (
 from src.core.program_paths import resolve_m365_registry_path_for_read
 from src.core.models import WorkItem
 from src.core.models_v2 import IntegrationError, Program, Signal, Workstream
+
+
+def count_transcript_series_state(workstreams: tuple[Workstream, ...]) -> tuple[int, int]:
+    total = 0
+    missing = 0
+    for workstream in workstreams:
+        signal_sources = workstream.signal_sources
+        if signal_sources is None:
+            continue
+        for series in signal_sources.teams_meeting_series:
+            if not series.include_transcripts:
+                continue
+            total += 1
+            if not series.series_id:
+                missing += 1
+    return total, missing
+
+
+def count_chat_thread_state(workstreams: tuple[Workstream, ...]) -> tuple[int, int]:
+    total = 0
+    missing = 0
+    for workstream in workstreams:
+        signal_sources = workstream.signal_sources
+        if signal_sources is None:
+            continue
+        for chat in signal_sources.teams_chats:
+            total += 1
+            if not chat.thread_id:
+                missing += 1
+    return total, missing
+
+
+def configured_m365_artifact_ids(
+    workstreams: tuple[Workstream, ...],
+    *,
+    normalize_thread_id: Callable[[str | None], str | None],
+) -> set[str]:
+    configured_ids: set[str] = set()
+    for workstream in workstreams:
+        signal_sources = workstream.signal_sources
+        if signal_sources is None:
+            continue
+        for series in signal_sources.teams_meeting_series:
+            normalized_series_id = normalize_thread_id(series.series_id)
+            if normalized_series_id:
+                configured_ids.add(normalized_series_id)
+        for chat in signal_sources.teams_chats:
+            normalized_thread_id = normalize_thread_id(chat.thread_id)
+            if normalized_thread_id:
+                configured_ids.add(normalized_thread_id)
+        for email_thread in signal_sources.email_threads:
+            normalized_thread_id = normalize_thread_id(email_thread.thread_id)
+            if normalized_thread_id:
+                configured_ids.add(normalized_thread_id)
+    return configured_ids
 
 
 def run_m365_discovery_stage(stage_input: M365DiscoveryStageInput) -> M365DiscoveryStageResult:

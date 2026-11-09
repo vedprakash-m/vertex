@@ -1,4 +1,5 @@
-<a id="{% if ws.edit_path and 'chapter_' in ws.edit_path %}chapter-{{ ws.section_id }}{% else %}{{ ws.section_id }}{% endif %}"></a>
+{% from "partials/workstream_anchor.j2" import workstream_anchor %}
+<a id="{{ workstream_anchor(ws) }}"></a>
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0 0 16px 0; background-color:transparent;">
   <tr>
     <td style="padding:{% if executive_style | default(false) %}20px 0 8px 0{% else %}10px 0 8px 0{% endif %}; border-top:1px solid #E5E7EB;">

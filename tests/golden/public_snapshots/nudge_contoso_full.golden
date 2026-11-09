@@ -1,7 +1,7 @@
 Subject: Contoso Hygiene | ADO Hygiene Report | 2026-06-21
-To: tpm@nudge-synth.local, schedule@nudge-synth.local,
- checklist@nudge-synth.local, documentation@nudge-synth.local,
- validation@nudge-synth.local, dependency@nudge-synth.local
+To: tpm@nudge-synth.example.net, schedule@nudge-synth.example.net,
+ checklist@nudge-synth.example.net, documentation@nudge-synth.example.net,
+ validation@nudge-synth.example.net, dependency@nudge-synth.example.net
 Date: Sun, 21 Jun 2026 09:00:00 +0000
 X-Unsent: 1
 MIME-Version: 1.0
@@ -200,8 +200,8 @@ w:ellipsis;white-space:nowrap;" title=3D"Contoso schedule">
       Contoso schedule
     </td>
     <td style=3D"padding:3px 6px;white-space:nowrap;">
-        <a href=3D"mailto:schedule@nudge-synth.local" style=3D"color:#2563EB;=
-text-decoration:none;">@schedule</a>
+        <a href=3D"mailto:schedule@nudge-synth.example.net" style=3D"color:#2=
+563EB;text-decoration:none;">@schedule</a>
     </td>
     <td style=3D"padding:3px 6px;text-align:center;"><span style=3D"color:#DC=
 2626;font-weight:600;">=E2=9C=97</span></td>
@@ -230,8 +230,8 @@ w:ellipsis;white-space:nowrap;" title=3D"Contoso checklist">
       Contoso checklist
     </td>
     <td style=3D"padding:3px 6px;white-space:nowrap;">
-        <a href=3D"mailto:checklist@nudge-synth.local" style=3D"color:#2563EB=
-;text-decoration:none;">@checklist</a>
+        <a href=3D"mailto:checklist@nudge-synth.example.net" style=3D"color:#=
+2563EB;text-decoration:none;">@checklist</a>
     </td>
     <td style=3D"padding:3px 6px;text-align:center;"><span style=3D"color:#16=
 A34A;font-weight:600;">=E2=9C=93</span></td>
@@ -260,8 +260,8 @@ w:ellipsis;white-space:nowrap;" title=3D"Contoso documentation">
       Contoso documentation
     </td>
     <td style=3D"padding:3px 6px;white-space:nowrap;">
-        <a href=3D"mailto:documentation@nudge-synth.local" style=3D"color:#25=
-63EB;text-decoration:none;">@documentation</a>
+        <a href=3D"mailto:documentation@nudge-synth.example.net" style=3D"col=
+or:#2563EB;text-decoration:none;">@documentation</a>
     </td>
     <td style=3D"padding:3px 6px;text-align:center;"><span style=3D"color:#16=
 A34A;font-weight:600;">=E2=9C=93</span></td>
@@ -290,8 +290,8 @@ w:ellipsis;white-space:nowrap;" title=3D"Contoso validation">
       Contoso validation
     </td>
     <td style=3D"padding:3px 6px;white-space:nowrap;">
-        <a href=3D"mailto:validation@nudge-synth.local" style=3D"color:#2563E=
-B;text-decoration:none;">@validation</a>
+        <a href=3D"mailto:validation@nudge-synth.example.net" style=3D"color:=
+#2563EB;text-decoration:none;">@validation</a>
     </td>
     <td style=3D"padding:3px 6px;text-align:center;"><span style=3D"color:#16=
 A34A;font-weight:600;">=E2=9C=93</span></td>
@@ -320,8 +320,8 @@ w:ellipsis;white-space:nowrap;" title=3D"Contoso dependency">
       Contoso dependency
     </td>
     <td style=3D"padding:3px 6px;white-space:nowrap;">
-        <a href=3D"mailto:dependency@nudge-synth.local" style=3D"color:#2563E=
-B;text-decoration:none;">@dependency</a>
+        <a href=3D"mailto:dependency@nudge-synth.example.net" style=3D"color:=
+#2563EB;text-decoration:none;">@dependency</a>
     </td>
     <td style=3D"padding:3px 6px;text-align:center;"><span style=3D"color:#16=
 A34A;font-weight:600;">=E2=9C=93</span></td>

@@ -17,6 +17,7 @@ import typer
 from typer.core import TyperGroup
 
 from src.ai.ai_mode import AIMode, set_ai_mode
+from src.ai.intent_router import IntentRouterError, _resolve_ask_edition
 from src.ai.tiered_router import register_decision_sink
 from src.commands.actions import app as actions_app
 from src.commands.ado import app as ado_app
@@ -35,7 +36,7 @@ from src.commands.archive_signing import (
     admin_archive_signing_command,
     archive_verify_command,
 )
-from src.commands.ask import ask_command
+from src.commands.ask import _require_ask_scope, ask_command
 from src.commands.actuate import app as actuate_app
 from src.commands.auth import app as auth_app
 from src.commands.assertion import app as assertion_app
@@ -150,6 +151,22 @@ from src.core.measurement_store import TierDecisionSinkConfig, make_tier_decisio
 _REGISTERED_TIER_SINKS: set[tuple[str, str | None]] = set()
 
 
+def _ask_startup_scope(edition: object, program: object) -> tuple[str, str | None] | None:
+    try:
+        _require_ask_scope(edition, program)
+    except typer.BadParameter:
+        return None
+    if isinstance(program, str) and program.strip():
+        return program.strip(), None
+    if isinstance(edition, str):
+        try:
+            paths = _resolve_ask_edition(edition.strip(), programs_root=PROGRAMS_ROOT)
+        except IntentRouterError:
+            return None
+        return paths.program_id, edition.strip()
+    return None
+
+
 class VertexRootGroup(TyperGroup):
     def resolve_command(
         self,
@@ -164,6 +181,61 @@ class VertexRootGroup(TyperGroup):
                 ctx.meta["offline_context_command"] = True
             elif resolved[0] == "admin" and resolved[2][:2] == ["metric", "history"]:
                 ctx.meta["offline_metric_history_command"] = True
+            elif resolved[0] == "doctor" and resolved[1] is not None and any(
+                arg == "--rev-health" or arg.startswith("--rev-health=") for arg in resolved[2]
+            ):
+                flag_options = {
+                    option
+                    for parameter in resolved[1].params
+                    if isinstance(parameter, click.Option) and parameter.is_flag
+                    for option in (*parameter.opts, *parameter.secondary_opts)
+                }
+                # Normalize invalid flag assignments only for this probe; the real parser reports them.
+                probe_args = [
+                    arg.split("=", 1)[0] if arg.partition("=")[0] in flag_options else arg
+                    for arg in resolved[2]
+                ]
+                probe = resolved[1].make_context(
+                    "doctor", probe_args, parent=ctx, resilient_parsing=True,
+                    help_option_names=[], ignore_unknown_options=True, allow_extra_args=True,
+                )
+                with probe:
+                    ctx.meta["offline_rev_health_command"] = probe.params.get("rev_health") is True
+            elif resolved[0] == "migrate" and resolved[1] is not None and any(
+                arg == "--dry-run" or arg.startswith("--dry-run=") for arg in resolved[2]
+            ):
+                probe_args = [
+                    "--dry-run" if arg.startswith("--dry-run=") else arg
+                    for arg in resolved[2]
+                ]
+                probe = resolved[1].make_context(
+                    "migrate", probe_args, parent=ctx, resilient_parsing=True,
+                    help_option_names=[], ignore_unknown_options=True, allow_extra_args=True,
+                )
+                with probe:
+                    ctx.meta["offline_migrate_dry_run"] = probe.params.get("dry_run") is True
+            elif resolved[0] == "ask" and resolved[1] is not None:
+                probe_command = copy(resolved[1])
+                probe_command.params = [copy(parameter) for parameter in resolved[1].params]
+                for parameter in probe_command.params:
+                    if isinstance(parameter.type, click.Path):
+                        parameter.type = click.STRING
+                probe_command.params.append(click.Option(["--help"], is_flag=True))
+                try:
+                    probe = probe_command.make_context(
+                        "ask", list(resolved[2]), parent=ctx,
+                        help_option_names=[], ignore_unknown_options=True, allow_extra_args=True,
+                    )
+                except click.ClickException:
+                    ctx.meta["ask_skip_startup"] = True
+                else:
+                    with probe:
+                        scope = _ask_startup_scope(
+                            probe.params.get("edition"), probe.params.get("program")
+                        )
+                        ctx.meta["ask_skip_startup"] = probe.params.get("help") is True or scope is None
+                        if scope is not None:
+                            ctx.meta["ask_startup_program"], ctx.meta["ask_startup_edition"] = scope
             elif resolved[0] == "nudge" and resolved[1] is not None:
                 probe_command = copy(resolved[1])
                 probe_command.params = [copy(parameter) for parameter in resolved[1].params]
@@ -193,9 +265,13 @@ class VertexRootGroup(TyperGroup):
                 raise
             edition = ctx.params.get("edition")
             routed_args: list[str] = []
-            if isinstance(edition, str) and edition.strip() and edition.strip():
+            if isinstance(edition, str) and edition.strip():
                 routed_args.extend(["--edition", edition.strip()])
             routed_args.append(" ".join(args).strip())
+            scope = _ask_startup_scope(edition, None)
+            ctx.meta["ask_skip_startup"] = scope is None
+            if scope is not None:
+                ctx.meta["ask_startup_program"], ctx.meta["ask_startup_edition"] = scope
             return "ask", ask_group, routed_args
 
 
@@ -215,6 +291,10 @@ def main(
     no_catchup: bool = typer.Option(False, "--no-catchup", help="Skip the session-start catchup scan for this invocation."),
     edition: str = typer.Option("", "--edition", help="Default edition for natural-language routing (e.g. 'acme_weekly')."),
 ) -> None:
+    if ctx.invoked_subcommand == "ask" and ctx.meta.get("ask_skip_startup") is True:
+        if skip_issue_flag:
+            raise typer.BadParameter("--skip-issue cannot be combined with a subcommand.")
+        return
     _set_invocation_ai_mode(sys.argv[1:])
     if ctx.invoked_subcommand is not None:
         if skip_issue_flag:
@@ -249,6 +329,10 @@ def main(
             ctx.invoked_subcommand == "admin" and ctx.meta.get("offline_metric_history_command") is True
         ) or (
             ctx.invoked_subcommand == "nudge" and ctx.meta.get("offline_nudge_command") is True
+        ) or (
+            ctx.invoked_subcommand == "doctor" and ctx.meta.get("offline_rev_health_command") is True
+        ) or (
+            ctx.invoked_subcommand == "migrate" and ctx.meta.get("offline_migrate_dry_run") is True
         ):
             return
         _maybe_register_tier_decision_sink(ctx)
@@ -273,7 +357,7 @@ def _maybe_run_session_catchup(ctx: typer.Context, *, no_catchup: bool) -> None:
         return
     if not _stdout_supports_interactive_catchup():
         return
-    program_id = _resolve_program_for_session_catchup(sys.argv[1:])
+    program_id = _program_for_startup(ctx)
     if program_id is None:
         return
     maybe_catchup(
@@ -294,11 +378,15 @@ def _maybe_register_tier_decision_sink(ctx: typer.Context) -> None:
     """
     if ctx.invoked_subcommand in {None, "admin"}:
         return
-    program_id = _resolve_program_for_session_catchup(sys.argv[1:])
+    program_id = _program_for_startup(ctx)
     if program_id is None:
         return
     try:
-        edition_id = _extract_option(sys.argv[1:], "--edition")
+        if ctx.invoked_subcommand == "ask":
+            selected_edition = ctx.meta.get("ask_startup_edition")
+            edition_id = selected_edition if isinstance(selected_edition, str) else None
+        else:
+            edition_id = _extract_option(sys.argv[1:], "--edition")
         sink_key = (program_id, edition_id)
         if sink_key in _REGISTERED_TIER_SINKS:
             return
@@ -328,7 +416,7 @@ def _maybe_run_scheduled_db_maintenance(ctx: typer.Context) -> None:
     """
     if _should_skip_scheduled_db_maintenance(ctx, sys.argv[1:]):
         return
-    program_id = _resolve_program_for_session_catchup(sys.argv[1:])
+    program_id = _program_for_startup(ctx)
     if program_id is None:
         return
     try:
@@ -373,6 +461,13 @@ def _resolve_program_for_session_catchup(argv: list[str]) -> str | None:
     if resolved is None:
         return None
     return resolved.program_id
+
+
+def _program_for_startup(ctx: typer.Context) -> str | None:
+    if ctx.invoked_subcommand == "ask":
+        program = ctx.meta.get("ask_startup_program")
+        return program if isinstance(program, str) else None
+    return _resolve_program_for_session_catchup(sys.argv[1:])
 
 
 def _extract_option(argv: list[str], option_name: str) -> str | None:

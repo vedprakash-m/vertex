@@ -26,6 +26,7 @@ def test_collect_empty_program_is_honest_and_non_identifying(tmp_path: Path) -> 
     assert row["nudge"]["cooldown_state_item_count"] == 0
     assert row["nudge"]["published_eml_artifact_count"] == 0
     assert [metric["confidence"] for metric in row["outcome_metrics"]] == ["unavailable"] * 4
+    assert "duplicate outcomes are not measured" in row["outcome_metrics"][1]["detail"].lower()
 
 
 def test_capture_and_verify_round_trip(tmp_path: Path, capsys) -> None:

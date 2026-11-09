@@ -335,7 +335,7 @@ def test_generate_workstream_blurb_uses_narrative_limit_override(tmp_path: Path)
 
 
 def test_generate_workstream_blurb_runs_safety_pipeline(tmp_path: Path) -> None:
-    client = _FakeAIClient("NEW Cache warmup safeguard moved due to vendor follow-up from foo@gmail.com.")
+    client = _FakeAIClient("NEW Cache warmup safeguard moved due to vendor follow-up from foo@example.com.")
 
     result = generate_workstream_blurb(
         client=client,

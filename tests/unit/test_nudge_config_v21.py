@@ -215,8 +215,8 @@ class TestParseAudiencePolicy:
         assert "microsoft.com" in policy.allowed_domains
 
     def test_opt_out_as_frozenset(self):
-        raw = {"opt_out": ["a@m.com", "b@m.com"]}
+        raw = {"opt_out": ["a@synthetic-06.example", "b@synthetic-06.example"]}
         policy = _parse_audience_policy(raw, "nova")
         assert policy is not None
         assert isinstance(policy.opt_out, frozenset)
-        assert "a@m.com" in policy.opt_out
+        assert "a@synthetic-06.example" in policy.opt_out

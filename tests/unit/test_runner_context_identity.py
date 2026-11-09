@@ -68,6 +68,7 @@ def test_foreign_compilation_blocks_before_cache_reservation_or_provider(tmp_pat
     cache.get.assert_not_called()
     cache.put.assert_not_called()
     ledger.reserve_call.assert_not_called()
+    ledger.reserve_frontier_call.assert_not_called()
     assert len(decisions) == 1
     assert decisions[0].outcome == RouteOutcome.SKIPPED
     assert decisions[0].frontier_called is False
@@ -102,6 +103,7 @@ def test_ineligible_batch_preserves_local_hits_without_context_or_provider(tmp_p
     provider.assert_not_called()
     build.assert_not_called()
     ledger.reserve_call.assert_not_called()
+    ledger.reserve_frontier_call.assert_not_called()
     assert any(decision.outcome == RouteOutcome.FRONTIER_BLOCKED for decision in decisions)
     assert all(decision.frontier_called is False for decision in decisions)
 

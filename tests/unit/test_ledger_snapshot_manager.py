@@ -29,8 +29,8 @@ def test_snapshot_hash_is_stable_for_same_projection(tmp_path) -> None:
     )
     first = tmp_path / "first.sqlite3"
     second = tmp_path / "second.sqlite3"
-    project_events_to_sqlite("acme", (event,), projection_path=first)
-    project_events_to_sqlite("acme", (event,), projection_path=second)
+    project_events_to_sqlite("acme", (event,), projection_path=first, programs_root=tmp_path / "programs")
+    project_events_to_sqlite("acme", (event,), projection_path=second, programs_root=tmp_path / "programs")
 
     assert compute_snapshot_hash(first) == compute_snapshot_hash(second)
 
@@ -48,7 +48,7 @@ def test_write_projection_snapshot_writes_content_addressed_files_and_manifest(t
         source_ref=_deck_ref(),
     )
     projection_path = tmp_path / "current.sqlite3"
-    result = project_events_to_sqlite("acme", (event,), projection_path=projection_path)
+    result = project_events_to_sqlite("acme", (event,), projection_path=projection_path, programs_root=tmp_path / "programs")
 
     snapshot = write_projection_snapshot(
         "acme",
@@ -116,7 +116,7 @@ def test_build_baseline_hardlock_event_uses_snapshot_manifest_fields(tmp_path) -
         source_ref=_deck_ref(),
     )
     projection_path = tmp_path / "current.sqlite3"
-    result = project_events_to_sqlite("acme", (event,), projection_path=projection_path)
+    result = project_events_to_sqlite("acme", (event,), projection_path=projection_path, programs_root=tmp_path / "programs")
     snapshot = write_projection_snapshot("acme", 79, result, events=(event,), programs_root=tmp_path / "programs")
 
     hardlock = build_baseline_hardlock_event(
