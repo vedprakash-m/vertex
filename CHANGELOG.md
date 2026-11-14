@@ -4,6 +4,7 @@
 
 | Feature | Change |
 |---|---|
+| Legacy cost-reservation integrity, partial | Refuse invalid active amounts encountered during the amount-only tracked-match scan; explicit-handle settlement and out-of-scope reservations are unchanged. Retained data is not repaired, and scan performance remains unqualified. |
 | Legacy cost-reservation matching, partial | Refuse ambiguous or changed tracked matches under the settlement lock; explicit-handle settlement and the unmatched legacy-balance path are unchanged. Ownership and reconciliation remain open. |
 | Declarative chart performance | Reuse the Agg canvas between layout and saving for initial and reduced-height renders without changing the chart data or size gates. |
 | Vitality recent-touch window | Count retained revision and comment timestamps in the seven days ending at the report's ADO data-as-of time in both draft and confirmation. Selection, scoring and history completeness are unchanged. |
