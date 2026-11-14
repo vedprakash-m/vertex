@@ -8,6 +8,7 @@
 
 ## Changelog
 
+- Last updated: 2026-11-14 — Refuse ambiguous or changed amount-only cost-reservation matches before settlement; ownership and reconciliation remain unqualified (§12.5).
 - Last updated: 2026-11-14 — Reuse the Agg canvas across declarative chart layout and saving (§8.3).
 - Last updated: 2026-11-14 — Omit caught rendering exception text from built-in chart warnings while retaining table fallback and required-chart gates (§8.3).
 - Last updated: 2026-11-14 — Refuse non-finite chart-cache rows on write and load; existing report success and stale eviction behavior remain unchanged (§8.3).
@@ -4252,7 +4253,7 @@ def load_latest_released_program_synthesis(program_id: str, *, programs_root: Pa
 
 ### 12.5 Cost Management
 
-- `cost_guard.py`: Per-edition, per-run budget tracking with ceiling. **D-16 retirement status:** `cost_guard.json` is a backward-compatibility projection only; `_persist_projection` is the sole `_write_atomic_json` caller. SQLite is authoritative when retained run state exists; `load_run_states` reads the ledger before falling back to legacy JSON. Reservations, settlements and spend updates reread the run under an immediate write transaction. When no active per-call reservation matches a legacy settlement by amount, the legacy path checks the remaining untracked balance against the sum of active tracked reservations before updating it. Amount-based matching remains ambiguous for equal amounts, and the existing floating-point and tolerance behavior is not exact-arithmetic qualification.
+- `cost_guard.py`: Per-edition, per-run budget tracking with ceiling. **D-16 retirement status:** `cost_guard.json` is a backward-compatibility projection only; `_persist_projection` is the sole `_write_atomic_json` caller. SQLite is authoritative when retained run state exists; `load_run_states` reads the ledger before falling back to legacy JSON. Reservations, settlements and spend updates reread the run under an immediate write transaction. An amount-only legacy settlement that initially matches a tracked reservation rechecks inside that transaction that the same row is the only active match in the edition and run, using the existing `1e-12` tolerance; an ambiguous or changed match is refused before ledger or projection updates. Explicit-handle settlement is unchanged. When no active per-call reservation matches a legacy settlement by amount, the legacy path checks the remaining untracked balance against the sum of active tracked reservations before updating it. A single amount match does not establish call ownership or resolve tracked/untracked coexistence, and the existing floating-point and tolerance behavior is not exact-arithmetic qualification. The added matching scan holds the SQLite write lock and has not been performance-qualified.
 
   The effective checked ceiling for each guard is the smaller of its
   configured value and the retained run budget; changing one instance does
