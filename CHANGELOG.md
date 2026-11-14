@@ -4,6 +4,7 @@
 
 | Feature | Change |
 |---|---|
+| Create dispatch fencing, partial | Reject naive dispatched-row expiry before lease acquisition, check retained row and workspace leases before the create callback, retain changed successor leases on refusal, and classify expired dispatched rows using aware timestamps and the full observed workspace handle. Provider-side fencing and recovery remain unqualified. |
 | Legacy cost-reservation integrity, partial | Refuse invalid active amounts encountered during the amount-only tracked-match scan; explicit-handle settlement and out-of-scope reservations are unchanged. Retained data is not repaired, and scan performance remains unqualified. |
 | Legacy cost-reservation matching, partial | Refuse ambiguous or changed tracked matches under the settlement lock; explicit-handle settlement and the unmatched legacy-balance path are unchanged. Ownership and reconciliation remain open. |
 | Declarative chart performance | Reuse the Agg canvas between layout and saving for initial and reduced-height renders without changing the chart data or size gates. |
@@ -14,6 +15,8 @@
 | Chart-cache numeric containment, partial | Refuse non-finite float row cells on write and load; invalid cached rows trigger live gather, while successful live charts retain their existing observation behavior if cache writeback is refused. |
 | Chart policy loading, partial | Reject malformed publish-blocking and cache-TTL settings consistently across query loaders, including edition policies that golden-query selection would discard; preserve those settings for inline program queries and reject active required inline charts that golden-query selection would discard. |
 | Chart privacy and gates, partial | Scrub chart rows before rendering and caching; reject numeric values and strings with remaining digits under recognized phone/SSN columns, including nested values; withhold rows on scrub failure; and recheck matching caches. Selected cache failure diagnostics omit arbitrary exception text; invalid UTF-8 cache reads return a corrupt-cache miss without rewriting the file. Carry required-chart policy into reports, preserve degraded failures through fallbacks, and apply size checks to legacy and routed charts. Omit chart gates when no chart settings or active chart work exist; disabled charts render scrubbed tables without discovery or chart gates. Historical caches, full PII classification, other diagnostics, live cache fallback and complete chart configuration wiring remain open. |
+
+Create dispatch fencing: `src/core/actuation_outbox.py`, `src/core/ledger/durable_outbox_store.py`, `src/core/workspace_lease.py`, `specs/vertex-tech-spec.md`. Tests: `tests/unit/test_actuation_outbox.py`, `tests/unit/test_durable_outbox_store.py`, `tests/contracts/test_outbox_create_fault_matrix.py`.
 
 Legacy cost-reservation matching: `src/ai/cost_guard.py`, `specs/vertex-tech-spec.md`. Tests: `tests/unit/test_ai_cost_guard.py`.
 
