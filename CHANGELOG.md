@@ -6,7 +6,7 @@
 |---|---|
 | Context-gap deduplication | Check for a recent matching gap while holding the append lock, preventing cooperating concurrent writers from appending the same observation. |
 | Manifest-backed gather retry, partial | Deduplicate against committed signals, serialize SQLite replacement checks, allow terminal failed-run collisions to be replaced only when both timestamps lie in the gather window, and restamp eligible uncommitted facts. Custom atomic stores must accept the optional window end. Detect a committed fact superseded by an uncommitted revision rather than silently hiding it; complete crash-safe replay remains open. |
-| Draft program-context binding, partial | Record the generated program-context hash and reject changed context at confirmation when a draft carries that hash. Legacy drafts without the hash remain compatible; complete capture and atomic fencing remain open. |
+| Draft program-context binding, partial | Recheck the generated context hash inside the archive/evidence fence before writes, after configuration and evidence checks. Fence reality-reader resources for bound contexts and captured non-legacy sources; shared knowledge can serialize promotions. Legacy drafts without the hash remain unbound, and complete capture and atomic fencing remain open. |
 | Context proposal stale-value check, partial | Refuse an unhashed proposal extracted from an empty value when a nonempty target value has since appeared. Target-read and concurrent-editor guarantees remain separate. |
 | WorkIQ batch budget containment, partial | Stop lane processing after a clustered prefetch budget refusal instead of making unchecked follow-up calls. Partial-result salvage, atomic reservation and complete WorkIQ budget coverage remain open. |
 | Architecture fitness budgets | Account for the added confirmation, report and channel-registry containment code without changing fitness policy. |
@@ -20,6 +20,8 @@
 | Lockfile source privacy | Replace private package-feed URLs with verified public PyPI artifacts and align the lock with the supported Python and dependency minimums. |
 
 Modified files: `cli.py`, `src/core/context_gap_store.py`, `src/core/program_fact_store.py`, `src/core/action_tracker.py`, `src/core/decision_register.py`, `src/core/sqlite_stores.py`, `src/core/store_protocols.py`, `src/core/ncfl_apply.py`, `src/commands/gather.py`, `src/commands/gather_record_helpers.py`, `src/commands/gather_pipeline/models.py`, `src/commands/gather_pipeline/persistence_stage.py`, `src/commands/report.py`, `src/commands/report_pipeline/assemble_stage.py`, `src/commands/confirm.py`, `src/commands/enrich.py`, and `specs/vertex-tech-spec.md`.
+
+Confirmation context recheck: `src/commands/confirm.py`, `src/commands/confirm_stages/archive_transaction.py`, `specs/vertex-tech-spec.md`. Tests: `tests/unit/test_confirm_config_binding.py`, `tests/unit/test_confirm_archive_transaction.py`, `tests/unit/test_confirm_archive_evidence_recheck.py`, `tests/unit/test_confirm_archive_evidence_recheck_process.py`.
 
 Dependency security files: `pyproject.toml`, `README.md`, `.github/copilot-instructions.md`, `specs/vertex-prd.md`, and `specs/vertex-tech-spec.md`.
 
