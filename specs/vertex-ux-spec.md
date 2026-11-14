@@ -584,7 +584,7 @@ Header: `11px/600 uppercase, #6B7280, bg: #F9FAFB, border-bottom: 1px solid #E5E
 
 **Metrics table:** Labels in 600-weight `#111827`, values right-aligned `#111827`.
 
-Metrics shown: Items updated (count/total/percentage), mean days since the latest meaningful ADO update when known, leakage events, best documented item, and trend summary. Show the known/total source-age count beside the mean, or `unknown` when no ages are known; never display a policy sentinel as elapsed days. Keep the existing table layout and width.
+Metrics shown: Items updated (count/total/percentage), mean days since the latest meaningful ADO update when known, leakage events, best documented item, and trend summary. The best-documented touch count covers retained revision and comment timestamps in the inclusive seven-day window ending at the report's ADO data-as-of time; it does not establish history completeness. Show the known/total source-age count beside the mean, or `unknown` when no ages are known; never display a policy sentinel as elapsed days. Keep the existing table layout and width.
 
 ### 3.10 Provenance Footer (`partials/provenance_footer.j2`)
 

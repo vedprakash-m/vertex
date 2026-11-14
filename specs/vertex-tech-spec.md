@@ -8,6 +8,11 @@
 
 ## Changelog
 
+- Last updated: 2026-11-14 — Reuse the Agg canvas across declarative chart layout and saving (§8.3).
+- Last updated: 2026-11-14 — Omit caught rendering exception text from built-in chart warnings while retaining table fallback and required-chart gates (§8.3).
+- Last updated: 2026-11-14 — Refuse non-finite chart-cache rows on write and load; existing report success and stale eviction behavior remain unchanged (§8.3).
+- Last updated: 2026-11-14 — Allow covered test collection more time and reject partial counts from unsuccessful pytest runs (§17.2).
+- Last updated: 2026-11-13 — Plot usable Decimal chart values at float precision and refuse lossy Decimal chart-cache writes; exact Decimal caching remains open (§8.3).
 - Last updated: 2026-11-13 — Contain concurrent context-gap duplicates, selected failed-gather retries, stale unhashed proposals and draft program-context drift; full replay and capture qualification remain open (§9.16, §11.3, §13.1.1).
 - Last updated: 2026-11-12 — Honor explicitly supplied compiler token estimators and injection detectors without truth-testing them; compiler qualification remains open (§12.1b).
 - Last updated: 2026-11-12 — Keep query IDs and caught exception text out of the KPI gather warning; empty KPI and Kusto-recorder errors retain failed query-state classification (§11.3).
@@ -1373,6 +1378,8 @@ def score_vitality(
 
 **Unknown source time:** `freshness_days` is `None` when no latest meaningful ADO timestamp is known; `fetched_at` and the assessment clock are not substitutes. The grade remains red and uses the existing red freshness contribution in the composite. Summary and program-snapshot averages use known source ages only and carry a known/total count; with no known ages the average is `None`. A policy-only compatibility mapping preserves prior stale-threshold, ordering, and eligibility comparisons (including thresholds at or above 9999); it is never reported as an age or persisted. `VitalityArchiveEntry` retains its existing schema and bytes.
 
+**Best-documented touch window:** Draft and confirmation count retained revision and comment timestamps in the inclusive seven-day window ending at the report's ADO data-as-of time. Timestamps are normalized to UTC, with naive values treated as UTC. The count describes retained history and does not establish that the ADO history is complete; item selection and scoring are unchanged.
+
 **Exclusions:** Terminal states (Resolved/Closed/Removed/Done/Completed/Cut). Initial states (New/Proposed) with age <7 days. Aliases marked `exempt_from_vitality`.
 
 ### 7.2 Leakage Detector (`src/core/leakage_detector.py`)
@@ -1610,6 +1617,31 @@ class ThemeContext:
 
 Zone A. PII pre-scrub contract enforced at write time (`pii_prescrubbed=True` required). 5 MiB per-entry cap. Eviction formula: `max(ttl * 3, 168)` hours.
 
+Chart gather and report rendering scrub rows before rendering or writing cache;
+an unavailable or failing scrubber withholds the rows. Gather rechecks a
+matching fresh cache before accepting it and refreshes when scrubbing would
+change its contents. This does not inspect or erase historical cache bytes.
+Numeric values anywhere under a recognized phone or SSN column are rejected,
+including values inside nested mappings and sequences. Strings under those
+columns are also rejected if they retain digits after scrubbing; this may
+withhold benign digit-bearing labels. Other numeric columns retain their
+existing behavior.
+The store trusts its caller's pre-scrub assertion, and the scrubber's recognized
+patterns are not a complete PII classification.
+
+Decimal or non-finite float row cells are refused before a chart-cache directory
+or entry is created or replaced; exact Decimal cache storage is not implemented.
+Existing cache rows that parse as non-finite floats are refused and logged
+without changing the entry, so chart gather executes live. Chart gather preserves
+Decimal cells through sanitization so a write refusal is an explicit integration
+error; other queries continue. Live report writeback logs a refusal without
+changing the successful observation. Independent stale-cache eviction retains its
+existing behavior. Gather cache-write errors and report writeback warnings use
+fixed reasons rather than arbitrary exception text; cache-read failures and the
+gather eviction warning likewise omit exception text. Invalid UTF-8 cache files
+are treated as corrupt on read without rewriting them. This does not qualify
+other diagnostics or cache filenames as PII-safe.
+
 ```python
 def write_chart_cache(edition_root, query_id, rows, *, pii_prescrubbed: bool, captured_at, ttl_hours) -> None
 def load_chart_cache(edition_root, query_id) -> ChartCacheEntry | None
@@ -1627,16 +1659,47 @@ For a Kusto query with `chart_config` set:
 
 Internal `render_mode` values: `"chart"` for registry path, `"chart_image"` for legacy path. YAML authoring always uses `render_as: chart_image`.
 
+Caught authentication and query failures use fixed messages instead of
+provider exception text in chart-gather errors and Kusto report warnings and
+observations. Query identifiers and target metadata, degraded and publish-gate
+behavior, existing cache contents, and continuation to later queries are
+unchanged. This does not sanitize provider-internal logs, other diagnostics or
+historical records.
+
+The current report configuration path carries the publish-blocking and TTL
+fields from golden queries, but does not yet carry their chart renderer,
+configuration, attachment or empty-row settings. Cache fallback in the
+rendering decision above is not yet wired into the live report path.
+
 The declarative renderer warns and skips configured Y columns missing from
 the result. Its legend, generated trend and alt text, and series metadata
 describe only the surviving columns in their plotted order; nonempty
 authored alt text is retained. If no Y column remains, rendering fails. This
 skip policy does not establish result completeness.
 
+The built-in declarative and deployment-velocity renderers plot finite Decimal
+Y values at the existing float precision, including ordinary rounding. They
+refuse numeric Y values that are non-finite, overflow a float, or are nonzero
+Decimals that underflow to float zero, with a warning that omits the value.
+They also withhold a trend if its calculated percentage is non-finite. On live
+renderer refusal, the current caller warns and falls back to the table without
+a chart-cache write, while recording the query observation as successful. A
+required-chart failure marks the table section degraded and blocks QG-22;
+otherwise the fallback section is not degraded. This is not source validation.
+Caught rendering exceptions produce a warning with the configured query ID but
+without exception text. Other diagnostics, configured identifiers and
+historical records are not covered by this correction.
+
 An initial PNG over 102,400 bytes is refused. Above the 80,000-byte target,
 line, bar and scatter charts are retried at reduced height with the same
 configured goal lines; stacked-bar and combined charts keep the initial
-render. The final PNG is also refused if it exceeds 102,400 bytes.
+render. The declarative renderer reuses an Agg canvas for layout and saving
+on each figure. The final PNG is also refused if it exceeds 102,400 bytes.
+
+When charts are enabled, QG-20/21/22 run for explicit chart settings, active
+chart queries, rendered chart sections, or required chart failures retained
+before fallback. With no chart settings and no active chart work, they are
+omitted. Disabled charts do not run these gates.
 
 #### Placement Routing (render_stage.py)
 
@@ -3216,10 +3279,22 @@ Chart-related fields on `KustoQuery` (edition `queries` list):
 |-------|------|---------|-------------|
 | `chart_renderer_id` | `str \| None` | `None` | Registered renderer ID (`namespace::name`). Required when `chart_config` is set. |
 | `chart_config` | `dict \| None` | `None` | Renderer-specific chart configuration. Activates the registry pipeline. |
-| `chart_cache_ttl_hours` | `int` | `26` | Per-query cache TTL in hours. |
-| `chart_blocks_publish` | `bool` | `False` | When true, a missing or expired chart cache blocks publish (QG-22). |
+| `chart_cache_ttl_hours` | `int` | `26` | Positive per-query cache TTL in hours. |
+| `chart_blocks_publish` | `bool` | `False` | When true, degraded chart data with missing, invalid, future or expired capture time blocks publish (QG-22). |
 | `attachment` | `AttachmentConfig \| None` | `None` | Routes chart to a workstream or exec summary. |
 | `fallback_on_empty_rows` | `bool` | `True` | When false, empty Kusto result renders a placeholder PNG. |
+
+Golden, KPI, inline program and report query loading reject non-boolean
+`chart_blocks_publish` and non-positive or non-integer `chart_cache_ttl_hours`
+with `ConfigError`; omitted fields retain the defaults above. Inline program
+queries preserve those two values in their parsed `KustoQuery`. Effective
+inline edition query policies are validated even when golden queries replace
+them, including when Kusto or charts are disabled.
+
+When Kusto and charts are enabled, report configuration rejects an inline
+publish-blocking chart that would otherwise be replaced by selected golden
+queries. The operator must resolve that conflict; query-selection semantics
+and the remaining chart-field propagation are not changed.
 
 `AttachmentConfig` fields: `target` (workstream ID or `"exec_summary"`), `position` (`"after"`, default), `fallback` (`"standalone"`, default).
 
@@ -3227,7 +3302,7 @@ Edition-level chart settings (`KustoQuerySettings` / `ChartEditionSettings`):
 
 | Field | Description |
 |-------|-------------|
-| `chart.enabled` | Global kill switch for chart pipeline. Set `VERTEX_CHARTS=0` env var to disable at runtime. |
+| `chart.enabled` | Edition switch; `false` disables chart rendering and gates. `VERTEX_CHARTS=0` disables them globally and is read on module import. Disabled charts render scrubbed tables and skip renderer discovery. |
 | `chart.renderer_modules` | Parsed extension hook for future module-based chart registration. Current runtime behavior is built-in auto-discovery from `src/core/charts/*`; this field is not yet merged into the default registry. |
 
 
@@ -4983,7 +5058,7 @@ Each summary sub-model is built by its own Zone-A-only reader (`_build_program_s
 
 **Retained exception scan (RELO-W4.12b):** `cockpit show --program <id> --as-of <timezone-aware-ISO> --format human|json|html` and `cockpit explain --program <id> --as-of <timezone-aware-ISO> --finding <id>` inspect one retained snapshot without rebuilding, persistence, alert/adoption writes or browser launch. HTML is emitted to stdout and requires `--as-of`; fresh `show` retains human/JSON behavior and is not qualified as fully non-mutating by `--no-persist`. A pure selector orders blocked findings before warnings, preserving recorded order within each status; the terminal action glance uses at most three distinct commands from that ordering. JSON preserves stored finding order, schema and input hash. Selected-root containment, program identity and retained timestamp are checked; absent history is unavailable, while unreadable, malformed or inconsistent selected history fails without older/current fallback. The same strict history failures reach existing build/compare callers; retained build still writes `cockpit.html`. This historical scan does not enumerate current drafts, approvals, gaps or uncertain effects and does not complete the current exception inbox, remediation or adoption qualification.
 
-**Canonical count collection (RELO-W0.12e):** `scripts/derive_spec_counts.py` invokes pytest through its active `sys.executable`, not a different Python resolved from PATH. Existing collection arguments, output parsing, timeout and explicit unresolved-count failure remain unchanged.
+**Canonical count collection (RELO-W0.12e):** `scripts/derive_spec_counts.py` invokes pytest through its active `sys.executable`, not a different Python resolved from PATH. Collection has a 600-second limit to accommodate subprocess coverage and parses summary lines rather than test IDs. A nonzero pytest exit, timeout or unrecognized summary leaves the metric unresolved and makes the command fail; partial collection output is not treated as a successful count.
 
 **Bounded synthetic isolation (RELO-W0.33):** A primed report-test cache may substitute only for its recorded source owner; an explicit synthetic source must not inherit another workspace's programs, knowledge or seed overrides. Pytest configure/unconfigure hooks disable dotenv loading before collection and restore the prior loader afterward. Unconditional session-autouse repository priming is retired. Source lookup, explicit cache priming and staging reject source/cache/destination roots inside the checkout, including descendants, before copying or directory creation, with an explicit synthetic-workspace error rather than a skip or private fallback. A subprocess regression executes the actual root plugin with private read/copy guards; selected synthetic suites also pass with normal root hooks enabled. This qualifies the bounded startup/shared-helper paths, not every repository test: legacy report/triage tests that supply the checkout must migrate to genuine synthetic inputs before broader/full-suite parity is claimed. Direct private-state readers outside these helpers remain outside this qualification.
 

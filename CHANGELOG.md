@@ -1,9 +1,39 @@
 # Changelog
 
+## 2026-11-14
+
+| Feature | Change |
+|---|---|
+| Declarative chart performance | Reuse the Agg canvas between layout and saving for initial and reduced-height renders without changing the chart data or size gates. |
+| Vitality recent-touch window | Count retained revision and comment timestamps in the seven days ending at the report's ADO data-as-of time in both draft and confirmation. Selection, scoring and history completeness are unchanged. |
+| Chart rendering diagnostic privacy, partial | Omit caught exception text from built-in chart-renderer warnings while retaining query IDs, table fallback, cache behavior and required-chart blocking. Other diagnostics and historical records remain unchanged. |
+| Kusto execution diagnostic privacy, partial | Omit caught provider exception text from chart-gather errors and Kusto report warnings and observations, while retaining failure classes, target metadata, degraded behavior, publish gates and continuation. Other diagnostics, provider-internal logs and historical records remain unchanged. |
+| Spec count collection | Allow ten minutes for covered test collection, reject partial counts on unsuccessful pytest exits, and distinguish summary lines from test IDs. |
+| Chart-cache numeric containment, partial | Refuse non-finite float row cells on write and load; invalid cached rows trigger live gather, while successful live charts retain their existing observation behavior if cache writeback is refused. |
+| Chart policy loading, partial | Reject malformed publish-blocking and cache-TTL settings consistently across query loaders, including edition policies that golden-query selection would discard; preserve those settings for inline program queries and reject active required inline charts that golden-query selection would discard. |
+| Chart privacy and gates, partial | Scrub chart rows before rendering and caching; reject numeric values and strings with remaining digits under recognized phone/SSN columns, including nested values; withhold rows on scrub failure; and recheck matching caches. Selected cache failure diagnostics omit arbitrary exception text; invalid UTF-8 cache reads return a corrupt-cache miss without rewriting the file. Carry required-chart policy into reports, preserve degraded failures through fallbacks, and apply size checks to legacy and routed charts. Omit chart gates when no chart settings or active chart work exist; disabled charts render scrubbed tables without discovery or chart gates. Historical caches, full PII classification, other diagnostics, live cache fallback and complete chart configuration wiring remain open. |
+
+Declarative chart performance: `src/core/charts/declarative.py`, `specs/vertex-tech-spec.md`. Tests: `tests/unit/test_declarative_chart_builder.py`.
+
+Vitality recent-touch window: `src/core/vitality_reporting.py`, `src/core/stages/render_stage.py`, `src/commands/confirm.py`, `specs/vertex-tech-spec.md`, `specs/vertex-ux-spec.md`. Tests: `tests/unit/test_vitality_reporting.py`, `tests/unit/test_commands_confirm.py`.
+
+Chart rendering diagnostic privacy: `src/core/charts/declarative.py`, `src/core/charts/deployment_velocity.py`, `specs/vertex-tech-spec.md`. Tests: `tests/unit/test_chart_renderer_registry.py`, `tests/unit/test_kusto_rendering.py`.
+
+Kusto execution diagnostic privacy: `src/commands/chart_gather.py`, `src/core/kusto_rendering.py`, `specs/vertex-tech-spec.md`. Tests: `tests/unit/test_chart_gather.py`, `tests/unit/test_kusto_rendering.py`.
+
+Spec count collection: `scripts/derive_spec_counts.py`, `specs/vertex-tech-spec.md`. Tests: `tests/unit/test_derive_spec_counts.py`.
+
+Chart-cache numeric containment: `src/core/chart_cache_store.py`, `specs/vertex-tech-spec.md`. Tests: `tests/unit/test_chart_cache_store.py`, `tests/unit/test_chart_gather.py`, `tests/unit/test_kusto_rendering.py`.
+
+Chart policy loading: `src/core/chart_policy.py`, `src/core/config_loader.py`, `src/core/config_loader_v2.py`, `src/core/edition_resolver.py`, `src/core/knowledge_store.py`, `src/core/kusto_query_loader.py`, `specs/vertex-tech-spec.md`. Tests: `tests/unit/test_config_loader.py`, `tests/unit/test_kusto_query_loader.py`.
+
+Chart privacy and gates: `src/commands/chart_gather.py`, `src/commands/report.py`, `src/commands/report_context.py`, `src/core/chart_cache_store.py`, `src/core/knowledge_store.py`, `src/core/config_loader_v2.py`, `src/core/config_loader.py`, `src/core/kusto_rendering.py`, `src/core/quality_gates/chart.py`, `src/core/stages/render_stage.py`, `src/core/stages/validation_stage.py`, `scripts/verify_spec_citations.py`, `specs/vertex-tech-spec.md`. Tests: `tests/unit/test_chart_cache_store.py`, `tests/unit/test_chart_gather.py`, `tests/unit/test_config_loader.py`, `tests/unit/test_kusto_rendering.py`, `tests/unit/test_chart_quality_gates.py`, `tests/unit/test_pipeline_stages.py`.
+
 ## 2026-11-13
 
 | Feature | Change |
 |---|---|
+| Chart numeric containment, partial | Render usable Decimal values at float precision, refuse non-finite or float-unrepresentable numeric values, and withhold non-finite trends in the built-in renderers. Refuse lossy Decimal cache writes; gather reports the failure and live report writeback logs it. On renderer refusal, the live caller still falls back to a table and records the query as successful; this is not source validation or report degradation. Exact Decimal caching remains open. |
 | Context-gap deduplication | Check for a recent matching gap while holding the append lock, preventing cooperating concurrent writers from appending the same observation. |
 | Manifest-backed gather retry, partial | Deduplicate against committed signals, serialize SQLite replacement checks, allow terminal failed-run collisions to be replaced only when both timestamps lie in the gather window, and restamp eligible uncommitted facts. Custom atomic stores must accept the optional window end. Detect a committed fact superseded by an uncommitted revision rather than silently hiding it; complete crash-safe replay remains open. |
 | Draft program-context binding, partial | Recheck the generated context hash inside the archive/evidence fence before writes, after configuration and evidence checks. Fence reality-reader resources for bound contexts and captured non-legacy sources; shared knowledge can serialize promotions. Legacy drafts without the hash remain unbound, and complete capture and atomic fencing remain open. |
@@ -32,6 +62,8 @@ Example privacy files: `src/core/evidence_models.py`, `tests/unit/test_ai_blurb_
 CI files: `.github/workflows/ci.yml`, `tests/contracts/test_ci_lane_separation.py`.
 
 Manifest verification files: `src/core/context_compiler.py`, `specs/vertex-tech-spec.md`. Tests: `tests/unit/test_context_compiler.py`.
+
+Chart numeric containment files: `src/core/charts/declarative.py`, `src/core/charts/deployment_velocity.py`, `src/core/chart_cache_store.py`, `src/commands/chart_gather.py`, `specs/vertex-tech-spec.md`. Tests: `tests/unit/test_chart_renderer_registry.py`, `tests/unit/test_chart_cache_store.py`, `tests/unit/test_chart_gather.py`, `tests/unit/test_kusto_rendering.py`.
 
 CLI reference and lockfile: `scripts/generate_cli_reference.py`, `uv.lock`. Tests: `tests/contracts/test_cli_reference_drift_contract.py`.
 
