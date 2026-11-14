@@ -10,6 +10,7 @@ from io import BytesIO
 import re
 from typing import Any, Callable, Mapping
 
+from src.core.chart_cache_store import chart_cache_write_failure_reason
 from src.core.config_loader import KustoQuerySettings, KustoSettings
 from src.core.exceptions import AuthError, QueryError
 from src.core.kusto_result_limits import admit_kusto_rows
@@ -35,6 +36,11 @@ ChartCacheLoader = Callable[[str, str], Any]  # (program_id, query_id) -> ChartC
 
 KustoQueryExecutor = Callable[[KustoQuerySettings], list[dict[str, Any]]]
 ChartBuilder = Callable[[KustoQuerySettings, tuple[dict[str, Any], ...]], str | None]
+ChartRowsScrubber = Callable[[list[dict[str, Any]]], list[dict[str, Any]]]
+
+
+def chart_pipeline_enabled(edition_enabled: bool = True) -> bool:
+    return _VERTEX_CHARTS_ENABLED and edition_enabled
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +64,8 @@ def build_kusto_sections(
     chart_registry: Any = None,  # ChartRendererRegistry | None
     chart_cache_loader: ChartCacheLoader | None = None,
     chart_builder: ChartBuilder | None = None,
+    chart_rows_scrubber: ChartRowsScrubber | None = None,
+    charts_enabled: bool = True,
     observed_at: datetime | None = None,
     template_context: KustoTemplateContext | None = None,
     programs_root: Any = None,  # Path | None — for chart cache writeback
@@ -71,13 +79,14 @@ def build_kusto_sections(
     warnings: list[str] = []
     build_chart = chart_builder or _build_chart_image_data_url
     observed_time = observed_at or datetime.now(timezone.utc)
+    charts_active = chart_pipeline_enabled(charts_enabled)
 
     for configured_query in settings.queries:
         query = render_kusto_query(configured_query, context=template_context) if template_context is not None else configured_query
 
         # Chart pipeline: determine if this is a registry-path chart
         is_registry_chart = (
-            _VERTEX_CHARTS_ENABLED
+            charts_active
             and query.render_as == "chart_image"
             and getattr(query, "chart_config", None) is not None
         )
@@ -122,17 +131,23 @@ def build_kusto_sections(
                     execution_state="degraded",
                     observed_at=observed_time,
                     last_successful_fetch_at=None,
-                    message=degraded.message if degraded is not None else str(exc),
+                    message=degraded.message if degraded is not None else (
+                        "Kusto authentication failed." if is_auth else "Kusto query failed."
+                    ),
                 )
             )
             warnings.append(
                 f"Kusto auth failed for {query.id}. Run `vertex admin auth setup` to restore query execution."
                 if is_auth else
-                f"Kusto query {query.id} degraded: {exc}"
+                f"Kusto query {query.id} degraded; live data is unavailable."
             )
             continue
 
         if not rows:
+            if query.render_as == "chart_image" and not charts_active:
+                sections.append(_build_table_section(query, (), message=None, degraded=False))
+                observations.append(_make_observation(query, observed_time, "success", None))
+                continue
             # Zero rows from live query is a valid data state — spec §5.5.
             # Cache is NOT consulted. Render "No data available" placeholder.
             _handle_zero_rows(query, observed_time, sections, observations)
@@ -156,6 +171,35 @@ def build_kusto_sections(
             continue
 
         if query.render_as == "chart_image":
+            try:
+                if chart_rows_scrubber is None:
+                    raise RuntimeError("Chart privacy scrubber is unavailable.")
+                rows = tuple(chart_rows_scrubber(list(rows)))
+            except Exception:
+                logger.error("Kusto chart privacy scrubbing failed for %s", query.id)
+                message = "Chart data could not be privacy-scrubbed; no chart data was rendered."
+                sections.append(_build_table_section(query, (), message=message, degraded=True))
+                observations.append(
+                    TelemetryObservation(
+                        query_id=query.id,
+                        cluster=query.cluster,
+                        database=query.database,
+                        confidence=query.confidence,
+                        kusto_section_validates_slice=query.kusto_section_validates_slice,
+                        execution_state="degraded",
+                        observed_at=observed_time,
+                        last_successful_fetch_at=None,
+                        message=message,
+                    )
+                )
+                warnings.append(f"Kusto chart privacy scrubbing failed for {query.id}.")
+                continue
+
+            if not charts_active:
+                sections.append(_build_table_section(query, rows, message=None, degraded=False))
+                observations.append(_make_observation(query, observed_time, "success", None))
+                continue
+
             # Determine path: registry (chart_config) or legacy
             if is_registry_chart:
                 section, obs = _build_registry_chart_section(
@@ -173,6 +217,17 @@ def build_kusto_sections(
             else:
                 # Legacy path
                 image_data_url = build_chart(query, rows)
+                png_size = 0
+                if image_data_url is not None:
+                    prefix = "data:image/png;base64,"
+                    try:
+                        if not isinstance(image_data_url, str) or not image_data_url.startswith(prefix):
+                            raise ValueError("Chart image must be an inline PNG.")
+                        png_size = len(base64.b64decode(image_data_url[len(prefix):], validate=True))
+                        if png_size == 0:
+                            raise ValueError("Chart image must not be empty.")
+                    except (TypeError, ValueError):
+                        image_data_url = None
                 if image_data_url is not None:
                     sections.append(
                         KustoSectionData(
@@ -190,11 +245,19 @@ def build_kusto_sections(
                             caveats=query.caveats,
                             message=None,
                             is_degraded=False,
+                            chart_png_size_bytes=png_size,
                         )
                     )
                     observations.append(_make_observation(query, observed_time, "success", None))
                     continue
                 warnings.append(f"Kusto chart rendering fell back to table for {query.id}.")
+
+            if query.chart_blocks_publish:
+                sections.append(_build_table_section(
+                    query, rows, message="Chart rendering failed; showing a table instead.", degraded=True,
+                ))
+                observations.append(_make_observation(query, observed_time, "success", None))
+                continue
 
         sections.append(_build_table_section(query, rows, message=None, degraded=False))
         observations.append(
@@ -270,28 +333,15 @@ def _build_table_section(
         caveats=query.caveats,
         message=message,
         is_degraded=degraded,
+        chart_blocks_publish=degraded and query.render_as == "chart_image" and query.chart_blocks_publish,
+        chart_cache_ttl_hours=query.chart_cache_ttl_hours,
     )
 
 
 def _build_degraded_section(query: KustoQuerySettings, *, message: str) -> KustoSectionData | None:
-    if not query.reference_url:
+    if not query.reference_url and not (query.render_as == "chart_image" and query.chart_blocks_publish):
         return None
-    return KustoSectionData(
-        section_id=_section_id(query.id),
-        title=query.section,
-        query_id=query.id,
-        render_mode="table",
-        source_label=_source_label(query),
-        confidence=query.confidence,
-        columns=(),
-        rows=(),
-        metrics=(),
-        image_data_url=None,
-        reference_url=query.reference_url,
-        caveats=query.caveats,
-        message=message,
-        is_degraded=True,
-    )
+    return _build_table_section(query, (), message=message, degraded=True)
 
 
 def _table_rows(rows: tuple[dict[str, Any], ...]) -> tuple[tuple[KustoTableCell, ...], ...]:
@@ -647,4 +697,7 @@ def _write_back_chart_cache(query, rows, observed_time, chart_cache_loader, prog
             query_contract_hash=chart_cache_contract_identity(query),
         )
     except Exception as exc:
-        logger.warning("_write_back_chart_cache: failed to write cache for %s/%s — %s", program_id, query.id, exc)
+        logger.warning(
+            "_write_back_chart_cache: failed to write cache for %s/%s — %s",
+            program_id, query.id, chart_cache_write_failure_reason(exc),
+        )

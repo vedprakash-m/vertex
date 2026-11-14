@@ -183,6 +183,161 @@ queries:
 
 
 class ConfigLoaderTests(unittest.TestCase):
+    def test_required_inline_chart_cannot_be_replaced_by_golden_queries(self) -> None:
+        for source in ("program", "edition"):
+            for query_id in ("required-inline-chart", "velocity-p50"):
+                with self.subTest(source=source, query_id=query_id), TemporaryDirectory() as temp_dir:
+                    editions_root, programs_root = _write_demo_v2_layout(Path(temp_dir))
+                    path = (
+                        programs_root / "demo" / "program.yaml"
+                        if source == "program" else editions_root / "demo_weekly.yaml"
+                    )
+                    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+                    document.setdefault("kusto", {})["queries"] = [{
+                        "id": query_id, "cluster": "https://example.test", "database": "synthetic",
+                        "kql": "print value=1", "section": "Required chart", "render_as": "chart_image",
+                        "confidence": "high", "chart_blocks_publish": True,
+                    }]
+                    path.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+                    with self.assertRaisesRegex(ConfigError, "required inline chart.*golden"):
+                        load_report_config(
+                            "demo_weekly", editions_root=editions_root, programs_root=programs_root,
+                        )
+
+    def test_invalid_edition_chart_policy_is_not_hidden_by_golden_queries(self) -> None:
+        for field, value in (
+            ("chart_blocks_publish", "true"),
+            ("chart_blocks_publish", 1),
+            ("chart_cache_ttl_hours", -1),
+            ("chart_cache_ttl_hours", True),
+        ):
+            for mode in ("enabled", "charts_disabled", "kusto_disabled"):
+                with self.subTest(field=field, value=value, mode=mode), TemporaryDirectory() as temp_dir:
+                    editions_root, programs_root = _write_demo_v2_layout(Path(temp_dir))
+                    path = editions_root / "demo_weekly.yaml"
+                    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+                    document["kusto"] = {"queries": [{
+                        "id": "inline-chart", "cluster": "https://example.test", "database": "synthetic",
+                        "kql": "print value=1", "section": "Inline chart", "render_as": "chart_image",
+                        "confidence": "high", field: value,
+                    }]}
+                    if mode == "charts_disabled":
+                        document["chart"] = {"enabled": False}
+                    elif mode == "kusto_disabled":
+                        document["kusto"]["enabled"] = False
+                    path.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+                    with self.assertRaisesRegex(ConfigError, field):
+                        load_report_config(
+                            "demo_weekly", editions_root=editions_root, programs_root=programs_root,
+                        )
+
+    def test_required_inline_chart_selection_compatibility(self) -> None:
+        for case in ("no_golden", "optional", "edition_disabled", "global_disabled", "kusto_disabled"):
+            with self.subTest(case=case), TemporaryDirectory() as temp_dir:
+                editions_root, programs_root = _write_demo_v2_layout(Path(temp_dir))
+                program_path = programs_root / "demo" / "program.yaml"
+                document = yaml.safe_load(program_path.read_text(encoding="utf-8"))
+                document["kusto"]["enabled"] = case != "kusto_disabled"
+                document["kusto"]["queries"] = [{
+                    "id": "inline-chart", "cluster": "https://example.test", "database": "synthetic",
+                    "kql": "print value=1", "section": "Inline chart", "render_as": "chart_image",
+                    "confidence": "high", "chart_blocks_publish": case != "optional",
+                }]
+                program_path.write_text(yaml.safe_dump(document), encoding="utf-8")
+                if case == "no_golden":
+                    query_path = programs_root / "demo" / "knowledge" / "golden_queries.yaml"
+                    query_path.write_text("schema_version: '1.0'\nqueries: []\n", encoding="utf-8")
+                elif case == "edition_disabled":
+                    edition_path = editions_root / "demo_weekly.yaml"
+                    edition = yaml.safe_load(edition_path.read_text(encoding="utf-8"))
+                    edition["chart"] = {"enabled": False}
+                    edition_path.write_text(yaml.safe_dump(edition), encoding="utf-8")
+
+                with patch("src.core.kusto_rendering._VERTEX_CHARTS_ENABLED", case != "global_disabled"):
+                    config = load_report_config(
+                        "demo_weekly", editions_root=editions_root, programs_root=programs_root,
+                    )
+
+                expected_query = "inline-chart" if case == "no_golden" else "velocity-p50"
+                self.assertEqual(config.kusto.queries[0].id, expected_query)
+                if case == "no_golden":
+                    self.assertTrue(config.kusto.queries[0].chart_blocks_publish)
+
+    def test_chart_publish_policy_reaches_report_config(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            editions_root, programs_root = _write_demo_v2_layout(Path(temp_dir))
+            query_path = programs_root / "demo" / "knowledge" / "golden_queries.yaml"
+            document = yaml.safe_load(query_path.read_text(encoding="utf-8"))
+            document["queries"][0].update(
+                render_as="chart_image", chart_blocks_publish=True, chart_cache_ttl_hours=7,
+            )
+            query_path.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+            config = load_report_config("demo_weekly", editions_root=editions_root, programs_root=programs_root)
+
+            self.assertTrue(config.kusto.queries[0].chart_blocks_publish)
+            self.assertEqual(config.kusto.queries[0].chart_cache_ttl_hours, 7)
+
+    def test_invalid_chart_publish_policy_is_rejected(self) -> None:
+        for field, value in (
+            ("chart_blocks_publish", "invalid"),
+            ("chart_cache_ttl_hours", -1),
+            ("chart_cache_ttl_hours", True),
+        ):
+            with self.subTest(field=field, value=value), TemporaryDirectory() as temp_dir:
+                editions_root, programs_root = _write_demo_v2_layout(Path(temp_dir))
+                query_path = programs_root / "demo" / "knowledge" / "golden_queries.yaml"
+                document = yaml.safe_load(query_path.read_text(encoding="utf-8"))
+                document["queries"][0][field] = value
+                query_path.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+                with self.assertRaises(ConfigError):
+                    load_report_config("demo_weekly", editions_root=editions_root, programs_root=programs_root)
+
+    def test_edition_chart_disable_reaches_report_config(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            editions_root, programs_root = _write_demo_v2_layout(
+                Path(temp_dir), edition_extra="chart:\n  enabled: false",
+            )
+
+            config = load_report_config("demo_weekly", editions_root=editions_root, programs_root=programs_root)
+
+            self.assertIsNotNone(config.charts)
+            assert config.charts is not None
+            self.assertFalse(config.charts.enabled)
+
+    def test_edition_chart_renderer_modules_are_parsed(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            editions_root, programs_root = _write_demo_v2_layout(
+                Path(temp_dir), edition_extra="chart:\n  renderer_modules:\n    - programs.synthetic.charts.renderers",
+            )
+
+            config = load_report_config("demo_weekly", editions_root=editions_root, programs_root=programs_root)
+
+            self.assertIsNotNone(config.charts)
+            assert config.charts is not None
+            self.assertTrue(config.charts.enabled)
+            self.assertEqual(config.charts.renderer_modules[0].module_name, "programs.synthetic.charts.renderers")
+
+    def test_invalid_edition_chart_switch_is_rejected(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            editions_root, programs_root = _write_demo_v2_layout(
+                Path(temp_dir), edition_extra="chart:\n  enabled: invalid",
+            )
+            with self.assertRaises(ConfigError):
+                load_report_config("demo_weekly", editions_root=editions_root, programs_root=programs_root)
+
+    def test_invalid_edition_chart_modules_are_rejected(self) -> None:
+        for value in ("invalid", "[123]", "['']"):
+            with self.subTest(value=value), TemporaryDirectory() as temp_dir:
+                editions_root, programs_root = _write_demo_v2_layout(
+                    Path(temp_dir), edition_extra=f"chart:\n  renderer_modules: {value}",
+                )
+                with self.assertRaises(ConfigError):
+                    load_report_config("demo_weekly", editions_root=editions_root, programs_root=programs_root)
+
     def test_declared_kusto_limits_reach_resolved_and_report_config(self) -> None:
         from src.core.kusto_result_limits import KustoResultLimits
 

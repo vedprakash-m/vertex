@@ -8,9 +8,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
@@ -28,6 +30,20 @@ MAX_CACHE_ENTRY_BYTES = 5 * 1024 * 1024  # 5 MiB
 
 # Allowed Kusto column types for cache storage
 _ALLOWED_COLUMN_TYPES = (int, float, str, bool)
+
+
+def chart_cache_write_failure_reason(error: Exception) -> str:
+    """Return a content-free reason for a chart cache write failure."""
+    if type(error) is ValueError and len(error.args) == 1 and type(error.args[0]) is str:
+        for reason in (
+            "Decimal values cannot be stored losslessly in chart cache.",
+            "non-finite float values cannot be stored in chart cache.",
+        ):
+            if error.args[0] == reason:
+                return reason
+    if isinstance(error, OSError):
+        return "Filesystem operation failed."
+    return "An unexpected error occurred."
 
 
 def chart_cache_contract_identity(query: KustoQuery | KustoQuerySettings) -> str:
@@ -65,15 +81,17 @@ def _sanitize_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for row in rows:
         clean: dict[str, Any] = {}
         for key, value in row.items():
+            if isinstance(value, Decimal):
+                raise ValueError("Decimal values cannot be stored losslessly in chart cache.")
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ValueError("non-finite float values cannot be stored in chart cache.")
             if _is_allowed_type(value):
                 clean[key] = value
             elif isinstance(value, datetime):
                 clean[key] = _serialize_datetime(value)
             else:
                 logger.warning(
-                    "chart_cache_store: dropping column '%s' of type %s — not JSON-safe",
-                    key,
-                    type(value).__name__,
+                    "chart_cache_store: dropping a column with a non-JSON-safe value",
                 )
         sanitized.append(clean)
     return sanitized
@@ -104,12 +122,11 @@ def write_chart_cache(
             "call PII scrubber in gather pipeline before writing"
         )
     query_contract_hash = _optional_query_contract_hash(query_contract_hash)
+    sanitized_rows = _sanitize_rows(rows)
 
     cache_dir = programs_root / program_id / "chart_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_path = cache_dir / f"{query_id}.json"
-
-    sanitized_rows = _sanitize_rows(rows)
 
     entry = {
         "schema_version": "1",
@@ -122,7 +139,7 @@ def write_chart_cache(
         "query_contract_hash": query_contract_hash,
     }
 
-    serialized = json.dumps(entry, indent=2).encode("utf-8")
+    serialized = json.dumps(entry, indent=2, allow_nan=False).encode("utf-8")
     if len(serialized) > MAX_CACHE_ENTRY_BYTES:
         logger.error(
             "chart_cache_store: cache entry for %s/%s exceeds %d bytes — skipping write",
@@ -163,12 +180,18 @@ def load_chart_cache(
     try:
         raw = cache_path.read_text(encoding="utf-8")
         data = json.loads(raw)
-    except (json.JSONDecodeError, OSError) as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError):
         logger.warning(
-            "chart_cache_store: corrupt cache for %s/%s — %s",
+            "chart_cache_store: corrupt cache for %s/%s",
             program_id,
             query_id,
-            exc,
+        )
+        return None
+    except OSError:
+        logger.warning(
+            "chart_cache_store: cache read failed for %s/%s",
+            program_id,
+            query_id,
         )
         return None
 
@@ -208,10 +231,10 @@ def load_chart_cache(
         row_count = _required_int(data.get("row_count"), field_name="row_count")
         schema_version = _required_string(data.get("schema_version"), field_name="schema_version")
         if schema_version != "1":
-            raise ValueError(f"unsupported schema_version {schema_version!r}")
+            raise ValueError("unsupported schema_version")
         rows = _required_row_tuple(rows_raw)
         if row_count != len(rows):
-            raise ValueError(f"row_count {row_count} does not match rows length {len(rows)}")
+            raise ValueError("row_count does not match rows length")
     except (TypeError, ValueError) as exc:
         logger.warning(
             "chart_cache_store: invalid cache metadata in %s/%s — %s",
@@ -333,7 +356,9 @@ def _required_row_tuple(value: list[Any]) -> tuple[dict[str, Any], ...]:
             if not isinstance(key, str):
                 raise TypeError("rows keys must be strings")
             if not _is_allowed_type(cell):
-                raise TypeError(f"rows values for key {key!r} must be JSON-safe scalars")
+                raise TypeError("rows values must be JSON-safe scalars")
+            if isinstance(cell, float) and not math.isfinite(cell):
+                raise ValueError("non-finite float values cannot be stored in chart cache.")
             clean_row[key] = cell
         rows.append(clean_row)
     return tuple(rows)

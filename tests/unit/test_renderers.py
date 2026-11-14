@@ -1460,6 +1460,7 @@ def test_chart_alt_missing_image_does_not_create_image(placement, tmp_path, repo
     ],
 )
 def test_chart_alt_real_registry_result_reaches_html(placement, title, tmp_path, repo_root, monkeypatch):
+    from src.commands.chart_gather import _scrub_pii_rows
     from src.core.chart_renderer_registry import ChartRendererRegistry
     from src.core.config_loader import KustoQuerySettings, KustoSettings
     from src.core.kusto_rendering import build_kusto_sections
@@ -1478,6 +1479,7 @@ def test_chart_alt_real_registry_result_reaches_html(placement, title, tmp_path,
     sections, observations, warnings = build_kusto_sections(
         KustoSettings(enabled=True, queries=(query,)), lambda _: rows,
         chart_registry=ChartRendererRegistry(), observed_at=observed,
+        chart_rows_scrubber=_scrub_pii_rows,
     )
     assert warnings == ()
     assert observations[0].execution_state == "success"

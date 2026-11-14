@@ -46,6 +46,59 @@ def test_declared_result_limits_survive_query_loading(source: str, valid: bool, 
         assert _apply_gather_query_state(query, {"last_cycle_succeeded": False}).result_limits == query.result_limits
 
 
+def _load_chart_policy_query(source: str, entry: dict[str, object], tmp_path: Path) -> KustoQuery:
+    if source == "inline":
+        from src.core.edition_resolver import _parse_kusto
+
+        config = _parse_kusto({"queries": [entry]})
+        assert config is not None
+        return config.queries[0]
+    program_dir = tmp_path / "synthetic"
+    knowledge_dir = program_dir / "knowledge"
+    knowledge_dir.mkdir(parents=True)
+    path = program_dir / "kpis.yaml" if source == "kpi" else knowledge_dir / "golden_queries.yaml"
+    collection = "kpis" if source == "kpi" else "queries"
+    path.write_text(json.dumps({collection: [entry]}), encoding="utf-8")
+    return load_kpi_queries("synthetic", programs_root=tmp_path)[0]
+
+
+@pytest.mark.parametrize("source", ["kpi", "golden", "inline"])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("chart_blocks_publish", "false"),
+        ("chart_blocks_publish", 0),
+        ("chart_blocks_publish", None),
+        ("chart_cache_ttl_hours", 0),
+        ("chart_cache_ttl_hours", -1),
+        ("chart_cache_ttl_hours", True),
+        ("chart_cache_ttl_hours", "26"),
+        ("chart_cache_ttl_hours", None),
+    ],
+)
+def test_query_loading_rejects_invalid_chart_policy(
+    source: str, field: str, value: object, tmp_path: Path,
+) -> None:
+    with pytest.raises(ConfigError, match=field):
+        _load_chart_policy_query(source, {"id": "chart", field: value}, tmp_path)
+
+
+@pytest.mark.parametrize("source", ["kpi", "golden", "inline"])
+@pytest.mark.parametrize(
+    ("policy", "expected"),
+    [
+        ({}, (False, 26)),
+        ({"chart_blocks_publish": False, "chart_cache_ttl_hours": 1}, (False, 1)),
+        ({"chart_blocks_publish": True, "chart_cache_ttl_hours": 7}, (True, 7)),
+    ],
+)
+def test_query_loading_preserves_valid_chart_policy(
+    source: str, policy: dict[str, object], expected: tuple[bool, int], tmp_path: Path,
+) -> None:
+    query = _load_chart_policy_query(source, {"id": "chart", **policy}, tmp_path)
+    assert (query.chart_blocks_publish, query.chart_cache_ttl_hours) == expected
+
+
 def test_changed_limits_invalidate_history_without_changing_legacy_identity() -> None:
     from dataclasses import replace
     import hashlib

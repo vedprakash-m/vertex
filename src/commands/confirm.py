@@ -1310,6 +1310,7 @@ def _build_confirm_artifacts(
         if vitality_settings.newsletter_aggregate:
             ado_vitality = build_vitality_section(
                 vitality_snapshot,
+                as_of=data_as_of,
                 current_issue_number=issue_number,
                 history_entries=read_vitality_history(edition_name, archive_root=archive_root),
                 items=items,

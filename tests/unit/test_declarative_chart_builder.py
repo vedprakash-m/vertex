@@ -65,6 +65,39 @@ def test_goal_lines_in_config():
     assert result is not None
 
 
+@pytest.mark.parametrize("reduced", [False, True])
+def test_layout_and_save_reuse_agg_canvas(reduced, monkeypatch):
+    from importlib import import_module
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    declarative = import_module("src.core.charts.declarative")
+    layout = Figure.tight_layout
+    save = Figure.savefig
+    canvases = []
+
+    def capture_layout(figure, *args, **kwargs):
+        canvases.append(("layout", figure.canvas))
+        return layout(figure, *args, **kwargs)
+
+    def capture_save(figure, *args, **kwargs):
+        canvases.append(("save", figure.canvas))
+        return save(figure, *args, **kwargs)
+
+    monkeypatch.setattr(Figure, "tight_layout", capture_layout)
+    monkeypatch.setattr(Figure, "savefig", capture_save)
+    if reduced:
+        monkeypatch.setattr(declarative, "PNG_TARGET_BYTES", 1)
+
+    result = _build("line")
+
+    assert result is not None
+    assert [operation for operation, _ in canvases] == ["layout", "save"] * (2 if reduced else 1)
+    for index in range(0, len(canvases), 2):
+        assert isinstance(canvases[index][1], FigureCanvasAgg)
+        assert canvases[index][1] is canvases[index + 1][1]
+
+
 @pytest.mark.parametrize("chart_type", ["line", "bar", "stacked_bar", "scatter", "combined"])
 @pytest.mark.parametrize("missing_index", [0, 1, 2])
 def test_missing_y_axis_keeps_rendered_series_and_metadata_aligned(chart_type, missing_index, caplog, monkeypatch):

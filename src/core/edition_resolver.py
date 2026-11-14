@@ -6,6 +6,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from src.core.chart_policy import parse_chart_blocks_publish, parse_chart_cache_ttl
 from src.core.exceptions import ConfigError, VertexMigrationError
 from src.core.kusto_result_limits import parse_kusto_result_limits
 from src.core.models_v2 import ADOCoverageRequirement, ADOConfig, AIConfig, AuthorConfig, DependencyADOQuery, DistributionConfig, EditionConfig, EmailThreadSource, LegacyDependency
@@ -961,6 +962,8 @@ def _parse_kusto(value: Any) -> KustoConfig | None:
             result_column=_optional_string(entry.get("result_column")),
             result_limits=parse_kusto_result_limits(entry.get("result_limits")),
             expected_cardinality=str(entry.get("expected_cardinality", "zero_ok")),
+            chart_blocks_publish=parse_chart_blocks_publish(entry.get("chart_blocks_publish", False)),
+            chart_cache_ttl_hours=parse_chart_cache_ttl(entry.get("chart_cache_ttl_hours", 26)),
         )
         for entry in queries_payload
         if isinstance(entry, dict)

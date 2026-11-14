@@ -11,13 +11,16 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from decimal import Decimal
+from numbers import Number
 from pathlib import Path
 from typing import Any
 
 from src.core.chart_cache_store import (
     ChartCacheEntry,
     chart_cache_contract_identity,
+    chart_cache_write_failure_reason,
     evict_stale_caches,
     write_chart_cache,
 )
@@ -40,9 +43,19 @@ _ROW_CAP = 500
 # Eviction horizon: max(ttl * 3, 168) hours — spec §5.4
 _EVICTION_GRACE_HOURS = 168
 
+_SENSITIVE_NUMERIC_COLUMNS = frozenset({
+    "phone", "phonenumber", "mobile", "mobilenumber", "mobilephone",
+    "mobilephonenumber", "cellphone", "cellphonenumber", "telephone",
+    "telephonenumber", "ssn", "socialsecurity", "socialsecuritynumber",
+})
+
 # Types
 KustoQueryExecutor = Any  # Callable[[KustoQuerySettings], list[dict[str, Any]]]
 ChartCacheLoader = Any  # Callable[[str, str], ChartCacheEntry | None]
+
+
+class _SensitiveChartColumn(ValueError):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,8 +145,8 @@ def gather_chart_data(
     # Evict stale caches for this program
     try:
         _evict_chart_caches(program_id, programs_root)
-    except Exception as exc:
-        logger.warning("gather_chart_data: cache eviction failed for %s — %s", program_id, exc)
+    except Exception:
+        logger.warning("gather_chart_data: cache eviction failed for %s", program_id)
 
     return tuple(results), tuple(errors)
 
@@ -185,6 +198,7 @@ def _gather_single_chart(
     """Execute one chart query and write to cache."""
 
     # Check cache freshness first
+    fresh_entry: ChartCacheEntry | None = None
     if cache_loader is not None:
         try:
             existing = cache_loader(program_id, query.id, programs_root=programs_root)
@@ -199,17 +213,36 @@ def _gather_single_chart(
                 from src.core.chart_cache_store import chart_cache_age_hours
                 age_h = chart_cache_age_hours(existing, now=now)
                 if 0 <= age_h < query.chart_cache_ttl_hours:
-                    # Fresh enough — skip live execution
-                    return ChartGatherResult(
-                        query_id=query.id,
-                        cluster=query.cluster,
-                        database=query.database,
-                        rows_written=None,
-                        cache_hit=True,
-                        error=None,
-                    )
-        except Exception as exc:
-            logger.warning("gather_chart_data: cache load failed for %s/%s — %s", program_id, query.id, exc)
+                    fresh_entry = existing
+        except Exception:
+            logger.warning("gather_chart_data: cache load failed for %s/%s", program_id, query.id)
+
+    if fresh_entry is not None:
+        checked_rows: list[dict[str, Any]] | None
+        try:
+            checked_rows = _scrub_pii_rows(list(fresh_entry.rows))
+        except _SensitiveChartColumn:
+            checked_rows = None
+        except Exception:
+            logger.error("gather_chart_data: chart privacy scrubbing failed for %s/%s", program_id, query.id)
+            return ChartGatherResult(
+                query_id=query.id,
+                cluster=query.cluster,
+                database=query.database,
+                rows_written=None,
+                cache_hit=False,
+                error="Chart privacy scrubbing failed; no data was written.",
+            )
+        if checked_rows == list(fresh_entry.rows):
+            return ChartGatherResult(
+                query_id=query.id,
+                cluster=query.cluster,
+                database=query.database,
+                rows_written=None,
+                cache_hit=True,
+                error=None,
+            )
+        logger.warning("gather_chart_data: cached chart rows require privacy refresh for %s/%s", program_id, query.id)
 
     # Execute live query
     rows: list[dict[str, Any]]
@@ -225,7 +258,11 @@ def _gather_single_chart(
             database=query.database,
             rows_written=None,
             cache_hit=False,
-            error=f"Kusto execution failed: {exc}",
+            error=(
+                "Kusto execution failed: authentication required."
+                if isinstance(exc, AuthError)
+                else "Kusto execution failed: query unavailable."
+            ),
         )
 
     # Truncate non-aggregated queries
@@ -239,11 +276,19 @@ def _gather_single_chart(
         )
         rows = truncated
 
-    # Sanitize: drop 'dynamic' columns with a warning, cap entry size
-    sanitized = _sanitize_rows(rows)
-
-    # Scrub PII from text fields (Zone B operation)
-    scrubbed = _scrub_pii_rows(sanitized)
+    # Scrub before truncating text and again after converting values to strings.
+    try:
+        scrubbed = _scrub_pii_rows(_sanitize_rows(_scrub_pii_rows(rows)))
+    except Exception:
+        logger.error("gather_chart_data: chart privacy scrubbing failed for %s/%s", program_id, query.id)
+        return ChartGatherResult(
+            query_id=query.id,
+            cluster=query.cluster,
+            database=query.database,
+            rows_written=None,
+            cache_hit=False,
+            error="Chart privacy scrubbing failed; no data was written.",
+        )
 
     # Write to chart cache
     try:
@@ -281,7 +326,7 @@ def _gather_single_chart(
             database=query.database,
             rows_written=None,
             cache_hit=False,
-            error=f"Cache write failed: {exc}",
+            error=f"Cache write failed: {chart_cache_write_failure_reason(exc)}",
         )
 
     return ChartGatherResult(
@@ -316,7 +361,7 @@ def _truncate_rows(rows: list[dict[str, Any]], kql: str) -> tuple[list[dict[str,
 def _sanitize_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
     Sanitize row values: drop 'dynamic' columns (cannot be serialized to JSON),
-    coerce datetime to ISO string, allow int/float/bool/str, cap total entry size.
+    coerce datetime to ISO string, retain scalar values, cap total entry size.
     Returns a new list (does not mutate input).
     """
     import datetime as dt
@@ -334,19 +379,18 @@ def _sanitize_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 clean[k] = v.isoformat()
             elif isinstance(v, dt.date):
                 clean[k] = v.isoformat()
-            elif isinstance(v, (int, float, bool, str)) or v is None:
+            elif isinstance(v, (int, float, bool, str, Decimal)) or v is None:
                 clean[k] = v
             elif isinstance(v, dict) or isinstance(v, list):
                 # 'dynamic' — skip with warning logged at call site
-                logger.warning("_sanitize_rows: dropping dynamic column '%s'", k)
+                logger.warning("_sanitize_rows: dropping a dynamic column")
                 continue
             else:
                 clean[k] = str(v)
         entry_size = len(str(clean).encode("utf-8"))
         if entry_size > max_entry_bytes:
             logger.warning(
-                "_sanitize_rows: entry %s exceeds %d bytes (%d), truncating string values",
-                list(clean.keys())[:3],
+                "_sanitize_rows: entry exceeds %d bytes (%d), truncating string values",
                 max_entry_bytes,
                 entry_size,
             )
@@ -360,28 +404,37 @@ def _sanitize_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _scrub_pii_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
-    Scrub PII from text field values in rows.
-
-    Applies email, phone, and SSN redaction using the safety PII scrubber.
-    Returns a new list with scrubbed string values.
+    Scrub text in chart rows and reject sensitive or invalid column names.
     """
-    try:
-        from src.ai.safety.pii_scrubber import scan_text
-    except ImportError:
-        # PII scrubber not available — return rows as-is
-        return rows
+    from src.ai.safety.pii_scrubber import scan_text
 
-    scrubbed: list[dict[str, Any]] = []
-    for row in rows:
-        clean: dict[str, Any] = {}
-        for k, v in row.items():
-            if isinstance(v, str) and v.strip():
-                result = scan_text(v)
-                clean[k] = result.scrubbed_text
-            else:
-                clean[k] = v
-        scrubbed.append(clean)
-    return scrubbed
+    def scrub_value(value: Any, sensitive_numeric: bool = False) -> Any:
+        if sensitive_numeric and isinstance(value, Number) and not isinstance(value, bool):
+            raise _SensitiveChartColumn("Chart data includes a numeric identifier.")
+        if isinstance(value, str):
+            scrubbed = scan_text(value).scrubbed_text
+            if sensitive_numeric and any(character.isdigit() for character in scrubbed):
+                raise _SensitiveChartColumn("Chart data includes a numeric identifier.")
+            return scrubbed
+        if isinstance(value, dict):
+            clean: dict[str, Any] = {}
+            for key, cell in value.items():
+                if not isinstance(key, str) or scan_text(key).pii_detected:
+                    raise _SensitiveChartColumn("Chart column names must be safe strings.")
+                normalized_key = re.sub(r"[^a-z0-9]", "", key.lower())
+                clean[key] = scrub_value(cell, sensitive_numeric or normalized_key in _SENSITIVE_NUMERIC_COLUMNS)
+            return clean
+        if isinstance(value, list):
+            return [scrub_value(cell, sensitive_numeric) for cell in value]
+        if isinstance(value, tuple):
+            return tuple(scrub_value(cell, sensitive_numeric) for cell in value)
+        if value is None or isinstance(value, (int, float, bool, Decimal, date)):
+            return value
+        return scrub_value(str(value), sensitive_numeric)
+
+    if any(not isinstance(row, dict) for row in rows):
+        raise ValueError("Chart rows must be mappings.")
+    return [scrub_value(row) for row in rows]
 
 
 def _eviction_grace_hours_for_ttl(ttl_hours: int) -> int:

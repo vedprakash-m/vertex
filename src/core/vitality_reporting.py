@@ -222,6 +222,7 @@ def parse_vitality_archive_entry(payload: Mapping[str, Any]) -> VitalityArchiveE
 def build_vitality_section(
     snapshot: VitalityProgramSnapshot,
     *,
+    as_of: datetime,
     current_issue_number: int,
     history_entries: tuple[VitalityArchiveEntry, ...],
     items: tuple[WorkItem, ...],
@@ -233,6 +234,7 @@ def build_vitality_section(
     best_documented_label, best_documented_detail = _build_best_documented_copy(
         best_documented_score,
         best_documented_item,
+        as_of=as_of,
         include_individual_praise=include_individual_praise,
     )
     trend_summary = _build_trend_summary(
@@ -341,11 +343,12 @@ def _build_best_documented_copy(
     score: VitalityScore | None,
     item: WorkItem | None,
     *,
+    as_of: datetime,
     include_individual_praise: bool,
 ) -> tuple[str | None, str | None]:
     if score is None or item is None:
         return None, None
-    touch_count = _recent_touch_count(item)
+    touch_count = _recent_touch_count(item, as_of=as_of)
     detail = f"{touch_count} ADO {'touch' if touch_count == 1 else 'touches'} in the last 7 days"
     if include_individual_praise and item.assigned_to:
         detail = f"{detail} by {item.assigned_to}"
@@ -367,15 +370,15 @@ def _best_documented_score(scores: tuple[VitalityScore, ...]) -> VitalityScore |
     )
 
 
-def _recent_touch_count(item: WorkItem, *, days: int = 7) -> int:
+def _recent_touch_count(item: WorkItem, *, as_of: datetime, days: int = 7) -> int:
     timestamps: list[datetime] = []
     timestamps.extend(revision.changed_date for revision in item.revisions)
     timestamps.extend(comment.created_date for comment in item.comments)
     if not timestamps:
         return 0
-    latest = max(_ensure_utc(timestamp) for timestamp in timestamps)
-    cutoff = latest - timedelta(days=days)
-    return sum(1 for timestamp in timestamps if _ensure_utc(timestamp) >= cutoff)
+    end = _ensure_utc(as_of)
+    cutoff = end - timedelta(days=days)
+    return sum(1 for timestamp in timestamps if cutoff <= _ensure_utc(timestamp) <= end)
 
 
 def _build_trend_summary(

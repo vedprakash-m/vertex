@@ -7,6 +7,8 @@ All renderers must stay in Zone A — no AI or M365 imports.
 from __future__ import annotations
 
 import logging
+import math
+from decimal import Decimal
 from io import BytesIO
 from typing import Any, Mapping
 
@@ -45,6 +47,7 @@ class DeclarativeChartBuilder:
         try:
             import matplotlib
             matplotlib.use("Agg")  # Non-interactive backend
+            from matplotlib.backends.backend_agg import FigureCanvasAgg
             from matplotlib.figure import Figure
         except ImportError:
             logger.warning("declarative_chart: matplotlib not available")
@@ -91,8 +94,18 @@ class DeclarativeChartBuilder:
             x_labels.append(str(x_val) if x_val is not None else "")
             for yi, y_idx in enumerate(y_indices):
                 y_val = row.get(columns[y_idx])
-                if isinstance(y_val, (int, float)):
-                    y_data[yi].append(float(y_val))
+                if isinstance(y_val, (int, float, Decimal)):
+                    try:
+                        numeric_value = float(y_val)
+                    except (OverflowError, ValueError):
+                        logger.warning("declarative_chart: numeric chart value is not finite or representable")
+                        return None
+                    if not math.isfinite(numeric_value) or (
+                        isinstance(y_val, Decimal) and numeric_value == 0.0 and not y_val.is_zero()
+                    ):
+                        logger.warning("declarative_chart: numeric chart value is not finite or representable")
+                        return None
+                    y_data[yi].append(numeric_value)
                 else:
                     y_data[yi].append(None)
 
@@ -104,6 +117,7 @@ class DeclarativeChartBuilder:
             grid_color = getattr(theme, "grid_color", "#E5E7EB")
 
             fig = Figure(figsize=(6.08, 2.8), dpi=dpi, facecolor=facecolor)
+            FigureCanvasAgg(fig)
             axis = fig.subplots()
 
             # Prefer explicit chart_config palette, then theme.palette, then defaults
@@ -155,6 +169,7 @@ class DeclarativeChartBuilder:
             # Try at reduced height if over target
             if len(png_bytes) > PNG_TARGET_BYTES:
                 fig2 = Figure(figsize=(6.08, 2.2), dpi=dpi, facecolor=facecolor)
+                FigureCanvasAgg(fig2)
                 ax2 = fig2.subplots()
                 if chart_type == "line":
                     self._render_line(ax2, x_labels, y_data, y_axes, palette, grid_alpha, grid_color=grid_color, facecolor=facecolor)
@@ -191,8 +206,8 @@ class DeclarativeChartBuilder:
 
             del fig
 
-        except Exception as exc:
-            logger.warning("declarative_chart: rendering failed for %s — %s", query_id, exc)
+        except Exception:
+            logger.warning("declarative_chart: rendering failed for %s", query_id)
             return None
 
         # Build metadata
@@ -303,6 +318,9 @@ class DeclarativeChartBuilder:
         if not avg_first:
             return "No trend data available"
         pct_change = ((avg_last - avg_first) / avg_first) * 100
+        if not math.isfinite(pct_change):
+            logger.warning("declarative_chart: trend calculation is not finite")
+            return "No trend data available"
         direction = "up" if pct_change > 1 else "down" if pct_change < -1 else "stable"
         return f"{y_axes[0]} trending {direction} ({pct_change:+.1f}%)"
 

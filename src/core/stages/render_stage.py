@@ -22,7 +22,7 @@ import functools
 
 from src.core.chart_cache_store import load_chart_cache
 from src.core.chart_renderer_registry import build_default_registry
-from src.core.kusto_rendering import TelemetryObservation, build_kusto_sections
+from src.core.kusto_rendering import TelemetryObservation, build_kusto_sections, chart_pipeline_enabled
 from src.core.theme_context import build_theme_context
 from src.core.kusto_templates import KustoTemplateContext
 from src.core.models import EditionType, ReportData, ReviewState, ReviewStatus, RiskLevel, Snapshot, WorkItem
@@ -83,6 +83,9 @@ class RenderStageState:
     markdown_body: str
     snapshot: Snapshot
     rendered_strings: dict[str, str]
+    chart_gate_sections: tuple[Any, ...] = ()
+    chart_gate_failures: tuple[Any, ...] = ()
+    chart_gates_enabled: bool = True
 
 
 class RenderStage:
@@ -366,6 +369,7 @@ class RenderStage:
             if vitality_settings.newsletter_aggregate:
                 ado_vitality = build_vitality_section(
                     vitality_snapshot,
+                    as_of=ctx.data_as_of,
                     current_issue_number=ctx.resolved_issue_number,
                     history_entries=read_vitality_history(
                         ctx.edition_name,
@@ -382,8 +386,10 @@ class RenderStage:
             if ctx.programs_root is not None
             else None
         )
-        _chart_registry = build_default_registry()
-        _theme_context = build_theme_context()
+        chart_settings = ctx.bundle.config.charts
+        charts_enabled = chart_pipeline_enabled(chart_settings is None or chart_settings.enabled)
+        _chart_registry = build_default_registry() if charts_enabled else None
+        _theme_context = build_theme_context() if charts_enabled else None
 
         kusto_sections, telemetry_observations, kusto_warnings = build_kusto_sections(
             replace(ctx.bundle.config.kusto, enabled=False) if ctx.offline else ctx.bundle.config.kusto,
@@ -395,6 +401,11 @@ class RenderStage:
             chart_cache_loader=_chart_cache_loader,
             chart_registry=_chart_registry,
             theme_context=_theme_context,
+            chart_rows_scrubber=support.chart_rows_scrubber,
+            charts_enabled=charts_enabled,
+        )
+        chart_gate_failures = tuple(
+            section for section in kusto_sections if section.is_degraded and section.chart_blocks_publish
         )
         kusto_sections, telemetry_observations, kusto_warnings = _apply_kusto_fallbacks(
             ctx=ctx,
@@ -423,6 +434,17 @@ class RenderStage:
                 or not getattr(s, "chart_png_base64", None)
             )
 
+        chart_gate_sections = kusto_sections
+        chart_gates_enabled = charts_enabled and (
+            chart_settings is not None
+            or bool(chart_gate_failures)
+            or any(section.render_mode in ("chart", "chart_image") for section in chart_gate_sections)
+            or (
+                not ctx.offline
+                and ctx.bundle.config.kusto.enabled
+                and any(query.render_as == "chart_image" for query in ctx.bundle.config.kusto.queries)
+            )
+        )
         # Phase 3: Chart placement routing — spec §5.3
         kusto_sections, exec_summary_chart, workstream_data = _route_chart_placements(kusto_sections, workstream_data)
         kusto_sections = tuple(section for section in kusto_sections if section.query_id != "icm-mttr")
@@ -682,6 +704,9 @@ class RenderStage:
                 markdown_body=markdown_body,
                 snapshot=snapshot,
                 rendered_strings=rendered_strings,
+                chart_gate_sections=chart_gate_sections,
+                chart_gate_failures=chart_gate_failures,
+                chart_gates_enabled=chart_gates_enabled,
             ),
         )
 

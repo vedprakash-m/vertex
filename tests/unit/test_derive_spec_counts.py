@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import re
 import sys
 import textwrap
 from pathlib import Path
@@ -62,6 +64,22 @@ class TestCollectedTests:
         )
         assert module._count_collected_tests(tmp_path) == 1
 
+    @pytest.mark.parametrize(
+        "node_id",
+        [
+            "tests/test_counts.py::test_example[collected 42 items]",
+            "tests/test_counts.py::test_example[42 tests collected in 1.00s]",
+        ],
+    )
+    def test_collection_summary_is_not_confused_with_test_ids(
+        self, module, monkeypatch, tmp_path, node_id
+    ):
+        output = f"{node_id}\n85/100 tests collected (15 deselected) in 1.00s\n"
+        monkeypatch.setattr(
+            module.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=output, returncode=0)
+        )
+        assert module._count_collected_tests(tmp_path) == 100
+
     def test_unrecognized_output_returns_negative_one(self, module, monkeypatch, tmp_path):
         monkeypatch.setattr(
             module.subprocess,
@@ -70,11 +88,52 @@ class TestCollectedTests:
         )
         assert module._count_collected_tests(tmp_path) == -1
 
+    @pytest.mark.parametrize(
+        "stdout",
+        ["collected 42 items\n", "42 tests collected in 1.00s\n"],
+    )
+    def test_collection_error_does_not_report_partial_count(
+        self, module, monkeypatch, tmp_path, capsys, stdout
+    ):
+        monkeypatch.setattr(
+            module.subprocess,
+            "run",
+            lambda *a, **k: SimpleNamespace(stdout=stdout, returncode=2),
+        )
+        assert module._count_collected_tests(tmp_path) == -1
+        assert module.main(["--format", "json"]) == 1
+        captured = capsys.readouterr()
+        assert '"collected_tests": -1' in captured.out
+        assert "collected_tests" in captured.err
+
+    def test_real_collection_error_is_not_reported_as_success(
+        self, module, monkeypatch, tmp_path
+    ):
+        (tmp_path / "test_good.py").write_text("def test_pass(): pass\n", encoding="utf-8")
+        (tmp_path / "test_broken.py").write_text(
+            "raise RuntimeError('synthetic collection failure')\n", encoding="utf-8"
+        )
+        run = module.subprocess.run
+        results = []
+
+        def record_run(*args, **kwargs):
+            result = run(*args, **kwargs)
+            results.append(result)
+            return result
+
+        monkeypatch.setattr(module.subprocess, "run", record_run)
+        assert module._count_collected_tests(tmp_path) == -1
+        assert results[0].returncode != 0
+        assert "test_good.py::test_pass" in results[0].stdout
+        assert re.search(
+            r"collected\s+\d+\s+items|\d+\s+tests?\s+collected", results[0].stdout
+        )
+
     def test_timeout_returns_negative_one(self, module, monkeypatch, tmp_path):
         import subprocess as real_subprocess
 
         def _raise(*a, **k):
-            raise real_subprocess.TimeoutExpired(cmd="pytest", timeout=120)
+            raise real_subprocess.TimeoutExpired(cmd="pytest", timeout=600)
 
         monkeypatch.setattr(module.subprocess, "run", _raise)
         assert module._count_collected_tests(tmp_path) == -1
@@ -113,8 +172,27 @@ class TestCliCommandCounting:
         assert module._count_commands_in_cli() == (-1, -1)
 
 
-def test_main_resolves_all_metrics_on_live_tree(module):
+def test_main_resolves_all_metrics_on_live_tree(module, monkeypatch, capsys):
     """Regression guard: on the real repo, every metric should resolve (no -1),
     matching arch-fix.md's Phase-0 requirement that the probe not be broken."""
+    run = module.subprocess.run
+    results = []
+
+    def record_run(*args, **kwargs):
+        result = run(*args, **kwargs)
+        results.append(result)
+        return result
+
+    monkeypatch.setattr(module.subprocess, "run", record_run)
     exit_code = module.main(["--format", "json"])
     assert exit_code == 0
+    counts = json.loads(capsys.readouterr().out)
+    summary = next(
+        line
+        for line in reversed(results[0].stdout.splitlines())
+        if "::" not in line
+        and ("test collected" in line or "tests collected" in line or line.startswith("collected "))
+    )
+    match = re.search(r"(\d+)\s+tests?\s+collected|^collected\s+(\d+)\s+items", summary)
+    assert match is not None
+    assert counts["collected_tests"] == int(match.group(1) or match.group(2))

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+
+import pytest
 
 from src.core.models import Comment, Revision, RiskLevel, WorkItem
 from src.core.models_v2 import PersonDirectory, VitalityAggregate, VitalityArchiveEntry, VitalityArchiveWorkstream, VitalityScore, Workstream
@@ -105,6 +107,7 @@ def test_build_vitality_section_formats_trend_and_best_documented_copy() -> None
 
     section = build_vitality_section(
         snapshot,
+        as_of=as_of,
         current_issue_number=77,
         history_entries=history_entries,
         items=items,
@@ -175,6 +178,7 @@ def test_build_vitality_section_skips_unmapped_accountability_rows() -> None:
 
     section = build_vitality_section(
         snapshot,
+        as_of=as_of,
         current_issue_number=77,
         history_entries=(),
         items=items,
@@ -209,6 +213,7 @@ def test_build_vitality_section_reports_unknown_age_as_unknown() -> None:
 
     section = build_vitality_section(
         snapshot,
+        as_of=as_of,
         current_issue_number=77,
         history_entries=(),
         items=(item,),
@@ -220,6 +225,78 @@ def test_build_vitality_section_reports_unknown_age_as_unknown() -> None:
     assert section.freshness_known_items == 0
     assert section.accountability_rows[0].fields_to_update == ("Meaningful ADO update (time unknown)",)
     assert "9999" not in " ".join(section.accountability_rows[0].fields_to_update)
+
+
+@pytest.mark.parametrize(
+    ("revision_offsets", "comment_offsets", "expected"),
+    [
+        ((), (), 0),
+        ((timedelta(days=-30),), (), 0),
+        ((timedelta(days=1),), (), 0),
+        (
+            (
+                timedelta(days=-7, microseconds=-1),
+                timedelta(days=-7),
+                timedelta(),
+                timedelta(microseconds=1),
+            ),
+            (timedelta(hours=-1), timedelta(days=1)),
+            3,
+        ),
+        ((), (timedelta(days=-7),), 1),
+    ],
+)
+@pytest.mark.parametrize("as_of_timezone", [None, timezone(timedelta(hours=5, minutes=30))])
+def test_best_documented_counts_retained_touches_in_report_week(
+    revision_offsets: tuple[timedelta, ...],
+    comment_offsets: tuple[timedelta, ...],
+    expected: int,
+    as_of_timezone: timezone | None,
+) -> None:
+    utc_as_of = datetime(2026, 5, 10, 18, tzinfo=timezone.utc)
+    as_of = utc_as_of.replace(tzinfo=None) if as_of_timezone is None else utc_as_of.astimezone(as_of_timezone)
+    item = WorkItem(
+        id=1,
+        type="Feature",
+        title="Synthetic item",
+        state="Active",
+        assigned_to=None,
+        assigned_to_email=None,
+        area_path="Example",
+        iteration_path="Example",
+        target_date=None,
+        risk_level=RiskLevel.HIGH,
+        tags=[],
+        custom_fields={},
+        revisions=[
+            Revision(
+                1, index, "Example", "example@example.test",
+                (utc_as_of + offset).astimezone(timezone(timedelta(hours=-4))), {},
+            )
+            for index, offset in enumerate(revision_offsets, start=1)
+        ],
+        comments=[
+            Comment(
+                1, index, "Example", "example@example.test",
+                (utc_as_of + offset).replace(tzinfo=None), "Update",
+            )
+            for index, offset in enumerate(comment_offsets, start=1)
+        ],
+        fetched_at=utc_as_of,
+    )
+    score = VitalityScore(1, None, None, None, "red", 90, (), 0, 0, 0, None)
+
+    section = build_vitality_section(
+        build_vitality_snapshot((score,), ()),
+        as_of=as_of,
+        current_issue_number=1,
+        history_entries=(),
+        items=(item,),
+        include_individual_praise=False,
+    )
+
+    noun = "touch" if expected == 1 else "touches"
+    assert section.best_documented_detail == f"{expected} ADO {noun} in the last 7 days"
 
 
 def test_build_vitality_archive_entry_tracks_aggregate_and_per_workstream() -> None:

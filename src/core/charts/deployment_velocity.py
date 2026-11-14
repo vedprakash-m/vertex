@@ -16,6 +16,8 @@ Zone A — no AI or M365 imports permitted.
 from __future__ import annotations
 
 import logging
+import math
+from decimal import Decimal
 from io import BytesIO
 from typing import Any, Mapping
 
@@ -109,8 +111,18 @@ class DeploymentVelocityChartBuilder:
             x_labels.append(str(x_val) if x_val is not None else "")
             for yi, y_idx in enumerate(y_indices):
                 y_val = row.get(columns[y_idx])
-                if isinstance(y_val, (int, float)):
-                    y_data[yi].append(float(y_val))
+                if isinstance(y_val, (int, float, Decimal)):
+                    try:
+                        numeric_value = float(y_val)
+                    except (OverflowError, ValueError):
+                        logger.warning("deployment_velocity: numeric chart value is not finite or representable")
+                        return None
+                    if not math.isfinite(numeric_value) or (
+                        isinstance(y_val, Decimal) and numeric_value == 0.0 and not y_val.is_zero()
+                    ):
+                        logger.warning("deployment_velocity: numeric chart value is not finite or representable")
+                        return None
+                    y_data[yi].append(numeric_value)
                 else:
                     y_data[yi].append(None)
 
@@ -142,7 +154,6 @@ class DeploymentVelocityChartBuilder:
                 y_max = max(y_all)
                 y_min = min(y_all)
                 step = max(1.0, round((y_max - y_min) / 5, 0)) if y_max != y_min else 8.0
-                import math
                 tick_vals = [
                     round(y_min + step * i, 0)
                     for i in range(math.ceil((y_max - y_min + step) / step) + 1)
@@ -214,8 +225,8 @@ class DeploymentVelocityChartBuilder:
                 )
                 return None
 
-        except Exception as exc:
-            logger.warning("deployment_velocity: rendering failed for %s — %s", query_id, exc)
+        except Exception:
+            logger.warning("deployment_velocity: rendering failed for %s", query_id)
             return None
 
         # Metadata — program-neutral subject phrase
@@ -259,6 +270,9 @@ def _derive_trend(y_data: list[list[float | None]], y_axes: list[str]) -> str:
     if first_avg == 0:
         return "No trend data"
     pct = ((last_avg - first_avg) / first_avg) * 100
+    if not math.isfinite(pct):
+        logger.warning("deployment_velocity: trend calculation is not finite")
+        return "No trend data"
     direction = "up" if pct > 2 else "down" if pct < -2 else "stable"
     name = y_axes[0] if y_axes else "P50"
     return f"{name} trending {direction} ({pct:+.1f}%)"

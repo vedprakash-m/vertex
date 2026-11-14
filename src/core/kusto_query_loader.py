@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from src.core.chart_policy import parse_chart_blocks_publish, parse_chart_cache_ttl
 from src.core.exceptions import ConfigError, StateError
 from src.core.gather_state_store import load_gather_query_states
 from src.core.knowledge_store import PROGRAMS_ROOT, _optional_slo_target, load_program_knowledge
@@ -64,8 +65,8 @@ def load_kpi_queries(
             chart_renderer_id=_optional_str(entry.get("chart_renderer_id")),
             chart_config=entry.get("chart_config"),
             attachment=_parse_attachment(entry.get("attachment"), kpis_path),
-            chart_cache_ttl_hours=int(entry.get("chart_cache_ttl_hours", 26)),
-            chart_blocks_publish=bool(entry.get("chart_blocks_publish", False)),
+            chart_cache_ttl_hours=parse_chart_cache_ttl(entry.get("chart_cache_ttl_hours", 26)),
+            chart_blocks_publish=parse_chart_blocks_publish(entry.get("chart_blocks_publish", False)),
             fallback_on_empty_rows=bool(entry.get("fallback_on_empty_rows", False)),
             chapter=_optional_str(entry.get("chapter")),
             timeout_seconds=int(entry["timeout_seconds"]) if entry.get("timeout_seconds") is not None else None,

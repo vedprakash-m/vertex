@@ -248,13 +248,14 @@ class ValidationStage:
             archive_inconsistencies=find_archive_index_inconsistencies(ctx.edition_name, archive_root=archive_root),
         )
         # Phase 3: Chart pipeline quality gates (QG-20, QG-21, QG-22)
-        edition_charts_enabled = getattr(ctx.bundle.config, "charts", None) is not None and (
-            getattr(ctx.bundle.config.charts, "enabled", True)
+        rendered_chart_sections = render_state.chart_gate_sections or render_state.kusto_sections
+        chart_gate_sections = rendered_chart_sections + tuple(
+            section for section in render_state.chart_gate_failures if section not in rendered_chart_sections
         )
         qg_charts = evaluate_chart_gates(
-            render_state.kusto_sections,
+            chart_gate_sections,
             current_time=ctx.started_at,
-            edition_charts_enabled=edition_charts_enabled,
+            edition_charts_enabled=render_state.chart_gates_enabled,
         )
         qg_reports = [qg_phase_1a, qg_phase_1b, qg_phase_1c, qg_charts, evaluate_persona_signal_gates(persona_coverage)]
         if support.is_continuity_layout(ctx.bundle):

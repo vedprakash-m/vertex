@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -50,6 +51,92 @@ def test_write_read_chart_cache(tmp_path):
     assert entry.captured_at == _NOW
     assert len(entry.rows) == 2
     assert entry.rows[0]["p50"] == 1.5
+
+
+@pytest.mark.parametrize("value", ["1.25", "NaN", "Infinity", "1e10000"])
+def test_decimal_cache_write_is_refused_without_replacing_previous_entry(tmp_path, value):
+    path = _write(tmp_path)
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError, match="Decimal values cannot be stored losslessly"):
+        _write(tmp_path, rows=[{"day": "first", "p50": 1.0}, {"day": "last", "p50": Decimal(value)}])
+
+    assert path.read_bytes() == before
+
+
+def test_decimal_cache_refusal_does_not_create_cache_directory(tmp_path):
+    with pytest.raises(ValueError, match="Decimal values cannot be stored losslessly"):
+        _write(tmp_path, rows=[{"p50": Decimal("1.25")}])
+
+    assert not (tmp_path / "acme" / "chart_cache").exists()
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_nonfinite_cache_write_is_refused_without_replacing_previous_entry(tmp_path, value):
+    path = _write(tmp_path)
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError, match="non-finite"):
+        _write(tmp_path, rows=[{"day": "first", "p50": 1.0}, {"day": "last", "p50": value}])
+
+    assert path.read_bytes() == before
+
+
+def test_nonfinite_cache_refusal_does_not_create_cache_directory(tmp_path):
+    with pytest.raises(ValueError, match="non-finite"):
+        _write(tmp_path, rows=[{"p50": float("inf")}])
+
+    assert not (tmp_path / "acme" / "chart_cache").exists()
+
+
+@pytest.mark.parametrize("token", ["NaN", "Infinity", "-Infinity", "1e10000"])
+def test_nonfinite_existing_cache_is_refused_without_changing_bytes(tmp_path, token, caplog):
+    path = _write(tmp_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["rows"] = [{"p50": "REPLACE"}]
+    payload["row_count"] = 1
+    path.write_text(json.dumps(payload).replace('"REPLACE"', token), encoding="utf-8")
+    before = path.read_bytes()
+
+    assert load_chart_cache("acme", "q1", programs_root=tmp_path) is None
+    assert "non-finite" in caplog.text
+    assert path.read_bytes() == before
+
+
+def test_finite_cache_values_and_infinity_text_round_trip(tmp_path):
+    rows = [{"zero": -0.0, "large": 1e308, "small": 5e-324, "label": "Infinity", "int": 2**64}]
+    _write(tmp_path, rows=rows)
+
+    entry = load_chart_cache("acme", "q1", programs_root=tmp_path)
+    assert entry.rows == tuple(rows)
+
+
+@pytest.mark.parametrize("invalid", ["schema_version", "row_column", "row_count"])
+def test_invalid_cache_logging_omits_sensitive_payload(tmp_path, caplog, invalid):
+    sample = "998877665544332211" if invalid == "row_count" else "sample@example.invalid"
+    path = _write(tmp_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if invalid == "schema_version":
+        payload["schema_version"] = sample
+    elif invalid == "row_count":
+        payload["row_count"] = int(sample)
+    else:
+        payload["rows"] = [{sample: {"nested": "value"}}]
+        payload["row_count"] = 1
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    before = path.read_bytes()
+
+    assert load_chart_cache("acme", "q1", programs_root=tmp_path) is None
+    assert caplog.text
+    assert sample not in caplog.text
+    assert path.read_bytes() == before
+
+
+def test_cache_sanitization_logging_omits_dropped_column_names(tmp_path, caplog):
+    sample = "sample@example.invalid"
+    _write(tmp_path, rows=[{sample: {"nested": "value"}, "value": 1}])
+    assert caplog.text
+    assert sample not in caplog.text
 
 
 @pytest.mark.parametrize("identity", [None, "a" * 64])
@@ -143,6 +230,32 @@ def test_load_returns_none_for_corrupt_json(tmp_path, caplog):
         result = load_chart_cache("acme", "bad", programs_root=tmp_path)
     assert result is None
     assert "corrupt" in caplog.text.lower() or "warning" in caplog.text.lower() or True  # logged
+
+
+def test_load_returns_none_for_non_utf8_cache_without_exposing_or_changing_bytes(tmp_path, caplog):
+    cache_dir = tmp_path / "acme" / "chart_cache"
+    cache_dir.mkdir(parents=True)
+    cache_path = cache_dir / "bad.json"
+    content = b'{"value":"sample@example.invalid\xff"}'
+    cache_path.write_bytes(content)
+
+    with caplog.at_level(logging.WARNING):
+        assert load_chart_cache("acme", "bad", programs_root=tmp_path) is None
+    assert "corrupt cache" in caplog.text
+    assert "sample@example.invalid" not in caplog.text
+    assert cache_path.read_bytes() == content
+
+
+def test_unreadable_chart_cache_diagnostic_omits_private_path(tmp_path, monkeypatch, caplog):
+    _write(tmp_path)
+
+    def fail(*_args, **_kwargs):
+        raise OSError(13, "Access denied", "sample@example.invalid")
+
+    monkeypatch.setattr(Path, "read_text", fail)
+    assert load_chart_cache("acme", "q1", programs_root=tmp_path) is None
+    assert "cache read failed" in caplog.text
+    assert "sample@example.invalid" not in caplog.text
 
 
 def test_load_returns_none_for_non_list_rows(tmp_path, caplog):
@@ -292,7 +405,7 @@ def test_load_returns_none_for_unsupported_schema_version(tmp_path, caplog):
         result = load_chart_cache("acme", "q1", programs_root=tmp_path)
 
     assert result is None
-    assert "unsupported schema_version '2'" in caplog.text.lower()
+    assert "unsupported schema_version" in caplog.text.lower()
 
 
 def test_load_returns_none_for_row_count_mismatch(tmp_path, caplog):
@@ -317,7 +430,7 @@ def test_load_returns_none_for_row_count_mismatch(tmp_path, caplog):
         result = load_chart_cache("acme", "q1", programs_root=tmp_path)
 
     assert result is None
-    assert "row_count 1 does not match rows length 0" in caplog.text.lower()
+    assert "row_count does not match rows length" in caplog.text.lower()
 
 
 def test_load_returns_none_for_nested_row_value(tmp_path, caplog):
@@ -342,7 +455,7 @@ def test_load_returns_none_for_nested_row_value(tmp_path, caplog):
         result = load_chart_cache("acme", "q1", programs_root=tmp_path)
 
     assert result is None
-    assert "rows values for key 'day' must be json-safe scalars" in caplog.text.lower()
+    assert "rows values must be json-safe scalars" in caplog.text.lower()
 
 
 def test_load_returns_none_for_null_row_value(tmp_path, caplog):
@@ -367,7 +480,7 @@ def test_load_returns_none_for_null_row_value(tmp_path, caplog):
         result = load_chart_cache("acme", "q1", programs_root=tmp_path)
 
     assert result is None
-    assert "rows values for key 'day' must be json-safe scalars" in caplog.text.lower()
+    assert "rows values must be json-safe scalars" in caplog.text.lower()
 
 
 # ---------------------------------------------------------------------------

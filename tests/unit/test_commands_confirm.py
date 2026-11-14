@@ -25,7 +25,7 @@ from src.core.claim_tracker import ClaimExtractionResult, append_claim_entry, lo
 from src.core.claim_extraction_calibration_store import load_claim_extraction_calibration_records
 from src.core.analytics_store import _connect_analytics_db, get_program_analytics_dirty_path, get_program_analytics_store_path
 from src.core.gather_state_store import GatherState
-from src.core.models import ArchiveEntry, ArchiveIndex
+from src.core.models import ArchiveEntry, ArchiveIndex, WorkItem
 from src.commands.confirm import confirm_issue
 from src.commands.report import _DraftAIContext, _write_output_json, generate_report_draft
 from src.ai.edit_learner import read_edit_patterns
@@ -1575,6 +1575,41 @@ def test_confirm_issue_blocks_when_exec_summary_scaffold_placeholders_remain(
 
     assert any("unresolved scaffold placeholders" in failure for failure in blocked.failures)
     assert placeholder_roots == [programs_root]
+
+
+def test_draft_and_confirm_count_vitality_touches_at_data_as_of(
+    repo_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_items = _confirmable_items
+
+    def items_with_future_comment(as_of: datetime) -> tuple[WorkItem, ...]:
+        items = list(original_items(as_of))
+        item = items[1]
+        items[1] = replace(
+            item,
+            comments=[replace(item.comments[0], created_date=as_of + timedelta(days=1))],
+        )
+        return tuple(items)
+
+    monkeypatch.setitem(globals(), "_confirmable_items", items_with_future_comment)
+    reports_root, archive_root, output_root = _prepare_confirmable_weekly_issue(repo_root, tmp_path)
+    draft_html = (output_root / EDITION_NAME / "issue_001" / "issue_001.html").read_text(encoding="utf-8")
+
+    result = confirm_issue(
+        edition_name=EDITION_NAME,
+        issue_number=1,
+        reports_root=reports_root,
+        archive_root=archive_root,
+        programs_root=reports_root.parent / "programs",
+        force=True,
+    )
+
+    assert result.exit_code == 0, result.failures
+    assert result.archive_paths is not None
+    confirmed_html = result.archive_paths.html_path.read_text(encoding="utf-8")
+    for html in (draft_html, confirmed_html):
+        assert "<strong>Best documented:</strong> WI:900002" in html
+        assert "1 ADO touch in the last 7 days" in html
 
 
 def test_confirm_issue_v2_records_claims_and_decision_asks(repo_root: Path, tmp_path: Path) -> None:

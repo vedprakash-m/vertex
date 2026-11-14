@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from jsonschema import Draft202012Validator, FormatChecker
 
 from src.core.chapter_contract_loader import ChapterContract, load_chapter_contract, load_chapter_contract_for_edition
+from src.core.chart_policy import parse_chart_blocks_publish, parse_chart_cache_ttl
 from src.core.exceptions import ConfigError, PersonaSchemaError
 from src.core.kusto_result_limits import KustoResultLimits, parse_kusto_result_limits
 from src.core.models import EditionType
@@ -1452,6 +1453,22 @@ def _parse_report_config(raw_config: dict[str, Any]) -> ReportConfig:
     cadence_note = _parse_cadence_note(raw_config.get("cadence_note"))
     if layout_mode == "continuity" and cadence_note is None:
         raise ConfigError("layout_mode=continuity requires cadence_note in config.yaml")
+    chart = raw_config.get("chart")
+    if chart is not None and (
+        not isinstance(chart, dict) or not isinstance(chart.get("enabled", True), bool)
+    ):
+        raise ConfigError("chart.enabled must be a boolean in an edition chart mapping.")
+    chart_settings = None
+    if chart is not None:
+        renderer_modules = chart.get("renderer_modules", [])
+        if not isinstance(renderer_modules, list) or any(
+            not isinstance(module, str) or not module.strip() for module in renderer_modules
+        ):
+            raise ConfigError("chart.renderer_modules must be a list of non-empty module names.")
+        chart_settings = ChartEditionSettings(
+            enabled=chart.get("enabled", True),
+            renderer_modules=tuple(ChartRendererModule(module) for module in renderer_modules),
+        )
 
     scorecards = tuple(
         ScorecardSettings(
@@ -1525,6 +1542,8 @@ def _parse_report_config(raw_config: dict[str, Any]) -> ReportConfig:
                     kusto_section_validates_slice=bool(query.get("kusto_section_validates_slice", False)),
                     caveats=tuple(query.get("caveats", [])),
                     reference_url=query.get("reference_url"),
+                    chart_blocks_publish=parse_chart_blocks_publish(query.get("chart_blocks_publish", False)),
+                    chart_cache_ttl_hours=parse_chart_cache_ttl(query.get("chart_cache_ttl_hours", 26)),
                     result_limits=parse_kusto_result_limits(query.get("result_limits")),
                     expected_cardinality=str(query.get("expected_cardinality", "zero_ok")),
                 )
@@ -1582,6 +1601,7 @@ def _parse_report_config(raw_config: dict[str, Any]) -> ReportConfig:
         type_scale_v2=bool(raw_config.get("type_scale_v2", False)),
         executive_style=bool(raw_config.get("executive_style", False)),
         calibration_pilot=bool(raw_config.get("calibration_pilot", False)),
+        charts=chart_settings,
     )
 
 

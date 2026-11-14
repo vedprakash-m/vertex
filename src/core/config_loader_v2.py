@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from src.core.chart_policy import parse_chart_blocks_publish, parse_chart_cache_ttl
 from src.core.dependency_graph import dependency_source_label, dependency_target_label
 from src.core.exceptions import ConfigError
 from src.core.edition_resolver import PROGRAMS_ROOT, ResolvedEdition, filter_workstreams, resolve_area_paths, resolve_edition
@@ -65,6 +66,29 @@ def _build_report_config_document(resolved: ResolvedEdition, knowledge: Knowledg
 
     raw_queries = _queries_from_knowledge(knowledge, program_id=resolved.paths.program_id)
     if raw_queries:
+        inline_queries = kusto.get("queries")
+        if isinstance(inline_queries, list):
+            for query in inline_queries:
+                if isinstance(query, dict):
+                    parse_chart_blocks_publish(query.get("chart_blocks_publish", False))
+                    parse_chart_cache_ttl(query.get("chart_cache_ttl_hours", 26))
+        if kusto.get("enabled", False) and isinstance(inline_queries, list) and any(
+            isinstance(query, dict)
+            and query.get("render_as") == "chart_image"
+            and query.get("chart_blocks_publish") is True
+            for query in inline_queries
+        ):
+            from src.core.kusto_rendering import chart_pipeline_enabled
+
+            chart_settings = edition_raw.get("chart")
+            edition_charts_enabled = (
+                chart_settings.get("enabled", True) if isinstance(chart_settings, dict) else True
+            )
+            if chart_pipeline_enabled(edition_charts_enabled):
+                raise ConfigError(
+                    "A required inline chart would be replaced by golden queries; "
+                    "remove the conflicting declaration before reporting."
+                )
         kusto["queries"] = raw_queries
 
     config_document = {
@@ -96,6 +120,7 @@ def _build_report_config_document(resolved: ResolvedEdition, knowledge: Knowledg
         ],
         "ai": ai,
         "kusto": kusto,
+        "chart": edition_raw.get("chart"),
         "m365": m365,
         "archive": {
             "root": _relative_root(resolved.paths.archive_dir),
@@ -296,6 +321,8 @@ def _queries_from_knowledge(knowledge: KnowledgeStore, *, program_id: str) -> li
                 "kusto_section_validates_slice": query.kusto_section_validates_slice,
                 "caveats": list(query.caveats),
                 "reference_url": query.reference_url,
+                "chart_blocks_publish": query.chart_blocks_publish,
+                "chart_cache_ttl_hours": query.chart_cache_ttl_hours,
             }
         )
         if query.result_limits is not None:

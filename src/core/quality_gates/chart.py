@@ -91,28 +91,32 @@ def evaluate_chart_gates(
         )
 
     qg22_messages: list[str] = []
-    for section in chart_sections:
+    for section in kusto_sections:
         if not getattr(section, "chart_blocks_publish", False):
             continue
         if not getattr(section, "is_degraded", False):
             continue
         ttl_hours = getattr(section, "chart_cache_ttl_hours", 26)
         cache_at = getattr(section, "cache_captured_at", None) or getattr(section, "captured_at", None)
-        if cache_at is None:
+        if not isinstance(cache_at, datetime):
+            qg22_messages.append(f"{section.query_id} has no usable capture timestamp")
             continue
         try:
             age_hours = (now - cache_at).total_seconds() / 3600.0
-            if age_hours > ttl_hours:
-                qg22_messages.append(f"{section.query_id} stale by {age_hours:.0f}h (TTL={ttl_hours}h)")
-        except Exception:
-            pass
+        except (TypeError, ValueError, OverflowError):
+            qg22_messages.append(f"{section.query_id} has no usable capture timestamp")
+            continue
+        if age_hours < 0:
+            qg22_messages.append(f"{section.query_id} has a future capture timestamp")
+        elif age_hours > ttl_hours:
+            qg22_messages.append(f"{section.query_id} stale by {age_hours:.0f}h (TTL={ttl_hours}h)")
 
     if qg22_messages:
         results.append(
             GateEvaluation(
                 gate_id="QG-22",
                 passed=False,
-                message=f"QG-22: {len(qg22_messages)} blocking chart(s) exceed TTL: {'; '.join(qg22_messages[:5])}{' ...' if len(qg22_messages) > 5 else ''}",
+                message=f"QG-22: {len(qg22_messages)} blocking chart(s) have missing or stale data: {'; '.join(qg22_messages[:5])}{' ...' if len(qg22_messages) > 5 else ''}",
                 exit_code=3,
                 forceable=False,
             )

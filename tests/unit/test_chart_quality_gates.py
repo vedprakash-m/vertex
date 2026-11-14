@@ -146,6 +146,25 @@ def test_qg22_passes_when_not_degraded():
     assert all(r.passed for r in qg22)
 
 
+def test_qg22_blocks_degraded_required_chart_without_a_capture():
+    section = _make_section(is_degraded=True, chart_blocks_publish=True)
+    section.captured_at = None
+
+    gate = next(result for result in _eval([section]).results if result.gate_id == "QG-22")
+    assert not gate.passed
+    assert not gate.forceable
+
+
+@pytest.mark.parametrize("capture", ["invalid", datetime(2026, 5, 28, 12, 0), _NOW + timedelta(hours=1)])
+def test_qg22_blocks_degraded_required_chart_with_unusable_capture(capture):
+    section = _make_section(is_degraded=True, chart_blocks_publish=True)
+    section.captured_at = capture
+
+    gate = next(result for result in _eval([section]).results if result.gate_id == "QG-22")
+    assert not gate.passed
+    assert not gate.forceable
+
+
 def test_qg22_passes_when_blocks_publish_false():
     stale_time = _NOW - timedelta(hours=50)
     section = _make_section(

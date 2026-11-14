@@ -43,7 +43,7 @@ import os
 import re
 import uuid
 import webbrowser
-from dataclasses import dataclass, field, fields, is_dataclass, replace
+from dataclasses import field, fields, is_dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
@@ -62,9 +62,9 @@ from src.ai.client import AIClientError
 from src.ai.llm_trace import AITraceContext, use_trace_context
 from src.ai.exec_summary_drafter import draft_exec_summary
 from src.ai.draft_reviewer import build_review_artifact, render_review_markdown, render_review_summary, review_draft
+from src.commands.chart_gather import _scrub_pii_rows
 from src.commands.report_ai import _AIGeneratedSection, _AISynthesisResult, _DraftAIContext
 from src.commands.report_ai import _GuardedReviewEvidence
-from src.commands.report_ai import _ReportSignalContext
 from src.commands.report_ai import _build_draft_readiness
 from src.commands.report_ai import _edit_pattern_context_lines
 from src.commands.report_ai import _build_newsletter_narrative_covered_item_ids as _build_newsletter_narrative_covered_item_ids_impl
@@ -128,7 +128,7 @@ from src.commands.report_cascade import _build_cascade_exec_summary_text
 from src.commands.report_cascade import _cascade_exec_summary_entry
 from src.commands.report_cascade import _cascade_messages_for_section
 from src.commands.report_cascade import _format_dependency_cascade
-from src.commands.report_context import _build_model_program_context
+from src.commands.report_context import _ReportStageSupport, _build_model_program_context
 from src.commands.report_narratives import _active_workstream_blurbs
 from src.commands.report_narratives import _workstream_narrative_warnings
 from src.commands.report_top_items import _build_auto_suggested_top_items
@@ -233,7 +233,7 @@ from src.core.eml_writer import write_eml
 from src.core.evidence_engine import build_evidence
 from src.core.exceptions import AuthError, ConfigError, QueryError, QueryTimeoutError, StateError
 from src.core.workspace_paths import REPO_ROOT, resolve_report_workspace_roots
-from src.core.forecast_engine import ETAForecast, ForecastAssessment, build_forecast_assessment
+from src.core.forecast_engine import ForecastAssessment, build_forecast_assessment
 from src.core.freshness_engine import build_freshness_report
 from src.core.hygiene_engine import evaluate_hygiene
 from src.core.issue_projection import IssueProjection
@@ -251,7 +251,7 @@ from src.core.notification_state_store import load_latest_notification_state
 from src.core.observability import RunLoggerAdapter, configure_file_logging, get_command_trace_path
 from src.core.models import AttributionTier, Comment, Confidence, ConfirmedDimension, DeltaKind, DeltaSet, DimensionRisk, EditionType, ItemDelta
 from src.core.models import EvidencePacket, FreshnessReport, ProgramContext, ReportData, ReviewSection, ReviewState
-from src.core.models import ReviewStatus, Revision, RiskLevel, RunManifest, ScorecardDelta, ScorecardEvidencePacket, Snapshot, SnapshotItem, WorkItem
+from src.core.models import ReviewStatus, Revision, RiskLevel, RunManifest, ScorecardDelta, ScorecardEvidencePacket, Snapshot, SnapshotItem
 from src.core.narrative_store import REMOVED_SECTION_MARKER, get_narratives_dir, load_narratives, merge_narratives
 from src.core.overrides_store import DecisionStripAck, DimensionOverride, OverridesDocument, ScorecardOverrides, Top3NowEntry
 from src.core.overrides_store import apply_pending_overrides, get_overrides_path, load_overrides, merge_overrides
@@ -396,71 +396,6 @@ DraftEmailSender = Callable[[GraphMailMessage], None]
 
 _build_override_snapshot = build_override_snapshot
 _build_report_diff_summary = build_report_diff_summary
-
-
-@dataclass(frozen=True, slots=True)
-class _ReportStageSupport:
-    load_program_reality: Callable[..., ProgramReality]
-    load_eta_forecasts: Callable[..., dict[int, ETAForecast]]
-    build_continuity_deltas: Callable[..., DeltaSet]
-    build_scorecard_packets: Callable[..., dict[str, dict[str, Any]]]
-    build_scorecard_data: Callable[..., tuple[tuple[ScorecardData, ...], tuple[DimensionRisk, ...], tuple[ScorecardDelta, ...]]]
-    load_report_signal_context: Callable[..., _ReportSignalContext | None]
-    build_exec_summary_text: Callable[..., str]
-    build_override_snapshot: Callable[[OverridesDocument], dict[str, dict[str, dict[str, Any]]]]
-    build_top_items: Callable[..., Any]
-    build_auto_suggested_top_items: Callable[..., Any]
-    build_newsletter_scoped_items: Callable[..., tuple[WorkItem, ...]]
-    build_newsletter_narrative_covered_item_ids: Callable[..., tuple[int, ...]]
-    visible_continuity_chapters: Callable[..., Any]
-    is_continuity_layout: Callable[..., bool]
-    build_chapter_templates: Callable[..., Any]
-    build_workstream_templates: Callable[..., Any]
-    build_continuity_exec_summary_template: Callable[..., str]
-    build_exec_summary_template: Callable[..., str]
-    active_chapter_notes: Callable[..., dict[str, str]]
-    visible_detail_section_ids: Callable[..., Any]
-    active_workstream_blurbs: Callable[..., dict[str, str]]
-    load_draft_ai_context: Callable[..., Any]
-    synthesize_v2_ai_content: Callable[..., Any]
-    build_disabled_ai_synthesis_result: Callable[..., Any]
-    ensure_review_status: Callable[..., Any]
-    skipped_review_sections: Callable[..., Any]
-    build_model_program_context: Callable[..., Any]
-    build_item_urls: Callable[..., Any]
-    build_workstream_data: Callable[..., Any]
-    build_continuity_render_data: Callable[..., Any]
-    workstream_narrative_warnings: Callable[..., Any]
-    detect_stale_narratives: Callable[..., Any]
-    count_new_high_dimensions: Callable[..., int]
-    decision_strip_ack_required: Callable[..., bool]
-    compute_read_time_minutes: Callable[..., int]
-    compute_healthy_streak: Callable[..., int]
-    build_health_summary: Callable[..., Any]
-    build_report_milestone_rows: Callable[..., Any]
-    resolve_forwarding_context: Callable[..., Any]
-    build_v2_vitality_snapshot: Callable[..., Any]
-    ado_saved_query_base_url: Callable[..., str | None]
-    ado_item_base_url: Callable[..., str | None]
-    derive_qg_status: Callable[..., Any]
-    format_edition_title: Callable[..., str]
-    subject_signal: Callable[..., str]
-    build_email_subject: Callable[..., str]
-    build_email_preheader: Callable[..., str]
-    format_prior_date_label: Callable[..., str | None]
-    build_deck_assumption_rows: Callable[..., Any]
-    build_deck_decision_rows: Callable[..., Any]
-    build_deck_ask_rows: Callable[..., Any]
-    build_deck_render_context: Callable[..., Any]
-    build_snapshot: Callable[..., Any]
-    group_scorecard_deltas: Callable[..., Any]
-    live_kusto_query_executor: Callable[..., Any]
-    now_utc: Callable[[], datetime]
-    read_git_sha: Callable[[], str | None]
-    build_draft_readiness: Callable[..., Any]
-    format_ban_violation: Callable[..., str]
-
-
 
 
 _HISTORICAL_ISSUE_CUTOFF = 77  # Preserved for potential future use
@@ -1196,6 +1131,7 @@ def _build_stage_request_context(
             build_snapshot=_build_snapshot,
             group_scorecard_deltas=_group_scorecard_deltas,
             live_kusto_query_executor=build_live_kusto_query_executor,
+            chart_rows_scrubber=_scrub_pii_rows,
             now_utc=lambda: datetime.now(timezone.utc),
             read_git_sha=_read_git_sha,
             build_draft_readiness=_build_draft_readiness,

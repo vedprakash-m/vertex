@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,7 +14,8 @@ from src.commands import report as report_module
 from src.commands import report_deck as report_deck_module
 from src.commands.report import generate_report_draft
 from src.core.action_tracker import append_action
-from src.core.exceptions import ConfigError, QueryTimeoutError
+from src.core.config_loader import ChartEditionSettings
+from src.core.exceptions import ConfigError, QueryError, QueryTimeoutError
 from src.core.file_stores import FileTrajectoryStore
 from src.core.models import Confidence, EditionType, RiskLevel
 from src.core.models_v2 import ActionItem, ActionSourceType, ActionStatus, Dependency, DependencyScheduleStatus, DependencyStatus
@@ -956,6 +958,367 @@ def test_render_stage_populates_render_outputs(repo_root: Path, tmp_path: Path) 
     assert render_ctx.render_state.report.manifest_id
     assert render_ctx.render_state.snapshot.items
     assert render_ctx.render_state.rendered_strings["html"] == render_ctx.render_state.html_body
+
+
+def _chart_gate_render_context(tmp_path: Path) -> StageContext:
+    reports_root = _stage_pipeline_workspace(tmp_path)
+    disable_kusto_in_report_copy(reports_root)
+    request = report_module._build_stage_request_context(
+        edition_name=EDITION_NAME,
+        issue_number=None,
+        reseed=False,
+        no_seed=False,
+        dry_run=True,
+        offline=False,
+        diff_mode=False,
+        as_of=datetime(2026, 5, 5, 18, 0, tzinfo=timezone.utc),
+        edition_type_override=None,
+        lookback_range=None,
+        reports_root=reports_root,
+        archive_root=tmp_path / "archive",
+        programs_root=tmp_path / "programs",
+        work_item_loader=lambda bundle, timestamp: load_cassette_work_items("cold_start", timestamp),
+        kusto_query_executor=lambda _: (_ for _ in ()).throw(QueryError("synthetic query failure")),
+        section_filter_ids=(),
+        open_browser=False,
+    )
+    ctx = ResolutionStage().execute(request)
+    for stage in (FetchStage(), ComputeStage(), MilestoneStage(), NarrativeStage(), AIStage()):
+        ctx = stage.execute(ctx)
+    return ctx
+
+
+@pytest.mark.parametrize(
+    ("settings", "expected_enabled"),
+    [(None, False), (ChartEditionSettings(), True), (ChartEditionSettings(enabled=False), False)],
+)
+def test_chart_gates_without_charts_follow_explicit_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, settings: ChartEditionSettings | None, expected_enabled: bool,
+) -> None:
+    import src.core.kusto_rendering as rendering
+
+    monkeypatch.setattr(rendering, "_VERTEX_CHARTS_ENABLED", True)
+    ctx = _chart_gate_render_context(tmp_path)
+    config = replace(ctx.bundle.config, charts=settings)
+    ctx = replace(ctx, bundle=replace(ctx.bundle, config=config))
+
+    rendered = RenderStage().execute(ctx)
+    validated = ValidationStage().execute(rendered)
+    results = validated.validation_state.manifest.qg_results
+
+    assert rendered.render_state.chart_gates_enabled is expected_enabled
+    assert all((name in results) is expected_enabled for name in ("QG-20", "QG-21", "QG-22"))
+
+
+@pytest.mark.parametrize("required", [False, True])
+def test_missing_chart_settings_still_gate_active_chart_query_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, required: bool,
+) -> None:
+    import src.core.kusto_rendering as rendering
+    from src.core.config_loader import KustoQuerySettings, KustoSettings
+
+    monkeypatch.setattr(rendering, "_VERTEX_CHARTS_ENABLED", True)
+    ctx = _chart_gate_render_context(tmp_path)
+    query = KustoQuerySettings(
+        id="synthetic-chart", cluster="synthetic", database="synthetic", kql="synthetic",
+        section="Synthetic", render_as="chart_image", confidence="high",
+        kusto_section_validates_slice=False, caveats=(), reference_url=None,
+        chart_blocks_publish=required,
+    )
+    config = replace(ctx.bundle.config, charts=None, kusto=KustoSettings(enabled=True, queries=(query,)))
+    ctx = replace(ctx, bundle=replace(ctx.bundle, config=config))
+
+    rendered = RenderStage().execute(ctx)
+    validated = ValidationStage().execute(rendered)
+    results = validated.validation_state.manifest.qg_results
+
+    assert all(name in results for name in ("QG-20", "QG-21", "QG-22"))
+    assert results["QG-22"] is not required
+    if required:
+        assert validated.validation_state.exit_code == 3
+
+
+@pytest.mark.parametrize(("kusto_enabled", "offline"), [(False, False), (True, True)])
+def test_missing_chart_settings_do_not_gate_inactive_chart_queries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kusto_enabled: bool, offline: bool,
+) -> None:
+    import src.core.kusto_rendering as rendering
+    from src.core.config_loader import KustoQuerySettings, KustoSettings
+
+    monkeypatch.setattr(rendering, "_VERTEX_CHARTS_ENABLED", True)
+    ctx = _chart_gate_render_context(tmp_path)
+    query = KustoQuerySettings(
+        id="synthetic-chart", cluster="synthetic", database="synthetic", kql="synthetic",
+        section="Synthetic", render_as="chart_image", confidence="high",
+        kusto_section_validates_slice=False, caveats=(), reference_url=None,
+        chart_blocks_publish=True,
+    )
+    config = replace(ctx.bundle.config, charts=None, kusto=KustoSettings(enabled=kusto_enabled, queries=(query,)))
+    ctx = replace(ctx, bundle=replace(ctx.bundle, config=config), offline=offline)
+
+    rendered = RenderStage().execute(ctx)
+    validated = ValidationStage().execute(rendered)
+
+    assert not rendered.render_state.chart_gates_enabled
+    assert all(name not in validated.validation_state.manifest.qg_results for name in ("QG-20", "QG-21", "QG-22"))
+
+
+def test_render_stage_wires_chart_scrubber_for_renderer_and_table_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import replace
+    from unittest.mock import MagicMock
+    from src.core.config_loader import KustoQuerySettings, KustoSettings
+
+    sample = "sample@example.invalid"
+    reports_root = _stage_pipeline_workspace(tmp_path)
+    disable_kusto_in_report_copy(reports_root)
+    request_ctx = report_module._build_stage_request_context(
+        edition_name=EDITION_NAME,
+        issue_number=None,
+        reseed=False,
+        no_seed=False,
+        dry_run=True,
+        offline=False,
+        diff_mode=False,
+        as_of=datetime(2026, 5, 5, 18, 0, tzinfo=timezone.utc),
+        edition_type_override=None,
+        lookback_range=None,
+        reports_root=reports_root,
+        archive_root=tmp_path / "archive",
+        programs_root=tmp_path / "programs",
+        work_item_loader=lambda bundle, timestamp: load_cassette_work_items("cold_start", timestamp),
+        kusto_query_executor=lambda _: [{"label": sample, "value": 2}],
+        section_filter_ids=(),
+        open_browser=False,
+    )
+    ctx = ResolutionStage().execute(request_ctx)
+    for stage in (FetchStage(), ComputeStage(), MilestoneStage(), NarrativeStage(), AIStage()):
+        ctx = stage.execute(ctx)
+    query = KustoQuerySettings(
+        id="synthetic-chart", cluster="synthetic", database="synthetic", kql="synthetic",
+        section="Synthetic chart", render_as="chart_image", confidence="high",
+        kusto_section_validates_slice=False, caveats=(), reference_url=None,
+        chart_config={"type": "line"}, chart_renderer_id="synthetic::line",
+    )
+    config = replace(ctx.bundle.config, kusto=KustoSettings(enabled=True, queries=(query,)))
+    ctx = replace(ctx, bundle=replace(ctx.bundle, config=config))
+    registry = MagicMock()
+    builder = registry.get_renderer.return_value
+    builder.build.return_value = None
+    monkeypatch.setattr(render_stage_module, "build_default_registry", lambda: registry)
+
+    rendered = RenderStage().execute(ctx)
+
+    assert sample not in str(builder.build.call_args.args[2])
+    assert "[PII-FILTERED-EMAIL]" in str(builder.build.call_args.args[2])
+    assert sample not in rendered.render_state.html_body
+    assert "[PII-FILTERED-EMAIL]" in rendered.render_state.html_body
+
+
+@pytest.mark.parametrize("query_id", ["synthetic-chart", "velocity-p50", "fleet-health", "icm-mttr"])
+@pytest.mark.parametrize("blocks_publish", [False, True])
+def test_chart_privacy_failure_reaches_validation_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, query_id: str, blocks_publish: bool,
+) -> None:
+    from dataclasses import replace
+    from src.core.config_loader import ChartEditionSettings, KustoQuerySettings, KustoSettings
+    from src.core.kusto_rendering import _build_table_section
+
+    sample = "sample@example.invalid"
+    reports_root = _stage_pipeline_workspace(tmp_path)
+    disable_kusto_in_report_copy(reports_root)
+    request_ctx = report_module._build_stage_request_context(
+        edition_name=EDITION_NAME,
+        issue_number=None,
+        reseed=False,
+        no_seed=False,
+        dry_run=True,
+        offline=False,
+        diff_mode=False,
+        as_of=datetime(2026, 5, 5, 18, 0, tzinfo=timezone.utc),
+        edition_type_override=None,
+        lookback_range=None,
+        reports_root=reports_root,
+        archive_root=tmp_path / "archive",
+        programs_root=tmp_path / "programs",
+        work_item_loader=lambda bundle, timestamp: load_cassette_work_items("cold_start", timestamp),
+        kusto_query_executor=lambda _: [{"label": sample, "value": 2}],
+        section_filter_ids=(),
+        open_browser=False,
+    )
+    ctx = ResolutionStage().execute(request_ctx)
+    for stage in (FetchStage(), ComputeStage(), MilestoneStage(), NarrativeStage(), AIStage()):
+        ctx = stage.execute(ctx)
+    query = KustoQuerySettings(
+        id=query_id, cluster="synthetic", database="synthetic", kql="synthetic",
+        section="Synthetic chart", render_as="chart_image", confidence="high",
+        kusto_section_validates_slice=False, caveats=(), reference_url=None,
+        chart_config={"type": "line"}, chart_blocks_publish=blocks_publish,
+    )
+
+    def reject_rows(_rows):
+        raise RuntimeError(sample)
+
+    config = replace(
+        ctx.bundle.config,
+        kusto=KustoSettings(enabled=True, queries=(query,)),
+        charts=ChartEditionSettings(),
+    )
+    ctx = replace(
+        ctx,
+        bundle=replace(ctx.bundle, config=config),
+        stage_support=replace(ctx.stage_support, chart_rows_scrubber=reject_rows),
+    )
+    monkeypatch.setattr(
+        render_stage_module, "build_velocity_kusto_section",
+        lambda **_: _build_table_section(query, (), message=None, degraded=False),
+    )
+    apply_fallbacks = render_stage_module._apply_kusto_fallbacks
+
+    def exercise_fallbacks(**kwargs):
+        if query_id == "fleet-health":
+            kwargs["ado_vitality_available"] = True
+        return apply_fallbacks(**kwargs)
+
+    monkeypatch.setattr(render_stage_module, "_apply_kusto_fallbacks", exercise_fallbacks)
+
+    rendered = RenderStage().execute(ctx)
+    validated = ValidationStage().execute(rendered)
+
+    assert sample not in rendered.render_state.html_body
+    visible = [section for section in rendered.render_state.kusto_sections if section.query_id == query_id]
+    if query_id in ("fleet-health", "icm-mttr"):
+        assert not visible
+    elif query_id == "velocity-p50":
+        assert len(visible) == 1 and not visible[0].is_degraded
+    assert validated.validation_state.manifest.qg_results["QG-22"] is not blocks_publish
+    if blocks_publish:
+        assert validated.validation_state.exit_code == 3
+
+
+def test_routed_chart_size_reaches_validation_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from dataclasses import replace
+    from src.core.config_loader import KustoQuerySettings
+    from src.core.kusto_rendering import _build_table_section
+
+    reports_root = _stage_pipeline_workspace(tmp_path)
+    disable_kusto_in_report_copy(reports_root)
+    request_ctx = report_module._build_stage_request_context(
+        edition_name=EDITION_NAME,
+        issue_number=None,
+        reseed=False,
+        no_seed=False,
+        dry_run=True,
+        offline=False,
+        diff_mode=False,
+        as_of=datetime(2026, 5, 5, 18, 0, tzinfo=timezone.utc),
+        edition_type_override=None,
+        lookback_range=None,
+        reports_root=reports_root,
+        archive_root=tmp_path / "archive",
+        programs_root=tmp_path / "programs",
+        work_item_loader=lambda bundle, timestamp: load_cassette_work_items("cold_start", timestamp),
+        kusto_query_executor=lambda _: [],
+        section_filter_ids=(),
+        open_browser=False,
+    )
+    ctx = ResolutionStage().execute(request_ctx)
+    for stage in (FetchStage(), ComputeStage(), MilestoneStage(), NarrativeStage(), AIStage()):
+        ctx = stage.execute(ctx)
+    query = KustoQuerySettings(
+        id="synthetic-chart", cluster="synthetic", database="synthetic", kql="synthetic",
+        section="Synthetic chart", render_as="chart_image", confidence="high",
+        kusto_section_validates_slice=False, caveats=(), reference_url=None,
+    )
+    section = replace(
+        _build_table_section(query, (), message=None, degraded=False),
+        render_mode="chart_image",
+        section_placement="exec_summary",
+        chart_png_base64="c3ludGhldGlj",
+        chart_png_size_bytes=102_401,
+    )
+    monkeypatch.setattr(render_stage_module, "build_kusto_sections", lambda *args, **kwargs: ((section,), (), ()))
+
+    rendered = RenderStage().execute(ctx)
+    assert section not in rendered.render_state.kusto_sections
+    validated = ValidationStage().execute(rendered)
+
+    assert validated.validation_state.manifest.qg_results["QG-21"] is False
+    assert validated.validation_state.exit_code == 3
+
+
+@pytest.mark.parametrize(
+    ("chart_enabled", "global_enabled"),
+    [(None, True), (True, True), (False, True), (None, False)],
+)
+def test_loaded_chart_publish_policy_reaches_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, chart_enabled: bool | None, global_enabled: bool,
+) -> None:
+    from dataclasses import replace
+    import src.core.kusto_rendering as rendering
+    from src.commands.chart_gather import _scrub_pii_rows
+
+    monkeypatch.setattr(rendering, "_VERTEX_CHARTS_ENABLED", global_enabled)
+    if chart_enabled is False or not global_enabled:
+        def unexpected_discovery():
+            pytest.fail("disabled chart pipeline must not discover renderers")
+
+        monkeypatch.setattr(render_stage_module, "build_default_registry", unexpected_discovery)
+        monkeypatch.setattr(render_stage_module, "build_theme_context", unexpected_discovery)
+
+    reports_root = _stage_pipeline_workspace(tmp_path)
+    program_dir = tmp_path / "programs" / "acme"
+    program_path = program_dir / "program.yaml"
+    program = yaml.safe_load(program_path.read_text(encoding="utf-8"))
+    program["kusto"]["enabled"] = True
+    program_path.write_text(yaml.safe_dump(program), encoding="utf-8")
+    query_path = program_dir / "knowledge" / "golden_queries.yaml"
+    query_path.write_text(
+        yaml.safe_dump({
+            "schema_version": "1.0",
+            "queries": [{
+                "id": "synthetic-chart", "cluster": "https://example.test", "database": "synthetic",
+                "kql": "synthetic", "section": "Synthetic", "render_as": "chart_image",
+                "confidence": "high", "chart_blocks_publish": True, "chart_cache_ttl_hours": 7,
+            }],
+        }),
+        encoding="utf-8",
+    )
+    if chart_enabled is not None:
+        edition_path = program_dir / "editions" / f"{EDITION_NAME}.yaml"
+        edition = yaml.safe_load(edition_path.read_text(encoding="utf-8"))
+        edition["chart"] = {"enabled": chart_enabled}
+        edition_path.write_text(yaml.safe_dump(edition), encoding="utf-8")
+
+    request_ctx = report_module._build_stage_request_context(
+        edition_name=EDITION_NAME, issue_number=None, reseed=False, no_seed=False,
+        dry_run=True, offline=False, diff_mode=False,
+        as_of=datetime(2026, 5, 5, 18, 0, tzinfo=timezone.utc),
+        edition_type_override=None, lookback_range=None, reports_root=reports_root,
+        archive_root=tmp_path / "archive", programs_root=tmp_path / "programs",
+        work_item_loader=lambda bundle, timestamp: load_cassette_work_items("cold_start", timestamp),
+        kusto_query_executor=lambda _: [{"value": 2}], section_filter_ids=(), open_browser=False,
+    )
+    ctx = ResolutionStage().execute(request_ctx)
+    for stage in (FetchStage(), ComputeStage(), MilestoneStage(), NarrativeStage(), AIStage()):
+        ctx = stage.execute(ctx)
+
+    def reject_rows(_rows):
+        raise RuntimeError("synthetic scrub failure")
+
+    scrubber = _scrub_pii_rows if chart_enabled is False or not global_enabled else reject_rows
+    ctx = replace(ctx, stage_support=replace(ctx.stage_support, chart_rows_scrubber=scrubber))
+    rendered = RenderStage().execute(ctx)
+    validated = ValidationStage().execute(rendered)
+
+    if chart_enabled is False or not global_enabled:
+        sections = [section for section in rendered.render_state.kusto_sections if section.query_id == "synthetic-chart"]
+        assert len(sections) == 1 and sections[0].render_mode == "table" and sections[0].rows
+        assert "QG-22" not in validated.validation_state.manifest.qg_results
+    else:
+        assert validated.validation_state.manifest.qg_results["QG-22"] is False
+        assert validated.validation_state.exit_code == 3
 
 
 def test_render_stage_deck_reads_sqlite_backed_icm_signals(repo_root: Path, tmp_path: Path) -> None:

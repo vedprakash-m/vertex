@@ -44,17 +44,22 @@ def _count_collected_tests(tests_root: Path) -> int:
             capture_output=True,
             text=True,
             check=False,
-            timeout=120,
+            # Collect-only still imports the suite, including under subprocess coverage.
+            timeout=600,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
+        return -1
+    if result.returncode != 0:
         return -1
     # pytest's collection summary wording has changed across major versions:
     #   pytest < 8:  "collected N items"
     #   pytest 9.x:  "N tests collected in X.XXs"
-    # Match either so an upstream pytest bump doesn't silently regress this to -1.
-    match = re.search(r"collected\s+(\d+)\s+items", result.stdout)
+    # Match summary lines only; parametrized test IDs can contain the same wording.
+    match = re.search(r"(?m)^[ \t]*collected\s+(\d+)\s+items\b", result.stdout)
     if match is None:
-        match = re.search(r"(\d+)\s+tests?\s+collected", result.stdout)
+        match = re.search(
+            r"(?m)^[ \t]*(?:\d+/)?(\d+)\s+tests?\s+collected\b", result.stdout
+        )
     if match is None:
         return -1
     return int(match.group(1))
