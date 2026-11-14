@@ -5,6 +5,7 @@ import math
 import sqlite3
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from datetime import timezone
 from pathlib import Path
 from threading import Barrier, Event
@@ -1036,6 +1037,108 @@ def test_legacy_settlement_refuses_ambiguous_tracked_matches(
             (resolved.reservation_id, "settled"),
             (other.reservation_id, "reserved"),
         ]
+
+
+@pytest.mark.parametrize(
+    "invalid_amount",
+    [-0.5, float("inf"), "nan", "private-state-value"],
+    ids=["negative", "infinity", "nan", "invalid-text"],
+)
+@pytest.mark.parametrize("when", ["before-lookup", "after-lookup"])
+def test_legacy_settlement_refuses_invalid_active_reservation(
+    tmp_path, monkeypatch, invalid_amount, when,
+) -> None:
+    guard = CostGuard(edition=EDITION_NAME, run_id="invalid-active", budget_usd=1.0, programs_root=tmp_path)
+    selected = guard.reserve_call(0.25)
+    other = guard.reserve_call(0.125)
+    previous_state = guard.current_state()
+    previous_projection = guard.state_path.read_bytes()
+    corrupted_rows = []
+
+    def corrupt_other() -> None:
+        with closing(sqlite3.connect(guard.ledger_path)) as connection:
+            with connection:
+                connection.execute(
+                    "UPDATE ai_cost_reservations SET reserved_usd = ? WHERE reservation_id = ?",
+                    (invalid_amount, other.reservation_id),
+                )
+            corrupted_rows.extend(connection.execute(
+                "SELECT * FROM ai_cost_reservations ORDER BY reservation_id"
+            ).fetchall())
+
+    if when == "after-lookup":
+        find_reservation = guard._find_legacy_reservation
+
+        def find_then_corrupt(amount):
+            reservation = find_reservation(amount)
+            assert reservation is not None and reservation.reservation_id == selected.reservation_id
+            corrupt_other()
+            return reservation
+
+        monkeypatch.setattr(guard, "_find_legacy_reservation", find_then_corrupt)
+    else:
+        corrupt_other()
+
+    with pytest.raises(StateError, match="Invalid cost guard reserved_usd value") as error:
+        guard.settle_reservation(0.25, 0.07)
+
+    assert "private-state-value" not in str(error.value)
+    assert guard.current_state() == previous_state
+    assert guard.state_path.read_bytes() == previous_projection
+    with closing(sqlite3.connect(guard.ledger_path)) as connection:
+        assert connection.execute(
+            "SELECT * FROM ai_cost_reservations ORDER BY reservation_id"
+        ).fetchall() == corrupted_rows
+    assert len(corrupted_rows) == 2
+
+
+@pytest.mark.parametrize("scope", ["other-run", "settled"])
+def test_legacy_settlement_ignores_invalid_reservations_outside_active_run(tmp_path, scope) -> None:
+    guard = CostGuard(edition=EDITION_NAME, run_id="active-run", budget_usd=1.0, programs_root=tmp_path)
+    selected = guard.reserve_call(0.25)
+    other_guard = (
+        CostGuard(edition=EDITION_NAME, run_id="other-run", budget_usd=1.0, programs_root=tmp_path)
+        if scope == "other-run" else guard
+    )
+    other = other_guard.reserve_call(0.125)
+    if scope == "settled":
+        other_guard.settle_call(other, 0.05)
+    with closing(sqlite3.connect(guard.ledger_path)) as connection, connection:
+        connection.execute(
+            "UPDATE ai_cost_reservations SET reserved_usd = ? WHERE reservation_id = ?",
+            ("private-state-value", other.reservation_id),
+        )
+
+    state = guard.settle_reservation(0.25, 0.07)
+
+    assert state.reserved_usd == 0.0
+    with closing(sqlite3.connect(guard.ledger_path)) as connection:
+        assert connection.execute(
+            "SELECT reservation_id, reserved_usd, status FROM ai_cost_reservations ORDER BY reservation_id"
+        ).fetchall() == [
+            (selected.reservation_id, 0.25, "settled"),
+            (other.reservation_id, "private-state-value", "reserved" if scope == "other-run" else "settled"),
+        ]
+
+
+def test_explicit_settlement_ignores_invalid_other_active_reservation(tmp_path) -> None:
+    guard = CostGuard(edition=EDITION_NAME, run_id="explicit-reservation", budget_usd=1.0, programs_root=tmp_path)
+    selected = guard.reserve_call(0.25)
+    other = guard.reserve_call(0.125)
+    with closing(sqlite3.connect(guard.ledger_path)) as connection, connection:
+        connection.execute(
+            "UPDATE ai_cost_reservations SET reserved_usd = ? WHERE reservation_id = ?",
+            ("private-state-value", other.reservation_id),
+        )
+
+    state = guard.settle_call(selected, 0.07)
+
+    assert state.spent_usd == pytest.approx(0.07)
+    assert state.reserved_usd == pytest.approx(0.125)
+    with closing(sqlite3.connect(guard.ledger_path)) as connection:
+        assert connection.execute(
+            "SELECT reservation_id, status FROM ai_cost_reservations ORDER BY reservation_id"
+        ).fetchall() == [(selected.reservation_id, "settled"), (other.reservation_id, "reserved")]
 
 
 def test_legacy_settlement_refuses_match_that_becomes_ambiguous(tmp_path, monkeypatch) -> None:

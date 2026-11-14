@@ -247,12 +247,19 @@ class CostGuard:
                 if reservation_row["status"] != "reserved":
                     raise StateError("Cost reservation has already been settled")
                 if require_unique_legacy_match:
-                    matches = connection.execute(
-                        "SELECT reservation_id FROM ai_cost_reservations WHERE edition = ? AND run_id = ? "
-                        "AND status = 'reserved' AND ABS(reserved_usd - ?) < 0.000000000001 LIMIT 2",
-                        (self._edition, self._run_id, reservation.estimated_cost_usd),
-                    ).fetchall()
-                    if len(matches) != 1 or matches[0]["reservation_id"] != reservation.reservation_id:
+                    matches = []
+                    for active in connection.execute(
+                        "SELECT reservation_id, reserved_usd, "
+                        "ABS(reserved_usd - ?) < 0.000000000001 AS amount_matches "
+                        "FROM ai_cost_reservations WHERE edition = ? AND run_id = ? AND status = 'reserved'",
+                        (reservation.estimated_cost_usd, self._edition, self._run_id),
+                    ):
+                        _coerce_state_float(active["reserved_usd"], field_name="reserved_usd")
+                        if active["amount_matches"]:
+                            matches.append(active["reservation_id"])
+                            if len(matches) == 2:
+                                break
+                    if len(matches) != 1 or matches[0] != reservation.reservation_id:
                         raise StateError("Legacy cost reservation match is ambiguous or changed; reconcile before retrying.")
                 reserved_cost_usd = _coerce_state_float(reservation_row["reserved_usd"], field_name="reserved_usd")
                 state_row = connection.execute(
