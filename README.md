@@ -210,7 +210,7 @@ vertex/
 ## 🛠️ Getting Started
 
 ### 1. Prerequisites
-* Python **3.11** or higher.
+* Python **3.11.5** or higher.
 * Operating System: Windows (optimized with cross-platform `portalocker` file locking), macOS, or Linux.
 * Git.
 

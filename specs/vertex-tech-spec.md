@@ -8,6 +8,72 @@
 
 ## Changelog
 
+- Last updated: 2026-11-13 — Contain concurrent context-gap duplicates, selected failed-gather retries, stale unhashed proposals and draft program-context drift; full replay and capture qualification remain open (§9.16, §11.3, §13.1.1).
+- Last updated: 2026-11-12 — Honor explicitly supplied compiler token estimators and injection detectors without truth-testing them; compiler qualification remains open (§12.1b).
+- Last updated: 2026-11-12 — Keep query IDs and caught exception text out of the KPI gather warning; empty KPI and Kusto-recorder errors retain failed query-state classification (§11.3).
+- Last updated: 2026-11-12 — Reject non-finite extracted confidence before clamping; caller-specific failure behavior and historical evidence remain unchanged (§13.1.1).
+- Last updated: 2026-11-12 — Separate ambiguous REV/AI file-cache keys while preserving verified ordinary legacy hits; authorization and W1.5 qualification remain open (§12.2a).
+- Last updated: 2026-11-12 — Reject uncomputable or non-finite optional-evidence salience scores; weight policy and compiler qualification remain open (§12.1b).
+- Last updated: 2026-11-12 — Check compiled prompt/hash agreement before released-cache lookup or dispatch; authentication and cache qualification remain open (§12.1a).
+- Last updated: 2026-11-12 — Reject invalid consumed compiler salience inputs and rank from validated optional-span snapshots; W1.2 remains partial (§12.1b).
+- Last updated: 2026-11-12 — Refresh stored cache identity metadata with the payload on successful existing-key writes; authorization and W1.5 qualification remain open (§12.1a).
+- Last updated: 2026-11-12 — Contain excessive JSON nesting at gather pointer, committed-candidate and pinned-manifest verification boundaries; retry and qualification remain open (§11.3).
+- Last updated: 2026-11-12 — Report filesystem failures during invalid-origin and malformed-JSON cache eviction as content-free state errors; W1.5 remains partial (§12.1a).
+- Last updated: 2026-11-12 — Preserve gather-run IDs for newly persisted fact-snapshot revisions; no-op lineage and replay remain open (§9.16).
+- Last updated: 2026-11-12 — Insert manifest-backed SQLite signal batches atomically; later gather failures and safe replay remain open (§11.3).
+- Last updated: 2026-11-12 — Refuse manifest-backed SQLite signal-ID collisions rather than replacing existing rows; partial writes and safe replay remain open (§5.2, §11.3).
+- Last updated: 2026-11-12 — Acquire the gather lease before recovery and attempt cleanup across post-acquisition exits; atomic fencing and safe replay remain open (§11.3).
+- Last updated: 2026-11-12 — Add opt-in SQLite committed-signal read parity; consumer enforcement and safe replay remain open (§11.3).
+- Last updated: 2026-11-12 — Normalize manifest-backed signals before deduplication and canonical ID assignment; committed-aware retry and fact lineage remain open (§5.2).
+- Last updated: 2026-11-12 — Defer successful ADO UIL verification in manifest-backed gather until promotion returns; replay and atomic checkpointing remain open (§11.3).
+- Last updated: 2026-11-12 — Scope gather's provider-instance registry access and channel-state reporting to the configured instance or default; retry durability and historical repair remain open (§9.12).
+- Last updated: 2026-11-12 — Reject malformed ADO revision-page evidence before reporting pagination completeness; independent source qualification remains open (§3).
+- Last updated: 2026-11-12 — Follow ADO comment body or header continuation tokens and reject malformed page evidence; independent source and effect qualification remain open (§3, §13.2).
+- Last updated: 2026-11-12 — Withhold an ADO revision or comment history with an invalid timestamp while preserving independently complete data; independent checkpoints and source qualification remain open (§3).
+- Last updated: 2026-11-12 — Conditionally evict the observed released-cache row on an explicit semantic rejection; the current invocation remains blocked and W1.5 remains partial (§12.1a).
+- Last updated: 2026-11-12 — Revalidate decoded released-cache payloads before runner writes and replay; the original retained-row behavior is superseded by the conditional eviction above (§12.1a).
+- Last updated: 2026-11-12 — Refuse literal `None` in direct shared-cache writes before serialization, release recording or storage; non-`None` values that decode to `None` and cache qualification remain open (§12.1a).
+- Last updated: 2026-11-12 — Bind CLI tier-decision sinks to an admitted invocation scope and withhold scoped startup effects when that scope cannot be safely established (§12.2a, §13.1).
+- Last updated: 2026-11-11 — Keep router cache-hit counts diagnostic and return unavailable frontier-call counts without qualified evidence (§12.2a).
+- Last updated: 2026-11-11 — Keep fresh cockpit frontier avoidance unavailable without qualified eligibility, call and window evidence; label the active-file cache ratio as unqualified (§12.2a).
+- Last updated: 2026-11-11 — Refuse corrupt or unchecked tier-decision reads without repair and make affected cockpit ratios unavailable; durable measurement completeness remains unqualified (§12.2a).
+- Last updated: 2026-11-11 — Count ordinary tier-decision sink failures at router and runner delivery boundaries; direct sink calls can raise and measurement completeness remains unqualified (§12.1a, §12.2a).
+- Last updated: 2026-11-11 — Extend fresh outcome-type containment to uncached runner paths and native-batch items; operational qualification remains open (§12.1a).
+- Last updated: 2026-11-11 — Initially refuse wrong-type fresh values before runner-owned cache writes; the later extension is described below (§12.1a).
+- Last updated: 2026-11-11 — Refuse wrong-type decoded values on runner cache reads and writes; this does not establish the original fresh value's type or qualify the cache (§12.1a).
+- Last updated: 2026-11-11 — Reject invalid compiler screening verdicts before compiler-owned work; upstream verdict authentication and qualification remain open (§12.1b).
+- Last updated: 2026-11-11 — Reject malformed WIQL response evidence and contain capped link results; query rewriting and provider qualification remain open (§3).
+- Last updated: 2026-11-11 — Persist typed ADO history-authentication failures for first-error diagnosis; historical and other failure classifications remain open (§3).
+- Last updated: 2026-11-11 — Treat a stored cache feature mismatch as an identity miss before decoding; the later existing-key write correction is described above (§12.1a).
+- Last updated: 2026-11-11 — Share wrapper-local feature accounting when the built-in AI client is explicitly supplied as well as selected by default; durable shared budgets remain open (§12.2).
+- Last updated: 2026-11-11 — Bind the default compiler estimator to its selected tokenizer backend and partition new identities accordingly; historical manifests and broader qualification remain open (§12.1b).
+- Last updated: 2026-11-11 — Validate and snapshot compiler source quotas before screening; omitted quotas and broader compiler qualification remain open (§12.1b).
+- Last updated: 2026-11-11 — Refuse damaged or foreign-program active blind-comparison journals without repair and report fixed pilot-summary errors; historical completeness remains unqualified (§12.1a).
+- Last updated: 2026-11-11 — Refuse runner-owned cache writes whose configured decoder returns the miss sentinel; direct writes, authorization and qualification remain open (§12.1a).
+- Last updated: 2026-11-11 — Refuse invalid bounded call-ceiling limits and retained counts, and prevent integer-storage overflow; scope compatibility and qualification remain open (§12.1a).
+- Last updated: 2026-11-11 — Bound expected failures in the default compiler-tokenizer path while retaining specified absence and unknown-model fallbacks; provenance and qualification remain open (§12.1b).
+- Last updated: 2026-11-11 — Bind the test-only dependency runner's sanitized cache payload and supplied cache identity to its originating release; generic enforcement and authorization remain open (§9.17.1, §12.1a).
+- Last updated: 2026-11-11 — Refuse a decoded `None` in either shared runner cache instead of treating a present entry as a miss; generic release binding and authorization remain open (§12.1a).
+- Last updated: 2026-11-11 — Use the stricter configured or retained run ceiling for guarded admission and actual-spend overrun reporting; cross-client budget propagation remains open (§12.2, §12.5).
+- Last updated: 2026-11-11 — Release the exact reservation after selected postcommit projection-refresh failures at the proven pre-dispatch boundary; cleanup outcomes and reconciliation remain unqualified (§12.2, §12.5).
+- Last updated: 2026-11-11 — Keep untrusted references, schema paths and exception text out of selected dependency-refusal audit reasons; historical and other diagnostics remain open (§9.17.1).
+- Last updated: 2026-11-11 — Record only reached lifecycle stages for the test-only dependency runner and propagate lifecycle-audit write failures; broad cache and audit qualification remain open (§9.17.1).
+- Last updated: 2026-11-11 — Partition the legacy dependency-proposal cache by its configured fallback deployment chain; actual provider identity and broader cache qualification remain open (§12.1a).
+- Last updated: 2026-11-11 — Refuse a resolved provider-tokenizer encoding failure instead of silently substituting a heuristic; default-estimator fallback and broader qualification remain open (§12.1a).
+- Last updated: 2026-11-11 — Partition default-estimator model identity and compiler manifest keys; durable fallback provenance and complete released-cache identity remain open (§12.1a).
+- Last updated: 2026-11-11 — Verify released-cache payload/hash consistency before deserialization; generic release-audit and authorization checks remain open (§12.1a).
+- Last updated: 2026-11-11 — Recheck the compatibility `CostGuard.record()` ceiling in the spend-write transaction; standalone WorkIQ admission remains separate and non-atomic (§12.2).
+- Last updated: 2026-11-11 — Bind returned cost-reservation handles to the resolved ledger path for settlement and proven non-dispatch release; ledger replacement and reconciliation remain unqualified (§12.2).
+- Last updated: 2026-11-11 — Release the returned cost reservation at selected proven local non-dispatch boundaries, preserving uncertain attempts and recording a transactional release marker (§12.2).
+- Last updated: 2026-11-11 — Bound selected AI cost/preflight failures at deployment, runner, report, synthesis and proposal callers; report-wide stopping and budget-gate policy remain separate decisions (§12.1a, §12.2).
+- Last updated: 2026-11-11 — Guarded router retries obtain individual reservations and rate admission; uncertain attempts retain their estimates and emit best-effort, per-attempt diagnostics (§12.2).
+- Last updated: 2026-11-11 — Existing opt-in AI traces carry the returned cost-reservation ID when available; the ID is ledger-scoped and does not establish billing or reconciliation (§12.2).
+- Last updated: 2026-11-10 — Retained cost runs are ordered by normalized UTC instant, with unrepresentable UTC timestamps reported as invalid state (§12.5).
+- Last updated: 2026-11-10 — Invalid retained cost timestamps no longer appear in their state errors, and AI-client reservation/settlement wrappers suppress original exception chains in ordinary tracebacks (§12.2).
+- Last updated: 2026-11-10 — Cost reservations preflight the existing compatibility projection before inserting a new reservation; later refresh and crash failures still require reconciliation (§12.5).
+- Last updated: 2026-11-10 — Per-thread enrichment reports and counts only WorkIQ-admitted evidence, including safe duplicates; rejected-only extractions preserve lane state and previews apply the same admission without stage-owned writes (§13.1.1).
+- Last updated: 2026-11-10 — The affected WorkIQ extraction diagnostics omit exception and cluster-key text; invalid textual confidence retains its exception type with a fixed message and suppressed standard traceback context (§13.1.1).
+- Last updated: 2026-11-10 — The opt-in 50-item gather baseline is a required serial CI step using runner temporary storage (§17.2). Its 30-second assertion is unchanged; broader performance qualification remains separate.
 - Last updated: 2026-11-08 — RELO-W4.12c refuses to open WAL-mode actuation journals or any journal with SQLite sidecars under the strict no-write policy; their reliability counts remain null with a warning. Rollback-journal reads retain exact selected-domain counts.
 - Last updated: 2026-11-08 — RELO-W3.3i separates native message IDs from supported thread fallbacks and keeps no-native WorkIQ previews out of gather signals, prefetch persistence, provenance, action/evidence extraction, AI feedback context, and source-family corroboration. Legacy provisional cache/read paths are rejected without rewriting retained state.
 - Last updated: 2026-11-04 — Full shim loading now distinguishes absent optional milestone input from malformed/unavailable input without losing unrelated facts; assessment freshness and output expose safe degradation. Incremental ledger projections now route every supported entity family into affected-row folding, compare full canonical output with rebuilds, and advance projector versions to rebuild stale caches.
@@ -550,6 +616,8 @@ Altitude values are open-vocabulary strings used by templates to choose section 
 
 **Shared milestone evidence qualification:** `assess_milestone_health()` returns UNKNOWN with confidence NONE, absent completion date and the existing unmeasured slip placeholder `0.5` for future/target-day milestones with no observed linked items. Explicit DEFERRED and existing past-due rules take precedence. `coverage_gap` also marks missing required links, and completion resolution refuses an incomplete linked set. Report summaries include UNKNOWN and the existing report gap emitter records actual assessment reasoning rather than a hardcoded past-due claim. Doctor and milestone CLI reuse this assessment; no new model, calibration or ProgramVerdict migration is implied.
 
+The report milestone gap emitter continues best-effort after a write failure and logs a fixed warning without program, milestone or exception details. Log visibility depends on host configuration; the warning does not establish that the gap was recorded and does not add a report-validation warning.
+
 Additional workstream-memory types live outside `models_v2.py` because they are persistence and reporting-adjacent rather than shared core program identity models:
 
 - `src/core/workstream_registry.py` — `WorkstreamRegistryEntry`, `WorkstreamIssueSnapshotEntry`, `WorkstreamIssueSnapshot`
@@ -804,6 +872,18 @@ Render-ready dataclasses consumed by Jinja2 templates:
 ## §3 ADO Client
 
 > **UIL note (2026-06-02):** The primary ADO ingest path is `ADODiscoveryProvider` (`src/core/ado_discovery.py`) + `ADOHydrationProvider` (`src/core/ado_hydration.py`) by default. The OData broad-sweep path (`_build_odata_filter`, `_load_program_items_from_ado`, `_load_freshness_program_items`) has been removed from `gather.py` (Phase 5 complete). `query_builder.py`'s `build_odata_filter` is retained and still used by `vertex freshness` and `vertex reconcile`. `ADOClient` is used directly by both UIL providers and legacy commands. `ADODiscoveryProvider._discover_scope_group()` deduplicates shared WIQL queries so each unique `(query_id, clause)` pair executes only once per gather cycle.
+
+**Saved-query reuse containment, partial:** Discovery fetches each successfully returned saved-query definition once per invocation rather than retaining it across invocations. A reused provider compares nonempty definitions with its first observed hash for the program, provider instance and query; a change is not executed and reports ERROR/PARTIAL without an execution hash. Partial rediscovery retains unobserved live bindings for failed, partial or unreported scopes without refreshing their observation times; independently successful FULL scopes can still retire missing bindings. An observed null-workstream binding reuses its live row, or the most recently observed retired row if no live row exists; multiple existing live rows for the same key cause a transactional refusal rather than repair. A new provider has no previous hash, filter changes are not covered, and this in-memory check is neither a semantic diff nor source-owner approval. Durable scope governance, retained-data repair and source qualification remain open.
+
+**WIQL response evidence, partial (RELO-W2.16c):** `execute_wiql` requires a flat or link result array, positive integer IDs without boolean or string coercion, valid rows and compatible supplied query/result metadata. Duplicate flat IDs, contradictory populated arrays, malformed endpoints and absent or invalid arrays raise a fixed-message `WIQLResponseError` carrying valid observed IDs; no successful pagination callback is emitted. Valid empty arrays and repeated link endpoints remain supported. An omitted empty array is conservatively unverified and can reduce availability. Link-row counts as well as unique-ID counts can indicate a cap. The WIQL pagination outcome identifies flat versus link or ambiguous shape: capped link results do not enter the flat ID-range rewrite, and link-shaped or ambiguous partition pages cannot complete that scan. Discovery retains observations and prior scope membership, reports malformed responses ERROR/PARTIAL and ignores any callback preceding the error; independent complete scopes retain normal retirement. Both gather paths retain their prior latest-FULL on the resulting partial run, and create reconciliation refuses malformed marker results. Other callers use their existing `QueryError` paths and may discard observations. This does not qualify provider response behavior, WIQL rewriting, independent completeness or full link-query semantics.
+
+**ADO detail completeness, partial:** Full hydration retains the batch item and each independently complete revision or comment history. It withholds a history unless exactly one `PaginationOutcome` confirms a matching integer row count, a positive integer page count and no truncation. It also withholds a paginated history if any selected timestamp is missing, non-string, blank, malformed or overflows UTC conversion, reporting a fixed diagnostic without the provider value; complete empty histories remain valid. Timestamp selection matches conversion: revision `fields["System.ChangedDate"]`, and comment `publishedDate or createdDate`. A failed history produces a retryable error and a failed rather than verified reference. A recorded hydration failure requests both histories again when the registration is next pullable, subject to existing backoff. Partial batch failures keep successful and failed references disjoint. The call counter is not a count of attempted HTTP pages. Gather's rolling signal window can still exclude older history on a later successful retry. Manifest-backed gather defers successful registry verification as described in §11.3; manifest-off and direct-channel verification can occur before extraction and durable commit. Independent subresource checkpoints, per-item completeness, replay and anti-entropy remain open.
+
+**ADO comment page evidence, partial:** The shared client follows an opaque nonempty `continuationToken` from the comment response body or the existing response header, requiring identical values when both are nonempty. Every page must be a JSON object with an array of comment objects; a supplied `count` must be a matching non-boolean integer. Malformed JSON, rows, counts or tokens, conflicting tokens, and a nonempty `nextPage` without a usable token raise a fixed content-free `QueryError` without a successful pagination callback. A supplied `nextPage` must be a string or null and is never fetched as a URL. Valid empty pages and header-only pagination remain supported. Following body tokens can add reads within the existing page cap; callers omitting the callback cannot detect truncation. Page-shape validation does not establish comment-field validity, provider snapshot consistency, permission completeness or source qualification.
+
+**ADO revision page evidence, partial:** Every revision page must be a JSON object with an array of revision objects no larger than the requested page size. A supplied `count` must be a matching non-boolean integer. Malformed JSON or contradictory page evidence raises a fixed content-free `QueryError` without a successful pagination callback; unrelated request errors retain their existing behavior. Valid empty pages, `$top`/`$skip` traversal and the page cap remain unchanged. Hydration withholds the affected history and retains independently complete comments; freshness and vitality use their existing error paths. Callers omitting the callback cannot detect truncation. Page-shape validation does not establish revision-field validity, provider snapshot consistency, permission completeness or source qualification.
+
+**ADO detail authentication, partial:** An authentication or credential-expiry failure during an individual revision or comment request follows the same partial-data path, with fixed diagnostic wording and credential-remediation guidance instead of provider text. Its typed `transient_auth` category is attached to the preceding generic failed-reference error only when the first matching provider error has the same channel, hydration stage, reference kind and ID. Gather state persists an optional category; missing or null categories retain legacy message classification, while malformed non-null categories raise a fixed state error even on incomplete detail entries. Observability still diagnoses only the first persisted error, using its typed category when present. Authentication failures at other ADO stages, other message-based classifications and historical records are unchanged.
 
 ### 3.1 Authentication (`src/core/ado_client.py`)
 
@@ -1134,6 +1214,8 @@ Source-specific fingerprinting:
 | fallback | source, raw_ref, entity_refs, stable_json(metadata), text |
 
 Format: `"|".join(normalized_parts)` — parts lowercased, tuples comma-joined, `None` → empty.
+
+**Manifest-backed identity normalization (RELO-W2.3, partial):** Before deduplication, gather widens candidate workstream references and classifies candidates, and classifies the existing comparison signals without rewriting them. New canonical IDs are calculated from the same normalized content used for comparison; downstream extractors now receive classified manifest-backed candidates. Fallback fingerprints include classification metadata, so new fallback IDs can differ from IDs produced before this correction. Manifest-off behavior and historical records remain unchanged. The rolling comparison baseline can include failed runs and omit older committed signals; normalization alone does not establish committed-aware replay. The separate SQLite collision guard is described in §11.3.
 
 **Known Kusto source-event identity (RELO-W3.3d):** UIL extraction supplies `event_timestamp` when the existing recognized row fields contain a parseable source time. One shared parser preserves the case-insensitive `Timestamp`, `Date`, `Event_Timestamp`, `CreateDate`, `ResolvedDate`, `Snapshot` aliases and selects the maximum parsed time across rows. Aware values normalize to UTC; historical naive-as-UTC and date-only-midnight handling remain. Metadata uses UTC ISO serialization; absent/unparseable source time remains omitted, not substituted from retrieval time. The legacy command wrapper retains its existing `as_of`-date fallback. Fingerprint format, signal timestamp, metric/cardinality semantics and retained journals are unchanged; this is not a revision identity or unknown-time admission contract.
 
@@ -1593,16 +1675,28 @@ def write_confirmed(
 
 **Atomic write pipeline:**
 1. Check for orphaned staging → raise `StateError` if found
-2. `ArchiveLock` context manager — PID + timestamp lockfile; refuses if lock held <30 min
+2. `ArchiveLock` context manager — hold a nonblocking exclusive OS guard before checking PID + timestamp metadata; refuse recent abandoned metadata (<30 min)
 3. Write to `staging/snapshots/issue_NNN.snapshot.json` via `_write_atomic_json`
 4. If `promote=True`: `os.replace()` staging → final, then `shutil.rmtree(staging_root)`
 5. Exception → `shutil.rmtree(staging_root)` cleanup
 
-**Concurrency limitation:** `ArchiveLock` checks for the lockfile before
-writing it, so concurrent entrants can both pass the check, and one entrant
-can remove the lock while another is still inside. The confirmation
-evidence fence covers participating fact and selector operations, not
-other archive writers; archive mutual exclusion is not established.
+**Archive exclusion:** `ArchiveLock` holds an exclusive `portalocker` lock
+on the persistent, empty `.archive.guard` sidecar from before inspecting
+`.lock` through metadata cleanup. The guard is never unlinked: changing its
+inode could split exclusion. Contention or unavailable locking raises
+`StateError`; file I/O errors remain visible. An active guard holder cannot
+be displaced when its metadata reaches 30 minutes. Normal exit removes
+`.lock` before releasing the guard. Process exit releases the OS lock but
+may retain metadata; the existing 30-minute admission rule for abandoned
+metadata and malformed-metadata handling remain.
+
+This protocol covers same-host cooperating archive writers using the new
+implementation, including confirmation and reconciliation. The empty
+guard's existence does not indicate an active operation. Mixed old/new
+writers, writers ignoring the guard and network/cross-host exclusion remain
+unqualified. The separate confirmation evidence fence covers participating
+fact and selector operations; neither mechanism establishes whole-input
+capture consistency or full competing-confirmation acceptance.
 
 **File naming:** `issue_{issue_number:03d}.snapshot.json` (zero-padded 3-digit).
 
@@ -1627,6 +1721,8 @@ programs/<prog>/archive/<edition>/
   review/issue_NNN.review.yaml
   narratives/issue_NNN/
 ```
+
+**Archive-index reconciliation:** `scripts/reconcile_archive_index.py` uses the explicitly selected program's `archive/<edition>` for index reads/writes, canonical files, locks and staging checks; it does not infer a second programs root from a program-local archive path. Existing editionless archive fixtures remain supported, and edition identifiers must still be bare names. Readd dry-run prints the plan without writing, verifies that required snapshot/HTML/Markdown/manifest paths are files and that the snapshot is readable, and returns exit 1 with an error when these checks fail. This is not complete publication-eligibility validation or a guarantee of later apply admission. Apply retains existing metadata/unrelated entries and refuses live locks or nonempty staging at that same root. Existing ArchiveLock race limitations remain; no real archive repair is authorized by this implementation.
 
 ### 9.3 Override Store (`src/core/overrides_store.py`)
 
@@ -1760,9 +1856,11 @@ Both stores implement the same read/write/query interface as the file-backed JSO
 
 **Migration:** `vertex migrate --program <id> --to sqlite|file [--dry-run]` previews or executes storage migration. A preview does not switch the configured backend. Forward previews refuse corrupt trajectory journals without repairing them; normal trajectory reads retain their repair behavior. Reverse previews use SQLite readers that may initialize or upgrade the schema; SQLite may also touch WAL sidecars. Do not treat reverse preview as byte-for-byte read-only. `--rebuild-analytics` rebuilds the program projection and cannot be combined with `--dry-run` or `--to`. Migration dry-run invocations skip unrelated root telemetry registration, scheduled maintenance and catchup.
 
-SQLite signals retain gather-run provenance and all workstream associations, including filtering by an additional workstream. File and SQLite stores explicitly preserve a single association when it cannot be derived from the singular workstream field, while retaining the legacy representation for derivable associations. Legacy databases remain readable without schema writes through read-only connections and are upgraded on a default connection; fields lost before this change cannot be reconstructed. This does not add SQLite's committed-gather-run filter. The current storage migration is not qualified as lossless or idempotent. Reverse migration can duplicate retained file records, exports only the latest review and thread states into active journals, and can leave partial file entries if the SQLite rename fails. Complete SQLite histories remain in the tombstone after a successful rollback. A reviewed migration and recovery design remains required; these observations do not authorize migration of private state.
+SQLite signals retain gather-run provenance and all workstream associations, including filtering by an additional workstream. File and SQLite stores explicitly preserve a single association when it cannot be derived from the singular workstream field, while retaining the legacy representation for derivable associations. Legacy databases remain readable without schema writes through read-only connections and are upgraded on a default connection; fields lost before this change cannot be reconstructed. Both stores support the opt-in committed-gather-run filter; existing callers remain unfiltered by default. The current storage migration is not qualified as lossless or idempotent. Reverse migration can duplicate retained file records, exports only the latest review and thread states into active journals, and can leave partial file entries if the SQLite rename fails. Complete SQLite histories remain in the tombstone after a successful rollback. A reviewed migration and recovery design remains required; these observations do not authorize migration of private state.
 
 ### 9.11 L1 Reality Store (`src/core/reality_store.py`)
+
+**Scheduled compaction on an uninitialized reality schema:** The startup maintenance hook inspects the existing database read-only before compaction. If no `reality_` table or view exists, it reports compaction as not applicable and creates neither reality tables nor a `.compact_last_run` success sentinel. A later initialization remains eligible on the next invocation. Any partially present or corrupt reality schema retains visible failure; startup still logs maintenance failures without blocking the command. Initialized-schema retention, rollback and successful-compaction sentinel behavior are unchanged. This does not initialize or migrate private databases, change explicit `admin db compact`, or qualify whole-input capture.
 
 Per-program SQLite database at `~/.vertex/<program_id>/vertex.sqlite3` (overridable via `VERTEX_DB_PATH` env var or `db_root` constructor param). WAL mode, `PRAGMA busy_timeout=5000`. 13 RealityStore tables + 3 Program Fact Store tables (§9.16) = **16 total**:
 
@@ -1832,6 +1930,8 @@ Per-program SQLite database at `programs/<prog>/channel_registry.sqlite3`. WAL m
 - Expired registrations auto-retired after 2× TTL for incremental channels.
 - Owned channel-registry and source-candidate connections use the existing strict-durability unit of work: each context commits or rolls back and closes on success, early return, or error. Helpers receiving a caller-owned connection leave its lifecycle to that caller. The source-candidate schema probe retains its `False` result on SQLite errors and logs a generic diagnostic without the exception or path.
 - Network-filesystem WAL fallback uses `PRAGMA journal_mode=DELETE` on paths matching `Q:` or UNC (`\\`).
+
+**Gather provider-instance isolation, partial:** Gather uses the configured instance, or `default` when absent or blank, for discovery freshness and inputs, hydration, attribution, verification and failure updates. Channel-state counts, discovery time, delta and scope health use the same instance. Discovery results with unambiguously foreign nondefault or conflicting instance metadata are degraded before capture or application; hydration may continue from the selected registry. For compatibility, default-valued metadata is still normalized to an explicitly configured nondefault binding, so it does not prove the actual source instance. TTL transitions remain channel-wide. This does not change verification-before-commit timing, repair retained data or establish source qualification.
 
 **Key methods:**
 
@@ -1914,6 +2014,8 @@ def append_context_gap(
     severity: str = "quality_degraded",
     impact_estimate: str | None = None,
     programs_root: Path = PROGRAMS_ROOT,
+    deduplicate: bool = True,
+    dedup_window_days: int = 7,
 ) -> Path
 
 def load_context_gaps(program_id: str, programs_root: Path = PROGRAMS_ROOT) -> list[ContextGapRecord]
@@ -1922,6 +2024,8 @@ def rank_context_gaps(gaps: list[ContextGapRecord], *, programs_root: Path | Non
 ```
 
 `rank_context_gaps` deduplicates by `(feature, field, lane)`, sums occurrences into `count`, and sorts by impact (`high` > `medium` > `low` > `None`) then by `count` descending. `vertex doctor --context --ranked` reads and surfaces ranked context gaps, labeling counts as recorded observations rather than gather cycles or elapsed time.
+
+With append deduplication enabled, the recent-fingerprint check and append share the existing file lock, so cooperating writers cannot both append the same recent gap. Disabling deduplication retains append behavior.
 
 **Retained gap read failure (RELO-W4.11w):** Invalid JSON syntax propagates from gap-history loading rather than silently discarding a record. Nonobject observations, missing required fields, non-string or invalid/overflowing timestamps and unhashable nonempty lanes raise a dedicated invalid-record error before any partial history is returned. The ranked doctor translates syntax and invalid-record errors to distinct fixed safe `BadParameter` diagnostics before empty/ranking success; solicitation and reply intake refuse these records through their existing error boundaries. Absent/empty/blank history, optional defaults and previously groupable record-shape compatibility remain; independent append/dedup behavior is unchanged. No repair or broader schema/foreign-record policy is introduced.
 
@@ -1991,6 +2095,17 @@ def project_workstreams(snapshot) -> tuple[Workstream, ...]
 def load_current_action_items(program_id, ...) -> tuple[ActionItem, ...]
 # ... analogues for risk_entries, dependencies, decision_entries, assumptions, milestones, workstreams
 ```
+
+**Snapshot gather provenance (RELO-W2.3, partial):** When persisting a fact
+snapshot, pass each fact's `gather_run_id` to newly created, superseding or
+proposed revisions; unstamped facts remain unstamped. An equivalent revision
+normally remains a no-op. When a caller supplies verified committed run IDs,
+an eligible equivalent revision left by a different uncommitted run is
+restamped by a new revision; the existing domain-event idempotency check still
+applies first. Committed-only loading fails explicitly if an uncommitted
+revision has superseded a visible committed revision rather than silently
+losing the fact. Other lineage fields, write-time effects on legacy cutoffs,
+cross-store atomicity and complete replay remain unqualified.
 
 **Schema:**
 
@@ -2178,13 +2293,22 @@ All 13 data-model quality gates are registered and enforced. Hard-block gates en
 - **Bounded capture traversal (RELO-W0.13f):** Classify each fixed root and recursive descendant without following links before collection. Existing roots must be ordinary directories; descendants must be ordinary directories/files. Links, reparse points, unsupported entries, enumeration failures and entries disappearing during enumeration fail through existing `StateError` before payload copying or manifest publication. Absent roots retain omission compatibility. No link target is implicitly authorized by its lexical in-root path. Root list, manifest/verification/restore semantics and database capture remain unchanged; source mutation after enumeration, historical provenance and complete recovery are not qualified.
 - **Unambiguous manifest properties (RELO-W0.13g):** The shared JSON manifest loader rejects repeated decoded property names within any object, including equal-valued duplicates and escaped-equivalent names, before structural validation. This applies to every version and to verify, restore (including skipped preflight) and backup-reference search. Ambiguous legacy documents previously accepted by last-property-wins decoding now fail explicitly; uniquely declared current, legacy and unversioned manifests preserve their existing semantics. Diagnostics do not echo arbitrary manifest values. This rule does not authenticate the manifest or establish inventory completeness, and changes no checksum, size, path-containment or capture-scope contract.
 - Backfill procedure for Tier A (LT decks), Tier B (newsletters), and Tier C (KB): see `governance/runbooks/ledger-backfill-runbook.md` (tracked, generic) or a workspace's own `docs/ledger-backfill-runbook.md` (gitignored, program-specific detail).
-- NFR-3 (50K replay budget): `project_program_events()` for 50K events must complete in < 60 seconds. Validated by `tests/unit/test_ledger_perf.py::test_replay_perf_50k` (`@pytest.mark.slow`).
+- NFR-3 (50K replay budget): `project_program_events()` for 50K events must complete in < 60 seconds. Validated by `tests/unit/test_ledger_perf.py::test_replay_perf_50k` (`@pytest.mark.slow` and `@pytest.mark.perf`), run as an explicit serial CI gate.
 
 ### 9.17.1 Common Persistence Kernel (CPK) — arch-fix.md Part A, Phases 0–1
 
 Foundational persistence primitives closing the architecture-remediation program's Phase 0/1 (see `.archive/specs/arch-fix.md` for the full audit trail and `specs/bklg.md` §7 for remaining Phase 2/2b/3 work). These exist as reusable Zone A infrastructure — they are not yet wired into any AI-safety or actuation call path (that wiring is the remaining `arch-fix` work).
 
 **Event-log hardening.** `event_log.py`'s append path was O(n) per write (a full `read_events()` re-scan for the hash chain plus a full-file `_count_lines()` for the index line number). It now maintains a small, self-healing O(1) tail cache (`programs/<id>/ledger/events/_tail.json` — last event hash, last `recorded_at`, active file name/size/line-count) that falls back to the exact prior full-scan behavior whenever the cache is missing, stale, or doesn't name the currently-resolved target file (rotation, cross-process drift, first-ever write). The cache is a pure write-path optimization; every reader (`read_events`, `verify_event_log`, projections) still derives truth from the JSONL files, never the cache. `event_index.py` now opens through `open_program_db()` (network-aware WAL/DELETE journal-mode selection) instead of hardcoding `PRAGMA journal_mode=WAL`.
+
+The event-log and event-index path helpers require the existing lexical bare
+program-identifier rule, rejecting invalid selectors with a content-free
+`StateError` before path-derived storage access. This applies to event-log
+append and read paths and to index reads and rebuilds; valid bare identifiers
+retain their existing selected-root mappings. Upstream envelope validation can
+reject malformed values earlier with `ValueError`. This is not authentication,
+complete platform filename validation or physical containment through links;
+it does not extend to other ledger stores or repair historical records.
 
 **New primitives (`src/core/ledger/` unless noted):**
 - `program_sequence.py` — monotonic per-program sequence allocator (`next_sequence()`/`current_sequence()`), atomic via SQLite `UPDATE ... RETURNING`.
@@ -2456,7 +2580,7 @@ dimensions, FleetReality/cockpit migration or source-freshness change.
 
 **Ordinary report fact baseline (RELO-W2.8d):** Resolution captures the existing-store fact pin after resolving ordinary report program/edition/issue identity and before acquisition stages. `StageContext` carries the pin; output verifies scope and current drift before replacing output artifacts, then records the same pin identity. A resolved ordinary report missing its pin fails rather than re-pinning newer facts after render. Configured database authority remains unchanged; lookback retains its existing path. Failed runs may leave unreferenced pins, and earlier narrative/seeding effects are not rolled back. This detects observed fact changes conservatively; domain reads are not frozen, source/config stores are not atomically captured, and a later change still requires the original confirm drift check.
 
-**Pinned gather acceptance (RELO-W2.4b):** The existing exact-run validator requires embedded program/run identity to match the selected pin, `COMMITTED` state and the supported schema before its existing hash, partial-scope and newer-FULL checks. The canonical writer schema is the string `gather-run.v1`; missing schema is unreadable evidence, not an implicit supported version. Wrong scalar types and missing identity/state fields cannot qualify a pin. Invalid pinned evidence yields explicit blocked failures, never a latest-run substitute. Existing absent-pin legacy behavior and optional-hash compatibility remain. This establishes selected-run admission, not current-run source completeness or coherent multi-store capture.
+**Pinned gather acceptance (RELO-W2.4b):** The existing exact-run validator requires embedded program/run identity to match the selected pin, `COMMITTED` state and the supported schema before its existing hash, partial-scope and newer-FULL checks. The canonical writer schema is the string `gather-run.v1`; missing schema is unreadable evidence, not an implicit supported version. Wrong scalar types and missing identity/state fields cannot qualify a pin. Parsing type/attribute errors, hash-input type/value errors and excessive nesting during parsing or hashing use the existing blocked diagnostics; other unexpected exceptions still propagate. Invalid pinned evidence yields explicit blocked failures, never a latest-run substitute. Existing absent-pin legacy behavior and optional-hash compatibility remain. This establishes selected-run admission, not current-run source completeness or coherent multi-store capture.
 
 **Persisted fact scope (RELO-W2.8f):** Both early and locked confirmation gates receive the selected edition/issue. Existing persisted scope metadata must match in value and type; another edition/issue and boolean/float substitutes for integer issue numbers cannot qualify merely because facts have not changed. Missing scope keys in legacy pins remain unscoped, without invented historical metadata. Standalone gate callers may retain the old program-only check. No draft authentication, revision sealing or atomic writer fencing is established.
 
@@ -2492,6 +2616,8 @@ dimensions, FleetReality/cockpit migration or source-freshness change.
 
 **Original effective configuration (RELO-W2.8i):** The same single manifest read captures its original strict `sha256:` configuration hash. Missing or malformed hashes require draft regeneration; do not synthesize historical metadata. Compare canonical effective configuration before rendering or claim extraction and freshly reload/compare it after acquiring the archive lock, before checkpoint or writes. Neither force nor stale-approval acknowledgement bypasses drift. Intended post-draft narrative and risk edits and semantically equivalent configuration remain supported. Archive readers are unchanged. This checks only existing `bundle.config` coverage, not every authored contract, audience policy or editor revision, and does not fence concurrent independent writers.
 
+**Draft program-context binding (partial):** Report records a digest of the program context when present. Confirmation rejects a changed or unavailable context when the draft contains that digest, before rendering or archive writes; older drafts without the digest retain compatibility. This early comparison is not repeated under the archive lock and does not seal other inputs or establish complete capture.
+
 **Deck reality and assessment clock (RELO-W2.8j/k):** Actual deck rendering supplies the eligible retained fact capture, selected edition and archive root. Fully-primary retained input selects the draft's captured facts and historical `as_of`; missing/foreign eligible capture fails before rendering. Legacy/shadow/mixed modes retain current authored shim behavior. Optional keyword-only `ProgramReality.load(assessment_as_of=...)` selects the assessment clock independently of historical fact selection: `assessment_as_of`, then `as_of`, then current UTC time. Existing `as_of` historical selection is unchanged. The independent companion supplies its resolved archive root, edition and draft assessment clock while preserving current authored inputs; it has no retained snapshot authority and is not historical replay. This is not whole-run snapshot coherence.
 
 **Assessment archive defaults:** Omitted `ProgramReality.load(archive_root=...)` remains unspecified until the selected program workspace resolves its skipped-issue and archived-claim inputs. These reads must not select ambient checkout archives. Archive lookup accepts an explicit program root, including roots not named `programs`; preserve existing explicitly selected archive behavior. `load_skipped_issues_for_program` uses the same distinction between omitted and explicit archive roots. This binds these archive reads, not every remaining consumer or the complete assessment.
@@ -2510,7 +2636,7 @@ dimensions, FleetReality/cockpit migration or source-freshness change.
 
 **Context synthesis acceptance (RELO-W4.11m):** The existing proposal model exposes one acceptance-binding error check, reused by authored apply, CLI synthesis admission and direct synthesizer execution before dispatch. Changed/historically unbound accepted payloads are unavailable with re-review guidance; no automatic backfill. Direct execution also requires proposal program/edition/issue to match synthesis inputs, even if the proposal has a valid acceptance in another scope. Preserve valid acceptance, accepted-to-accepted metadata and existing pending filtering. This does not authenticate reviewers or replace the distinct section-proposal confirmation contract.
 
-**Optimistic target availability (RELO-W4.11o):** An expected current-value hash requires a readable matching current target. Missing/deleted/malformed target state cannot qualify as matching: return explicit `skipped_stale` with re-review guidance before starting a write journal, including dry-run. Preserve existing matching-value and no-expected-hash behavior. This is prewrite admission, not an atomic check-and-write against arbitrary editors.
+**Optimistic target availability (RELO-W4.11o):** An expected current-value hash requires a readable matching current target. Missing/deleted/malformed target state cannot qualify as matching: return explicit `skipped_stale` with re-review guidance before starting a write journal, including dry-run. An unhashed proposal extracted against an empty value is also stale if a nonempty target value has appeared. Preserve matching-value and other no-expected-hash behavior. This is prewrite admission, not an atomic check-and-write against arbitrary editors; the unhashed check cannot distinguish an unavailable target from an absent value.
 
 Knowledge-document current reads precede YAML-only target selection and reuse the writer's containment and `body`-field validation; otherwise a valid existing document could incorrectly appear unavailable.
 
@@ -2524,7 +2650,9 @@ Missing persisted fact pins raise safe `ConfigError` at the quality-gate boundar
 
 **Qualification-gap reporting (RELO-W6.12a):** `python scripts/verify_relo.py --repo-root <root> --spec <path> --terminal-state [--json] [--budgets <private-registry>]` is an opt-in read-only projection of explicitly selected governance and a supplied private decision table. It never runs the normal verifier's program/telemetry checks. Report `terminal_state: null` and `assessment: not_assessed`, observed ledger counts, declared scheduled principal modes, unratified budgets, unresolved/interim decisions and unsupported assessment inputs with citations. The public `governance/nfr-budgets.yaml` is only an unset candidate template; existing loader APIs accept an explicit private registry path, and `--budgets` selects it for verification. This separation does not revoke private ratifications or make the public template an operational authority. Missing or unratified specification ceilings cannot establish successful size-budget assessment. Code completion, configuration and document status do not prove certification or runtime source health. Unreadable/invalid sections are explicitly unavailable, without raw content/exception payloads. Exit 1 indicates unavailable input; otherwise exit 6 means insufficient certification evidence, never certification success. Full terminal predicates, operational evidence and product-vision gate ownership remain separate work.
 
-**Work-package shape admission (RELO-W0.12c):** Normal readiness lint reports invalid card identifiers, non-string classes or dependencies, and non-list `AGENT_READY` path fields as failed `RELO-WORK-PACKAGES` checks rather than crashing or interpreting a mapping as a path list. Preserve valid records, checks on other cards and the normal JSON exit policy. This does not validate status or dependency cycles, promote readiness or certify execution.
+**Work-package shape admission (RELO-W0.12c):** Normal readiness lint reports invalid card identifiers, non-string classes or dependencies, and non-list `AGENT_READY` path fields as failed `RELO-WORK-PACKAGES` checks rather than crashing or interpreting a mapping as a path list. Preserve valid records, checks on other cards and the normal JSON exit policy. This does not validate status, promote readiness or certify execution.
+
+**Work-package dependency cycles (RELO-W0.12c):** Normal readiness lint rejects self and indirect cycles among resolved dependency edges with a fixed, content-free diagnostic, including when another dependency is malformed. Duplicate card IDs retain their existing failure without selecting an ambiguous graph. Preserve acyclic graphs, shared prerequisites, repeated edges and independent findings. This read-only check does not establish semantic prerequisites, card acceptance or complete traceability.
 
 **Work-package repository paths (RELO-W0.12c):** Check that each `AGENT_READY` path is lexically inside the selected repository or its resolved root before strictly resolving the original path, and that its resolved target is an existing file inside that root. Preserve in-repository absolute, normalized and linked paths; reject outside targets without echoing their paths. This read-only check is not a race-free filesystem security boundary and does not change missing-file or `creates:` policy.
 
@@ -2552,6 +2680,8 @@ Missing persisted fact pins raise safe `ConfigError` at the quality-gate boundar
 
 **Goal and objective traceability (RELO-W0.12n):** When §19.1 exists, normal specification lint requires a well-formed mapping for every defined goal, defined objectives and at least one defined FR/NFR per row, and a reference from a defined goal to every defined objective. Resolve declared requirement, feature and work-item IDs against their respective definition sections; expand inclusive same-family ranges and accept the existing slash/shorthand notation. Reject malformed, descending, cross-family or unresolved ranges and references, including attached dotted ID suffixes; retain terminal punctuation. Ignore fenced and commented examples and unrelated sections; minimal specifications without §19.1 remain compatible. This line-oriented check does not enforce unique goal rows, find orphan work items, prove evidence execution or establish complete bidirectional traceability.
 
+**Phase work-item definition integrity (RELO-W0.12z):** Normal specification lint and work-package coverage share the first visible `ID | Work item` table in each §11.1–11.7. Phase headings may include a terminal period or omit a title; plain and balanced-bold IDs are accepted. Fenced examples, HTML comments and unrelated tables do not define work items. A declared phase without a well-formed table, an orphan or repeated phase heading, or a malformed ID or work-item row fails with a generic phase-table diagnostic. Header cells must be nonempty; each row must have exactly the declared number of nonempty cells. Explicit empty tables and minimal specifications without phase headings remain compatible. Specification lint rejects duplicate IDs, including across phases, through `RELO-SPEC-LINT` and the existing CLI exit policy without echoing the IDs; parent and suffixed IDs remain distinct. The §19.2 requirement-reference resolver retains its existing visible outside-section definition scan rather than using this phase-table-only set, and the separately ratified specification-size obligation count is unchanged. This bounded split-based recognizer does not parse escaped cell pipes, detect orphan work items, establish semantic ownership or prove evidence execution.
+
 **Provider invocation frontier (RELO-W1.6a):** The existing AI-call inventory is the single function-level syntactic baseline for named provider calls, with source-order multiplicities and explicit legacy, test-only-pilot and infrastructure dispositions. Contract ratchets reject additions, stale rows and duplicate identities rather than merely matching filenames or comments. REV adoption checks inspect actual implementation modules, not unreachable compatibility anchors. The current baseline contains 31 legacy feature invocations, one test-only runner pilot and three infrastructure expressions. These static checks neither resolve arbitrary dynamic dispatch nor establish runtime authorization. The dependency pilot is not production adoption; real snapshot/principal binding and complete compiled-input coverage remain required.
 
 **Dependency pilot input integrity (RELO-W1.6f):** The pilot compiles dependency identity, upstream/downstream context, risk and status as required context alongside every referenced evidence span. Unequal evidence-reference/text lengths produce an explicit evidence gap before compilation or released-cache lookup. Provider input is only the complete compiled prompt, with no uncompiled user-prompt suffix. Required context overflow abstains before dispatch; empty evidence pairs remain supported. The original legacy feature invocation is unchanged. This closes the pilot's input-coverage prerequisite only; W1.6h replaces its fabricated execution context, without production migration.
@@ -2574,9 +2704,51 @@ aggregate-verdict migration or new dated-policy requirement is introduced.
 
 **Runner admission (RELO-W1.6b/W1.6c):** `RunnerContext` requires nonblank string program/run/policy/snapshot/principal/classification identities through `StateError`. Single and batch compiled manifests must match the invocation's program, feature and prompt version before released-model cache, call reservation or provider dispatch; mismatch yields explicit `BLOCKED`/no value with safe guidance and skipped telemetry. Compiler policy version and routing policy version are distinct namespaces, not compared as equal. Frontier-ineligible batches preserve deterministic/cache/local hits while unresolved items use the existing single-call blocked/fallback contract, before context compilation. These checks neither authenticate opaque identities nor migrate production AI features.
 
+**Runner injected stores (RELO-W1.4/W1.5, partial):** The runner uses an explicitly supplied call-ceiling ledger, released-result cache or deterministic-result cache without truth-testing it; only `None` selects the corresponding default. This preserves the supplied store's counters and callbacks, but does not authenticate the store, reconcile previous writes made to a substituted default, establish shared budget policy or qualify cache authorization.
+
+**Runner local-router mapping:** The runner also retains an explicitly supplied local-router mapping without truth-testing it; only `None` selects a new empty mapping. Consequently later edits to a supplied initially empty mapping now affect this runner, as they already did for an initially nonempty mapping. This does not authenticate a router or change tier policy.
+
+**Compiled-prompt hash binding (RELO-W1.2/W1.5, partial):** After compilation, the single-item and native-batch runner checks that the in-memory manifest's context hash equals SHA-256 of the exact UTF-8 prompt bytes. A mismatch, non-string prompt or hash, or unencodable prompt yields `BLOCKED` without a value and with fixed guidance and skipped telemetry before released-model cache access, call reservation, fallback or provider dispatch. Per-item batch fallback follows the single-item path. Pre-context fast paths and compilation effects may already have occurred; valid contexts and existing cache rows are unchanged. Recompilation can produce a new cache identity and a later eligible call may incur cost. Agreement does not authenticate the manifest, compiler key, principal, tokenizer, source evidence or authorization.
+
 **Runner program selectors (RELO-W1.6e):** `RunnerContext` and the direct call-ceiling, released-result and deterministic-result cache path helpers require the shared `workspace_paths.is_bare_identifier()` rule before constructing paths. Invalid selectors raise safe `StateError` without exposing their contents or probing/creating storage. Valid identifiers retain explicit-root mapping. This is lexical validation, not physical containment or a new identity policy.
 
 **Cache identity binding (RELO-W1.6d/W1.6g):** Both existing runner cache identities require program identity, independently of storage-file location. Released-model identity additionally retains compiler policy and routing policy as separate dimensions, and binds execution classification from `RunnerContext` independently of compiled-manifest classification. SHA-256 inputs are canonical ordered JSON arrays, not delimiter-joined strings. Identical complete identities still hit; different programs, compiler policies, execution classifications or delimiter-bearing tuples cannot share the same encoded key. Existing cache schemas/files remain intact, but old keys intentionally miss once; no production AI migration or additional provider access is authorized.
+
+**Compiler identity metadata (RELO-W1.2/W1.5, partial):** The default estimator's tokenizer ID includes its declared model and its selected backend, encoded as compact JSON after `context_budget.estimate_tokens:`. The backend is `unresolved` until a nonempty estimate successfully resolves it, then `char_heuristic:4cpt` or `tiktoken:<encoding>`. Resolution is synchronized and bound for the estimator's lifetime; a new estimator can select a different backend. Empty input does not initiate resolution: an empty compilation's manifest records `unresolved` only if the estimator is still unresolved when its ID is captured; otherwise it records the selected backend. The compiler snapshots that ID and hashes a canonical ordered tuple of program, feature, prompt version, compiler policy, tokenizer ID, stripped effective schema text and rendered-context hash for its manifest key. The runner's released-result key includes this supplied in-memory manifest key in addition to the tokenizer ID and caller-supplied response-schema version. Different default backends partition new keys; compiler-produced changes to effective schema boundaries also partition the cache even when rendered prompts and schema versions match, while equivalent stripped schema text remains reusable. A cache-enabled single-item invocation reaching this lookup rejects a blank or non-string manifest key with `StateError` before the released-result cache read, call-slot reservation or provider dispatch; uncached and pre-context fast paths are unchanged. Existing released-cache rows remain intact but old model-only keys miss, and a later cache-enabled invocation may reserve a call slot and invoke its provider callback, subject to existing configured admission and budget controls. Native batches do not use the released-result cache; the per-item fallback inherits the single-item identity. The supplied key and selected-backend label do not authenticate the tokenizer or its assets. Prompt-addressed historical manifest files remain unchanged; a different tokenizer ID for the same prompt can retain the earlier on-disk manifest and trigger the existing fixed conflict warning even though the returned in-memory manifest carries the current ID. Deployment and versioned schema/validator identity, durable provenance and full cache qualification remain open.
+
+**Released-cache integrity (RELO-W1.5, partial):** The runner serializes a validated response once and validates its UTF-8 payload/hash pair before writing or deserializing a cache entry. A mismatch raises a content-free `StateError` and conditionally deletes the row only if every observed stored field still matches. If a decoder error names the exact cached payload and standard JSON decoding confirms it is malformed, the runner applies the same conditional eviction and raises a content-free state error; other decoder errors and JSON-check value or recursion errors preserve the original exception and row. A changed row is retained, even if its payload and hash are unchanged; an identical whole-row replacement is indistinguishable and a retained replacement may itself be invalid. Eviction failure is explicit. The invalid-origin and malformed-JSON eviction attempts reopen the store; SQLite and filesystem failures there raise a content-free `StateError`. A failed reopen does not itself mutate the row; initial-read and verifier or decoder exceptions retain their existing behavior. No new provider call is made on the failing invocation; a later invocation may miss and make an admitted, budgeted call. The test-only dependency pilot records a discarded runner-state decision without attributing it to provider failure, subject to the audit-failure exceptions below. A checksum cannot authenticate a pair whose payload and hash are both altered. Generic schema-validity and release-audit enforcement, current authorization, revocation and obsolescence checks, historical repair and operational qualification remain open.
+
+**Cache miss-sentinel containment (RELO-W1.5, partial):** Both shared runner caches reserve `None` for a miss. When an identity-matching row's decoder returns `None`, including for JSON `null`, the cache raises a content-free `StateError` without itself deleting or rewriting the row. Absent or identity-mismatched rows still miss, and non-`None` falsey values remain hits. The runner does not continue to a later handler, call-slot reservation, fallback or provider dispatch after that read refusal. For each runner-owned deterministic or released-cache write, the runner serializes once and decodes that exact payload before the write or cache release-recording callback; a decoded `None` raises the same content-free state error and decoder exceptions propagate. This adds a decoder invocation and runs deterministic serialization before the cache's `put` call, including its database open. A serializer-raised `sqlite3.DatabaseError` now propagates directly from the runner instead of being wrapped by `put` as `StateError`. A handler, frontier call and call-slot reservation, or earlier batch items may already have acted. Native batches do not write released-model results. Both direct cache `put` methods reject a literal `None` with a content-free `StateError` before serialization, release recording or opening storage, even if a custom serializer would transform it. Non-`None` values can still serialize to payloads that decode to `None`, because direct writes have no decoder; existing rows are not repaired. These checks do not establish decoded-value equivalence or schema validity, authenticate a release or identity, establish current authorization, or qualify batch atomicity; W1.11's completed cache separation is a distinct obligation.
+
+**Runner cache decoded-type containment (RELO-W1.5, partial):** After a cache read and before a runner-owned cache write or release-recording callback, the runner rejects a decoded non-`None` value that is not an `isinstance` of the feature's declared response type with a content-free `StateError`. On read, release verification still precedes decoding where configured; a type mismatch preserves the row and does not proceed to a later handler, fallback, call-slot reservation or provider call. Context compilation, verification or earlier batch-item work may already have occurred. On write, the handler or provider, call-slot reservation and validation may already have occurred. Native batches use this deterministic-cache check but do not use the released-result cache; per-item batch fallback follows single-item behavior. Subclasses are accepted, including `bool` as an `int`; unsupported runtime type declarations can raise `TypeError`. Direct cache APIs do not enforce this decoded-type check. A preserved row can fail repeatedly, and no data is repaired. This decoded-value check alone does not establish the original fresh response's runtime type when serialization produces a compatible decoded value. It is not schema or semantic validation, proof that the original and decoded values are equivalent, release authentication, current authorization or cache qualification.
+
+**Runner fresh outcome-type containment (RELO-W1.5, partial):** The runner checks fresh deterministic and local values, present fallback values for value-carrying statuses, and single-provider responses using `isinstance(value, response_type)`. A mismatch raises a content-free `StateError`; absent fallback values remain allowed. Single-provider checking now precedes semantic validation. For runner-owned cache writes it also precedes serialization, decoding, storage and the cache release callback, retaining the existing cache-specific error wording. A wrong-type native-batch provider response blocks only that item before semantic validation; valid items and failed or missing `UNAVAILABLE` items retain their behavior. Per-item batch execution and native-batch fast paths or fallbacks can instead raise for the whole call. Context, handler, provider, call-slot, fallback telemetry or earlier batch-item work may already have occurred; no batch rollback is implied, and cache reads can initialize storage. Direct cache APIs do not enforce this fresh outcome-type check. Subclasses, including `bool` for `int`, are accepted; unsupported runtime declarations can raise `TypeError`. This is not schema or semantic validation, proof of value equivalence, authentication, authorization, repair or cache qualification.
+
+**Runner released-cache semantic validation (RELO-W1.5, partial):** For a cache-enabled single-item provider result, the runner validates the fresh response and then the exact decoded serialized payload before recording a release or writing the cache. It revalidates a decoded cache hit against the current request before returning it, and returns the validator's evidence references on a valid hit. Only a verdict whose `valid` field is exactly `True` releases a single-provider response or native-batch provider item. An invalid decoded payload blocks release. On a hit, literal `False` conditionally evicts the complete observed row while blocking the current invocation without fallback or another provider call; changed concurrent replacements survive, but identical whole-row replacements are indistinguishable. A later eligible invocation can miss and incur an admitted provider call. Other non-`True` verdicts block without eviction; validator exceptions propagate without semantic eviction. SQLite and filesystem failures during semantic eviction raise a content-free `StateError`. The existing cache `get` signature is unchanged; the runner refuses substituted values or false misses from injected caches after validation, but cannot ensure an injected cache evicts or prevent in-place mutation. A fresh provider call and its reservation, pre-context work or earlier batch-item work may already have occurred. Native batches do not use the released-result cache; per-item batch fallback follows single-item behavior. Direct cache APIs do not apply the feature validator. The test-only dependency pilot revalidates sanitized fields without duplicating lifecycle stages and preserves its replay-refusal reasons and finding counts. This does not prove equivalence to the original response, complete schema validity, authenticated release or identity, current authorization, revocation or cache qualification.
+
+**Runner decision delivery:** A wrong-type single-provider response attempts to emit a zero-confidence `FRONTIER_CALL` before its `StateError`. The runner uses only its optional injected decision sink; it does not automatically invoke router-registered sinks or add to the router ring. Ordinary exceptions escaping that sink are counted without replacing the runner outcome. Release and lifecycle audit callbacks remain separately blocking.
+
+Both cache reads also compare the observed stored feature with the requested
+identity, alongside principal and classification. An observed mismatch is a
+miss before decoding or release verification and does not itself mutate the
+row. A later eligible handler or provider may run. A successful existing-key
+upsert replaces feature, principal and classification with the new payload
+and timestamp in one SQLite statement; the released cache also replaces the
+content hash and release run ID. Pre-write serialization, hash or release
+recording failures leave the observed row unchanged. Release recording and
+the cache write are not atomic together. This does not authenticate metadata,
+establish current authorization, add a concurrency guarantee or sweep
+historical rows; unconfigured released caches remain unbound.
+
+**Legacy dependency-proposal cache (RELO-W1.5, partial):** The production dependency generator uses a versioned typed-request key, checks a strict, non-touching cache read against the latest originating release and content hash, and persists sanitized proposal content only after its release decision. A bad identifiable entry fails without staging; an expired entry can miss before its inner content is checked. Cache preflight occurs before prompt/policy loading and new lifecycle writes. The actual fallback client's configured ordered deployment tuple now contributes a versioned canonical SHA-256 fingerprint to this generator's deployment key; different tested chains no longer share the same configured-chain key. Existing cache writes may still prune or evict entries, and historical `unknown` keys miss without a migration, so a later eligible call may incur provider cost. This deployment-key change does not alter other client labels or the test-only runner. The fingerprint does not establish the selected provider, model, endpoint, factory, caller or confidentiality; equal chains can still represent different actual providers. The local hash and audit are not authenticated authorization, and complete cache identity, revocation, concurrency and QG-29 qualification remain open.
+
+**Dependency-proposal response shape (RELO-W1.5, partial):** The production generator and test-only runner require string narrative fields and, when present, an array containing only string evidence references before constructing a proposal. Missing or empty reference arrays remain supported; existing reference-membership checks are unchanged. Malformed fresh responses are rejected without release or cache insertion, and the CLI does not stage them. Before the test-only pilot records release, it also rechecks the returned payload's object shape, bounds and existing dependency semantics, including on a runner cache hit. Syntactically valid non-object cache payloads, including `null`, are refused before they can be mistaken for a cache miss; invalid replay does not invoke another provider. Rows rejected before a semantic verdict or by a non-boolean verdict can remain; explicit semantic rejection and a conclusively invalid origin are conditionally evicted as described above and below. Malformed JSON follows the conditional eviction above. Later eligible requests can invoke the provider again. Previously coerced or filtered cached content cannot be identified from its sanitized representation; source grounding, runner cache authorization and full QG-29 qualification remain open.
+
+**Dependency-runner lifecycle (RELO-W1.5, partial):** The test-only pilot records `responded`, `schema_validated` and `semantically_validated` only after a response is returned, the bounds check passes and the feature-semantic check completes, respectively. A cached response is a response without a new provider call; semantic refusal still records the completed semantic check. Lifecycle-audit write failures propagate and prevent a returned proposal, including when a callback failure would otherwise be caught by the runner. A failed fresh terminal append prevents a new cache write; a failed replay terminal can leave the prior row intact. Authenticated identity, historical repair, production migration and QG-29 qualification remain open.
+
+**Dependency-pilot cache release binding (RELO-W1.5, partial):** `ReleasedResultCache` accepts optional paired release-recording and origin-verification callbacks; caches without them retain their unbound behavior. After identity and payload/hash checks, a bound cache verifies the origin before invoking its decoder. The test-only dependency pilot serializes only sanitized proposal fields, rechecks the exact decoded payload with the existing bounds, parsing, text-safety and semantic rules, and refuses if revalidation changes those fields. It records a release before the cache write, binding a versioned canonical digest to the serialized payload and complete supplied cache key, and stores the resulting AI run ID. Replay verifies that run's latest terminal and digest with a non-repairing program-scoped ledger read, revalidates the content and records a new release for the replay run. A conclusively invalid origin, including a blank origin, conditionally evicts only the observed row and refuses the invocation; verification errors or invalid verifier results preserve it. Previously unbound rows are not replayed. A non-repairing preflight reads the ledger before the pilot's first lifecycle write but does not fence later changes. Audit append and cache write are not atomic: an uncertain append propagates without a new cache write, while a later cache-write failure is explicit and can leave an already recorded release or an uncertain committed row. This is not authenticated ledger or caller identity, current authorization, complete revocation, generic runner enforcement, production migration or operational qualification.
+
+**Dependency-refusal audit privacy (RELO-W1.5, partial):** The production dependency generator and test-only pilot omit unknown reference values from semantic findings and schema error paths from outbound rejection reasons; the production inbound rejection also omits its schema path. Handled production provider failures and unexpected pilot runner failures record fixed reasons rather than exception text. The existing terminal classifications and finding counts are unchanged. This does not sanitize other logging, other schema-gateway consumers, provider diagnostics or historical records.
 
 **Retained NCFL queue integrity (RELO-W4.11h):** Non-array retained proposal roots and nonobject entries are invalid, not empty queues. Fail before staging/dismissal/import mutation and preserve existing bytes. Absent queues and valid empty arrays remain compatible. Context inspection/manual-diff/apply/batch/synthesis readers use safe CLI parameter errors instead of successful zero-proposal messages; extraction reports failure instead of overwriting damaged retained queues. Pending/manual-only intake and decision-preservation rules remain unchanged; no automatic queue repair or concurrency guarantee is introduced.
 
@@ -2591,6 +2763,12 @@ Staging and dismissal validate all retained issue queues before changing the sel
 Ordinary resolution populates the existing `StageContext.fact_snapshot`. Fully-primary report action projection consumes that capture and rejects a missing or foreign-program capture instead of silently reading current facts. Legacy/shadow authored merges, standalone helper compatibility, lookback and other ProgramReality projections remain unchanged. Existing revision/member deletion cascades invalidate affected captures and remove their member metadata. This is not deep object immutability, authenticated capture clocks, new retention entitlement, physical-erasure assurance, coherent cross-store replay or atomic release fencing.
 
 **Unqualified draft evidence capture (RELO-W2.8o):** Actual resolved ordinary report output retains the selected gather manifest once and constructs a content-addressed `RunEvidenceSnapshot` before output-directory creation. It references the original fact pin/content digest and retained transaction/valid clocks, existing report snapshot/config hashes, query declaration triplets, unevaluated fact-revision/entity-ref declarations and the rendered item-ID population. Query membership remains in the referenced gather manifest; it is not the rendered population or an independent completeness denominator. The manifest contains the capture; draft state contains its checksum. Confirm checks both already-captured payloads with its existing single manifest read, rejecting malformed or mismatched declared captures before artifact construction. Historical reads retain v1/absent-capture compatibility; ordinary program-backed confirmation follows the selector-binding extension below. The fixed, digest-bound `unqualified_capture` limitations explicitly exclude qualified source scope, evaluated binding, gather-to-fetch equivalence, authenticated principal, complete effective policy, authorization and sealed nonfact inputs. No new store, accepted-binding path, release gate, dormant-assembly adoption or qualified whole-run snapshot is established.
+
+Saved-query discovery with no usable WIQL retains its `missing_wiql` ERROR query row and empty hash, reports each affected scope as ERROR/PARTIAL and aggregate discovery as PARTIAL, and preserves independent successful scopes and configured explicit refs. Capture construction refuses blank query identity with an explicit instruction to inspect failed gather diagnostics and gather again; it does not omit the failed scope or fabricate a hash. Other hash-present query behavior and persisted capture validation remain unchanged. This corrects failure classification and diagnostics, not failed source acquisition, source completeness or gather qualification.
+
+**ADO discovery pagination admission (RELO-W2.16a, partial):** A saved-query scope requires exactly one typed pagination outcome with an integer count matching the returned IDs, a positive integer page count and a boolean truncation flag. Missing or inconsistent evidence retains returned IDs but marks every affected scope ERROR/PARTIAL and its query row `unverified_pagination`/PARTIAL without claiming a cap or initiating cap recovery. Registry retirement continues only for independently complete scopes; the resulting degraded gather cannot advance latest-FULL. Verified truncated flat outcomes can trigger the partition scan described below; capped link or ambiguous results remain partial as specified in §3. This admission alone does not establish response-parser completeness, historical replay, independent enumeration or operational qualification.
+
+**ADO partition-page integrity (RELO-W2.16b, partial):** Each capped-query scan page requires exactly one typed single-page pagination outcome whose count and truncation flag agree with page length and cap. IDs must be positive integers, strictly increasing above the previous cursor; the existing elapsed-time budget also applies to a short or empty terminal page. A completed scan must include every ID from the original capped result. Invalid or late pages and contradictory membership retain valid observed IDs and prior scope registrations as partial; a scan `QueryError` additionally reports an error without provider text. Independently complete scopes keep their normal retirement behavior, and neither gather path advances latest-FULL for the partial run. A consistent short flat page or an empty flat page after an exact cap multiple remains eligible for completion. These guards alone do not validate WIQL response parsing or rewriting, link-query semantics, independent source completeness or operational qualification.
 
 **Program verdict observation:** `program_verdict.py` adds frozen
 `ProgramVerdict`, retained inputs and an observe-mode envelope. Actual
@@ -3144,11 +3322,25 @@ def gather_program(
 7. **Auto-review:** `_is_auto_approved_signal(signal)` → append `approved` to `reviews.jsonl` with `reviewed_by="system"`. ADO, validated Kusto, IcM, manual, vertex/freshness are auto-approved. WorkIQ and unvalidated Kusto require human review. **FR-SG-38 population auto-approval:** `compute_auto_approval_policies(signals, review_states, min_sample=10, ceiling_rate=0.8, floor_rate=0.2)` — when ≥10 signals from a source have been reviewed at ≥80% approval rate (and >20% floor), all remaining PENDING signals from that source are promoted to AUTO_APPROVED in `persistence_stage.py` during this same gather.
 8. **Trajectory updates:** for each item, build trajectory point → `append_trajectory_point()`
 9. **Plane 1 changelog** (§22 E1): diff loaded Plane 1 bundle against `changelog/plane1_last_seen.json`; append field-level changes to `changelog/plane1_changes.jsonl`; update `plane1_last_seen.json`
-10. **Evidence extraction** (`--extract-evidence` flag, ME-02): if enabled, calls `run_evidence_extraction_stage()` from `gather_pipeline/evidence_extraction_stage.py`. Filters transcript signals, groups by workstream lane, invokes `ContentExtractionAgent` per lane, and writes `WorkstreamEvidence` objects to `programs/<prog>/journal/evidence_store.jsonl` via `persist_evidence()`. Records `EvidenceQualityRecord` (per-lane confidence + extraction count) to `evidence_quality.jsonl` (ME-05). Zone C `AgencyBridge` is injected as a callable; default factory is `_AgencyBridge = AgencyBridge` (lazy import).
+10. **Evidence extraction** (`--extract-evidence` flag, ME-02): if enabled, calls `run_evidence_extraction_stage()` from `gather_pipeline/evidence_extraction_stage.py`. Filters transcript signals, groups by workstream lane, and invokes `ContentExtractionAgent` per lane. Admitted `WorkstreamEvidence` is written to `programs/<prog>/journal/evidence_store.jsonl` through the shared writer behind `persist_evidence()`, and the stage attempts to record an `EvidenceQualityRecord` in `evidence_quality.jsonl` (ME-05). Zone C `AgencyBridge` is injected as a callable; default factory is `_AgencyBridge = AgencyBridge` (lazy import).
+
+**AI action fallback diagnostic:** If optional AI action-extractor setup or extraction raises the existing caught `ActionExtractorError` or `RuntimeError`, gather continues without AI-derived actions and emits a fixed warning without the program ID, exception text or traceback. Other exceptions and successful extraction are unchanged. This does not sanitize provider-internal logs or other diagnostics.
+
+**KPI gather warning:** A caught KPI query failure emits a fixed warning without the query ID, exception text or traceback. When the exception text is empty, the KPI gather stage records a fixed nonempty failure message so Kusto, WIQL and ADO-PR query states remain failed and degraded, including for zero-allowed queries. The shared Kusto query-state recorder also treats an explicitly supplied empty error as a failure, including when forwarded by UIL hydration; an absent error still triggers normal result validation. Nonempty exception text remains in query state; continuation and subsequent-query behavior are unchanged. Other diagnostics and historical data are not sanitized.
 
 **M365 configured-source helpers:** `gather.py` delegates configured meeting/chat counts and configured M365 artifact-ID collection to `gather_pipeline/m365_discovery_stage.py`, retaining its existing callback and thread-ID-normalizer seams. This changes code placement, not discovery behavior.
 
 **Gather-run manifests (`gather-run.v1`):** an opt-in, program-configured activation layer (`GatherActivationConfig`, `off`/`shadow`/`enforce`, parsed and enforced by `gather_pipeline/lifecycle_policy.py`) wraps `gather_program()` with a versioned run-lifecycle state machine — `staging` → `committed`/`failed`/`quarantined` — implemented in `src/core/gather_run_manifest.py`. Staged artifacts (`ado_items.jsonl`, `query_results.json`, channel outcomes) are written under a run-scoped directory and promoted atomically (`os.replace`, with bounded retry on transient Windows handle-release failures) only once a run commits; `latest.json`/`latest_full.json` pointers are updated atomically last, so no reader ever observes a partially-written run. Each manifest carries a canonical content hash, per-query capture/skew timestamps, discovered/hydrated global unique counts plus per-query raw counts, a resolved completeness-oracle result (`resolve_oracle_result()`; order-2 operator-recorded source-export reconciliation via `vertex gather --source-export <scope_id>=<count>`, order-1 independent Kusto/OData oracle intentionally deferred pending qualification evidence), shrinkage classification, and freshness state (next-expected-full timestamp, current/warn/block thresholds). `report.py`, draft state, and `confirm.py` all resolve and pin the same committed manifest once per run rather than re-fetching membership. A one-time `create_legacy_cutoff_manifest()` / `vertex admin bootstrap-legacy-cutoff --program <id>` bootstraps a synthetic cutoff manifest so `journal.read_signals()` and `program_fact_store.load_program_facts()` can safely bound pre-activation, unstamped record pass-through once a program flips `enforce`; absent a cutoff, today's unconditional pass-through is preserved exactly (full backward compatibility). Both enforcement readers obtain verified committed IDs and the earliest valid cutoff from one committed-directory scan, avoiding a mixed pair of independently sampled values. Retention (`privacy_purge`) removes expired non-current committed/failed/quarantined run directories (90-day default) while always preserving pointer-named and confirm-bound runs; `observability bundle` emits a redacted `gather_runs.json` summary excluding raw delivery-scope membership. A workspace-scoped lease/fencing mechanism serializes concurrent gather attempts, and `gather_schedule_monitor` opens/resolves a `gather_missed_attempt` alert independent of data freshness. Slice-contract schema `1.1` (`src/core/slice_contract_loader.py`, backward-compatible with `1.0`) adds `workstream_id`, per-binding `mode` (`full_scope`/`activity_delta`/`analytics_history`), `workstream_ids[]`/`lane_ids[]` multi-lane attribution, and a closed filter-operator set (`area_path`, `work_item_type`, `title`, `tag`); `report_fetch.py` partitions saved-query bindings by mode so `full_scope` bindings are never date-bounded while `activity_delta` bindings retain the existing recency window, and `analytics_history` bindings never render as current scope. Golden queries (`knowledge/golden_queries.yaml`) carry a closed `classification` (`validation`/`analytics_history`/`evidence`/`hygiene`/`retired`) so no golden query can be mistaken for authoritative delivery scope.
+
+**Committed gather identity (RELO-W2.3/W2.9, partial):** The single enforcement scan accepts a manifest only when its program, directory/run ID, committed status, supported schema and canonical hash agree; invalid candidates emit a fixed warning and are excluded. Excessively nested candidate JSON or hash inputs follow the existing invalid-candidate policies; excessively nested pointers follow the existing scan fallback. Pointer run IDs must be bare identifiers; invalid pointers use the existing scan fallback. Pinned run IDs must also be bare identifiers and block before path lookup when invalid; an absent legacy pin remains allowed. This is lexical validation, not physical containment or symlink protection. The ordinary latest resolver still reports invalid selected evidence, whereas the latest-FULL resolver may recover from an invalid candidate. Valid partial and full runs remain eligible. Cutoff bootstrap revalidates the matching synthetic manifest and fails if a previously verified cutoff cannot be revalidated rather than creating a replacement. When no valid cutoff exists, the existing unstamped-record pass-through remains, including for invalid cutoff evidence. Hash checks do not authenticate origin or verify sidecars; concurrent changes, recovery and gather retry durability remain unqualified.
+
+**Committed signal read parity (RELO-W2.3, partial):** `SQLiteSignalStore.read` accepts the same opt-in committed-run filter as the file store, using the same verified scan and legacy cutoff, including on read-only legacy schemas. Manifest-backed gather requests this filter for its recent-signal deduplication window; other callers remain unfiltered unless they request it. This does not establish safe replay.
+
+**Manifest-backed SQLite signal collision containment (RELO-W2.3, partial):** For manifest-backed signals, gather uses the optional `AtomicSignalBatchStore` capability where available; SQLite inserts a same-program batch with `INSERT` in one transaction. A collision or serialization failure rolls back the batch. A collision with a different terminal failed or quarantined run may replace its invisible row only when both the retained and retry timestamps lie within the inclusive recent-signal window; other existing or duplicate IDs still raise an integrity error. The atomic capability accepts `replace_failed_since` and the optional `replace_failed_until`; direct callers omitting the end apply only the lower bound. Custom atomic implementations must accept the end argument. With a lower bound, SQLite acquires the write lock before checking an existing row, so competing retries serialize. Mixed-program batches are refused before opening storage. File and custom stores without the capability retain per-signal `SignalStore.append(..., append_only=True)` behavior; file journals can contain duplicate IDs. Manifest-off SQLite writes retain replacement behavior. A later gather failure can still leave an entire signal batch, and other writes are outside this transaction. General retry recovery and atomic evidence/checkpoint commits remain unresolved.
+
+**Gather lifecycle cleanup (RELO-W2.3, partial):** Acquire the gather lease before quarantining abandoned staging, start its renewal before recovery and setup, and attempt heartbeat stop and lease release on every post-acquisition exit. Implementation and pre-promotion renewal failures retain failed-manifest handling; other interruptions leave staging for recovery. A promotion error is not automatically classified as a failed run because directory promotion can precede pointer writing. Heartbeat stop has a bounded join and does not guarantee a blocked renewal has terminated. This does not make the lease atomic with filesystem promotion or establish recovery and replay.
+
+**ADO verification ordering (RELO-W2.3, partial):** Manifest-backed gathers queue successful ADO UIL verification updates until `commit_staging_run` returns, then renew the gather lease before applying them. Manifest-off and direct-channel calls retain immediate updates; failures propagate. Directory promotion can precede a pointer failure, and the lease renewal and registry write are not atomic. This does not repair prior watermarks or establish safe signal/fact replay, independent subresource checkpoints, crash recovery or source qualification.
 
 **Tag-hygiene leakage-rate metric (`specs/bklg.md` BL-F1, shipped 2026-07-24):** any program that configures an `ado_odata`-engine `hygiene`-classified golden query gets a `leakage_rate = likely_missing_tag_items / max(authoritative_scope_items + likely_missing_tag_items, 1)` measurement, computed by `src/core/tag_hygiene.py`'s `compute_leakage_rate()` against `resolve_latest_committed_manifest()`'s authoritative-scope count. Candidates are tracked in an event-sourced ledger (`programs/<id>/_quality/leakage_candidates.jsonl`) with first-seen/reseen/reopened/auto-resolved lifecycle transitions, a 7-day owner-disposition and 14-day no-unresolved-candidate SLA clock (measured from `first_seen_at`, never paused), and a `correctly_untagged` disposition that durably suppresses a false positive from future counts. Surfaced as a warn-only `vertex doctor --storage` check (never blocks) — the metric is a longer-horizon certification trend target, not a per-run gate. Deployment leakage measurements, candidate records, and SLA dispositions remain private.
 
@@ -3320,7 +3512,15 @@ Three separated concerns, matching the original arch-fix design: run lifecycle (
 
 **Release-ledger read containment (RELO-W0.15r):** Release checks use the existing non-repairing, program-scoped ledger read. Invalid envelopes or foreign-program records raise rather than authorize a surviving subset, and invalid encoding or read errors propagate without rewriting the ledger. An absent ledger still means no recorded release. This does not verify event hashes, complete payload validity, concurrent capture or every AI consumer.
 
+The test-only dependency runner uses this read to verify its cache's originating release and content/identity digest; its bounded ordering, failure and authentication limits are specified in §9.17.1. The actual proposal command still uses the legacy generator.
+
 **Pilot dual-path pattern:** two features (`decision_brief_advisor`, `program_synthesizer`) additionally route through `DeterministicContextCompiler` (§12.1b) on an opt-in pilot path, compared blind against the existing baseline path via `vertex decision-brief-pilot compare`/`vertex program-synthesizer-pilot compare` and `... summary` — the comparison records human A/B judgments through `src/core/blind_ab_comparison.py` before any production swap decision is made. Both paths run the full AISchemaGateway/QG-29 lifecycle identically; the pilot only changes how evidence is assembled into the prompt, not the safety boundary around it.
+
+**Blind-review input integrity:** Both pilot commands use `src/commands/blind_ab_prompt.py` to normalize case and whitespace and require a preference of `a`, `b`, `tie` or `neither` and a critical-error answer of `y`/`yes` or `n`/`no`. Invalid answers produce fixed guidance and are re-prompted without recording a judgment or rerunning either AI path. An interrupted or end-of-input review writes no judgment for the current item; already recorded items remain. For compatibility, an injected prompt callback returning an empty critical-error answer still means no, while the actual Typer prompt requires an entered value. The direct record writer rejects invalid choices and non-boolean candidate mappings or critical-error flags with a fixed `ValueError` before creating or appending a journal. Its `critical_error=False` default remains compatible. Historical records are not repaired or reclassified: the existing reader still defaults a missing `critical_error` to false and coerces retained values with `bool`. Independent evaluation and the existing BL-D3 decision and approval requirements remain unchanged.
+
+**Blind-review read containment:** The active comparison journal is read without automatic repair. Malformed or non-object JSONL, invalid encoding or read errors, missing or mismatched program identity on any row, and selected-surface records that cannot be constructed raise a fixed `StateError`; the program check precedes surface filtering. Both pilot summaries report a content-free error on stderr and exit 2 without a tally or recommendation. An absent or empty journal remains empty. No historical judgment or checksum is rewritten, and valid surface filtering and the existing BL-D3 rule are unchanged. This does not authenticate provenance, verify checksums or all retained fields, validate off-surface record content, account for rotated journals or concurrent writes, or qualify historical judgments.
+
+**Shared JSONL rotation and migration:** `jsonl_utils.py` allocates a new same-second numeric suffix above the existing matching maximum and lists numeric suffixes in numeric order. Nonnumeric suffixes for that timestamp sort before numeric ones; other noncanonical names use lexical fallback. For timestamp-plus-numeric filenames, listing applies the requested stem glob to the stem encoded before the timestamp; rotation escapes glob metacharacters in its literal stem. Windows name matching is case-insensitive. Retention preserves the just-rotated segment and prunes previously retained matching segments in listing order as needed; the default limit of five rotated segments and active-file checksum behavior are unchanged. Candidate JSONL-to-SQLite migration reads the listed segments before the active file and retains the first duplicate candidate ID, so a future migration can select a different duplicate payload than under the former lexical order and excludes canonical-form names assigned to another encoded stem. Existing databases and journals are not rewritten. Legacy names remain prefix-matched and can ambiguously select another stem for deletion or import; a legacy convention can also give a canonical-form name a different intended owner. Retention can delete segments; filenames cannot establish complete or chronological history after suffix reuse, noncanonical naming or clock regression. Legacy ownership, concurrent rotation and historical recovery remain unqualified.
 
 **Production proposal evidence pairing (RELO-W1.15):** Risk, governance-decision-brief and dependency-blast-radius generators discard unequal evidence-reference/text counts after PLANNED and before REQUESTED, policy/cache lookup or provider invocation. Existing discard auditing and matched/direct-empty behavior remain; unsupported risk-CLI empty input stays unsupported. No truncation/padding is permitted. Client construction precedes this generator boundary; pilot migration, citation semantics and historical releases remain unchanged.
 
@@ -3346,19 +3546,40 @@ already reserved before an uncertain provider outcome remain consumed. Existing
 counter history is not repaired. Commit-outcome recovery, cost reservation,
 ceiling values and production runner integration remain outside this correction.
 
+**Runner call-slot state integrity:** Each bounded limit must be a nonnegative
+integer, excluding booleans. For each bounded counter, the retained SQLite
+value must be a nonnegative integer; invalid limits or retained values raise a
+fixed, content-free `StateError` before the provider callback. At SQLite's
+maximum integer, ordinary exhaustion remains a ceiling outcome; a requested
+increment beyond that storage boundary is refused. Refusals roll back the
+transaction's counter changes. Unbounded counters are neither read nor updated.
+This validates the stored representation, not its provenance, and does not
+repair historical counters or resolve the scope-key limitation below.
+
 **Runner call-slot scope limitation:** The current scope key joins program,
 run, feature and policy identifiers with `:`. Admitted identifiers containing
 that delimiter can make distinct tuples share a counter, causing one tuple
 to exhaust another's ceiling. Identity admission, a collision-free encoding
 and treatment of retained counters require a compatibility decision.
 
-**Runner budget refusal:** A `BudgetExceeded` from the provider callable
-produces a non-retryable fallback with `budget_exceeded` in its limitations,
-including when that fallback is not released. Other non-released fallback
-fields remain intact, and a released fallback keeps its existing deterministic
-mapping. The exception alone does not distinguish a pre-dispatch refusal from
-post-usage budget exhaustion; the runner does not release call slots or alter
-the cost ledger.
+**Runner budget refusal:** A `BudgetExceeded`, `BudgetConfigurationError`,
+`BudgetStateError` or `AIPreflightError` from the provider callable produces
+a non-retryable fallback with the respective `budget_exceeded`,
+`budget_configuration_invalid`, `budget_state_invalid` or `ai_preflight_failed`
+limitation, including when that fallback is not released. Other non-released
+fallback fields remain intact, and a released fallback keeps its existing
+deterministic mapping. For these failures the runner's `frontier_called`
+decision records that it entered the provider callback, not proof of an
+external dispatch. The exception alone does not distinguish a pre-dispatch
+refusal from a failure after dispatch; the runner does not release call slots
+or alter the cost ledger. Later independent batch items retain their existing
+admission behavior.
+
+**Runner compiler rejection:** Single and batch outcomes retain the existing
+unreleased evidence-gap status and rejection details and direct the operator to
+resolve the issue without dropping required evidence or bypassing safety checks.
+The runner does not dispatch, invoke fallback or reserve a call slot for that
+rejection.
 
 ### 12.1b Deterministic ContextCompiler (`src/core/context_compiler.py`)
 
@@ -3369,12 +3590,192 @@ class ContextCompiler(Protocol): ...
 @dataclass(frozen=True, slots=True)
 class EvidenceSpan:  # evidence_id, source_family, text, required, origin, trust_level, verification_state, injection_screen, salience_inputs, token_estimate
 @dataclass(frozen=True, slots=True)
-class ContextCompileRequest:  # program_id, edition_id, feature, prompt_version, system_instructions, output_schema_text, required_evidence, optional_evidence, max_input_tokens, reserved_output_tokens
+class ContextCompileRequest:  # program_id, edition_id, feature, prompt_version, system_instructions, output_schema_text, required_evidence, optional_evidence, max_input_tokens, reserved_output_tokens, per_source_quotas
 class DeterministicContextCompiler:
     def compile(self, request: ContextCompileRequest, *, validation_context: ValidationContext) -> CompiledContext  # raises ContextCompileRejected
 ```
 
 Ordered stages: privacy filter → injection screening → required-evidence reservation (a required span that can't fit raises `ContextCompileRejected` rather than silently dropping it) → entity/authority filtering → dedup → deterministic salience ranking → per-source quotas → token-budget packing → manifest emission. The emitted `ContextManifest` records exactly what evidence was included/excluded and why, giving every compiled prompt an audit trail. `decision_brief_advisor`'s pilot path (§12.1a) is the reference caller: required spans (current text, evidence delta, prior AI proposal, stale claims) plus optional spans (ranked signals with decaying recency salience, KPI/vitality summaries) — the compiler's own quota/token-budget logic replaces what used to be a hardcoded `[:6]` truncation.
+
+**Program identity admission:** Before screening or token estimation, the
+compiler requires a bare request program identifier equal to the validation
+context's program identifier. Otherwise it raises a fixed
+`ContextCompileRejected` without writing a compiler-owned alert or manifest.
+The manifest-path helper also rejects non-bare program or hash components with
+`StateError`. Both checks use the existing lexical identifier rule; they do not
+authenticate identity, validate a hash digest or establish physical filesystem
+containment. On paths that reach compilation, the structured runner returns an
+evidence gap without fallback, call reservation or provider dispatch; its
+earlier deterministic fast paths need not compile. Both program-synthesis
+entry points may record caller-owned lifecycle state before compilation, but
+the event-log boundary rejects non-bare selectors before that state is written.
+
+**Budget input admission:** The compiler requires nonnegative integer input
+and output-reservation budgets, excluding booleans, before screening,
+estimation or compiler-owned alert/manifest writes. Every token estimate used
+by the compiler must also be a nonnegative integer, excluding booleans.
+Invalid values raise a fixed, content-free `ContextCompileRejected`; zero
+remains valid. This validates the estimator's output shape, not its accuracy
+or equivalence to provider billing. On compiled paths, the structured runner
+reports an evidence gap without fallback, call reservation or provider
+dispatch. Valid callers can still perform their own lifecycle writes before
+compilation.
+
+**Evidence requiredness admission:** Every span in `required_evidence` must
+declare `required=True`, and every span in `optional_evidence` must declare
+`required=False`; non-boolean values are not coerced. After identity and
+budget admission, the compiler rejects a mismatch with a fixed, content-free
+`ContextCompileRejected` before screening, estimation, or compiler-owned
+alert or manifest writes. Valid selection and rendering are unchanged. On
+compiled single and batch runner paths, rejection produces an evidence gap
+without fallback, call reservation or provider dispatch; the single path
+also stops before released-result lookup. Pre-context fast paths and any
+caller-owned writes before compilation remain unchanged.
+
+**Source-quota admission, partial:** Before screening, estimation or
+compiler-owned alert/manifest writes, the compiler snapshots the supplied
+quota mapping and requires string keys and nonnegative integer values,
+excluding booleans. A malformed mapping or entry raises a fixed, content-free
+`ContextCompileRejected`, even when the entry is unused. The admitted
+snapshot is used for quota selection, so later caller mutations do not alter
+that compilation. Quotas apply to optional evidence; zero and missing entries
+remain unlimited, while required evidence is not quota-limited. No additional
+source-family naming rule is imposed. Compiled single and batch runner paths
+report an evidence gap without fallback, call reservation or provider dispatch;
+the single path also stops before released-result lookup. Pre-context fast
+paths and earlier caller-owned writes remain unchanged. Mandatory quotas for
+provider-bound production features, concurrency during snapshot creation and
+broader compiler qualification remain open.
+
+**Salience-input admission, partial:** After screening and span token
+estimation, but before optional redundancy collapse and ranking, the compiler
+snapshots each surviving optional span's salience mapping. Its
+`source_authority` and any factor used by the configured weights must be
+integer or floating-point values in the inclusive range 0–1, excluding
+booleans. A malformed mapping or consumed value raises a fixed, content-free
+`ContextCompileRejected` before compiler-owned alert or manifest writes.
+Missing factors still default to zero; unknown unweighted factors, required
+spans and hard-excluded optional spans retain their existing handling.
+Selection uses the admitted snapshot, so later caller mutations do not alter
+it. On compiled single and batch runner paths, rejection produces an evidence
+gap without fallback, call reservation or provider dispatch; the single path
+also stops before released-result lookup. Screening, token estimation,
+pre-context fast paths and earlier caller-owned effects can already have
+occurred. This does not validate weight policy, guarantee concurrent mutation
+during snapshot creation or qualify the compiler.
+
+**Salience-score containment, partial:** After screening, span estimation,
+salience-input admission and duplicate collapse, each surviving optional
+span's weighted score must be finite. A non-finite score, or a `TypeError` or
+`OverflowError` during its calculation or finiteness check, raises a fixed,
+content-free `ContextCompileRejected` before quota selection, packing or
+compiler-owned alert or manifest writes. Existing finite ranking behavior is
+unchanged; weights are not evaluated when no optional span reaches ranking.
+Compiled single and native-batch runner paths report an evidence gap without
+fallback, call reservation or provider dispatch; the single path also stops
+before released-result lookup. Screening, token estimation, pre-context fast
+paths and earlier caller-owned effects can already have occurred. This
+containment does not define weight ranges or normalization, guarantee exact
+arithmetic, or qualify the compiler.
+
+**Screening-verdict admission:** Before screening, estimation or
+compiler-owned alert/manifest writes, the compiler rejects evidence whose
+screening verdict is not `pass`, `flagged` or `excluded`, using a fixed,
+content-free `ContextCompileRejected`. Valid verdict handling is unchanged.
+Compiled single and batch runner paths return an evidence gap without
+fallback, call reservation or provider dispatch; the single path also stops
+before released-result lookup. Pre-context fast paths and earlier caller-owned
+effects remain outside this boundary. Validating a verdict does not
+authenticate an upstream screening result.
+
+**Default compiler-tokenizer failures:** For nonempty input, the default
+compiler estimator uses the core budget helper's strict backend resolver. A top-level
+`ModuleNotFoundError` naming `tiktoken` retains the character heuristic; the
+exception name is an import signal, not independent proof of absence or
+package integrity. An unrecognized model's documented name-lookup
+`KeyError` retains the `cl100k_base` fallback. Other expected import,
+name-lookup, encoding-loading or ordinary-encoding failures become a fixed,
+content-free `ContextCompileRejected`; unexpected failures propagate. On
+compiled single and batch runner paths, the handled rejection produces an
+evidence gap without fallback, call reservation or provider dispatch; the
+single path also stops before released-result lookup. Pre-context fast paths
+and caller-owned earlier writes remain unchanged. The estimator retains a
+successfully resolved backend even if a later encoding call fails; it does not
+silently switch to the heuristic. Direct strict-helper calls resolve per call,
+and other callers of the core helper retain its legacy fallback behavior.
+The backend label does not authenticate tokenizer assets or establish
+provider framing or billed token counts.
+
+**Literal tokenizer markers:** When a real `tiktoken` encoding is available,
+the core budget helper and provider-specific estimator count literal special
+token markers as ordinary text in that encoding. This also applies to the
+joined system and user text used by `AIClient` before its cost reservation.
+After a provider-specific encoding is resolved, `ValueError`, `TypeError`,
+`RuntimeError` and `OverflowError` from ordinary encoding become a fixed,
+content-free `ContextCompileRejected`; other exceptions propagate rather than
+producing a heuristic estimate. A compiled single or batch runner reports the
+handled rejection as an evidence gap before its frontier call-slot reservation;
+the single-item path also stops before its released-result lookup. When
+`AIClient` uses that estimator for an enabled cost reservation, its existing
+non-retryable preflight error occurs before the affected reservation or
+dispatch; a prior uncertain attempt remains reserved. Pre-context fast paths
+are unchanged. The provider factory selects a separately identified heuristic
+when the top-level `tiktoken` import raises `ModuleNotFoundError` naming
+`tiktoken`, or when a deployment is unrecognized. Missing submodules or
+dependencies and other import failures propagate; the exception name is an
+import signal, not independent proof of package integrity. Its model-name
+lookup uses `encoding_name_for_model()` and treats its documented `KeyError`
+as unrecognized; other lookup failures and subsequent encoding loading
+failures propagate instead of selecting a heuristic. Explicit legacy
+overrides and successful-estimator caching remain unchanged, and failed
+construction is not cached. Raw construction exceptions can expose library
+details; the guarded AI preflight boundary provides its own content-free
+error. These checks do not authenticate tokenizer assets or establish provider
+framing or billed counts.
+
+**Rendered-budget accounting, partial:** The compiler estimates the complete
+required prompt and each of the first two quota-kept optional candidates.
+Later optional candidates still use separately estimated span and separator
+costs, so a fitting span can be excluded or the final check can reject a
+usable smaller selection. The complete selected prompt is checked before
+returning; an over-budget result is rejected before persisting a manifest.
+Newly returned and newly persisted manifest totals reflect the selected estimator;
+existing content-addressed manifests are not rewritten. The estimator may use a
+character heuristic and does not establish provider-billed tokens or separate
+message framing. Exact bounded packing and scale qualification remain open.
+
+An explicitly supplied token estimator or injection detector is used without
+truth-testing the object; only `None` selects the corresponding default. This
+does not authenticate either dependency or qualify its behavior.
+
+If writing a context-budget alert raises `OSError` or `StateError`, the
+compiler logs a content-free warning and preserves the QG-32 rejection.
+This warning is not durable run-health or release-audit evidence.
+
+If best-effort context-manifest persistence fails, the compiler retains its
+in-memory result and logs a fixed warning without the exception, traceback,
+path, identifiers or content hash. This does not provide the required
+persistence outcome in run health or release audit, repair earlier logs or
+qualify persistence recovery.
+
+**Manifest publication and collision diagnostics, partial:** A new manifest
+is written to a same-directory temporary file, then published without replacing
+an existing destination via a hard link, or via a no-replace rename on
+Windows if linking fails. An existing or concurrently published manifest is
+read with a bounded byte limit and compared with the current stable metadata;
+specified malformed, unverifiable or different records produce content-free
+warnings and are not rewritten. On Windows, permission-denied verification
+reads are retried up to five times at 10 ms intervals before the existing
+unverifiable warning. A valid UTC compilation timestamp and finite,
+nonnegative duration may differ. The prompt hash alone does not uniquely bind
+all manifest metadata, and a warning is not a durable persistence outcome or
+recovery contract. On non-Windows filesystems without hard-link support,
+persistence now fails with a warning even where the previous direct write
+could succeed. Controlled same-host Windows tests cover a two-process collision
+for hard-link publication and the simulated no-replace-rename fallback.
+These tests do not establish general concurrency, cross-host, crash,
+power-loss or filesystem durability; the writer does not explicitly sync the
+file or directory.
 
 Compiler rejection is terminal for that attempted context: callers must not
 rebuild an ad-hoc prompt or reuse a cached release to bypass it. The
@@ -3398,17 +3799,276 @@ class AIClient:
 ```
 
 Budget guard: `_spent_usd >= _budget_usd` → raises `BudgetExceeded`. Cost computed per-call from token counts.
+For a traced, guarded request, the client refuses before run reservation or
+dispatch when its applicable process-local settled spend, retained reservation
+estimates and estimated next-call cost exceed its feature budget. Equality
+remains admissible under existing floating-point arithmetic unless settled
+spend has already exhausted the ceiling. Admission and usage settlement are
+serialized over that local state, but provider dispatch is not. Successful
+settlement replaces the local estimate with actual spend; unsettled estimates,
+including uncertain provider outcomes, remain held for the state's lifetime.
+A settlement failure may retain both the estimate and already-recorded
+actual spend.
+
+After successful settlement, actual process-local feature spend strictly
+above the feature ceiling raises `BudgetExceeded`; an actual run-ceiling
+overrun takes precedence when both occur. Spend exactly at the feature ceiling
+may return that response but prevents a subsequent call. This detects an
+overrun after provider usage, not before or instead of the incurred cost.
+When reporting a known run or feature overrun, `OSError`, `StateError` and
+`UnicodeError` from trace writing produce a content-free log and do not mask
+the budget exception or trigger deployment fallback. Other trace failures,
+trace durability and provider billing remain unqualified.
+The metadata trace's existing best-effort write block emits a content-free
+warning when writing, serialization, locking or sync fails; it continues to
+attempt telemetry without changing the provider outcome. A failed write may
+have partially written or synced the trace. When telemetry append succeeds, a
+known post-settlement run or feature overrun is recorded with
+`budget_exceeded` status while preserving accounted usage. This does not
+guarantee telemetry for pre-dispatch refusals or failures outside that trace
+write block or in telemetry append. Failures caught by the existing telemetry
+append handler emit a content-free warning without changing the provider
+outcome or budget exception; this does not establish whether an append
+partially completed or make telemetry durable.
+
+When an existing post-reservation trace is written, it includes the returned
+SQLite `cost_reservation_id` as an optional top-level field, separate from
+caller metadata. Observe-only and other records without a returned reservation
+omit it. The ID is scoped to the current edition ledger; copying, restoring,
+deleting or recreating a ledger can reuse it. Disabled or failed traces,
+crashes and reservation commits whose projection refresh fails before
+returning a handle remain uncorrelated. The ID does not prove provider
+dispatch, billed usage or successful reconciliation.
+
+Returned cost-reservation handles are bound in memory to the resolved ledger
+path. Settlement and proven non-dispatch release reject unbound handles and
+handles bound to another path before opening the target ledger; equivalent
+relative and absolute paths can use the same handle. Manually constructed
+legacy handles without a binding can no longer be settled or released.
+State-only `reserve` and amount-based `settle_reservation` remain available,
+with internally reconstructed handles bound to their selected ledger. The
+new refusal messages and default handle representation omit ledger paths;
+paths are not added to AI traces or stored reservation rows. Path binding
+prevents cross-ledger mistakes but is not authentication or a durable ledger
+identity, and cannot detect replacement or restoration at the same path.
+
+For a guarded request, the router obtains rate admission before each provider
+attempt. Before a retry it retains the preceding attempt's reservation and
+obtains a new one; only a successfully accounted attempt is settled. A known
+budget, configuration or cost-state refusal stops before the next attempt and
+does not trigger deployment fallback. This is incremental containment, not an
+up-front reservation for the worst-case deployment and retry chain. Other
+non-dispatch sites and uncertain-cost reconciliation remain open.
+
+Within `reserve_call`, a `StateError`, `OSError` or `UnicodeError` from
+projection refresh after the reservation commit occurs before that handle is
+returned and before the guarded attempt can dispatch. The guard settles only
+that identity-bound reservation at zero cost and zero calls, inserts its
+non-dispatch release marker in the same SQLite transaction, and re-raises the
+original refresh error without retrying the projection. Selected cleanup
+errors produce a class-only `StateError` requiring reconciliation, which the
+guarded client translates to non-retryable `BudgetStateError`. Ordinary
+unexpected cleanup exceptions propagate unchanged to direct guard callers;
+the guarded client converts them to a class-only, non-retryable
+`AIPreflightError` with the standard exception chain suppressed. Inspectable
+exception context remains available. A cleanup error does not establish
+whether its transaction committed.
+
+If the built-in router's initial execution-mode check or the current
+attempt's rate-admission wait fails, the client can prove that attempt has
+not reached the SDK. It settles the returned current reservation at zero cost
+and zero calls and inserts its ID into `ai_cost_non_dispatch_releases` in the
+same SQLite transaction. Ordinary zero-cost settlements have no release marker.
+Only successful release and projection refresh remove the local feature
+estimate. A failed release raises a non-retryable `BudgetStateError`; after a
+commit followed by projection failure, SQLite can show the release while
+JSON is stale and the local estimate remains held. The local admission error
+becomes a non-retryable, class-only `AIPreflightError` and does not create a
+provider trace or telemetry row for that undispatched attempt. Standard
+tracebacks suppress the underlying exception chain, but its context remains
+inspectable. Direct router callers without the callback retain their
+existing exception behavior.
+
+Previously dispatched uncertain attempts and reservations whose handles were
+not returned outside the selected internal cleanup boundary remain held.
+Provider failures, retry-preflight and backoff failures, interruptions and
+other admission sites are not released by these changes. The client's earlier
+observe-only check can still write its existing diagnostic before reservation.
+Structured-runner call slots and the report-wide and unknown-cost gate
+policies are unchanged.
+
+When the pre-retry callback is reached, the existing best-effort trace and
+telemetry path reports the preceding attempt with a fixed diagnostic. An
+intermediate trace includes the returned reservation ID; the separate telemetry
+row does not carry that ID. The new intermediate telemetry rows have `other`
+status and unknown cost, and omit latency to avoid double-counting overlapping
+logical-request durations. The final row retains the existing logical-request
+latency. Feature summaries count those additional rows as calls and errors,
+but sum only known costs, so failed-attempt billing can be missing from the
+displayed total. Trace or telemetry failure can leave rows absent; selected
+intermediate trace failures log a content-free warning without masking the
+retry. Other trace failures remain unqualified.
+
+For AIClient, `CostGuard.ai_calls` increments on accounted settlement rather
+than every attempt, and structured-runner call ceilings can count the logical
+request rather than internal retries. After settlement, the existing response
+rule checks actual spend rather than actual spend plus retained estimates;
+their combined value can exceed the ceiling without changing that response.
+Provider billing, attempt-level call ceilings and operational cost
+qualification remain open.
+
+Within one fallback wrapper, lazy client creation is serialized and each
+deployment reuses its client. When the wrapper uses the built-in `AIClient`,
+whether supplied explicitly or selected by default, its deployment clients
+share that local spend and outstanding estimates; their individual usage
+statistics remain separate. A budget refusal stops fallback and can therefore
+reduce backup availability. Other custom factories and replaced default
+factories keep their existing arguments and do not receive shared state.
+Standalone clients, separate wrappers,
+processes and restarts do not share it. This wrapper lifetime is not a
+durable program/run/feature/policy identity and can span trace contexts;
+unguarded calls do not reserve a pre-dispatch estimate. A projection error
+observed by the reservation preflight prevents a new reservation, but a
+SQLite reservation may still remain committed without a returned handle when
+cleanup fails or a later refresh raises outside the selected errors; that
+estimate may be absent from local state (§12.5). The local check neither
+pre-reserves the worst-case retry/fallback chain nor reconciles provider
+billing; durable shared feature-budget enforcement remains open.
+The feature budget must be a finite nonnegative number, excluding booleans.
+An explicit `run_budget_usd` must also be finite and nonnegative; numeric strings
+are accepted, and missing or `None` uses the feature budget. Invalid values
+raise a content-free `BudgetConfigurationError`. A zero run budget raises
+`BudgetExceeded` before the router is created; a zero feature budget blocks
+before dispatch. Positive run budgets retain the existing durable reservation
+path. For retained SQLite and legacy JSON state, negative, nonfinite or
+malformed budget, spent and reserved amounts are rejected without exposing
+their values. A stored zero budget is preserved rather than replaced by a
+later supplied budget. Each guard's checked admission uses the lower of its
+configured ceiling and the retained run ceiling, including the reservation
+and checked-record transaction rechecks. A guarded client reports settled
+actual spend exceeding that same ceiling as a run overrun, while still
+recording already-incurred cost; exact equality remains allowed. Other active
+reservations count for admission but are not actual spend for this post-usage
+signal. The retained ceiling and `CostRunState.within_budget` remain unchanged,
+and a lower ceiling supplied to one guard does not propagate to another.
+Durable shared policy changes, complete cross-client enforcement and
+qualification remain open. The selected deployment's input and output prices,
+or the existing default when no deployment entry is selected, must be finite
+nonnegative numbers; booleans, nonnumeric values and float-conversion overflow
+are rejected. Pricing-loader `ConfigError` becomes a non-retryable,
+content-free `BudgetConfigurationError` before cost-state or router creation.
+Its original exception chain is suppressed in standard tracebacks; this does
+not erase the retained exception context.
+
+Before a traced provider request reserves run budget, the requested output
+maximum and selected prompt estimate must be nonnegative integers, excluding
+booleans; zero remains valid. Invalid counts or an unrepresentable or
+nonfinite reservation cost raise a content-free `BudgetConfigurationError`
+before cost-state mutation or provider dispatch. Arithmetic-overflow context
+is suppressed in standard tracebacks, not erased. Existing trace, observe-only
+and exhausted-feature-budget checks retain their precedence. The router may
+already be constructed, and runner call slots reserved before the callback
+remain consumed. This validates inputs and finite arithmetic, not estimate
+accuracy, provider message framing, model limits or billed cost.
+
+Direct `CostGuard` constructor budgets, estimates, reservations and actual
+amounts must be finite, nonnegative numbers, excluding booleans and strings.
+Invalid amounts raise a content-free `StateError` before the affected operation
+mutates state. Live `ai_calls` values must be nonboolean integers between zero
+and SQLite's signed 64-bit maximum; retained integer strings and integral
+floats remain readable, while malformed, fractional, negative, nonfinite,
+boolean or out-of-range retained counts are rejected. A cumulative count
+overflow is rejected before the affected ledger update or reservation
+settlement. If that failure follows a provider response, client in-memory
+usage and spend may already have been updated; the durable reservation remains
+for reconciliation and deployment fallback does not retry.
+`record_actual`, legacy settlement and per-call settlement also reject a
+nonfinite resulting spend before persistence or reservation settlement.
+These checks do not qualify other arithmetic. Recording actual spend and
+unmatched legacy settlements reread the current SQLite run state under an
+immediate write transaction; this prevents those cooperating updates from
+replacing an intervening committed reservation, settlement or spend with an
+older snapshot.
+
+The checked compatibility `record()` retains its early run-ceiling preflight,
+then rechecks spent plus reserved plus requested cost against the current
+SQLite row in the same immediate transaction as its spend update. An
+intervening cooperating update can therefore cause `BudgetExceeded`; equality
+is allowed using the existing floating-point comparison and refusal message.
+`record_actual()` and settlement still record already-incurred amounts
+without this admission check. The later JSON projection is not part of the
+ledger transaction. Standalone WorkIQ's separate `check()` and
+`record_actual()` calls remain non-atomic.
+
+Cost-guard SQLite connections use the existing bounded setup retry for
+lock/busy errors. This retries connection and PRAGMA setup, not transactions
+or provider calls. If a reader sees the database before `ai_cost_runs` is
+created, it retries that exact missing-table error seven times with
+exponential sleeps totaling 2.54 seconds. A persistently missing table and
+other database errors remain explicit state failures; an invalid ledger is
+not treated as empty. This bounds selected startup races, not all concurrent
+initialization, filesystem or crash behavior.
+
+After a provider response, both token counts must be nonnegative integers,
+excluding booleans. Missing, malformed or unrepresentable counts, a
+nonfinite computed cost or a nonfinite cumulative client spend raise a
+non-retryable `BudgetStateError` before client usage or spend is changed.
+An existing per-call reservation is retained for reconciliation. Valid zero
+counts remain valid and settle normally. An error trace omits unaccountable
+counts and cost; if only cumulative spend overflows, the individually valid
+counts and cost can still be traced. This does not independently verify
+provider-reported usage, provider billing, configured-price accuracy, or
+the pre-dispatch estimate and fallback-chain upper bound.
 
 Retry: up to 2 retries with exponential backoff (`0.5 × 2^attempt`). Retryable: `RateLimitError`, HTTP 429, 5xx.
 
+For a single deployment, the router recognizes the configured
+`RateLimitError` class or an integer `status_code` of 429 or 500–599.
+Exception-message text and missing or malformed status values do not
+independently authorize a retry. The separate deployment-fallback wrapper
+can still try another deployment after an ordinary wrapped provider error.
+Failed dispatched attempts retain their reservations for reconciliation.
+
+`AIClient` wraps `StateError`, `OSError` and `UnicodeError` from cost
+reservation or settlement as `BudgetStateError`. The latter two use a fixed
+message; existing `StateError` messages are retained and are not generally
+sanitized. Invalid retained cost-state timestamps are an exception: their
+field-specific error omits the invalid value. The wrapper suppresses the
+original exception chain in ordinary tracebacks; Python exception context
+remains inspectable, and rich locals and other diagnostics are not covered.
+After a response, the client attempts an error trace with valid
+reported token counts and estimated cost. If that trace raises one of the
+same three error types, a fixed error is logged and the original cost-state
+failure is preserved. Other unexpected trace failures are not covered by this
+handling.
+
+Unexpected exceptions during initial reservation or retry preflight become
+`AIPreflightError`, with the underlying exception class but not its message
+in the new error. The original chain is suppressed in ordinary tracebacks,
+but exception context remains inspectable. A reservation committed before
+its handle is returned remains retained for reconciliation.
+
 `FallbackAIClient.chat()` and `.structured()` immediately propagate the
-original `BudgetExceeded`, including when raised during client construction
-or when a custom retry tuple includes it. They do not try a later deployment
-after budget exhaustion; other configured retry behavior is unchanged. The
+original `BudgetExceeded`, `BudgetConfigurationError`, `BudgetStateError`
+or `AIPreflightError`, including when raised during client construction or
+when a custom retry tuple includes it. They do not try a later deployment
+after these failures; other configured retry behavior is unchanged. The
 exception alone does not establish whether provider dispatch occurred. Claim
-resolution receives its existing budget-specific error instead of mistaking
-this condition for a generic provider failure. Confirmation's outer handling
+resolution receives its existing budget-specific error for exhaustion instead
+of mistaking it for a generic provider failure. Confirmation's outer handling
 of claim-extraction failures remains unchanged.
+
+When these errors arise inside routed generation, the exec-summary and
+workstream-blurb generators record a content-free QG-29 discard and re-raise
+the original error; workstream synthesis records a discard. Its caller also
+stops deployment fallback for these errors from client construction. The report's
+per-request fallback stops at the failed request and records an exception-class
+warning without the error text. Later independent synthesis requests can
+still run; this is not a report-wide AI stop or an approved report-abort
+policy. The proposal API retains its existing abort behavior before proposal
+supersession and writes, while `vertex propose` reports the error class on
+stderr and exits 2. Earlier report-stage or steering effects are not undone;
+other `StateError` handling and ordinary provider fallback are unchanged.
 
 ### 12.2a Tiered Routing, Result Caching, and Correlation Telemetry (`src/ai/tiered_router.py`, `src/core/ai_result_cache.py`, `src/core/operation_trace.py`)
 
@@ -3428,6 +4088,18 @@ def route_through_tiers(
 
 **Routing order**: `CACHE → DETERMINISTIC (Tier 0) → LOCAL (Tier 1, economy) → FRONTIER (Tier 2)`, first tier to produce a value wins. Every route is recorded as a `TierDecision` (`feature`, `tier`, `outcome`, `confidence`, `frontier_called`, trace id) via a registrable decision-sink (`register_decision_sink`); `RouteOutcome` is a closed vocabulary (`deterministic_hit | local_hit | frontier_call | frontier_blocked | frontier_disabled | cache_hit | skipped`) — `CACHE_HIT` is a first-class outcome, not a bypass of the audit trail. A feature may only route through `LOCAL` (Tier 1, economy-lane) after clearing the local-tier graduation gate (§1.3's changelog: signed model artifact, model card, holdout evaluation, Wilson lower-bound ≥0.95, abstention behavior, kill switch) — `local_tier.py` was deleted 2026-07-13 for never clearing this gate; the `local_fn` extensibility seam remains available to a future implementation that does.
 
+Registered decision sinks are called synchronously outside the router lock. Ordinary errors escaping a sink increment a process-global counter and do not stop delivery to other sinks or change the routing outcome. The durable sink propagates its own errors to this boundary; direct invocation of the sink can therefore raise. A sink that swallows its own failures is not observable, and a sink can write before raising. The resettable counter neither identifies a run nor automatically invalidates measurement windows and has no discovered production consumer; it does not establish durable telemetry completeness.
+
+The root CLI binds its optional durable sink to the invocation context and restores the preceding binding on exit; explicitly registered global sinks remain global. Sequential, nested and overlapping tested invocations do not share that scoped sink. A copied context cannot start a new sink call after its owning invocation exits, but a call already in progress may finish afterward. Context variables do not automatically propagate to new threads, so this is not a completeness guarantee.
+
+For ordinary resolved commands, scoped sink registration, scheduled maintenance and interactive catchup use one cached startup program selection. A conservative command-argument preview withholds those effects when it cannot safely establish an explicit program or edition, including conflicting identifiers or unsafe parameter processing. Rejected previews and unresolved named scopes emit a fixed warning; commands without a selected scope can skip the effects silently. The requested command still uses its own parser and may run or fail independently. Edition lookup can itself raise, and command-level resolution may occur later; this preview does not qualify every command, other startup probes, process-global AI-mode selection or the full supported Click/Typer version range.
+
+Tier-decision measurement reads check the active JSONL file's object shape and each row checksum without repairing the file. An unreadable, malformed or unchecked row raises `MeasurementReadError`; the cockpit leaves both tier-derived ratios unavailable and reports a warning instead of using a surviving subset. A missing or empty file remains an empty read. Checksums do not authenticate records, validate their semantics, include rotated files or establish a complete measurement window.
+
+Fresh cockpit projections leave `frontier_avoidance` unavailable even for intact rows: the current records do not establish eligible attempts, actual frontier-model calls or complete window coverage. For a nonempty active file, `cache_hit_rate` remains the fraction of rows marked with a cache tier or hit and is accompanied by a warning that it is an unqualified active-file diagnostic, not a window rate. Empty history gives an informational explanation. Retained snapshots are not recomputed; qualified tier economics and durable coverage remain open.
+
+`cache_hit_stats()` counts observed cache hits in its supplied snapshot or bounded in-process log. Its existing `frontier_calls_avoided_by_cache` and `actual_frontier_calls` keys now return `None`, including for an empty snapshot: cache hits do not establish eligible counterfactual calls, and callback outcomes do not establish model dispatch. Callers must handle these formerly integer-valued fields as unavailable. Routing and persisted records are unchanged; these diagnostics do not establish a complete measurement window.
+
 **Result cache (`src/core/ai_result_cache.py`)**: a generalized, content-hash-keyed cache any `route_through_tiers` caller may opt into via `cache_lookup_fn`/`cache_store_fn`:
 ```python
 @dataclass(frozen=True, slots=True)
@@ -3440,6 +4112,8 @@ def get_ai_result(key: AIResultCacheKey, *, programs_root: Path) -> CachedAIResu
 def put_ai_result(key: AIResultCacheKey, value: Any, *, programs_root: Path) -> None
 ```
 An identical request (same program, feature, canonical input, prompt/policy version, model, compiled-context manifest hash, and output schema version) is served from cache rather than re-calling the provider — the key's breadth means any of those seven dimensions changing invalidates the entry, so a prompt-version bump or a context-compile difference can never silently serve a stale result.
+
+The shared REV/AI file cache preserves the existing filename for ordinary delimiter-free ordered keys. Keys containing `|`, the empty tuple and the single-empty-string tuple use a separately prefixed fingerprint over canonical ordered JSON; their older ambiguous files are not read and may cause a later admitted provider call. Labeled reads and writes require one unique label per key component and reject violations before filesystem access; unlabeled non-strict reads and empty tuples remain supported. If an ordinary key's legacy filename holds a different stored identity, an ordinary read logs a content-free warning and misses without touching or pruning that file; a strict read raises. A subsequent write uses the separate fingerprint rather than overwriting the foreign file, and reads prefer that entry. Normal TTL/LRU eviction remains in effect, so writes can still evict older files. The fingerprint encodes values, not label names: different label schemas for the same kind and ordered values are not isolated, although the current REV and AI wrappers use fixed labels per kind. This does not establish cache-entry authentication, release authorization, input-equivalence proof or W1.5 qualification.
 
 **Correlation telemetry (`src/core/operation_trace.py`)**: a purely internal, Vertex-generated `correlation_id` (a `uuid.uuid4().hex`, never touching any external system) links every artifact one logical run produces — source acquisition, fact write, context manifest, AI release decision, rendered output, actuation intent/receipt — into one queryable `OperationTrace`:
 ```python
@@ -3503,7 +4177,27 @@ def load_latest_released_program_synthesis(program_id: str, *, programs_root: Pa
 
 ### 12.5 Cost Management
 
-- `cost_guard.py`: Per-edition, per-run budget tracking with ceiling. **D-16 retirement status:** `cost_guard.json` is a backward-compatibility projection only — `_write_atomic_json` must be called from exactly one site (`record_actual`). `_write_sqlite_state` is the authoritative write path; `load_run_states` reads the SQLite ledger before falling back to the `cost_guard.json` file. New cost state must go through SQLite, never additional JSON writes.
+- `cost_guard.py`: Per-edition, per-run budget tracking with ceiling. **D-16 retirement status:** `cost_guard.json` is a backward-compatibility projection only; `_persist_projection` is the sole `_write_atomic_json` caller. SQLite is authoritative when retained run state exists; `load_run_states` reads the ledger before falling back to legacy JSON. Reservations, settlements and spend updates reread the run under an immediate write transaction. When no active per-call reservation matches a legacy settlement by amount, the legacy path checks the remaining untracked balance against the sum of active tracked reservations before updating it. Amount-based matching remains ambiguous for equal amounts, and the existing floating-point and tolerance behavior is not exact-arithmetic qualification.
+
+  The effective checked ceiling for each guard is the smaller of its
+  configured value and the retained run budget; changing one instance does
+  not update the stored value or other instances (§12.2).
+
+  Retained SQLite and legacy JSON runs are ordered by descending normalized
+  UTC `updated_at`, then descending run ID for equal instants; naive timestamps
+  retain their existing UTC interpretation. Invalid timestamps and offset
+  timestamps that cannot be represented in UTC raise a field-specific
+  `StateError` without the offending value. Brief and triage use the latest
+  run for budget warnings, and doctor uses it for storage metadata. Reading
+  does not rewrite retained state. The additional in-memory SQLite sort has
+  not been performance-qualified for large retained histories.
+
+  A projection refresh acquires an immediate SQLite write transaction, rereads the latest run and holds the lock while merging and writing the shared edition JSON. This serializes cooperating projection writers, including writers for different runs, but holds the database write lock across filesystem write and `fsync`; contention and timeout behavior remain operationally unqualified. The ledger update commits before its projection refresh, so a refresh failure or crash can leave SQLite and JSON divergent. Selected reservation-refresh errors receive the pre-dispatch cleanup described in §12.2; cleanup failure, crashes, other errors, settlement and spend updates are not automatically reconciled. The bounded tests cover selected same-host thread interleavings, not all processes, hosts, filesystems, crashes, initial database creation or noncooperating writers. Retained numeric validation does not establish provider billing or uncertain-outcome reconciliation.
+
+  After the run-ceiling check and before inserting a reservation, the reservation transaction reads the compatibility projection through the same outer-payload validation as refresh. An error observed by this preflight aborts the transaction without adding a reservation; previously active reservations are not released. It reads while holding the SQLite write lock, so the added contention is not operationally qualified. It does not validate every legacy run entry, repair state or prevent noncooperating changes.
+
+  On these preflight and refresh reads, invalid JSON, a non-object payload, a missing or foreign edition, or missing or non-object `runs` raises a fixed, content-free `StateError`; its standard traceback suppresses the original exception, but the exception context remains accessible. Invalid UTF-8 retains the existing `UnicodeDecodeError` behavior. This does not claim that every read or filesystem error has a fixed diagnostic. A genuinely absent projection may be created; a valid projection retains other legacy-only run entries, but they are not migrated into SQLite or restored if previously lost, and SQLite-first reads do not include them. A failure after preflight or during refresh does not roll back the preceding ledger transaction. The selected reservation cleanup may release its SQLite row while JSON remains stale or ahead if replacement already occurred; a later successful projection can catch up. Other reservation failures can leave a committed row without a returned handle, and settlement or WorkIQ spend can already be committed after a provider response. Inspect and reconcile before retrying; no general repair or reconciliation is automatic.
+- Standalone WorkIQ enrichment currently uses an optional check-then-record guard, not an atomic reservation. In batched cluster prefetch, `BudgetExceeded` stops prefetch and, as fail-closed containment, stops all later lane work: no per-lane or extraction-callback WorkIQ call, lane-result recording or evidence persistence follows. The command reports `WorkIQ budget exceeded` on stdout; JSON output is then an object with an empty `results` list and a `stopped` message instead of the usual list. Whether already-prefetched cluster responses may be salvaged as partial results remains undecided. Other check failures propagate. Provider failures retain the query-estimate recording path, while a recording failure after either provider success or failure propagates without a second recording attempt or a later cluster call. SQLite may already contain the recorded estimate when projection fails; no reconciliation is automatic. This does not cover every WorkIQ invocation: per-thread retrieval and the extraction callback are not passed this guard, and the guard is absent when AI is disabled or its configured run budget is finite and nonpositive. When AI is enabled, NaN and both infinities reach constructor validation and are rejected before registry loading or bridge setup. WorkIQ budget authority, concurrency, provider billing and complete call coverage remain open.
 - `context_budget.py`: Token-budget management; truncates dated updates/comments to fit LLM windows
 - `llm_trace.py`: Every AI call → JSONL (tokens, latency, cost, model, caller)
 
@@ -3608,6 +4302,89 @@ Rich retrieval also returns the examined source-time rejection count for a priva
 
 Rich WorkIQ persistence is a composite safety boundary. `sanitize_workiq_evidence()` scrubs email/phone/SSN fields and quarantines credential patterns or sensitivity-marked content without retaining the offending excerpt. `SourceRef` round-trips `canonical_id` and `extraction_method`. The reader keeps the latest revision per `(lane_id, canonical_source_id)`, applies approval per source, and deterministically aggregates only admitted sources. `VerificationState` distinguishes `unverified`, `model_self_attested`, `human_verified`, and `source_verified`; approval promotes admitted evidence to `human_verified`. Zone A owns models, freshness identity, and aggregation; Zone C owns WorkIQ retrieval; command orchestration owns budgets, privacy, persistence, and review-signal creation.
 
+The sanitizer also checks and scrubs ETA labels and owners; non-string labels
+or non-null, non-string owners are unsafe. Standalone enrichment uses the
+sanitized summary for its review signal and, on the legacy `--accept` path,
+for the registry update, including safe duplicate evidence. Empty signal
+summaries use a fixed fallback rather than the query. An unsafe legacy
+`--accept` update is refused without content and produces a nonzero exit
+after other selected lanes are processed (RELO-W3.3v).
+
+The evidence writer invokes the sanitizer for every `workiq_` source ref and
+when the transcript or standalone enrichment callers identify WorkIQ origin,
+even if refs are absent. It quarantines the whole bundle when no WorkIQ ref
+exists, a WorkIQ ID is missing, blank or non-string, or any other ref ID is
+non-null and non-string. New quarantine metadata omits source IDs, and
+malformed IDs do not prevent enrichment from reaching this boundary.
+Non-WorkIQ calls retain their existing behavior. This syntactic admission
+does not establish native identity or authenticity. ETA ADO IDs, source IDs
+and permalinks are not covered by the text-field correction, existing
+quarantine entries are not rewritten, and field privacy, atomic signal/
+evidence persistence and retained-record repair remain open (RELO-W3.3x).
+
+The transcript extraction stage returns the sanitizer-admitted evidence and
+attempts its per-run quality record for new and safely deduplicated
+extractions. Quarantined evidence is omitted from both the returned results
+and quality recording; other lanes continue. The stage's in-memory dry-run
+applies the same sanitizer and emits a content-free warning for unsafe
+evidence without writing evidence, quarantine or quality records. This does
+not change the public writer's Boolean result, backing IDs, approval rules,
+or legacy standalone enrichment result handling. Admission does not prove native
+identity or source authenticity (RELO-W3.3y).
+
+Per-thread standalone enrichment uses the same admission outcome for its
+result rows and lane yield, counting admitted new and safely deduplicated
+evidence but omitting quarantined extractions. If none are admitted and any
+were rejected, lane state is preserved; complete empty discovery retains its
+zero-yield behavior, while incomplete empty discovery preserves state.
+Dry-run applies the sanitizer in memory without writing evidence, quarantine,
+lane outcomes or freshness. Normal writes retain the existing pending-review
+signal and original-evidence-derived backing ID, and mark freshness only for
+new evidence with a first source ID. Lane outcomes are recorded after evidence
+and signal processing, so their failures do not record a later successful
+outcome; evidence and signal writes are not atomic. This does not validate
+source IDs for privacy or authenticity, repair prior records, or change legacy
+enrichment and budget behavior (RELO-W3.10a).
+
+The existing caught transcript extraction and quality, standalone enrichment
+query, extraction, cluster, provenance and quality, and content-parser
+failures use static diagnostics without exception or cluster-key text. Existing
+lane identifiers and per-lane failure categories remain. Invalid textual
+confidence still raises `ValueError`, but its message is fixed and its prior
+context is suppressed in the standard formatted traceback. The context remains
+directly inspectable; provider-internal logs and uncaught failures elsewhere are
+outside this correction (RELO-W3.3z).
+
+The content parser rejects non-finite confidence after numeric conversion and
+before clamping, using the same fixed `ValueError` as invalid textual confidence.
+Missing or null values and finite values retain their existing defaults and
+clamping. Gather and legacy standalone enrichment retain their per-lane error
+handling; rich per-thread enrichment propagates the error before persisting
+that lane's evidence. Earlier lanes may already have written results, and
+retrieval may have recorded freshness as `retrieved` before extraction fails.
+Existing evidence is not repaired, and lane-wide or cross-store atomicity is
+not established.
+
+**Unresolved standalone enrichment gap:** The legacy non-per-thread path
+constructs `enrich:<lane>:<date>` as a source ID and can persist it without
+a native source identity; this does not meet the native-identity requirement
+above. In a cached batch, evidence can be written before an unbound `query`
+prevents its review signal. The empty-summary fallback no longer copies a
+preceding lane's query, but the unbound-query partial-write defect remains.
+The legacy-path disposition, review-signal consistency and retained-record
+repair remain open; this observation is not an exception to the identity
+contract.
+
+**Standalone enrichment dry-run gap:** The command does not persist extracted
+evidence, record lane outcomes or write the per-thread freshness cache during
+dry-run; it still reads the cache. Existing cost accounting and circuit-breaker
+behavior remain active, so their state may be written. The root CLI skips
+scheduled maintenance and interactive catchup for a parsed enrichment
+dry-run, while retaining tier-decision sink registration when scoped startup
+is admitted. Other startup state may still change. A warning describes the
+remaining risk, but the complete write-free contract in §11.5 remains unmet. This does not add cost guarding
+to per-thread calls or resolve the legacy-identity and budget-refusal gaps.
+
 ### 13.2 ADO Writer (`src/m365/ado_writer.py`)
 
 **Meeting exact-marker fallback (RELO-W4.5a):** In the existing ActionExtractor malformed-marker fallback branch, successful exact-marker lines retain their original action identity and order. Only their raw-line spans are removed from fallback input; malformed markers and all nonmarker content retain signal identity/metadata and existing heuristic/frontier routing. Preserved actions precede fallback results, excluding duplicate preserved IDs. All-valid/no-valid extraction, parser rejection and candidate/effect authority remain unchanged; this does not select a consolidated meeting pipeline or add residual extraction to the all-valid path.
@@ -3624,7 +4401,7 @@ class ADOWriter:
 2. Check expiry (72-hour default unless overridden by proposal generation config)
 3. Loop pending/failed entries:
    - Re-fetch live ADO state → revision conflict check → dispatch by action type
-   - `add_comment`: duplicate detection (Vertex header check) requires one valid, non-truncated comment-history pagination outcome; incomplete or unavailable history records a conflict, while `AuthError`/`QueryError` records a failed entry. Only complete history can authorize the existing duplicate-signature decision and subsequent POST.
+   - `add_comment`: duplicate detection (Vertex header check) requires one valid, non-truncated comment-history pagination outcome; incomplete or unavailable history records a conflict, while `AuthError`/`QueryError` records a failed entry. Comment-page validation and body-token handling are specified in §3. Only complete history can authorize the existing duplicate-signature decision and subsequent POST; page-shape checks alone do not prove comment content or provider consistency.
      For the existing persisted `update_type="meeting_action"`, duplicate equality compares the entire comment body so a shared meeting title cannot suppress distinct approved obligations (RELO-W4.9a). Exact-body replay remains suppressed; other update types and rollback retain header-signature compatibility. This does not establish source-occurrence identity or new external-effect authority.
    - `add_tag`/`remove_tag`: compute tag delta, PATCH `System.Tags`
    - `set_field`: current_value conflict check, PATCH field
@@ -4130,6 +4907,9 @@ Per-issue audit record with: `manifest_id`, `issue_number`, `edition`, timestamp
 ### 16.3 LLM Trace (`src/ai/llm_trace.py`)
 
 Every AI call logged to JSONL: edition, run_id, caller module, model, prompt version, token counts (prompt/completion/total), latency_ms, cost_usd, timestamp.
+The current opt-in metadata trace is best effort. Failures within its write
+block produce a content-free warning; this is not durable trace evidence or
+a run-health or release-audit record.
 
 ### 16.4 Cost Guard (`src/ai/cost_guard.py`)
 
@@ -4197,6 +4977,8 @@ Each summary sub-model is built by its own Zone-A-only reader (`_build_program_s
 - **Shared helpers:** `tests/support/report_test_setup.py` — stages V2 temp workspace with `editions/`, `programs/`, `knowledge/`, `reports/schemas`
 - **Golden update:** `--update-golden` flag
 
+**Performance lanes (RELO-W0.7):** The default pytest selection excludes the marked chart, 50K replay, structural-gap, pilot replay, persona-evaluation and 50-item gather timing tests. CI runs them in separate serial `-n 0 -m perf` steps with a ten-minute timeout for replay and three-minute timeouts for the other five; the under-two-second, under-60-second, under-100ms, under-six-second, under-500ms and under-30-second assertions remain unchanged. The gather measurement uses an in-memory fixture, is written under runner temporary storage and is not uploaded. The default functional selection retains the clean 1,000-fact and simultaneous four-rule structural-gap checks, 1,000-event pilot replay counts, and the 15-persona evaluation. These steps do not classify all timing tests or establish the CPU/memory envelope, loaded performance or operational qualification.
+
 **Public cockpit baselines (RELO-W0.33a):** Fixed authored synthetic cockpit terminal/HTML snapshots use reviewed files in `tests/golden/public_snapshots/`, not ignored operator baselines. Missing baselines fail without creating directories or files; only explicit `--update-golden` creates or replaces output. Regression tests also preserve existing mismatched baselines. These comparisons establish synthetic byte-level parity, not real-program visual or operational qualification.
 
 **Retained exception scan (RELO-W4.12b):** `cockpit show --program <id> --as-of <timezone-aware-ISO> --format human|json|html` and `cockpit explain --program <id> --as-of <timezone-aware-ISO> --finding <id>` inspect one retained snapshot without rebuilding, persistence, alert/adoption writes or browser launch. HTML is emitted to stdout and requires `--as-of`; fresh `show` retains human/JSON behavior and is not qualified as fully non-mutating by `--no-persist`. A pure selector orders blocked findings before warnings, preserving recorded order within each status; the terminal action glance uses at most three distinct commands from that ordering. JSON preserves stored finding order, schema and input hash. Selected-root containment, program identity and retained timestamp are checked; absent history is unavailable, while unreadable, malformed or inconsistent selected history fails without older/current fallback. The same strict history failures reach existing build/compare callers; retained build still writes `cockpit.html`. This historical scan does not enumerate current drafts, approvals, gaps or uncertain effects and does not complete the current exception inbox, remediation or adoption qualification.
@@ -4251,6 +5033,7 @@ Jinja2>=3.1.4            # Template rendering
 jsonschema>=4.23.0       # Config schema validation
 keyring>=25.3.0          # OS-backed secret storage
 beautifulsoup4>=4.12     # HTML parsing
+soupsieve>=4.0           # Patched Beautiful Soup selector dependency
 icalendar>=5.0           # Calendar (.ics) parsing
 portalocker>=3.1.1       # Cross-platform file locking
 pypdf>=5.7.0             # PDF text extraction
@@ -4263,7 +5046,7 @@ typer>=0.12.3,<0.26      # CLI framework (upper-bounded — see pyproject.toml's
 click>=8.1.7,<8.4        # typer's dependency (same upper-bound reasoning)
 ```
 
-Current repo-managed base dependency count: 16 packages in `pyproject.toml`'s `[project.dependencies]`.
+Current repo-managed base dependency count: 17 packages in `pyproject.toml`'s `[project.dependencies]`.
 
 ### 18.2 Optional Dependencies (`pyproject.toml` — `[project.optional-dependencies]`)
 
@@ -4271,7 +5054,7 @@ Current repo-managed base dependency count: 16 packages in `pyproject.toml`'s `[
 dev       = pip-audit, pytest, pytest-cov, pytest-xdist, pytest-mock, mypy   # Test/lint/supply-chain tooling
 ai        = openai, tiktoken             # Azure OpenAI + tokenizer (Zone B)
 ai-local  = rapidfuzz                    # Tier-1 local fuzzy-match seam
-m365      = msgraph-sdk                  # Microsoft Graph (Zone C; declared, not yet imported — see WO-8)
+m365      = msgraph-sdk, opentelemetry-api>=1.45.2  # Graph and its patched telemetry dependency (Zone C)
 kusto     = azure-kusto-data              # Azure Data Explorer (Zone A/C)
 render    = matplotlib                    # Chart generation (Zone A)
 ```
@@ -4282,7 +5065,7 @@ render    = matplotlib                    # Chart generation (Zone A)
 [project]
 name = "vertex"
 version = "0.1.0"
-requires-python = ">=3.11"
+requires-python = ">=3.11.5"
 # See §18.1 for the full [project.dependencies] list and §18.2 for extras.
 
 [project.scripts]
@@ -4296,7 +5079,7 @@ include = ["src*"]
 
 ### 18.4 Runtime Requirements
 
-- **Python:** ≥3.11 (slots=True, structural pattern matching)
+- **Python:** ≥3.11.5 (slots=True, structural pattern matching)
 - **OS:** Windows (primary), macOS/Linux (supported via portalocker)
 - **Git:** Required for `vertex kb changelog`
 - **Editor:** `$EDITOR` for `vertex edit`

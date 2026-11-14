@@ -2152,7 +2152,7 @@ pytest tests/ --run-integration             # Live ADO tests
 
 ### 16.5 Maintainability
 
-- **Python 3.11+** with type hints on all public functions
+- **Python 3.11.5+** with type hints on all public functions
 - **Frozen dataclasses** for all value objects
 - **Zone boundary** enforced by AST-level contract test
 - **Schema versioning** on all YAML config files (major version = hard failure, minor = warning)
@@ -2368,7 +2368,7 @@ render    = matplotlib                      # Chart generation (Kusto layer)
 
 ### 20.4 Runtime Requirements
 
-- **Python:** ≥3.11
+- **Python:** ≥3.11.5
 - **OS:** Windows (primary), macOS/Linux (supported via portalocker cross-platform locking)
 - **Git:** Required for `vertex kb changelog` (reads commit history)
 - **Editor:** `$EDITOR` or system default for `vertex edit`

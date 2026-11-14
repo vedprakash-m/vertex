@@ -7,6 +7,14 @@
 
 ## Changelog
 
+- Last updated: 2026-11-12 — Report unavailable scoped startup without exposing identifiers; enrichment previews retain tier telemetry only when scope is admitted (§12.1, §12.6.4).
+- Last updated: 2026-11-11 — Fresh cockpit frontier avoidance is unavailable without qualified evidence; its active-file cache diagnostic carries a warning (§18.5).
+- Last updated: 2026-11-11 — Blind pilot summaries refuse invalid active journals with a fixed stderr error and exit 2 rather than presenting a partial recommendation (§12.1).
+- Last updated: 2026-11-11 — Selected AI cost/preflight failures stop the affected report request with a class-only warning; the proposal command reports a class-only error and exits 2 (§12.9).
+- Last updated: 2026-11-10 — Per-thread enrichment omits rejected evidence from results and source counts, warns without rejected content, and labels its human summary as sources (§12.6.4).
+- Last updated: 2026-11-10 — The affected WorkIQ extraction failure messages omit exception and cluster-key text while preserving existing progress and exit behavior.
+- Last updated: 2026-11-10 — Standalone WorkIQ enrichment keeps its JSON result array on stdout and routes command progress and interactive catchup output to stderr in JSON mode; that correction preserved the then-current human output and result/exit semantics.
+
 - Last updated: 2026-11-08 — WorkIQ FQ-01 adds no reader-visible newsletter chrome; only native-identity-backed signals use pending-review and source-health surfaces. Semantic-only previews remain in memory and are not exposed as reviewable signals.
 
 - Last updated: 2026-07-08 — Incorporated `specs/fix-data-flow.md` (v1.0→v1.13, archived to `.archive/specs/fix-data-flow.md`) findings and closure. **Correction to the 2026-06-10 entry below**: direct code investigation during that spec's work found no trust-badge rendering markup existed anywhere in the codebase (not for risk, not even for milestone) — the 2026-06-10 claim that §3.6b/§3.6c were "already implemented" was verified false. Trust badges are genuinely implemented for the first time as of 2026-07-08: `templates/partials/truth_badge.j2` renders the `[DISPUTED ⚠]` marker (§3.6b) and the 5-level truth vocabulary (§3.6c) for risk (`health_banner.j2`, `continuity_exec_summary.j2`), milestone (`milestone_rows.j2`), and assumption (`lookback.j2`) sections. §3.6b/§3.6c's rendering rule updated below to match the actual, verified implementation convention: inline `style="..."` attributes, not `<span class="...">` CSS classes — this codebase's HTML surfaces have no `<style>` blocks anywhere (Outlook-safe rendering constraint), so a literal CSS-class instruction was never implementable as written.
@@ -244,6 +252,13 @@ Three nested `<table role="presentation">`:
 1. **Page table:** Full-width centering, `background-color: #F9FAFB`
 2. **Container table:** `width="680"`, `background-color: #FFFFFF`, `border: 1px solid #E5E7EB`
 3. **Content table:** `width="640"` — all partials render within this 640px content area
+
+For executive narrative tables, numeric pixel cell widths are total column
+budgets including the existing 8px padding on each side. The normalizer emits
+the residual content width in both the cell attribute and inline CSS; numeric
+budgets at or below 16px refuse rendering with `ConfigError`. Widthless cells,
+nonnumeric width handling and non-executive rendering are unchanged. This
+padding correction does not qualify oversized, nested or percentage tables.
 
 **Header block:** Title (20px/600), optional `header_label` (eyebrow), subtitle, bottom border.
 
@@ -995,6 +1010,12 @@ Per-DRI message with item list, ADO links including "Edit in ADO" deep links.
 
 When catchup is enabled and unseen items exist, the CLI may emit a short session-start catchup banner before the requested command output. The banner is advisory, bounded, and summarizes the highest-salience unseen changes rather than replaying full history.
 
+When an ordinary scope preview is rejected or a named scope cannot be resolved, a fixed warning omits identifiers and reports that scoped startup effects were skipped. Commands without a selected scope can skip the effects silently. The requested command may still run or report its own error; edition-lookup exceptions and other startup probes retain their existing behavior.
+
+The two blind pilot `compare` commands require an explicit `a`, `b`, `tie` or `neither` preference and an explicit `y`/`yes` or `n`/`no` critical-error answer. The critical-error prompt shows `[y/n]`, not a default; blank terminal input is prompted again. Invalid answers receive fixed correction guidance and are prompted again without regenerating the compared outputs. An interrupted review does not record its current item.
+
+The two blind pilot `summary` commands report an invalid or unreadable active journal with fixed preservation-and-correction guidance on stderr and exit 2, without a tally or swap recommendation. An absent or empty journal retains its existing zero-comparison output; this does not establish a complete historical tally.
+
 `vertex ask` help explains that either the command's `--edition` or `--program` is required. An unscoped request exits 2 and directs the operator to `vertex list editions`, without running startup, routing or miss-log work. Edition errors give correction guidance; conflicting layouts are reported without exposing their paths. Template editions are refused for `ask`, not modified. The top-level `--edition` remains the default for natural-language fallback rather than an implicit option to an explicit `ask` child.
 
 When the default Kusto auth probe reports failed targets, `doctor --check-auth` displays a failed Kusto Access check and exits 1 in human, JSON and CSV formats; the existing Kusto operator gate also receives the failure. The detail names up to two failed targets, counts any others and gives generic access guidance without provider exception text. Target metadata still lists all probed targets rather than identifying every failure (RELO-W2.5b).
@@ -1268,6 +1289,43 @@ Each row includes the source label, last attempt time, best candidate confidence
 
 Structured WorkIQ enumeration does not add a new end-user surface. Accepted records enter the existing pending signal-review queue and use the standard gather counts, source-health diagnostics, and privacy-safe source explanations. Malformed, unsafe, or out-of-window records are omitted rather than partially rendered; connector-level failure remains a degraded-source warning, not fabricated empty success.
 
+Transcript extraction progress counts lanes admitted by the WorkIQ privacy
+boundary, including safe duplicates; quarantined evidence is not counted.
+The stage's in-memory preview likewise omits unsafe evidence and warns without
+the offending content. Admission and the count do not establish approval,
+native identity or source completeness (RELO-W3.3y).
+
+For standalone `vertex enrich --format json`, result-producing invocations
+write the existing JSON array on stdout; command progress, lane outcomes and
+any interactive catchup banner use stderr. Early failures may emit no JSON.
+Except for the per-thread source counts described below, human output and
+existing exits are unchanged: an array or zero exit does not establish that
+every lane succeeded or that sources are complete. This contract does not
+control output written independently by external providers.
+
+Per-thread enrichment counts and reports only admitted evidence, including
+safe duplicates; rejected extractions produce a count-only warning on stderr.
+Rejected-only results do not advance lane zero-yield state, while complete
+empty discovery retains its existing zero-yield behavior. In-memory previews
+also omit rejected evidence. The human summary labels result rows as sources,
+not lanes; the JSON array shape remains unchanged. These counts do not prove
+approval, source-ID privacy or authenticity, or source completeness
+(RELO-W3.10a).
+
+Standalone query and extraction failures use fixed progress messages; the
+affected transcript, cluster, parser and quality/provenance warnings omit
+exception and cluster-key text. Existing lane identifiers, continuation and
+exit behavior remain. This does not cover provider-internal output or all
+other failure paths (RELO-W3.3z).
+
+Standalone `vertex enrich --dry-run` warns on stderr that enrichment evidence is
+not saved but WorkIQ budget, circuit-breaker and CLI startup state may be
+written. The command-level warning precedes its budget-guard initialization;
+root startup retains tier-decision sink registration when scope is admitted
+but skips scheduled maintenance and interactive catchup for a parsed preview.
+The warning remains conservative about other startup state. The complete write-free contract remains
+unmet.
+
 Rich per-thread evidence remains opt-in and invisible to readers until its source-specific review signal is approved. Published attribution continues to use the standard `Signal sources:` footnote; unapproved or quarantined thread content must never appear in a draft, reviewer pane, source footnote, or generated artifact. Grounding state is provenance, not a confidence synonym: only `human_verified` and `source_verified` count as grounded.
 
 Identity-rejected rich candidates produce a bounded count-only enrichment warning while valid native candidates continue (RELO-W3.3a). Do not print rejected identifiers, subjects or participants; a rejected-only result is not a successful empty collection.
@@ -1446,6 +1504,13 @@ Steering (optional, ≤1 line — emphasize a source-supported blocker):
 ```
 
 The steering line is recorded as a `pm_steering` `ProgramEvent` for provenance and constrains AI synthesis (FR-SG-24) as a system-prompt anchor. It can re-weight emphasis but can never fabricate facts; an empty line is accepted and recorded as no steering.
+
+For the selected non-retryable AI cost or preflight errors, `vertex propose`
+prints the error class and cost-state guidance to stderr without the error
+text and exits 2. A report warns that the affected synthesis was skipped,
+also naming only the error class; later independent requests can still run.
+This does not describe a report-wide AI stop or undo earlier steering or
+report-stage effects.
 
 ### 12.10 Ledger & Discovery CLI Surfaces
 
@@ -1850,6 +1915,7 @@ Pass condition: generated cards stay within body/action limits, preserve risk em
 - `compare <earlier> <later>` operates only on retained history snapshots — never a live recompute — so a comparison is always reproducible from the same two points in time.
 - Fresh primary-judgment risk summaries use retained primary risk records rather than the authored mirror. Unreadable or inconsistent authority displays unknown risk and a blocked finding, never a mirror-derived green result. Existing non-primary mode remains compatible; this is not historical snapshot or coverage certification.
 - Value/time-savings figures always render their confidence tier (`measured`/`calibrated`/`proxy`/`unavailable`) alongside the number — a figure is never presented as a bare percentage without its evidence tier visible.
+- Fresh economics projections leave frontier avoidance unavailable until eligible attempts, actual frontier-model calls and complete window coverage are established. With intact nonempty tier records, the accompanying warning identifies the cache-hit ratio as an unqualified active-file diagnostic; missing or empty records get an informational explanation. Retained snapshots are not rewritten.
 - A failed lineage read is not "no facts": terminal data trust shows `lineage unavailable (read failed)`, while JSON and HTML retain unknown coverage with the blocked `intelligence.lineage.read_failed` explanation and manual diagnostic guidance. Successful-empty lineage remains `not measured yet` with an informational finding. Known program risk and independently released synthesis remain visible; raw exception messages are not rendered.
 - Failed earned-autonomy state is unavailable trust with the blocked `trust.autonomy_ladder.read_failed` explanation, not L0, zero reviews or "not evaluated." Fresh and retained JSON/terminal/HTML/TUI keep the finding and independent business risk; guidance is manual inspection, not automatic repair or promotion (RELO-W0.15n).
 - Fresh actuation-journal diagnostics distinguish observed exact-status counts from unavailable evidence: the three reliability counts are JSON `null` when the selected journal is absent or cannot be inspected safely. Under the strict no-write policy, WAL-mode journals and any journal with SQLite sidecars are left unread and shown as unavailable. Absence is informational; unsafe or invalid evidence and observed uncertain, dead-letter, terminal-failure or compensation-required states use existing warnings. Findings omit payloads, failure reasons, raw exceptions and private paths. They do not imply provider reconciliation or a complete current exception inbox (RELO-W4.12c).

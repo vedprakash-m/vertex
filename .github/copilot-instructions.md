@@ -18,7 +18,7 @@ Architecture decision records, superseded plans, and completed feature specs: `.
 
 ## Code and Architecture
 
-- Python 3.11+; type hints on all public functions; `@dataclass(frozen=True, slots=True)` for all value objects.
+- Python 3.11.5+; type hints on all public functions; `@dataclass(frozen=True, slots=True)` for all value objects.
 - UTC `datetime`; use `datetime.now(timezone.utc)`, never `datetime.utcnow()`. ADO work item IDs: `int`; enums: `str` enums for JSON portability.
 - **Zone boundary:** `src/core/` must never import from `src/ai/` or `src/m365/`; enforced by `tests/contracts/test_import_boundaries.py`.
 - **Single write path:** only `snapshot_store.write_confirmed()` writes confirmed snapshots; only `commands/confirm.py` calls it.

@@ -33,16 +33,18 @@ published report; it has its own `lookback_retrospective.v1` identity, bounded
 validation and release audit, but still uses legacy dispatch.
 
 The original dependency generator remains wired at
-`src/commands/ai_proposals.py`'s `_generate_dependency_blast_radius`. Its pilot
-cannot be switched into production as-is: it supplies
-`snapshot_id="no-snapshot-pinning-yet"` and `principal="system"`.
+`src/commands/ai_proposals.py`'s `_generate_dependency_blast_radius`. W1.6h
+requires the pilot's caller to supply `RunnerContext` instead of fabricating
+snapshot and principal values. That context is not independently authenticated
+or proven to represent a coherent snapshot, so the pilot cannot be switched
+into production as-is.
 W1.6f now compiles all dependency request fields as required context alongside
 the referenced evidence and sends only compiled content to the provider.
 Unequal evidence-reference/text sequences abstain before compilation and
 released-cache lookup rather than being truncated by `zip`.
 No caller with both approved snapshot and principal binding was established
-by this discovery. Snapshot/principal propagation remains a migration
-prerequisite; input-integrity tests do not supply that authority.
+by this discovery. Verified snapshot/principal binding remains a migration
+prerequisite; input-integrity tests and supplied values do not supply that authority.
 No identity, trust, budget or policy
 defaults are invented here. Existing prompt/model/schema versions, cache keys,
 failure contracts, release semantics and output consumers require feature-wise

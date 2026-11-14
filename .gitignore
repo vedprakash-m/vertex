@@ -116,6 +116,7 @@ vertex.sqlite3
 *.sqlite-journal
 *.sqlite3-journal
 *.db-journal
+*.capture.lock
 **/.workiq_*.json
 # Private program directories (operator-managed, never committed).
 # Pattern excludes all programs/<name>/ except the bundled _templates directory.
