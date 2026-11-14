@@ -23,6 +23,46 @@ from src.core.ledger.durable_outbox_store import load_entry
 from src.core.workspace_lease import ACTUATION_DISPATCH_DOMAIN
 
 
+def test_dispatch_does_not_reclaim_future_backlog_lease(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import datetime, timezone
+    from src.core._db import open_program_db_with_retry
+    from src.core.ledger import durable_outbox_store as store
+    from src.core import workspace_lease
+
+    root = tmp_path / "programs"
+    for key in ("older", "requested"):
+        enqueue_create_task_intent(
+            program_id="fixture", idempotency_key=key, operation_intent_id=key,
+            proposal_id=key, payload_json="{}", programs_root=root,
+        )
+    db = outbox_db_path("fixture", programs_root=root)
+    with open_program_db_with_retry(db) as connection:
+        connection.execute(
+            "UPDATE outbox SET status = 'leased', lease_owner = 'old', lease_fencing_token = 1, "
+            "lease_expires_at = '2030-01-01T00:00:00.000001Z', created_at = '2000-01-01T00:00:00Z' "
+            "WHERE outbox_id = 'older'",
+        )
+        connection.execute("UPDATE outbox SET created_at = '2001-01-01T00:00:00Z' WHERE outbox_id = 'requested'")
+    before = load_entry(db, "older")
+    now = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr(store, "_now", lambda: now)
+    monkeypatch.setattr(workspace_lease, "_now", lambda: now)
+    dispatched = []
+
+    def callback(entry):
+        dispatched.append(entry.outbox_id)
+        return DispatchResult(succeeded=True, remote_id=42)
+
+    outcome = dispatch_leased_create_task(
+        program_id="fixture", idempotency_key="requested", owner="new",
+        dispatch_fn=callback, programs_root=root,
+    )
+
+    assert outcome.status == "completed"
+    assert dispatched == ["requested"]
+    assert load_entry(db, "older") == before
+
+
 @pytest.mark.parametrize("changed", ["payload_json", "domain", "correlation_id"])
 def test_existing_key_rejects_changed_identity(tmp_path: Path, changed: str) -> None:
     from src.core._db import open_program_db_with_retry

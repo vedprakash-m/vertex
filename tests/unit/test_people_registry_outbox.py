@@ -118,3 +118,68 @@ def test_drain_with_nothing_pending_is_a_no_op(tmp_path: Path) -> None:
     drained = drain_registry_outbox_for_program(knowledge_root, "acme", owner="drainer-1", handler=lambda entry: (_ for _ in ()).throw(AssertionError("handler should not be called")))
 
     assert drained == ()
+
+
+def test_drain_waits_for_exact_lease_expiry(tmp_path: Path, monkeypatch) -> None:
+    from datetime import datetime, timedelta, timezone
+    from src.core._db import open_program_db_with_retry
+    from src.core.ledger import durable_outbox_store as store
+    from src.core.people_registry_outbox import registry_outbox_db_path
+
+    root = tmp_path / "knowledge"
+    entry = enqueue_registry_outbox_item(root, transaction_id="tx", program_id="acme", payload={})
+    db = registry_outbox_db_path(root)
+    with open_program_db_with_retry(db) as connection:
+        connection.execute(
+            "UPDATE outbox SET status = 'leased', lease_owner = 'old', lease_fencing_token = 1, "
+            "lease_expires_at = '2030-01-01T00:00:00.000001Z'",
+        )
+    before = store.load_entry(db, entry.outbox_id)
+    base = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    now = [base]
+    monkeypatch.setattr(store, "_now", lambda: now[0])
+    delivered = []
+
+    assert drain_registry_outbox_for_program(root, "acme", owner="new", handler=delivered.append) == ()
+    assert delivered == []
+    assert store.load_entry(db, entry.outbox_id) == before
+
+    now[0] = base + timedelta(microseconds=1)
+    drained = drain_registry_outbox_for_program(root, "acme", owner="new", handler=delivered.append)
+    assert len(drained) == len(delivered) == 1
+    assert drained[0].status == "completed"
+
+
+def test_drain_cannot_complete_successor_claim_with_same_owner(tmp_path: Path, monkeypatch) -> None:
+    from contextlib import contextmanager
+    import pytest
+    from src.core.ledger import durable_outbox_store as store
+    from src.core.people_registry_outbox import registry_outbox_db_path
+
+    root = tmp_path / "knowledge"
+    entry = enqueue_registry_outbox_item(root, transaction_id="tx", program_id="acme", payload={})
+    db = registry_outbox_db_path(root)
+    actual_open = store.open_program_db
+    takeover_pending = [True]
+    successor = []
+
+    @contextmanager
+    def reclaim_after_commit(*args, **kwargs):
+        with actual_open(*args, **kwargs) as connection:
+            yield connection
+        if takeover_pending[0] and not kwargs.get("read_only"):
+            takeover_pending[0] = False
+            with actual_open(db) as connection:
+                connection.execute("UPDATE outbox SET lease_expires_at = '2000-01-01T00:00:00Z'")
+            successor.append(store.lease_next(db, "acme", owner="worker"))
+
+    monkeypatch.setattr(store, "open_program_db", reclaim_after_commit)
+    delivered = []
+    with pytest.raises(store.LeaseNoLongerCurrent):
+        drain_registry_outbox_for_program(root, "acme", owner="worker", handler=delivered.append)
+
+    assert len(delivered) == 1
+    assert delivered[0].lease_fencing_token == 1
+    assert successor[0] is not None
+    assert successor[0].lease_fencing_token == 2
+    assert store.load_entry(db, entry.outbox_id) == successor[0]

@@ -122,6 +122,18 @@ def _parse(value: str | None) -> datetime | None:
     return None if value is None else datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def _scheduling_timestamp(value: object) -> datetime:
+    if not isinstance(value, str):
+        raise OutboxError("Outbox contains an invalid scheduling timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.utcoffset() is None:
+            raise ValueError
+        return parsed.astimezone(timezone.utc)
+    except (ValueError, OverflowError):
+        raise OutboxError("Outbox contains an invalid scheduling timestamp") from None
+
+
 def _entry_from_row(row: tuple) -> OutboxEntry:  # type: ignore[type-arg]
     (
         outbox_id, domain, correlation_id, payload_json, status,
@@ -270,37 +282,53 @@ def lease_next(
     row, a due ``failed_retryable`` row, or any row whose previous lease has
     expired (stale-worker reclaim). Returns None if nothing is eligible.
     """
-    now = _now()
     with open_program_db(db_path, durability="strict") as connection:
         connection.executescript(_SCHEMA_SQL)
         connection.execute("BEGIN IMMEDIATE")
-        row = connection.execute(
+        now = _now()
+        row = None
+        oldest_created_at = None
+        for candidate in connection.execute(
             """
-            SELECT outbox_id, lease_fencing_token FROM outbox
-            WHERE domain = ? AND (
-                status IN ('pending', 'failed_retryable')
-                AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-                OR (status = 'leased' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?)
-            )
-            ORDER BY created_at
-            LIMIT 1
+            SELECT outbox_id, lease_fencing_token, status, lease_expires_at,
+                   next_attempt_at, created_at
+            FROM outbox
+            WHERE domain = ? AND status IN ('pending', 'failed_retryable', 'leased')
             """,
-            (domain, _wire(now), _wire(now)),
-        ).fetchone()
+            (domain,),
+        ):
+            created_at = _scheduling_timestamp(candidate["created_at"])
+            deadline = candidate["lease_expires_at"] if candidate["status"] == "leased" else candidate["next_attempt_at"]
+            if deadline is None:
+                if candidate["status"] == "leased":
+                    continue
+            elif _scheduling_timestamp(deadline) > now:
+                continue
+            if oldest_created_at is None or created_at < oldest_created_at:
+                row = candidate
+                oldest_created_at = created_at
         if row is None:
             return None
-        outbox_id, current_token = row
+        if row["status"] == "leased" and row["next_attempt_at"] is not None:
+            _scheduling_timestamp(row["next_attempt_at"])
+        outbox_id, current_token = row["outbox_id"], row["lease_fencing_token"]
         next_token = int(current_token) + 1
+        now = _now()
         expires_at = now + timedelta(seconds=ttl_seconds)
-        connection.execute(
+        updated = connection.execute(
             """
             UPDATE outbox SET status = 'leased', lease_owner = ?, lease_fencing_token = ?,
                 lease_expires_at = ?, attempt_count = attempt_count + 1, updated_at = ?
             WHERE outbox_id = ?
+            RETURNING outbox_id, domain, correlation_id, payload_json, status, lease_owner,
+                lease_fencing_token, lease_expires_at, attempt_count, next_attempt_at,
+                remote_request_hash, remote_response_hash, failure_reason, created_at, updated_at
             """,
             (owner, next_token, _wire(expires_at), _wire(now), outbox_id),
-        )
-    return load_entry(db_path, str(outbox_id))
+        ).fetchone()
+        assert updated is not None
+        leased = _entry_from_row(tuple(updated))
+    return leased
 
 
 def classify_expired_dispatched(

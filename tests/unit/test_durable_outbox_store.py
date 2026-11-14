@@ -430,6 +430,380 @@ def _db(tmp_path: Path) -> Path:
     return tmp_path / "outbox.sqlite3"
 
 
+@pytest.mark.parametrize("status", ["pending", "failed_retryable", "leased"])
+@pytest.mark.parametrize(
+    ("now_us", "deadline_us", "eligible"),
+    [(0, 1, False), (1, 0, True), (0, 0, True)],
+)
+def test_lease_deadlines_compare_instants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    status: str, now_us: int, deadline_us: int, eligible: bool,
+) -> None:
+    from src.core.ledger import durable_outbox_store as store
+
+    db = _db(tmp_path)
+    enqueue(db, "item", domain="test", correlation_id="intent", payload_json="{}")
+    base = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    now = base + timedelta(microseconds=now_us)
+    deadline = (base + timedelta(microseconds=deadline_us)).isoformat().replace("+00:00", "Z")
+    with open_program_db_with_retry(db) as connection:
+        if status == "leased":
+            connection.execute(
+                "UPDATE outbox SET status = ?, lease_owner = 'first', lease_fencing_token = 1, "
+                "lease_expires_at = ? WHERE outbox_id = 'item'",
+                (status, deadline),
+            )
+        else:
+            connection.execute(
+                "UPDATE outbox SET status = ?, next_attempt_at = ? WHERE outbox_id = 'item'",
+                (status, deadline),
+            )
+    before = load_entry(db, "item")
+    monkeypatch.setattr(store, "_now", lambda: now)
+
+    result = lease_next(db, "test", owner="second")
+
+    if not eligible:
+        assert result is None
+        assert load_entry(db, "item") == before
+    else:
+        assert result is not None
+        assert before is not None
+        assert result.lease_owner == "second"
+        assert result.lease_fencing_token == before.lease_fencing_token + 1
+        assert result.attempt_count == before.attempt_count + 1
+        assert result.lease_expires_at == now + timedelta(seconds=300)
+
+
+@pytest.mark.parametrize("status", ["pending", "failed_retryable", "leased"])
+@pytest.mark.parametrize(
+    ("deadline", "eligible"),
+    [
+        ("2029-12-31T19:00:00.000001-05:00", False),
+        ("2030-01-01T05:30:00+05:30", True),
+    ],
+)
+def test_lease_deadlines_respect_utc_offsets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    status: str, deadline: str, eligible: bool,
+) -> None:
+    from src.core.ledger import durable_outbox_store as store
+
+    db = _db(tmp_path)
+    enqueue(db, "item", domain="test", correlation_id="intent", payload_json="{}")
+    column = "lease_expires_at" if status == "leased" else "next_attempt_at"
+    with open_program_db_with_retry(db) as connection:
+        connection.execute(f"UPDATE outbox SET status = ?, {column} = ?", (status, deadline))
+    monkeypatch.setattr(store, "_now", lambda: datetime(2030, 1, 1, tzinfo=timezone.utc))
+
+    result = lease_next(db, "test", owner="worker")
+
+    assert (result is not None) is eligible
+
+
+@pytest.mark.parametrize(
+    ("status", "eligible"),
+    [("pending", True), ("failed_retryable", True), ("leased", False)],
+)
+def test_lease_null_deadline_compatibility(tmp_path: Path, status: str, eligible: bool) -> None:
+    db = _db(tmp_path)
+    enqueue(db, "item", domain="test", correlation_id="intent", payload_json="{}")
+    with open_program_db_with_retry(db) as connection:
+        connection.execute("UPDATE outbox SET status = ?", (status,))
+
+    result = lease_next(db, "test", owner="worker")
+
+    assert (result is not None) is eligible
+
+
+@pytest.mark.parametrize(
+    "newer",
+    ["2030-01-01T00:00:00.000001Z", "2029-12-31T19:00:00.000001-05:00"],
+)
+def test_lease_selects_oldest_eligible_instant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, newer: str,
+) -> None:
+    from src.core.ledger import durable_outbox_store as store
+
+    db = _db(tmp_path)
+    for key in ("older", "newer", "not-due"):
+        enqueue(db, key, domain="test", correlation_id=key, payload_json="{}")
+    with open_program_db_with_retry(db) as connection:
+        connection.execute("UPDATE outbox SET created_at = ? WHERE outbox_id = 'older'", ("2030-01-01T00:00:00Z",))
+        connection.execute("UPDATE outbox SET created_at = ? WHERE outbox_id = 'newer'", (newer,))
+        connection.execute(
+            "UPDATE outbox SET created_at = ?, next_attempt_at = ? WHERE outbox_id = 'not-due'",
+            ("2029-01-01T00:00:00Z", "2030-01-02T00:00:00Z"),
+        )
+    monkeypatch.setattr(store, "_now", lambda: datetime(2030, 1, 1, 0, 0, 1, tzinfo=timezone.utc))
+
+    result = lease_next(db, "test", owner="worker")
+
+    assert result is not None
+    assert result.outbox_id == "older"
+    assert load_entry(db, "not-due").status == "pending"
+
+
+@pytest.mark.parametrize(
+    ("status", "column"),
+    [
+        ("pending", "next_attempt_at"),
+        ("failed_retryable", "next_attempt_at"),
+        ("leased", "lease_expires_at"),
+        ("pending", "created_at"),
+        ("leased", "next_attempt_at"),
+    ],
+)
+@pytest.mark.parametrize(
+    "invalid", ["invalid-timestamp", "2030-01-01T00:00:00", "0001-01-01T00:00:00+00:01", b"\xff"],
+)
+def test_lease_refuses_invalid_scheduling_evidence_without_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str, column: str, invalid: object,
+) -> None:
+    from src.core.ledger import durable_outbox_store as store
+
+    db = _db(tmp_path)
+    for key in ("bad", "valid"):
+        enqueue(db, key, domain="test", correlation_id=key, payload_json="{}")
+    with open_program_db_with_retry(db) as connection:
+        connection.execute(f"UPDATE outbox SET status = ?, {column} = ? WHERE outbox_id = 'bad'", (status, invalid))
+        if status == "leased" and column != "lease_expires_at":
+            connection.execute(
+                "UPDATE outbox SET lease_expires_at = '2029-01-01T00:00:00Z' WHERE outbox_id = 'bad'",
+            )
+        before = [tuple(row) for row in connection.execute("SELECT * FROM outbox ORDER BY outbox_id")]
+    monkeypatch.setattr(store, "_now", lambda: datetime(2030, 1, 1, tzinfo=timezone.utc))
+
+    with pytest.raises(OutboxError, match="scheduling timestamp"):
+        try:
+            lease_next(db, "test", owner="worker")
+        finally:
+            with open_program_db_with_retry(db, read_only=True) as connection:
+                assert [tuple(row) for row in connection.execute("SELECT * FROM outbox ORDER BY outbox_id")] == before
+
+
+@pytest.mark.parametrize("status", ["pending", "failed_retryable"])
+def test_lease_ignores_invalid_unused_expiry_and_overwrites(tmp_path: Path, status: str) -> None:
+    db = _db(tmp_path)
+    enqueue(db, "item", domain="test", correlation_id="item", payload_json="{}")
+    with open_program_db_with_retry(db) as connection:
+        connection.execute("UPDATE outbox SET status = ?, lease_expires_at = 'invalid'", (status,))
+
+    result = lease_next(db, "test", owner="worker")
+
+    assert result is not None
+    assert result.lease_owner == "worker"
+    assert result.lease_expires_at is not None
+
+
+def test_lease_ignores_invalid_unused_retry_on_unselected_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.core.ledger import durable_outbox_store as store
+
+    db = _db(tmp_path)
+    for key in ("ready", "future"):
+        enqueue(db, key, domain="test", correlation_id=key, payload_json="{}")
+    with open_program_db_with_retry(db) as connection:
+        connection.execute(
+            "UPDATE outbox SET status = 'leased', lease_expires_at = '2030-01-02T00:00:00Z', "
+            "next_attempt_at = 'invalid' WHERE outbox_id = 'future'",
+        )
+    monkeypatch.setattr(store, "_now", lambda: datetime(2030, 1, 1, tzinfo=timezone.utc))
+
+    result = lease_next(db, "test", owner="worker")
+
+    assert result is not None
+    assert result.outbox_id == "ready"
+
+
+def test_lease_deadlines_preserve_valid_retained_retry_on_reclaim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.core.ledger import durable_outbox_store as store
+
+    db = _db(tmp_path)
+    enqueue(db, "item", domain="test", correlation_id="item", payload_json="{}")
+    with open_program_db_with_retry(db) as connection:
+        connection.execute(
+            "UPDATE outbox SET status = 'leased', lease_expires_at = '2029-01-01T00:00:00Z', "
+            "next_attempt_at = '2029-12-31T19:00:00-05:00'",
+        )
+    monkeypatch.setattr(store, "_now", lambda: datetime(2030, 1, 1, tzinfo=timezone.utc))
+
+    result = lease_next(db, "test", owner="worker")
+
+    assert result is not None
+    assert result.next_attempt_at == datetime(2030, 1, 1, tzinfo=timezone.utc)
+    with open_program_db_with_retry(db, read_only=True) as connection:
+        assert connection.execute("SELECT next_attempt_at FROM outbox").fetchone()[0] == "2029-12-31T19:00:00-05:00"
+
+
+def test_invalid_future_row_refuses_before_leasing_an_earlier_ready_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.core.ledger import durable_outbox_store as store
+
+    db = _db(tmp_path)
+    for key in ("ready", "future"):
+        enqueue(db, key, domain="test", correlation_id=key, payload_json="{}")
+    with open_program_db_with_retry(db) as connection:
+        connection.execute(
+            "UPDATE outbox SET created_at = 'invalid', next_attempt_at = '2030-01-02T00:00:00Z' "
+            "WHERE outbox_id = 'future'",
+        )
+        before = [tuple(row) for row in connection.execute("SELECT * FROM outbox ORDER BY outbox_id")]
+    monkeypatch.setattr(store, "_now", lambda: datetime(2030, 1, 1, tzinfo=timezone.utc))
+
+    with pytest.raises(OutboxError, match="scheduling timestamp"):
+        lease_next(db, "test", owner="worker")
+
+    with open_program_db_with_retry(db, read_only=True) as connection:
+        assert [tuple(row) for row in connection.execute("SELECT * FROM outbox ORDER BY outbox_id")] == before
+
+
+def test_lease_ignores_invalid_evidence_outside_candidate_domain_and_status(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    for key, domain in (("ready", "test"), ("other-domain", "other"), ("completed", "test")):
+        enqueue(db, key, domain=domain, correlation_id=key, payload_json="{}")
+    with open_program_db_with_retry(db) as connection:
+        connection.execute(
+            "UPDATE outbox SET created_at = 'invalid', next_attempt_at = 'invalid' "
+            "WHERE outbox_id IN ('other-domain', 'completed')",
+        )
+        connection.execute("UPDATE outbox SET status = 'completed' WHERE outbox_id = 'completed'")
+
+    result = lease_next(db, "test", owner="worker")
+
+    assert result is not None
+    assert result.outbox_id == "ready"
+
+
+def test_lease_clock_is_sampled_after_write_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from contextlib import contextmanager
+    from src.core.ledger import durable_outbox_store as store
+
+    db = _db(tmp_path)
+    enqueue(db, "item", domain="test", correlation_id="intent", payload_json="{}")
+    active = []
+    actual_open = store.open_program_db
+
+    @contextmanager
+    def observe(*args, **kwargs):
+        with actual_open(*args, **kwargs) as connection:
+            active.append(connection)
+            yield connection
+
+    now = datetime(2030, 1, 1, tzinfo=timezone.utc)
+
+    def clock():
+        assert active and active[-1].in_transaction
+        return now
+
+    monkeypatch.setattr(store, "open_program_db", observe)
+    monkeypatch.setattr(store, "_now", clock)
+    result = lease_next(db, "test", owner="worker")
+    assert result is not None
+    assert result.lease_expires_at == now + timedelta(seconds=300)
+
+
+def test_lease_clock_advances_while_waiting_for_write_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import contextmanager
+    from threading import Event
+    from src.core.ledger import durable_outbox_store as store
+
+    db = _db(tmp_path)
+    enqueue(db, "item", domain="test", correlation_id="intent", payload_json="{}")
+    base = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    with open_program_db_with_retry(db) as connection:
+        connection.execute("UPDATE outbox SET next_attempt_at = '2030-01-01T00:00:00.000001Z'")
+    attempted = Event()
+    now = [base]
+    actual_open = store.open_program_db
+
+    @contextmanager
+    def observe(*args, **kwargs):
+        with actual_open(*args, **kwargs) as connection:
+            connection.set_trace_callback(lambda statement: attempted.set() if statement == "BEGIN IMMEDIATE" else None)
+            yield connection
+
+    monkeypatch.setattr(store, "open_program_db", observe)
+    monkeypatch.setattr(store, "_now", lambda: now[0])
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with open_program_db_with_retry(db, durability="strict") as blocker:
+            blocker.execute("BEGIN IMMEDIATE")
+            future = executor.submit(lease_next, db, "test", owner="worker")
+            assert attempted.wait(5)
+            assert not future.done()
+            now[0] = base + timedelta(microseconds=1)
+        result = future.result(timeout=10)
+
+    assert result is not None
+    assert result.lease_expires_at == now[0] + timedelta(seconds=300)
+
+
+def test_lease_ttl_starts_after_scheduling_scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.core.ledger import durable_outbox_store as store
+
+    db = _db(tmp_path)
+    enqueue(db, "item", domain="test", correlation_id="intent", payload_json="{}")
+    start = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    current = [start]
+    parse = store._scheduling_timestamp
+
+    def advance_during_scan(value: object) -> datetime:
+        result = parse(value)
+        current[0] = start + timedelta(seconds=2)
+        return result
+
+    monkeypatch.setattr(store, "_now", lambda: current[0])
+    monkeypatch.setattr(store, "_scheduling_timestamp", advance_during_scan)
+
+    leased = lease_next(db, "test", owner="worker", ttl_seconds=1)
+
+    assert leased is not None
+    assert leased.lease_expires_at == current[0] + timedelta(seconds=1)
+    assert leased.updated_at == current[0]
+
+
+@pytest.mark.parametrize("successor_owner", ["worker", "other-worker"])
+def test_lease_returns_its_own_claim_after_successor_reclaims(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, successor_owner: str,
+) -> None:
+    from contextlib import contextmanager
+    from src.core.ledger import durable_outbox_store as store
+
+    db = _db(tmp_path)
+    enqueue(db, "item", domain="test", correlation_id="intent", payload_json="{}")
+    actual_open = store.open_program_db
+    takeover_pending = [True]
+    successor = []
+
+    @contextmanager
+    def reclaim_after_commit(*args, **kwargs):
+        with actual_open(*args, **kwargs) as connection:
+            yield connection
+        if takeover_pending[0] and not kwargs.get("read_only"):
+            takeover_pending[0] = False
+            with actual_open(db) as connection:
+                connection.execute("UPDATE outbox SET lease_expires_at = '2000-01-01T00:00:00Z'")
+            successor.append(lease_next(db, "test", owner=successor_owner))
+
+    monkeypatch.setattr(store, "open_program_db", reclaim_after_commit)
+    claimed = lease_next(db, "test", owner="worker")
+
+    assert claimed is not None
+    assert successor[0] is not None
+    assert claimed.lease_owner == "worker"
+    assert claimed.lease_fencing_token == 1
+    assert successor[0].lease_owner == successor_owner
+    assert successor[0].lease_fencing_token == 2
+    with pytest.raises(LeaseNoLongerCurrent):
+        mark_completed(db, "item", owner="worker", fencing_token=claimed.lease_fencing_token)
+    assert load_entry(db, "item") == successor[0]
+
+
 def test_enqueue_starts_pending(tmp_path: Path) -> None:
     db_path = _db(tmp_path)
     entry = enqueue(db_path, "op-1", domain="ado_actuation", correlation_id="intent-1", payload_json="{}")
