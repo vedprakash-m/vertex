@@ -27,6 +27,7 @@ from src.commands.confirm_stages.claim_resolution import prepare_confirm_claim_e
 from src.commands.confirm_stages.claim_resolution import evaluate_claim_extraction_calibration_gate as _evaluate_claim_extraction_calibration_gate
 from src.commands.confirm_stages.claim_resolution import record_confirmed_claims_for_v2 as _record_confirmed_claims_for_v2_impl
 from src.commands.confirm_stages.baseline_followthrough import apply_baseline_followthrough as _apply_baseline_followthrough
+from src.commands.confirm_stages.archive_transaction import evidence_fence_resources as _evidence_fence_resources
 from src.commands.confirm_stages.archive_transaction import execute_archive_transaction as _execute_archive_transaction_impl
 from src.commands.confirm_stages.archive_transaction import revalidate_evidence as _revalidate_evidence
 from src.commands.confirm_stages.signal_metrics import compute_provenance_confidence as _compute_provenance_confidence
@@ -66,7 +67,6 @@ from src.core.delta_engine import build_deltas
 from src.core.edition_resolver import get_program_output_dir, resolve_edition, resolve_edition_paths as _resolve_edition_paths
 from src.core.evidence_engine import build_evidence
 from src.core.exceptions import ConfigError, ConfirmError, StateError as _AlertStateError
-from src.core.fact_sor_state import get_fact_sor_state_path
 from src.core.workspace_paths import REPO_ROOT, resolve_report_workspace_roots, validate_report_workspace
 from src.core.forecast_engine import build_forecast_assessment
 from src.core.freshness_engine import build_freshness_report
@@ -79,7 +79,6 @@ from src.core.models import Confidence, EditionType, ProgramContext, ReportData,
 from src.core.models import ReviewStatus, RiskLevel, RunManifest, Snapshot, WorkItem
 from src.core.narrative_store import find_unresolved_scaffold_placeholders, get_narratives_dir, load_narratives, reset_narratives_for_next_issue, strip_scaffold_comments
 from src.core.overrides_store import OverridesDocument, get_overrides_path, reset_overrides_for_next_issue
-from src.core.program_fact_store import ProgramFactStore
 from src.core.quality_gates import QualityGateReport, combine_gate_reports, evaluate_bridge_gates, evaluate_continuity_gates, evaluate_context_integrity_gates, evaluate_phase_1a_gates
 from src.core.quality_gates import evaluate_phase_1b_gates, evaluate_phase_1c_gates, evaluate_contradiction_gate, evaluate_program_fact_drift_from_draft, evaluate_readiness_gates, evaluate_source_health_gates
 from src.core.quality_gates import evaluate_workiq_confirm_gates
@@ -726,12 +725,10 @@ def confirm_issue(
         draft_manifest.run_evidence_snapshot.effective_family_modes
         if draft_manifest.run_evidence_snapshot is not None else None
     )
-    evidence_fence_resources: list[Path] = []
-    if program_id is not None:
-        if "program_fact_snapshot" in draft_state:
-            evidence_fence_resources.append(ProgramFactStore(program_id, db_root=fact_db_root).db_path)
-        if draft_state.get("edition_type") != "lookback" and effective_family_modes is not None:
-            evidence_fence_resources.append(get_fact_sor_state_path(program_id, programs_root=programs_root))
+    evidence_fence_resources = _evidence_fence_resources(
+        program_id=program_id, programs_root=programs_root, draft_state=draft_state,
+        db_root=fact_db_root, effective_family_modes=effective_family_modes,
+    )
 
     def revalidate_evidence() -> None:
         _revalidate_evidence(
@@ -767,7 +764,7 @@ def confirm_issue(
         legacy_regex_extractor=legacy_regex_extractor,
         extraction_result=extraction_result,
         extraction_mode=extraction_mode,
-        evidence_fence_resources=tuple(evidence_fence_resources),
+        evidence_fence_resources=evidence_fence_resources,
         revalidate_evidence_fn=revalidate_evidence,
         build_confirmed_eml_bytes_fn=_build_confirmed_eml_bytes,
         write_confirmed_fn=write_confirmed,

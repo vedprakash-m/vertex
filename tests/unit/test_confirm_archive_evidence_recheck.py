@@ -17,6 +17,8 @@ from src.core.edition_resolver import get_program_output_dir
 from src.core.exceptions import ConfigError
 from src.core.fact_sor_state import get_fact_sor_state_path, save_fact_sor_state
 from src.core import fact_sor_state, workspace_lease
+from src.core.knowledge_store import get_shared_knowledge_root
+from src.core.manifest_writer import hash_jsonable
 from src.core.milestone_engine import assess_milestone_health, save_milestones
 from src.core.models import RiskLevel
 from src.core.models_v2 import Milestone, MilestoneStatus, TrajectoryPoint
@@ -504,21 +506,15 @@ def test_dry_run_does_not_enter_archive_evidence_fence(
     confirm_tests.test_confirm_issue_force_surfaces_source_health_gate_as_warning(monkeypatch, repo_root, tmp_path)
 
 
-@pytest.mark.parametrize("pinned", [True, False])
-def test_lookback_confirm_fences_only_declared_fact_pin(
-    repo_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pinned: bool,
-) -> None:
+def _prepare_confirmable_lookback(
+    repo_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Path, Path, Path]:
     monkeypatch.setenv("VERTEX_DB_PATH", str(tmp_path / "fact-db"))
     monkeypatch.setenv("VERTEX_AUTHOR", "Synthetic reviewer")
     _build_lookback(repo_root, tmp_path)
     reports = tmp_path / "reports"
     programs = tmp_path / "programs"
     archive = tmp_path / "archive"
-    if not pinned:
-        draft_path = get_program_output_dir("acme_weekly", programs_root=programs) / "issue_004" / "issue_004.draft.json"
-        draft = json.loads(draft_path.read_text(encoding="utf-8"))
-        del draft["program_fact_snapshot"]
-        draft_path.write_text(json.dumps(draft), encoding="utf-8")
     overrides = confirm_module.get_overrides_path("acme_weekly", reports, issue_number=4)
     payload = yaml.safe_load((overrides.parent / "issue_000.yaml").read_text(encoding="utf-8"))
     payload["issue_number"] = 4
@@ -536,6 +532,23 @@ def test_lookback_confirm_fences_only_declared_fact_pin(
     monkeypatch.setattr(
         confirm_module, "evaluate_continuity_gates", lambda **_kwargs: QualityGateReport(results=()),
     )
+    return reports, programs, archive
+
+
+@pytest.mark.parametrize("pinned", [True, False])
+@pytest.mark.parametrize("context_bound", [True, False], ids=["bound", "legacy-unbound"])
+def test_lookback_confirm_fence_preserves_selector_compatibility(
+    repo_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pinned: bool,
+    context_bound: bool,
+) -> None:
+    reports, programs, archive = _prepare_confirmable_lookback(repo_root, tmp_path, monkeypatch)
+    draft_path = get_program_output_dir("acme_weekly", programs_root=programs) / "issue_004" / "issue_004.draft.json"
+    draft = json.loads(draft_path.read_text(encoding="utf-8"))
+    if not pinned:
+        del draft["program_fact_snapshot"]
+    if not context_bound:
+        del draft["program_context_sha256"]
+    draft_path.write_text(json.dumps(draft), encoding="utf-8")
 
     fence = archive_transaction.cooperative_capture_fence
     observed: list[tuple[Path, ...]] = []
@@ -547,15 +560,66 @@ def test_lookback_confirm_fences_only_declared_fact_pin(
             yield
 
     monkeypatch.setattr(archive_transaction, "cooperative_capture_fence", observe)
+    checkpoints = Mock(wraps=archive_transaction.create_checkpoint_snapshot)
+    monkeypatch.setattr(archive_transaction, "create_checkpoint_snapshot", checkpoints)
     selector = get_fact_sor_state_path("acme", programs_root=programs)
     sidecar = selector.with_name(selector.name + ".capture.lock")
     with portalocker.Lock(sidecar, timeout=0, flags=portalocker.LOCK_EX | portalocker.LOCK_NB):
-        result = confirm_module.confirm_issue(
-            edition_name="acme_weekly", issue_number=4, force=True,
-            reports_root=reports, archive_root=archive, programs_root=programs,
-        )
+        if context_bound:
+            with pytest.raises(ConfigError, match="Capture fence unavailable"):
+                confirm_module.confirm_issue(
+                    edition_name="acme_weekly", issue_number=4, force=True,
+                    reports_root=reports, archive_root=archive, programs_root=programs,
+                )
+        else:
+            result = confirm_module.confirm_issue(
+                edition_name="acme_weekly", issue_number=4, force=True,
+                reports_root=reports, archive_root=archive, programs_root=programs,
+            )
+    if context_bound:
+        checkpoints.assert_not_called()
+        assert len(observed) == 1
+        assert set(observed[0]) == {
+            ProgramFactStore("acme").db_path, selector, programs / "acme" / "ledger",
+            get_shared_knowledge_root(programs),
+        }
+    else:
+        assert result.exit_code == 0, "\n".join(result.failures)
+        assert observed == [((ProgramFactStore("acme").db_path,) if pinned else ())]
+
+
+def test_bound_lookback_allows_selector_change_when_projection_is_unchanged(
+    repo_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    reports, programs, archive = _prepare_confirmable_lookback(repo_root, tmp_path, monkeypatch)
+    original = confirm_module.load_bundle("acme_weekly", reports_root=reports, programs_root=programs)
+    draft = confirm_module._load_draft_state("acme_weekly", 4, programs_root=programs)
+    assert original.program_context is not None
+    assert draft["program_context_sha256"] == hash_jsonable(original.program_context)
+    lock = archive_transaction.ArchiveLock
+
+    @contextmanager
+    def switch_after_lock(path: Path):
+        with lock(path):
+            save_fact_sor_state(
+                "acme", mode="legacy", family_modes={"workitem.state": "shadow"},
+                recorded_at=datetime(2026, 5, 5, tzinfo=timezone.utc), programs_root=programs,
+            )
+            updated = confirm_module.load_bundle("acme_weekly", reports_root=reports, programs_root=programs)
+            assert hash_jsonable(updated.config) == hash_jsonable(original.config)
+            assert hash_jsonable(updated.program_context) == draft["program_context_sha256"]
+            yield
+
+    monkeypatch.setattr(archive_transaction, "ArchiveLock", switch_after_lock)
+    caplog.clear()
+    result = confirm_module.confirm_issue(
+        edition_name="acme_weekly", issue_number=4, force=True,
+        reports_root=reports, archive_root=archive, programs_root=programs,
+    )
     assert result.exit_code == 0, "\n".join(result.failures)
-    assert observed == [((ProgramFactStore("acme").db_path,) if pinned else ())]
+    assert result.archive_paths is not None
+    assert not any("Capture fence cannot expand" in record.message for record in caplog.records)
 
 
 @pytest.mark.parametrize("change", ["addition", "replacement", "content", "missing_pin"])

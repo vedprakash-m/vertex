@@ -17,8 +17,10 @@ from src.core.archive_store import ConfirmedIssueArchivePaths
 from src.core.archive_store import find_latest_confirmed_entry, read_archive_index
 from src.core.checkpoint_store import create_checkpoint_snapshot
 from src.core.exceptions import ConfigError
+from src.core.fact_sor_state import get_fact_sor_state_path
+from src.core.knowledge_store import get_shared_knowledge_root
 from src.core.measurement_spine import IssueMetrics, write_issue_metrics
-from src.core.program_fact_store import _resolve_fact_db_root, load_program_facts, persist_program_fact_snapshot, resolve_fact_sor_mode
+from src.core.program_fact_store import ProgramFactStore, _resolve_fact_db_root, load_program_facts, persist_program_fact_snapshot, resolve_fact_sor_mode
 from src.core.ledger.event_log import ConfidenceTier, TemporalConfidence, build_event_envelope, read_events, write_event
 from src.core.ledger.program_views import project_program_events
 from src.core.ledger.source_refs import NewsletterRef, OperatorAssertionRef
@@ -63,6 +65,36 @@ LedgerEventWriter = Callable[..., Any]
 class ArchiveTransactionResult:
     archive_paths: ConfirmedIssueArchivePaths
     warnings: tuple[str, ...]
+
+
+def evidence_fence_resources(
+    *,
+    program_id: str | None,
+    programs_root: Path,
+    draft_state: Mapping[str, Any],
+    db_root: Path | None,
+    effective_family_modes: tuple[tuple[str, str], ...] | None,
+) -> tuple[Path, ...]:
+    if program_id is None:
+        return ()
+    resources: list[Path] = []
+    is_lookback = draft_state.get("edition_type") == "lookback"
+    if "program_fact_snapshot" in draft_state:
+        resources.append(ProgramFactStore(program_id, db_root=db_root).db_path)
+    if not is_lookback and effective_family_modes is not None:
+        resources.append(get_fact_sor_state_path(program_id, programs_root=programs_root))
+    workstream_mode = dict(effective_family_modes or ()).get("workitem.state")
+    if (
+        draft_state.get("program_context_sha256") is not None
+        or (workstream_mode is not None and workstream_mode != "legacy")
+    ):
+        resources.extend((
+            ProgramFactStore(program_id, db_root=_resolve_fact_db_root(programs_root)).db_path,
+            get_fact_sor_state_path(program_id, programs_root=programs_root),
+            programs_root / program_id / "ledger",
+            get_shared_knowledge_root(programs_root),
+        ))
+    return tuple(resources)
 
 
 def revalidate_evidence(
@@ -110,6 +142,15 @@ def revalidate_evidence(
         )
     if evidence_failures:
         raise ConfigError("Confirmation evidence changed before archive write: " + "; ".join(evidence_failures))
+    expected_program_context_sha256 = draft_state.get("program_context_sha256")
+    if expected_program_context_sha256 is not None and (
+        current_bundle.program_context is None
+        or hash_jsonable_fn(current_bundle.program_context) != expected_program_context_sha256
+    ):
+        raise ConfigError(
+            "Confirmation program context changed or became unavailable before archive write. "
+            "Re-run `vertex report --dry-run` and review the updated draft before confirming."
+        )
 
 
 def execute_archive_transaction(

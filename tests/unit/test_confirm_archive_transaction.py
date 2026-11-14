@@ -15,11 +15,14 @@ from src.commands.confirm_stages import archive_transaction
 from src.commands.confirm_stages.draft_loaders import ConfirmDraftManifest
 from src.core.archive_store import ConfirmedIssueArchivePaths
 from src.core.exceptions import ConfigError, StateError
+from src.core.fact_sor_state import get_fact_sor_state_path
+from src.core.knowledge_store import get_shared_knowledge_root
 from src.core.ledger.event_log import ConfidenceTier, TemporalConfidence, build_event_envelope, read_events
 from src.core.ledger.program_views import project_program_events
 from src.core.ledger.source_refs import LTDeckRef, NewsletterRef, OperatorAssertionRef
 from src.core.models import RunManifest
 from src.core.projections.snapshot_manager import write_projection_snapshot
+from src.core.program_fact_store import ProgramFactStore
 from src.core.quality_gates.models import GateEvaluation, QualityGateReport
 
 
@@ -32,6 +35,32 @@ class _DimensionStub:
 @dataclass(frozen=True, slots=True)
 class _ScorecardStub:
     dimensions: tuple[_DimensionStub, ...]
+
+
+@pytest.mark.parametrize("edition_type", ["lookback", "weekly"])
+def test_bound_context_with_legacy_capture_fences_both_fact_authorities(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, edition_type: str,
+) -> None:
+    monkeypatch.delenv("VERTEX_DB_PATH", raising=False)
+    programs_root = tmp_path / "workspace" / "programs"
+    retained_db_root = tmp_path / "retained"
+    retained_db = ProgramFactStore("acme", db_root=retained_db_root).db_path
+    reality_db = ProgramFactStore("acme", db_root=programs_root.parent).db_path
+    assert retained_db != reality_db
+
+    resources = archive_transaction.evidence_fence_resources(
+        program_id="acme", programs_root=programs_root,
+        draft_state={
+            "edition_type": edition_type, "program_fact_snapshot": {},
+            "program_context_sha256": "captured-context",
+        },
+        db_root=retained_db_root, effective_family_modes=(("workitem.state", "legacy"),),
+    )
+
+    assert set(resources) == {
+        retained_db, reality_db, get_fact_sor_state_path("acme", programs_root=programs_root),
+        programs_root / "acme" / "ledger", get_shared_knowledge_root(programs_root),
+    }
 
 
 def _manifest() -> RunManifest:
@@ -148,6 +177,22 @@ def test_revalidate_evidence_refuses_config_drift_before_other_checks(
         archive_transaction.revalidate_evidence(**inputs)
     inputs["evaluate_fact_drift_fn"].assert_not_called()
     inputs["validate_pinned_gather_run_fn"].assert_not_called()
+
+
+@pytest.mark.parametrize("context", [None, {"objective": "changed"}], ids=["unavailable", "changed"])
+def test_revalidate_evidence_refuses_context_drift_after_evidence_checks(
+    revalidation_inputs: dict[str, Any], context: object,
+) -> None:
+    inputs = revalidation_inputs
+    inputs["draft_state"]["program_context_sha256"] = "sha256:original"
+    inputs["load_bundle_fn"].return_value.program_context = context
+    inputs["hash_jsonable_fn"].side_effect = ["sha256:synthetic", "sha256:changed"]
+
+    with pytest.raises(ConfigError, match="(?i)program context.*changed"):
+        archive_transaction.revalidate_evidence(**inputs)
+
+    inputs["evaluate_fact_drift_fn"].assert_called_once()
+    inputs["validate_pinned_gather_run_fn"].assert_called_once()
 
 
 def test_revalidate_evidence_reports_fact_and_gather_failures_in_order(
