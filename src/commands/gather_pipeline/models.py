@@ -89,6 +89,8 @@ class PersistenceStageInput:
     # then persisted without a gather_run_id, exactly as they were before
     # this field existed.
     gather_run_id: str | None = None
+    # Start of the window this gather read; only failed-run rows inside it may be replaced.
+    signal_window_start: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

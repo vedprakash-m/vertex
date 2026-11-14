@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 import json
+import logging
 import os
 from pathlib import Path
 import portalocker
@@ -653,6 +655,16 @@ def maybe_run_scheduled_compaction(
         return None
     sentinel_path = db_path.parent / ".compact_last_run"
     if not _scheduled_compaction_due(sentinel_path, now=reference_time):
+        return None
+    with closing(_open_readonly(db_path)) as connection:
+        reality_table = connection.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type IN ('table', 'view') AND lower(name) GLOB 'reality_*' LIMIT 1"
+        ).fetchone()
+    if reality_table is None:
+        logging.getLogger(__name__).info(
+            "Scheduled db compaction not applicable: reality schema is not initialized."
+        )
         return None
     return _compact_database(program, db_path, dry_run=False)
 

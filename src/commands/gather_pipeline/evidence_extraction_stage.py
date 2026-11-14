@@ -90,7 +90,7 @@ def run_evidence_extraction_stage(
 ) -> dict[str, WorkstreamEvidence]:
     """Extract WorkstreamEvidence from transcript signals.
 
-    Returns a dict of {lane_id: WorkstreamEvidence} for lanes with extracted evidence.
+    Returns a dict of {lane_id: WorkstreamEvidence} for privacy-admitted extractions.
     Skips email signals (insufficient content). Skips lanes with no transcripts.
     Never raises — failures are logged and the lane is skipped.
     """
@@ -126,22 +126,35 @@ def run_evidence_extraction_stage(
         )
         try:
             evidence = agent.extract(ctx)   # extract() takes only ctx; enrichments are in ctx
-        except Exception as exc:  # noqa: BLE001
-            log.warning("ContentExtractionAgent failed for lane %s: %s", lane_id, exc)
+        except Exception:  # noqa: BLE001
+            log.warning("ContentExtractionAgent failed for lane %s", lane_id)
             continue
         if evidence is None:
             continue
-        results[lane_id] = evidence
-        if not dry_run:
+        if dry_run:
+            from src.commands.workiq_evidence_safety import UnsafeWorkIQEvidenceError, sanitize_workiq_evidence
+
+            try:
+                evidence = sanitize_workiq_evidence(evidence)
+            except UnsafeWorkIQEvidenceError as exc:
+                log.warning("Omitted unsafe WorkIQ evidence for lane %s: %s", lane_id, exc)
+                continue
+        else:
             # P4-0: link this evidence to the transcript signals that produced it so
             # blurb synthesis (P4-1) can gate on signal approval (§17.8 Option A).
             backing_signal_ids = tuple(s.id for s in sigs if s.id)
-            persist_evidence(
+            _, admitted_evidence = _persist_evidence(
                 evidence,
                 program_id=program_id,
                 programs_root=programs_root,
                 backing_signal_ids=backing_signal_ids,
+                workiq_origin=True,
             )
+            if admitted_evidence is None:
+                continue
+            evidence = admitted_evidence
+        results[lane_id] = evidence
+        if not dry_run:
             # ME-05: record quality metrics; enrichments is in scope from the capture above
             from src.core.evidence_quality import EvidenceQualityRecord, record_evidence_quality
             body_chars = sum(len(e.body_text or "") for e in enrichments)
@@ -158,8 +171,8 @@ def run_evidence_extraction_stage(
             )
             try:
                 record_evidence_quality(qrec, program_id=program_id, programs_root=programs_root)
-            except Exception as qexc:  # noqa: BLE001
-                log.warning("Failed to record evidence quality for lane %s: %s", lane_id, qexc)
+            except Exception:  # noqa: BLE001
+                log.warning("Failed to record evidence quality for lane %s", lane_id)
 
     return results
 
@@ -218,6 +231,7 @@ def persist_evidence(
     program_id: str,
     programs_root: Path,
     backing_signal_ids: tuple[str, ...] = (),
+    workiq_origin: bool = False,
 ) -> bool:
     """Write one WorkstreamEvidence record to evidence_store.jsonl (deduplicated).
 
@@ -227,13 +241,34 @@ def persist_evidence(
 
     P4-3: skips the write and returns False when an identical content fingerprint
     (`_dedup_key`) already exists in the store — prevents unbounded growth on re-runs.
-    Returns True when a new record was written.
+    Also returns False when WorkIQ evidence is quarantined. Returns True when a new
+    record was written.
 
     P4-0 (§17.8 Option A): ``backing_signal_ids`` links this evidence to the journal
     Signal(s) that gate its approval for blurb synthesis. The ME-02 gather path passes
     the transcript signal ids; the ME-03 enrich path passes the PENDING enrich signal id.
     Stored as ``_backing_signal_ids`` on the JSONL record (not on the dataclass).
+
+    ``workiq_origin`` applies the WorkIQ boundary even when source refs are missing.
     """
+    wrote, _ = _persist_evidence(
+        evidence,
+        program_id=program_id,
+        programs_root=programs_root,
+        backing_signal_ids=backing_signal_ids,
+        workiq_origin=workiq_origin,
+    )
+    return wrote
+
+
+def _persist_evidence(
+    evidence: WorkstreamEvidence,
+    *,
+    program_id: str,
+    programs_root: Path,
+    backing_signal_ids: tuple[str, ...],
+    workiq_origin: bool,
+) -> tuple[bool, WorkstreamEvidence | None]:
     from datetime import date as _date
 
     def _json_default(obj: object) -> str:
@@ -241,7 +276,7 @@ def persist_evidence(
             return obj.isoformat()
         raise TypeError(f"Not JSON serializable: {type(obj)}")
 
-    if any(ref.source_type.startswith("workiq_") and ref.canonical_id for ref in evidence.source_refs):
+    if workiq_origin or any(ref.source_type.startswith("workiq_") for ref in evidence.source_refs):
         from src.commands.workiq_evidence_safety import UnsafeWorkIQEvidenceError, sanitize_workiq_evidence
 
         try:
@@ -256,13 +291,12 @@ def persist_evidence(
                         "lane_id": evidence.lane_id,
                         "quarantined_at": datetime.now(timezone.utc).isoformat(),
                         "signal_types": list(exc.signal_types),
-                        "source_ids": [ref.canonical_id for ref in evidence.source_refs if ref.canonical_id],
                     },
                     sort_keys=True,
                 ) + "\n",
             )
             log.warning("Quarantined unsafe WorkIQ evidence for lane %s: %s", evidence.lane_id, exc)
-            return False
+            return False, None
 
     path = _evidence_store_path(program_id, programs_root)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -273,7 +307,7 @@ def persist_evidence(
             evidence.lane_id,
             dedup_key[:12],
         )
-        return False
+        return False, evidence
 
     data = asdict(evidence)
     data = {k: v for k, v in data.items() if v is not None}
@@ -287,7 +321,7 @@ def persist_evidence(
         data["_backing_signal_ids"] = list(backing_signal_ids)
     # _json_default handles nested date objects: etas[].eta_date, source_refs[].source_date
     append_jsonl_line(path, json.dumps(data, ensure_ascii=False, default=_json_default) + "\n")
-    return True
+    return True, evidence
 
 
 def _dedup_key_exists(path: Path, dedup_key: str) -> bool:

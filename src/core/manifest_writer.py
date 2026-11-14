@@ -122,6 +122,13 @@ def build_run_evidence_snapshot(
         or hash_jsonable(report_snapshot) != manifest.snapshot_hash
     ):
         raise ConfigError("Run evidence source or rendered snapshot identity is inconsistent.")
+    if gather is not None and any(
+        isinstance(row.wiql_hash, str) and not row.wiql_hash.strip() for row in gather.query_results
+    ):
+        raise ConfigError(
+            "Run evidence saved-query identity is unavailable. Inspect failed gather diagnostics "
+            "and gather again before regenerating the draft."
+        )
     capture = RunEvidenceSnapshot(
         program_id=pin.program_id, fact_snapshot_id=pin.snapshot_id,
         fact_content_sha256=pin.content_sha256 or "",

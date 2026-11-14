@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -15,6 +16,7 @@ import portalocker
 from src.core.edition_resolver import get_program_output_dir, PROGRAMS_ROOT
 
 
+logger = logging.getLogger(__name__)
 _TRACE_ENVS = ("VERTEX_LLM_TRACE",)
 
 
@@ -76,6 +78,7 @@ def llm_trace(
     latency_ms: float | None = None,
     cost_usd: float | None = None,
     error: str | None = None,
+    cost_reservation_id: int | None = None,
     metadata: dict[str, Any] | None = None,
     trace_file: Path | None = None,
 ) -> None:
@@ -105,6 +108,8 @@ def llm_trace(
         record["cost_usd"] = round(cost_usd, 6)
     if error is not None:
         record["error"] = error
+    if cost_reservation_id is not None:
+        record["cost_reservation_id"] = cost_reservation_id
     if metadata:
         record["metadata"] = {str(key): value for key, value in metadata.items()}
 
@@ -120,4 +125,5 @@ def llm_trace(
             finally:
                 portalocker.unlock(handle)
     except Exception:
+        logger.warning("LLM trace write failed.")
         return

@@ -150,7 +150,7 @@ def test_run_comparison_records_blind_judgment_for_each_item(monkeypatch, tmp_pa
 
     def _prompt(_message: str) -> str:
         prompts.append(_message)
-        return "b"
+        return "b" if "Which is better?" in _message else "n"
 
     result = run_context_gateway_comparison(
         edition_name="acme_weekly",
@@ -172,7 +172,6 @@ def test_run_comparison_records_blind_judgment_for_each_item(monkeypatch, tmp_pa
     assert len(records) == 2
     for record in records:
         assert record.choice == "b"
-        # "b" is not a "y"/"yes" answer to the critical-error question either.
         assert record.critical_error is False
         # Exactly one of the two texts is the baseline, one is the candidate.
         texts = {record.option_a_text, record.option_b_text}

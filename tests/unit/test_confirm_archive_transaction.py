@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -13,7 +14,7 @@ import pytest
 from src.commands.confirm_stages import archive_transaction
 from src.commands.confirm_stages.draft_loaders import ConfirmDraftManifest
 from src.core.archive_store import ConfirmedIssueArchivePaths
-from src.core.exceptions import ConfigError
+from src.core.exceptions import ConfigError, StateError
 from src.core.ledger.event_log import ConfidenceTier, TemporalConfidence, build_event_envelope, read_events
 from src.core.ledger.program_views import project_program_events
 from src.core.ledger.source_refs import LTDeckRef, NewsletterRef, OperatorAssertionRef
@@ -771,6 +772,52 @@ def test_arc_txn01_real_writers_lock_stage_and_commit_selected_archive(
     assert _bytes(decoy) == before
 
 
+@pytest.mark.parametrize("age_minutes", [0, 31])
+def test_competing_confirmation_refuses_before_revalidation_or_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, age_minutes: int,
+) -> None:
+    from src.core import archive_store, snapshot_store
+    from tests.unit.test_archive_workspace_context import _bytes
+
+    kwargs, effects = _spine_inputs(tmp_path, monkeypatch)
+    selected = kwargs["programs_root"]
+    edition_root = selected / "acme" / "archive" / "acme_weekly"
+    decoy = kwargs["archive_root"].parent
+    decoy_before = _bytes(decoy)
+    admissions: list[str] = []
+
+    def forbidden() -> None:
+        pytest.fail("competing confirmation reached evidence revalidation")
+
+    competing_kwargs = {**kwargs, "revalidate_evidence_fn": forbidden}
+
+    def revalidate() -> None:
+        metadata_path = edition_root / ".lock"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["started_at"] = (
+            datetime.now(timezone.utc) - timedelta(minutes=age_minutes)
+        ).isoformat()
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+        before = _bytes(selected)
+        with pytest.raises(StateError, match="locked"):
+            archive_transaction.execute_archive_transaction(**competing_kwargs)
+        assert _bytes(selected) == before
+        assert effects == []
+        assert not (edition_root / "staging").exists()
+        admissions.append("owner only")
+
+    kwargs["revalidate_evidence_fn"] = revalidate
+    result = archive_transaction.execute_archive_transaction(**kwargs)
+    assert admissions == ["owner only"] and effects == ["checkpoint"]
+    assert snapshot_store.read_snapshot(result.archive_paths.snapshot_path).issue_number == 79
+    assert [entry.issue_number for entry in archive_store.read_archive_index(
+        "acme_weekly", programs_root=selected,
+    ).issues] == [78, 79]
+    assert not (edition_root / ".lock").exists()
+    assert not (edition_root / "staging").exists()
+    assert _bytes(decoy) == decoy_before
+
+
 def test_arc_txn02_real_snapshot_callback_preserves_selected_hardlock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -787,7 +834,8 @@ def test_arc_txn02_real_snapshot_callback_preserves_selected_hardlock(
     with pytest.raises(BaselineLockError):
         archive_transaction.execute_archive_transaction(**kwargs)
     assert effects == ["revalidate", "checkpoint"]
-    assert _bytes(tmp_path) == before
+    guard = selected / "acme" / "archive" / "acme_weekly" / ".archive.guard"
+    assert _bytes(tmp_path) == before | {str(guard.relative_to(tmp_path)): b""}
 
 
 def test_arc_txn03_context_callback_receives_selected_prior_not_new_issue(
@@ -879,7 +927,8 @@ def test_arc_txn05_real_archive_promotion_failure_restores_selected_bytes(
     with pytest.raises(OSError, match="synthetic promotion"):
         archive_transaction.execute_archive_transaction(**kwargs)
     assert count == 4 and effects == ["revalidate", "checkpoint"]
-    assert _bytes(tmp_path) == before
+    guard = selected / "acme" / "archive" / "acme_weekly" / ".archive.guard"
+    assert _bytes(tmp_path) == before | {str(guard.relative_to(tmp_path)): b""}
     assert not (kwargs["programs_root"] / "acme" / "archive" / "acme_weekly" / "staging").exists()
 
 

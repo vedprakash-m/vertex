@@ -220,6 +220,39 @@ def test_lost_response_then_rerun_creates_zero_new_items(tmp_path: Path) -> None
     assert duplicate_events[0].payload["detection"] == "preflight_search"
 
 
+def test_malformed_wiql_blocks_lost_response_reconciliation(tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    proposal, manifest_path = _proposal(programs_root)
+    write_proposal_manifest_to_handle_at_path(manifest_path, proposal)
+    backend = _FakeADOBackend()
+    first_writer = ADOWriter(_fake_client(backend, lose_first_response=True), programs_root=programs_root)
+    first = first_writer.apply_manifest(manifest_path, applied_at=datetime(2026, 7, 2, tzinfo=timezone.utc))
+    assert first.failed_count == 1 and backend.create_call_count == 1
+
+    class MalformedReadSession(_FakeReadSession):
+        def request(self, method: str, url: str, **kwargs) -> _FakeJsonResponse:
+            response = super().request(method, url, **kwargs)
+            if "wiql" in url:
+                response._payload["workItems"].append("private-value")
+            return response
+
+    second_client = _fake_client(backend, lose_first_response=False)
+    second_client._session = MalformedReadSession(backend)
+    second_writer = ADOWriter(second_client, programs_root=programs_root)
+    result = second_writer.apply_manifest(manifest_path, applied_at=datetime(2026, 7, 2, 0, 5, tzinfo=timezone.utc))
+
+    assert result.failed_count == 1 and result.applied_count == 0
+    assert result.proposal.entries[0].entry_status == "failed"
+    assert "reconciliation" in (result.proposal.entries[0].status_reason or "").lower()
+    assert "private-value" not in (result.proposal.entries[0].status_reason or "")
+    assert backend.create_call_count == 1 and len(backend.work_items) == 1
+    assert len(second_client._mutation_session.calls) == 0
+    assert len(second_client._session.calls) == 1
+    assert "wiql" in second_client._session.calls[0]["url"]
+    assert not any(event.event_type == "actuation.duplicate_prevented.v1" for event in
+                   read_events("fixture_prog", programs_root=programs_root))
+
+
 def test_never_attempted_entry_skips_search_and_creates_normally(tmp_path: Path) -> None:
     """A first-ever attempt (attempted_at is None) must not pay for a WIQL search."""
     programs_root = tmp_path / "programs"

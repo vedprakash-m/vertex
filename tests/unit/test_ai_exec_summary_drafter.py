@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
+from src.ai.client import AIPreflightError, BudgetConfigurationError, BudgetExceeded, BudgetStateError
 from src.ai.exec_summary_drafter import ExecSummaryDraftError, _RankedChange, _derive_ai_confidence, draft_exec_summary
 from src.core.config_loader import EditionVerbosityLimits, EditorialRules, VerbositySettings
 from src.core.models import AttributionTier, Confidence, DeltaKind, EditionType, EvidencePacket, ItemDelta, RiskLevel, WorkItem
@@ -506,6 +508,38 @@ def _valid_deltas() -> SimpleNamespace:
         eta_changes=(),
         owner_changes=(),
     )
+
+
+@pytest.mark.parametrize("error_type", [AIPreflightError, BudgetExceeded, BudgetConfigurationError, BudgetStateError])
+def test_draft_exec_summary_discards_nonretryable_cost_failure(tmp_path, monkeypatch, error_type) -> None:
+    from src.core.ledger.event_log import read_events
+
+    failure = error_type("private synthetic cost detail")
+    client = _FakeAIClient("")
+    client.structured = Mock(side_effect=failure)
+    monkeypatch.setattr(
+        "src.ai.exec_summary_drafter.route_through_tiers",
+        lambda _feature, **kwargs: kwargs["frontier_fn"](),
+    )
+
+    with pytest.raises(error_type) as caught:
+        draft_exec_summary(
+            client=client,
+            program_id="acme",
+            programs_root=tmp_path,
+            items=(_item(102, "Deployment blocker", risk_level=RiskLevel.HIGH),),
+            deltas=_valid_deltas(),
+            editorial_rules=_editorial_rules(),
+        )
+
+    assert caught.value is failure
+    decisions = [
+        event for event in read_events("acme", programs_root=tmp_path)
+        if event.event_type == "ai.release_decision.v1"
+    ]
+    assert len(decisions) == 1
+    assert decisions[0].payload["terminal"] == "discarded"
+    assert "private synthetic cost detail" not in str(decisions[0].payload)
 
 
 def test_draft_exec_summary_records_released_terminal_on_success(tmp_path) -> None:

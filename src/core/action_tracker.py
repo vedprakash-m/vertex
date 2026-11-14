@@ -300,6 +300,16 @@ def _apply_status_update(action: ActionItem, update: ActionStatusUpdate | None) 
     )
 
 
+def _committed_gather_run_ids(
+    program_id: str, programs_root: Path, gather_run_id: str | None,
+) -> frozenset[str] | None:
+    if gather_run_id is None:
+        return None
+    from src.core.gather_run_manifest import get_verified_committed_run_ids
+
+    return get_verified_committed_run_ids(program_id, programs_root=programs_root)
+
+
 def _sync_action_fact(
     program_id: str,
     action: ActionItem,
@@ -341,6 +351,7 @@ def _sync_action_fact(
             gather_run_id=gather_run_id,
         ),
         recorded_at=recorded_at,
+        committed_gather_run_ids=_committed_gather_run_ids(program_id, programs_root, gather_run_id),
     )
     # ADF-W2.12: skip the trace link on a genuine content-dedup no-op (e.g. a
     # retried append_action for an already-persisted action) -- only a real

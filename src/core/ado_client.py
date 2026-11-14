@@ -18,7 +18,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from src.adapters.microsoft.ado_runtime import load_ado_credential_types
-from src.core.exceptions import AuthError, CredentialExpired, QueryError, QueryTimeoutError
+from src.core.exceptions import AuthError, CredentialExpired, QueryError, QueryTimeoutError, WIQLResponseError
 from src.core.work_item_states import TERMINAL_WORK_ITEM_STATES_ADO
 
 if TYPE_CHECKING:
@@ -367,8 +367,21 @@ class ADOClient:
         is_truncated = False
         skip = 0
         while page_count < max_pages:
-            response = self._request_json("GET", url, params={"$top": str(page_size), "$skip": str(skip)})
-            page_rows = response.get("value", [])
+            try:
+                response = self._request_json("GET", url, params={"$top": str(page_size), "$skip": str(skip)})
+            except requests.exceptions.JSONDecodeError:
+                raise QueryError("ADO revision response is malformed.") from None
+            if not isinstance(response, dict):
+                raise QueryError("ADO revision response is malformed.")
+            page_rows = response.get("value")
+            if (
+                not isinstance(page_rows, list)
+                or len(page_rows) > page_size
+                or any(not isinstance(row, dict) for row in page_rows)
+            ):
+                raise QueryError("ADO revision response is malformed.")
+            if "count" in response and (type(response["count"]) is not int or response["count"] != len(page_rows)):
+                raise QueryError("ADO revision response is malformed.")
             all_rows.extend(page_rows)
             page_count += 1
             if len(page_rows) < page_size:
@@ -389,10 +402,10 @@ class ADOClient:
         max_pages: int = _DEFAULT_MAX_PAGES,
         on_pagination: Callable[[PaginationOutcome], None] | None = None,
     ) -> list[dict[str, Any]]:
-        """ADF-W2.1 (Section 8.4.2): follows the comments API's
-        ``continuationToken`` response header across pages, rather than
-        returning only the first page. ``on_pagination`` is the same
-        optional completeness callback as ``list_work_item_revisions``."""
+        """Follow body or header continuation tokens up to the page cap.
+
+        ``on_pagination``, if supplied, receives the bounded fetch outcome.
+        """
         all_comments: list[dict[str, Any]] = []
         page_count = 0
         is_truncated = False
@@ -401,11 +414,32 @@ class ADOClient:
             url = f"{self._rest_base_url}workItems/{work_item_id}/comments?api-version=7.1-preview.4"
             params = {"continuationToken": continuation_token} if continuation_token else None
             response = self._request_response("GET", url, params=params)
-            body = response.json()
-            page_comments = body.get("comments", [])
+            try:
+                body = response.json()
+            except ValueError:
+                raise QueryError("ADO comment response is malformed.") from None
+            if not isinstance(body, dict):
+                raise QueryError("ADO comment response is malformed.")
+            page_comments = body.get("comments")
+            if not isinstance(page_comments, list) or any(not isinstance(row, dict) for row in page_comments):
+                raise QueryError("ADO comment response is malformed.")
+            if "count" in body and (type(body["count"]) is not int or body["count"] != len(page_comments)):
+                raise QueryError("ADO comment response is malformed.")
+            body_token = body.get("continuationToken")
+            header_token = response.headers.get("x-ms-continuationtoken")
+            if any(
+                token is not None and (not isinstance(token, str) or (token and not token.strip()))
+                for token in (body_token, header_token)
+            ):
+                raise QueryError("ADO comment response is malformed.")
+            if body_token and header_token and body_token != header_token:
+                raise QueryError("ADO comment response is malformed.")
+            continuation_token = body_token or header_token
+            next_page = body.get("nextPage")
+            if next_page is not None and (not isinstance(next_page, str) or (next_page and not continuation_token)):
+                raise QueryError("ADO comment response is malformed.")
             all_comments.extend(page_comments)
             page_count += 1
-            continuation_token = response.headers.get("x-ms-continuationtoken")
             if not continuation_token:
                 break
         else:
@@ -481,40 +515,104 @@ class ADOClient:
         response = self._request_json("POST", url, json={"query": wiql})
         ordered_ids: list[int] = []
         seen_ids: set[int] = set()
+        if not isinstance(response, dict):
+            raise WIQLResponseError(())
 
-        for item in response.get("workItems", []):
-            if not isinstance(item, dict):
-                continue
-            work_item_id = int(item.get("id") or 0)
-            if work_item_id <= 0 or work_item_id in seen_ids:
-                continue
-            seen_ids.add(work_item_id)
-            ordered_ids.append(work_item_id)
+        has_flat = "workItems" in response
+        has_links = "workItemRelations" in response
+        flat_rows = response.get("workItems")
+        link_rows = response.get("workItemRelations")
+        malformed = (
+            not (has_flat or has_links)
+            or (has_flat and not isinstance(flat_rows, list))
+            or (has_links and not isinstance(link_rows, list))
+        )
+        declared_flat: bool | None = None
+        if "queryType" in response:
+            query_type = response["queryType"]
+            if query_type == "flat":
+                declared_flat = True
+            elif query_type == "tree" or query_type == "oneHop":
+                declared_flat = False
+            else:
+                malformed = True
+        if "queryResultType" in response:
+            result_type = response["queryResultType"]
+            if result_type == "workItem":
+                result_flat: bool | None = True
+            elif result_type == "workItemLink":
+                result_flat = False
+            else:
+                result_flat = None
+                malformed = True
+            if result_flat is not None:
+                if declared_flat is not None and declared_flat != result_flat:
+                    malformed = True
+                declared_flat = result_flat
 
-        for relation in response.get("workItemRelations", []):
-            if not isinstance(relation, dict):
-                continue
-            for relation_end in ("source", "target"):
-                relation_item = relation.get(relation_end)
-                if not isinstance(relation_item, dict):
+        flat_populated = isinstance(flat_rows, list) and bool(flat_rows)
+        link_populated = isinstance(link_rows, list) and bool(link_rows)
+        if (
+            (flat_populated and link_populated)
+            or (declared_flat is True and (not isinstance(flat_rows, list) or link_populated))
+            or (declared_flat is False and (not isinstance(link_rows, list) or flat_populated))
+        ):
+            malformed = True
+
+        flat_ids: set[int] = set()
+        if isinstance(flat_rows, list):
+            for item in flat_rows:
+                work_item_id = item.get("id") if isinstance(item, dict) else None
+                if type(work_item_id) is not int or work_item_id <= 0:
+                    malformed = True
                     continue
-                work_item_id = int(relation_item.get("id") or 0)
-                if work_item_id <= 0 or work_item_id in seen_ids:
-                    continue
-                seen_ids.add(work_item_id)
-                ordered_ids.append(work_item_id)
+                if work_item_id in flat_ids:
+                    malformed = True
+                flat_ids.add(work_item_id)
+                if work_item_id not in seen_ids:
+                    seen_ids.add(work_item_id)
+                    ordered_ids.append(work_item_id)
 
-        is_capped = len(ordered_ids) >= top
+        if isinstance(link_rows, list):
+            for relation in link_rows:
+                if not isinstance(relation, dict):
+                    malformed = True
+                    continue
+                valid_endpoint = False
+                for relation_end in ("source", "target"):
+                    relation_item = relation.get(relation_end)
+                    if relation_item is None:
+                        continue
+                    work_item_id = relation_item.get("id") if isinstance(relation_item, dict) else None
+                    if type(work_item_id) is not int or work_item_id <= 0:
+                        malformed = True
+                        continue
+                    valid_endpoint = True
+                    if work_item_id not in seen_ids:
+                        seen_ids.add(work_item_id)
+                        ordered_ids.append(work_item_id)
+                if not valid_endpoint:
+                    malformed = True
+
+        if malformed:
+            raise WIQLResponseError(tuple(ordered_ids))
+
+        is_flat_result = declared_flat is True or (
+            declared_flat is None and has_flat and (flat_populated or not has_links)
+        )
+        is_capped = len(ordered_ids) >= top or (isinstance(link_rows, list) and len(link_rows) >= top)
         if is_capped:
             logging.getLogger(__name__).warning(
-                "WIQL query returned %d IDs at cap %d — results are likely truncated; review query scope",
-                len(ordered_ids),
+                "WIQL query reached cap %d with %d unique IDs — results may be truncated; review query scope",
                 top,
+                len(ordered_ids),
             )
         if on_pagination is not None:
-            from src.core.integration_types import PaginationOutcome
+            from src.core.integration_types import WIQLPaginationOutcome
 
-            on_pagination(PaginationOutcome(total_fetched=len(ordered_ids), page_count=1, is_truncated=is_capped))
+            on_pagination(WIQLPaginationOutcome(
+                total_fetched=len(ordered_ids), page_count=1, is_truncated=is_capped, is_flat_result=is_flat_result,
+            ))
         return ordered_ids
 
     def list_team_iterations(self, timeframe: str | None = None, team: str | None = None) -> list[dict[str, Any]]:

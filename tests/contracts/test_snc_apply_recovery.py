@@ -104,7 +104,10 @@ class TestHappyPath:
         prog_dir.mkdir(parents=True, exist_ok=True)
         _write_assumptions_yaml(prog_dir, [_minimal_assumption("assume-alpha", text="old text")])
 
-        p = _accepted(programs_root)
+        p = _accepted(
+            programs_root, current_value="old text",
+            current_value_hash=hashlib.sha256(b"old text").hexdigest(),
+        )
         # Stub out proposal-store update (avoid full store wiring)
         with patch("src.core.ncfl_apply._update_proposal_status") as mock_update:
             result = apply_proposal(p, actor="test", programs_root=programs_root)
@@ -188,6 +191,21 @@ class TestSkipGuards:
         assert "hash" in result.note.lower()
 
 
+    def test_hashless_proposal_refuses_target_created_after_extraction(self, tmp_path) -> None:
+        """C.169: a proposal extracted against an absent value must not overwrite a value created later."""
+        programs_root = tmp_path / "programs"
+        prog_dir = programs_root / "alpha"
+        prog_dir.mkdir(parents=True, exist_ok=True)
+        p = _accepted(programs_root)
+        _write_assumptions_yaml(prog_dir, [_minimal_assumption("assume-alpha", text="created later")])
+
+        for dry_run in (True, False):
+            result = apply_proposal(p, actor="test", programs_root=programs_root, dry_run=dry_run)
+            assert result.action == "skipped_stale"
+        doc = yaml.safe_load((prog_dir / "assumptions.yaml").read_text(encoding="utf-8"))
+        assert doc["assumptions"][0]["text"] == "created later"
+
+
 class TestIdempotency:
 
     def test_already_applied_is_skipped(self, tmp_path) -> None:
@@ -215,7 +233,7 @@ class TestIdempotency:
         prog_dir.mkdir(parents=True, exist_ok=True)
         _write_assumptions_yaml(prog_dir, [_minimal_assumption("assume-alpha")])
 
-        p = _accepted(programs_root)
+        p = _accepted(programs_root, current_value="old")
         with patch("src.core.ncfl_apply._update_proposal_status"):
             r1 = apply_proposal(p, actor="test", programs_root=programs_root)
         assert r1.action == "applied"
@@ -284,7 +302,7 @@ class TestCrashRecovery:
         prog_dir.mkdir(parents=True, exist_ok=True)
         _write_assumptions_yaml(prog_dir, [_minimal_assumption("assume-alpha")])
 
-        p = _accepted(programs_root)
+        p = _accepted(programs_root, current_value="old")
         with patch("src.core.ncfl_apply._write_changelog_entry", side_effect=OSError("io error")):
             result = apply_proposal(p, actor="test", programs_root=programs_root)
 
@@ -312,6 +330,7 @@ class TestBatchApply:
                 programs_root,
                 proposal_id=f"prop-{i:03d}",
                 target_key=f"assume-{i}",
+                current_value="old",
             )
             for i in range(3)
         )

@@ -21,6 +21,74 @@ from src.core.reality_store import RealityStore
 from src.core.source_models import SourceKind
 
 
+@pytest.mark.parametrize("error_type", [OSError, ValueError, RuntimeError])
+def test_unvalidated_kpi_gap_failure_warns_without_disclosing_details(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    error_type: type[Exception],
+) -> None:
+    from src.commands import gather
+
+    skipped = KustoQuery(
+        id="private-query-canary", cluster="synthetic", database="synthetic", kql="print x=1",
+        section="KPI", render_as="metric_highlight", confidence="high",
+        refresh_on_gather=True, validated=False,
+    )
+    included = replace(skipped, id="valid-query", validated=True)
+    monkeypatch.setattr(gather, "load_kpi_queries", lambda *args, **kwargs: (skipped, included))
+
+    def fail_append(**kwargs: object) -> None:
+        raise error_type("private-error-canary")
+
+    monkeypatch.setattr(gather, "append_context_gap", fail_append)
+    with caplog.at_level("WARNING", logger=gather.log.name):
+        result = gather._load_refresh_kpi_queries("sample", programs_root=tmp_path)
+
+    assert result == (included,)
+    assert len(caplog.records) == 1
+    assert "context gap" in caplog.records[0].getMessage().lower()
+    assert "private-query-canary" not in caplog.text
+    assert "private-error-canary" not in caplog.text
+    assert caplog.records[0].exc_info is None
+
+
+def test_probe_includes_unvalidated_kpi_without_gap_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    from src.commands import gather
+
+    query = KustoQuery(
+        id="candidate", cluster="synthetic", database="synthetic", kql="print x=1",
+        section="KPI", render_as="metric_highlight", confidence="high",
+        refresh_on_gather=True, validated=False,
+    )
+    monkeypatch.setattr(gather, "load_kpi_queries", lambda *args, **kwargs: (query,))
+    monkeypatch.setattr(gather, "append_context_gap", lambda **kwargs: pytest.fail("unexpected gap append"))
+    with caplog.at_level("WARNING", logger=gather.log.name):
+        assert gather._load_refresh_kpi_queries("sample", programs_root=tmp_path, include_unvalidated=True) == (query,)
+    assert not caplog.records
+
+
+def test_unvalidated_kpi_gap_is_recorded_without_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    from src.commands import gather
+    from src.core.context_gap_store import load_context_gaps
+
+    skipped = KustoQuery(
+        id="candidate", cluster="synthetic", database="synthetic", kql="print x=1",
+        section="KPI", render_as="metric_highlight", confidence="high",
+        refresh_on_gather=True, validated=False,
+    )
+    included = replace(skipped, id="valid-query", validated=True)
+    monkeypatch.setattr(gather, "load_kpi_queries", lambda *args, **kwargs: (skipped, included))
+    with caplog.at_level("WARNING", logger=gather.log.name):
+        assert gather._load_refresh_kpi_queries("sample", programs_root=tmp_path) == (included,)
+    gaps = load_context_gaps("sample", programs_root=tmp_path)
+    assert len(gaps) == 1
+    assert gaps[0].field == "kpis.validated"
+    assert not caplog.records
+
+
 @pytest.mark.parametrize("row,expected", [
     ({"measurement_period_start": "2026-10-24", "measurement_period_end": "2026-10-25"}, "ordered"),
     ({"measurement_period_start": "2026-10-25", "measurement_period_end": "2026-10-25"}, "ordered"),

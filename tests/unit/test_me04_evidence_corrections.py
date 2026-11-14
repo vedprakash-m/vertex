@@ -12,11 +12,11 @@ def _make_pattern(lane_id: str = "acme.networking") -> "EvidenceCorrectionPatter
         lane_id=lane_id,
         corrected_at=datetime(2026, 6, 17, 18, 0, 0, tzinfo=timezone.utc),
         workiq_latest_before="2026-06-10: Low.",
-        workiq_latest_after="2026-06-17: Networking parity NOT achieved. IcM 771996570 ACTIVE.",
+        workiq_latest_after="2026-06-17: Networking parity NOT achieved. IcM 111111 ACTIVE.",
         risk_level_before="LOW",
         risk_level_after="HIGH",
         ado_ids_added=(),
-        icm_ids_added=("771996570",),
+        icm_ids_added=("111111",),
         source_hint="cowork_manual",
         operator="maintainer",
     )
@@ -31,7 +31,7 @@ def test_round_trip(tmp_path: Path) -> None:
     assert len(loaded) == 1
     assert loaded[0].lane_id == "acme.networking"
     assert loaded[0].risk_level_after == "HIGH"
-    assert "771996570" in loaded[0].icm_ids_added
+    assert "111111" in loaded[0].icm_ids_added
 
 
 def test_filter_by_lane(tmp_path: Path) -> None:

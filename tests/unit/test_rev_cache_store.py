@@ -55,6 +55,17 @@ class TestExtractionCacheStore:
         )
         assert got == claims
 
+    def test_delimited_keys_do_not_overwrite_each_other(self, tmp_path: Path) -> None:
+        first = dict(program_id="p1", source_hash="a|b", prompt_version="c",
+                     programs_root=tmp_path, now_epoch=T0)
+        second = dict(program_id="p1", source_hash="a", prompt_version="b|c",
+                      programs_root=tmp_path, now_epoch=T0)
+        put_extraction_result(claims=[{"id": "first"}], **first)
+        put_extraction_result(claims=[{"id": "second"}], **second)
+
+        assert get_extraction_result(**first) == [{"id": "first"}]
+        assert get_extraction_result(**second) == [{"id": "second"}]
+
     def test_different_source_hash_is_a_miss(self, tmp_path: Path) -> None:
         put_extraction_result(
             program_id="p1", source_hash="abc", prompt_version="rev_extractor.v1",
@@ -242,6 +253,17 @@ class TestJudgeCacheStore:
             ground_truth_hash=gt_hash, programs_root=tmp_path, now_epoch=T0,
         )
         assert got == verdict
+
+    def test_delimited_keys_do_not_overwrite_each_other(self, tmp_path: Path) -> None:
+        first = dict(program_id="p1", source_document_key="a|b", prompt_version="c",
+                     ground_truth_hash="d", programs_root=tmp_path, now_epoch=T0)
+        second = dict(program_id="p1", source_document_key="a", prompt_version="b|c",
+                      ground_truth_hash="d", programs_root=tmp_path, now_epoch=T0)
+        put_judge_result(verdict={"id": "first"}, **first)
+        put_judge_result(verdict={"id": "second"}, **second)
+
+        assert get_judge_result(**first) == {"id": "first"}
+        assert get_judge_result(**second) == {"id": "second"}
 
     def test_different_ground_truth_is_a_miss(self, tmp_path: Path) -> None:
         gt1 = hash_ground_truth(["fact1"])

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import traceback
 from datetime import date, datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -84,6 +85,61 @@ def test_extract_returns_none_on_invalid_json():
     assert agent.extract(ctx) is None
 
 
+@pytest.mark.parametrize("error_kind", ["value", "json"])
+def test_extraction_diagnostic_privacy_parse_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, error_kind: str,
+) -> None:
+    marker = "synthetic-private-parse-7f2"
+    error = ValueError(marker) if error_kind == "value" else json.JSONDecodeError(marker, "{}", 0)
+    monkeypatch.setattr("src.ai.content_extractor._extract_json", MagicMock(side_effect=error))
+
+    assert ContentExtractionAgent(ask_ai_fn=lambda _: "{}").extract(_make_ctx()) is None
+
+    assert "JSON parse failed" in caplog.text
+    assert marker not in caplog.text
+
+
+def test_extraction_diagnostic_privacy_invalid_confidence() -> None:
+    marker = "synthetic-private-confidence-7f2"
+    response = json.dumps({"risk_level": "low", "confidence": marker})
+    agent = ContentExtractionAgent(ask_ai_fn=lambda _: response)
+
+    with pytest.raises(ValueError) as caught:
+        agent.extract(_make_ctx())
+
+    assert "confidence" in str(caught.value).lower()
+    assert marker not in str(caught.value)
+    assert marker not in "".join(traceback.format_exception(caught.type, caught.value, caught.tb))
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["NaN", "Infinity", "-Infinity", "1e999", "-1e999", '"nan"', '"-inf"', '"1e999"'],
+)
+def test_extract_rejects_nonfinite_confidence(value: str) -> None:
+    agent = ContentExtractionAgent(ask_ai_fn=lambda _: f'{{"risk_level":"low","confidence":{value}}}')
+
+    with pytest.raises(ValueError, match="^ContentExtractionAgent: invalid confidence$"):
+        agent.extract(_make_ctx())
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("0.75", 0.75), ('"0.75"', 0.75), ("0", 0.0), ("1", 1.0),
+        ("-0.5", 0.0), ("1.5", 1.0), ("null", 0.0), (None, 0.0),
+    ],
+)
+def test_extract_finite_confidence_behavior_is_unchanged(value: str | None, expected: float) -> None:
+    response = f'{{"risk_level":"low","confidence":{value}}}' if value is not None else '{"risk_level":"low"}'
+    agent = ContentExtractionAgent(ask_ai_fn=lambda _: response)
+
+    evidence = agent.extract(_make_ctx())
+
+    assert evidence is not None
+    assert evidence.confidence == expected
+
+
 def test_extract_parses_risk_level():
     response = json.dumps({"risk_level": "high", "etas": [], "blocking_items": [],
                            "owners": [], "raw_excerpts": [], "confidence": 0.8})
@@ -98,9 +154,9 @@ def test_extract_parses_etas():
     response = json.dumps({
         "risk_level": "high",
         "etas": [{"label": "Perf Signoff", "eta_date": "2026-06-12",
-                  "owner": "Sukumar", "status": "missed", "ado_id": "900104"}],
+                  "owner": "Example Owner", "status": "missed", "ado_id": "900104"}],
         "blocking_items": [],
-        "owners": ["Sukumar"],
+        "owners": ["Example Owner"],
         "raw_excerpts": [],
         "confidence": 0.9,
     })
@@ -110,7 +166,7 @@ def test_extract_parses_etas():
     assert len(ev.etas) == 1
     assert ev.etas[0].label == "Perf Signoff"
     assert ev.etas[0].eta_date == date(2026, 6, 12)
-    assert ev.etas[0].owner == "Sukumar"
+    assert ev.etas[0].owner == "Example Owner"
     assert ev.etas[0].status == "missed"
     assert ev.etas[0].ado_id == "900104"
 
@@ -119,7 +175,7 @@ def test_extract_parses_blocking_items():
     response = json.dumps({
         "risk_level": "blocked",
         "etas": [],
-        "blocking_items": ["ADO:900112", "IcM:788471726", "PR:4312", "PIPELINE:88123"],
+        "blocking_items": ["ADO:900112", "IcM:222222", "PR:4312", "PIPELINE:88123"],
         "owners": [],
         "raw_excerpts": [],
         "confidence": 0.85,
@@ -128,7 +184,7 @@ def test_extract_parses_blocking_items():
     ev = agent.extract(_make_ctx())
     assert ev is not None
     assert "ADO:900112" in ev.blocking_items
-    assert "IcM:788471726" in ev.blocking_items
+    assert "IcM:222222" in ev.blocking_items
     assert "PR:4312" in ev.blocking_items
     assert "PIPELINE:88123" in ev.blocking_items
 
@@ -192,11 +248,11 @@ def test_local_kb_reads_markdown_file():
     from src.m365.local_kb_reader import read_local_kb_enrichments
     with tempfile.TemporaryDirectory() as tmp:
         kb_file = Path(tmp) / "test.md"
-        kb_file.write_text("# Test\nTao Peng owns 7 EXAMPLETAG1 items.", encoding="utf-8")
+        kb_file.write_text("# Test\nExample Person owns 7 EXAMPLETAG1 items.", encoding="utf-8")
         result = read_local_kb_enrichments(kb_paths=[tmp], stale_threshold_days=365)
     assert len(result) == 1
     assert result[0].source == "local_kb"
-    assert "Tao Peng" in result[0].body_text
+    assert "Example Person" in result[0].body_text
 
 
 def test_local_kb_skips_unsupported_extensions():

@@ -10,7 +10,7 @@ import sqlite3
 from typing import Any, Literal, cast
 
 from src.core._db import open_program_db
-from src.core.journal import PROGRAMS_ROOT, _signal_workstream_ids_for_storage
+from src.core.journal import PROGRAMS_ROOT, _signal_is_visible_in_committed_run, _signal_workstream_ids_for_storage
 from src.core.models import Confidence, RiskLevel
 from src.core.models_v2 import ReviewPolicy, Signal, SignalReviewDecision, SignalThreadLink, SignalUsageMarker, TrajectoryPoint
 
@@ -26,46 +26,103 @@ class SQLiteSignalStore:
     def __init__(self, programs_root: Path = PROGRAMS_ROOT) -> None:
         self._programs_root = programs_root
 
-    def append(self, signal: Signal) -> None:
+    def append(self, signal: Signal, *, append_only: bool = False) -> None:
+        with _connect_program_db(signal.program_id, programs_root=self._programs_root) as connection:
+            self._insert_signal(connection, signal, append_only=append_only, programs_root=self._programs_root)
+
+    def append_atomic(
+        self, program_id: str, signals: tuple[Signal, ...], *,
+        replace_failed_since: datetime | None = None,
+        replace_failed_until: datetime | None = None,
+    ) -> None:
+        if not signals:
+            return
+        if any(signal.program_id != program_id for signal in signals):
+            raise ValueError("Atomic signal batch must contain only the requested program")
+        with _connect_program_db(program_id, programs_root=self._programs_root) as connection:
+            if replace_failed_since is not None:
+                # Acquire the write lock before inspecting a replaceable row.
+                connection.execute("BEGIN IMMEDIATE")
+            for signal in signals:
+                self._insert_signal(
+                    connection,
+                    signal,
+                    append_only=True,
+                    programs_root=self._programs_root,
+                    replace_failed_since=replace_failed_since,
+                    replace_failed_until=replace_failed_until,
+                )
+
+    @staticmethod
+    def _insert_signal(
+        connection: sqlite3.Connection,
+        signal: Signal,
+        *,
+        append_only: bool,
+        programs_root: Path,
+        replace_failed_since: datetime | None = None,
+        replace_failed_until: datetime | None = None,
+    ) -> None:
         workstream_ids = _signal_workstream_ids_for_storage(signal)
         workstream_ids_json = json.dumps(workstream_ids) if workstream_ids is not None else None
-        with _connect_program_db(signal.program_id, programs_root=self._programs_root) as connection:
-            connection.execute(
-                """
-                INSERT OR REPLACE INTO signals (
-                    program_id,
-                    signal_id,
-                    timestamp,
-                    source,
-                    workstream_id,
-                    entity_refs_json,
-                    text,
-                    raw_ref,
-                    confidence,
-                    metadata_json,
-                    thread_id,
-                    review_policy,
-                    gather_run_id,
-                    workstream_ids_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    signal.program_id,
-                    signal.id,
-                    _encode_datetime(signal.timestamp),
-                    signal.source,
-                    signal.workstream_id,
-                    json.dumps(list(signal.entity_refs)),
-                    signal.text,
-                    signal.raw_ref,
-                    signal.confidence.value,
-                    json.dumps(signal.metadata, sort_keys=True) if signal.metadata is not None else None,
-                    signal.thread_id,
-                    signal.review_policy.value if signal.review_policy is not None else None,
-                    signal.gather_run_id,
-                    workstream_ids_json,
-                ),
-            )
+        insert = "INSERT" if append_only else "INSERT OR REPLACE"
+        # Both observations must be in the caller's deduplication window.
+        if append_only and signal.gather_run_id is not None and replace_failed_since is not None:
+            window_start = _normalize_datetime(replace_failed_since)
+            window_end = _normalize_datetime(replace_failed_until) if replace_failed_until is not None else None
+            candidate_at = _normalize_datetime(signal.timestamp)
+            if candidate_at >= window_start and (window_end is None or candidate_at <= window_end):
+                existing = connection.execute(
+                    "SELECT gather_run_id, timestamp FROM signals WHERE program_id = ? AND signal_id = ?",
+                    (signal.program_id, signal.id),
+                ).fetchone()
+                if existing is not None and existing[0] is not None and existing[0] != signal.gather_run_id:
+                    retained_at = _parse_datetime(existing[1])
+                    if retained_at >= window_start and (window_end is None or retained_at <= window_end):
+                        from src.core.gather_run_manifest import get_failed_run_dir, get_quarantine_run_dir
+
+                        # Running peers still collide; only terminal failures are replaceable.
+                        if any(
+                            resolve(signal.program_id, existing[0], programs_root=programs_root).is_dir()
+                            for resolve in (get_failed_run_dir, get_quarantine_run_dir)
+                        ):
+                            insert = "INSERT OR REPLACE"
+        connection.execute(
+            f"""
+            {insert} INTO signals (
+                program_id,
+                signal_id,
+                timestamp,
+                source,
+                workstream_id,
+                entity_refs_json,
+                text,
+                raw_ref,
+                confidence,
+                metadata_json,
+                thread_id,
+                review_policy,
+                gather_run_id,
+                workstream_ids_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                signal.program_id,
+                signal.id,
+                _encode_datetime(signal.timestamp),
+                signal.source,
+                signal.workstream_id,
+                json.dumps(list(signal.entity_refs)),
+                signal.text,
+                signal.raw_ref,
+                signal.confidence.value,
+                json.dumps(signal.metadata, sort_keys=True) if signal.metadata is not None else None,
+                signal.thread_id,
+                signal.review_policy.value if signal.review_policy is not None else None,
+                signal.gather_run_id,
+                workstream_ids_json,
+            ),
+        )
 
     def read(
         self,
@@ -76,9 +133,19 @@ class SQLiteSignalStore:
         read_only: bool = False,
         **filters: Any,
     ) -> tuple[Signal, ...]:
-        unexpected_filters = sorted(key for key in filters if key != "workstream_id")
+        unexpected_filters = sorted(key for key in filters if key not in {"workstream_id", "require_committed_gather_run"})
         if unexpected_filters:
             raise TypeError(f"Unsupported signal filters: {', '.join(unexpected_filters)}")
+
+        committed_run_ids: set[str] | None = None
+        legacy_cutoff_at: datetime | None = None
+        if filters.get("require_committed_gather_run", False):
+            from src.core.gather_run_manifest import get_verified_committed_run_state
+
+            run_ids, legacy_cutoff_at = get_verified_committed_run_state(
+                program_id, programs_root=self._programs_root,
+            )
+            committed_run_ids = set(run_ids)
 
         clauses = ["program_id = ?"]
         params: list[Any] = [program_id]
@@ -145,6 +212,10 @@ class SQLiteSignalStore:
                 gather_run_id=_optional_string(row["gather_run_id"]),
                 workstream_ids=workstream_ids,
             )
+            if committed_run_ids is not None and not _signal_is_visible_in_committed_run(
+                signal, committed_run_ids, legacy_cutoff_at,
+            ):
+                continue
             if workstream_id is not None and workstream_id not in signal.workstream_ids:
                 continue
             thread_link = thread_links.get(signal.id)

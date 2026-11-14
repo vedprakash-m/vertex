@@ -19,8 +19,8 @@ from src.core.ado_enrichment import (
 from src.core.ado_relations import parse_relations_payload, traverse_relations
 from src.core.ado_schema_drift import assert_row_shape
 from src.core.config_loader import PROGRAMS_ROOT
-from src.core.exceptions import QueryError
-from src.core.failure_taxonomy import safe_failure_suffix
+from src.core.exceptions import AuthError, CredentialExpired, QueryError
+from src.core.failure_taxonomy import FailureCategory, safe_failure_suffix
 from src.core.integration_types import (
     ADOHydrationOutput,
     ChannelConfig,
@@ -28,6 +28,7 @@ from src.core.integration_types import (
     HydrationMode,
     HydrationResult,
     IntegrationError,
+    PaginationOutcome,
     ProviderCapability,
     DiscoveryCompleteness,
     WorkItemRelation,
@@ -167,16 +168,16 @@ class ADOHydrationProvider:
                         operator_action="Verify Azure DevOps access and retry hydration.",
                     )
                 )
-                failed_ref_ids.extend((str(work_item_id), "work_item") for work_item_id in work_item_ids)
 
         items: list[WorkItem] = []
-        if work_item_ids and rows:
+        if work_item_ids:
             # activation.md §6.14.13 — inspect contract drift (non-fatal) so a
             # renamed/removed ADO field alerts the maintainer even when the
             # fail-closed required-field guard is satisfied.
             from src.core.ado_schema_drift import inspect_contract_drift
 
-            inspect_contract_drift(rows, contract_fields=ADO_BATCH_FIELDS)
+            if rows:
+                inspect_contract_drift(rows, contract_fields=ADO_BATCH_FIELDS)
             rows_by_id = {_row_work_item_id(row): row for row in rows}
             fetched_at = datetime.now(timezone.utc)
             registrations_by_id = {int(reg.ref_id): reg for reg in work_item_regs if reg.ref_id.isdigit()}
@@ -191,20 +192,20 @@ class ADOHydrationProvider:
             api_calls += detail_api_calls
             errors.extend(detail_errors)
             failed_ref_ids.extend((work_item_id, "work_item") for work_item_id in detail_failed_ids)
+            detail_failed_set = set(detail_failed_ids)
             for work_item_id in work_item_ids:
                 row = rows_by_id.get(work_item_id)
                 if row is None:
                     failed_ref_ids.append((str(work_item_id), "work_item"))
                     continue
                 registration = registrations_by_id.get(work_item_id)
-                if str(work_item_id) in detail_failed_ids:
-                    continue
                 revision_rows, comment_rows = detail_rows_by_id.get(work_item_id, ([], []))
                 item = _work_item_from_batch_row(row, revision_rows=revision_rows, comment_rows=comment_rows, fetched_at=fetched_at)
                 if registration is not None:
                     item.custom_fields["workstream_ids"] = tuple(registration.workstream_ids)
                 items.append(item)
-                hydrated_ref_ids.append((str(work_item_id), "work_item"))
+                if str(work_item_id) not in detail_failed_set:
+                    hydrated_ref_ids.append((str(work_item_id), "work_item"))
 
         pull_requests_list = []
         if repo_regs:
@@ -339,41 +340,82 @@ class ADOHydrationProvider:
         api_calls = 0
         for result in results:
             api_calls += result.api_calls
-            if result.error is not None:
-                errors.append(result.error)
+            if result.errors:
+                errors.extend(result.errors)
                 failed_ids.append(str(result.work_item_id))
-                continue
             detail_rows_by_id[result.work_item_id] = (result.revision_rows, result.comment_rows)
         return detail_rows_by_id, errors, failed_ids, api_calls
 
     @staticmethod
     def _fetch_item_detail(work_item_id: int, client: ADOClient) -> "_ItemDetailFetch":
         api_calls = 0
-        try:
-            revision_rows = client.list_work_item_revisions(work_item_id)
-            api_calls += 1
-            comment_rows: list[dict[str, Any]] = []
-            comment_loader = getattr(client, "list_work_item_comments", None)
-            if callable(comment_loader):
-                comment_rows = comment_loader(work_item_id)
-                api_calls += 1
-            return _ItemDetailFetch(work_item_id, revision_rows, comment_rows, api_calls)
-        except QueryError as error:
+        errors: list[IntegrationError] = []
+
+        def _fetch_history(
+            name: str,
+            loader: Callable[..., list[dict[str, Any]]] | None,
+            timestamp: Callable[[dict[str, Any]], datetime | None],
+        ) -> list[dict[str, Any]]:
+            nonlocal api_calls
             description = f"Failed to hydrate work item {work_item_id}"
-            return _ItemDetailFetch(
-                work_item_id,
-                [],
-                [],
-                api_calls,
+            outcomes: list[PaginationOutcome] = []
+            operator_action = None
+            failure_category = None
+            if loader is None:
+                message = f"{description} {name}: loader unavailable."
+            else:
+                try:
+                    history = loader(work_item_id, on_pagination=outcomes.append)
+                except AuthError as error:
+                    reason = "credential expired" if isinstance(error, CredentialExpired) else "authentication failed"
+                    message = f"{description} {name}: {reason}."
+                    operator_action = "Refresh Azure DevOps credentials and retry hydration."
+                    failure_category = FailureCategory.TRANSIENT_AUTH
+                except QueryError as error:
+                    message = f"{description} {name}{safe_failure_suffix(f'{description}: {error}')}"
+                else:
+                    api_calls += 1
+                    if len(outcomes) == 1 and isinstance(outcomes[0], PaginationOutcome):
+                        outcome = outcomes[0]
+                        if (
+                            type(outcome.total_fetched) is int
+                            and outcome.total_fetched == len(history)
+                            and type(outcome.page_count) is int
+                            and outcome.page_count > 0
+                            and outcome.is_truncated is False
+                        ):
+                            try:
+                                timestamps_valid = all(timestamp(row) is not None for row in history)
+                            except (ValueError, OverflowError):
+                                timestamps_valid = False
+                            if timestamps_valid:
+                                return history
+                            message = f"{description} {name}: invalid timestamp."
+                        else:
+                            reason = "truncated" if outcome.is_truncated is True else "unverified"
+                            message = f"{description} {name}: pagination {reason}."
+                    else:
+                        message = f"{description} {name}: pagination unverified."
+            errors.append(
                 IntegrationError(
                     source="ado",
                     stage="hydration",
-                    message=f"{description}{safe_failure_suffix(f'{description}: {error}')}",
+                    message=message,
                     retryable=True,
                     ref_id=str(work_item_id),
                     ref_kind="work_item",
-                ),
+                    operator_action=operator_action,
+                    failure_category=failure_category,
+                )
             )
+            return []
+
+        revision_rows = _fetch_history("revisions", client.list_work_item_revisions, _revision_timestamp)
+        comment_loader = getattr(client, "list_work_item_comments", None)
+        comment_rows = _fetch_history(
+            "comments", comment_loader if callable(comment_loader) else None, _comment_timestamp
+        )
+        return _ItemDetailFetch(work_item_id, revision_rows, comment_rows, api_calls, tuple(errors))
 
 
 @dataclass(frozen=True, slots=True)
@@ -382,7 +424,7 @@ class _ItemDetailFetch:
     revision_rows: list[dict[str, Any]]
     comment_rows: list[dict[str, Any]]
     api_calls: int
-    error: IntegrationError | None = None
+    errors: tuple[IntegrationError, ...] = ()
 
 
 def _requires_item_detail(
@@ -394,6 +436,8 @@ def _requires_item_detail(
 ) -> bool:
     if mode is not HydrationMode.FULL:
         return False
+    if registration is not None and registration.consecutive_hydration_failures > 0:
+        return True
     # ADF-W2.2: an item already verified more recently than the rolling
     # window only needs fresh detail when it changed after its own watermark.
     effective_since = since
@@ -478,12 +522,20 @@ def _work_item_from_batch_row(
     return item
 
 
+def _revision_timestamp(row: dict[str, Any]) -> datetime | None:
+    return _parse_datetime(_extract_fields(row).get("System.ChangedDate"))
+
+
+def _comment_timestamp(row: dict[str, Any]) -> datetime | None:
+    return _parse_datetime(row.get("publishedDate") or row.get("createdDate"))
+
+
 def _parse_revisions(work_item_id: int, rows: list[dict[str, Any]]) -> list[Revision]:
     revisions: list[Revision] = []
     previous_fields: dict[str, Any] | None = None
     for row in sorted(rows, key=lambda entry: int(entry.get("rev") or 0)):
         fields = _extract_fields(row)
-        changed_date = _parse_datetime(fields.get("System.ChangedDate"))
+        changed_date = _revision_timestamp(row)
         if changed_date is None:
             continue
         changed_by, changed_by_email = _parse_identity(fields.get("System.ChangedBy"))
@@ -511,7 +563,7 @@ def _parse_revisions(work_item_id: int, rows: list[dict[str, Any]]) -> list[Revi
 def _parse_comments(work_item_id: int, rows: list[dict[str, Any]]) -> list[Comment]:
     comments: list[Comment] = []
     for row in rows:
-        created_at = _parse_datetime(row.get("publishedDate") or row.get("createdDate"))
+        created_at = _comment_timestamp(row)
         if created_at is None:
             continue
         created_by, created_by_email = _parse_identity(row.get("createdBy"))

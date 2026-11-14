@@ -77,7 +77,7 @@ class WorkstreamEvidence:
     synthesized_at: datetime
     risk_level: "RiskLevel"
     etas: tuple[EtaRecord, ...]
-    blocking_items: tuple[str, ...]    # "ADO:900112", "IcM:771996570", "PR:1234", "PIPELINE:98765"
+    blocking_items: tuple[str, ...]    # "ADO:900112", "IcM:111111", "PR:1234", "PIPELINE:98765"
     owners: tuple[str, ...]
     source_refs: tuple[SourceRef, ...]
     raw_excerpts: tuple[str, ...]

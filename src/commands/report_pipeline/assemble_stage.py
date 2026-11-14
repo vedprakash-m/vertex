@@ -368,6 +368,15 @@ class DraftState:
     # verbatim by confirm -- never re-resolved live.
     gather_run_id: str | None = None
     gather_run_hash: str | None = None
+    # C.167: binds the draft to the program context it was generated from.
+    program_context_sha256: str | None = None
+
+
+def _program_context_sha256(bundle: Any) -> str | None:
+    from src.core.manifest_writer import hash_jsonable
+
+    program_context = getattr(bundle, "program_context", None)
+    return hash_jsonable(program_context) if program_context is not None else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1292,6 +1301,7 @@ def _generate_report_draft_from_context(ctx: StageContext) -> DraftArtifacts:
             program_fact_snapshot=draft_fact_snapshot,
             top_3_now=top_3_now,
             exec_summary_text=render_exec_summary_text,
+            program_context_sha256=_program_context_sha256(bundle),
         ),
     )
     adaptive_card_paths = _write_report_adaptive_cards(
@@ -1960,6 +1970,7 @@ def _generate_lookback_draft(
             exec_summary_text=exec_summary_text,
             gather_run_id=gather_run_id,
             gather_run_hash=gather_run_hash,
+            program_context_sha256=_program_context_sha256(bundle),
         ),
     )
     manifest_path = write_run_manifest(

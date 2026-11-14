@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 
 
@@ -36,9 +37,28 @@ class ContextBudgetResult:
     final_tokens: int
 
 
-def estimate_tokens(text: str, model: str = "gpt-4o-mini") -> int:
+def _resolve_strict_tokenizer(model: str) -> tuple[str, Callable[[str], int]]:
+    try:
+        tiktoken = importlib.import_module("tiktoken")
+    except ModuleNotFoundError as error:
+        if error.name != "tiktoken":
+            raise
+        return "char_heuristic:4cpt", lambda text: max(1, len(text) // 4)
+    try:
+        encoding_name = tiktoken.encoding_name_for_model(model)
+    except KeyError:
+        encoding_name = "cl100k_base"
+    encoding = tiktoken.get_encoding(encoding_name)
+    return f"tiktoken:{encoding_name}", lambda text: len(encoding.encode_ordinary(text))
+
+
+def estimate_tokens(text: str, model: str = "gpt-4o-mini", *, fail_closed: bool = False) -> int:
     if not text:
         return 0
+
+    if fail_closed:
+        _, estimate = _resolve_strict_tokenizer(model)
+        return estimate(text)
 
     try:
         tiktoken = importlib.import_module("tiktoken")
@@ -53,7 +73,7 @@ def estimate_tokens(text: str, model: str = "gpt-4o-mini") -> int:
         except Exception:
             return max(1, len(text) // 4)
     try:
-        return len(encoding.encode(text))
+        return len(encoding.encode_ordinary(text))
     except Exception:
         return max(1, len(text) // 4)
 

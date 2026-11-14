@@ -4,6 +4,10 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
+from src.core.exceptions import StateError
+from src.core.failure_taxonomy import FailureCategory
 from src.core.gather_state_store import load_gather_query_states, load_gather_state, write_gather_state
 from src.core.models_v2 import IntegrationError
 
@@ -170,6 +174,108 @@ def test_load_gather_state_reads_legacy_schema_1_payload(tmp_path: Path) -> None
     assert state.previous_query_states == {}
     assert state.previous_channels == {}
     assert state.previous_m365_discovery == {}
+    assert state.integration_error_details[0].failure_category is None
+
+
+def test_gather_state_round_trips_optional_typed_failure_category(tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    path = write_gather_state(
+        "acme", gathered_at=datetime(2026, 5, 17, tzinfo=timezone.utc),
+        scanned_items=0, discovered_signals=0, new_signals=0, pending_review=0,
+        trajectory_updates=0, auto_reviews_written=0, ado_calls=0,
+        archived_journal_files=0, background_proposals=0, integration_errors=2,
+        integration_error_details=(
+            IntegrationError(
+                source="ado", stage="hydration", retryable=True, message="authentication failure",
+                failure_category=FailureCategory.TRANSIENT_AUTH,
+            ),
+            IntegrationError(source="kusto", stage="gather", retryable=True, message="unavailable"),
+        ),
+        programs_root=programs_root,
+    )
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["integration_error_details"][0]["failure_category"] == "transient_auth"
+    assert "failure_category" not in payload["integration_error_details"][1]
+    state = load_gather_state("acme", programs_root=programs_root)
+    assert state is not None
+    assert state.integration_error_details[0].failure_category is FailureCategory.TRANSIENT_AUTH
+    assert state.integration_error_details[1].failure_category is None
+
+
+@pytest.mark.parametrize("include_null", [False, True])
+def test_gather_state_legacy_category_uses_message_classification(tmp_path: Path, include_null: bool) -> None:
+    from src.commands.doctor_checks.observability_checks import build_diagnose_report
+
+    program_dir = tmp_path / "acme"
+    program_dir.mkdir()
+    detail: dict[str, object] = {
+        "source": "ado", "stage": "hydration", "message": "HTTP 429 too many requests", "retryable": True,
+    }
+    if include_null:
+        detail["failure_category"] = None
+    (program_dir / "gather_state.json").write_text(
+        json.dumps({
+            "program_id": "acme", "gathered_at": "2026-05-17T14:02:11Z",
+            "integration_errors": 1, "integration_error_details": [detail],
+        }),
+        encoding="utf-8",
+    )
+
+    state = load_gather_state("acme", programs_root=tmp_path)
+    assert state is not None and state.integration_error_details[0].failure_category is None
+    report = build_diagnose_report("acme", programs_root=tmp_path)
+    assert report.last_failure_category is FailureCategory.RATE_LIMIT
+    assert report.last_failure_retryable is True
+
+
+@pytest.mark.parametrize("category", ["unexpected-private-category", "", 42, False, [], {}])
+def test_gather_state_rejects_invalid_typed_failure_category(tmp_path: Path, category: object) -> None:
+    programs_root = tmp_path / "programs"
+    program_dir = programs_root / "acme"
+    program_dir.mkdir(parents=True)
+    (program_dir / "gather_state.json").write_text(
+        json.dumps({
+            "program_id": "acme", "gathered_at": "2026-05-17T14:02:11Z",
+            "integration_errors": 1,
+            "integration_error_details": [{
+                "source": "ado", "stage": "hydration", "message": "failed",
+                "retryable": True, "failure_category": category,
+            }],
+        }),
+        encoding="utf-8",
+    )
+    with pytest.raises(StateError, match="Invalid integration error failure category") as exc:
+        load_gather_state("acme", programs_root=programs_root)
+    assert "unexpected-private-category" not in str(exc.value)
+
+
+@pytest.mark.parametrize("missing", ["source", "stage", "message"])
+@pytest.mark.parametrize("category", [None, "unexpected-private-category"])
+def test_gather_state_validates_category_before_skipping_incomplete_detail(
+    tmp_path: Path, missing: str, category: str | None,
+) -> None:
+    program_dir = tmp_path / "acme"
+    program_dir.mkdir()
+    detail: dict[str, object] = {
+        "source": "ado", "stage": "hydration", "message": "failed", "failure_category": category,
+    }
+    del detail[missing]
+    (program_dir / "gather_state.json").write_text(
+        json.dumps({
+            "program_id": "acme", "gathered_at": "2026-05-17T14:02:11Z",
+            "integration_errors": 1, "integration_error_details": [detail],
+        }),
+        encoding="utf-8",
+    )
+
+    if category is None:
+        state = load_gather_state("acme", programs_root=tmp_path)
+        assert state is not None and state.integration_error_details == ()
+    else:
+        with pytest.raises(StateError, match="Invalid integration error failure category") as exc:
+            load_gather_state("acme", programs_root=tmp_path)
+        assert category not in str(exc.value)
 
 
 def test_write_gather_state_carries_forward_previous_snapshots_when_omitted(tmp_path: Path) -> None:

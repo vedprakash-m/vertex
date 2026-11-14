@@ -558,6 +558,28 @@ def load_program_facts(
                 return fact.gather_run_id in committed_run_ids
             return legacy_cutoff_at is None or fact.recorded_at <= legacy_cutoff_at
 
+        # C.145/C.161 containment: a non-committed run that superseded a
+        # committed revision would otherwise make the fact silently vanish.
+        hidden = {
+            fact.fact_id: fact for fact in snapshot.facts
+            if fact.gather_run_id is not None and not _visible(fact)
+        }
+        if hidden:
+            history = ProgramFactStore(program_id, home_root=home_root, db_root=resolved_db_root).list_accepted_revisions(
+                tuple(hidden), as_of=snapshot.as_of,
+            )
+            for earlier in history:
+                latest = hidden[earlier.fact_id]
+                if (
+                    earlier.revision_id != latest.revision_id
+                    and earlier.recorded_at <= latest.recorded_at
+                    and _visible(earlier)
+                ):
+                    raise ValueError(
+                        f"Committed fact {latest.natural_key!r} was superseded by non-committed gather run "
+                        f"{latest.gather_run_id!r}; re-run gather to commit a replacement before reading."
+                    )
+
         snapshot = ProgramFactSnapshot(
             program_id=snapshot.program_id,
             as_of=snapshot.as_of,
@@ -1225,6 +1247,7 @@ def persist_program_fact_snapshot(
                 privacy_classification=fact.privacy_classification,
                 accepted_by=accepted_by if accepted_by is not None else fact.accepted_by,
                 write_authority=fact.write_authority,
+                gather_run_id=fact.gather_run_id,
             ),
             recorded_at=write_recorded_at,
         )
@@ -1261,6 +1284,7 @@ class ProgramFactStore:
         fact: ProgramFactInput,
         *,
         recorded_at: datetime | None = None,
+        committed_gather_run_ids: frozenset[str] | None = None,
     ) -> ProgramFactWriteResult:
         if not self._program_id:
             raise ValueError("program_id must not be empty")
@@ -1307,7 +1331,16 @@ class ProgramFactStore:
                 )
                 return ProgramFactWriteResult(revision=revision, action="created")
 
-            if self._revisions_equivalent(active_revision, fact):
+            # A retry restamps an unchanged fact left by an uncommitted gather
+            # run; otherwise it stays hidden from committed-only readers.
+            restamp_uncommitted = (
+                committed_gather_run_ids is not None
+                and fact.gather_run_id is not None
+                and active_revision.gather_run_id is not None
+                and active_revision.gather_run_id != fact.gather_run_id
+                and active_revision.gather_run_id not in committed_gather_run_ids
+            )
+            if self._revisions_equivalent(active_revision, fact) and not restamp_uncommitted:
                 return ProgramFactWriteResult(revision=active_revision, action="noop")
 
             if _PRECEDENCE_ORDER[fact.precedence] < _PRECEDENCE_ORDER[active_revision.precedence]:
@@ -1438,6 +1471,34 @@ class ProgramFactStore:
                     "milestone.entry",
                     FactReviewState.ACCEPTED.value,
                     *natural_keys,
+                    _serialize_datetime(as_of),
+                ),
+            ).fetchall()
+        return tuple(self._row_to_revision(row) for row in rows)
+
+    def list_accepted_revisions(
+        self,
+        fact_ids: tuple[str, ...],
+        *,
+        as_of: datetime,
+    ) -> tuple[ProgramFactRevision, ...]:
+        if not fact_ids or not self._db_path.exists():
+            return ()
+        placeholders = ", ".join("?" for _ in fact_ids)
+        with open_program_db(self._db_path, read_only=True) as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM program_fact_revisions
+                WHERE program_id = ?
+                  AND review_state = ?
+                  AND fact_id IN ({placeholders})
+                  AND recorded_at <= ?
+                ORDER BY recorded_at, revision_id
+                """,
+                (
+                    self._program_id,
+                    FactReviewState.ACCEPTED.value,
+                    *fact_ids,
                     _serialize_datetime(as_of),
                 ),
             ).fetchall()

@@ -568,3 +568,362 @@ def test_run_channel_with_extraction_skips_sync_for_non_ado_resources(
     )
 
     assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("configured_instance", "force_discovery", "dry_run", "failed", "legacy_result"),
+    [
+        (None, False, False, False, False),
+        (None, False, False, True, False),
+        (None, True, False, False, False),
+        (None, True, True, True, False),
+        ("", False, False, False, False),
+        ("default", False, False, False, False),
+        ("instance-a", False, False, False, False),
+        ("instance-a", True, False, True, False),
+        ("instance-a", True, False, False, True),
+    ],
+)
+def test_run_channel_isolates_provider_instance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    configured_instance: str | None,
+    force_discovery: bool,
+    dry_run: bool,
+    failed: bool,
+    legacy_result: bool,
+) -> None:
+    from dataclasses import replace
+
+    from src.core.channel_registry_store import ChannelRegistryStore
+    from src.core.integration_types import (
+        ADOHydrationOutput, ChannelBinding, ChannelConfig, ChannelRegistration, DiscoveredRef,
+        DiscoveryCompleteness, DiscoveryResult, HydrationResult, RegistrationBinding,
+        RegistrationStatus, RunContext,
+    )
+
+    now = datetime.now(timezone.utc)
+    selected = configured_instance or "default"
+    other = "instance-a" if selected == "default" else "default"
+    store = ChannelRegistryStore(tmp_path / "registry.sqlite3", "demo")
+    refs = {}
+    for instance, distinct_id in (("default", "102"), ("instance-a", "201")):
+        refs[instance] = tuple(
+            DiscoveredRef(
+                registration=ChannelRegistration(
+                    channel="ado", program_id="demo", provider_instance_id=instance,
+                    ref_id=ref_id, ref_kind="work_item", status=RegistrationStatus.ACTIVE,
+                    first_discovered_at=now, last_seen_at=now,
+                ),
+                bindings=(RegistrationBinding(
+                    workstream_id=f"demo.{instance}", scope_id=f"scope-{instance}",
+                    source_type="wiql_saved_query", confidence=1.0, confidence_source="wiql_saved_query",
+                ),),
+            )
+            for ref_id in ("101", distinct_id)
+        )
+        store.apply_discovery_result(DiscoveryResult(
+            channel="ado", program_id="demo", discovered_refs=refs[instance],
+            completeness=DiscoveryCompleteness.FULL, scope_statuses={}, scope_state_updates={},
+            errors=(), computed_at=now, provider_instance_id=instance,
+        ))
+
+    before_other = store.all_registrations("ado", provider_instance_id=other)
+    discoveries = []
+    hydrations = []
+
+    class _DiscoveryProvider:
+        def discover(self, program_id, config, existing, run_ctx=None):
+            del config, run_ctx
+            discoveries.append(existing)
+            discovered_refs = refs[selected]
+            if legacy_result:
+                discovered_refs = tuple(
+                    replace(ref, registration=replace(ref.registration, provider_instance_id="default"))
+                    for ref in discovered_refs
+                )
+            return DiscoveryResult(
+                channel="ado", program_id=program_id, discovered_refs=discovered_refs,
+                completeness=DiscoveryCompleteness.FULL, scope_statuses={}, scope_state_updates={},
+                errors=(), computed_at=now, provider_instance_id="default" if legacy_result else selected,
+            )
+
+    class _HydrationProvider:
+        def hydrate(self, registrations, since, program_id, config, mode=None, run_ctx=None):
+            del since, program_id, config, mode, run_ctx
+            hydrations.append(registrations)
+            item = WorkItem(
+                id=101, type="Feature", title="Hydrated", state="Active", assigned_to=None,
+                assigned_to_email=None, area_path="One\\Demo", iteration_path="One\\Iteration",
+                target_date=None, risk_level=RiskLevel.UNKNOWN, tags=[], custom_fields={}, fetched_at=now,
+            )
+            return HydrationResult(
+                channel="ado",
+                resources=ADOHydrationOutput(work_items=() if failed else (item,), freshness_items=()),
+                api_call_count=1, errors=(),
+                hydrated_ref_ids=() if failed else (("101", "work_item"),),
+                failed_ref_ids=(("101", "work_item"),) if failed else (),
+            )
+
+    binding = ChannelBinding(
+        config=ChannelConfig(
+            channel="ado", enabled=True, discovery_threshold_hours=24, ttl_days=None,
+            extra=None if configured_instance is None else {"instance_id": configured_instance},
+        ),
+        discovery_provider=_DiscoveryProvider(), hydration_provider=_HydrationProvider(),
+        signal_extractor=object(), discovery_config=object(), hydration_config=object(),
+    )
+    monkeypatch.setattr(channel_runtime, "load_arch_data_fix", lambda *args, **kwargs: None)
+    errors = []
+    hydration, _ = channel_runtime.run_channel(
+        binding, store, program_id="demo", since=now - timedelta(days=14),
+        verified_at=now + timedelta(minutes=1),
+        run_ctx=RunContext(force_discovery=force_discovery, dry_run=dry_run),
+        integration_error_sink=errors, programs_root=tmp_path,
+    )
+
+    assert len(discoveries) == int(force_discovery)
+    if discoveries:
+        assert {registration.provider_instance_id for registration in discoveries[0]} == {selected}
+    assert store.all_registrations("ado", provider_instance_id=other) == before_other
+    assert len(hydrations) == 1
+    assert {(registration.provider_instance_id, registration.ref_id) for registration in hydrations[0]} == {
+        (selected, ref.registration.ref_id) for ref in refs[selected]
+    }
+    assert next(registration for registration in hydrations[0] if registration.ref_id == "101").workstream_ids == (
+        f"demo.{selected}",
+    )
+    assert hydration is not None
+    if not failed:
+        assert hydration.resources.work_items[0].custom_fields["workstream_ids"] == (f"demo.{selected}",)
+    selected_registration = next(
+        registration for registration in store.all_registrations("ado", provider_instance_id=selected)
+        if registration.ref_id == "101"
+    )
+    assert selected_registration.last_verified_at == (
+        now + timedelta(minutes=1) if not failed and not dry_run else None
+    )
+    assert selected_registration.consecutive_hydration_failures == int(failed and not dry_run)
+
+
+def test_run_channel_default_provider_instance_discovery_ignores_other_freshness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from src.core.channel_registry_store import ChannelRegistryStore
+    from src.core.integration_types import (
+        ADOHydrationOutput, ChannelConfig, ChannelRegistration, DiscoveredRef, DiscoveryCompleteness,
+        DiscoveryResult, HydrationResult, RegistrationStatus, RunContext,
+    )
+
+    now = datetime.now(timezone.utc)
+    store = ChannelRegistryStore(tmp_path / "registry.sqlite3", "demo")
+    store.apply_discovery_result(DiscoveryResult(
+        channel="ado", program_id="demo",
+        discovered_refs=(DiscoveredRef(registration=ChannelRegistration(
+            channel="ado", program_id="demo", provider_instance_id="instance-a", ref_id="101",
+            ref_kind="work_item", status=RegistrationStatus.ACTIVE, first_discovered_at=now, last_seen_at=now,
+        ), bindings=()),),
+        completeness=DiscoveryCompleteness.FULL,
+        scope_statuses={}, scope_state_updates={}, errors=(), computed_at=now, provider_instance_id="instance-a",
+    ))
+    discoveries = []
+
+    def discover(program_id, config, existing, run_ctx=None):
+        del config, run_ctx
+        discoveries.append(existing)
+        return DiscoveryResult(
+            channel="ado", program_id=program_id, discovered_refs=(), completeness=DiscoveryCompleteness.FULL,
+            scope_statuses={}, scope_state_updates={}, errors=(), computed_at=now,
+        )
+
+    binding = SimpleNamespace(
+        config=ChannelConfig(channel="ado", enabled=True, discovery_threshold_hours=24, ttl_days=None),
+        discovery_provider=SimpleNamespace(discover=discover),
+        hydration_provider=SimpleNamespace(hydrate=lambda *args, **kwargs: HydrationResult(
+            channel="ado", resources=ADOHydrationOutput(work_items=(), freshness_items=()),
+            api_call_count=0, errors=(), hydrated_ref_ids=(), failed_ref_ids=(),
+        )),
+        discovery_config=object(), hydration_config=object(),
+    )
+    monkeypatch.setattr(channel_runtime, "load_arch_data_fix", lambda *args, **kwargs: None)
+    channel_runtime.run_channel(
+        binding, store, program_id="demo", since=now, verified_at=now, run_ctx=RunContext(),
+        integration_error_sink=[], programs_root=tmp_path,
+    )
+
+    assert discoveries == [()]
+
+
+@pytest.mark.parametrize(
+    ("selected", "returned", "result_kind"),
+    [
+        ("default", "instance-a", "declared"),
+        ("instance-a", "instance-b", "declared"),
+        ("default", "instance-a", "ref"),
+        ("default", "instance-a", "mixed"),
+    ],
+)
+def test_run_channel_rejects_foreign_discovery_provider_instance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selected: str, returned: str, result_kind: str,
+) -> None:
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from src.core.channel_registry_store import ChannelRegistryStore
+    from src.core.integration_types import (
+        ADOHydrationOutput, ChannelConfig, ChannelRegistration, DiscoveredRef, DiscoveryCompleteness,
+        DiscoveryResult, HydrationResult, RegistrationBinding, RegistrationStatus, RunContext,
+    )
+
+    now = datetime.now(timezone.utc)
+    store = ChannelRegistryStore(tmp_path / "registry.sqlite3", "demo")
+    refs = {}
+    for instance in (selected, returned):
+        ref = DiscoveredRef(
+            registration=ChannelRegistration(
+                channel="ado", program_id="demo", provider_instance_id=instance, ref_id="101",
+                ref_kind="work_item", status=RegistrationStatus.ACTIVE, first_discovered_at=now, last_seen_at=now,
+            ),
+            bindings=(RegistrationBinding(
+                workstream_id=f"demo.{instance}", scope_id=instance, source_type="wiql_saved_query",
+                confidence=1.0, confidence_source="wiql_saved_query",
+            ),),
+        )
+        store.apply_discovery_result(DiscoveryResult(
+            channel="ado", program_id="demo", discovered_refs=(ref,), completeness=DiscoveryCompleteness.FULL,
+            scope_statuses={}, scope_state_updates={}, errors=(), computed_at=now, provider_instance_id=instance,
+        ))
+        refs[instance] = ref
+    before_other = store.all_registrations("ado", provider_instance_id=returned)
+    hydrations = []
+
+    def hydrate(registrations, *args, **kwargs):
+        hydrations.append(registrations)
+        return HydrationResult(
+            channel="ado", resources=ADOHydrationOutput(work_items=(), freshness_items=()), api_call_count=0,
+            errors=(), hydrated_ref_ids=(), failed_ref_ids=(),
+        )
+
+    discovered_refs = ()
+    if result_kind in {"ref", "mixed"}:
+        discovered_refs = (refs[returned],)
+    if result_kind == "mixed":
+        discovered_refs += (replace(
+            refs[returned], registration=replace(refs[returned].registration, provider_instance_id="instance-b"),
+        ),)
+    binding = SimpleNamespace(
+        config=ChannelConfig(
+            channel="ado", enabled=True, discovery_threshold_hours=24, ttl_days=None,
+            extra=None if selected == "default" else {"instance_id": selected},
+        ),
+        discovery_provider=SimpleNamespace(discover=lambda *args, **kwargs: DiscoveryResult(
+            channel="ado", program_id="demo", discovered_refs=discovered_refs, completeness=DiscoveryCompleteness.FULL,
+            scope_statuses={}, scope_state_updates={}, errors=(), computed_at=now,
+            provider_instance_id=returned if result_kind == "declared" else "default",
+        )),
+        hydration_provider=SimpleNamespace(hydrate=hydrate),
+        discovery_config=object(), hydration_config=object(),
+    )
+    monkeypatch.setattr(channel_runtime, "load_arch_data_fix", lambda *args, **kwargs: None)
+    errors, outcomes, captures = [], [], []
+    hydration, delta = channel_runtime.run_channel(
+        binding, store, program_id="demo", since=now, verified_at=now, run_ctx=RunContext(force_discovery=True),
+        integration_error_sink=errors, channel_outcome_sink=outcomes, discovery_result_sink=captures,
+        programs_root=tmp_path,
+    )
+
+    assert hydration is not None
+    assert delta is None
+    assert captures == []
+    assert len(hydrations) == 1
+    assert {registration.provider_instance_id for registration in hydrations[0]} == {selected}
+    assert store.all_registrations("ado", provider_instance_id=returned) == before_other
+    assert len(errors) == 1 and errors[0].stage == "discovery"
+    assert "provider instance" in errors[0].message.lower()
+    assert returned not in errors[0].message
+    assert len(outcomes) == 1 and outcomes[0].degraded
+
+
+@pytest.mark.parametrize("gather_v2_enabled", [False, True])
+@pytest.mark.parametrize("selected", ["default", "instance-a"])
+@pytest.mark.parametrize("deferred", [False, True])
+def test_uil_ado_loader_isolates_provider_instance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, gather_v2_enabled: bool, selected: str, deferred: bool,
+) -> None:
+    from types import SimpleNamespace
+
+    from src.commands import gather
+    from src.core.channel_registry_store import ChannelRegistryStore
+    from src.core.integration_types import (
+        ADOHydrationOutput, ChannelConfig, ChannelRegistration, DiscoveredRef, DiscoveryCompleteness,
+        DiscoveryResult, HydrationResult, RegistrationBinding, RegistrationStatus,
+    )
+    from src.core.models_v2 import Program
+    from src.core.program_paths import get_channel_registry_path
+
+    now = datetime.now(timezone.utc)
+    store = ChannelRegistryStore(get_channel_registry_path("demo", programs_root=tmp_path), "demo")
+    for instance in ("default", "instance-a"):
+        ref = DiscoveredRef(
+            registration=ChannelRegistration(
+                channel="ado", program_id="demo", provider_instance_id=instance, ref_id="101",
+                ref_kind="work_item", status=RegistrationStatus.ACTIVE, first_discovered_at=now, last_seen_at=now,
+            ),
+            bindings=(RegistrationBinding(
+                workstream_id=f"demo.{instance}", scope_id=instance, source_type="wiql_saved_query",
+                confidence=1.0, confidence_source="wiql_saved_query",
+            ),),
+        )
+        store.apply_discovery_result(DiscoveryResult(
+            channel="ado", program_id="demo", discovered_refs=(ref,), completeness=DiscoveryCompleteness.FULL,
+            scope_statuses={}, scope_state_updates={}, errors=(), computed_at=now, provider_instance_id=instance,
+        ))
+    other = "instance-a" if selected == "default" else "default"
+    before_selected = store.all_registrations("ado", provider_instance_id=selected)
+    before_other = store.all_registrations("ado", provider_instance_id=other)
+    hydrated = []
+    item = WorkItem(
+        id=101, type="Feature", title="Hydrated", state="Active", assigned_to=None, assigned_to_email=None,
+        area_path="One\\Demo", iteration_path="One\\Iteration", target_date=None, risk_level=RiskLevel.UNKNOWN,
+        tags=[], custom_fields={}, fetched_at=now,
+    )
+
+    def hydrate(registrations, *args, **kwargs):
+        hydrated.append(registrations)
+        return HydrationResult(
+            channel="ado", resources=ADOHydrationOutput(work_items=(item,), freshness_items=(item,)),
+            api_call_count=1, errors=(), hydrated_ref_ids=(("101", "work_item"),), failed_ref_ids=(),
+        )
+
+    binding = SimpleNamespace(
+        config=ChannelConfig(
+            channel="ado", enabled=True, discovery_threshold_hours=24, ttl_days=None,
+            extra=None if selected == "default" else {"instance_id": selected},
+        ),
+        discovery_provider=SimpleNamespace(),
+        hydration_provider=SimpleNamespace(hydrate=hydrate),
+        discovery_config=object(), hydration_config=object(),
+    )
+    monkeypatch.setattr(channel_runtime, "load_arch_data_fix", lambda *args, **kwargs: None)
+    monkeypatch.setattr(channel_runtime, "_resolve_channel_budget_alert_best_effort", lambda *args, **kwargs: None)
+    monkeypatch.delenv("VERTEX_UIL_FORCE_DISCOVERY", raising=False)
+    monkeypatch.delenv("VERTEX_UIL_ACCEPT_SHRINKAGE", raising=False)
+    deferred_verifications = [] if deferred else None
+    items, freshness, calls = gather._load_ado_items_via_uil(
+        Program(schema_version="2.0", id="demo", name="Demo"), (), now + timedelta(minutes=1),
+        since=now, programs_root=tmp_path, binding=binding, integration_error_sink=[],
+        gather_v2_enabled=gather_v2_enabled, deferred_verifications=deferred_verifications,
+    )
+
+    assert len(hydrated) == 1
+    assert {registration.provider_instance_id for registration in hydrated[0]} == {selected}
+    assert items[0].custom_fields["workstream_ids"] == (f"demo.{selected}",)
+    assert freshness == items and calls == 1
+    if deferred_verifications is not None:
+        assert store.all_registrations("ado", provider_instance_id=selected) == before_selected
+        assert len(deferred_verifications) == 1
+        deferred_verifications[0]()
+    assert store.all_registrations("ado", provider_instance_id=selected)[0].last_verified_at == now + timedelta(minutes=1)
+    assert store.all_registrations("ado", provider_instance_id=other) == before_other

@@ -14,7 +14,7 @@ class FileSignalStore:
     def __init__(self, programs_root: Path = journal.PROGRAMS_ROOT) -> None:
         self._programs_root = programs_root
 
-    def append(self, signal: Signal) -> None:
+    def append(self, signal: Signal, *, append_only: bool = False) -> None:
         journal.append_signal(signal, programs_root=self._programs_root)
 
     def read(

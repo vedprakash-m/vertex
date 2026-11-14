@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import threading
 import time
-from datetime import datetime, timezone
-from typing import Any
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Callable
 
 import pytest
 
@@ -17,7 +20,8 @@ from src.core.ado_hydration import (
     _work_item_from_batch_row,
 )
 from src.core.config_loader import ScorecardDimensionSettings, ScorecardSettings
-from src.core.integration_types import ChannelRegistration, HydrationMode, RegistrationStatus
+from src.core.exceptions import AuthError, CredentialExpired
+from src.core.integration_types import ChannelRegistration, HydrationMode, PaginationOutcome, RegistrationStatus
 from src.core.models import RiskLevel, WorkItem
 from src.core.overrides_store import DimensionOverride, OverridesDocument, ScorecardOverrides
 
@@ -66,9 +70,8 @@ class _FakeADOClient:
         ]
 
     def list_work_item_revisions(self, work_item_id: int, **kwargs: object) -> list[dict[str, object]]:
-        del kwargs  # ADF-W2.1: real client now accepts on_pagination/page_size/max_pages
         self.revision_calls.append(work_item_id)
-        return [
+        rows: list[dict[str, object]] = [
             {
                 "rev": 1,
                 "fields": {
@@ -86,11 +89,14 @@ class _FakeADOClient:
                 },
             },
         ]
+        callback = kwargs.get("on_pagination")
+        if callable(callback):
+            callback(PaginationOutcome(total_fetched=len(rows), page_count=1, is_truncated=False))
+        return rows
 
     def list_work_item_comments(self, work_item_id: int, **kwargs: object) -> list[dict[str, object]]:
-        del kwargs  # ADF-W2.1: real client now accepts on_pagination/max_pages
         self.comment_calls.append(work_item_id)
-        return [
+        rows: list[dict[str, object]] = [
             {
                 "id": 7,
                 "createdBy": {"displayName": "Owner", "uniqueName": "owner@example.com"},
@@ -98,6 +104,87 @@ class _FakeADOClient:
                 "text": "Ready for review",
             }
         ]
+        callback = kwargs.get("on_pagination")
+        if callable(callback):
+            callback(PaginationOutcome(total_fetched=len(rows), page_count=1, is_truncated=False))
+        return rows
+
+
+class _IncompleteHistoryClient(_FakeADOClient):
+    def __init__(self, failures: dict[str, str]) -> None:
+        super().__init__()
+        self.failures = failures
+
+    def _history(
+        self,
+        kind: str,
+        work_item_id: int,
+        kwargs: dict[str, object],
+        loader: Callable[..., list[dict[str, object]]],
+    ) -> list[dict[str, object]]:
+        failure = self.failures.get(kind) if work_item_id == 101 else None
+        if failure is None:
+            return loader(work_item_id, **kwargs)
+        if failure == "query_error":
+            from src.core.exceptions import QueryError
+
+            calls = self.revision_calls if kind == "revisions" else self.comment_calls
+            calls.append(work_item_id)
+            raise QueryError("429 confidential-provider-detail")
+        if failure in ("auth_error", "credential_expired"):
+            calls = self.revision_calls if kind == "revisions" else self.comment_calls
+            calls.append(work_item_id)
+            if failure == "credential_expired":
+                raise CredentialExpired("confidential-provider-detail", auth_method="ADO_PAT", connector="ADO")
+            raise AuthError("confidential-provider-detail")
+        if failure.startswith("timestamp_"):
+            rows = loader(work_item_id, **kwargs)
+            row = rows[0]
+            if kind == "revisions":
+                row["revisedDate"] = "2026-05-24T10:00:00Z"
+                fields = row["fields"]
+                assert isinstance(fields, dict)
+                row = fields
+                timestamp_key = "System.ChangedDate"
+            else:
+                timestamp_key = "createdDate"
+            if failure == "timestamp_missing":
+                del row[timestamp_key]
+            else:
+                row[timestamp_key] = {
+                    "timestamp_none": None,
+                    "timestamp_blank": " ",
+                    "timestamp_type": 123,
+                    "timestamp_invalid": "confidential-provider-detail",
+                    "timestamp_overflow": "0001-01-01T00:00:00+14:00",
+                }[failure]
+            return rows
+        rows = loader(work_item_id)
+        if failure == "bool_count":
+            rows = rows[:1]
+        callback = kwargs.get("on_pagination")
+        if callable(callback) and failure != "missing":
+            if failure == "wrong_type":
+                callback("untrusted outcome")
+            else:
+                total: Any = True if failure == "bool_count" else len(rows) + (failure == "count")
+                pages: Any = True if failure == "bool_pages" else (0 if failure == "pages" else 1)
+                truncated: Any = 1 if failure == "flag" else failure == "truncated"
+                outcome = PaginationOutcome(
+                    total_fetched=total,
+                    page_count=pages,
+                    is_truncated=truncated,
+                )
+                callback(outcome)
+                if failure == "duplicate":
+                    callback(outcome)
+        return rows
+
+    def list_work_item_revisions(self, work_item_id: int, **kwargs: object) -> list[dict[str, object]]:
+        return self._history("revisions", work_item_id, kwargs, super().list_work_item_revisions)
+
+    def list_work_item_comments(self, work_item_id: int, **kwargs: object) -> list[dict[str, object]]:
+        return self._history("comments", work_item_id, kwargs, super().list_work_item_comments)
 
 
 def _risk_row(
@@ -460,6 +547,372 @@ def test_ado_hydration_freshness_only_skips_revisions_and_comments() -> None:
     assert client.comment_calls == []
 
 
+@pytest.mark.parametrize("kind", ["revisions", "comments"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "truncated", "missing", "duplicate", "wrong_type", "count", "bool_count",
+        "pages", "bool_pages", "flag", "query_error", "auth_error", "credential_expired",
+        "timestamp_missing", "timestamp_none", "timestamp_blank", "timestamp_type",
+        "timestamp_invalid", "timestamp_overflow",
+    ],
+)
+def test_incomplete_history_preserves_independent_item_data(kind: str, failure: str) -> None:
+    client = _IncompleteHistoryClient({kind: failure})
+    provider = ADOHydrationProvider(client)  # type: ignore[arg-type]
+
+    result = provider.hydrate(
+        (_registration("101"), _registration("102")),
+        datetime(2026, 5, 23, tzinfo=timezone.utc),
+        "demo",
+        ADOHydrationConfig(),
+    )
+
+    assert [item.id for item in result.resources.work_items] == [101, 102]
+    item = result.resources.work_items[0]
+    assert bool(item.revisions) is (kind != "revisions")
+    assert bool(item.comments) is (kind != "comments")
+    assert result.resources.freshness_items == result.resources.work_items
+    assert result.hydrated_ref_ids == (("102", "work_item"),)
+    assert result.failed_ref_ids == (("101", "work_item"),)
+    assert len(result.errors) == 1
+    assert result.errors[0].ref_id == "101" and result.errors[0].retryable
+    assert kind in result.errors[0].message.lower()
+    assert "confidential-provider-detail" not in repr(result.errors)
+    if failure.startswith("timestamp_"):
+        assert result.errors[0].message == f"Failed to hydrate work item 101 {kind}: invalid timestamp."
+        assert result.api_call_count == 5
+    if failure in ("auth_error", "credential_expired"):
+        expected = "credential expired" if failure == "credential_expired" else "authentication failed"
+        assert expected in result.errors[0].message
+        assert result.errors[0].operator_action == "Refresh Azure DevOps credentials and retry hydration."
+    assert client.revision_calls == [101, 102]
+    assert client.comment_calls == [101, 102]
+
+
+@pytest.mark.parametrize(
+    "failures",
+    [
+        {"revisions": "truncated", "comments": "query_error"},
+        {"revisions": "timestamp_missing", "comments": "timestamp_invalid"},
+    ],
+)
+def test_two_incomplete_histories_report_each_failure_once_per_resource(failures: dict[str, str]) -> None:
+    client = _IncompleteHistoryClient(failures)
+    result = ADOHydrationProvider(client).hydrate(  # type: ignore[arg-type]
+        (_registration("101"),), datetime(2026, 5, 23, tzinfo=timezone.utc), "demo", ADOHydrationConfig()
+    )
+
+    assert [item.id for item in result.resources.work_items] == [101]
+    assert result.resources.work_items[0].revisions == []
+    assert result.resources.work_items[0].comments == []
+    assert result.hydrated_ref_ids == ()
+    assert result.failed_ref_ids == (("101", "work_item"),)
+    assert len(result.errors) == 2
+    assert "revisions" in result.errors[0].message.lower()
+    assert "comments" in result.errors[1].message.lower()
+    assert "confidential-provider-detail" not in repr(result.errors)
+
+
+def test_two_history_auth_failures_preserve_item_and_report_each_failure() -> None:
+    client = _IncompleteHistoryClient({"revisions": "credential_expired", "comments": "auth_error"})
+    result = ADOHydrationProvider(client).hydrate(  # type: ignore[arg-type]
+        (_registration("101"),), datetime(2026, 5, 23, tzinfo=timezone.utc), "demo", ADOHydrationConfig()
+    )
+
+    assert [item.id for item in result.resources.work_items] == [101]
+    assert not result.resources.work_items[0].revisions and not result.resources.work_items[0].comments
+    assert result.hydrated_ref_ids == () and result.failed_ref_ids == (("101", "work_item"),)
+    assert len(result.errors) == 2
+    assert "revisions" in result.errors[0].message and "comments" in result.errors[1].message
+    assert all(
+        error.operator_action == "Refresh Azure DevOps credentials and retry hydration." for error in result.errors
+    )
+    assert "confidential-provider-detail" not in repr(result.errors)
+
+
+def test_missing_comment_loader_does_not_claim_complete_history(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _FakeADOClient()
+    monkeypatch.setattr(client, "list_work_item_comments", None)
+    result = ADOHydrationProvider(client).hydrate(  # type: ignore[arg-type]
+        (_registration("101"),), datetime(2026, 5, 23, tzinfo=timezone.utc), "demo", ADOHydrationConfig()
+    )
+
+    assert result.resources.work_items[0].revisions
+    assert result.resources.work_items[0].comments == []
+    assert result.hydrated_ref_ids == ()
+    assert result.failed_ref_ids == (("101", "work_item"),)
+    assert len(result.errors) == 1 and "comments" in result.errors[0].message.lower()
+
+
+def test_partial_batch_failure_keeps_success_and_failure_references_disjoint() -> None:
+    from src.core.exceptions import QueryError
+
+    class _PartialBatchClient(_FakeADOClient):
+        def query_work_items_batch(self, work_item_ids: list[int], fields: tuple[str, ...]) -> list[dict[str, object]]:
+            if work_item_ids == [102]:
+                raise QueryError("429 confidential-provider-detail")
+            return super().query_work_items_batch(work_item_ids, fields)
+
+    result = ADOHydrationProvider(_PartialBatchClient()).hydrate(  # type: ignore[arg-type]
+        (_registration("101"), _registration("102"), _registration("103")),
+        datetime(2026, 5, 23, tzinfo=timezone.utc), "demo", ADOHydrationConfig(batch_size=1),
+    )
+
+    assert [item.id for item in result.resources.work_items] == [101]
+    assert result.hydrated_ref_ids == (("101", "work_item"),)
+    assert result.failed_ref_ids == (("102", "work_item"), ("103", "work_item"))
+    assert set(result.hydrated_ref_ids).isdisjoint(result.failed_ref_ids)
+    assert "confidential-provider-detail" not in repr(result.errors)
+
+
+def test_missing_batch_rows_do_not_claim_success() -> None:
+    class _EmptyBatchClient(_FakeADOClient):
+        def query_work_items_batch(self, work_item_ids: list[int], fields: tuple[str, ...]) -> list[dict[str, object]]:
+            return []
+
+    result = ADOHydrationProvider(_EmptyBatchClient()).hydrate(  # type: ignore[arg-type]
+        (_registration("101"),), datetime(2026, 5, 23, tzinfo=timezone.utc), "demo", ADOHydrationConfig()
+    )
+
+    assert result.resources.work_items == ()
+    assert result.hydrated_ref_ids == ()
+    assert result.failed_ref_ids == (("101", "work_item"),)
+
+
+@pytest.mark.parametrize("kind", ["revisions", "comments"])
+def test_actual_ado_client_page_cap_degrades_hydration(kind: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.core.ado_client import ADOClient
+
+    client = _FakeADOClient()
+    real = object.__new__(ADOClient)
+    real._rest_base_url = "https://example.invalid/"
+    monkeypatch.setattr(real, "_request_json", lambda *_args, **_kwargs: {"value": [{"rev": 1, "fields": {}}]})
+    monkeypatch.setattr(
+        real,
+        "_request_response",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            headers={"x-ms-continuationtoken": "more"}, json=lambda: {"comments": [{"id": 1}]}
+        ),
+    )
+    if kind == "revisions":
+        def capped(work_item_id: int, **kwargs: object) -> list[dict[str, Any]]:
+            return real.list_work_item_revisions(work_item_id, page_size=1, max_pages=1, **kwargs)
+
+        monkeypatch.setattr(client, "list_work_item_revisions", capped)
+    else:
+        def capped(work_item_id: int, **kwargs: object) -> list[dict[str, Any]]:
+            return real.list_work_item_comments(work_item_id, max_pages=1, **kwargs)
+
+        monkeypatch.setattr(client, "list_work_item_comments", capped)
+
+    result = ADOHydrationProvider(client).hydrate(  # type: ignore[arg-type]
+        (_registration("101"),), datetime(2026, 5, 23, tzinfo=timezone.utc), "demo", ADOHydrationConfig()
+    )
+
+    assert [item.id for item in result.resources.work_items] == [101]
+    assert result.hydrated_ref_ids == ()
+    assert result.failed_ref_ids == (("101", "work_item"),)
+    assert len(result.errors) == 1 and "truncat" in result.errors[0].message.lower()
+    assert bool(result.resources.work_items[0].revisions) is (kind != "revisions")
+    assert bool(result.resources.work_items[0].comments) is (kind != "comments")
+
+
+@pytest.mark.parametrize("kind", ["revisions", "comments"])
+def test_actual_ado_client_401_degrades_history_without_provider_text(
+    kind: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.core.ado_client import ADOClient
+
+    client = _FakeADOClient()
+    real = object.__new__(ADOClient)
+    real._rest_base_url = "https://example.invalid/"
+    real.auth_method = "pat"
+    monkeypatch.setattr(
+        real,
+        "_request_with_progress",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            status_code=401, headers={"WWW-Authenticate": "confidential-provider-detail"}
+        ),
+    )
+    monkeypatch.setattr(client, f"list_work_item_{kind}", getattr(real, f"list_work_item_{kind}"))
+    result = ADOHydrationProvider(client).hydrate(  # type: ignore[arg-type]
+        (_registration("101"),), datetime(2026, 5, 23, tzinfo=timezone.utc), "demo", ADOHydrationConfig()
+    )
+
+    assert [item.id for item in result.resources.work_items] == [101]
+    assert bool(result.resources.work_items[0].revisions) is (kind != "revisions")
+    assert bool(result.resources.work_items[0].comments) is (kind != "comments")
+    assert result.hydrated_ref_ids == () and result.failed_ref_ids == (("101", "work_item"),)
+    assert len(result.errors) == 1 and "credential expired" in result.errors[0].message
+    assert result.errors[0].operator_action == "Refresh Azure DevOps credentials and retry hydration."
+    assert "confidential-provider-detail" not in repr(result.errors)
+
+
+def test_complete_empty_histories_are_verified() -> None:
+    class _EmptyHistoryClient(_FakeADOClient):
+        def list_work_item_revisions(self, work_item_id: int, **kwargs: object) -> list[dict[str, object]]:
+            callback = kwargs.get("on_pagination")
+            if callable(callback):
+                callback(PaginationOutcome(0, 1, False))
+            return []
+
+        def list_work_item_comments(self, work_item_id: int, **kwargs: object) -> list[dict[str, object]]:
+            callback = kwargs.get("on_pagination")
+            if callable(callback):
+                callback(PaginationOutcome(0, 1, False))
+            return []
+
+    result = ADOHydrationProvider(_EmptyHistoryClient()).hydrate(  # type: ignore[arg-type]
+        (_registration("101"),), datetime(2026, 5, 23, tzinfo=timezone.utc), "demo", ADOHydrationConfig()
+    )
+
+    assert result.errors == ()
+    assert result.failed_ref_ids == ()
+    assert result.hydrated_ref_ids == (("101", "work_item"),)
+    assert result.resources.work_items[0].revisions == []
+    assert result.resources.work_items[0].comments == []
+
+
+@pytest.mark.parametrize(
+    ("published", "created", "expected"),
+    [
+        ("2026-05-24T14:00:00+02:00", "confidential-provider-detail",
+         datetime(2026, 5, 24, 12, tzinfo=timezone.utc)),
+        (None, "2026-05-24T12:00:00Z", datetime(2026, 5, 24, 12, tzinfo=timezone.utc)),
+        ("", "2026-05-24T12:00:00Z", datetime(2026, 5, 24, 12, tzinfo=timezone.utc)),
+        (" ", "2026-05-24T12:00:00Z", None),
+        ("confidential-provider-detail", "2026-05-24T12:00:00Z", None),
+        (123, "2026-05-24T12:00:00Z", None),
+    ],
+)
+def test_comment_timestamp_preserves_existing_precedence(
+    published: object, created: object, expected: datetime | None,
+) -> None:
+    class _CommentDatesClient(_FakeADOClient):
+        def list_work_item_comments(self, work_item_id: int, **kwargs: object) -> list[dict[str, object]]:
+            rows = super().list_work_item_comments(work_item_id, **kwargs)
+            rows[0]["publishedDate"] = published
+            rows[0]["createdDate"] = created
+            return rows
+
+    result = ADOHydrationProvider(_CommentDatesClient()).hydrate(  # type: ignore[arg-type]
+        (_registration("101"),), datetime(2026, 5, 23, tzinfo=timezone.utc), "demo", ADOHydrationConfig()
+    )
+
+    if expected is None:
+        assert result.failed_ref_ids == (("101", "work_item"),)
+        assert result.resources.work_items[0].comments == []
+        assert result.errors[0].message == "Failed to hydrate work item 101 comments: invalid timestamp."
+    else:
+        assert result.errors == ()
+        assert result.hydrated_ref_ids == (("101", "work_item"),)
+        assert result.resources.work_items[0].comments[0].created_date == expected
+
+
+@pytest.mark.parametrize(
+    ("kind", "failure"),
+    [
+        ("revisions", "truncated"),
+        ("revisions", "timestamp_missing"),
+        ("comments", "timestamp_missing"),
+        ("revisions", "timestamp_invalid"),
+        ("comments", "timestamp_invalid"),
+    ],
+)
+def test_partial_history_retry_uses_real_registry_and_channel_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str, failure: str,
+) -> None:
+    from src.commands.gather_pipeline import channel_runtime
+    from src.core.ado_signal_extractor import ADOSignalExtractor
+    from src.core.channel_registry_store import ChannelRegistryStore
+    from src.core.integration_types import (
+        ChannelBinding,
+        ChannelConfig,
+        DiscoveredRef,
+        DiscoveryCompleteness,
+        DiscoveryResult,
+        RegistrationBinding,
+        RunContext,
+    )
+
+    now = datetime.now(timezone.utc)
+    prior = datetime(2026, 5, 24, 9, tzinfo=timezone.utc)
+    store = ChannelRegistryStore(tmp_path / "registry.sqlite3", "demo")
+    scope = RegistrationBinding(
+        workstream_id="demo.slice", scope_id="synthetic", source_type="manual_config",
+        confidence=1.0, confidence_source="manual_config",
+    )
+    refs = tuple(
+        DiscoveredRef(
+            replace(_registration(ref_id, last_verified_at=prior), first_discovered_at=now, last_seen_at=now),
+            (scope,),
+        )
+        for ref_id in ("101", "102")
+    )
+    store.apply_discovery_result(DiscoveryResult(
+        channel="ado", program_id="demo", discovered_refs=refs, completeness=DiscoveryCompleteness.FULL,
+        scope_statuses={}, scope_state_updates={}, errors=(), computed_at=now,
+    ))
+    client = _IncompleteHistoryClient({kind: failure})
+    binding = ChannelBinding(
+        config=ChannelConfig(channel="ado", enabled=True, discovery_threshold_hours=24, ttl_days=30),
+        discovery_provider=SimpleNamespace(),
+        discovery_config=SimpleNamespace(),
+        hydration_provider=ADOHydrationProvider(client),  # type: ignore[arg-type]
+        hydration_config=ADOHydrationConfig(),
+        signal_extractor=ADOSignalExtractor(),
+    )
+    monkeypatch.setattr(ChannelRegistryStore, "is_discovery_stale", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(channel_runtime, "load_arch_data_fix", lambda *_args, **_kwargs: None)
+
+    def run(*, dry_run: bool, since: datetime, verified_at: datetime) -> tuple[Any, Any, list[Any], list[Any]]:
+        errors: list[Any] = []
+        outcomes: list[Any] = []
+        hydration, extraction, _ = channel_runtime.run_channel_with_extraction(
+            binding, store, program_id="demo", since=since, verified_at=verified_at,
+            run_ctx=RunContext(dry_run=dry_run), integration_error_sink=errors,
+            channel_outcome_sink=outcomes, programs_root=tmp_path,
+        )
+        return hydration, extraction, errors, outcomes
+
+    dry, _, dry_errors, dry_outcomes = run(
+        dry_run=True, since=datetime(2026, 5, 1, tzinfo=timezone.utc), verified_at=now,
+    )
+    assert dry.failed_ref_ids == (("101", "work_item"),)
+    assert dry_errors and dry_outcomes[0].degraded
+    assert all(reg.last_verified_at == prior and reg.consecutive_hydration_failures == 0
+               for reg in store.all_registrations("ado"))
+
+    result, extraction, errors, outcomes = run(
+        dry_run=False, since=datetime(2026, 5, 1, tzinfo=timezone.utc), verified_at=now,
+    )
+    registered = {reg.ref_id: reg for reg in store.all_registrations("ado")}
+    assert result.failed_ref_ids == (("101", "work_item"),)
+    assert result.hydrated_ref_ids == (("102", "work_item"),)
+    assert registered["101"].last_verified_at == prior
+    assert registered["101"].consecutive_hydration_failures == 1
+    assert registered["102"].last_verified_at == now
+    assert errors and outcomes[0].degraded
+    signal_refs = {signal.raw_ref for signal in extraction.signals}
+    assert any(ref.startswith("ado/comment/101/") for ref in signal_refs) is (kind != "comments")
+    assert any(ref.startswith("ado/revision/101/") for ref in signal_refs) is (kind != "revisions")
+
+    client.failures.clear()
+    client.revision_calls.clear()
+    client.comment_calls.clear()
+    retry, extraction, errors, outcomes = run(
+        dry_run=False, since=datetime(2026, 6, 1, tzinfo=timezone.utc), verified_at=now + timedelta(minutes=1),
+    )
+    registered = {reg.ref_id: reg for reg in store.all_registrations("ado")}
+    assert client.revision_calls == [101] and client.comment_calls == [101]
+    assert retry.failed_ref_ids == () and set(retry.hydrated_ref_ids) == {("101", "work_item"), ("102", "work_item")}
+    assert registered["101"].last_verified_at == now + timedelta(minutes=1)
+    assert registered["101"].consecutive_hydration_failures == 0
+    assert errors == [] and not outcomes[0].degraded
+    assert any(signal.raw_ref.startswith("ado/revision/101/") for signal in extraction.signals)
+
+
 def test_ado_hydration_empty_registry_returns_empty_result() -> None:
     """Empty registration list returns HydrationResult with zero items and no API calls."""
     client = _FakeADOClient()
@@ -509,9 +962,8 @@ def test_normalize_ado_comment_html_empty_input_is_unchanged() -> None:
 def test_ado_hydration_strips_html_from_comment_text() -> None:
     class _HtmlCommentClient(_FakeADOClient):
         def list_work_item_comments(self, work_item_id: int, **kwargs: object) -> list[dict[str, object]]:
-            del kwargs
             self.comment_calls.append(work_item_id)
-            return [
+            rows: list[dict[str, object]] = [
                 {
                     "id": 7,
                     "createdBy": {"displayName": "Owner", "uniqueName": "owner@example.com"},
@@ -519,6 +971,10 @@ def test_ado_hydration_strips_html_from_comment_text() -> None:
                     "text": '<div>Ready for review — see <a href="https://example/wi/1234">WI 1234</a></div>',
                 }
             ]
+            callback = kwargs.get("on_pagination")
+            if callable(callback):
+                callback(PaginationOutcome(total_fetched=len(rows), page_count=1, is_truncated=False))
+            return rows
 
     client = _HtmlCommentClient()
     provider = ADOHydrationProvider(client)  # type: ignore[arg-type]

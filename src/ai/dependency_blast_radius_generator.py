@@ -25,9 +25,11 @@ from pathlib import Path
 from typing import Any
 
 from src.ai._pipeline import AIPipelineError, process_generated_text
+from src.ai.deployment_fallback import FallbackAIClient
 from src.ai.prompt_registry import PromptRegistryError, load_prompt
 from src.ai.provider import LLMProvider
 from src.ai.structured_feature_runner import (
+    CacheIdentity,
     ContextBuildResult,
     FeatureOutcome,
     FeatureOutcomeStatus,
@@ -51,7 +53,8 @@ from src.core.context_compiler import (
 )
 from src.core.dependency_blast_radius import DependencyBlastRadiusProposal, DependencyBlastRadiusRequest
 from src.core.edition_resolver import PROGRAMS_ROOT
-from src.core.exceptions import StateError
+from src.core.exceptions import ConfigError, StateError
+from src.core.ledger.event_log import canonical_json, get_event_logs_dir, read_events
 from src.core.policy_loader import load_ai_feature_policy
 from src.core.quality_gates.ai_release_audit import (
     AIRunState,
@@ -59,9 +62,12 @@ from src.core.quality_gates.ai_release_audit import (
     new_ai_run_id,
     record_ai_release_decision,
     record_ai_run_lifecycle,
+    released_content_matches,
 )
 
 _OUTPUT_SCHEMA_VERSION = "1"
+_CACHE_IDENTITY_VERSION = "dependency_blast_radius.released.v1"
+_PILOT_CACHE_RELEASE_SCHEMA = "dependency_blast_radius.released_cache.v1"
 
 PROMPT_VERSION = "dependency_blast_radius_generator.v1"
 POLICY_VERSION = "dependency_blast_radius_generator.v1"
@@ -75,8 +81,9 @@ def generate_dependency_blast_radius_proposal(
     programs_root: Path = PROGRAMS_ROOT,
 ) -> DependencyBlastRadiusProposal | None:
     """Returns a released proposal, or ``None`` if discarded/rejected."""
-    ai_run_id = new_ai_run_id()
     program_id = request.program_id
+    get_event_logs_dir(program_id, programs_root=programs_root)
+    ai_run_id = new_ai_run_id()
 
     def _lifecycle(state: AIRunState) -> None:
         record_ai_run_lifecycle(
@@ -90,13 +97,14 @@ def generate_dependency_blast_radius_proposal(
             validator_finding_count=finding_count, programs_root=programs_root,
         )
 
-    _lifecycle(AIRunState.PLANNED)
-
     if len(request.evidence_refs) != len(request.evidence_texts):
+        _lifecycle(AIRunState.PLANNED)
         _discard(ReleaseTerminal.DISCARDED, "Evidence references and texts must be paired.")
         return None
 
     request_payload = {
+        "program_id": request.program_id,
+        "dependency_id": request.dependency_id,
         "from_summary": request.from_summary,
         "to_summary": request.to_summary,
         "risk_if_broken": request.risk_if_broken,
@@ -106,26 +114,44 @@ def generate_dependency_blast_radius_proposal(
     }
     try:
         validate_bounded_payload(request_payload)
-    except SchemaGatewayError as error:
-        _discard(ReleaseTerminal.DISCARDED, f"AISchemaGateway rejected the outbound request: {error}")
+    except SchemaGatewayError:
+        _lifecycle(AIRunState.PLANNED)
+        _discard(ReleaseTerminal.DISCARDED, "AISchemaGateway rejected the outbound request.")
         return None
 
-    _lifecycle(AIRunState.REQUESTED)
-
-    prompt_template = _load_prompt_template()
-    policy = load_ai_feature_policy(_FEATURE)
     cache_key = AIResultCacheKey(
         program_id=program_id,
         feature=_FEATURE,
-        canonical_input_hash=canonical_input_hash(_build_user_prompt(request)),
+        canonical_input_hash=canonical_input_hash(canonical_json({
+            "identity_version": _CACHE_IDENTITY_VERSION,
+            **request_payload,
+        })),
         prompt_version=PROMPT_VERSION,
         policy_version=POLICY_VERSION,
-        model_deployment=_resolve_model_deployment(client),
+        model_deployment=_resolve_dependency_cache_deployment(client),
         context_manifest_hash=canonical_input_hash("|".join(request.evidence_refs)),
         output_schema_version=_OUTPUT_SCHEMA_VERSION,
     )
     try:
-        raw = route_through_tiers(
+        cached_response = _cached_response(cache_key, request=request, programs_root=programs_root)
+    except StateError:
+        try:
+            read_events(program_id, programs_root=programs_root, repair_corruption=False)
+        except (ConfigError, OSError, UnicodeError, ValueError, RecursionError, StateError):
+            raise StateError("Dependency proposal release audit could not be verified; no proposal released.") from None
+        _lifecycle(AIRunState.PLANNED)
+        _lifecycle(AIRunState.REQUESTED)
+        _discard(ReleaseTerminal.DISCARDED, "Dependency proposal cache could not be verified; no proposal released.")
+        raise StateError("Dependency proposal cache could not be verified; no proposal released.") from None
+    except (ConfigError, OSError, UnicodeError, ValueError, RecursionError):
+        raise StateError("Dependency proposal release audit could not be verified; no proposal released.") from None
+
+    _lifecycle(AIRunState.PLANNED)
+    _lifecycle(AIRunState.REQUESTED)
+    prompt_template = _load_prompt_template()
+    policy = load_ai_feature_policy(_FEATURE)
+    try:
+        route = route_through_tiers(
             _FEATURE,
             deterministic_fn=lambda: None,
             frontier_fn=lambda: client.structured(
@@ -136,23 +162,23 @@ def generate_dependency_blast_radius_proposal(
                 prompt_version=PROMPT_VERSION,
             ),
             policy=policy,
-            cache_lookup_fn=lambda: _cached_response(cache_key, programs_root=programs_root),
-            cache_store_fn=lambda value: put_ai_result(cache_key, value, programs_root=programs_root),
-        ).value
-    except Exception as error:
-        _discard(ReleaseTerminal.DISCARDED, f"provider call failed: {error}")
+            cache_lookup_fn=lambda: cached_response,
+        )
+    except Exception:
+        _discard(ReleaseTerminal.DISCARDED, "provider call failed.")
         return None
 
     _lifecycle(AIRunState.RESPONDED)
 
+    raw = route.value
     if not isinstance(raw, dict):
         _discard(ReleaseTerminal.DISCARDED, "no structured response returned by the provider.")
         return None
 
     try:
         validate_bounded_payload(raw)
-    except SchemaGatewayError as error:
-        _discard(ReleaseTerminal.REJECTED, f"AISchemaGateway rejected the response: {error}")
+    except SchemaGatewayError:
+        _discard(ReleaseTerminal.REJECTED, "AISchemaGateway rejected the response.")
         return None
 
     _lifecycle(AIRunState.SCHEMA_VALIDATED)
@@ -169,11 +195,25 @@ def generate_dependency_blast_radius_proposal(
         _discard(ReleaseTerminal.REJECTED, "; ".join(findings), finding_count=len(findings))
         return None
 
+    content = {
+        "program_id": request.program_id,
+        "dependency_id": request.dependency_id,
+        "request_hash": cache_key.canonical_input_hash,
+        "next_proving_event": proposal.next_proving_event,
+        "blast_radius_narrative": proposal.blast_radius_narrative,
+        "evidence_refs": list(proposal.evidence_refs),
+    }
     record_ai_release_decision(
         program_id=program_id, ai_run_id=ai_run_id, terminal=ReleaseTerminal.RELEASED,
         reason="passed AISchemaGateway bounds and dependency blast-radius semantic validation",
-        validator_finding_count=0, programs_root=programs_root,
+        validator_finding_count=0, released_content_hash=canonical_input_hash(canonical_json(content)),
+        programs_root=programs_root,
     )
+    if route.frontier_called:
+        try:
+            put_ai_result(cache_key, {"release_run_id": ai_run_id, "proposal": content}, programs_root=programs_root)
+        except (OSError, ValueError, RecursionError, StateError):
+            raise StateError("Dependency proposal cache write failed after release; no proposal staged.") from None
     return proposal
 
 
@@ -210,11 +250,35 @@ def generate_dependency_blast_radius_proposal_via_runner(
     ai_run_id = new_ai_run_id()
     program_id = request.program_id
     policy = load_ai_feature_policy(_FEATURE)
+    lifecycle_error: Exception | None = None
+    release_write_pending = False
+    release_written = False
+    released_proposal: DependencyBlastRadiusProposal | None = None
+    origin_read_pending = False
+    verified_release_hash: str | None = None
+    semantic_stage_recorded = False
+    replayed_proposal: DependencyBlastRadiusProposal | None = None
+    replay_refusal_reason: str | None = None
+    replay_finding_count = 0
 
-    record_ai_run_lifecycle(
-        program_id=program_id, ai_run_id=ai_run_id, feature=_FEATURE, state=AIRunState.PLANNED,
-        prompt_version=PROMPT_VERSION, policy_version=POLICY_VERSION, programs_root=programs_root,
-    )
+    try:
+        read_events(program_id, programs_root=programs_root, repair_corruption=False)
+    except (ConfigError, OSError, UnicodeError, ValueError, RecursionError):
+        raise StateError("Dependency proposal release audit could not be verified.") from None
+
+    def _lifecycle(state: AIRunState) -> None:
+        nonlocal lifecycle_error
+        try:
+            record_ai_run_lifecycle(
+                program_id=program_id, ai_run_id=ai_run_id, feature=_FEATURE, state=state,
+                prompt_version=PROMPT_VERSION, policy_version=POLICY_VERSION, programs_root=programs_root,
+            )
+        except Exception as error:
+            # The runner catches provider callback exceptions; preserve audit-write failures.
+            lifecycle_error = error
+            raise
+
+    _lifecycle(AIRunState.PLANNED)
 
     request_payload = {
         "from_summary": request.from_summary,
@@ -226,18 +290,15 @@ def generate_dependency_blast_radius_proposal_via_runner(
     }
     try:
         validate_bounded_payload(request_payload)
-    except SchemaGatewayError as error:
+    except SchemaGatewayError:
         record_ai_release_decision(
             program_id=program_id, ai_run_id=ai_run_id, terminal=ReleaseTerminal.DISCARDED,
-            reason=f"AISchemaGateway rejected the outbound request: {error}",
+            reason="AISchemaGateway rejected the outbound request.",
             validator_finding_count=0, programs_root=programs_root,
         )
         return None
 
-    record_ai_run_lifecycle(
-        program_id=program_id, ai_run_id=ai_run_id, feature=_FEATURE, state=AIRunState.REQUESTED,
-        prompt_version=PROMPT_VERSION, policy_version=POLICY_VERSION, programs_root=programs_root,
-    )
+    _lifecycle(AIRunState.REQUESTED)
 
     def build_context(req: DependencyBlastRadiusRequest) -> ContextBuildResult:
         if len(req.evidence_refs) != len(req.evidence_texts):
@@ -287,19 +348,112 @@ def generate_dependency_blast_radius_proposal_via_runner(
             compiled.prompt_text, "", parser=lambda payload: payload,
             max_tokens=policy.max_tokens or 700, prompt_version=PROMPT_VERSION,
         )
+        _lifecycle(AIRunState.RESPONDED)
         if not isinstance(raw, dict):
             raise AIPipelineError("no structured response returned by the provider.")
         validate_bounded_payload(raw)
+        _lifecycle(AIRunState.SCHEMA_VALIDATED)
         return raw
 
     def semantic_validator(req: DependencyBlastRadiusRequest, raw: dict[str, Any]) -> ValidationResult:
+        nonlocal semantic_stage_recorded, replayed_proposal, replay_refusal_reason, replay_finding_count
+        cache_hit = verified_release_hash is not None
+        revalidating_payload = semantic_stage_recorded
+        if cache_hit:
+            _lifecycle(AIRunState.RESPONDED)
+            try:
+                validate_bounded_payload(raw)
+            except SchemaGatewayError:
+                replay_refusal_reason = "released payload failed structural validation."
+                raise StateError("Released dependency proposal failed structural validation.") from None
+            _lifecycle(AIRunState.SCHEMA_VALIDATED)
         proposal = _parse_proposal(raw, request=req, ai_run_id=ai_run_id)
         if proposal is None:
+            if cache_hit:
+                replay_refusal_reason = "released payload failed to re-parse into a proposal."
+                raise StateError("Released dependency proposal failed to re-parse.")
+            if revalidating_payload:
+                raise StateError("Serialized dependency proposal failed release validation.")
             return ValidationResult(valid=False, reason="response missing required fields or failed the text-safety pipeline.")
+        if (cache_hit or revalidating_payload) and proposal_fields(proposal) != raw:
+            if cache_hit:
+                replay_refusal_reason = "revalidated proposal did not match released payload."
+            raise StateError("Revalidated dependency proposal did not match released payload.")
         findings = _validate_semantics(proposal, request=req)
+        if not semantic_stage_recorded:
+            _lifecycle(AIRunState.SEMANTICALLY_VALIDATED)
+            semantic_stage_recorded = True
         if findings:
+            if cache_hit:
+                replay_refusal_reason = "released payload failed dependency semantic validation."
+                replay_finding_count = len(findings)
+            elif revalidating_payload:
+                raise StateError("Serialized dependency proposal failed release validation.")
             return ValidationResult(valid=False, reason="; ".join(findings))
+        if cache_hit:
+            replayed_proposal = proposal
         return ValidationResult(valid=True, evidence_refs=proposal.evidence_refs)
+
+    def deserialize_response(text: str) -> dict[str, Any]:
+        response = json.loads(text)
+        if not isinstance(response, dict):
+            raise StateError("Dependency proposal cached response must be an object.")
+        return response
+
+    def proposal_fields(proposal: DependencyBlastRadiusProposal) -> dict[str, object]:
+        return {
+            "next_proving_event": proposal.next_proving_event,
+            "blast_radius_narrative": proposal.blast_radius_narrative,
+            "evidence_refs": list(proposal.evidence_refs),
+        }
+
+    def serialize_response(raw: dict[str, Any]) -> str:
+        proposal = _parse_proposal(raw, request=request, ai_run_id=ai_run_id)
+        if proposal is None:
+            raise StateError("Dependency proposal could not be serialized safely.")
+        return json.dumps(proposal_fields(proposal), sort_keys=True)
+
+    def release_hash(identity: CacheIdentity, payload: str) -> str:
+        return canonical_input_hash(canonical_json({
+            "schema": _PILOT_CACHE_RELEASE_SCHEMA,
+            "cache_key": identity.cache_key(),
+            "payload": payload,
+        }))
+
+    def record_release(identity: CacheIdentity, payload: str) -> str:
+        nonlocal release_write_pending, release_written, released_proposal
+        response = deserialize_response(payload)
+        validate_bounded_payload(response)
+        proposal = _parse_proposal(response, request=request, ai_run_id=ai_run_id)
+        if (
+            proposal is None or proposal_fields(proposal) != response
+            or _validate_semantics(proposal, request=request)
+        ):
+            raise StateError("Serialized dependency proposal failed release validation.")
+        content_hash = release_hash(identity, payload)
+        release_write_pending = True
+        record_ai_release_decision(
+            program_id=program_id, ai_run_id=ai_run_id, terminal=ReleaseTerminal.RELEASED,
+            reason="passed AISchemaGateway bounds and dependency blast-radius semantic validation (via StructuredFeatureRunner)",
+            validator_finding_count=0, released_content_hash=content_hash, programs_root=programs_root,
+        )
+        release_written = True
+        release_write_pending = False
+        released_proposal = proposal
+        return ai_run_id
+
+    def verify_release(identity: CacheIdentity, payload: str, origin_run_id: str) -> bool:
+        nonlocal origin_read_pending, verified_release_hash
+        origin_read_pending = True
+        content_hash = release_hash(identity, payload)
+        matches = released_content_matches(
+            origin_run_id, program_id=program_id, released_content_hash=content_hash,
+            programs_root=programs_root,
+        )
+        origin_read_pending = False
+        if matches is True:
+            verified_release_hash = content_hash
+        return matches
 
     def fallback_handler(req: DependencyBlastRadiusRequest) -> FeatureOutcome[dict[str, Any]]:
         # No deterministic fallback exists for this feature (same as the
@@ -309,7 +463,10 @@ def generate_dependency_blast_radius_proposal_via_runner(
     runner = StructuredFeatureRunner(
         context=context,
         frontier_eligible=policy.frontier_eligible,
-        released_cache=ReleasedResultCache(_released_cache_path(programs_root, program_id)),
+        released_cache=ReleasedResultCache(
+            _released_cache_path(programs_root, program_id),
+            record_release=record_release, verify_release=verify_release,
+        ),
     )
     spec = StructuredFeatureSpec(
         feature=_FEATURE, task_class="synthesis", prompt_version=PROMPT_VERSION, schema_version=_OUTPUT_SCHEMA_VERSION,
@@ -319,53 +476,63 @@ def generate_dependency_blast_radius_proposal_via_runner(
         request_hash=lambda req: canonical_input_hash(_build_user_prompt(req)),
         deployment_fingerprint=_resolve_model_deployment(client),
         validator_version="dependency_blast_radius_generator.v1",
-        serialize_response=lambda payload: json.dumps(payload, sort_keys=True),
-        deserialize_response=lambda text: json.loads(text),
+        serialize_response=serialize_response,
+        deserialize_response=deserialize_response,
     )
 
     try:
         outcome = runner.run(spec, request)
     except Exception as error:
+        if lifecycle_error is not None:
+            raise lifecycle_error
+        if origin_read_pending:
+            raise StateError("Dependency proposal release audit could not be verified.") from None
+        if release_write_pending:
+            raise
+        if release_written:
+            raise StateError("Dependency proposal cache write failed after release; no proposal staged.") from None
         record_ai_release_decision(
             program_id=program_id, ai_run_id=ai_run_id, terminal=ReleaseTerminal.DISCARDED,
-            reason=f"provider call failed: {error}", validator_finding_count=0, programs_root=programs_root,
+            reason=(
+                replay_refusal_reason
+                or (
+                    "Structured runner state failure; no proposal released."
+                    if isinstance(error, StateError) else "Structured runner failed; no proposal released."
+                )
+            ),
+            validator_finding_count=0, programs_root=programs_root,
         )
         return None
 
-    record_ai_run_lifecycle(
-        program_id=program_id, ai_run_id=ai_run_id, feature=_FEATURE, state=AIRunState.RESPONDED,
-        prompt_version=PROMPT_VERSION, policy_version=POLICY_VERSION, programs_root=programs_root,
-    )
-    record_ai_run_lifecycle(
-        program_id=program_id, ai_run_id=ai_run_id, feature=_FEATURE, state=AIRunState.SEMANTICALLY_VALIDATED,
-        prompt_version=PROMPT_VERSION, policy_version=POLICY_VERSION, programs_root=programs_root,
-    )
+    if lifecycle_error is not None:
+        raise lifecycle_error
 
     if not outcome.released:
         record_ai_release_decision(
             program_id=program_id, ai_run_id=ai_run_id,
             terminal=ReleaseTerminal.REJECTED if outcome.status == FeatureOutcomeStatus.BLOCKED else ReleaseTerminal.DISCARDED,
-            reason="; ".join(outcome.limitations) or outcome.status.value,
-            validator_finding_count=len(outcome.limitations), programs_root=programs_root,
+            reason=replay_refusal_reason or "; ".join(outcome.limitations) or outcome.status.value,
+            validator_finding_count=replay_finding_count if replay_refusal_reason else len(outcome.limitations),
+            programs_root=programs_root,
         )
         return None
 
-    assert outcome.value is not None
-    proposal = _parse_proposal(outcome.value, request=request, ai_run_id=ai_run_id)
-    if proposal is None:
-        record_ai_release_decision(
-            program_id=program_id, ai_run_id=ai_run_id, terminal=ReleaseTerminal.DISCARDED,
-            reason="released payload failed to re-parse into a proposal.",
-            validator_finding_count=0, programs_root=programs_root,
-        )
-        return None
+    cache_hit = outcome.tier == Tier.CACHE
+    if not cache_hit:
+        if not release_written or released_proposal is None:
+            raise StateError("Dependency proposal was not recorded as released.")
+        return released_proposal
+    if verified_release_hash is None:
+        raise StateError("Dependency proposal originating release was not verified.")
+    if replayed_proposal is None:
+        raise StateError("Dependency proposal replay was not validated.")
 
     record_ai_release_decision(
         program_id=program_id, ai_run_id=ai_run_id, terminal=ReleaseTerminal.RELEASED,
         reason="passed AISchemaGateway bounds and dependency blast-radius semantic validation (via StructuredFeatureRunner)",
-        validator_finding_count=0, programs_root=programs_root,
+        validator_finding_count=0, released_content_hash=verified_release_hash, programs_root=programs_root,
     )
-    return proposal
+    return replayed_proposal
 
 
 def _released_cache_path(programs_root: Path, program_id: str) -> Path:
@@ -383,7 +550,7 @@ def _validate_semantics(
     known_refs = set(request.evidence_refs)
     unknown_refs = tuple(ref for ref in proposal.evidence_refs if ref not in known_refs)
     if unknown_refs:
-        findings.append(f"evidence_refs cites refs not present on the dependency: {unknown_refs}.")
+        findings.append("evidence_refs cites refs not present on the dependency.")
     return tuple(findings)
 
 
@@ -412,10 +579,21 @@ def _build_user_prompt(request: DependencyBlastRadiusRequest) -> str:
 def _parse_proposal(
     raw: dict[str, Any], *, request: DependencyBlastRadiusRequest, ai_run_id: str
 ) -> DependencyBlastRadiusProposal | None:
+    next_event_raw = raw.get("next_proving_event")
+    narrative_raw = raw.get("blast_radius_narrative")
+    evidence_refs_raw = raw.get("evidence_refs", [])
+    if (
+        not isinstance(next_event_raw, str)
+        or not isinstance(narrative_raw, str)
+        or not isinstance(evidence_refs_raw, list)
+        or not all(isinstance(ref, str) for ref in evidence_refs_raw)
+    ):
+        return None
+
     try:
-        next_event_raw = str(raw.get("next_proving_event", "")).strip()
+        next_event_raw = next_event_raw.strip()
         next_proving_event = process_generated_text(next_event_raw).text if next_event_raw else ""
-        narrative_raw = str(raw.get("blast_radius_narrative", "")).strip()
+        narrative_raw = narrative_raw.strip()
         blast_radius_narrative = process_generated_text(narrative_raw).text if narrative_raw else ""
     except AIPipelineError:
         return None
@@ -423,30 +601,32 @@ def _parse_proposal(
     if not next_proving_event or not blast_radius_narrative:
         return None
 
-    evidence_refs_raw = raw.get("evidence_refs")
-    evidence_refs = (
-        tuple(str(ref) for ref in evidence_refs_raw if isinstance(ref, str))
-        if isinstance(evidence_refs_raw, list)
-        else ()
-    )
-
     return DependencyBlastRadiusProposal(
         id=f"blast-radius-{ai_run_id}",
         program_id=request.program_id,
         dependency_id=request.dependency_id,
         next_proving_event=next_proving_event,
         blast_radius_narrative=blast_radius_narrative,
-        evidence_refs=evidence_refs,
+        evidence_refs=tuple(evidence_refs_raw),
         ai_run_id=ai_run_id,
     )
 
 
+def _resolve_dependency_cache_deployment(client: LLMProvider) -> str:
+    if isinstance(client, FallbackAIClient):
+        chain = canonical_json({
+            "version": "fallback-chain.v1",
+            "deployments": client.configured_deployments,
+        })
+        return f"fallback-chain.v1:{canonical_input_hash(chain)}"
+    return _resolve_model_deployment(client)
+
+
 def _resolve_model_deployment(client: LLMProvider) -> str:
-    """Best-effort model/deployment identifier for the cache key (Section
-    8.8.3), same degrade-to-sentinel discipline as
-    ``risk_proposal_generator.py``: a wrong/missing deployment id only
-    under-shares the cache (never over-shares, since program_id/feature/
-    input hash are still exact-matched), so this never raises."""
+    """Return a client-provided deployment label, or ``unknown`` if absent.
+
+    An absent or inaccurate label can cause distinct clients to share a key.
+    """
     for attr in ("deployment", "primary_deployment", "model", "deployment_id"):
         value = getattr(client, attr, None)
         if isinstance(value, str) and value:
@@ -454,9 +634,48 @@ def _resolve_model_deployment(client: LLMProvider) -> str:
     return "unknown"
 
 
-def _cached_response(key: AIResultCacheKey, *, programs_root: Path) -> dict[str, Any] | None:
-    hit = get_ai_result(key, programs_root=programs_root)
-    return hit.value if hit is not None else None
+def _cached_response(
+    key: AIResultCacheKey, *, request: DependencyBlastRadiusRequest, programs_root: Path
+) -> dict[str, Any] | None:
+    hit = get_ai_result(key, programs_root=programs_root, strict_read=True)
+    if hit is None:
+        return None
+    envelope = hit.value
+    if not isinstance(envelope, dict) or set(envelope) != {"release_run_id", "proposal"}:
+        raise StateError("Dependency proposal cache envelope is invalid.")
+    release_run_id = envelope["release_run_id"]
+    content = envelope["proposal"]
+    if (
+        not isinstance(release_run_id, str)
+        or not release_run_id
+        or not isinstance(content, dict)
+        or set(content) != {
+            "program_id", "dependency_id", "request_hash", "next_proving_event",
+            "blast_radius_narrative", "evidence_refs",
+        }
+        or content["program_id"] != request.program_id
+        or content["dependency_id"] != request.dependency_id
+        or content["request_hash"] != key.canonical_input_hash
+        or not isinstance(content["next_proving_event"], str)
+        or not isinstance(content["blast_radius_narrative"], str)
+        or not isinstance(content["evidence_refs"], list)
+        or not all(isinstance(ref, str) for ref in content["evidence_refs"])
+    ):
+        raise StateError("Dependency proposal cache content is invalid.")
+    try:
+        validate_bounded_payload(content)
+    except SchemaGatewayError:
+        raise StateError("Dependency proposal cache content exceeds its bounds.") from None
+    if not released_content_matches(
+        release_run_id, program_id=request.program_id,
+        released_content_hash=canonical_input_hash(canonical_json(content)), programs_root=programs_root,
+    ):
+        raise StateError("Dependency proposal cache lacks a matching release.")
+    return {
+        "next_proving_event": content["next_proving_event"],
+        "blast_radius_narrative": content["blast_radius_narrative"],
+        "evidence_refs": content["evidence_refs"],
+    }
 
 
 def _load_prompt_template() -> str:

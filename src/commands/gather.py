@@ -701,16 +701,12 @@ def gather_program(
 ) -> GatherArtifacts:
     """D-13/Sec 4.6 lifecycle wrapper around the actual gather implementation.
 
-    Before delegating: reconciles any ``gather_runs/staging`` manifests
-    abandoned by a crashed prior process (D-13 rule 8), then acquires the
-    program's ``gather`` workspace lease -- failing fast with a clear error
-    if another process currently holds it (no silent queuing/retry) -- and
-    creates a ``status=running`` manifest. After delegating: on success,
-    populates the manifest's aggregate fields from the returned
-    ``GatherArtifacts`` and commits it; on any exception (including the
-    early config-validation ``typer.BadParameter`` raised below), fails the
-    manifest instead. The lease is always released before returning or
-    re-raising.
+    Before delegating: acquires the program's ``gather`` workspace lease,
+    reconciles abandoned staging manifests (D-13 rule 8), and creates a
+    ``status=running`` manifest. A held lease fails fast without reconciliation.
+    On success, the returned ``GatherArtifacts`` populate a committed manifest.
+    Implementation or pre-promotion fencing failures fail the staged manifest;
+    other interruptions leave it for recovery. The lease is always released.
 
     Legacy injected loaders cannot provide authoritative discovery membership.
     They therefore commit as ``PARTIAL`` with ``discovered_count=0`` rather
@@ -732,6 +728,7 @@ def gather_program(
         program_id,
         programs_root=resolved_programs_root,
     )
+    deferred_ado_verifications: list[Callable[[], None]] = []
 
     def run_implementation(gather_run_id: str | None) -> GatherArtifacts:
         return _gather_program_impl(
@@ -768,6 +765,7 @@ def gather_program(
             force_discovery=force_discovery,
             accept_shrinkage=accept_shrinkage,
             gather_run_id=gather_run_id,
+            deferred_ado_verifications=deferred_ado_verifications if gather_run_id is not None else None,
         )
 
     # D-24's off mode is an explicit compatibility path. It neither creates
@@ -776,12 +774,6 @@ def gather_program(
         return run_implementation(None)
 
     lifecycle_started_at = datetime.now(timezone.utc)
-    quarantine_abandoned_staging_runs(
-        program_id,
-        finished_at=lifecycle_started_at,
-        programs_root=resolved_programs_root,
-    )
-
     lease_owner = f"vertex_gather:{uuid.uuid4().hex[:12]}"
     try:
         lease = acquire_lease(
@@ -797,189 +789,186 @@ def gather_program(
             "or expire before retrying."
         ) from exc
 
-    alert_ledger_before, alert_tracking_failed = _alert_ledger_state(
-        program_id, programs_root=resolved_programs_root
-    )
+    lease_heartbeat: LeaseRenewalHeartbeat | None = None
     try:
-        previous_committed_run = resolve_latest_committed_manifest(
+        # Renew throughout recovery and setup as well as the gather itself.
+        lease_heartbeat = LeaseRenewalHeartbeat(lease, programs_root=resolved_programs_root)
+        lease_heartbeat.start()
+        quarantine_abandoned_staging_runs(
+            program_id,
+            finished_at=lifecycle_started_at,
+            programs_root=resolved_programs_root,
+        )
+        alert_ledger_before, alert_tracking_failed = _alert_ledger_state(
             program_id, programs_root=resolved_programs_root
         )
-        previous_full_run = resolve_latest_full_committed_manifest(
-            program_id, programs_root=resolved_programs_root
-        )
-    except ValueError as exc:
-        release_lease(lease, programs_root=resolved_programs_root)
-        raise ConfigError(
-            "Committed gather evidence is invalid. Run `vertex doctor` and repair gather evidence before retrying."
-        ) from exc
-
-    run_id = f"gather-{new_ulid(lifecycle_started_at)}"
-    running_manifest = GatherRunManifest(
-        run_id=run_id,
-        status=GatherRunStatus.RUNNING,
-        program_id=program_id,
-        actor_identity_type=actor_identity_type,
-        lease_owner=lease.owner,
-        lease_fencing_token=lease.fencing_token,
-        started_at=lifecycle_started_at,
-        scope_as_of=as_of or lifecycle_started_at,
-        required_scope_status=RequiredScopeStatus.FULL,
-    )
-    create_staging_manifest(running_manifest, programs_root=resolved_programs_root)
-    # D-13/AG-7.3: a gather can legitimately exceed the lease TTL while a
-    # remote channel is bounded but slow. Renew in the background and retain
-    # a synchronous pre-promotion fence so a superseded worker cannot publish
-    # a manifest after a newer holder takes the gather domain.
-    lease_heartbeat = LeaseRenewalHeartbeat(lease, programs_root=resolved_programs_root)
-    lease_heartbeat.start()
-
-    try:
-        artifacts = run_implementation(run_id)
-    except BaseException:
         try:
+            previous_committed_run = resolve_latest_committed_manifest(
+                program_id, programs_root=resolved_programs_root
+            )
+            previous_full_run = resolve_latest_full_committed_manifest(
+                program_id, programs_root=resolved_programs_root
+            )
+        except ValueError as exc:
+            raise ConfigError(
+                "Committed gather evidence is invalid. Run `vertex doctor` and repair gather evidence before retrying."
+            ) from exc
+
+        run_id = f"gather-{new_ulid(lifecycle_started_at)}"
+        running_manifest = GatherRunManifest(
+            run_id=run_id,
+            status=GatherRunStatus.RUNNING,
+            program_id=program_id,
+            actor_identity_type=actor_identity_type,
+            lease_owner=lease.owner,
+            lease_fencing_token=lease.fencing_token,
+            started_at=lifecycle_started_at,
+            scope_as_of=as_of or lifecycle_started_at,
+            required_scope_status=RequiredScopeStatus.FULL,
+        )
+        create_staging_manifest(running_manifest, programs_root=resolved_programs_root)
+
+        try:
+            artifacts = run_implementation(run_id)
+        except BaseException:
             fail_staging_run(
                 running_manifest,
                 finished_at=datetime.now(timezone.utc),
                 programs_root=resolved_programs_root,
             )
-        finally:
-            # A failure recording the failure must not strand the lease.
-            lease_heartbeat.stop()
-            release_lease(lease_heartbeat.handle, programs_root=resolved_programs_root)
-        raise
+            raise
 
-    # The immediate renewal is the promotion fence: it fails if a TTL expiry
-    # allowed another process to acquire a newer fencing token while the
-    # gather was still executing. Treat that loss exactly like any other
-    # handled lifecycle failure: do not leave a runnable staging directory or
-    # a background heartbeat behind.
-    try:
-        lease = lease_heartbeat.renew_now()
-    except BaseException:
+        # Fence immediately before promotion preparation; a newer holder must
+        # prevent this run from becoming the committed manifest.
         try:
+            lease_heartbeat.renew_now()
+        except BaseException:
             fail_staging_run(
                 running_manifest,
                 finished_at=datetime.now(timezone.utc),
                 programs_root=resolved_programs_root,
             )
-        finally:
-            lease_heartbeat.stop()
-            release_lease(lease_heartbeat.handle, programs_root=resolved_programs_root)
-        raise
-    finished_at = datetime.now(timezone.utc)
-    alert_ledger_after, post_gather_alert_tracking_failed = _alert_ledger_state(
-        program_id, programs_root=resolved_programs_root
-    )
-    alert_tracking_failed = alert_tracking_failed or post_gather_alert_tracking_failed
-    alert_ids = tuple(sorted(
-        alert_id
-        for alert_id, state in alert_ledger_after.items()
-        if state != alert_ledger_before.get(alert_id)
-    ))
-    failed_refs = tuple(
-        FailedRefEntry(ref_kind=error.source, ref_id=error.stage, reason=error.message)
-        for error in artifacts.integration_errors
-    )
-    query_results = tuple(
-        QueryResultEntry(
-            query_id=result.query_id,
-            scope_id=result.scope_id,
-            wiql_hash=result.wiql_hash,
-            captured_at=result.captured_at,
-            raw_count=result.raw_count,
-            membership_ids=result.membership_ids,
-            membership_hash=result.membership_hash,
-            cap_reached=result.cap_reached,
-            completeness_state=result.completeness_state,
-            oracle_result=resolve_oracle_result(
-                result.scope_id, result.raw_count, resolved_source_export_counts
-            ),
-            failure_category=result.failure_category,
+            raise
+        finished_at = datetime.now(timezone.utc)
+        alert_ledger_after, post_gather_alert_tracking_failed = _alert_ledger_state(
+            program_id, programs_root=resolved_programs_root
         )
-        for result in artifacts.ado_query_results
-    )
-    query_capture_times = tuple(result.captured_at for result in query_results)
-    first_query_captured_at = min(query_capture_times) if query_capture_times else None
-    last_query_captured_at = max(query_capture_times) if query_capture_times else None
-    query_capture_skew_seconds = (
-        (last_query_captured_at - first_query_captured_at).total_seconds()
-        if first_query_captured_at is not None and last_query_captured_at is not None
-        else None
-    )
-    query_capture_skew_exceeded = (
-        query_capture_skew_seconds is not None and query_capture_skew_seconds > 300
-    )
-    authoritative_discovery_captured = bool(query_results)
-    required_scope_status = (
-        RequiredScopeStatus.PARTIAL
-        if (
-            _has_required_scope_degradation(artifacts)
-            or query_capture_skew_exceeded
-            or not authoritative_discovery_captured
+        alert_tracking_failed = alert_tracking_failed or post_gather_alert_tracking_failed
+        alert_ids = tuple(sorted(
+            alert_id
+            for alert_id, state in alert_ledger_after.items()
+            if state != alert_ledger_before.get(alert_id)
+        ))
+        failed_refs = tuple(
+            FailedRefEntry(ref_kind=error.source, ref_id=error.stage, reason=error.message)
+            for error in artifacts.integration_errors
         )
-        else RequiredScopeStatus.FULL
-    )
-    last_successful_full_discovery_at = (
-        (last_query_captured_at or finished_at)
-        if required_scope_status is RequiredScopeStatus.FULL
-        else _full_discovery_timestamp(previous_full_run)
-    )
-    next_expected_run_at = (
-        last_successful_full_discovery_at + timedelta(hours=runtime_policy.full_discovery_cadence_hours)
-        if last_successful_full_discovery_at is not None
-        else None
-    )
-    consecutive_failed_runs = (
-        0
-        if required_scope_status is RequiredScopeStatus.FULL
-        else (previous_committed_run.consecutive_failed_runs if previous_committed_run is not None else 0) + 1
-    )
-    ado_items = [{"work_item_id": item_id} for item_id in artifacts.hydrated_work_item_ids]
-    staging_dir = get_staging_run_dir(program_id, run_id, programs_root=resolved_programs_root)
-    # The sidecars are written before the final manifest so the hashes cover
-    # exactly the data atomically promoted with that manifest.
-    write_ado_items(staging_dir, ado_items)
-    write_query_results_sidecar(staging_dir, query_results)
-    final_manifest = replace(
-        running_manifest,
-        required_scope_status=required_scope_status,
-        first_query_captured_at=first_query_captured_at,
-        last_query_captured_at=last_query_captured_at,
-        query_capture_skew_seconds=query_capture_skew_seconds,
-        query_results=query_results,
-        discovered_count=len(artifacts.discovered_work_item_ids),
-        hydrated_count=len(artifacts.hydrated_work_item_ids),
-        ado_call_count=artifacts.ado_calls,
-        failed_refs=failed_refs,
-        channel_outcomes=tuple(artifacts.channel_outcomes),
-        alert_ids=alert_ids,
-        alert_delivery_failed=alert_tracking_failed,
-        last_successful_full_discovery_at=last_successful_full_discovery_at,
-        last_attempt_at=finished_at,
-        next_expected_run_at=next_expected_run_at,
-        consecutive_failed_runs=consecutive_failed_runs,
-        freshness_state=freshness_state(
+        query_results = tuple(
+            QueryResultEntry(
+                query_id=result.query_id,
+                scope_id=result.scope_id,
+                wiql_hash=result.wiql_hash,
+                captured_at=result.captured_at,
+                raw_count=result.raw_count,
+                membership_ids=result.membership_ids,
+                membership_hash=result.membership_hash,
+                cap_reached=result.cap_reached,
+                completeness_state=result.completeness_state,
+                oracle_result=resolve_oracle_result(
+                    result.scope_id, result.raw_count, resolved_source_export_counts
+                ),
+                failure_category=result.failure_category,
+            )
+            for result in artifacts.ado_query_results
+        )
+        query_capture_times = tuple(result.captured_at for result in query_results)
+        first_query_captured_at = min(query_capture_times) if query_capture_times else None
+        last_query_captured_at = max(query_capture_times) if query_capture_times else None
+        query_capture_skew_seconds = (
+            (last_query_captured_at - first_query_captured_at).total_seconds()
+            if first_query_captured_at is not None and last_query_captured_at is not None
+            else None
+        )
+        query_capture_skew_exceeded = (
+            query_capture_skew_seconds is not None and query_capture_skew_seconds > 300
+        )
+        authoritative_discovery_captured = bool(query_results)
+        required_scope_status = (
+            RequiredScopeStatus.PARTIAL
+            if (
+                _has_required_scope_degradation(artifacts)
+                or query_capture_skew_exceeded
+                or not authoritative_discovery_captured
+            )
+            else RequiredScopeStatus.FULL
+        )
+        last_successful_full_discovery_at = (
+            (last_query_captured_at or finished_at)
+            if required_scope_status is RequiredScopeStatus.FULL
+            else _full_discovery_timestamp(previous_full_run)
+        )
+        next_expected_run_at = (
+            last_successful_full_discovery_at + timedelta(hours=runtime_policy.full_discovery_cadence_hours)
+            if last_successful_full_discovery_at is not None
+            else None
+        )
+        consecutive_failed_runs = (
+            0
+            if required_scope_status is RequiredScopeStatus.FULL
+            else (previous_committed_run.consecutive_failed_runs if previous_committed_run is not None else 0) + 1
+        )
+        ado_items = [{"work_item_id": item_id} for item_id in artifacts.hydrated_work_item_ids]
+        staging_dir = get_staging_run_dir(program_id, run_id, programs_root=resolved_programs_root)
+        # The sidecars are written before the final manifest so the hashes cover
+        # exactly the data atomically promoted with that manifest.
+        write_ado_items(staging_dir, ado_items)
+        write_query_results_sidecar(staging_dir, query_results)
+        final_manifest = replace(
+            running_manifest,
+            required_scope_status=required_scope_status,
+            first_query_captured_at=first_query_captured_at,
+            last_query_captured_at=last_query_captured_at,
+            query_capture_skew_seconds=query_capture_skew_seconds,
+            query_results=query_results,
+            discovered_count=len(artifacts.discovered_work_item_ids),
+            hydrated_count=len(artifacts.hydrated_work_item_ids),
+            ado_call_count=artifacts.ado_calls,
+            failed_refs=failed_refs,
+            channel_outcomes=tuple(artifacts.channel_outcomes),
+            alert_ids=alert_ids,
+            alert_delivery_failed=alert_tracking_failed,
             last_successful_full_discovery_at=last_successful_full_discovery_at,
-            # The stored state describes this immutable capture as-of its
-            # declared scope. Consumers recompute it against their own clock.
-            now=running_manifest.scope_as_of,
-            warn_hours=runtime_policy.freshness_warn_hours,
-            block_hours=runtime_policy.freshness_block_hours,
-        ),
-        cap_reached=any(result.cap_reached for result in query_results),
-        ado_items_hash=hash_ado_items(ado_items),
-        query_results_hash=hash_query_results(query_results),
-        latency=(finished_at - lifecycle_started_at).total_seconds(),
-    )
-    # Promotion is filesystem I/O and may fail. Do not strand the
-    # single-writer lease until its TTL expires; recovery will quarantine the
-    # still-staged run on the next attempt.
-    try:
+            last_attempt_at=finished_at,
+            next_expected_run_at=next_expected_run_at,
+            consecutive_failed_runs=consecutive_failed_runs,
+            freshness_state=freshness_state(
+                last_successful_full_discovery_at=last_successful_full_discovery_at,
+                # The stored state describes this immutable capture as-of its
+                # declared scope. Consumers recompute it against their own clock.
+                now=running_manifest.scope_as_of,
+                warn_hours=runtime_policy.freshness_warn_hours,
+                block_hours=runtime_policy.freshness_block_hours,
+            ),
+            cap_reached=any(result.cap_reached for result in query_results),
+            ado_items_hash=hash_ado_items(ado_items),
+            query_results_hash=hash_query_results(query_results),
+            latency=(finished_at - lifecycle_started_at).total_seconds(),
+        )
         commit_staging_run(final_manifest, finished_at=finished_at, programs_root=resolved_programs_root)
+        if deferred_ado_verifications:
+            lease_heartbeat.renew_now()
+            for acknowledge in deferred_ado_verifications:
+                acknowledge()
+        return artifacts
     finally:
-        lease_heartbeat.stop()
-        release_lease(lease_heartbeat.handle, programs_root=resolved_programs_root)
-    return artifacts
+        try:
+            if lease_heartbeat is not None:
+                lease_heartbeat.stop()
+        finally:
+            release_lease(
+                lease_heartbeat.handle if lease_heartbeat is not None else lease,
+                programs_root=resolved_programs_root,
+            )
 
 
 def _gather_program_impl(
@@ -1017,6 +1006,7 @@ def _gather_program_impl(
     force_discovery: bool = False,
     accept_shrinkage: bool = False,
     gather_run_id: str | None = None,
+    deferred_ado_verifications: list[Callable[[], None]] | None = None,
 ) -> GatherArtifacts:
     resolved_programs_root = programs_root or PROGRAMS_ROOT
     # ADF-W2.12: one correlation id per gather cycle (mirrors report.py's
@@ -1173,6 +1163,7 @@ def _gather_program_impl(
             accept_shrinkage=accept_shrinkage,
             discovery_result_sink=ado_discovery_results,
             channel_outcome_sink=channel_outcomes,
+            deferred_verifications=deferred_ado_verifications,
         )
         ado_calls = uil_ado_calls
         freshness_ado_calls = 0
@@ -1191,6 +1182,7 @@ def _gather_program_impl(
         end=current_time,
         programs_root=resolved_programs_root,
         signal_store=signal_store,
+        require_committed_gather_run=gather_run_id is not None,
     )
     if loader is not None:
         _record_channel_outcome(
@@ -1775,6 +1767,7 @@ def _gather_program_impl(
             ai_action_extractor=ai_action_extractor,
             correlation_id=correlation_id,
             gather_run_id=gather_run_id,
+            signal_window_start=signal_window_start,
         )
     )
     new_signals = persistence_result.new_signals
@@ -2157,6 +2150,7 @@ def _load_ado_items_via_uil(
     accept_shrinkage: bool = False,
     discovery_result_sink: list[Any] | None = None,
     channel_outcome_sink: list[Any] | None = None,
+    deferred_verifications: list[Callable[[], None]] | None = None,
 ) -> tuple[tuple[WorkItem, ...], tuple[WorkItem, ...], int]:
     if binding is None:
         from src.commands.channel_wiring import resolve_channel_binding
@@ -2181,6 +2175,7 @@ def _load_ado_items_via_uil(
         run_channel_fn=run_channel_fn,
         discovery_result_sink=discovery_result_sink,
         channel_outcome_sink=channel_outcome_sink,
+        deferred_verifications=deferred_verifications,
     )
 
 
@@ -2309,6 +2304,7 @@ def _run_channel(
     integration_error_sink: list[IntegrationError] | None = None,
     discovery_result_sink: list[Any] | None = None,
     channel_outcome_sink: list[Any] | None = None,
+    deferred_verifications: list[Callable[[], None]] | None = None,
     programs_root: Path = PROGRAMS_ROOT,
 ) -> tuple[Any | None, Any | None]:
     return _run_channel_impl(
@@ -2321,6 +2317,7 @@ def _run_channel(
         integration_error_sink=integration_error_sink,
         discovery_result_sink=discovery_result_sink,
         channel_outcome_sink=channel_outcome_sink,
+        deferred_verifications=deferred_verifications,
         programs_root=programs_root,
     )
 
@@ -2888,7 +2885,7 @@ def _load_refresh_kpi_queries(
                     programs_root=programs_root,
                 )
             except Exception:
-                pass
+                log.warning("Unable to record a context gap for a skipped unvalidated KPI query.")
     return tuple(included)
 
 

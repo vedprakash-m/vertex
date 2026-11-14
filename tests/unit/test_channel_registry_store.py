@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from src.core import channel_registry_store
-from src.core.channel_registry_store import ChannelRegistryStore, RegistryConcurrencyError, RegistryMetadataError, SchemaVersionError, ShrinkageGuardError
+from src.core.channel_registry_store import ChannelRegistryStore, RegistryConcurrencyError, RegistryError, RegistryMetadataError, SchemaVersionError, ShrinkageGuardError
 from src.core.integration_types import (
     ChannelRegistration,
     DiscoveredRef,
@@ -117,6 +117,216 @@ def test_incremental_discovery_does_not_remove_absent_refs(tmp_path) -> None:
 
     assert delta.removed == ()
     assert {registration.ref_id for registration in store.active_registrations("ado")} == {"101", "102"}
+
+
+def test_partial_discovery_preserves_unverified_bindings_on_rediscovered_refs(tmp_path) -> None:
+    store = ChannelRegistryStore(tmp_path / "channel_registry.sqlite3", "demo")
+    failed = RegistrationBinding("failed", "failed", "wiql_saved_query", 1.0, "manual_config")
+    completed = RegistrationBinding("completed", "completed", "wiql_saved_query", 1.0, "manual_config")
+    observed = RegistrationBinding("observed", "observed", "wiql_saved_query", 1.0, "manual_config")
+    initial = DiscoveredRef(
+        registration=_registration("101", workstreams=("failed", "completed", "observed")),
+        bindings=(failed, completed, observed),
+    )
+    store.apply_discovery_result(_result(initial))
+    with store._connect() as conn:
+        prior_seen = conn.execute(
+            "SELECT last_seen_at FROM registration_bindings WHERE ref_id = ? AND scope_id = ?",
+            ("101", "failed"),
+        ).fetchone()[0]
+
+    current = DiscoveredRef(registration=_registration("101", workstreams=("observed",)), bindings=(observed,))
+    partial = replace(
+        _result(current, completeness=DiscoveryCompleteness.PARTIAL),
+        computed_at=datetime(2026, 5, 24, 2, 0, tzinfo=timezone.utc),
+        scope_statuses={
+            "failed": ScopeStatus("failed", ScopeStatusKind.ERROR, DiscoveryCompleteness.PARTIAL, 0),
+            "completed": ScopeStatus("completed", ScopeStatusKind.SUCCESS, DiscoveryCompleteness.FULL, 0),
+            "observed": ScopeStatus("observed", ScopeStatusKind.SUCCESS, DiscoveryCompleteness.FULL, 1),
+        },
+    )
+    delta = store.apply_discovery_result(partial)
+
+    assert len(delta.updated) == 1
+    stored = store.load_discovered_refs("ado")[0]
+    assert {binding.scope_id for binding in stored.bindings} == {"failed", "observed"}
+    assert set(store.active_registrations("ado")[0].workstream_ids) == {"failed", "observed"}
+    with store._connect() as conn:
+        assert conn.execute(
+            "SELECT last_seen_at FROM registration_bindings WHERE ref_id = ? AND scope_id = ?",
+            ("101", "failed"),
+        ).fetchone()[0] == prior_seen
+
+    another_partial = replace(
+        partial,
+        computed_at=datetime(2026, 5, 24, 3, 0, tzinfo=timezone.utc),
+        scope_statuses={"failed": ScopeStatus("failed", ScopeStatusKind.ERROR, DiscoveryCompleteness.PARTIAL, 0)},
+    )
+    store.apply_discovery_result(another_partial)
+    assert {binding.scope_id for binding in store.load_discovered_refs("ado")[0].bindings} == {"failed", "observed"}
+
+
+def test_partial_discovery_preserves_unverified_bindings_with_nullable_workstream(tmp_path) -> None:
+    store = ChannelRegistryStore(tmp_path / "channel_registry.sqlite3", "demo")
+    unverified = RegistrationBinding(None, "unverified", "wiql_saved_query", 1.0, "manual_config")
+    observed = RegistrationBinding("observed", "observed", "wiql_saved_query", 1.0, "manual_config")
+    store.apply_discovery_result(_result(DiscoveredRef(_registration("101"), (unverified,))))
+
+    partial = replace(
+        _result(
+            DiscoveredRef(_registration("101", workstreams=("observed",)), (observed,)),
+            completeness=DiscoveryCompleteness.PARTIAL,
+        ),
+        scope_statuses={
+            "observed": ScopeStatus("observed", ScopeStatusKind.SUCCESS, DiscoveryCompleteness.FULL, 1),
+        },
+    )
+    delta = store.apply_discovery_result(partial)
+
+    assert len(delta.updated) == 1
+    stored = store.load_discovered_refs("ado")[0]
+    assert {(binding.workstream_id, binding.scope_id) for binding in stored.bindings} == {
+        (None, "unverified"), ("observed", "observed"),
+    }
+
+
+@pytest.mark.parametrize("channel", ["ado", "kusto"])
+@pytest.mark.parametrize(
+    ("completeness", "status"),
+    [
+        (DiscoveryCompleteness.PARTIAL, ScopeStatusKind.ERROR),
+        (DiscoveryCompleteness.PARTIAL, ScopeStatusKind.SUCCESS),
+        (DiscoveryCompleteness.INCREMENTAL, ScopeStatusKind.SUCCESS),
+        (DiscoveryCompleteness.FULL, ScopeStatusKind.SUCCESS),
+    ],
+)
+def test_rediscovered_nullable_binding_reuses_row_and_governance(
+    tmp_path, channel: str, completeness: DiscoveryCompleteness, status: ScopeStatusKind,
+) -> None:
+    store = ChannelRegistryStore(tmp_path / "channel_registry.sqlite3", "demo")
+    ref_kind = "work_item" if channel == "ado" else "kusto_query"
+    registration = replace(_registration("101"), channel=channel, ref_kind=ref_kind)
+    binding = RegistrationBinding(None, "shared", "query", 1.0, "manual_config")
+    discovered = DiscoveredRef(registration, (binding,))
+    initial = replace(_result(discovered), channel=channel)
+    store.apply_discovery_result(initial)
+    store.confirm(channel, "101", ref_kind)
+    store.promote(channel, "101", ref_kind)
+    with store._connect() as conn:
+        first_seen = conn.execute("SELECT first_seen_at FROM registration_bindings").fetchone()[0]
+
+    scope_completeness = (
+        DiscoveryCompleteness.FULL if status is ScopeStatusKind.SUCCESS else DiscoveryCompleteness.PARTIAL
+    )
+    for hour in (2, 3):
+        current = replace(
+            initial,
+            completeness=completeness,
+            computed_at=datetime(2026, 5, 24, hour, tzinfo=timezone.utc),
+            scope_statuses={"shared": ScopeStatus("shared", status, scope_completeness, 1)},
+        )
+        store.apply_discovery_result(current)
+
+    with store._connect() as conn:
+        rows = conn.execute(
+            "SELECT status, first_seen_at, last_seen_at, pm_confirmed, promoted "
+            "FROM registration_bindings WHERE workstream_id IS NULL AND scope_id = ?",
+            ("shared",),
+        ).fetchall()
+    assert len(rows) == 1
+    assert tuple(rows[0]) == ("active", first_seen, "2026-05-24T03:00:00+00:00", 1, 1)
+    stored = store.load_discovered_refs(channel)[0]
+    assert len(stored.bindings) == 1
+    assert stored.bindings[0].pm_confirmed and stored.bindings[0].promoted
+
+
+def test_nullable_rediscovery_prefers_live_row_over_retired_history(tmp_path) -> None:
+    store = ChannelRegistryStore(tmp_path / "channel_registry.sqlite3", "demo")
+    binding = RegistrationBinding(None, "shared", "query", 1.0, "manual_config")
+    result = _result(DiscoveredRef(_registration("101"), (binding,)))
+    store.apply_discovery_result(result)
+    store.confirm("ado", "101", "work_item")
+    with store._connect() as conn:
+        conn.execute("INSERT INTO registration_bindings SELECT * FROM registration_bindings")
+        conn.execute(
+            "UPDATE registration_bindings SET status = 'retired', last_seen_at = ?, pm_confirmed = 0 "
+            "WHERE rowid = (SELECT MAX(rowid) FROM registration_bindings)",
+            ("2026-05-24T04:00:00+00:00",),
+        )
+        before = tuple(conn.execute(
+            "SELECT * FROM registration_bindings WHERE status = 'retired'"
+        ).fetchone())
+
+    store.apply_discovery_result(replace(result, computed_at=datetime(2026, 5, 24, 5, tzinfo=timezone.utc)))
+
+    with store._connect() as conn:
+        rows = conn.execute("SELECT * FROM registration_bindings ORDER BY rowid").fetchall()
+    assert len(rows) == 2
+    assert sum(row["status"] == "active" for row in rows) == 1
+    assert next(row for row in rows if row["status"] == "active")["pm_confirmed"] == 1
+    assert tuple(next(row for row in rows if row["status"] == "retired")) == before
+
+
+def test_nullable_rediscovery_reuses_retired_row(tmp_path) -> None:
+    store = ChannelRegistryStore(tmp_path / "channel_registry.sqlite3", "demo")
+    binding = RegistrationBinding(None, "shared", "query", 1.0, "manual_config")
+    result = _result(DiscoveredRef(_registration("101"), (binding,)))
+    store.apply_discovery_result(result)
+    store.confirm("ado", "101", "work_item")
+    with store._connect() as conn:
+        first_seen = conn.execute("SELECT first_seen_at FROM registration_bindings").fetchone()[0]
+    store.apply_discovery_result(replace(_result(), computed_at=datetime(2026, 5, 24, 2, tzinfo=timezone.utc)))
+
+    store.apply_discovery_result(replace(result, computed_at=datetime(2026, 5, 24, 3, tzinfo=timezone.utc)))
+
+    with store._connect() as conn:
+        rows = conn.execute(
+            "SELECT status, first_seen_at, last_seen_at, pm_confirmed FROM registration_bindings"
+        ).fetchall()
+    assert [tuple(row) for row in rows] == [("active", first_seen, "2026-05-24T03:00:00+00:00", 1)]
+
+
+def test_nullable_binding_repeated_in_one_discovery_does_not_duplicate(tmp_path) -> None:
+    store = ChannelRegistryStore(tmp_path / "channel_registry.sqlite3", "demo")
+    binding = RegistrationBinding(None, "shared", "query", 1.0, "manual_config")
+    result = _result(DiscoveredRef(_registration("101"), (binding, binding)))
+
+    store.apply_discovery_result(result)
+
+    with store._connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM registration_bindings").fetchone()[0] == 1
+
+
+def test_nullable_rediscovery_refuses_ambiguous_live_rows_without_mutation(tmp_path) -> None:
+    store = ChannelRegistryStore(tmp_path / "channel_registry.sqlite3", "demo")
+    binding = RegistrationBinding(None, "shared", "query", 1.0, "manual_config")
+    result = _result(DiscoveredRef(_registration("101"), (binding,)))
+    store.apply_discovery_result(result)
+    with store._connect() as conn:
+        conn.execute("INSERT INTO registration_bindings SELECT * FROM registration_bindings")
+        before = [tuple(row) for row in conn.execute("SELECT * FROM registration_bindings ORDER BY rowid")]
+        registration_before = tuple(conn.execute("SELECT * FROM registrations").fetchone())
+        scope_before = [tuple(row) for row in conn.execute("SELECT * FROM scope_health ORDER BY scope_id")]
+        delta_count = conn.execute("SELECT COUNT(*) FROM registry_deltas").fetchone()[0]
+
+    partial = replace(
+        result,
+        completeness=DiscoveryCompleteness.PARTIAL,
+        computed_at=datetime(2026, 5, 24, 2, tzinfo=timezone.utc),
+        scope_statuses={},
+    )
+    with pytest.raises(RegistryError, match="multiple live null-workstream bindings"):
+        store.apply_discovery_result(partial)
+
+    with store._connect() as conn:
+        assert [tuple(row) for row in conn.execute(
+            "SELECT * FROM registration_bindings ORDER BY rowid"
+        )] == before
+        assert tuple(conn.execute("SELECT * FROM registrations").fetchone()) == registration_before
+        assert [tuple(row) for row in conn.execute(
+            "SELECT * FROM scope_health ORDER BY scope_id"
+        )] == scope_before
+        assert conn.execute("SELECT COUNT(*) FROM registry_deltas").fetchone()[0] == delta_count
 
 
 def test_apply_discovery_result_uses_declared_provider_instance_for_empty_result(tmp_path) -> None:

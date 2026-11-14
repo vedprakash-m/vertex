@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import cast
 
 from src.ai._pipeline import AIPipelineError, process_generated_text
+from src.ai.client import NON_RETRYABLE_AI_ERRORS
 from src.ai.provider import LLMProvider
 from src.ai.tiered_router import TierResult, route_through_tiers
 from src.core.ai_result_cache import AIResultCacheKey, canonical_input_hash, get_ai_result, put_ai_result
@@ -173,20 +174,24 @@ def generate_workstream_blurb(
         ),
         output_schema_version=_OUTPUT_SCHEMA_VERSION,
     )
-    raw = route_through_tiers(
-        _FEATURE,
-        deterministic_fn=lambda: None,
-        frontier_fn=lambda: client.structured(
-            system_prompt,
-            user_prompt,
-            parser=lambda payload: payload,
-            max_tokens=policy.max_tokens,
-            prompt_version=PROMPT_VERSION,
-        ),
-        policy=policy,
-        cache_lookup_fn=lambda: _cached_response(cache_key, programs_root=programs_root),
-        cache_store_fn=lambda value: put_ai_result(cache_key, value, programs_root=programs_root),
-    ).value
+    try:
+        raw = route_through_tiers(
+            _FEATURE,
+            deterministic_fn=lambda: None,
+            frontier_fn=lambda: client.structured(
+                system_prompt,
+                user_prompt,
+                parser=lambda payload: payload,
+                max_tokens=policy.max_tokens,
+                prompt_version=PROMPT_VERSION,
+            ),
+            policy=policy,
+            cache_lookup_fn=lambda: _cached_response(cache_key, programs_root=programs_root),
+            cache_store_fn=lambda value: put_ai_result(cache_key, value, programs_root=programs_root),
+        ).value
+    except NON_RETRYABLE_AI_ERRORS:
+        _discard(ReleaseTerminal.DISCARDED, "AI cost or preflight failure prevented workstream blurb generation.")
+        raise
 
     _lifecycle(AIRunState.RESPONDED)
 

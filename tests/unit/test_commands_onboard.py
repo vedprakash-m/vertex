@@ -1834,6 +1834,7 @@ def test_onboard_update_continues_real_created_draft_without_rewriting_history(m
     assert {path.relative_to(program): path.read_bytes()
             for path in first_html.parent.rglob("*") if path.is_file()} == first
     tokenizer.encoding_for_model.assert_not_called()
+    tokenizer.encoding_name_for_model.assert_not_called()
     tokenizer.get_encoding.assert_not_called()
 
 
@@ -1857,7 +1858,7 @@ def test_synthetic_onboard_repair_review_and_confirm_with_stale_fact(
     from src.commands.gather_pipeline import channel_runtime
     from src.core.ado_discovery import ADODiscoveryConfig, ADODiscoveryProvider
     from src.core.gather_run_manifest import RequiredScopeStatus, resolve_latest_full_committed_manifest
-    from src.core.integration_types import ADOHydrationOutput, ChannelConfig, HydrationResult
+    from src.core.integration_types import ADOHydrationOutput, ChannelConfig, HydrationResult, PaginationOutcome
     from src.core.models import ReviewState, RiskLevel, WorkItem
     from src.core.narrative_store import get_narratives_dir
     from src.core.overrides_store import get_overrides_path
@@ -1936,6 +1937,7 @@ def test_synthetic_onboard_repair_review_and_confirm_with_stale_fact(
             return {"id": query_id, "wiql": "Select [System.Id] From WorkItems"}
 
         def execute_wiql(self, wiql, top=None, **kwargs):
+            kwargs["on_pagination"](PaginationOutcome(1, 1, False))
             return [900001]
 
     item = item_at(as_of)
@@ -2043,6 +2045,15 @@ def test_synthetic_onboard_repair_review_and_confirm_with_stale_fact(
             future_bytes = yaml.safe_dump(future_overrides, sort_keys=False).encode("utf-8")
         future_path.parent.mkdir(parents=True, exist_ok=True)
         future_path.write_bytes(future_bytes)
+    program_yaml = programs / "storage_demo" / "program.yaml"
+    reviewed_context = program_yaml.read_bytes()
+    edited_context = yaml.safe_load(reviewed_context)
+    holder = edited_context if edited_context.get("objective") else edited_context["program"]
+    holder["objective"] = "Context edited after section approval."
+    program_yaml.write_text(yaml.safe_dump(edited_context, sort_keys=False), encoding="utf-8")
+    with pytest.raises(ConfigError, match="Program context changed"):
+        confirm_issue(edition, 1, dry_run=True, programs_root=programs, reports_root=reports, archive_root=archive)
+    program_yaml.write_bytes(reviewed_context)
     preview = confirm_issue(
         edition, 1, dry_run=True, programs_root=programs, reports_root=reports, archive_root=archive,
     )
@@ -2179,4 +2190,5 @@ def test_synthetic_onboard_repair_review_and_confirm_with_stale_fact(
     assert "Provide a concise weekly readiness view." in objectives
     assert objectives[-1] == "Updated synthetic context."
     tokenizer.encoding_for_model.assert_not_called()
+    tokenizer.encoding_name_for_model.assert_not_called()
     tokenizer.get_encoding.assert_not_called()

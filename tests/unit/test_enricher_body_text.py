@@ -166,6 +166,6 @@ def test_enrichment_accepts_local_kb_source():
         timestamp=_AS_OF,
         excerpt="onedeploy.md",
         permalink=None,
-        body_text="Tao Peng owns 7 EXAMPLETAG1 items.",
+        body_text="Example Person owns 7 EXAMPLETAG1 items.",
     )
     assert e.source == "local_kb"

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import io
 import time
+from types import SimpleNamespace
 
 import pytest
+import requests
 
 from src.core.ado_client import ADOClient
-from src.core.exceptions import AuthError, QueryTimeoutError
+from src.core.exceptions import AuthError, QueryError, QueryTimeoutError
 
 
 class RecordingADOClient(ADOClient):
@@ -275,6 +277,91 @@ def test_list_work_item_revisions_reports_truncation_at_safety_cap() -> None:
     assert outcomes[0].page_count == 3
 
 
+@pytest.mark.parametrize(
+    "page",
+    [
+        "invalid-json",
+        None,
+        [],
+        {},
+        {"value": None},
+        {"value": {}},
+        {"value": [None]},
+        {"value": [], "count": True},
+        {"value": [], "count": 1},
+        {"value": [], "count": 0.0},
+        {"value": [], "count": "0"},
+        {"value": [{"rev": 1}, {"rev": 2}, {"rev": 3}], "count": 3},
+    ],
+)
+@pytest.mark.parametrize("second_page", [False, True])
+def test_revision_response_malformed_page_cannot_certify_completeness(
+    monkeypatch: pytest.MonkeyPatch, page: object, second_page: bool,
+) -> None:
+    client = RecordingRestADOClient(payload={})
+    requested: list[object] = []
+    outcomes: list[object] = []
+
+    def request(method: str, url: str, **kwargs: object) -> object:
+        del method, url
+        requested.append(kwargs.get("params"))
+        if second_page and len(requested) == 1:
+            return {"value": [{"rev": 1}, {"rev": 2}], "count": 2}
+        if page == "invalid-json":
+            raise requests.exceptions.JSONDecodeError("private-json-detail", "private-body", 0)
+        return page
+
+    monkeypatch.setattr(client, "_request_json", request)
+    with pytest.raises(QueryError) as error:
+        client.list_work_item_revisions(101, page_size=2, on_pagination=outcomes.append)
+
+    assert "private" not in str(error.value)
+    assert outcomes == []
+    assert requested == ([{"$top": "2", "$skip": "0"}, {"$top": "2", "$skip": "2"}]
+                         if second_page else [{"$top": "2", "$skip": "0"}])
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        {"value": []},
+        {"value": [], "count": 0},
+        {"value": [{"rev": 1}]},
+        {"value": [{"rev": 1}], "count": 1},
+    ],
+)
+@pytest.mark.parametrize("with_callback", [False, True])
+def test_revision_response_valid_terminal_page_remains_complete(
+    page: dict[str, object], with_callback: bool,
+) -> None:
+    client = RecordingRestADOClient(payload=page)
+    outcomes: list[object] = []
+
+    rows = client.list_work_item_revisions(
+        101, page_size=2, on_pagination=outcomes.append if with_callback else None,
+    )
+
+    assert rows == page["value"]
+    if with_callback:
+        assert len(outcomes) == 1
+        assert (outcomes[0].total_fetched, outcomes[0].page_count, outcomes[0].is_truncated) == (len(rows), 1, False)
+    else:
+        assert outcomes == []
+
+
+def test_revision_response_unrelated_value_error_is_not_masked(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = RecordingRestADOClient(payload={})
+    outcomes: list[object] = []
+
+    def request(method: str, url: str, **kwargs: object) -> object:
+        raise ValueError("unrelated failure")
+
+    monkeypatch.setattr(client, "_request_json", request)
+    with pytest.raises(ValueError, match="unrelated failure"):
+        client.list_work_item_revisions(101, on_pagination=outcomes.append)
+    assert outcomes == []
+
+
 def test_list_work_item_comments_uses_comments_endpoint() -> None:
     client = RecordingRestADOClient(payload={"comments": [{"id": 7}]})
 
@@ -311,6 +398,122 @@ def test_list_work_item_comments_follows_continuation_token_across_pages() -> No
     assert outcomes[0].total_fetched == 2
     assert outcomes[0].page_count == 2
     assert outcomes[0].is_truncated is False
+
+
+@pytest.mark.parametrize("with_header", [False, True])
+@pytest.mark.parametrize("with_callback", [False, True])
+def test_comment_response_follows_body_token_and_preserves_opaque_value(
+    monkeypatch: pytest.MonkeyPatch, with_header: bool, with_callback: bool,
+) -> None:
+    client = RecordingRestADOClient(payload={})
+    requests: list[tuple[str, object]] = []
+    token = " opaque token+value "
+
+    def request(method: str, url: str, **kwargs: object) -> _FakeJsonResponse:
+        assert method == "GET"
+        requests.append((url, kwargs.get("params")))
+        if len(requests) == 1:
+            return _FakeJsonResponse(
+                {"comments": [{"id": 1}], "count": 1, "continuationToken": token,
+                 "nextPage": "https://not-followed.invalid/"},
+                headers={"x-ms-continuationtoken": token} if with_header else {},
+            )
+        return _FakeJsonResponse({"comments": [{"id": 2}], "count": 1, "continuationToken": None})
+
+    monkeypatch.setattr(client, "_request_response", request)
+    outcomes: list[object] = []
+    rows = client.list_work_item_comments(101, on_pagination=outcomes.append if with_callback else None)
+
+    assert rows == [{"id": 1}, {"id": 2}]
+    assert [params for _, params in requests] == [None, {"continuationToken": token}]
+    assert all(url == "https://dev.azure.com/your-org/One/_apis/wit/workItems/101/comments?api-version=7.1-preview.4"
+               for url, _ in requests)
+    if with_callback:
+        assert len(outcomes) == 1
+        assert (outcomes[0].total_fetched, outcomes[0].page_count, outcomes[0].is_truncated) == (2, 2, False)
+    else:
+        assert outcomes == []
+
+
+def test_comment_response_body_token_reports_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = RecordingRestADOClient(payload={"comments": [{"id": 1}], "continuationToken": "page-2"})
+    outcomes: list[object] = []
+    rows = client.list_work_item_comments(101, max_pages=1, on_pagination=outcomes.append)
+
+    assert rows == [{"id": 1}]
+    assert len(outcomes) == 1
+    assert (outcomes[0].total_fetched, outcomes[0].page_count, outcomes[0].is_truncated) == (1, 1, True)
+
+
+@pytest.mark.parametrize(
+    ("page", "headers"),
+    [
+        ("invalid-json", {}),
+        (None, {}),
+        ([], {}),
+        ({}, {}),
+        ({"comments": None}, {}),
+        ({"comments": {}}, {}),
+        ({"comments": [None]}, {}),
+        ({"comments": [], "count": True}, {}),
+        ({"comments": [], "count": 1}, {}),
+        ({"comments": [], "count": "0"}, {}),
+        ({"comments": [], "continuationToken": False}, {}),
+        ({"comments": [], "continuationToken": []}, {}),
+        ({"comments": [], "continuationToken": "  "}, {}),
+        ({"comments": [], "nextPage": True}, {}),
+        ({"comments": [], "nextPage": "https://private.invalid/"}, {}),
+        ({"comments": []}, {"x-ms-continuationtoken": 4}),
+        ({"comments": [], "continuationToken": "private-body"}, {"x-ms-continuationtoken": "private-header"}),
+    ],
+)
+@pytest.mark.parametrize("second_page", [False, True])
+def test_comment_response_malformed_page_cannot_certify_completeness(
+    monkeypatch: pytest.MonkeyPatch, page: object, headers: dict[str, object], second_page: bool,
+) -> None:
+    client = RecordingRestADOClient(payload={})
+    requested: list[object] = []
+    outcomes: list[object] = []
+
+    def request(method: str, url: str, **kwargs: object) -> object:
+        del method, url
+        requested.append(kwargs.get("params"))
+        if second_page and len(requested) == 1:
+            return _FakeJsonResponse({"comments": [{"id": 1}], "continuationToken": "page-2"})
+
+        def json_body() -> object:
+            if page == "invalid-json":
+                raise ValueError("private-json-detail")
+            return page
+
+        return SimpleNamespace(json=json_body, headers=headers)
+
+    monkeypatch.setattr(client, "_request_response", request)
+    with pytest.raises(QueryError) as error:
+        client.list_work_item_comments(101, on_pagination=outcomes.append)
+
+    assert "private" not in str(error.value)
+    assert outcomes == []
+    assert len(requested) == (2 if second_page else 1)
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        {"comments": []},
+        {"comments": [], "count": 0, "continuationToken": None, "nextPage": None},
+        {"comments": [{"id": 1}], "count": 1, "continuationToken": "", "nextPage": ""},
+    ],
+)
+def test_comment_response_valid_terminal_page_remains_complete(page: dict[str, object]) -> None:
+    client = RecordingRestADOClient(payload=page)
+    outcomes: list[object] = []
+
+    rows = client.list_work_item_comments(101, on_pagination=outcomes.append)
+
+    assert rows == page["comments"]
+    assert len(outcomes) == 1
+    assert (outcomes[0].total_fetched, outcomes[0].page_count, outcomes[0].is_truncated) == (len(rows), 1, False)
 
 
 def test_list_work_item_comments_reports_truncation_at_page_cap() -> None:
@@ -551,6 +754,159 @@ def test_execute_wiql_reports_not_capped_when_under_top() -> None:
     client.execute_wiql("Select [System.Id] From WorkItems", top=2000, on_pagination=outcomes.append)
 
     assert outcomes[0].is_truncated is False
+
+
+@pytest.mark.parametrize(
+    ("payload", "observed"),
+    [
+        pytest.param({}, (), id="missing-arrays"),
+        pytest.param({"queryType": "flat"}, (), id="missing-flat-array"),
+        pytest.param({"queryType": "tree"}, (), id="missing-link-array"),
+        pytest.param({"workItems": None}, (), id="null-array"),
+        pytest.param({"workItems": "private-value"}, (), id="non-array"),
+        pytest.param(
+            {"workItems": [{"id": 101}, "private-value", {"id": 202}]},
+            (101, 202), id="malformed-flat-row",
+        ),
+        pytest.param(
+            {"workItems": [{"id": 101}, {"id": True}, {"id": 202}]},
+            (101, 202), id="boolean-id",
+        ),
+        pytest.param(
+            {"workItems": [{"id": 101}, {"id": "303"}, {"id": 202}]},
+            (101, 202), id="string-id",
+        ),
+        pytest.param(
+            {"workItems": [{"id": 101}, {"id": 3.0}, {"id": 202}]},
+            (101, 202), id="float-id",
+        ),
+        pytest.param(
+            {"workItems": [{"id": 101}, {"id": 0}, {"id": 202}]},
+            (101, 202), id="zero-id",
+        ),
+        pytest.param(
+            {"workItems": [{"id": 101}, {"id": -1}, {"id": 202}]},
+            (101, 202), id="negative-id",
+        ),
+        pytest.param(
+            {"workItems": [{"id": 101}, {}, {"id": 202}]},
+            (101, 202), id="missing-id",
+        ),
+        pytest.param(
+            {"workItems": [{"id": 101}, {"id": 101}, {"id": 202}]},
+            (101, 202), id="duplicate-flat-id",
+        ),
+        pytest.param(
+            {"workItemRelations": [{"target": {"id": 101}}, {}, {"target": {"id": 202}}]},
+            (101, 202), id="link-without-endpoints",
+        ),
+        pytest.param(
+            {"workItemRelations": [{"source": {"id": 101}, "target": {"id": "private-value"}},
+                                   {"target": {"id": 202}}]},
+            (101, 202), id="malformed-link-endpoint",
+        ),
+        pytest.param(
+            {"workItemRelations": [{"target": {"id": 101}}, "private-value", {"source": {"id": 202}}]},
+            (101, 202), id="malformed-link-row",
+        ),
+        pytest.param(
+            {"queryType": "flat", "workItemRelations": [{"target": {"id": 101}}]},
+            (101,), id="type-array-mismatch",
+        ),
+        pytest.param(
+            {"queryType": "private-value", "workItems": [{"id": 101}]},
+            (101,), id="unknown-query-type",
+        ),
+        pytest.param(
+            {"queryType": None, "workItems": [{"id": 101}]},
+            (101,), id="null-query-type",
+        ),
+        pytest.param(
+            {"queryResultType": "private-value", "workItems": [{"id": 101}]},
+            (101,), id="unknown-result-type",
+        ),
+        pytest.param(
+            {"queryResultType": ["private-value"], "workItems": [{"id": 101}]},
+            (101,), id="non-string-result-type",
+        ),
+        pytest.param(
+            {"queryType": "flat", "queryResultType": "workItemLink",
+             "workItems": [{"id": 101}], "workItemRelations": []},
+            (101,), id="conflicting-metadata",
+        ),
+        pytest.param(
+            {"workItems": [{"id": 101}], "workItemRelations": [{"target": {"id": 202}}]},
+            (101, 202), id="contradictory-populated-arrays",
+        ),
+    ],
+)
+def test_execute_wiql_rejects_malformed_response(
+    payload: dict[str, object], observed: tuple[int, ...],
+) -> None:
+    client = RecordingRestADOClient(payload=payload)
+    outcomes: list[object] = []
+
+    with pytest.raises(QueryError) as raised:
+        client.execute_wiql("Select [System.Id] From WorkItems", on_pagination=outcomes.append)
+
+    assert getattr(raised.value, "observed_ids") == observed
+    assert "private-value" not in str(raised.value)
+    assert outcomes == []
+
+
+def test_execute_wiql_rejects_non_object_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = RecordingRestADOClient(payload={})
+    monkeypatch.setattr(client, "_request_json", lambda *args, **kwargs: [])
+    outcomes: list[object] = []
+
+    with pytest.raises(QueryError) as raised:
+        client.execute_wiql("query", on_pagination=outcomes.append)
+
+    assert getattr(raised.value, "observed_ids") == ()
+    assert outcomes == []
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"workItems": []}, []),
+        ({"queryType": "flat", "queryResultType": "workItem", "workItems": []}, []),
+        ({"queryType": "tree", "workItemRelations": []}, []),
+        ({"workItems": [], "workItemRelations": []}, []),
+        (
+            {"queryType": "oneHop", "queryResultType": "workItemLink", "workItemRelations": [
+                {"source": None, "target": {"id": 101}},
+                {"source": {"id": 101}, "target": None},
+                {"source": {"id": 101}, "target": {"id": 202}},
+            ]},
+            [101, 202],
+        ),
+    ],
+)
+def test_execute_wiql_accepts_verified_empty_and_link_responses(
+    payload: dict[str, object], expected: list[int],
+) -> None:
+    client = RecordingRestADOClient(payload=payload)
+    outcomes: list[object] = []
+
+    assert client.execute_wiql("query", top=10, on_pagination=outcomes.append) == expected
+    assert len(outcomes) == 1
+    assert outcomes[0].total_fetched == len(expected)
+    assert outcomes[0].is_truncated is False
+
+
+def test_execute_wiql_link_record_cap_is_truncated() -> None:
+    client = RecordingRestADOClient(payload={"queryType": "oneHop", "workItemRelations": [
+        {"target": {"id": 101}},
+        {"source": {"id": 101}, "target": {"id": 202}},
+        {"source": {"id": 202}, "target": {"id": 101}},
+    ]})
+    outcomes: list[object] = []
+
+    assert client.execute_wiql("query", top=3, on_pagination=outcomes.append) == [101, 202]
+    assert len(outcomes) == 1
+    assert outcomes[0].total_fetched == 2
+    assert outcomes[0].is_truncated is True
 
 
 def test_list_team_iterations_uses_teamsettings_iterations_endpoint() -> None:

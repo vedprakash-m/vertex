@@ -12,7 +12,7 @@ from src.core.edition_resolver import get_program_output_dir
 from src.core.exceptions import ConfigError
 from src.core.forecast_engine import ETAForecast
 from src.core.models import Confidence, RiskLevel
-from src.core.gather_run_manifest import QueryResultEntry
+from src.core.gather_run_manifest import QueryResultEntry, get_committed_run_dir
 from src.core.manifest_writer import hash_jsonable
 from src.core.program_fact_store import ProgramFactInput, ProgramFactStore
 from tests.support.report_test_setup import disable_kusto_in_report_copy, stage_v2_report_workspace
@@ -151,6 +151,39 @@ def test_ordinary_report_persists_the_pre_acquisition_pin(
         assert "gather_fetch_join_unknown" in capture["limitations"]
     with store._connect() as connection:
         assert connection.execute("SELECT COUNT(*) FROM program_fact_snapshot_pins").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("existing_draft", [False, True])
+def test_missing_query_identity_refuses_report_without_rewriting_gather_or_output(
+    repo_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, existing_draft: bool,
+) -> None:
+    reports = stage_v2_report_workspace(repo_root, tmp_path)
+    root = reports.parent / "programs"
+    disable_kusto_in_report_copy(reports)
+    monkeypatch.setenv("VERTEX_DB_PATH", str(tmp_path / "fact-db"))
+    selected = _commit_gather_run(root, query_results=(QueryResultEntry(
+        query_id="query", scope_id="scope", wiql_hash="",
+        captured_at=datetime(2026, 5, 4, tzinfo=timezone.utc), raw_count=0,
+        membership_ids=(), membership_hash="empty-membership", cap_reached=False,
+        completeness_state="ERROR", failure_category="missing_wiql",
+    ),))
+    run_dir = get_committed_run_dir("acme", selected.run_id, programs_root=root)
+    gather_before = {path: path.read_bytes() for path in run_dir.rglob("*") if path.is_file()}
+    output = get_program_output_dir("acme_weekly", programs_root=root)
+    issue = output / "issue_001"
+    if existing_draft:
+        issue.mkdir(parents=True, exist_ok=True)
+        (issue / "issue_001.html").write_text("previous reviewed artifact", encoding="utf-8")
+    output_before = {path: path.read_bytes() for path in issue.rglob("*") if path.is_file()}
+    with pytest.raises(ConfigError, match="saved-query identity is unavailable"):
+        generate_report_draft(
+            edition_name="acme_weekly", reports_root=reports, programs_root=root,
+            archive_root=tmp_path / "archive", as_of=datetime(2026, 5, 5, 18, tzinfo=timezone.utc),
+            work_item_loader=lambda bundle, timestamp: (_sample_items(timestamp), 0), open_browser=False,
+        )
+    assert {path: path.read_bytes() for path in run_dir.rglob("*") if path.is_file()} == gather_before
+    assert {path: path.read_bytes() for path in issue.rglob("*") if path.is_file()} == output_before
+    assert issue.exists() is existing_draft
 
 
 @pytest.mark.parametrize("damage", [

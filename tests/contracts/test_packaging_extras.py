@@ -3,9 +3,9 @@ their actual import sites (specs/backlog.md WO-8 / BL-C5).
 
 A bidirectional audit for the five named extras (ai, ai-local, m365, kusto,
 render): every package declared in an extra must be traceable to a real
-import site in src/ (or an explicitly documented exception -- msgraph-sdk,
-kept declared despite being currently unused, see pyproject.toml's own
-comment), and every known optional-integration import in src/ must resolve
+import site in src/ (or an explicitly documented exception -- msgraph-sdk
+and its security-constrained opentelemetry-api dependency), and every known
+optional-integration import in src/ must resolve
 to the extra this test expects, so a future refactor that moves e.g. the
 Kusto import into a different file doesn't silently orphan the `kusto`
 extra's rationale.
@@ -17,6 +17,8 @@ from pathlib import Path
 import tomllib
 
 import pytest
+from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SRC_ROOT = _REPO_ROOT / "src"
@@ -42,7 +44,7 @@ _KNOWN_IMPORT_SITES: tuple[tuple[str, str, str], ...] = (
 
 # Packages declared in an extra with no current import site, and why that's
 # expected (not a bug) -- see pyproject.toml's own comment on each entry.
-_DOCUMENTED_UNUSED_PACKAGES: frozenset[str] = frozenset({"msgraph-sdk"})
+_DOCUMENTED_UNUSED_PACKAGES: frozenset[str] = frozenset({"msgraph-sdk", "opentelemetry-api"})
 
 
 def _package_name(requirement: str) -> str:
@@ -108,3 +110,28 @@ def test_typer_and_click_retain_upper_bounds() -> None:
         assert expected_bound in pyproject_line, (
             f"pyproject.toml's {package} pin is missing its {expected_bound} upper bound: {pyproject_line!r}"
         )
+
+
+@pytest.mark.parametrize(
+    ("extra", "package", "vulnerable", "fixed"),
+    (
+        (None, "soupsieve", "3.0.4", "4.0"),
+        ("m365", "opentelemetry-api", "1.45.1", "1.45.2"),
+    ),
+)
+def test_security_dependency_floors_reject_vulnerable_versions(
+    extra: str | None, package: str, vulnerable: str, fixed: str,
+) -> None:
+    requirements = _PYPROJECT["project"]["dependencies"] if extra is None else _EXTRAS[extra]
+    matches = [Requirement(value) for value in requirements if _package_name(value) == package]
+
+    assert len(matches) == 1
+    assert vulnerable not in matches[0].specifier
+    assert fixed in matches[0].specifier
+
+
+def test_supported_python_includes_the_fixed_soupsieve_minimum() -> None:
+    supported = SpecifierSet(_PYPROJECT["project"]["requires-python"])
+
+    assert "3.11.4" not in supported
+    assert "3.11.5" in supported

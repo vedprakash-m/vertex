@@ -25,16 +25,16 @@ def test_evidence_correction_pattern_is_frozen_dataclass():
         lane_id="acme.networking",
         corrected_at=_NOW,
         workiq_latest_before=None,
-        workiq_latest_after="2026-06-17: NMAgent IcM 771996570 ACTIVE.",
+        workiq_latest_after="2026-06-17: NMAgent IcM 111111 ACTIVE.",
         risk_level_before=None,
         risk_level_after="high",
         ado_ids_added=(),
-        icm_ids_added=("771996570",),
+        icm_ids_added=("111111",),
         source_hint="cowork_manual",
         operator="maintainer",
     )
     assert pattern.lane_id == "acme.networking"
-    assert pattern.icm_ids_added == ("771996570",)
+    assert pattern.icm_ids_added == ("111111",)
     assert pattern.source_hint == "cowork_manual"
 
 

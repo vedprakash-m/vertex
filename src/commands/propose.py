@@ -10,6 +10,7 @@ import typer
 
 from src.ai.ai_mode import AIMode, get_ai_mode
 from src.ai.blurb_generator import WorkstreamBlurb, generate_workstream_blurb
+from src.ai.client import NON_RETRYABLE_AI_ERRORS
 from src.ai.exec_summary_drafter import ExecSummaryDraft, draft_exec_summary
 from src.commands import report as report_command_helpers
 from src.core.ban_list_validator import find_ban_list_violations
@@ -314,6 +315,12 @@ def propose_command(
             offline=offline,
             steering=steering or None,
         )
+    except NON_RETRYABLE_AI_ERRORS as error:
+        typer.echo(
+            f"AI proposal generation stopped: {type(error).__name__}; check AI budget and cost state before retrying.",
+            err=True,
+        )
+        raise typer.Exit(code=2) from None
     except StateError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(code=2) from error

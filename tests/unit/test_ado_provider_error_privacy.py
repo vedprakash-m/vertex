@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
@@ -14,13 +14,14 @@ from cli import app
 from src.commands import gather
 from src.commands.doctor_checks.observability_checks import build_diagnose_report
 from src.commands.gather_pipeline import channel_runtime
+from src.core.ado_client import ADOClient
 from src.core.ado_discovery import ADODiscoveryConfig, ADODiscoveryProvider
 from src.core.ado_hydration import ADOHydrationConfig, ADOHydrationProvider
 from src.core.ado_signal_extractor import ADOSignalExtractor
 from src.core.channel_execution_policy import ChannelExecutionPolicy
 from src.core.channel_registry_store import ChannelRegistryStore
-from src.core.exceptions import QueryError
-from src.core.failure_taxonomy import _PATTERN_TABLE, classify_exception
+from src.core.exceptions import AuthError, CredentialExpired, QueryError
+from src.core.failure_taxonomy import FailureCategory, _PATTERN_TABLE, classify_exception
 from src.core.gather_run_manifest import resolve_latest_committed_manifest
 from src.core.gather_state_store import load_gather_state
 from src.core.integration_types import (
@@ -30,6 +31,7 @@ from src.core.integration_types import (
     DiscoveredRef,
     DiscoveryCompleteness,
     DiscoveryResult,
+    PaginationOutcome,
     RegistrationBinding,
     RegistrationStatus,
     ScopeStatus,
@@ -68,6 +70,8 @@ class _Client(_FakeADOClient):
         self.calls.append("wiql:bad" if "'bad'" in wiql else "wiql:good")
         if self.phase == "discovery_query" and "'bad'" in wiql:
             raise self.error
+        if on_pagination is not None:
+            on_pagination(PaginationOutcome(total_fetched=1, page_count=1, is_truncated=False))
         return [101]
 
     def query_work_items_batch(
@@ -214,7 +218,7 @@ def test_provider_caught_error_is_private_and_retains_failure(
         if phase in ("detail", "pull_requests"):
             assert error.ref_id == ref_id
             assert error.ref_kind == ("repository" if phase == "pull_requests" else "work_item")
-        assert result.api_call_count == {"batch": 1, "detail": 2, "relations": 3, "pull_requests": 0}[phase]
+        assert result.api_call_count == {"batch": 1, "detail": 3, "relations": 3, "pull_requests": 0}[phase]
         assert error.operator_action == (
             "Verify Azure DevOps access and retry hydration." if phase == "batch" else None
         )
@@ -274,6 +278,38 @@ def test_shared_failed_query_preserves_each_scope(ado: SimpleNamespace) -> None:
     assert ado.client.calls.count("saved:bad") == 1
 
 
+@pytest.mark.parametrize("gather_v2", [False, True])
+@pytest.mark.parametrize("budgeted", [False, True])
+def test_actual_gather_preserves_missing_wiql_failure(
+    ado: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, gather_v2: bool, budgeted: bool,
+) -> None:
+    monkeypatch.setattr(gather, "_gather_v2_enabled", lambda: gather_v2)
+    if budgeted:
+        _enable_budget(monkeypatch)
+    get_saved_query = ado.client.get_saved_query
+    monkeypatch.setattr(
+        ado.client, "get_saved_query",
+        lambda query_id: {} if query_id == "bad" else get_saved_query(query_id),
+    )
+    artifacts = gather.gather_program(
+        _PROGRAM, programs_root=ado.scenario.root, as_of=_NOW, force_discovery=True,
+    )
+    manifest = resolve_latest_committed_manifest(_PROGRAM, programs_root=ado.scenario.root)
+    assert manifest is not None
+    outcome = next(row for row in manifest.channel_outcomes if row.channel == "ado")
+    assert outcome.degraded and "WIQL" in (outcome.degrade_reason or "")
+    assert gather._semantic_gather_exit_code(artifacts) == 3
+    failed = next(row for row in manifest.query_results if row.query_id == "bad")
+    assert failed.completeness_state == "ERROR"
+    assert failed.failure_category == "missing_wiql" and failed.wiql_hash == ""
+    good = next(row for row in manifest.query_results if row.query_id == "good")
+    assert good.completeness_state == "FULL" and good.membership_ids == ("101",)
+    assert "batch" in ado.client.calls and "revisions:101" in ado.client.calls
+    registry = ChannelRegistryStore(get_channel_registry_path(_PROGRAM, programs_root=ado.scenario.root), _PROGRAM)
+    delta = registry.recent_deltas("ado")[0]
+    assert delta.failed_scopes["synthetic.slice:bad"].status is ScopeStatusKind.ERROR
+
+
 @pytest.mark.parametrize("phase", ["discovery_saved", "discovery_query", "batch", "detail", "relations"])
 @pytest.mark.parametrize("gather_v2", [False, True])
 @pytest.mark.parametrize("budgeted", [False, True])
@@ -331,6 +367,451 @@ def test_actual_gather_surfaces_omit_caught_exception(
     assert _PROGRAM not in (outcome.degrade_reason or "")
 
 
+@pytest.mark.parametrize("gather_v2", [False, True])
+@pytest.mark.parametrize("malformed_second_page", [False, True])
+def test_comment_response_reaches_actual_gather_and_retries_malformed_page(
+    ado: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, gather_v2: bool, malformed_second_page: bool,
+) -> None:
+    now = datetime.now(timezone.utc)
+    prior = datetime(2026, 5, 24, 9, tzinfo=timezone.utc)
+    first_gather = datetime(2026, 5, 25, 12, tzinfo=timezone.utc)
+    registration = replace(_registration(), first_discovered_at=now, last_seen_at=now, last_verified_at=prior)
+    binding = RegistrationBinding(
+        workstream_id="ws", scope_id="manual", source_type="manual_config",
+        confidence=1.0, confidence_source="manual_config",
+    )
+    store = ChannelRegistryStore(get_channel_registry_path(_PROGRAM, programs_root=ado.scenario.root), _PROGRAM)
+    store.apply_discovery_result(DiscoveryResult(
+        channel="ado", program_id=_PROGRAM, discovered_refs=(DiscoveredRef(registration, (binding,)),),
+        completeness=DiscoveryCompleteness.FULL,
+        scope_statuses={"manual": ScopeStatus("manual", ScopeStatusKind.SUCCESS, DiscoveryCompleteness.FULL, 1)},
+        scope_state_updates={}, errors=(), computed_at=now,
+    ))
+    monkeypatch.setattr(ChannelRegistryStore, "is_discovery_stale", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(gather, "_gather_v2_enabled", lambda: gather_v2)
+    real_client = object.__new__(ADOClient)
+    real_client._rest_base_url = "https://example.invalid/_apis/wit/"
+    requested: list[object] = []
+    malformed = malformed_second_page
+
+    def request(method: str, url: str, **kwargs: object) -> SimpleNamespace:
+        assert method == "GET" and url == f"{real_client._rest_base_url}workItems/101/comments?api-version=7.1-preview.4"
+        params = kwargs.get("params")
+        requested.append(params)
+        if params is None:
+            body: dict[str, object] = {
+                "comments": [{"id": 7, "createdDate": "2026-05-24T12:00:00Z", "text": "first page"}],
+                "count": 1, "continuationToken": "page-2",
+            }
+        elif malformed:
+            body = {"message": _PRIVATE}
+        else:
+            body = {
+                "comments": [{"id": 8, "createdDate": "2026-05-24T13:00:00Z", "text": "second page"}],
+                "count": 1,
+            }
+        return SimpleNamespace(json=lambda: body, headers={})
+
+    monkeypatch.setattr(real_client, "_request_response", request)
+    monkeypatch.setattr(ado.client, "list_work_item_comments", real_client.list_work_item_comments)
+    first = gather.gather_program(_PROGRAM, programs_root=ado.scenario.root, as_of=first_gather)
+    manifest = resolve_latest_committed_manifest(_PROGRAM, programs_root=ado.scenario.root)
+    state = load_gather_state(_PROGRAM, programs_root=ado.scenario.root)
+    assert manifest is not None and state is not None
+    assert requested == [None, {"continuationToken": "page-2"}]
+    signals = read_signals(_PROGRAM, programs_root=ado.scenario.root)
+    comments = [signal.text for signal in signals if signal.source == "ado/comment"]
+    outcome = next(row for row in manifest.channel_outcomes if row.channel == "ado")
+    if not malformed_second_page:
+        assert gather._semantic_gather_exit_code(first) == 0 and not outcome.degraded
+        assert any("first page" in text for text in comments)
+        assert any("second page" in text for text in comments)
+        assert store.all_registrations("ado")[0].last_verified_at == first_gather
+        return
+
+    assert gather._semantic_gather_exit_code(first) == 3 and outcome.degraded
+    assert comments == [] and any(signal.source == "ado/revision" for signal in signals)
+    failed = store.all_registrations("ado")[0]
+    assert failed.last_verified_at == prior and failed.consecutive_hydration_failures == 1
+    assert _PRIVATE not in repr((first.integration_errors, state.integration_error_details, manifest.channel_outcomes))
+
+    malformed = False
+    retry_time = first_gather + timedelta(days=1)
+    second = gather.gather_program(_PROGRAM, programs_root=ado.scenario.root, as_of=retry_time)
+    assert gather._semantic_gather_exit_code(second) == 0
+    assert requested == [None, {"continuationToken": "page-2"}] * 2
+    recovered = store.all_registrations("ado")[0]
+    assert recovered.last_verified_at == retry_time and recovered.consecutive_hydration_failures == 0
+    comments = [signal.text for signal in read_signals(_PROGRAM, programs_root=ado.scenario.root)
+                if signal.source == "ado/comment"]
+    assert any("first page" in text for text in comments)
+    assert any("second page" in text for text in comments)
+
+
+@pytest.mark.parametrize("gather_v2", [False, True])
+@pytest.mark.parametrize(
+    ("kind", "failure"),
+    [
+        ("revisions", "truncated"),
+        ("revisions", "timestamp_missing"),
+        ("comments", "timestamp_missing"),
+        ("revisions", "timestamp_invalid"),
+        ("comments", "timestamp_invalid"),
+    ],
+)
+def test_actual_gather_recovers_incomplete_history_within_window(
+    ado: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, gather_v2: bool, kind: str, failure: str,
+) -> None:
+    now = datetime.now(timezone.utc)
+    prior = datetime(2026, 5, 24, 9, tzinfo=timezone.utc)
+    first_gather = datetime(2026, 5, 25, 12, tzinfo=timezone.utc)
+    registration = replace(_registration(), first_discovered_at=now, last_seen_at=now, last_verified_at=prior)
+    binding = RegistrationBinding(
+        workstream_id="ws", scope_id="manual", source_type="manual_config",
+        confidence=1.0, confidence_source="manual_config",
+    )
+    store = ChannelRegistryStore(get_channel_registry_path(_PROGRAM, programs_root=ado.scenario.root), _PROGRAM)
+    store.apply_discovery_result(DiscoveryResult(
+        channel="ado", program_id=_PROGRAM, discovered_refs=(DiscoveredRef(registration, (binding,)),),
+        completeness=DiscoveryCompleteness.FULL,
+        scope_statuses={"manual": ScopeStatus("manual", ScopeStatusKind.SUCCESS, DiscoveryCompleteness.FULL, 1)},
+        scope_state_updates={}, errors=(), computed_at=now,
+    ))
+    monkeypatch.setattr(ChannelRegistryStore, "is_discovery_stale", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(gather, "_gather_v2_enabled", lambda: gather_v2)
+    method_name = f"list_work_item_{kind}"
+    original_history = getattr(ado.client, method_name)
+    incomplete = True
+
+    def history(work_item_id: int, **kwargs: Any) -> list[dict[str, object]]:
+        if not incomplete:
+            return original_history(work_item_id, **kwargs)
+        if failure == "truncated":
+            rows = original_history(work_item_id)
+            kwargs["on_pagination"](PaginationOutcome(total_fetched=len(rows), page_count=1, is_truncated=True))
+            return rows
+        rows = original_history(work_item_id, **kwargs)
+        row = rows[0]
+        if kind == "revisions":
+            fields = row["fields"]
+            assert isinstance(fields, dict)
+            row = fields
+            timestamp_key = "System.ChangedDate"
+        else:
+            timestamp_key = "createdDate"
+        if failure == "timestamp_missing":
+            del row[timestamp_key]
+        else:
+            row[timestamp_key] = _PRIVATE
+        return rows
+
+    monkeypatch.setattr(ado.client, method_name, history)
+    first = gather.gather_program(_PROGRAM, programs_root=ado.scenario.root, as_of=first_gather)
+    manifest = resolve_latest_committed_manifest(_PROGRAM, programs_root=ado.scenario.root)
+    state = load_gather_state(_PROGRAM, programs_root=ado.scenario.root)
+    assert manifest is not None and state is not None
+    assert gather._semantic_gather_exit_code(first) == 3
+    reason = "pagination truncated" if failure == "truncated" else "invalid timestamp"
+    assert any(f"{kind}: {reason}" in error.message for error in first.integration_errors)
+    assert any(f"{kind}: {reason}" in error.message for error in state.integration_error_details)
+    assert next(row for row in manifest.channel_outcomes if row.channel == "ado").degraded
+    failed = store.all_registrations("ado")[0]
+    assert failed.last_verified_at == prior and failed.consecutive_hydration_failures == 1
+    sources = {signal.source for signal in read_signals(_PROGRAM, programs_root=ado.scenario.root)}
+    assert ("ado/revision" in sources) is (kind != "revisions")
+    assert ("ado/comment" in sources) is (kind != "comments")
+    assert _PRIVATE not in repr((first.integration_errors, state.integration_error_details, manifest.channel_outcomes))
+
+    incomplete = False
+    retry_time = first_gather + timedelta(days=1)
+    second = gather.gather_program(_PROGRAM, programs_root=ado.scenario.root, as_of=retry_time)
+    manifest = resolve_latest_committed_manifest(_PROGRAM, programs_root=ado.scenario.root)
+    assert manifest is not None
+    assert gather._semantic_gather_exit_code(second) == 0
+    assert not next(row for row in manifest.channel_outcomes if row.channel == "ado").degraded
+    recovered = store.all_registrations("ado")[0]
+    assert recovered.last_verified_at == retry_time and recovered.consecutive_hydration_failures == 0
+    assert {"ado/revision", "ado/comment"} <= {
+        signal.source for signal in read_signals(_PROGRAM, programs_root=ado.scenario.root)
+    }
+
+
+@pytest.mark.parametrize("gather_v2", [False, True])
+@pytest.mark.parametrize("malformed_second_page", [False, True])
+def test_revision_response_reaches_actual_gather_and_retries_malformed_page(
+    ado: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, gather_v2: bool, malformed_second_page: bool,
+) -> None:
+    now = datetime.now(timezone.utc)
+    prior = datetime(2026, 5, 24, 9, tzinfo=timezone.utc)
+    first_gather = datetime(2026, 5, 25, 12, tzinfo=timezone.utc)
+    registration = replace(_registration(), first_discovered_at=now, last_seen_at=now, last_verified_at=prior)
+    binding = RegistrationBinding(
+        workstream_id="ws", scope_id="manual", source_type="manual_config",
+        confidence=1.0, confidence_source="manual_config",
+    )
+    store = ChannelRegistryStore(get_channel_registry_path(_PROGRAM, programs_root=ado.scenario.root), _PROGRAM)
+    store.apply_discovery_result(DiscoveryResult(
+        channel="ado", program_id=_PROGRAM, discovered_refs=(DiscoveredRef(registration, (binding,)),),
+        completeness=DiscoveryCompleteness.FULL,
+        scope_statuses={"manual": ScopeStatus("manual", ScopeStatusKind.SUCCESS, DiscoveryCompleteness.FULL, 1)},
+        scope_state_updates={}, errors=(), computed_at=now,
+    ))
+    monkeypatch.setattr(ChannelRegistryStore, "is_discovery_stale", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(gather, "_gather_v2_enabled", lambda: gather_v2)
+    real_client = object.__new__(ADOClient)
+    real_client._rest_base_url = "https://example.invalid/_apis/wit/"
+    requested: list[object] = []
+    malformed = malformed_second_page
+
+    def request(method: str, url: str, **kwargs: object) -> object:
+        assert method == "GET" and url == f"{real_client._rest_base_url}workItems/101/revisions?api-version=7.1"
+        params = kwargs["params"]
+        requested.append(params)
+        if params == {"$top": "1", "$skip": "0"}:
+            return {"value": [{"rev": 1, "fields": {
+                "System.ChangedDate": "2026-05-24T10:00:00Z", "System.State": "Active",
+            }}], "count": 1}
+        if params == {"$top": "1", "$skip": "1"}:
+            if malformed:
+                return {"message": _PRIVATE}
+            return {"value": [{"rev": 2, "fields": {
+                "System.ChangedDate": "2026-05-24T11:00:00Z", "System.State": "Closed",
+            }}], "count": 1}
+        assert params == {"$top": "1", "$skip": "2"}
+        return {"value": [], "count": 0}
+
+    def revisions(work_item_id: int, **kwargs: Any) -> list[dict[str, Any]]:
+        return real_client.list_work_item_revisions(work_item_id, page_size=1, **kwargs)
+
+    monkeypatch.setattr(real_client, "_request_json", request)
+    monkeypatch.setattr(ado.client, "list_work_item_revisions", revisions)
+    first = gather.gather_program(_PROGRAM, programs_root=ado.scenario.root, as_of=first_gather)
+    manifest = resolve_latest_committed_manifest(_PROGRAM, programs_root=ado.scenario.root)
+    state = load_gather_state(_PROGRAM, programs_root=ado.scenario.root)
+    assert manifest is not None and state is not None
+    expected = [{"$top": "1", "$skip": str(skip)} for skip in range(2 if malformed else 3)]
+    assert requested == expected
+    signals = read_signals(_PROGRAM, programs_root=ado.scenario.root)
+    revisions_seen = [signal for signal in signals if signal.source == "ado/revision"]
+    outcome = next(row for row in manifest.channel_outcomes if row.channel == "ado")
+    if not malformed_second_page:
+        assert gather._semantic_gather_exit_code(first) == 0 and not outcome.degraded
+        assert len(revisions_seen) == 1
+        assert revisions_seen[0].metadata["revision_number"] == 2
+        assert revisions_seen[0].metadata["prior"] == "Active"
+        assert revisions_seen[0].metadata["current"] == "Closed"
+        assert store.all_registrations("ado")[0].last_verified_at == first_gather
+        return
+
+    assert gather._semantic_gather_exit_code(first) == 3 and outcome.degraded
+    assert revisions_seen == [] and any(signal.source == "ado/comment" for signal in signals)
+    failed = store.all_registrations("ado")[0]
+    assert failed.last_verified_at == prior and failed.consecutive_hydration_failures == 1
+    assert _PRIVATE not in repr((first.integration_errors, state.integration_error_details, manifest.channel_outcomes))
+
+    malformed = False
+    retry_time = first_gather + timedelta(days=1)
+    second = gather.gather_program(_PROGRAM, programs_root=ado.scenario.root, as_of=retry_time)
+    assert gather._semantic_gather_exit_code(second) == 0
+    assert requested == expected + [{"$top": "1", "$skip": str(skip)} for skip in range(3)]
+    recovered = store.all_registrations("ado")[0]
+    assert recovered.last_verified_at == retry_time and recovered.consecutive_hydration_failures == 0
+    revisions_seen = [signal for signal in read_signals(_PROGRAM, programs_root=ado.scenario.root)
+                      if signal.source == "ado/revision"]
+    assert len(revisions_seen) == 1
+    assert revisions_seen[0].metadata["revision_number"] == 2
+    assert revisions_seen[0].metadata["prior"] == "Active"
+    assert revisions_seen[0].metadata["current"] == "Closed"
+
+
+@pytest.mark.parametrize("surface", ["freshness", "vitality"])
+@pytest.mark.parametrize("malformed", [False, True])
+def test_revision_response_direct_consumers_refuse_malformed_history(
+    surface: str, malformed: bool, monkeypatch: pytest.MonkeyPatch, tmp_path: Any,
+) -> None:
+    from src.commands import freshness, vitality
+
+    client = object.__new__(ADOClient)
+    client._rest_base_url = "https://example.invalid/_apis/wit/"
+    monkeypatch.setattr(client, "_request_json", lambda *_args, **_kwargs:
+                        {"message": _PRIVATE} if malformed else {"value": [], "count": 0})
+    monkeypatch.setattr(client, "query_all", lambda **_kwargs: [{"WorkItemId": 101}])
+    monkeypatch.setattr(client, "query_work_items_batch", lambda *_args, **_kwargs: [{"id": 101, "fields": {}}])
+    monkeypatch.setattr(client, "list_work_item_comments", lambda *_args, **_kwargs: [])
+    ado_config = SimpleNamespace(
+        organization="synthetic", project="synthetic", api_timeout_seconds=30,
+        area_paths=("synthetic",), work_item_types=("Feature",), excluded_states=(),
+    )
+    if surface == "freshness":
+        monkeypatch.setattr(freshness, "ADOClient", lambda **_kwargs: client)
+        bundle = SimpleNamespace(config=SimpleNamespace(ado=ado_config))
+        load = lambda: freshness._load_live_freshness_items(bundle, _NOW, _NOW)
+    else:
+        registry_path = tmp_path / "synthetic-registry"
+        registry_path.touch()
+        monkeypatch.setattr(vitality, "ADOClient", lambda **_kwargs: client)
+        monkeypatch.setattr(vitality, "resolve_channel_registry_path_for_read", lambda *_args, **_kwargs: registry_path)
+        monkeypatch.setattr(
+            vitality, "ChannelRegistryStore",
+            lambda *_args, **_kwargs: SimpleNamespace(
+                pullable_registrations=lambda _channel: (SimpleNamespace(ref_id="101"),),
+            ),
+        )
+        load = lambda: vitality._load_vitality_items(SimpleNamespace(id="synthetic", ado=ado_config), (), _NOW)
+
+    if malformed:
+        with pytest.raises(QueryError) as error:
+            load()
+        assert _PRIVATE not in str(error.value)
+    else:
+        items, calls = load()
+        assert len(items) == 1 and calls == (4 if surface == "freshness" else 3)
+
+
+@pytest.mark.parametrize("kind", ["revisions", "comments"])
+@pytest.mark.parametrize("error_type", [AuthError, CredentialExpired])
+@pytest.mark.parametrize("gather_v2", [False, True])
+@pytest.mark.parametrize("budgeted", [False, True])
+@pytest.mark.parametrize("ref_id", ["101", "429"])
+def test_actual_gather_preserves_history_on_auth_failure(
+    ado: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    kind: str, error_type: type[AuthError], gather_v2: bool, budgeted: bool, ref_id: str,
+) -> None:
+    now = datetime.now(timezone.utc)
+    prior = datetime(2026, 5, 24, 9, tzinfo=timezone.utc)
+    first_gather = datetime(2026, 5, 25, 12, tzinfo=timezone.utc)
+    registration = replace(
+        _registration(ref_id=ref_id), first_discovered_at=now, last_seen_at=now, last_verified_at=prior
+    )
+    binding = RegistrationBinding(
+        workstream_id="ws", scope_id="manual", source_type="manual_config",
+        confidence=1.0, confidence_source="manual_config",
+    )
+    store = ChannelRegistryStore(get_channel_registry_path(_PROGRAM, programs_root=ado.scenario.root), _PROGRAM)
+    store.apply_discovery_result(DiscoveryResult(
+        channel="ado", program_id=_PROGRAM, discovered_refs=(DiscoveredRef(registration, (binding,)),),
+        completeness=DiscoveryCompleteness.FULL,
+        scope_statuses={"manual": ScopeStatus("manual", ScopeStatusKind.SUCCESS, DiscoveryCompleteness.FULL, 1)},
+        scope_state_updates={}, errors=(), computed_at=now,
+    ))
+    monkeypatch.setattr(ChannelRegistryStore, "is_discovery_stale", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(gather, "_gather_v2_enabled", lambda: gather_v2)
+    if budgeted:
+        _enable_budget(monkeypatch)
+    method_name = f"list_work_item_{kind}"
+    original = getattr(ado.client, method_name)
+    failed = True
+
+    def history(work_item_id: int, **kwargs: Any) -> list[dict[str, object]]:
+        if failed:
+            raise error_type(_PRIVATE)
+        return original(work_item_id, **kwargs)
+
+    monkeypatch.setattr(ado.client, method_name, history)
+    with caplog.at_level(logging.WARNING):
+        first = gather.gather_program(_PROGRAM, programs_root=ado.scenario.root, as_of=first_gather)
+    manifest = resolve_latest_committed_manifest(_PROGRAM, programs_root=ado.scenario.root)
+    state = load_gather_state(_PROGRAM, programs_root=ado.scenario.root)
+    assert manifest is not None and state is not None
+    report = build_diagnose_report(_PROGRAM, programs_root=ado.scenario.root)
+    assert (report.last_failure_category, report.last_failure_retryable, report.last_failure_next_command) == (
+        FailureCategory.TRANSIENT_AUTH, True, "vertex doctor --check-auth --edition <name>"
+    )
+    expected = "credential expired" if error_type is CredentialExpired else "authentication failed"
+    error = next(item for item in first.integration_errors if expected in item.message)
+    assert error.retryable and error.operator_action == "Refresh Azure DevOps credentials and retry hydration."
+    assert error.failure_category is FailureCategory.TRANSIENT_AUTH
+    assert first.integration_errors[0].failure_category is FailureCategory.TRANSIENT_AUTH
+    assert first.integration_errors[0].operator_action == error.operator_action
+    assert gather._semantic_gather_exit_code(first) == 3
+    assert next(row for row in manifest.channel_outcomes if row.channel == "ado").degraded
+    assert any(expected in item.message for item in state.integration_error_details)
+    assert state.integration_error_details[0].failure_category is FailureCategory.TRANSIENT_AUTH
+    failed_registration = store.all_registrations("ado")[0]
+    assert failed_registration.last_verified_at == prior and failed_registration.consecutive_hydration_failures == 1
+    sources = {signal.source for signal in read_signals(_PROGRAM, programs_root=ado.scenario.root)}
+    assert ("ado/revision" in sources) is (kind != "revisions")
+    assert ("ado/comment" in sources) is (kind != "comments")
+    assert _PRIVATE not in repr(
+        (first.integration_errors, state.integration_error_details, manifest.channel_outcomes, failed_registration, report)
+    )
+    assert _PRIVATE not in caplog.text
+
+    failed = False
+    retry_time = first_gather + timedelta(days=1)
+    second = gather.gather_program(_PROGRAM, programs_root=ado.scenario.root, as_of=retry_time)
+    recovered = store.all_registrations("ado")[0]
+    assert gather._semantic_gather_exit_code(second) == 0
+    assert recovered.last_verified_at == retry_time and recovered.consecutive_hydration_failures == 0
+    sources = {signal.source for signal in read_signals(_PROGRAM, programs_root=ado.scenario.root)}
+    assert {"ado/revision", "ado/comment"} <= sources
+
+
+@pytest.mark.parametrize("gather_v2", [False, True])
+def test_actual_gather_keeps_failure_categories_bound_to_their_first_reference_error(
+    ado: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, gather_v2: bool,
+) -> None:
+    now = datetime.now(timezone.utc)
+    binding = RegistrationBinding(
+        workstream_id="ws", scope_id="manual", source_type="manual_config",
+        confidence=1.0, confidence_source="manual_config",
+    )
+    store = ChannelRegistryStore(get_channel_registry_path(_PROGRAM, programs_root=ado.scenario.root), _PROGRAM)
+    registrations = tuple(
+        replace(_registration(ref_id=ref_id), first_discovered_at=now, last_seen_at=now)
+        for ref_id in ("101", "429")
+    )
+    store.apply_discovery_result(DiscoveryResult(
+        channel="ado", program_id=_PROGRAM,
+        discovered_refs=tuple(DiscoveredRef(registration, (binding,)) for registration in registrations),
+        completeness=DiscoveryCompleteness.FULL,
+        scope_statuses={"manual": ScopeStatus("manual", ScopeStatusKind.SUCCESS, DiscoveryCompleteness.FULL, 2)},
+        scope_state_updates={}, errors=(), computed_at=now,
+    ))
+    monkeypatch.setattr(ChannelRegistryStore, "is_discovery_stale", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(gather, "_gather_v2_enabled", lambda: gather_v2)
+    original_comments = ado.client.list_work_item_comments
+
+    def revisions(work_item_id: int, **_kwargs: Any) -> list[dict[str, object]]:
+        if work_item_id == 101:
+            raise QueryError("synthetic query failure")
+        raise AuthError(_PRIVATE)
+
+    def comments(work_item_id: int, **kwargs: Any) -> list[dict[str, object]]:
+        if work_item_id == 101:
+            raise AuthError(_PRIVATE)
+        return original_comments(work_item_id, **kwargs)
+
+    monkeypatch.setattr(ado.client, "list_work_item_revisions", revisions)
+    monkeypatch.setattr(ado.client, "list_work_item_comments", comments)
+    artifacts = gather.gather_program(_PROGRAM, programs_root=ado.scenario.root, as_of=_NOW)
+    state = load_gather_state(_PROGRAM, programs_root=ado.scenario.root)
+    assert state is not None
+    assert gather._semantic_gather_exit_code(artifacts) == 3
+    errors = {item.message: item for item in state.integration_error_details}
+    assert errors["Failed to hydrate work_item:101"].failure_category is None
+    assert errors["Failed to hydrate work_item:429"].failure_category is FailureCategory.TRANSIENT_AUTH
+    assert state.integration_error_details[0].message == "Failed to hydrate work_item:101"
+    report = build_diagnose_report(_PROGRAM, programs_root=ado.scenario.root)
+    assert report.last_failure_category is FailureCategory.UNKNOWN
+    assert report.last_failure_retryable is False
+    assert _PRIVATE not in repr((artifacts.integration_errors, state.integration_error_details, report))
+
+
+def test_actual_cli_reports_expired_history_credential_without_provider_text(
+    ado: SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ado.client.phase = "detail"
+    ado.client.error = CredentialExpired(_PRIVATE, auth_method="ADO_PAT", connector="ADO")
+    monkeypatch.setattr(gather, "PROGRAMS_ROOT", ado.scenario.root)
+    monkeypatch.setattr(gather, "_surface_alert_banner", lambda *_args, **_kwargs: None)
+    result = CliRunner().invoke(app, ["gather", "--program", _PROGRAM, "--force-discovery"])
+    assert result.exit_code == 3, result.output
+    assert "credential expired" in result.output
+    assert "Refresh Azure DevOps credentials and retry hydration." in result.output
+    assert _PRIVATE not in result.output
+
+
 @pytest.mark.parametrize("phase", ["batch", "detail", "relations"])
 def test_actual_cli_reports_hydration_failure_without_provider_text(
     ado: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, phase: str
@@ -384,10 +865,13 @@ def test_actual_gather_contains_pull_request_exception(
 
 
 @pytest.mark.parametrize("parallel", [False, True])
+@pytest.mark.parametrize("error_type", [QueryError, AuthError, CredentialExpired])
 def test_detail_failure_keeps_independent_work_item(
-    ado: SimpleNamespace, parallel: bool
+    ado: SimpleNamespace, parallel: bool, error_type: type[Exception],
 ) -> None:
     ado.client.phase = "detail"
+    if error_type is not QueryError:
+        ado.client.error = error_type(_PRIVATE)
     factory = (lambda: ado.client) if parallel else None
     provider = ADOHydrationProvider(ado.client, detail_client_factory=factory)
     result = provider.hydrate(
@@ -396,8 +880,12 @@ def test_detail_failure_keeps_independent_work_item(
     )
     assert result.failed_ref_ids == (("101", "work_item"),)
     assert result.hydrated_ref_ids == (("102", "work_item"),)
-    assert [item.id for item in result.resources.work_items] == [102]
+    assert [item.id for item in result.resources.work_items] == [101, 102]
+    assert result.resources.work_items[0].revisions == []
+    assert result.resources.work_items[0].comments
     assert result.errors[0].ref_id == "101" and _PRIVATE not in result.errors[0].message
+    if issubclass(error_type, AuthError):
+        assert result.errors[0].operator_action == "Refresh Azure DevOps credentials and retry hydration."
 
 
 def test_multiple_failed_items_keep_distinct_diagnostics(ado: SimpleNamespace) -> None:
@@ -471,6 +959,17 @@ def test_unexpected_provider_exception_still_propagates(
     ado.client.error = ValueError("synthetic unexpected error")
     with pytest.raises(ValueError, match="synthetic unexpected error"):
         _failure(ado, monkeypatch, phase)
+
+
+def test_unexpected_comment_exception_still_propagates(ado: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail(*_args: Any, **_kwargs: Any) -> None:
+        raise ValueError("synthetic unexpected error")
+
+    monkeypatch.setattr(ado.client, "list_work_item_comments", fail)
+    with pytest.raises(ValueError, match="synthetic unexpected error"):
+        ado.binding.hydration_provider.hydrate(
+            (_registration(),), _NOW, _PROGRAM, ado.binding.hydration_config
+        )
 
 
 def test_successful_ado_gather_remains_non_degraded(ado: SimpleNamespace) -> None:

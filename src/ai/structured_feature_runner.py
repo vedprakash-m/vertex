@@ -86,8 +86,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Generic, Protocol, TypeVar
 
-from src.ai.client import BudgetExceeded
-from src.ai.tiered_router import RouteOutcome, Tier, TierDecision, TierResult
+from src.ai.client import AIPreflightError, BudgetConfigurationError, BudgetExceeded, BudgetStateError
+from src.ai.tiered_router import RouteOutcome, Tier, TierDecision, TierResult, _notify_sink
 from src.core._db import open_program_db
 from src.core.context_compiler import CompiledContext, ContextCompileRejected
 from src.core.edition_resolver import PROGRAMS_ROOT
@@ -287,6 +287,8 @@ class CallCeilingLedger:
         bounded = [(kind, ceiling) for kind, ceiling in ceilings if ceiling is not None]
         if not bounded:
             return
+        if any(isinstance(ceiling, bool) or not isinstance(ceiling, int) or ceiling < 0 for _, ceiling in bounded):
+            raise StateError("Call-ceiling limit must be a nonnegative integer or None.")
         try:
             with open_program_db(self._ledger_path, durability="strict") as connection:
                 connection.executescript(_CEILING_SCHEMA_SQL)
@@ -296,9 +298,13 @@ class CallCeilingLedger:
                         "SELECT call_count FROM call_ceiling_counters WHERE scope_key = ? AND kind = ?",
                         (scope_key, kind),
                     ).fetchone()
-                    current = int(row[0]) if row is not None else 0
+                    current = row[0] if row is not None else 0
+                    if type(current) is not int or current < 0:
+                        raise StateError("Call-ceiling ledger contains an invalid counter.")
                     if current >= ceiling:
                         raise CallCeilingExceeded(kind=kind, scope_key=scope_key, ceiling=ceiling)
+                    if current == (1 << 63) - 1:
+                        raise StateError("Call-ceiling ledger counter cannot be incremented.")
                     connection.execute(
                         "INSERT INTO call_ceiling_counters (scope_key, kind, call_count, updated_at) VALUES (?, ?, 1, ?) "
                         "ON CONFLICT(scope_key, kind) DO UPDATE SET call_count = call_count + 1, updated_at = excluded.updated_at",
@@ -334,6 +340,7 @@ class CacheIdentity:
     feature: str
     request_hash: str
     context_hash: str
+    compiler_cache_key: str
     prompt_version: str
     policy_version: str
     compiler_policy_version: str
@@ -353,6 +360,7 @@ class CacheIdentity:
                 self.feature,
                 self.request_hash,
                 self.context_hash,
+                self.compiler_cache_key,
                 self.prompt_version,
                 self.policy_version,
                 self.compiler_policy_version,
@@ -384,17 +392,56 @@ CREATE TABLE IF NOT EXISTS released_result_cache (
 """
 
 
+def _released_content_hash(payload: object) -> str:
+    if not isinstance(payload, str):
+        raise StateError("Released-result cache payload integrity check failed.")
+    try:
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    except UnicodeEncodeError:
+        raise StateError("Released-result cache payload integrity check failed.") from None
+
+
+def _delete_observed_released_cache_entry(
+    connection: sqlite3.Connection, cache_key: str, observed: sqlite3.Row,
+) -> None:
+    connection.execute(
+        "DELETE FROM released_result_cache "
+        "WHERE cache_key = ? AND feature IS ? AND principal IS ? AND classification IS ? "
+        "AND payload IS ? AND released_content_hash IS ? AND release_run_id IS ? AND cached_at IS ?",
+        (cache_key, *observed),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _RunnerCacheDecoder(Generic[ResponseT]):
+    """Carry the runner's post-decode check without changing the cache API."""
+
+    deserialize: Callable[[str], ResponseT]
+    evict_if_invalid: Callable[[ResponseT], bool]
+
+    def __call__(self, payload: str) -> ResponseT:
+        return self.deserialize(payload)
+
+
 class ReleasedResultCache:
     """Sec 8.1.7: the released-model-result cache, SQLite-backed and
-    content-addressed by :class:`CacheIdentity`. Only ever written after a
-    response has passed semantic/grounding validation and release audit —
-    "poisoned output never persists" is enforced by the *caller* only ever
-    invoking :meth:`put` from that point in the runner's sequence, never
-    speculatively. Authorization (principal + classification) is rechecked
-    against the identity on every read, not trusted from write time."""
+    content-addressed by :class:`CacheIdentity`. Optional paired callbacks
+    record and verify a release; unconfigured caches remain unbound. Stored
+    feature, principal and classification are compared with the identity on read;
+    this is not an independent authorization check."""
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        *,
+        record_release: Callable[[CacheIdentity, str], str] | None = None,
+        verify_release: Callable[[CacheIdentity, str, str], bool] | None = None,
+    ) -> None:
+        if (record_release is None) != (verify_release is None):
+            raise StateError("Released-result cache requires both release callbacks.")
         self._db_path = db_path
+        self._record_release = record_release
+        self._verify_release = verify_release
 
     def get(
         self,
@@ -402,25 +449,84 @@ class ReleasedResultCache:
         *,
         deserialize: Callable[[str], ResponseT],
     ) -> ResponseT | None:
+        """Read a value; the runner's private check may evict but does not suppress it."""
+        operation = "read"
+        invalid = False
         try:
             with open_program_db(self._db_path, durability="strict") as connection:
                 connection.executescript(_RELEASED_CACHE_SCHEMA_SQL)
+                cache_key = identity.cache_key()
                 row = connection.execute(
-                    "SELECT payload, principal, classification FROM released_result_cache WHERE cache_key = ?",
-                    (identity.cache_key(),),
+                    "SELECT feature, principal, classification, payload, released_content_hash, release_run_id, cached_at "
+                    "FROM released_result_cache WHERE cache_key = ?",
+                    (cache_key,),
                 ).fetchone()
+                if row is None:
+                    return None
+                principal, classification = row["principal"], row["classification"]
+                payload, stored_hash = row["payload"], row["released_content_hash"]
+                if row["feature"] != identity.feature or principal != identity.principal or classification != identity.classification:
+                    return None
+                try:
+                    actual_hash = _released_content_hash(payload)
+                except StateError:
+                    invalid = True
+                else:
+                    invalid = not isinstance(stored_hash, str) or stored_hash != actual_hash
+                if invalid:
+                    operation = "evict an invalid entry from"
+                    _delete_observed_released_cache_entry(connection, cache_key, row)
         except sqlite3.DatabaseError as error:
+            if operation != "read":
+                raise StateError("Unable to evict invalid released-result cache entry.") from None
             raise StateError(f"Unable to read released-result cache at {self._db_path}") from error
-        if row is None:
-            return None
-        payload, principal, classification = row
-        # Authorization recheck (Sec 8.1.7): a cache entry written under a
-        # different principal or classification is never reused, even
-        # though its cache_key already encodes both -- this is a defensive
-        # second check independent of key construction.
-        if principal != identity.principal or classification != identity.classification:
-            return None
-        return deserialize(payload)
+        if invalid:
+            raise StateError("Released-result cache payload integrity check failed.")
+        assert isinstance(payload, str)
+        if self._verify_release is not None:
+            origin_run_id = row["release_run_id"]
+            if isinstance(origin_run_id, str) and origin_run_id.strip():
+                verified = self._verify_release(identity, payload, origin_run_id)
+                if verified is not True and verified is not False:
+                    raise StateError("Released-result cache release verification result is invalid.")
+            else:
+                verified = False
+            if verified is False:
+                try:
+                    with open_program_db(self._db_path, durability="strict") as connection:
+                        _delete_observed_released_cache_entry(connection, cache_key, row)
+                except (sqlite3.DatabaseError, OSError):
+                    raise StateError("Unable to evict invalid released-result cache entry.") from None
+                raise StateError("Released-result cache originating release could not be verified.")
+        try:
+            decoded = deserialize(payload)
+        except json.JSONDecodeError as error:
+            if error.doc != payload:
+                raise
+            try:
+                json.loads(payload)
+            except json.JSONDecodeError:
+                pass
+            except (ValueError, RecursionError):
+                raise error from None
+            else:
+                raise
+        else:
+            if decoded is None:
+                raise StateError("Released-result cache decoder returned no value.")
+            if isinstance(deserialize, _RunnerCacheDecoder) and deserialize.evict_if_invalid(decoded) is True:
+                try:
+                    with open_program_db(self._db_path, durability="strict") as connection:
+                        _delete_observed_released_cache_entry(connection, cache_key, row)
+                except (sqlite3.DatabaseError, OSError):
+                    raise StateError("Unable to evict invalid released-result cache entry.") from None
+            return decoded
+        try:
+            with open_program_db(self._db_path, durability="strict") as connection:
+                _delete_observed_released_cache_entry(connection, cache_key, row)
+        except (sqlite3.DatabaseError, OSError):
+            raise StateError("Unable to evict invalid released-result cache entry.") from None
+        raise StateError("Released-result cache JSON payload is invalid.")
 
     def put(
         self,
@@ -431,6 +537,15 @@ class ReleasedResultCache:
         released_content_hash: str,
         release_run_id: str,
     ) -> None:
+        if value is None:
+            raise StateError("Released-result cache received no value.")
+        payload = serialize(value)
+        if _released_content_hash(payload) != released_content_hash:
+            raise StateError("Released-result cache payload integrity check failed.")
+        if self._record_release is not None:
+            release_run_id = self._record_release(identity, payload)
+            if not isinstance(release_run_id, str) or not release_run_id.strip():
+                raise StateError("Released-result cache release run ID must be a nonblank string.")
         try:
             with open_program_db(self._db_path, durability="strict") as connection:
                 connection.executescript(_RELEASED_CACHE_SCHEMA_SQL)
@@ -438,7 +553,8 @@ class ReleasedResultCache:
                     "INSERT INTO released_result_cache "
                     "(cache_key, feature, principal, classification, payload, released_content_hash, release_run_id, cached_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
-                    "ON CONFLICT(cache_key) DO UPDATE SET payload = excluded.payload, "
+                    "ON CONFLICT(cache_key) DO UPDATE SET feature = excluded.feature, "
+                    "principal = excluded.principal, classification = excluded.classification, payload = excluded.payload, "
                     "released_content_hash = excluded.released_content_hash, release_run_id = excluded.release_run_id, "
                     "cached_at = excluded.cached_at",
                     (
@@ -446,7 +562,7 @@ class ReleasedResultCache:
                         identity.feature,
                         identity.principal,
                         identity.classification,
-                        serialize(value),
+                        payload,
                         released_content_hash,
                         release_run_id,
                         datetime.now(timezone.utc).isoformat(),
@@ -522,8 +638,8 @@ class DeterministicResultCache:
     from :class:`ReleasedResultCache`, never conflated with it (Sec 8.1.2
     step 4 reads this cache before the deterministic handler even runs;
     step 8's model-result cache is a completely separate lookup after
-    context compilation). Same authorization-recheck-on-read discipline as
-    the released-model cache."""
+    context compilation). Stored feature, principal and classification are
+    compared with the identity on read; this is not an independent authorization check."""
 
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
@@ -538,26 +654,33 @@ class DeterministicResultCache:
             with open_program_db(self._db_path, durability="strict") as connection:
                 connection.executescript(_DETERMINISTIC_CACHE_SCHEMA_SQL)
                 row = connection.execute(
-                    "SELECT payload, principal, classification FROM deterministic_result_cache WHERE cache_key = ?",
+                    "SELECT payload, feature, principal, classification FROM deterministic_result_cache WHERE cache_key = ?",
                     (identity.cache_key(),),
                 ).fetchone()
         except sqlite3.DatabaseError as error:
             raise StateError(f"Unable to read deterministic-result cache at {self._db_path}") from error
         if row is None:
             return None
-        payload, principal, classification = row
-        if principal != identity.principal or classification != identity.classification:
+        payload, feature, principal, classification = row
+        if feature != identity.feature or principal != identity.principal or classification != identity.classification:
             return None
-        return deserialize(payload)
+        decoded = deserialize(payload)
+        if decoded is None:
+            raise StateError("Deterministic-result cache decoder returned no value.")
+        return decoded
 
     def put(self, identity: DeterministicCacheIdentity, value: ResponseT, *, serialize: Callable[[ResponseT], str]) -> None:
+        if value is None:
+            raise StateError("Deterministic-result cache received no value.")
         try:
             with open_program_db(self._db_path, durability="strict") as connection:
                 connection.executescript(_DETERMINISTIC_CACHE_SCHEMA_SQL)
                 connection.execute(
                     "INSERT INTO deterministic_result_cache (cache_key, feature, principal, classification, payload, cached_at) "
                     "VALUES (?, ?, ?, ?, ?, ?) "
-                    "ON CONFLICT(cache_key) DO UPDATE SET payload = excluded.payload, cached_at = excluded.cached_at",
+                    "ON CONFLICT(cache_key) DO UPDATE SET feature = excluded.feature, "
+                    "principal = excluded.principal, classification = excluded.classification, "
+                    "payload = excluded.payload, cached_at = excluded.cached_at",
                     (
                         identity.cache_key(),
                         identity.feature,
@@ -621,16 +744,16 @@ class StructuredFeatureRunner:
     ) -> None:
         self._context = context
         self._frontier_eligible = frontier_eligible
-        self._ceiling_ledger = ceiling_ledger or CallCeilingLedger(
+        self._ceiling_ledger = ceiling_ledger if ceiling_ledger is not None else CallCeilingLedger(
             call_ceiling_ledger_path(context.program_id)
         )
-        self._released_cache = released_cache or ReleasedResultCache(
+        self._released_cache = released_cache if released_cache is not None else ReleasedResultCache(
             released_result_cache_path(context.program_id)
         )
-        self._deterministic_cache = deterministic_cache or DeterministicResultCache(
+        self._deterministic_cache = deterministic_cache if deterministic_cache is not None else DeterministicResultCache(
             deterministic_result_cache_path(context.program_id)
         )
-        self._local_routers = local_routers or {}
+        self._local_routers = local_routers if local_routers is not None else {}
         self._decision_sink = decision_sink
 
     def _deterministic_cache_identity(
@@ -671,11 +794,14 @@ class StructuredFeatureRunner:
         ):
             return None
         manifest = context_build.compiled.manifest
+        if not isinstance(manifest.cache_key, str) or not manifest.cache_key.strip():
+            raise StateError("Compiled context cache identity is invalid.")
         return CacheIdentity(
             program_id=self._context.program_id,
             feature=spec.feature,
             request_hash=spec.request_hash(request),
             context_hash=manifest.context_hash,
+            compiler_cache_key=manifest.cache_key,
             prompt_version=spec.prompt_version,
             policy_version=self._context.policy_version,
             compiler_policy_version=manifest.policy_version,
@@ -698,15 +824,26 @@ class StructuredFeatureRunner:
         expected = (self._context.program_id, spec.feature, spec.prompt_version)
         actual = (manifest.program_id, manifest.feature, manifest.prompt_version)
         if actual == expected:
-            return None
+            prompt = context_build.compiled.prompt_text
+            try:
+                prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest() if isinstance(prompt, str) else None
+            except UnicodeEncodeError:
+                prompt_hash = None
+            if prompt_hash is not None and isinstance(manifest.context_hash, str) and prompt_hash == manifest.context_hash:
+                return None
+            limitation = "Compiled prompt does not match its context hash."
+            next_action = "Recompile the context for the current invocation before retrying."
+        else:
+            limitation = "Compiled context identity does not match the invocation."
+            next_action = "Recompile context for the current program, feature and prompt before retrying."
         self._record_decision(spec.feature, Tier.NONE, RouteOutcome.SKIPPED, 0.0)
         return FeatureOutcome(
             status=FeatureOutcomeStatus.BLOCKED,
             value=None,
             tier=Tier.NONE,
-            limitations=("Compiled context identity does not match the invocation.",),
+            limitations=(limitation,),
             retryable=False,
-            next_action="Recompile context for the current program, feature and prompt before retrying.",
+            next_action=next_action,
         )
 
     def _pre_context_fast_path(
@@ -722,12 +859,14 @@ class StructuredFeatureRunner:
         # model context" (Sec 8.1.7), so this check happens before the
         # deterministic handler even runs, using only request/snapshot/
         # engine-version/authorization identity, no compiled-context or
-        # model dimensions at all.
+        #         model dimensions at all.
         det_cache_identity = self._deterministic_cache_identity(spec, request)
         if det_cache_identity is not None:
             assert spec.deserialize_response is not None
             cached_det_value = self._deterministic_cache.get(det_cache_identity, deserialize=spec.deserialize_response)
             if cached_det_value is not None:
+                if not isinstance(cached_det_value, spec.response_type):
+                    raise StateError("Deterministic-result cache decoder returned an unexpected response type.")
                 self._record_decision(spec.feature, Tier.CACHE, RouteOutcome.CACHE_HIT, 1.0)
                 return FeatureOutcome(status=FeatureOutcomeStatus.RELEASED, value=cached_det_value, tier=Tier.CACHE)
 
@@ -735,9 +874,20 @@ class StructuredFeatureRunner:
         if spec.deterministic_handler is not None:
             det_result = spec.deterministic_handler(request)
             if det_result is not None:
+                if not isinstance(det_result.value, spec.response_type):
+                    if det_cache_identity is not None:
+                        raise StateError("Deterministic-result cache received an unexpected response type.")
+                    raise StateError("Deterministic handler returned an unexpected response type.")
                 if det_cache_identity is not None:
                     assert spec.serialize_response is not None
-                    self._deterministic_cache.put(det_cache_identity, det_result.value, serialize=spec.serialize_response)
+                    assert spec.deserialize_response is not None
+                    payload = spec.serialize_response(det_result.value)
+                    decoded = spec.deserialize_response(payload)
+                    if decoded is None:
+                        raise StateError("Deterministic-result cache decoder returned no value.")
+                    if not isinstance(decoded, spec.response_type):
+                        raise StateError("Deterministic-result cache decoder returned an unexpected response type.")
+                    self._deterministic_cache.put(det_cache_identity, payload, serialize=lambda value: value)
                 self._record_decision(spec.feature, Tier.DETERMINISTIC, RouteOutcome.DETERMINISTIC_HIT, det_result.confidence)
                 return FeatureOutcome(status=FeatureOutcomeStatus.RELEASED, value=det_result.value, tier=Tier.DETERMINISTIC)
 
@@ -747,6 +897,8 @@ class StructuredFeatureRunner:
             if router is not None:
                 local_result = router.route(request)
                 if local_result is not None:
+                    if not isinstance(local_result.value, spec.response_type):
+                        raise StateError("Local router returned an unexpected response type.")
                     self._record_decision(spec.feature, Tier.LOCAL, RouteOutcome.LOCAL_HIT, local_result.confidence)
                     return FeatureOutcome(status=FeatureOutcomeStatus.RELEASED, value=local_result.value, tier=Tier.LOCAL)
 
@@ -777,7 +929,10 @@ class StructuredFeatureRunner:
                 tier=Tier.NONE,
                 limitations=(str(error),),
                 retryable=False,
-                next_action="Reduce required evidence or raise max_input_tokens for this feature.",
+                next_action=(
+                    "Review the rejection details and resolve the issue without dropping required evidence "
+                    "or bypassing safety checks."
+                ),
             )
 
         binding_failure = self._context_binding_failure(spec, context_build)
@@ -785,16 +940,45 @@ class StructuredFeatureRunner:
             return binding_failure
 
         # Step 8: construct the model-result cache key from the (now-built)
-        # compiled context's manifest and load only a previously released
-        # typed envelope. A cache hit skips the call-ceiling check and the
+        # compiled context's manifest and load a cached typed response.
+        # A cache hit skips the call-ceiling check and the
         # provider entirely -- it is not a call, remote or otherwise.
         cache_identity = self._cache_identity(spec, request, context_build)
         if cache_identity is not None:
             assert spec.deserialize_response is not None
-            cached_value = self._released_cache.get(cache_identity, deserialize=spec.deserialize_response)
-            if cached_value is not None:
+            validation: ValidationResult | None = None
+            validated_value: ResponseT | None = None
+
+            def validate_cached_value(value: ResponseT) -> bool:
+                nonlocal validation, validated_value
+                if not isinstance(value, spec.response_type):
+                    raise StateError("Released-result cache decoder returned an unexpected response type.")
+                validated_value = value
+                validation = spec.semantic_validator(request, value)
+                return validation.valid is False
+
+            cached_value = self._released_cache.get(
+                cache_identity, deserialize=_RunnerCacheDecoder(spec.deserialize_response, validate_cached_value),
+            )
+            if cached_value is not None or validated_value is not None or validation is not None:
+                if cached_value is None or validation is None or cached_value is not validated_value:
+                    raise StateError("Released-result cache did not validate the decoded response.")
+                if validation.valid is not True:
+                    self._record_decision(spec.feature, Tier.CACHE, RouteOutcome.SKIPPED, 0.0)
+                    return FeatureOutcome(
+                        status=FeatureOutcomeStatus.BLOCKED,
+                        value=None,
+                        tier=Tier.CACHE,
+                        limitations=validation.limitations + ((validation.reason,) if validation.reason else ()),
+                        evidence_refs=validation.evidence_refs,
+                        retryable=False,
+                        next_action="Validation failed a release gate; not released.",
+                    )
                 self._record_decision(spec.feature, Tier.CACHE, RouteOutcome.CACHE_HIT, 1.0)
-                return FeatureOutcome(status=FeatureOutcomeStatus.RELEASED, value=cached_value, tier=Tier.CACHE)
+                return FeatureOutcome(
+                    status=FeatureOutcomeStatus.RELEASED, value=cached_value, tier=Tier.CACHE,
+                    evidence_refs=validation.evidence_refs,
+                )
 
         # Step 9/10: remote/frontier call-count ceiling — checked and
         # incremented BEFORE any provider call is attempted.
@@ -816,6 +1000,15 @@ class StructuredFeatureRunner:
             # Sec 8.1.6: budget exhaustion is non-retryable.
             self._record_decision(spec.feature, Tier.FRONTIER, RouteOutcome.FRONTIER_BLOCKED, 0.0)
             return self._fallback(spec, request, reason="budget_exceeded")
+        except BudgetConfigurationError:
+            self._record_decision(spec.feature, Tier.FRONTIER, RouteOutcome.FRONTIER_BLOCKED, 0.0)
+            return self._fallback(spec, request, reason="budget_configuration_invalid")
+        except BudgetStateError:
+            self._record_decision(spec.feature, Tier.FRONTIER, RouteOutcome.FRONTIER_BLOCKED, 0.0)
+            return self._fallback(spec, request, reason="budget_state_invalid")
+        except AIPreflightError:
+            self._record_decision(spec.feature, Tier.FRONTIER, RouteOutcome.FRONTIER_BLOCKED, 0.0)
+            return self._fallback(spec, request, reason="ai_preflight_failed")
         except Exception:
             # Uncertain provider outcome (timeout/unknown failure): AIClient's
             # own reservation is retained internally per Sec 8.1.6 — this
@@ -829,9 +1022,15 @@ class StructuredFeatureRunner:
                 next_action="Provider call failed or timed out; reservation retained pending reconciliation.",
             )
 
+        if not isinstance(response, spec.response_type):
+            self._record_decision(spec.feature, Tier.FRONTIER, RouteOutcome.FRONTIER_CALL, 0.0)
+            if cache_identity is not None:
+                raise StateError("Released-result cache received an unexpected response type.")
+            raise StateError("Provider returned an unexpected response type.")
+
         # Step 13: semantic/grounding validation.
         validation = spec.semantic_validator(request, response)
-        if not validation.valid:
+        if validation.valid is not True:
             self._record_decision(spec.feature, Tier.FRONTIER, RouteOutcome.FRONTIER_CALL, 0.0)
             return FeatureOutcome(
                 status=FeatureOutcomeStatus.BLOCKED,
@@ -843,17 +1042,36 @@ class StructuredFeatureRunner:
                 next_action="Validation failed a release gate; not released.",
             )
 
-        # Step 15: cache only the released typed envelope -- this is the
-        # only place `put` is ever called, so an invalid/blocked response
-        # (returned above) can never be cached ("poisoned output never
-        # persists", Sec 8.1.7).
+        # A configured released cache records its release before the write.
         if cache_identity is not None:
             assert spec.serialize_response is not None
-            content_hash = hashlib.sha256(spec.serialize_response(response).encode("utf-8")).hexdigest()
+            assert spec.deserialize_response is not None
+            payload = spec.serialize_response(response)
+            content_hash = _released_content_hash(payload)
+            decoded = spec.deserialize_response(payload)
+            if decoded is None:
+                raise StateError("Released-result cache decoder returned no value.")
+            if not isinstance(decoded, spec.response_type):
+                raise StateError("Released-result cache decoder returned an unexpected response type.")
+            cached_validation = spec.semantic_validator(request, decoded)
+            if cached_validation.valid is not True:
+                self._record_decision(spec.feature, Tier.FRONTIER, RouteOutcome.FRONTIER_CALL, 0.0)
+                return FeatureOutcome(
+                    status=FeatureOutcomeStatus.BLOCKED,
+                    value=None,
+                    tier=Tier.FRONTIER,
+                    limitations=(
+                        cached_validation.limitations
+                        + ((cached_validation.reason,) if cached_validation.reason else ())
+                    ),
+                    evidence_refs=cached_validation.evidence_refs,
+                    retryable=False,
+                    next_action="Validation failed a release gate; not released.",
+                )
             self._released_cache.put(
                 cache_identity,
-                response,
-                serialize=spec.serialize_response,
+                payload,
+                serialize=lambda value: value,
                 released_content_hash=content_hash,
                 release_run_id=self._context.run_id,
             )
@@ -952,7 +1170,10 @@ class StructuredFeatureRunner:
                 tier=Tier.NONE,
                 limitations=(str(error),),
                 retryable=False,
-                next_action="Reduce required evidence, shrink the batch, or raise max_input_tokens for this feature.",
+                next_action=(
+                    "Review the rejection details and resolve the issue without dropping required evidence "
+                    "or bypassing safety checks."
+                ),
             )
             return {item_id: outcome for item_id, _request in chunk}
 
@@ -977,6 +1198,24 @@ class StructuredFeatureRunner:
         except BudgetExceeded:
             self._record_decision(spec.feature, Tier.FRONTIER, RouteOutcome.FRONTIER_BLOCKED, 0.0)
             return {item_id: self._fallback(spec, request, reason="budget_exceeded") for item_id, request in chunk}
+        except BudgetConfigurationError:
+            self._record_decision(spec.feature, Tier.FRONTIER, RouteOutcome.FRONTIER_BLOCKED, 0.0)
+            return {
+                item_id: self._fallback(spec, request, reason="budget_configuration_invalid")
+                for item_id, request in chunk
+            }
+        except BudgetStateError:
+            self._record_decision(spec.feature, Tier.FRONTIER, RouteOutcome.FRONTIER_BLOCKED, 0.0)
+            return {
+                item_id: self._fallback(spec, request, reason="budget_state_invalid")
+                for item_id, request in chunk
+            }
+        except AIPreflightError:
+            self._record_decision(spec.feature, Tier.FRONTIER, RouteOutcome.FRONTIER_BLOCKED, 0.0)
+            return {
+                item_id: self._fallback(spec, request, reason="ai_preflight_failed")
+                for item_id, request in chunk
+            }
         except Exception:
             self._record_decision(spec.feature, Tier.FRONTIER, RouteOutcome.FRONTIER_CALL, 0.0)
             unavailable: FeatureOutcome[ResponseT] = FeatureOutcome(
@@ -1004,8 +1243,11 @@ class StructuredFeatureRunner:
                 continue
 
             response = batch_result.responses[item_id]
-            validation = spec.semantic_validator(request, response)
-            if not validation.valid:
+            if not isinstance(response, spec.response_type):
+                validation = ValidationResult(valid=False, reason="Batched provider returned an unexpected response type.")
+            else:
+                validation = spec.semantic_validator(request, response)
+            if validation.valid is not True:
                 self._record_decision(spec.feature, Tier.FRONTIER, RouteOutcome.FRONTIER_CALL, 0.0)
                 results[item_id] = FeatureOutcome(
                     status=FeatureOutcomeStatus.BLOCKED,
@@ -1036,6 +1278,14 @@ class StructuredFeatureRunner:
 
     def _fallback(self, spec: StructuredFeatureSpec[RequestT, ResponseT], request: RequestT, *, reason: str) -> FeatureOutcome[ResponseT]:
         outcome = spec.fallback_handler(request)
+        if (
+            outcome.status in (
+                FeatureOutcomeStatus.RELEASED, FeatureOutcomeStatus.DETERMINISTIC_FALLBACK, FeatureOutcomeStatus.PARTIAL,
+            )
+            and outcome.value is not None
+            and not isinstance(outcome.value, spec.response_type)
+        ):
+            raise StateError("Fallback returned an unexpected response type.")
         if outcome.status == FeatureOutcomeStatus.RELEASED:
             return FeatureOutcome(
                 status=FeatureOutcomeStatus.DETERMINISTIC_FALLBACK,
@@ -1044,7 +1294,7 @@ class StructuredFeatureRunner:
                 limitations=outcome.limitations + (reason,),
                 evidence_refs=outcome.evidence_refs,
             )
-        if reason == "budget_exceeded":
+        if reason in ("budget_exceeded", "budget_configuration_invalid", "budget_state_invalid", "ai_preflight_failed"):
             return replace(outcome, limitations=outcome.limitations + (reason,), retryable=False)
         if reason in ("remote_cap_exhausted", "frontier_cap_exhausted"):
             return replace(outcome, limitations=outcome.limitations + (reason,))
@@ -1061,7 +1311,7 @@ class StructuredFeatureRunner:
             recorded_at=datetime.now(timezone.utc).isoformat(),
         )
         if self._decision_sink is not None:
-            self._decision_sink(decision)
+            _notify_sink(self._decision_sink, decision)
 
 
 __all__ = [

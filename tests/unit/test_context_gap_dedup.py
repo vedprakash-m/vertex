@@ -82,6 +82,22 @@ class TestContextGapDedup:
         gaps = load_context_gaps("nova", programs_root=programs_root)
         assert len(gaps) == 2
 
+    @pytest.mark.parametrize("deduplicate", [False, True])
+    def test_append_preserves_unterminated_existing_record(self, tmp_path: Path, deduplicate: bool):
+        programs_root = tmp_path / "programs"
+        base = dict(feature="nudge", program="nova", lane="priority", programs_root=programs_root)
+        path = append_context_gap(**base, field="first", message="original \u03a9")
+        original = path.read_bytes().rstrip(b"\r\n")
+        path.write_bytes(original)
+
+        append_context_gap(**base, field="second", message="new", deduplicate=deduplicate)
+
+        assert path.read_bytes().startswith(original + b"\n")
+        gaps = load_context_gaps("nova", programs_root=programs_root)
+        assert [(gap.field, gap.message) for gap in gaps] == [
+            ("first", "original \u03a9"), ("second", "new"),
+        ]
+
     def test_no_existing_file_no_recent_gap(self, tmp_path: Path):
         path = tmp_path / "programs" / "nova" / "_feedback" / "context_gaps.jsonl"
         since = datetime.now(timezone.utc).timestamp() - 86400
@@ -116,3 +132,34 @@ class TestContextGapDedup:
         path = programs_root / "nova" / "_feedback" / "context_gaps.jsonl"
         since = datetime.now(timezone.utc).timestamp() - 86400
         assert _has_recent_gap(path, "nudge", None, "field_b", since_ts=since) is False
+
+
+def test_dedup_check_and_append_are_atomic_under_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """C.166: a concurrent writer committing between check and append must not yield a duplicate."""
+    import json
+
+    import src.core.context_gap_store as store
+
+    programs_root = tmp_path / "programs"
+    path = programs_root / "nova" / "_feedback" / "context_gaps.jsonl"
+    concurrent = {
+        "ts": datetime.now(timezone.utc).isoformat(), "feature": "nudge", "program": "nova",
+        "lane": "priority", "field": "deadline", "severity": "quality_degraded",
+        "message": "other writer", "impact_estimate": "medium",
+    }
+    real_lock = store.portalocker.lock
+    injected = {"done": False}
+
+    def lock_after_concurrent_commit(handle, flags):
+        if not injected["done"]:
+            injected["done"] = True
+            with open(path, "ab") as other:
+                other.write((json.dumps(concurrent) + "\n").encode("utf-8"))
+        return real_lock(handle, flags)
+
+    monkeypatch.setattr(store.portalocker, "lock", lock_after_concurrent_commit)
+    append_context_gap(
+        feature="nudge", program="nova", lane="priority", field="deadline",
+        message="this writer", programs_root=programs_root,
+    )
+    assert len(load_context_gaps("nova", programs_root=programs_root)) == 1

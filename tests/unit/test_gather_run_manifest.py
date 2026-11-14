@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import shutil
+import sys
 
 import pytest
 
@@ -78,6 +79,126 @@ def _make_manifest(
     )
 
 
+def _write_nested_manifest(path: Path, phase: str) -> bytes:
+    import json
+
+    if phase == "decode":
+        text = "[" * 10000 + "0" + "]" * 10000
+        with pytest.raises(RecursionError):
+            json.loads(text)
+    else:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["actor_identity_type"] = "__nested_actor__"
+        limit = sys.getrecursionlimit()
+        depth = limit + 100 if sys.version_info >= (3, 12) else limit * 3 // 4
+        text = json.dumps(payload).replace(
+            '"__nested_actor__"', "[" * depth + "0" + "]" * depth,
+        )
+        assert isinstance(json.loads(text), dict)
+    path.write_text(text, encoding="utf-8")
+    if phase == "hash":
+        with pytest.raises(RecursionError):
+            compute_manifest_hash(read_manifest(path.parent))
+    return path.read_bytes()
+
+
+@pytest.mark.parametrize("backend", ["file", "sqlite"])
+@pytest.mark.parametrize("cutoff_state", ["absent", "valid", "invalid"])
+@pytest.mark.parametrize("read_only", [False, True])
+def test_signal_store_committed_filter_matches_manifest_membership(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    cutoff_state: str,
+    read_only: bool,
+) -> None:
+    from src.core.file_stores import FileSignalStore
+    from src.core.models import Confidence
+    from src.core.models_v2 import Signal, SignalThreadLink
+    from src.core.sqlite_stores import SQLiteSignalStore, get_program_sqlite_store_path
+
+    programs_root = tmp_path / "programs"
+    cutoff = _now() - timedelta(days=1)
+    if cutoff_state != "absent":
+        legacy = create_legacy_cutoff_manifest("demo", legacy_cutoff_at=cutoff, programs_root=programs_root)
+        if cutoff_state == "invalid":
+            gather_run_manifest.write_manifest(
+                get_committed_run_dir("demo", legacy.run_id, programs_root=programs_root),
+                replace(legacy, manifest_hash="tampered"),
+            )
+
+    full = _make_manifest(run_id="gather-full")
+    partial = _make_manifest(run_id="gather-partial", required_scope_status=RequiredScopeStatus.PARTIAL)
+    tampered = _make_manifest(run_id="gather-tampered")
+    for manifest in (full, partial, tampered):
+        create_staging_manifest(manifest, programs_root=programs_root)
+        committed = commit_staging_run(manifest, finished_at=_now(), programs_root=programs_root)
+        if manifest is tampered:
+            gather_run_manifest.write_manifest(
+                get_committed_run_dir("demo", manifest.run_id, programs_root=programs_root),
+                replace(committed, manifest_hash="tampered"),
+            )
+    running = _make_manifest(run_id="gather-running")
+    failed = _make_manifest(run_id="gather-failed")
+    create_staging_manifest(running, programs_root=programs_root)
+    create_staging_manifest(failed, programs_root=programs_root)
+    fail_staging_run(failed, finished_at=_now(), programs_root=programs_root)
+
+    store = FileSignalStore(programs_root=programs_root) if backend == "file" else SQLiteSignalStore(programs_root=programs_root)
+    entries = (
+        ("legacy-before", None, cutoff - timedelta(seconds=1)),
+        ("legacy-at", None, cutoff),
+        ("legacy-after", None, cutoff + timedelta(seconds=1)),
+        ("full", full.run_id, _now()),
+        ("partial", partial.run_id, _now()),
+        ("running", running.run_id, _now()),
+        ("failed", failed.run_id, _now()),
+        ("tampered", tampered.run_id, _now()),
+    )
+    for label, run_id, timestamp in entries:
+        store.append(
+            Signal(
+                label, timestamp, "manual", "demo", "ws", (f"WI:{label}",),
+                label, None, Confidence.HIGH, gather_run_id=run_id,
+                workstream_ids=("ws", "shared") if label == "full" else ("ws",),
+            )
+        )
+    store.append_thread("demo", SignalThreadLink("full", "thread-1", _now(), "reviewer"))
+    database_path = get_program_sqlite_store_path("demo", programs_root=programs_root)
+    before_read = database_path.read_bytes() if backend == "sqlite" and read_only else None
+    scan = gather_run_manifest.get_verified_committed_run_state
+    scans: list[str] = []
+
+    def count_scan(program_id: str, *, programs_root: Path):
+        scans.append(program_id)
+        return scan(program_id, programs_root=programs_root)
+
+    monkeypatch.setattr(gather_run_manifest, "get_verified_committed_run_state", count_scan)
+
+    assert {signal.id for signal in store.read("demo", read_only=read_only)} == {
+        entry[0] for entry in entries
+    }
+    assert scans == []
+    visible = store.read("demo", read_only=read_only, require_committed_gather_run=True)
+    assert scans == ["demo"]
+    expected = {"full", "partial", "legacy-before", "legacy-at"}
+    if cutoff_state != "valid":
+        expected.add("legacy-after")
+    assert {signal.id for signal in visible} == expected
+    selected = store.read(
+        "demo", start=_now(), end=_now(), workstream_id="shared",
+        read_only=read_only, require_committed_gather_run=True,
+    )
+    assert [(signal.id, signal.thread_id) for signal in selected] == [("full", "thread-1")]
+    assert scans == ["demo", "demo"]
+    assert {signal.id for signal in store.read(
+        "demo", read_only=read_only, require_committed_gather_run=False,
+    )} == {entry[0] for entry in entries}
+    assert scans == ["demo", "demo"]
+    if before_read is not None:
+        assert database_path.read_bytes() == before_read
+
+
 class TestManifestHashing:
     def test_hash_is_deterministic_across_equal_manifests(self) -> None:
         manifest_a = _make_manifest()
@@ -111,6 +232,126 @@ class TestManifestHashing:
         assert gather_run_manifest.get_verified_committed_run_ids(
             "demo", programs_root=tmp_path
         ) == frozenset()
+
+    @pytest.mark.parametrize(("field", "value"), [
+        ("program_id", "foreign"),
+        ("run_id", "gather-foreign"),
+        ("schema_version", "gather-run.unsupported"),
+    ])
+    @pytest.mark.parametrize("surface", ["state", "signals", "facts"])
+    def test_committed_scan_binds_identity_for_signal_and_fact_readers(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture, field: str, value: str, surface: str,
+    ) -> None:
+        from src.core.journal import append_signal, read_signals
+        from src.core.models import Confidence
+        from src.core.models_v2 import Signal
+        from src.core.program_fact_store import ProgramFactInput, ProgramFactStore, load_program_facts
+
+        programs_root = tmp_path / "programs"
+        cutoff = _now() - timedelta(days=2)
+        legacy = create_legacy_cutoff_manifest("demo", legacy_cutoff_at=cutoff, programs_root=programs_root)
+        full = _make_manifest(run_id="gather-full")
+        partial = _make_manifest(run_id="gather-partial", required_scope_status=RequiredScopeStatus.PARTIAL)
+        for manifest in (full, partial):
+            create_staging_manifest(manifest, programs_root=programs_root)
+            commit_staging_run(manifest, finished_at=_now(), programs_root=programs_root)
+
+        invalid_dir = get_committed_run_dir("demo", "gather-invalid", programs_root=programs_root)
+        invalid = replace(
+            _make_manifest(run_id=invalid_dir.name),
+            status=GatherRunStatus.COMMITTED,
+            legacy_cutoff_at=cutoff - timedelta(days=2),
+            **{field: value},
+        )
+        invalid = replace(invalid, manifest_hash=compute_manifest_hash(invalid))
+        gather_run_manifest.write_manifest(invalid_dir, invalid)
+
+        store = ProgramFactStore("demo", db_root=tmp_path)
+        for label, run_id, timestamp in (
+            ("full", full.run_id, _now()),
+            ("partial", partial.run_id, _now()),
+            ("invalid", invalid.run_id, _now()),
+            ("legacy-before", None, cutoff - timedelta(days=1)),
+            ("legacy-after", None, _now()),
+        ):
+            append_signal(
+                Signal(
+                    label, timestamp, "ado", "demo", "ws", (f"WI:{label}",),
+                    label, None, Confidence.HIGH, gather_run_id=run_id,
+                ),
+                programs_root=programs_root,
+                partition_at=timestamp,
+            )
+            store.append_fact(
+                ProgramFactInput(
+                    fact_type="action.item", entity_refs=(f"WI:{label}",),
+                    payload={"title": label}, gather_run_id=run_id,
+                ),
+                recorded_at=timestamp,
+            )
+
+        with caplog.at_level("WARNING", logger="src.core.gather_run_manifest"):
+            if surface == "state":
+                run_ids, selected_cutoff = get_verified_committed_run_state("demo", programs_root=programs_root)
+                assert run_ids == frozenset({legacy.run_id, full.run_id, partial.run_id})
+                assert selected_cutoff == cutoff
+            elif surface == "signals":
+                assert {signal.id for signal in read_signals("demo", programs_root=programs_root)} == {
+                    "full", "partial", "invalid", "legacy-before", "legacy-after",
+                }
+                assert {
+                    signal.id for signal in read_signals(
+                        "demo", programs_root=programs_root, require_committed_gather_run=True,
+                    )
+                } == {"full", "partial", "legacy-before"}
+            else:
+                facts = load_program_facts(
+                    "demo", db_root=tmp_path, programs_root=programs_root,
+                    as_of=_now() + timedelta(days=1), require_committed_gather_run=True,
+                )
+                assert {fact.payload["title"] for fact in facts.facts} == {"full", "partial", "legacy-before"}
+        assert "invalid committed gather manifest" in caplog.text.lower()
+        assert "gather-invalid" not in caplog.text
+        assert "foreign" not in caplog.text
+
+    def test_committed_scan_rejects_malformed_hash_inputs(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import json
+
+        valid = _make_manifest(run_id="gather-valid")
+        create_staging_manifest(valid, programs_root=tmp_path)
+        commit_staging_run(valid, finished_at=_now(), programs_root=tmp_path)
+        invalid_dir = get_committed_run_dir("demo", "gather-invalid", programs_root=tmp_path)
+        invalid_dir.mkdir(parents=True)
+        valid_path = get_committed_run_dir("demo", valid.run_id, programs_root=tmp_path) / "manifest.json"
+        payload = json.loads(valid_path.read_text(encoding="utf-8"))
+        payload["run_id"] = invalid_dir.name
+        payload["alert_ids"] = ["valid", 1]
+        (invalid_dir / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
+
+        with caplog.at_level("WARNING", logger="src.core.gather_run_manifest"):
+            assert get_verified_committed_run_ids("demo", programs_root=tmp_path) == frozenset({valid.run_id})
+        assert "invalid committed gather manifest" in caplog.text.lower()
+        assert "gather-invalid" not in caplog.text
+
+    @pytest.mark.parametrize("phase", ["decode", "hash"])
+    def test_committed_scan_rejects_excessively_nested_manifest(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture, phase: str,
+    ) -> None:
+        valid = _make_manifest(run_id="gather-valid")
+        invalid = _make_manifest(run_id="gather-invalid")
+        for manifest in (valid, invalid):
+            create_staging_manifest(manifest, programs_root=tmp_path)
+            commit_staging_run(manifest, finished_at=_now(), programs_root=tmp_path)
+        path = get_committed_run_dir("demo", invalid.run_id, programs_root=tmp_path) / "manifest.json"
+        before = _write_nested_manifest(path, phase)
+
+        with caplog.at_level("WARNING", logger="src.core.gather_run_manifest"):
+            assert get_verified_committed_run_ids("demo", programs_root=tmp_path) == frozenset({valid.run_id})
+        assert "invalid committed gather manifest" in caplog.text.lower()
+        assert "gather-invalid" not in caplog.text
+        assert path.read_bytes() == before
 
     def test_hash_is_order_independent_for_query_results(self) -> None:
         entry_a = QueryResultEntry(
@@ -313,6 +554,86 @@ class TestStagingCreationAndCommit:
         assert resolved is not None
         assert resolved.run_id == committed.run_id
 
+    @pytest.mark.parametrize("full_only", [False, True])
+    @pytest.mark.parametrize("selector", ["forward", "backward", "absolute"])
+    def test_path_shaped_pointer_recovers_without_selecting_staged_manifest(
+        self, tmp_path: Path, full_only: bool, selector: str,
+    ) -> None:
+        manifest = _make_manifest(run_id="gather-valid")
+        create_staging_manifest(manifest, programs_root=tmp_path)
+        committed = commit_staging_run(manifest, finished_at=_now(), programs_root=tmp_path)
+
+        staged_dir = get_staging_run_dir("demo", "gather-outside", programs_root=tmp_path)
+        staged = replace(
+            _make_manifest(run_id=staged_dir.name),
+            status=GatherRunStatus.COMMITTED,
+            finished_at=_now() + timedelta(minutes=5),
+        )
+        staged = replace(staged, manifest_hash=compute_manifest_hash(staged))
+        staged_path = gather_run_manifest.write_manifest(staged_dir, staged)
+        run_id = {
+            "forward": "../staging/gather-outside",
+            "backward": r"..\staging\gather-outside",
+            "absolute": str(staged_dir),
+        }[selector]
+        pointer = (
+            get_latest_full_pointer_path("demo", programs_root=tmp_path)
+            if full_only else get_latest_pointer_path("demo", programs_root=tmp_path)
+        )
+        gather_run_manifest._write_pointer(pointer, run_id=run_id, manifest_hash=staged.manifest_hash)
+        pointer_before, staged_before = pointer.read_bytes(), staged_path.read_bytes()
+
+        resolver = resolve_latest_full_committed_manifest if full_only else resolve_latest_committed_manifest
+        assert resolver("demo", programs_root=tmp_path) == committed
+        assert pointer.read_bytes() == pointer_before
+        assert staged_path.read_bytes() == staged_before
+
+    @pytest.mark.parametrize("run_id", [None, 42, False, [], {}])
+    def test_nonstring_pointer_run_id_is_invalid(self, tmp_path: Path, run_id: object) -> None:
+        import json
+
+        pointer = tmp_path / "latest.json"
+        pointer.write_text(json.dumps({"run_id": run_id, "manifest_hash": "hash"}), encoding="utf-8")
+        assert gather_run_manifest._read_pointer(pointer) is None
+
+    @pytest.mark.parametrize("full_only", [False, True])
+    def test_resolve_latest_recovers_from_excessively_nested_pointer(
+        self, tmp_path: Path, full_only: bool,
+    ) -> None:
+        manifest = _make_manifest()
+        create_staging_manifest(manifest, programs_root=tmp_path)
+        committed = commit_staging_run(manifest, finished_at=_now(), programs_root=tmp_path)
+        pointer = (
+            get_latest_full_pointer_path("demo", programs_root=tmp_path)
+            if full_only else get_latest_pointer_path("demo", programs_root=tmp_path)
+        )
+        text = "[" * 10000 + "0" + "]" * 10000
+        pointer.write_text(text, encoding="utf-8")
+        before = pointer.read_bytes()
+
+        resolver = resolve_latest_full_committed_manifest if full_only else resolve_latest_committed_manifest
+        assert resolver("demo", programs_root=tmp_path) == committed
+        assert pointer.read_bytes() == before
+
+    @pytest.mark.parametrize("phase", ["decode", "hash"])
+    def test_nested_selected_manifest_keeps_existing_resolution_policies(
+        self, tmp_path: Path, phase: str,
+    ) -> None:
+        full = _make_manifest(run_id="gather-full")
+        newer = _make_manifest(run_id="gather-newer")
+        for manifest, finished_at in ((full, _now()), (newer, _now() + timedelta(minutes=1))):
+            create_staging_manifest(manifest, programs_root=tmp_path)
+            commit_staging_run(manifest, finished_at=finished_at, programs_root=tmp_path)
+        path = get_committed_run_dir("demo", newer.run_id, programs_root=tmp_path) / "manifest.json"
+        before = _write_nested_manifest(path, phase)
+
+        with pytest.raises(ValueError, match="Invalid committed gather evidence"):
+            resolve_latest_committed_manifest("demo", programs_root=tmp_path)
+        resolved_full = resolve_latest_full_committed_manifest("demo", programs_root=tmp_path)
+        assert resolved_full is not None
+        assert resolved_full.run_id == full.run_id
+        assert path.read_bytes() == before
+
     def test_resolve_latest_full_committed_manifest_falls_back_and_filters_partial(self, tmp_path: Path) -> None:
         full_manifest = _make_manifest(run_id="gather-FULL", required_scope_status=RequiredScopeStatus.FULL)
         create_staging_manifest(full_manifest, programs_root=tmp_path)
@@ -433,6 +754,50 @@ class TestValidatePinnedGatherRun:
             "demo", gather_run_id=None, gather_run_hash=None, programs_root=tmp_path
         ) == ()
 
+    @pytest.mark.parametrize("selector", ["forward", "backward", "absolute"])
+    @pytest.mark.parametrize("include_hash", [False, True])
+    def test_path_shaped_pinned_run_cannot_admit_staged_evidence(
+        self, tmp_path: Path, selector: str, include_hash: bool,
+    ) -> None:
+        get_committed_root("demo", programs_root=tmp_path).mkdir(parents=True)
+        staged_dir = get_staging_run_dir("demo", "gather-outside", programs_root=tmp_path)
+        run_id = {
+            "forward": "../staging/gather-outside",
+            "backward": r"..\staging\gather-outside",
+            "absolute": str(staged_dir),
+        }[selector]
+        staged = replace(
+            _make_manifest(run_id=run_id), status=GatherRunStatus.COMMITTED, finished_at=_now(),
+        )
+        staged = replace(staged, manifest_hash=compute_manifest_hash(staged))
+        staged_path = gather_run_manifest.write_manifest(staged_dir, staged)
+        before = staged_path.read_bytes()
+
+        failures = validate_pinned_gather_run(
+            "demo", gather_run_id=run_id,
+            gather_run_hash=staged.manifest_hash if include_hash else None,
+            programs_root=tmp_path,
+        )
+        assert len(failures) == 1
+        assert failures[0].startswith("BLOCKED:")
+        assert "invalid identifier" in failures[0]
+        assert staged_path.read_bytes() == before
+
+    @pytest.mark.parametrize("run_id", ["", ".", "..", "C:run", "gather/*", "gather[1]", 0, False, [], {}])
+    def test_invalid_pinned_selector_is_blocked_before_path_lookup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run_id: object,
+    ) -> None:
+        def no_path_lookup(*args, **kwargs):
+            pytest.fail("Invalid pinned identifiers must not be used as filesystem paths")
+
+        monkeypatch.setattr(gather_run_manifest, "get_committed_run_dir", no_path_lookup)
+        failures = validate_pinned_gather_run(
+            "demo", gather_run_id=run_id, gather_run_hash=None, programs_root=tmp_path,
+        )
+        assert len(failures) == 1
+        assert failures[0].startswith("BLOCKED:")
+        assert "invalid identifier" in failures[0]
+
     @pytest.mark.parametrize(("field", "value"), [
         ("program_id", "other"),
         ("run_id", "gather-other"),
@@ -514,6 +879,142 @@ class TestValidatePinnedGatherRun:
         )
         assert failures
         assert failures[0].startswith("BLOCKED:")
+
+    @pytest.mark.parametrize(("field", "value", "diagnostic"), [
+        (None, None, "invalid: no readable"),
+        (None, [], "invalid: no readable"),
+        ("query_results", None, "invalid: no readable"),
+        ("query_results", [None], "invalid: no readable"),
+        ("query_results", [
+            {
+                "query_id": "query", "scope_id": "scope", "wiql_hash": "hash",
+                "captured_at": "2026-01-15T12:00:00+00:00", "raw_count": 0,
+                "membership_ids": None, "membership_hash": "hash", "cap_reached": False,
+                "completeness_state": "FULL",
+            },
+        ], "invalid: no readable"),
+        ("query_results", [
+            {
+                "query_id": query_id, "scope_id": "scope", "wiql_hash": "hash",
+                "captured_at": "2026-01-15T12:00:00+00:00", "raw_count": 0,
+                "membership_ids": [], "membership_hash": "hash", "cap_reached": False,
+                "completeness_state": "FULL",
+            }
+            for query_id in ("query", 1)
+        ], "hash verification"),
+        ("channel_outcomes", None, "invalid: no readable"),
+        ("channel_outcomes", [None], "invalid: no readable"),
+        ("failed_refs", None, "invalid: no readable"),
+        ("failed_refs", [None], "invalid: no readable"),
+        ("started_at", 1, "invalid: no readable"),
+        ("finished_at", [], "invalid: no readable"),
+        ("alert_ids", None, "invalid: no readable"),
+        ("alert_ids", ["alert", 1], "hash verification"),
+        ("manifest_hash", None, "hash verification"),
+        ("channel_outcomes", [
+            {"channel": "ado", "degraded": False, "elapsed_seconds": 0},
+            {"channel": 1, "degraded": False, "elapsed_seconds": 0},
+        ], "hash verification"),
+        ("failed_refs", [
+            {"ref_kind": "work_item", "ref_id": "1", "reason": "error"},
+            {"ref_kind": "work_item", "ref_id": 2, "reason": "error"},
+        ], "hash verification"),
+    ])
+    @pytest.mark.parametrize("include_hash", [False, True])
+    def test_malformed_pinned_manifest_is_blocked_without_latest_lookup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        field: str | None, value: object, diagnostic: str, include_hash: bool,
+    ) -> None:
+        import json
+
+        manifest = _make_manifest()
+        create_staging_manifest(manifest, programs_root=tmp_path)
+        committed = commit_staging_run(manifest, finished_at=_now(), programs_root=tmp_path)
+        path = get_committed_run_dir("demo", committed.run_id, programs_root=tmp_path) / "manifest.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if field is None:
+            payload = value
+        else:
+            payload[field] = value
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+        def no_latest(*args, **kwargs):
+            pytest.fail("Malformed pinned evidence must not consult latest evidence")
+
+        monkeypatch.setattr(gather_run_manifest, "resolve_latest_full_committed_manifest", no_latest)
+        failures = validate_pinned_gather_run(
+            "demo", gather_run_id=committed.run_id,
+            gather_run_hash=committed.manifest_hash if include_hash else None,
+            programs_root=tmp_path,
+        )
+        assert len(failures) == 1
+        assert failures[0].startswith("BLOCKED:")
+        assert diagnostic in failures[0]
+
+    def test_manifest_hash_value_error_is_blocked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        manifest = _make_manifest()
+        create_staging_manifest(manifest, programs_root=tmp_path)
+        committed = commit_staging_run(manifest, finished_at=_now(), programs_root=tmp_path)
+
+        def fail_hash(*args, **kwargs):
+            raise ValueError("invalid hash input")
+
+        monkeypatch.setattr(gather_run_manifest, "compute_manifest_hash", fail_hash)
+        failures = validate_pinned_gather_run(
+            "demo", gather_run_id=committed.run_id,
+            gather_run_hash=committed.manifest_hash, programs_root=tmp_path,
+        )
+        assert len(failures) == 1
+        assert failures[0].startswith("BLOCKED:")
+        assert "hash verification" in failures[0]
+
+    @pytest.mark.parametrize(("phase", "diagnostic"), [
+        ("decode", "invalid: no readable"),
+        ("hash", "hash verification"),
+    ])
+    @pytest.mark.parametrize("include_hash", [False, True])
+    def test_excessively_nested_pin_is_blocked_without_latest_lookup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        phase: str, diagnostic: str, include_hash: bool,
+    ) -> None:
+        manifest = _make_manifest()
+        create_staging_manifest(manifest, programs_root=tmp_path)
+        committed = commit_staging_run(manifest, finished_at=_now(), programs_root=tmp_path)
+        path = get_committed_run_dir("demo", committed.run_id, programs_root=tmp_path) / "manifest.json"
+        before = _write_nested_manifest(path, phase)
+
+        def no_latest(*args, **kwargs):
+            pytest.fail("Invalid pinned evidence must not consult latest evidence")
+
+        monkeypatch.setattr(gather_run_manifest, "resolve_latest_full_committed_manifest", no_latest)
+        failures = validate_pinned_gather_run(
+            "demo", gather_run_id=committed.run_id,
+            gather_run_hash=committed.manifest_hash if include_hash else None,
+            programs_root=tmp_path,
+        )
+        assert len(failures) == 1
+        assert failures[0].startswith("BLOCKED:")
+        assert diagnostic in failures[0]
+        assert path.read_bytes() == before
+
+    def test_unexpected_manifest_hash_error_propagates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        manifest = _make_manifest()
+        create_staging_manifest(manifest, programs_root=tmp_path)
+        committed = commit_staging_run(manifest, finished_at=_now(), programs_root=tmp_path)
+
+        def fail_hash(*args, **kwargs):
+            raise RuntimeError("unexpected hashing error")
+
+        monkeypatch.setattr(gather_run_manifest, "compute_manifest_hash", fail_hash)
+        with pytest.raises(RuntimeError, match="unexpected hashing error"):
+            validate_pinned_gather_run(
+                "demo", gather_run_id=committed.run_id,
+                gather_run_hash=committed.manifest_hash, programs_root=tmp_path,
+            )
 
     def test_valid_current_full_run_passes(self, tmp_path: Path) -> None:
         manifest = _make_manifest()
@@ -740,6 +1241,120 @@ class TestLegacyCutoffManifest:
         committed_root = get_committed_root("demo", programs_root=tmp_path)
         legacy_dirs = [p for p in committed_root.iterdir() if p.name.startswith(LEGACY_CUTOFF_RUN_ID_PREFIX)]
         assert len(legacy_dirs) == 1
+
+    @pytest.mark.parametrize("invalid_kind", ["hash", "program", "run", "schema", "status", "actor"])
+    def test_cutoff_bootstrap_reverifies_matching_manifest(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_kind: str,
+    ) -> None:
+        cutoff = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        valid = create_legacy_cutoff_manifest("demo", legacy_cutoff_at=cutoff, programs_root=tmp_path)
+        root = get_committed_root("demo", programs_root=tmp_path)
+        valid_dir = get_committed_run_dir("demo", valid.run_id, programs_root=tmp_path)
+        invalid_dir = root / f"{LEGACY_CUTOFF_RUN_ID_PREFIX}invalid"
+        invalid = replace(valid, run_id=invalid_dir.name, manifest_hash=None)
+        if invalid_kind == "program":
+            invalid = replace(invalid, program_id="foreign")
+        elif invalid_kind == "run":
+            invalid = replace(invalid, run_id=f"{LEGACY_CUTOFF_RUN_ID_PREFIX}foreign")
+        elif invalid_kind == "schema":
+            invalid = replace(invalid, schema_version="gather-run.unsupported")
+        elif invalid_kind == "status":
+            invalid = replace(invalid, status=GatherRunStatus.FAILED)
+        elif invalid_kind == "actor":
+            invalid = replace(invalid, actor_identity_type="interactive")
+        invalid = replace(
+            invalid,
+            manifest_hash="tampered" if invalid_kind == "hash" else compute_manifest_hash(invalid),
+        )
+        gather_run_manifest.write_manifest(invalid_dir, invalid)
+        original_iterdir = Path.iterdir
+
+        def ordered_iterdir(path: Path):
+            return iter((invalid_dir, valid_dir)) if path == root else original_iterdir(path)
+
+        monkeypatch.setattr(Path, "iterdir", ordered_iterdir)
+        selected = create_legacy_cutoff_manifest(
+            "demo", legacy_cutoff_at=cutoff + timedelta(days=1), programs_root=tmp_path,
+        )
+        assert selected == valid
+
+    @pytest.mark.parametrize("disappearance", ["empty", "removed"])
+    def test_cutoff_bootstrap_fails_if_verified_manifest_disappears(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, disappearance: str,
+    ) -> None:
+        cutoff = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        valid = create_legacy_cutoff_manifest("demo", legacy_cutoff_at=cutoff, programs_root=tmp_path)
+        root = get_committed_root("demo", programs_root=tmp_path)
+        valid_dir = get_committed_run_dir("demo", valid.run_id, programs_root=tmp_path)
+        original_iterdir = Path.iterdir
+        scans = 0
+
+        def disappearing_iterdir(path: Path):
+            nonlocal scans
+            if path != root:
+                return original_iterdir(path)
+            scans += 1
+            if scans == 1:
+                return iter((valid_dir,))
+            if disappearance == "removed":
+                raise FileNotFoundError("committed directory disappeared")
+            return iter(())
+
+        monkeypatch.setattr(Path, "iterdir", disappearing_iterdir)
+        with pytest.raises(ValueError, match="verified legacy cutoff"):
+            create_legacy_cutoff_manifest(
+                "demo", legacy_cutoff_at=cutoff + timedelta(days=1), programs_root=tmp_path,
+            )
+        assert tuple(original_iterdir(root)) == (valid_dir,)
+
+    def test_cutoff_bootstrap_fails_if_verified_cutoff_has_no_synthetic_manifest(self, tmp_path: Path) -> None:
+        cutoff = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        run = replace(_make_manifest(), legacy_cutoff_at=cutoff)
+        create_staging_manifest(run, programs_root=tmp_path)
+        commit_staging_run(run, finished_at=_now(), programs_root=tmp_path)
+
+        with pytest.raises(ValueError, match="verified legacy cutoff"):
+            create_legacy_cutoff_manifest(
+                "demo", legacy_cutoff_at=cutoff + timedelta(days=1), programs_root=tmp_path,
+            )
+        assert {path.name for path in get_committed_root("demo", programs_root=tmp_path).iterdir()} == {run.run_id}
+
+    def test_invalid_cutoff_preserves_absent_cutoff_compatibility(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from src.core.journal import append_signal, read_signals
+        from src.core.models import Confidence
+        from src.core.models_v2 import Signal
+        from src.core.program_fact_store import ProgramFactInput, ProgramFactStore, load_program_facts
+
+        programs_root = tmp_path / "programs"
+        cutoff = _now() - timedelta(days=1)
+        invalid = create_legacy_cutoff_manifest("demo", legacy_cutoff_at=cutoff, programs_root=programs_root)
+        gather_run_manifest.write_manifest(
+            get_committed_run_dir("demo", invalid.run_id, programs_root=programs_root),
+            replace(invalid, manifest_hash="tampered"),
+        )
+        append_signal(
+            Signal("legacy", _now(), "manual", "demo", "ws", ("WI:1",), "legacy", None, Confidence.HIGH),
+            programs_root=programs_root, partition_at=_now(),
+        )
+        ProgramFactStore("demo", db_root=tmp_path).append_fact(
+            ProgramFactInput(fact_type="action.item", entity_refs=("WI:1",), payload={"title": "legacy"}),
+            recorded_at=_now(),
+        )
+
+        with caplog.at_level("WARNING", logger="src.core.gather_run_manifest"):
+            assert tuple(
+                signal.id for signal in read_signals(
+                    "demo", programs_root=programs_root, require_committed_gather_run=True,
+                )
+            ) == ("legacy",)
+            facts = load_program_facts(
+                "demo", db_root=tmp_path, programs_root=programs_root,
+                as_of=_now() + timedelta(days=1), require_committed_gather_run=True,
+            )
+            assert {fact.payload["title"] for fact in facts.facts} == {"legacy"}
+        assert "invalid committed gather manifest" in caplog.text.lower()
 
     def test_get_legacy_cutoff_at_returns_none_when_no_manifest_exists(self, tmp_path: Path) -> None:
         assert get_legacy_cutoff_at("demo", programs_root=tmp_path) is None

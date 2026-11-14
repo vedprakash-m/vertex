@@ -47,7 +47,12 @@ from src.core.outcome_metrics import canary_window_status, compute_om4_audit_cov
 from src.core.program_synthesis import load_latest_released_program_synthesis
 from src.core.ledger.event_log import EventEnvelope, read_events
 from src.core.ledger.durable_outbox_store import OutboxError, read_status_counts
-from src.core.measurement_store import read_measurements, tier_decision_store_path
+from src.core.measurement_store import (
+    TIER_DECISIONS_REL,
+    MeasurementReadError,
+    read_measurements,
+    tier_decision_store_path,
+)
 from src.core.proposal_autonomy_ladder import PROPOSAL_CLASSES, resolve_ceiling
 from src.core.risk_register_engine import HIGH_RISK_SCORE_THRESHOLD, compute_risk_score, load_risk_register
 from src.core.run_telemetry import read_run_telemetry
@@ -229,26 +234,65 @@ def _build_economics_summary(
     frontier_cost_usd = sum((row.cost_usd or 0.0) for row in telemetry_rows)
     context_tokens_in = sum((row.tokens_in or 0) for row in telemetry_rows)
 
-    tier_rows = read_measurements(tier_decision_store_path(program_id, programs_root=programs_root))
-    total_decisions = len(tier_rows)
+    try:
+        tier_rows = read_measurements(tier_decision_store_path(program_id, programs_root=programs_root))
+    except MeasurementReadError:
+        tier_rows = None
+        findings.append(
+            CockpitFinding(
+                finding_id="economics.tier_decisions.unavailable",
+                area="economics",
+                status="warn",
+                summary="AI tier-routing measurements are unavailable.",
+                detail=(
+                    "Review the tier-decision store and reconcile its integrity before using either ratio. "
+                    "No automatic repair was attempted."
+                ),
+                owner=None,
+                next_command=None,
+                evidence_refs=(TIER_DECISIONS_REL,),
+                observed_at=observed_at,
+            )
+        )
+
     frontier_avoidance: float | None = None
     cache_hit_rate: float | None = None
-    if total_decisions > 0:
-        frontier_calls = sum(1 for row in tier_rows if row.get("outcome") == "frontier_call")
+    if tier_rows:
+        total_decisions = len(tier_rows)
         cache_hits = sum(1 for row in tier_rows if row.get("chosen_tier") == "cache" or row.get("cache_hit") is True)
-        frontier_avoidance = 1.0 - (frontier_calls / total_decisions)
         cache_hit_rate = cache_hits / total_decisions
-    else:
+        findings.append(
+            CockpitFinding(
+                finding_id="economics.tier_decisions.unqualified",
+                area="economics",
+                status="warn",
+                summary="Frontier-model avoidance is unavailable.",
+                detail=(
+                    "Current tier records do not establish eligible attempts, actual frontier-model calls "
+                    "or complete measurement coverage. The cache-hit rate counts markers in the active file "
+                    "only; it is not a qualified window rate."
+                ),
+                owner=None,
+                next_command=None,
+                evidence_refs=(TIER_DECISIONS_REL,),
+                observed_at=observed_at,
+            )
+        )
+    elif tier_rows is not None:
         findings.append(
             CockpitFinding(
                 finding_id="economics.tier_decisions.empty",
                 area="economics",
                 status="info",
-                summary="No AI tier-routing decisions recorded yet.",
-                detail="frontier_avoidance and cache_hit_rate are unavailable until at least one routed AI call occurs.",
+                summary="No AI tier-routing measurements are available.",
+                detail=(
+                    "No decisions were found in the active tier file; cache-hit rate is unavailable. "
+                    "Frontier avoidance also requires verified eligible attempts, actual frontier-model "
+                    "calls and complete measurement coverage."
+                ),
                 owner=None,
                 next_command=None,
-                evidence_refs=(),
+                evidence_refs=(TIER_DECISIONS_REL,),
                 observed_at=observed_at,
             )
         )

@@ -3,8 +3,12 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timezone
 import json
+from pathlib import Path
+from unittest.mock import Mock
+
 import pytest
 
+from src.core.exceptions import StateError
 from src.core.ledger.event_log import (
     ConfidenceTier,
     TemporalConfidence,
@@ -12,9 +16,11 @@ from src.core.ledger.event_log import (
     compute_envelope_hash,
     get_active_event_log_path,
     get_event_logs_dir,
+    iter_event_records,
     read_events,
     verify_event_log,
     write_event,
+    write_events_atomic,
 )
 from src.core.ledger.event_index import load_indexed_events
 from src.core.ledger.event_types import count_control_event_types, get_registered_event_types, validate_event_payload
@@ -112,6 +118,73 @@ def test_event_log_round_trip_and_verify(tmp_path) -> None:
     assert read_events("acme", programs_root=programs_root) == (result.envelope,)
     assert load_indexed_events("acme", programs_root=programs_root)[0].event_id == result.envelope.event_id
     assert verify_event_log("acme", programs_root=programs_root).ok is True
+
+
+@pytest.mark.parametrize(
+    "program_id",
+    [
+        "../synthetic-private", r"..\synthetic-private", "..", "synthetic*", "synthetic?",
+        "synthetic.", "synthetic ", "\n", pytest.param("__absolute__", id="absolute"),
+    ],
+)
+@pytest.mark.parametrize(
+    "operation",
+    ["directory", "active", "read", "read-no-repair", "records", "write", "write-batch"],
+)
+def test_event_log_rejects_non_bare_program_before_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program_id: str, operation: str,
+) -> None:
+    programs_root = tmp_path / "workspace" / "programs"
+    if program_id == "__absolute__":
+        program_id = str(tmp_path / "synthetic-private")
+    fence = Mock(side_effect=AssertionError("invalid selector reached capture fence"))
+    monkeypatch.setattr("src.core.ledger.event_log.cooperative_capture_fence", fence)
+    now = datetime(2026, 6, 10, tzinfo=timezone.utc)
+    envelope = build_event_envelope(
+        program_id=program_id,
+        event_type="risk.raised.v1",
+        occurred_at=now,
+        recorded_at=now,
+        temporal_confidence=TemporalConfidence.EXACT,
+        confidence=ConfidenceTier.SOURCE_AUTHORITATIVE,
+        actor="synthetic",
+        payload={"risk_id": "risk:synthetic", "title": "Synthetic", "severity": "high"},
+        source_ref=LTDeckRef(file_path="synthetic.pptx", deck_date=now.date()),
+    )
+    operations = {
+        "directory": lambda: get_event_logs_dir(program_id, programs_root=programs_root),
+        "active": lambda: get_active_event_log_path(program_id, programs_root=programs_root),
+        "read": lambda: read_events(program_id, programs_root=programs_root),
+        "read-no-repair": lambda: read_events(program_id, programs_root=programs_root, repair_corruption=False),
+        "records": lambda: iter_event_records(program_id, programs_root=programs_root),
+        "write": lambda: write_event(envelope, programs_root=programs_root),
+        "write-batch": lambda: write_events_atomic((envelope,), programs_root=programs_root),
+    }
+
+    with pytest.raises(StateError) as error:
+        operations[operation]()
+
+    assert "synthetic-private" not in str(error.value)
+    fence.assert_not_called()
+    assert not (tmp_path / "workspace").exists()
+
+
+@pytest.mark.parametrize("program_id", [None, 42, False, "", " "])
+def test_event_log_directory_rejects_invalid_program_type_or_empty_value(
+    tmp_path: Path, program_id: object,
+) -> None:
+    with pytest.raises(StateError):
+        get_event_logs_dir(program_id, programs_root=tmp_path / "programs")  # type: ignore[arg-type]
+
+    assert not (tmp_path / "programs").exists()
+
+
+@pytest.mark.parametrize("program_id", ["samplealpha", "sample-alpha_123", "sample alpha"])
+def test_event_log_directory_preserves_bare_program_mapping(tmp_path: Path, program_id: str) -> None:
+    programs_root = tmp_path / "programs"
+
+    assert get_event_logs_dir(program_id, programs_root=programs_root) == programs_root / program_id / "ledger" / "events"
+    assert not programs_root.exists()
 
 
 def test_build_event_envelope_rejects_invalid_source_ref() -> None:

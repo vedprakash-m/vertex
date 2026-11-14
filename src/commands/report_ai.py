@@ -12,7 +12,7 @@ from typing import Any, Callable, TypedDict
 
 from src.ai.blurb_generator import BlurbGenerationError
 from src.ai.ai_mode import AIMode, get_ai_mode
-from src.ai.client import AIClientError
+from src.ai.client import AIClientError, NON_RETRYABLE_AI_ERRORS
 from src.ai.deployment_fallback import LEGACY_DEPLOYMENT_ALIAS_NOTICE, resolve_ai_deployments_for_feature
 from src.ai.edit_learner import load_recent_edit_patterns, summarize_recent_calibration, summarize_recent_confidence_bands, summarize_recent_models, summarize_recent_prompt_version_confidence_bands, summarize_recent_prompt_version_models, summarize_recent_prompt_versions
 from src.ai.exec_summary_drafter import ExecSummaryDraftError
@@ -2075,6 +2075,8 @@ def _get_report_ai_client(
             budget_usd=budget_usd,
             trace_context=trace_context,
         )
+    except NON_RETRYABLE_AI_ERRORS:
+        raise
     except (AIClientError, RuntimeError) as error:
         if warn_on_failure:
             warnings.append(f"AI {label} synthesis skipped: {error}")
@@ -2102,17 +2104,21 @@ def _run_report_ai_with_fallback(
 
     last_error: Exception | None = None
     for index, deployment in enumerate(deployments):
-        client = _get_report_ai_client(
-            deployment=deployment,
-            temperature=temperature,
-            budget_usd=budget_usd,
-            client_cache=client_cache,
-            trace_context=trace_context,
-            warnings=warnings,
-            label=label,
-            create_ai_client=create_ai_client,
-            warn_on_failure=index == len(deployments) - 1,
-        )
+        try:
+            client = _get_report_ai_client(
+                deployment=deployment,
+                temperature=temperature,
+                budget_usd=budget_usd,
+                client_cache=client_cache,
+                trace_context=trace_context,
+                warnings=warnings,
+                label=label,
+                create_ai_client=create_ai_client,
+                warn_on_failure=index == len(deployments) - 1,
+            )
+        except NON_RETRYABLE_AI_ERRORS as error:
+            warnings.append(f"AI {label} synthesis skipped: {type(error).__name__}.")
+            return None
         if client is None:
             if index < len(deployments) - 1:
                 warnings.append(
@@ -2121,6 +2127,9 @@ def _run_report_ai_with_fallback(
             continue
         try:
             result = runner(client)
+        except NON_RETRYABLE_AI_ERRORS as error:
+            warnings.append(f"AI {label} synthesis skipped: {type(error).__name__}.")
+            return None
         except (AIClientError, BlurbGenerationError, ExecSummaryDraftError, RuntimeError) as error:
             last_error = error
             if index < len(deployments) - 1:

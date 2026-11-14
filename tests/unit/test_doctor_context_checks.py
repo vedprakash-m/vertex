@@ -904,6 +904,27 @@ def test_detector_forwards_selected_root_and_ranked_gaps_reopen(tmp_path: Path, 
         assert observations.read_bytes() == before
 
 
+def test_detector_appends_after_unterminated_observation(tmp_path: Path) -> None:
+    from src.core.context_gap_store import append_context_gap, load_context_gaps
+
+    programs = tmp_path / "programs"
+    observations = append_context_gap(
+        feature="nudge", program="sample", field="prior", message="original", programs_root=programs,
+    )
+    original = observations.read_bytes().rstrip(b"\r\n")
+    observations.write_bytes(original)
+
+    context_checks.emit_context_gaps(
+        program_id="sample", registry_entries=[{"id": "lane", "deep_context": {}}],
+        kpis_list=[], today=date(2026, 10, 26), programs_root=programs,
+    )
+
+    assert observations.read_bytes().startswith(original + b"\n")
+    gaps = load_context_gaps("sample", programs_root=programs)
+    assert any(gap.feature == "nudge" and gap.field == "prior" for gap in gaps)
+    assert any(gap.feature == "doctor --context" and gap.field == "deep_context.why" for gap in gaps)
+
+
 def test_ranked_gaps_without_program_are_nonmutating(monkeypatch, tmp_path: Path, capsys) -> None:
     monkeypatch.setattr(context_checks, "_resolve_context_program_id", lambda **kwargs: None)
     context_checks.run_ranked_gaps(

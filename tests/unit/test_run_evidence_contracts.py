@@ -147,6 +147,35 @@ def test_builder_rejects_mismatched_pin_content_contract(field, value):
         build_run_evidence_snapshot(pin, snapshot, gather, manifest, report, effective_family_modes=())
 
 
+@pytest.mark.parametrize("wiql_hash", ["", " \t"])
+@pytest.mark.parametrize("state", ["ERROR", "FULL", "PARTIAL"])
+def test_builder_diagnoses_unavailable_query_identity_without_admitting_capture(wiql_hash, state):
+    row = QueryResultEntry(
+        query_id="query", scope_id="scope", wiql_hash=wiql_hash,
+        captured_at=datetime(2026, 5, 5, tzinfo=timezone.utc), raw_count=0,
+        membership_ids=(), membership_hash="empty-membership", cap_reached=False,
+        completeness_state=state, failure_category="missing_wiql" if state == "ERROR" else None,
+    )
+    inputs = _capture_inputs(queries=(row,))
+    with pytest.raises(ConfigError, match="saved-query identity is unavailable.*Inspect failed gather diagnostics"):
+        build_run_evidence_snapshot(*inputs, effective_family_modes=())
+    assert inputs[2].query_results == (row,)
+    assert inputs[2].query_results[0].wiql_hash == wiql_hash
+
+
+@pytest.mark.parametrize("state", ["ERROR", "FULL", "PARTIAL"])
+def test_builder_retains_existing_hash_present_query_behavior(state):
+    row = QueryResultEntry(
+        query_id="query", scope_id="scope", wiql_hash="known-query-hash",
+        captured_at=datetime(2026, 5, 5, tzinfo=timezone.utc), raw_count=0,
+        membership_ids=(), membership_hash="empty-membership", cap_reached=False,
+        completeness_state=state, failure_category="query_error" if state == "ERROR" else None,
+    )
+    capture = _capture(queries=(row,))
+    assert capture.source_scopes == (SourceScopeContract("query", "scope", "known-query-hash"),)
+    assert capture.capture_state == "unqualified_capture"
+
+
 @pytest.mark.parametrize("field,value", [
     ("payload", {"state": "changed"}),
     ("entity_refs", ("PROGRAM:other",)),

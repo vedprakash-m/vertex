@@ -6,6 +6,7 @@ from datetime import date, datetime, timezone
 import pytest
 
 from src.core.delta_engine import build_deltas
+from src.core.exceptions import ConfigError
 from src.core.html_renderer import HTMLRenderer, RenderContext, build_render_payload
 from src.core.models import AttributionTier, Confidence, DeltaKind, DeltaSet, DimensionRisk, EditionType
 from src.core.models import EvidencePacket, FreshnessItem, FreshnessReport, ItemDelta, PersonProfile, ProgramContext, ReportData
@@ -304,6 +305,43 @@ def test_html_renderer_renders_detailed_newsletter(repo_root) -> None:
     assert rendered.index("WHAT CHANGED") < rendered.index("Executive Summary")
     assert rendered.index("Executive Summary") < rendered.index('<a id="deployment"></a>')
     assert rendered.index('<a id="deployment"></a>') < rendered.index('<a id="kusto-fleet-health"></a>')
+
+
+@pytest.mark.parametrize("widths", [(376, 132, 132), (160, 240, 130, 110), (140, 310, 120, 70)])
+@pytest.mark.parametrize("executive", [False, True])
+def test_html_renderer_preserves_narrative_column_budgets(widths: tuple[int, ...], executive: bool) -> None:
+    cells = "".join(f'<th width="{width}">Column {index}</th>' for index, width in enumerate(widths))
+    narrative = (
+        f'<table width="640"><tr>{cells}</tr><tr><td colspan="{len(widths)}">'
+        '<a href="https://example.com/evidence">Retained evidence</a></td></tr></table>'
+    )
+    context = _render_context()
+    context = replace(
+        context, executive_style=executive,
+        report=replace(context.report, exec_summary_text=narrative),
+        workstreams=(replace(context.workstreams[0], blurb=narrative),),
+    )
+    rendered = HTMLRenderer("acme_weekly").render(context)
+
+    for index, width in enumerate(widths):
+        expected_width = width - 16 if executive else width
+        assert rendered.count(f'<th width="{expected_width}"') == 2 * widths.count(width)
+        assert rendered.count(f'Column {index}</th>') == 2
+    assert rendered.count('<a href="https://example.com/evidence">Retained evidence</a>') == 2
+    assert rendered.count(f'<td colspan="{len(widths)}"') == 2
+    assert 'width="680"' in rendered and 'width="640"' in rendered
+
+
+@pytest.mark.parametrize("section", ["summary", "workstream"])
+def test_html_renderer_surfaces_invalid_executive_column_budget(section: str) -> None:
+    narrative = '<table><tr><th width="16">Evidence</th></tr></table>'
+    context = replace(_render_context(), executive_style=True)
+    if section == "summary":
+        context = replace(context, report=replace(context.report, exec_summary_text=narrative))
+    else:
+        context = replace(context, workstreams=(replace(context.workstreams[0], blurb=narrative),))
+    with pytest.raises(ConfigError, match="column width must exceed 16px"):
+        HTMLRenderer("acme_weekly").render(context)
 
 
 def test_html_renderer_renders_narrative_newsletter_without_scorecards() -> None:
@@ -824,7 +862,7 @@ def test_workstream_partial_renders_markdown_bullets_links_and_blocked_label() -
         ),
         significant_findings=(
             "ADO#900108: Target slipped 2 times in the last 90 days; current target 2026-05-15.",
-            "ADO#900109: Linked work: Task ADO#36930000 - Validate EXAMPLETEAM parity.",
+            "ADO#900109: Linked work: Task ADO#900200 - Validate EXAMPLETEAM parity.",
         ),
         ado_query_url="https://example.invalid/query",
         edit_path="narratives/issue_077/ws_nova-adventure-syn-a-100-ramp-readiness-exampleteam-gaps.md",

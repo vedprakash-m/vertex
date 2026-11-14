@@ -10,6 +10,7 @@ from unittest.mock import Mock
 
 import pytest
 
+import src.core.quality_gates.ai_release_audit as release_audit
 from src.core.exceptions import ConfigError
 from src.core.quality_gates.ai_release_audit import (
     AIReleaseAuditError,
@@ -60,6 +61,49 @@ def test_released_terminal_recorded_and_readable(tmp_path: Path) -> None:
     )
     assert released_terminal_for_run(ai_run_id, program_id="samplealpha", programs_root=programs_root) is ReleaseTerminal.RELEASED
     assert is_ai_output_released(ai_run_id, program_id="samplealpha", programs_root=programs_root) is True
+
+
+def test_dependency_release_cache_requires_latest_matching_content_hash(tmp_path: Path) -> None:
+    program_id, run_id = "samplealpha", "synthetic-run"
+    match = lambda content_hash: release_audit.released_content_matches(
+        run_id, program_id=program_id, released_content_hash=content_hash, programs_root=tmp_path,
+    )
+    assert not match("hash-a")
+    record_ai_release_decision(
+        program_id=program_id, ai_run_id=run_id, terminal=ReleaseTerminal.RELEASED,
+        reason="synthetic", validator_finding_count=0, released_content_hash="hash-a", programs_root=tmp_path,
+    )
+    assert match("hash-a")
+    assert not match("hash-b")
+    record_ai_release_decision(
+        program_id=program_id, ai_run_id=run_id, terminal=ReleaseTerminal.REJECTED,
+        reason="synthetic", validator_finding_count=1, programs_root=tmp_path,
+    )
+    assert not match("hash-a")
+    record_ai_release_decision(
+        program_id=program_id, ai_run_id=run_id, terminal=ReleaseTerminal.RELEASED,
+        reason="synthetic", validator_finding_count=0, programs_root=tmp_path,
+    )
+    assert not match("hash-a")
+
+
+def test_dependency_release_cache_hash_lookup_rejects_any_matching_malformed_event(tmp_path: Path) -> None:
+    for reason in ("first", "second"):
+        record_ai_release_decision(
+            program_id="samplealpha", ai_run_id="synthetic-run", terminal=ReleaseTerminal.RELEASED,
+            reason=reason, validator_finding_count=0, released_content_hash="hash-a", programs_root=tmp_path,
+        )
+    path = next(get_event_logs_dir("samplealpha", programs_root=tmp_path).glob("*.events.jsonl"))
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    del rows[0]["payload"]["validator_finding_count"]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    before = path.read_bytes()
+
+    with pytest.raises(ConfigError, match="release decision"):
+        release_audit.released_content_matches(
+            "synthetic-run", program_id="samplealpha", released_content_hash="hash-a", programs_root=tmp_path,
+        )
+    assert path.read_bytes() == before
 
 
 def test_rejected_terminal_is_not_released(tmp_path: Path) -> None:

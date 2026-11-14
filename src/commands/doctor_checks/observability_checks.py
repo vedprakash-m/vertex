@@ -23,6 +23,7 @@ from typing import Any
 from src.core.alerts import AlertSeverity, read_alerts
 from src.core.failure_taxonomy import (
     FailureCategory,
+    classify_category,
     classify_exception,
 )
 from src.core.gather_state_store import (
@@ -123,7 +124,10 @@ def build_diagnose_report(
             # Classify the first error and surface it.
             first = gather_state.integration_error_details[0] if gather_state.integration_error_details else None
             if first is not None:
-                classification = classify_exception(first.message)
+                classification = (
+                    classify_category(first.failure_category)
+                    if first.failure_category is not None else classify_exception(first.message)
+                )
                 last_failure_category = classification.category
                 last_failure_retryable = classification.retryable
                 last_failure_detail = first.message

@@ -407,6 +407,60 @@ class TestMigrateJsonlToSqlite:
         ids = {r["candidate_id"] for r in rows}
         assert ids == {"c-rotated", "c-current"}
 
+    def test_migration_uses_numeric_rotation_order_for_duplicate_candidates(
+        self, tmp_path: Path,
+    ) -> None:
+        db_dir = tmp_path / "ledger" / "candidates"
+        pending = db_dir / "pending.jsonl"
+        triaged = db_dir / "triaged.jsonl"
+        rotated_dir = db_dir / "rotated"
+        for suffix, batch_id in ((2, "earlier"), (10, "later")):
+            record = self._base_record("same-candidate")
+            record["batch_id"] = batch_id
+            self._write_jsonl(
+                rotated_dir / f"pending.20260625T120000Z.{suffix}.jsonl",
+                [record],
+            )
+
+        _sqls.init_candidate_db(db_dir)
+        assert _sqls.migrate_jsonl_to_sqlite(
+            db_dir, pending_path=pending, triaged_path=triaged,
+        ) == (1, 0)
+        rows = _sqls.sqlite_load_candidates(db_dir)
+        assert len(rows) == 1
+        assert rows[0]["batch_id"] == "earlier"
+
+    def test_migration_excludes_canonical_segments_from_other_stems(self, tmp_path: Path) -> None:
+        db_dir = tmp_path / "ledger" / "candidates"
+        pending = db_dir / "pending.jsonl"
+        triaged = db_dir / "triaged.jsonl"
+        rotated_dir = db_dir / "rotated"
+        self._write_jsonl(
+            rotated_dir / "pending.20260625T120000Z.1.jsonl",
+            [self._base_record("own")],
+        )
+        self._write_jsonl(
+            rotated_dir / "pending.audit.20260625T120000Z.1.jsonl",
+            [self._base_record("foreign")],
+        )
+        for stem, candidate_id in (("triaged", "own"), ("triaged.audit", "foreign")):
+            self._write_jsonl(
+                rotated_dir / f"{stem}.20260625T120000Z.1.jsonl",
+                [{
+                    "candidate_id": candidate_id,
+                    "kind": "approved",
+                    "decided_at": NOW.isoformat(),
+                    "triage_actor": "operator",
+                }],
+            )
+
+        _sqls.init_candidate_db(db_dir)
+        assert _sqls.migrate_jsonl_to_sqlite(
+            db_dir, pending_path=pending, triaged_path=triaged,
+        ) == (1, 1)
+        assert [row["candidate_id"] for row in _sqls.sqlite_load_candidates(db_dir)] == ["own"]
+        assert [row["candidate_id"] for row in _sqls.sqlite_load_decisions(db_dir)] == ["own"]
+
     def test_idempotent_when_db_already_has_rows(self, tmp_path: Path) -> None:
         db_dir = tmp_path / "ledger" / "candidates"
         pending = db_dir / "pending.jsonl"

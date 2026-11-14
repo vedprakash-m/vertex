@@ -7,11 +7,16 @@ from pathlib import Path
 
 import yaml
 import pytest
+import typer
+from typer.testing import CliRunner
 from src.ai.ai_mode import AIMode, set_ai_mode
 from src.ai.blurb_generator import WorkstreamBlurb
+from src.ai.client import AIPreflightError, BudgetConfigurationError, BudgetExceeded, BudgetStateError
 from src.ai.exec_summary_drafter import ExecSummaryDraft
+from src.core.exceptions import StateError
 from src.core.models import Confidence
 
+from src.commands import propose as propose_module
 from src.commands.propose import generate_section_revision_proposals
 from src.core.gather_state_store import write_gather_state
 from src.core.journal import append_review_decision, append_signal
@@ -107,6 +112,98 @@ def test_generate_section_revision_proposals_writes_ai_text_when_enabled(repo_ro
     else:
         assert workstream_proposal.proposed_text.startswith("AI proposal for ")
         assert workstream_proposal.ai_model_used == "workstream_blurb.v1"
+
+
+@pytest.mark.parametrize(
+    "error_type",
+    [BudgetExceeded, BudgetConfigurationError, BudgetStateError, AIPreflightError],
+)
+def test_propose_cli_reports_nonretryable_ai_error_without_private_details(
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[Exception],
+) -> None:
+    def fail(**_kwargs: object) -> None:
+        raise error_type("synthetic private cost detail")
+
+    monkeypatch.setattr(propose_module, "generate_section_revision_proposals", fail)
+    test_app = typer.Typer()
+    test_app.command()(propose_module.propose_command)
+    result = CliRunner().invoke(test_app, ["--edition", "synthetic_weekly", "--ai"])
+
+    assert result.exit_code == 2
+    assert f"AI proposal generation stopped: {error_type.__name__}" in result.output
+    assert "synthetic private cost detail" not in result.output
+    assert "proposals:" not in result.output
+
+
+def test_propose_cli_preserves_other_state_error_handling(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail(**_kwargs: object) -> None:
+        raise StateError("existing state error")
+
+    monkeypatch.setattr(propose_module, "generate_section_revision_proposals", fail)
+    test_app = typer.Typer()
+    test_app.command()(propose_module.propose_command)
+    result = CliRunner().invoke(test_app, ["--edition", "synthetic_weekly"])
+
+    assert result.exit_code == 2
+    assert "existing state error" in result.output
+    assert "AI proposal generation stopped" not in result.output
+
+
+@pytest.mark.parametrize("origin", ["factory", "provider"])
+def test_generate_section_revision_proposals_preserves_existing_proposals_on_ai_refusal(
+    repo_root: Path,
+    tmp_path: Path,
+    origin: str,
+) -> None:
+    reports_root, archive_root = _seed_v2_report_layout(repo_root, tmp_path)
+    programs_root = reports_root.parent / "programs"
+    _enable_v2_program_ai(programs_root)
+    timestamp = datetime(2026, 5, 5, 18, 0, tzinfo=timezone.utc)
+    args = {
+        "edition_name": "acme_weekly",
+        "reports_root": reports_root,
+        "archive_root": archive_root,
+        "programs_root": programs_root,
+        "as_of": timestamp,
+        "work_item_loader": lambda bundle, as_of: (_sample_items(as_of), 0),
+    }
+    initial = generate_section_revision_proposals(**args)
+    assert initial.proposals_path is not None
+    before = initial.proposals_path.read_bytes()
+    failure = BudgetExceeded("synthetic private cost detail")
+    client_calls = []
+    exec_calls = []
+    blurb_calls = []
+
+    def fake_create_ai_client(**kwargs):
+        client_calls.append(kwargs)
+        if origin == "factory":
+            raise failure
+        return SimpleNamespace()
+
+    def fake_exec_summary(**kwargs):
+        exec_calls.append(kwargs)
+        raise failure
+
+    def fake_workstream_blurb(**kwargs):
+        blurb_calls.append(kwargs)
+        raise AssertionError("A failed exec proposal must not continue to a workstream.")
+
+    with pytest.raises(BudgetExceeded) as caught:
+        generate_section_revision_proposals(
+            **args,
+            ai=True,
+            create_ai_client=fake_create_ai_client,
+            draft_exec_summary_runner=fake_exec_summary,
+            generate_workstream_blurb_runner=fake_workstream_blurb,
+        )
+
+    assert caught.value is failure
+    assert len(client_calls) == (1 if origin == "factory" else 2)
+    assert len(exec_calls) == (1 if origin == "provider" else 0)
+    assert not blurb_calls
+    assert initial.proposals_path.read_bytes() == before
 
 
 def test_generate_section_revision_proposals_ai_skips_low_confidence_sections(repo_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

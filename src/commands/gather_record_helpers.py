@@ -31,8 +31,11 @@ def read_recent_signals(
     end: datetime,
     programs_root: Path,
     signal_store: Any = None,
+    require_committed_gather_run: bool = False,
 ) -> tuple[Signal, ...]:
     store = signal_store or build_signal_store(programs_root=programs_root)
+    if require_committed_gather_run:
+        return store.read(program_id, start=start, end=end, require_committed_gather_run=True)
     return store.read(program_id, start=start, end=end)
 
 

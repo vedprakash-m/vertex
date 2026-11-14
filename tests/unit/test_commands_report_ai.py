@@ -9,6 +9,7 @@ from unittest.mock import Mock
 import pytest
 
 from src.ai.ai_mode import AIMode
+from src.ai.client import AIClientError, AIPreflightError, BudgetConfigurationError, BudgetExceeded, BudgetStateError
 from src.commands import report_ai
 from src.core.dependency_graph import save_dependencies
 from src.core.evidence_models import SourceRef, WorkstreamEvidence
@@ -18,6 +19,171 @@ from src.core.models_v2 import Dependency, DependencyStatus, DependencyType, Sig
 from src.core.models_v2 import WorkstreamEvidenceBundle
 from src.core.program_reality import FactAssessment, ProgramReality
 from src.core.truth_levels import TruthLevel
+
+
+@pytest.mark.parametrize("error_type", [AIPreflightError, BudgetExceeded, BudgetConfigurationError, BudgetStateError])
+@pytest.mark.parametrize("origin", ["factory", "provider"])
+@pytest.mark.parametrize("failure_deployment", ["primary", "backup"])
+def test_report_ai_stops_deployment_fallback_for_nonretryable_cost_errors(
+    error_type, origin, failure_deployment,
+) -> None:
+    failure = error_type("synthetic cost refusal")
+    constructed = []
+    invoked = []
+    warnings = []
+
+    def factory(*, deployment, **_kwargs):
+        constructed.append(deployment)
+        if deployment == failure_deployment and origin == "factory":
+            raise failure
+        return SimpleNamespace(deployment=deployment)
+
+    def run(client):
+        invoked.append(client.deployment)
+        if client.deployment == failure_deployment and origin == "provider":
+            raise failure
+        if client.deployment == "primary" and failure_deployment == "backup":
+            raise AIClientError("ordinary synthetic provider failure")
+        return "unexpected success"
+
+    result = report_ai._run_report_ai_with_fallback(
+        deployments=("primary", "backup", "third"),
+        temperature=0.2,
+        budget_usd=1.0,
+        client_cache={},
+        trace_context=None,
+        warnings=warnings,
+        label="exec summary",
+        create_ai_client=factory,
+        runner=run,
+    )
+
+    assert result is None
+    assert constructed == (["primary"] if failure_deployment == "primary" else ["primary", "backup"])
+    assert invoked == (
+        (["primary"] if origin == "provider" else [])
+        if failure_deployment == "primary"
+        else (["primary", "backup"] if origin == "provider" else ["primary"])
+    )
+    assert warnings[-1] == f"AI exec summary synthesis skipped: {error_type.__name__}."
+    assert "synthetic cost refusal" not in " ".join(warnings)
+
+
+@pytest.mark.parametrize("error_type", [AIClientError, RuntimeError])
+@pytest.mark.parametrize("origin", ["factory", "provider"])
+def test_report_ai_keeps_fallback_for_ordinary_failures(error_type, origin) -> None:
+    constructed = []
+    invoked = []
+    warnings = []
+
+    def factory(*, deployment, **_kwargs):
+        constructed.append(deployment)
+        if deployment == "primary" and origin == "factory":
+            raise error_type("synthetic ordinary failure")
+        return SimpleNamespace(deployment=deployment)
+
+    def run(client):
+        invoked.append(client.deployment)
+        if client.deployment == "primary" and origin == "provider":
+            raise error_type("synthetic ordinary failure")
+        return "backup result"
+
+    result = report_ai._run_report_ai_with_fallback(
+        deployments=("primary", "backup"),
+        temperature=0.2,
+        budget_usd=1.0,
+        client_cache={},
+        trace_context=None,
+        warnings=warnings,
+        label="exec summary",
+        create_ai_client=factory,
+        runner=run,
+    )
+
+    assert result == "backup result"
+    assert constructed == ["primary", "backup"]
+    assert invoked == (["primary", "backup"] if origin == "provider" else ["backup"])
+    assert any("trying backup deployment" in warning for warning in warnings)
+    assert any("fallback deployment succeeded" in warning for warning in warnings)
+
+
+@pytest.mark.parametrize("error_type", [AIPreflightError, BudgetExceeded, BudgetConfigurationError, BudgetStateError])
+@pytest.mark.parametrize("origin", ["factory", "provider"])
+@pytest.mark.parametrize("phase", ["exec", "section"])
+def test_report_ai_preserves_existing_independent_synthesis_after_cost_error(
+    tmp_path, monkeypatch, error_type, origin, phase,
+) -> None:
+    failure = error_type("synthetic cost refusal")
+    constructed = []
+
+    def factory(*, deployment, **_kwargs):
+        constructed.append(deployment)
+        if origin == "factory" and len(constructed) == 1:
+            raise failure
+        return SimpleNamespace(deployment=deployment)
+
+    exec_runner = Mock(return_value=None, side_effect=failure if origin == "provider" and phase == "exec" else None)
+    blurb_runner = Mock(return_value=None, side_effect=[failure, None] if origin == "provider" and phase == "section" else None)
+    monkeypatch.setattr(report_ai, "get_ai_mode", lambda: AIMode.ACTIVE)
+    monkeypatch.setattr(report_ai, "_report_ai_budget_per_client", lambda _bundle: 1.0)
+    monkeypatch.setattr(report_ai, "_resolve_report_ai_deployments", lambda **kwargs: (kwargs["primary"], kwargs["backup"]))
+    monkeypatch.setattr(report_ai, "_exec_ai_context_lines", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(report_ai, "_program_synthesis_exec_summary_context_lines", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(report_ai, "load_approved_evidence_by_lane", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(report_ai, "_build_section_evidence_bundle", lambda **_kwargs: None)
+    monkeypatch.setattr(report_ai, "_section_ai_context_lines", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(report_ai, "_program_synthesis_blurb_context_lines", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(report_ai, "_matching_program_workstream_ids", lambda *_args, **_kwargs: ())
+    bundle = SimpleNamespace(
+        config=SimpleNamespace(ai=SimpleNamespace(
+            budget_usd_per_run=1.0,
+            temperature=0.2,
+            exec_summary_deployment="primary",
+            exec_summary_backup_deployment="backup",
+            blurb_deployment="primary",
+            blurb_backup_deployment="backup",
+        )),
+        editorial_rules=None,
+    )
+    ai_context = SimpleNamespace(program_id="synthetic", programs_root=tmp_path, approved_signals=(), workstreams=())
+    sections = (
+        SimpleNamespace(section_id="first", title="First", items=()),
+        SimpleNamespace(section_id="second", title="Second", items=()),
+    )
+
+    from src.core.models import EditionType
+
+    result = report_ai._synthesize_v2_ai_content(
+        bundle=bundle,
+        edition_name="synthetic_weekly",
+        issue_number=1,
+        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        edition_type=EditionType.DETAILED,
+        items=(),
+        evidence_by_item={},
+        deltas=None,
+        scorecards=(),
+        scorecard_packets={},
+        overrides_document=None,
+        continuity_chapters=(),
+        current_exec_summary_text="",
+        loaded_exec_summary_text="" if phase == "exec" else "Human-authored summary.",
+        current_workstream_blurbs={},
+        visible_section_ids={"first", "second"},
+        ai_program_context=None,
+        ai_context=ai_context,
+        create_ai_client=factory,
+        draft_exec_summary_runner=exec_runner,
+        generate_workstream_blurb_runner=blurb_runner,
+        iter_ai_generated_sections=lambda **_kwargs: sections,
+        relevant_item_deltas=lambda *_args: (),
+    )
+
+    assert constructed == ["primary"] * (3 if phase == "exec" else 2)
+    assert exec_runner.call_count == (1 if origin == "provider" and phase == "exec" else 0)
+    assert blurb_runner.call_count == (2 if phase == "exec" or origin == "provider" else 1)
+    assert sum(error_type.__name__ in warning for warning in result.warnings) == 1
+    assert "synthetic cost refusal" not in " ".join(result.warnings)
 
 
 def test_missing_report_ai_deployment_warning_for_exec_summary_is_vertex_first() -> None:

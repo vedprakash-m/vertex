@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from src.core.exceptions import StateError
 from src.core.rev.rev_cache_store import get_cached, put_cached
 
 AI_RESULT_CACHE_KIND = "ai_result"
@@ -92,8 +93,13 @@ def get_ai_result(
     *,
     programs_root: Path,
     now_epoch: float | None = None,
+    strict_read: bool = False,
 ) -> CachedAIResult | None:
-    """Return the cached result, or None on miss/expiry/corrupt/schema-mismatch."""
+    """Return a cache hit, or None on miss/expiry.
+
+    The default treats corrupt entries as misses and refreshes LRU. A strict
+    read raises for identifiable corruption and leaves the entry unchanged.
+    """
     payload = get_cached(
         program_id=key.program_id,
         kind=AI_RESULT_CACHE_KIND,
@@ -101,19 +107,24 @@ def get_ai_result(
         programs_root=programs_root,
         ttl_days=AI_RESULT_TTL_DAYS,
         now_epoch=now_epoch,
+        strict_read=strict_read,
+        key_labels=_KEY_LABELS,
     )
-    if not isinstance(payload, dict):
+    if payload is None:
         return None
     # A hit must carry a value under every key this cache always writes;
     # any missing field means the entry is not one this module wrote (or is
     # from an incompatible earlier version) -- treat as a miss, never guess.
-    if "value" not in payload:
-        return None
     if (
-        payload.get("prompt_version") != key.prompt_version
+        not isinstance(payload, dict)
+        or "value" not in payload
+        or payload.get("prompt_version") != key.prompt_version
         or payload.get("policy_version") != key.policy_version
         or payload.get("output_schema_version") != key.output_schema_version
+        or (strict_read and payload.get("model_deployment") != key.model_deployment)
     ):
+        if strict_read:
+            raise StateError("AI result cache entry has invalid metadata.")
         return None
     return CachedAIResult(
         value=payload["value"],

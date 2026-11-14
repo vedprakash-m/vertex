@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from src.core.exceptions import StateError
 from src.core.jsonl_utils import append_jsonl_line, read_jsonl_records
 
 #: Schema version for measurement rows emitted by this module.
@@ -41,6 +42,10 @@ DEFAULT_MEASUREMENT_MAX_BYTES = 8 * 1024 * 1024  # 8 MiB
 TIER_DECISIONS_REL = "runtime/tier_decisions.jsonl"
 RUN_TELEMETRY_REL = "runtime/run_telemetry.jsonl"
 AI_TELEMETRY_REL = "_state/ai_telemetry.jsonl"
+
+
+class MeasurementReadError(StateError):
+    """A measurement store cannot be read without losing integrity."""
 
 
 # --------------------------------------------------------------------------------------
@@ -168,15 +173,18 @@ def append_measurements(
 
 
 def read_measurements(path: Path) -> tuple[dict[str, Any], ...]:
-    """Read measurement rows, quarantining corrupt/unchecksummed lines.
+    """Read only intact measurement rows without repairing or changing the store.
 
-    Corrupt JSON or a checksum mismatch causes the row to be quarantined via
-    :mod:`src.core.jsonl_utils`; the returned tuple omits it. Callers treat a
-    gap as invalidation of the affected metric (Section 9.6).
+    Refuse the entire read if any row is malformed or has an invalid checksum.
+    This does not establish that the measurement window is complete.
     """
-    if not path.exists():
-        return ()
-    return tuple(read_jsonl_records(path))
+    try:
+        rows = read_jsonl_records(path, repair_corruption=False)
+    except (OSError, ValueError):
+        raise MeasurementReadError("Measurement store is unreadable or corrupt.") from None
+    if not all(verify_record_checksum(row) for row in rows):
+        raise MeasurementReadError("Measurement store contains an invalid record checksum.")
+    return rows
 
 
 # --------------------------------------------------------------------------------------
@@ -205,9 +213,8 @@ def make_tier_decision_sink(config: TierDecisionSinkConfig):
 
     The callable maps an in-memory ``TierDecision`` (``src.ai.tiered_router``,
     Zone B) into a durable :class:`TierDecisionRecord` and appends it to the
-    program's tier-decision store. Failures are swallowed so a durable sink can
-    never break routing (matches the existing sink contract in
-    :func:`src.ai.tiered_router._record`).
+    program's tier-decision store. Write failures propagate to the caller;
+    routing catches and counts them without changing its outcome.
 
     Zone A (this module) must not import Zone B (INV-ADF-17), so the sink
     reads ``decision.tier`` / ``decision.outcome`` by duck-typed ``.value``
@@ -217,36 +224,33 @@ def make_tier_decision_sink(config: TierDecisionSinkConfig):
     store_path = tier_decision_store_path(config.program_id, programs_root=config.programs_root)
 
     def _sink(decision: Any) -> None:
-        try:
-            record = TierDecisionRecord(
-                schema_version=MEASUREMENT_SCHEMA_VERSION,
-                program_id=config.program_id,
-                edition_id=config.edition_id,
-                run_id=config.run_id,
-                feature=decision.feature,
-                chosen_tier=decision.tier.value,
-                outcome=decision.outcome.value,
-                confidence=decision.confidence,
-                # TierDecision is the pre-W0.7 in-memory record; frontier_eligible
-                # and cache metadata are not yet carried on it, so we derive the
-                # durable facts we can and leave the rest None until Slice 5.
-                frontier_eligible=False,
-                frontier_called=decision.frontier_called,
-                cache_hit=decision.outcome.value == "cache_hit",
-                policy_version=config.policy_version,
-                model_version=None,
-                deployment_id=None,
-                context_hash=None,
-                latency_ms=None,
-                input_tokens=None,
-                output_tokens=None,
-                cost_usd=None,
-                execution_mode=config.execution_mode,
-                recorded_at=decision.recorded_at,
-            )
-            append_measurement(store_path, record)
-        except Exception:  # pragma: no cover - sink must never break routing
-            pass
+        record = TierDecisionRecord(
+            schema_version=MEASUREMENT_SCHEMA_VERSION,
+            program_id=config.program_id,
+            edition_id=config.edition_id,
+            run_id=config.run_id,
+            feature=decision.feature,
+            chosen_tier=decision.tier.value,
+            outcome=decision.outcome.value,
+            confidence=decision.confidence,
+            # TierDecision is the pre-W0.7 in-memory record; frontier_eligible
+            # and cache metadata are not yet carried on it, so we derive the
+            # durable facts we can and leave the rest None until Slice 5.
+            frontier_eligible=False,
+            frontier_called=decision.frontier_called,
+            cache_hit=decision.outcome.value == "cache_hit",
+            policy_version=config.policy_version,
+            model_version=None,
+            deployment_id=None,
+            context_hash=None,
+            latency_ms=None,
+            input_tokens=None,
+            output_tokens=None,
+            cost_usd=None,
+            execution_mode=config.execution_mode,
+            recorded_at=decision.recorded_at,
+        )
+        append_measurement(store_path, record)
 
     _sink.config = config  # type: ignore[attr-defined]
     _sink.store_path = store_path  # type: ignore[attr-defined]

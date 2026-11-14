@@ -942,6 +942,7 @@ def _write_goal_traceability_spec(tmp_path, rows=_GOAL_ROWS, *, objective_rows=N
         "| ID | Work item | Acceptance |\n|---|---|---|\n"
         "| RELO-W0.1 | first | evidence |\n| RELO-W0.2 | second | evidence |\n"
         "### 11.2 Phase RELO-1\n"
+        "| ID | Work item | Acceptance |\n|---|---|---|\n"
         "## 19. Traceability\n"
         "### 19.1 Goal and objective traceability\n"
         "| Goal | Objectives | Primary requirements/workstreams |\n"
@@ -952,6 +953,132 @@ def _write_goal_traceability_spec(tmp_path, rows=_GOAL_ROWS, *, objective_rows=N
         encoding="utf-8",
     )
     return spec
+
+
+@pytest.mark.parametrize(("original", "replacement"), [
+    (
+        "| RELO-W0.1 | first | evidence |\n",
+        "| RELO-W0.1 | first | evidence |\n| RELO-W0.1 | first | evidence |\n",
+    ),
+    (
+        "| RELO-W0.1 | first | evidence |\n",
+        "| RELO-W0.1 | first | evidence |\n| **RELO-W0.1** | different | evidence |\n",
+    ),
+    (
+        "| RELO-W0.2 | second | evidence |\n",
+        "| RELO-W0.2 | second | evidence |\n"
+        "| RELO-W0.2a | child | evidence |\n| RELO-W0.2a | duplicate | evidence |\n",
+    ),
+    (
+        "### 11.2 Phase RELO-1\n",
+        "### 11.2 Phase RELO-1\n| ID | Work item | Acceptance |\n|---|---|---|\n"
+        "| RELO-W0.1 | repeated in another phase | evidence |\n",
+    ),
+])
+def test_spec_lint_rejects_duplicate_phase_work_item_definitions(
+    tmp_path, original, replacement,
+) -> None:
+    spec = _write_goal_traceability_spec(tmp_path)
+    spec.write_text(spec.read_text(encoding="utf-8").replace(original, replacement), encoding="utf-8")
+    before = spec.read_bytes()
+
+    result = lint_specification(spec)
+
+    assert result.passed is False
+    assert "duplicate work-item definition" in result.detail
+    assert "RELO-W0." not in result.detail
+    assert spec.read_bytes() == before
+
+
+def test_spec_lint_rejects_duplicate_phase_work_items_without_goal_table(tmp_path) -> None:
+    spec = _write_goal_traceability_spec(tmp_path)
+    content = spec.read_text(encoding="utf-8").split("## 19. Traceability", maxsplit=1)[0]
+    spec.write_text(
+        content.replace(
+            "| RELO-W0.1 | first | evidence |\n",
+            "| RELO-W0.1 | first | evidence |\n| RELO-W0.1 | duplicate | evidence |\n",
+        ),
+        encoding="utf-8",
+    )
+
+    result = lint_specification(spec)
+
+    assert result.passed is False
+    assert "duplicate work-item definition" in result.detail
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_verifier_cli_rejects_duplicate_phase_work_items_without_mutation(
+    tmp_path, capsys, json_output,
+) -> None:
+    spec = _write_goal_traceability_spec(tmp_path)
+    spec.write_text(
+        spec.read_text(encoding="utf-8").replace(
+            "| RELO-W0.1 | first | evidence |\n",
+            "| RELO-W0.1 | first | evidence |\n| RELO-W0.1 | duplicate | evidence |\n",
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        'addopts = "-m \'not perf\'"\nmarkers = ["perf: lane"]\n', encoding="utf-8",
+    )
+    _write_budgets(
+        tmp_path, line_status="ratified", line_value=100,
+        obligation_status="ratified", obligation_value=10,
+    )
+    (tmp_path / "governance" / "relo-work-packages.yaml").write_text(
+        "schema_version: '1'\nwork_items:\n"
+        "  - {id: RELO-W0.1, class: NEEDS_JUDGMENT, depends_on: []}\n"
+        "  - {id: RELO-W0.2, class: NEEDS_JUDGMENT, depends_on: []}\n",
+        encoding="utf-8",
+    )
+    before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    arguments = ["--repo-root", str(tmp_path), "--spec", str(spec)]
+    if json_output:
+        arguments.append("--json")
+    exit_code = main(arguments)
+
+    output = capsys.readouterr().out
+    assert exit_code == 6
+    assert "duplicate work-item definition" in output
+    if json_output:
+        assert [row["id"] for row in json.loads(output) if not row["passed"]] == ["RELO-SPEC-LINT"]
+    assert {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+
+
+@pytest.mark.parametrize("decoy", [
+    "\n<!--\n| RELO-W0.1 | hidden | evidence |\n-->\n",
+    "\n```markdown\n| RELO-W0.1 | example | evidence |\n```\n",
+    "\nOther material:\n| Other | Description |\n|---|---|\n| RELO-W0.1 | reference |\n",
+])
+def test_spec_lint_ignores_duplicate_work_item_mentions_outside_phase_table(
+    tmp_path, decoy,
+) -> None:
+    spec = _write_goal_traceability_spec(tmp_path)
+    spec.write_text(
+        spec.read_text(encoding="utf-8").replace("### 11.2 Phase RELO-1\n", decoy + "### 11.2 Phase RELO-1\n"),
+        encoding="utf-8",
+    )
+
+    result = lint_specification(spec)
+
+    assert result.passed is True
+
+
+def test_spec_lint_accepts_distinct_parent_and_suffixed_work_items(tmp_path) -> None:
+    spec = _write_goal_traceability_spec(tmp_path)
+    spec.write_text(
+        spec.read_text(encoding="utf-8").replace(
+            "| RELO-W0.1 | first | evidence |\n",
+            "| RELO-W0.1 | first | evidence |\n| RELO-W0.1a | child | evidence |\n",
+        ),
+        encoding="utf-8",
+    )
+
+    result = lint_specification(spec)
+
+    assert result.passed is True
 
 
 @pytest.mark.parametrize(("rows", "finding"), [
@@ -1417,7 +1544,10 @@ def test_work_package_lint_rejects_missing_cards_and_unresolved_agent_paths(tmp_
     (tmp_path / "governance").mkdir()
     spec = tmp_path / "relo.md"
     spec.write_text(
-        "### 11.1 Phase RELO-0\n\n| RELO-W0.1 | item |\n\n### 11.2 Phase RELO-1\n\n| RELO-W1.1 | item |\n\n### 11.3 Next\n\n**RELO-D4**\n",
+        "## 11. Plan\n"
+        "### 11.1 Phase RELO-0\n| ID | Work item |\n|---|---|\n| RELO-W0.1 | item |\n"
+        "### 11.2 Phase RELO-1\n| ID | Work item |\n|---|---|\n| RELO-W1.1 | item |\n"
+        "### 11.3 Next\n| ID | Work item |\n|---|---|\n**RELO-D4**\n",
         encoding="utf-8",
     )
     (tmp_path / "governance" / "relo-work-packages.yaml").write_text(
@@ -1453,8 +1583,10 @@ def _write_work_package_fixture(tmp_path, cards, identifiers=("RELO-W0.1",)):
     spec.write_text(
         "**Version:** 1.0\n\n- **v1.0 — synthetic:** note\n\n"
         "## Table of Contents\n"
-        "### 11.1 Phase RELO-0\n" + rows
-        + "### 11.2 Phase RELO-1\n### 11.3 Next\n**RELO-D1**\n",
+        "## 11. Plan\n"
+        "### 11.1 Phase RELO-0\n| ID | Work item |\n|---|---|\n" + rows
+        + "### 11.2 Phase RELO-1\n| ID | Work item |\n|---|---|\n"
+        "### 11.3 Next\n| ID | Work item |\n|---|---|\n**RELO-D1**\n",
         encoding="utf-8",
     )
     (tmp_path / "governance" / "relo-work-packages.yaml").write_text(
@@ -1462,6 +1594,363 @@ def _write_work_package_fixture(tmp_path, cards, identifiers=("RELO-W0.1",)):
         encoding="utf-8",
     )
     return spec
+
+
+@pytest.mark.parametrize("covered", [False, True])
+def test_work_package_phase_coverage_recognizes_bold_ids(tmp_path, covered) -> None:
+    cards = [_ready_work_package()] if covered else []
+    spec = _write_work_package_fixture(tmp_path, cards, identifiers=("**RELO-W0.1**",))
+    before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    result = lint_work_packages(tmp_path, spec_path=spec)
+
+    assert result.passed is covered
+    if not covered:
+        assert "missing work-package card(s): RELO-W0.1" in result.detail
+    assert {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+
+
+@pytest.mark.parametrize("heading", [
+    "### 11.1 Phase RELO-0",
+    "### 11.1. Phase RELO-0",
+    "### 11.1",
+    "### 11.1.",
+])
+@pytest.mark.parametrize("covered", [False, True])
+def test_work_package_phase_coverage_recognizes_numbered_headings(tmp_path, heading, covered) -> None:
+    cards = [_ready_work_package()] if covered else []
+    spec = _write_work_package_fixture(tmp_path, cards)
+    spec.write_text(
+        spec.read_text(encoding="utf-8").replace("### 11.1 Phase RELO-0", heading, 1),
+        encoding="utf-8",
+    )
+    before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    specification = lint_specification(spec)
+    work_packages = lint_work_packages(tmp_path, spec_path=spec)
+
+    assert specification.passed is True
+    assert work_packages.passed is covered
+    if not covered:
+        assert "missing work-package card(s): RELO-W0.1" in work_packages.detail
+    assert {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+
+
+@pytest.mark.parametrize("heading", ["### 11.1", "### 11.1."])
+def test_phase_coverage_rejects_untitled_phase_without_table(tmp_path, heading) -> None:
+    spec = _write_work_package_fixture(tmp_path, [])
+    content = spec.read_text(encoding="utf-8").replace("### 11.1 Phase RELO-0", heading, 1)
+    content = content.replace(
+        "| ID | Work item |\n|---|---|\n| RELO-W0.1 | item |\n",
+        "Only prose mentions the item.\n",
+        1,
+    )
+    spec.write_text(content, encoding="utf-8")
+    before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    results = (lint_specification(spec), lint_work_packages(tmp_path, spec_path=spec))
+
+    assert all(not result.passed for result in results)
+    assert all("phase work-item definition table is missing or malformed" in result.detail for result in results)
+    assert {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+
+
+@pytest.mark.parametrize("decoy", [
+    "\n```markdown\n| RELO-W9.9 | hidden example |\n```\n",
+    "\n~~~markdown\n| RELO-W9.9 | hidden example |\n~~~\n",
+    "\n<!--\n| RELO-W9.9 | hidden comment |\n-->\n",
+    "\n| Other | Detail |\n|---|---|\n| RELO-W9.9 | unrelated |\n",
+    "\n| ID | Work item |\n|---|---|\n| RELO-W9.9 | later table |\n",
+])
+def test_work_package_phase_coverage_ignores_nondefinitions(tmp_path, decoy) -> None:
+    spec = _write_work_package_fixture(tmp_path, [_ready_work_package()])
+    content = spec.read_text(encoding="utf-8").replace(
+        "### 11.2 Phase RELO-1\n", decoy + "### 11.2 Phase RELO-1\n",
+    )
+    spec.write_text(content, encoding="utf-8")
+    before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    result = lint_work_packages(tmp_path, spec_path=spec)
+
+    assert result.passed is True
+    assert {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+
+
+@pytest.mark.parametrize("decoy", [
+    "```markdown\n### 11.2 Decoy\n```\n",
+    "<!--\n### 11.2 Decoy\n-->\n",
+    "```markdown\n### 11.2.\n```\n",
+    "<!--\n### 11.2. Decoy\n-->\n",
+])
+def test_work_package_phase_coverage_ignores_hidden_phase_boundaries(tmp_path, decoy) -> None:
+    spec = _write_work_package_fixture(tmp_path, [_ready_work_package()])
+    content = spec.read_text(encoding="utf-8").replace(
+        "### 11.1 Phase RELO-0\n", "### 11.1 Phase RELO-0\n" + decoy,
+    )
+    spec.write_text(content, encoding="utf-8")
+
+    assert lint_work_packages(tmp_path, spec_path=spec).passed is True
+
+
+def test_work_package_phase_coverage_includes_final_phase_without_next_subsection(tmp_path) -> None:
+    card = _ready_work_package("RELO-W6.1")
+    spec = _write_work_package_fixture(tmp_path, [card])
+    spec.write_text(
+        "**Version:** 1.0\n- **v1.0 — synthetic:** note\n"
+        "## 11. Plan\n### 11.7 Final phase\n"
+        "| ID | Work item |\n|---|---|\n| RELO-W6.1 | final |\n"
+        "## 12. Next section\n",
+        encoding="utf-8",
+    )
+
+    assert lint_specification(spec).passed is True
+    assert lint_work_packages(tmp_path, spec_path=spec).passed is True
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ("| ID | Work item |\n|---|---|\n| RELO-W0.1 | item |\n", "Only prose mentions the item.\n"),
+    ("| ID | Work item |\n|---|---|\n", "| ID | Work item |\n"),
+    ("| ID | Work item |\n|---|---|\n", "| ID | Other |\n|---|---|\n"),
+    ("| ID | Work item |\n|---|---|\n", "| ID | Work item |\n|---|bad|\n"),
+    (
+        "| ID | Work item |\n|---|---|\n| RELO-W0.1 | item |\n",
+        "<!--\n| ID | Work item |\n|---|---|\n| RELO-W0.1 | item |\n-->\n",
+    ),
+    ("| RELO-W0.1 | item |\n", "| SYNTHETIC-SECRET-MARKER | item |\n"),
+    ("| RELO-W0.1 | item |\n", "| **RELO-W0.1 | item |\n"),
+    ("| RELO-W0.1 | item |\n", "| RELO-W0.1** | item |\n"),
+    ("| RELO-W0.1 | item |\n", "| RELO-W0.1 extra | item |\n"),
+    ("| RELO-W0.1 | item |\n", "| RELO-W0.1 | item\n"),
+    ("| RELO-W0.1 | item |\n", "RELO-W0.1 | item |\n"),
+    ("| RELO-W0.1 | item |\n", "| RELO-W0.1 | |\n"),
+    ("## 11. Plan\n", ""),
+])
+def test_phase_coverage_rejects_malformed_declared_tables_without_echoing_content(
+    tmp_path, old, new,
+) -> None:
+    spec = _write_work_package_fixture(tmp_path, [_ready_work_package()])
+    content = spec.read_text(encoding="utf-8")
+    assert old in content
+    spec.write_text(content.replace(old, new, 1), encoding="utf-8")
+    before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    results = (lint_specification(spec), lint_work_packages(tmp_path, spec_path=spec))
+
+    for result in results:
+        assert result.passed is False
+        assert "phase work-item definition table is missing or malformed" in result.detail
+        assert "SYNTHETIC-SECRET-MARKER" not in result.detail
+    assert {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+
+
+@pytest.mark.parametrize(("header", "row"), [
+    ("| ID | Work item |\n|---|---|", "| RELO-W0.1 | item | SYNTHETIC-SECRET-MARKER |"),
+    ("| ID | Work item | |\n|---|---|---|", "| RELO-W0.1 | item | accepted |"),
+    ("| ID | Work item | Acceptance |\n|---|---|---|", "| RELO-W0.1 | item |"),
+    ("| ID | Work item | Acceptance |\n|---|---|---|", "| RELO-W0.1 | item | |"),
+    (
+        "| ID | Work item | Acceptance |\n|---|---|---|",
+        "| RELO-W0.1 | item | accepted | SYNTHETIC-SECRET-MARKER |",
+    ),
+    (
+        "| ID | Work item | Primary files | Acceptance |\n|---|---|---|---|",
+        "| RELO-W0.1 | item | files |",
+    ),
+    (
+        "| ID | Work item | Primary files | Acceptance |\n|---|---|---|---|",
+        "| RELO-W0.1 | item | | accepted |",
+    ),
+])
+def test_phase_coverage_rejects_mismatched_or_empty_declared_cells(tmp_path, header, row) -> None:
+    spec = _write_work_package_fixture(tmp_path, [_ready_work_package()])
+    content = spec.read_text(encoding="utf-8").replace(
+        "| ID | Work item |\n|---|---|\n| RELO-W0.1 | item |",
+        header + "\n" + row,
+        1,
+    )
+    spec.write_text(content, encoding="utf-8")
+    before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    results = (lint_specification(spec), lint_work_packages(tmp_path, spec_path=spec))
+    assert [result.passed for result in results] == [False, False]
+    for result in results:
+        assert "phase work-item definition table is missing or malformed" in result.detail
+        assert "SYNTHETIC-SECRET-MARKER" not in result.detail
+    assert {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+
+
+@pytest.mark.parametrize(("header", "row"), [
+    ("| ID | Work item | Acceptance |\n|---|---|---|", "| RELO-W0.1 | item | accepted |"),
+    (
+        "| ID | Work item | Primary files | Acceptance |\n|---|---|---|---|",
+        "| RELO-W0.1 | item | files | accepted |",
+    ),
+])
+def test_work_package_phase_coverage_accepts_complete_declared_cells(tmp_path, header, row) -> None:
+    spec = _write_work_package_fixture(tmp_path, [_ready_work_package()])
+    content = spec.read_text(encoding="utf-8").replace(
+        "| ID | Work item |\n|---|---|\n| RELO-W0.1 | item |",
+        header + "\n" + row,
+        1,
+    )
+    spec.write_text(content, encoding="utf-8")
+
+    assert lint_specification(spec).passed
+    assert lint_work_packages(tmp_path, spec_path=spec).passed
+
+
+@pytest.mark.parametrize("heading", ["### 11.1 Orphan phase", "### 11.1.", "### 11.1. Orphan phase"])
+def test_phase_coverage_rejects_an_orphan_duplicate_phase_heading(tmp_path, heading) -> None:
+    spec = _write_work_package_fixture(tmp_path, [_ready_work_package()])
+    content = spec.read_text(encoding="utf-8").replace(
+        "## 11. Plan\n",
+        heading + "\n\n## 11. Plan\n",
+    )
+    spec.write_text(content, encoding="utf-8")
+
+    assert not lint_specification(spec).passed
+    assert not lint_work_packages(tmp_path, spec_path=spec).passed
+
+
+@pytest.mark.parametrize("wrapper", ["<!--\n{}\n-->", "```markdown\n{}\n```"])
+def test_phase_coverage_ignores_hidden_malformed_duplicate_rows(tmp_path, wrapper) -> None:
+    spec = _write_work_package_fixture(tmp_path, [_ready_work_package()])
+    decoy = wrapper.format("| **RELO-W9.9 | hidden |\n| **RELO-W9.9 | hidden |")
+    spec.write_text(
+        spec.read_text(encoding="utf-8").replace("### 11.2 Phase RELO-1\n", decoy + "\n### 11.2 Phase RELO-1\n"),
+        encoding="utf-8",
+    )
+
+    assert lint_specification(spec).passed
+    assert lint_work_packages(tmp_path, spec_path=spec).passed
+
+
+def test_phase_coverage_does_not_echo_duplicate_malformed_row_ids(tmp_path) -> None:
+    spec = _write_work_package_fixture(tmp_path, [_ready_work_package()])
+    spec.write_text(
+        spec.read_text(encoding="utf-8").replace(
+            "| RELO-W0.1 | item |\n",
+            "| **RELO-W9.9 | first |\n| **RELO-W9.9 | second |\n",
+        ),
+        encoding="utf-8",
+    )
+
+    for result in (lint_specification(spec), lint_work_packages(tmp_path, spec_path=spec)):
+        assert not result.passed
+        assert "phase work-item definition table is missing or malformed" in result.detail
+        assert "RELO-W9.9" not in result.detail
+
+
+@pytest.mark.parametrize("include_phase", [False, True])
+def test_work_package_phase_coverage_accepts_explicitly_empty_or_phase_free_spec(
+    tmp_path, include_phase,
+) -> None:
+    spec = _write_work_package_fixture(tmp_path, [], identifiers=())
+    if not include_phase:
+        spec.write_text(
+            "**Version:** 1.0\n- **v1.0 — synthetic:** note\n## 1. Minimal\n",
+            encoding="utf-8",
+        )
+
+    assert lint_specification(spec).passed is True
+    assert lint_work_packages(tmp_path, spec_path=spec).passed is True
+
+
+def test_goal_and_work_package_phase_coverage_use_the_same_bold_definition(tmp_path) -> None:
+    spec = _write_goal_traceability_spec(tmp_path)
+    spec.write_text(
+        spec.read_text(encoding="utf-8").replace("| RELO-W0.1 |", "| **RELO-W0.1** |"),
+        encoding="utf-8",
+    )
+    (tmp_path / "governance").mkdir()
+    (tmp_path / "governance" / "relo-work-packages.yaml").write_text(
+        json.dumps({
+            "schema_version": "1",
+            "work_items": [
+                {"id": "RELO-W0.1", "class": "NEEDS_JUDGMENT", "depends_on": []},
+                {"id": "RELO-W0.2", "class": "NEEDS_JUDGMENT", "depends_on": []},
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    assert lint_specification(spec).passed is True
+    assert lint_work_packages(tmp_path, spec_path=spec).passed is True
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+@pytest.mark.parametrize("heading", ["### 11.1 Phase RELO-0", "### 11.1."])
+def test_verifier_cli_rejects_missing_bold_phase_card_without_mutation(
+    tmp_path, capsys, json_output, heading,
+) -> None:
+    spec = _write_work_package_fixture(tmp_path, [], identifiers=("**RELO-W0.1**",))
+    spec.write_text(
+        spec.read_text(encoding="utf-8").replace("### 11.1 Phase RELO-0", heading, 1),
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        'addopts = "-m \'not perf\'"\nmarkers = ["perf: lane"]\n', encoding="utf-8",
+    )
+    _write_budgets(
+        tmp_path, line_status="ratified", line_value=100,
+        obligation_status="ratified", obligation_value=10,
+    )
+    before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    args = ["--repo-root", str(tmp_path), "--spec", str(spec)]
+    if json_output:
+        args.append("--json")
+
+    exit_code = main(args)
+
+    output = capsys.readouterr().out
+    assert exit_code == 6
+    assert "missing work-package card(s): RELO-W0.1" in output
+    if json_output:
+        assert [row["id"] for row in json.loads(output) if not row["passed"]] == ["RELO-WORK-PACKAGES"]
+    else:
+        assert "FAIL RELO-WORK-PACKAGES" in output
+    assert {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_verifier_cli_rejects_malformed_phase_row_without_mutation(tmp_path, capsys, json_output) -> None:
+    spec = _write_work_package_fixture(tmp_path, [_ready_work_package()])
+    spec.write_text(
+        spec.read_text(encoding="utf-8").replace(
+            "| RELO-W0.1 | item |",
+            "| RELO-W0.1 | item | SYNTHETIC-SECRET-MARKER |",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        'addopts = "-m \'not perf\'"\nmarkers = ["perf: lane"]\n', encoding="utf-8",
+    )
+    _write_budgets(
+        tmp_path, line_status="ratified", line_value=100,
+        obligation_status="ratified", obligation_value=10,
+    )
+    before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    args = ["--repo-root", str(tmp_path), "--spec", str(spec)]
+    if json_output:
+        args.append("--json")
+
+    exit_code = main(args)
+
+    output = capsys.readouterr().out
+    assert exit_code == 6
+    assert "SYNTHETIC-SECRET-MARKER" not in output
+    if json_output:
+        results = json.loads(output)
+        assert [row["id"] for row in results if not row["passed"]] == ["RELO-SPEC-LINT", "RELO-WORK-PACKAGES"]
+        assert all(
+            "phase work-item definition table is missing or malformed" in row["detail"]
+            for row in results if not row["passed"]
+        )
+    else:
+        assert "FAIL RELO-SPEC-LINT: phase work-item definition table is missing or malformed" in output
+        assert "FAIL RELO-WORK-PACKAGES: phase work-item definition table is missing or malformed" in output
+    assert {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
 
 
 @pytest.mark.parametrize(("field", "value", "diagnostic"), [
@@ -1539,6 +2028,140 @@ def test_work_package_lint_preserves_valid_classes_and_aggregates_invalid_cards(
     assert "RELO-W0.1: invalid class" in result.detail
     assert "RELO-W0.2: unresolved depends_on" in result.detail
     assert "RELO-W0.3: NEEDS_DECISION must name" in result.detail
+
+
+@pytest.mark.parametrize(("dependencies", "cyclic"), [
+    (((1,),), True),
+    (((2,), (1,)), True),
+    (((2,), (3,), (1,), (1,)), True),
+    (((), (1,), (1,), (2, 3, 3)), False),
+    (((), (), (1, 2)), False),
+])
+def test_work_package_dependency_cycles_and_acyclic_controls(tmp_path, dependencies, cyclic) -> None:
+    identifiers = tuple(f"RELO-W0.{index}" for index in range(1, len(dependencies) + 1))
+    cards = [
+        {
+            "id": identifier,
+            "class": "NEEDS_JUDGMENT",
+            "depends_on": [identifiers[index - 1] for index in deps],
+        }
+        for identifier, deps in zip(identifiers, dependencies)
+    ]
+    spec = _write_work_package_fixture(tmp_path, cards, identifiers=identifiers)
+    before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    result = lint_work_packages(tmp_path, spec_path=spec)
+
+    assert result.passed is not cyclic
+    assert ("dependency graph contains a cycle" in result.detail) is cyclic
+    assert {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+
+
+def test_work_package_dependency_cycles_preserve_other_diagnostics_without_echoing_input(tmp_path) -> None:
+    cards = [
+        {"id": "RELO-W0.1", "class": "NEEDS_JUDGMENT", "depends_on": ["RELO-W0.2"]},
+        {"id": "RELO-W0.2", "class": "NEEDS_JUDGMENT", "depends_on": ["RELO-W0.1"]},
+        {"id": "RELO-W0.3", "class": "NEEDS_JUDGMENT", "depends_on": ["SYNTHETIC-SECRET-MARKER"]},
+    ]
+    spec = _write_work_package_fixture(tmp_path, cards, identifiers=("RELO-W0.1", "RELO-W0.2", "RELO-W0.3"))
+
+    result = lint_work_packages(tmp_path, spec_path=spec)
+
+    assert result.passed is False
+    assert "RELO-W0.3: unresolved depends_on" in result.detail
+    assert "dependency graph contains a cycle" in result.detail
+    assert "SYNTHETIC-SECRET-MARKER" not in result.detail
+
+
+@pytest.mark.parametrize("malformed", ["SYNTHETIC-SECRET-MARKER", 42, []])
+def test_work_package_dependency_cycles_survive_malformed_edge_on_same_card(tmp_path, malformed) -> None:
+    cards = [
+        {"id": "RELO-W0.1", "class": "NEEDS_JUDGMENT", "depends_on": ["RELO-W0.2", malformed]},
+        {"id": "RELO-W0.2", "class": "NEEDS_JUDGMENT", "depends_on": ["RELO-W0.1"]},
+    ]
+    spec = _write_work_package_fixture(tmp_path, cards, identifiers=("RELO-W0.1", "RELO-W0.2"))
+
+    result = lint_work_packages(tmp_path, spec_path=spec)
+
+    assert result.passed is False
+    assert "RELO-W0.1: unresolved depends_on" in result.detail
+    assert "dependency graph contains a cycle" in result.detail
+    assert "SYNTHETIC-SECRET-MARKER" not in result.detail
+
+
+def test_work_package_dependency_cycles_survive_invalid_class(tmp_path) -> None:
+    cards = [
+        {"id": "RELO-W0.1", "class": [], "depends_on": ["RELO-W0.2"]},
+        {"id": "RELO-W0.2", "class": "NEEDS_JUDGMENT", "depends_on": ["RELO-W0.1"]},
+    ]
+    spec = _write_work_package_fixture(tmp_path, cards, identifiers=("RELO-W0.1", "RELO-W0.2"))
+
+    result = lint_work_packages(tmp_path, spec_path=spec)
+
+    assert result.passed is False
+    assert "RELO-W0.1: invalid class" in result.detail
+    assert "dependency graph contains a cycle" in result.detail
+
+
+def test_work_package_dependency_cycles_do_not_select_duplicate_ids(tmp_path) -> None:
+    cards = [
+        {"id": "RELO-W0.1", "class": "NEEDS_JUDGMENT", "depends_on": ["RELO-W0.1"]},
+        {"id": "RELO-W0.1", "class": "NEEDS_JUDGMENT", "depends_on": []},
+    ]
+    spec = _write_work_package_fixture(tmp_path, cards)
+
+    result = lint_work_packages(tmp_path, spec_path=spec)
+
+    assert result.passed is False
+    assert "duplicate card ID(s)" in result.detail
+    assert "dependency graph contains a cycle" not in result.detail
+
+
+def test_work_package_dependency_cycles_handle_long_graphs(tmp_path) -> None:
+    identifiers = tuple(f"RELO-W0.{index}" for index in range(1, 1101))
+    cards = [
+        {
+            "id": identifier,
+            "class": "NEEDS_JUDGMENT",
+            "depends_on": [identifiers[(index + 1) % len(identifiers)]],
+        }
+        for index, identifier in enumerate(identifiers)
+    ]
+    spec = _write_work_package_fixture(tmp_path, cards, identifiers=identifiers)
+
+    result = lint_work_packages(tmp_path, spec_path=spec)
+
+    assert result.passed is False
+    assert "dependency graph contains a cycle" in result.detail
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_verifier_cli_rejects_work_package_dependency_cycles_without_mutation(tmp_path, capsys, json_output) -> None:
+    cards = [
+        {"id": "RELO-W0.1", "class": "NEEDS_JUDGMENT", "depends_on": ["RELO-W0.2"]},
+        {"id": "RELO-W0.2", "class": "NEEDS_JUDGMENT", "depends_on": ["RELO-W0.1"]},
+    ]
+    spec = _write_work_package_fixture(tmp_path, cards, identifiers=("RELO-W0.1", "RELO-W0.2"))
+    (tmp_path / "pyproject.toml").write_text(
+        'addopts = "-m \'not perf\'"\nmarkers = ["perf: lane"]\n', encoding="utf-8",
+    )
+    _write_budgets(
+        tmp_path, line_status="ratified", line_value=100,
+        obligation_status="ratified", obligation_value=10,
+    )
+    before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    args = ["--repo-root", str(tmp_path), "--spec", str(spec)]
+    if json_output:
+        args.append("--json")
+
+    exit_code = main(args)
+
+    output = capsys.readouterr().out
+    assert exit_code == 6
+    assert "dependency graph contains a cycle" in output
+    if json_output:
+        assert [row["id"] for row in json.loads(output) if not row["passed"]] == ["RELO-WORK-PACKAGES"]
+    assert {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
 
 
 @pytest.mark.parametrize(("field", "value"), [

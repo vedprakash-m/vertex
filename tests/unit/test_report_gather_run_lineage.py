@@ -23,6 +23,7 @@ import pytest
 
 from src.commands.report import _pin_gather_run_lineage
 from src.core.exceptions import ConfigError
+import src.core.gather_run_manifest as gather_run_manifest
 from src.core.gather_run_manifest import (
     GatherRunManifest,
     GatherRunStatus,
@@ -34,6 +35,7 @@ from src.core.gather_run_manifest import (
     create_staging_manifest,
     get_committed_run_dir,
     get_latest_pointer_path,
+    get_staging_run_dir,
     read_manifest,
     write_manifest,
 )
@@ -74,6 +76,26 @@ def _fake_resolved_v2(program_id: str) -> object:
 def test_pin_gather_run_lineage_stamps_ctx_from_latest_committed_run(tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     committed = _commit_gather_run(programs_root)
+
+    ctx = StageContext(programs_root=programs_root, resolved_v2=_fake_resolved_v2("acme"))
+    pinned = _pin_gather_run_lineage(ctx)
+
+    assert pinned.gather_run_id == committed.run_id
+    assert pinned.gather_run_hash == committed.manifest_hash
+    assert pinned.gather_run_manifest == committed
+
+
+def test_pin_gather_run_lineage_does_not_select_path_shaped_pointer(tmp_path: Path) -> None:
+    programs_root = tmp_path / "programs"
+    committed = _commit_gather_run(programs_root)
+    staged_dir = get_staging_run_dir("acme", "gather-outside", programs_root=programs_root)
+    staged = replace(committed, run_id=staged_dir.name, manifest_hash=None)
+    staged = replace(staged, manifest_hash=compute_manifest_hash(staged))
+    write_manifest(staged_dir, staged)
+    gather_run_manifest._write_pointer(
+        get_latest_pointer_path("acme", programs_root=programs_root),
+        run_id="../staging/gather-outside", manifest_hash=staged.manifest_hash,
+    )
 
     ctx = StageContext(programs_root=programs_root, resolved_v2=_fake_resolved_v2("acme"))
     pinned = _pin_gather_run_lineage(ctx)

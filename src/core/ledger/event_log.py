@@ -10,13 +10,13 @@ import os
 from pathlib import Path
 from typing import Any
 
-from src.core.exceptions import ConfigError
+from src.core.exceptions import ConfigError, StateError
 from src.core.jsonl_utils import append_jsonl_line, append_jsonl_lines, quarantine_and_rewrite_jsonl
 from src.core.ledger.event_index import index_event, index_events
 from src.core.ledger.event_types import validate_event_payload
 from src.core.ledger.source_refs import SourceRef, source_document_key, source_ref_from_dict, source_ref_to_dict, validate_typed_source_ref
 from src.core.ledger.ulid import new_ulid
-from src.core.workspace_paths import PROGRAMS_ROOT
+from src.core.workspace_paths import PROGRAMS_ROOT, is_bare_identifier
 from src.core.workspace_lease import cooperative_capture_fence
 
 
@@ -225,6 +225,8 @@ def _tail_is_fresh(tail: _EventLogTail, target_path: Path) -> bool:
 
 
 def get_event_logs_dir(program_id: str, *, programs_root: Path = PROGRAMS_ROOT) -> Path:
+    if not isinstance(program_id, str) or not is_bare_identifier(program_id):
+        raise StateError("Event log requires a bare program identifier.")
     return programs_root / program_id / "ledger" / "events"
 
 

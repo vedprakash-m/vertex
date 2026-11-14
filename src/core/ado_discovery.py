@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
 from typing import Any, Callable
 
 from src.core.ado_client import ADOClient
@@ -12,7 +13,7 @@ from src.core.ado_relations import parse_relations_payload, relation_quarantine_
 from src.core.ado_saved_query_helpers import append_wiql_clause as _append_wiql_clause
 from src.core.ado_saved_query_helpers import extract_saved_query_wiql as _extract_saved_query_wiql
 from src.core.config_loader import PROGRAMS_ROOT
-from src.core.exceptions import QueryError
+from src.core.exceptions import QueryError, WIQLResponseError
 from src.core.failure_taxonomy import safe_failure_suffix
 from src.core.integration_types import (
     ChannelConfig,
@@ -30,6 +31,7 @@ from src.core.integration_types import (
     RelationTargetKind,
     ScopeStatus,
     ScopeStatusKind,
+    WIQLPaginationOutcome,
     HydrationMode,
 )
 from src.core.models_v2 import Program, Workstream
@@ -76,22 +78,14 @@ def _execute_wiql_with_id_partitioning(
     *,
     skew_budget_seconds: float = ID_PARTITION_SKEW_BUDGET_SECONDS,
     clock: Callable[[], float] = time.monotonic,
-) -> tuple[list[int], bool]:
-    """Spec D-3 partition algorithm: re-run a capped WIQL query as a
-    deterministic, ID-ordered cursor scan so its full membership is proven
-    rather than silently truncated at ``top_cap``. The query's own
-    ``ORDER BY`` is dropped for this scan (execution only; the pinned
-    predicate is preserved) in favor of ``[System.Id] > cursor`` ascending,
-    since the original ordering may not be ID-based and can't be resumed
-    from the discarded, already-truncated first page.
+) -> tuple[list[int], bool, bool]:
+    """Scan a capped WIQL query in ID order, validating each page.
 
-    Returns ``(ordered_ids, is_complete)``. ``is_complete`` is ``False``
-    (caller must treat the scope as ``PARTIAL``) only when a non-empty page
-    fails to advance the cursor, the skew budget is exceeded, or an id
-    recurs across pages (contradictory membership under concurrent
-    mutation) -- an empty page immediately after a full page is normal
-    completion for an exact cap multiple.
+    Returns observed IDs, whether the scan completed, and whether a query
+    failed. Source stability and independent completeness are not proven.
     """
+    if type(top_cap) is not int or top_cap <= 0:
+        return [], False, False
     predicate_only = _strip_order_by_clause(predicate_wiql)
     started_at = clock()
     cursor = 0
@@ -99,22 +93,48 @@ def _execute_wiql_with_id_partitioning(
     seen_ids: set[int] = set()
     while True:
         page_wiql = f"{_append_wiql_clause(predicate_only, f'[System.Id] > {cursor}')} order by [System.Id] asc"
-        page_ids = client.execute_wiql(page_wiql, top=top_cap)
-        if not page_ids:
-            return ordered_ids, True
+        outcomes: list[PaginationOutcome] = []
+        try:
+            page_ids = client.execute_wiql(page_wiql, top=top_cap, on_pagination=outcomes.append)
+        except WIQLResponseError as error:
+            page_ids = list(error.observed_ids)
+            page_error = True
+        except QueryError:
+            return ordered_ids, False, True
+        else:
+            page_error = False
+        in_order = True
+        previous_id = cursor
         for work_item_id in page_ids:
-            if work_item_id in seen_ids:
-                return ordered_ids, False
-            seen_ids.add(work_item_id)
-            ordered_ids.append(work_item_id)
+            if type(work_item_id) is not int or work_item_id <= 0:
+                in_order = False
+                continue
+            if work_item_id <= previous_id:
+                in_order = False
+            previous_id = work_item_id
+            if work_item_id not in seen_ids:
+                seen_ids.add(work_item_id)
+                ordered_ids.append(work_item_id)
+        if page_error:
+            return ordered_ids, False, True
+        outcome = outcomes[0] if len(outcomes) == 1 else None
+        if (
+            not in_order
+            or not isinstance(outcome, PaginationOutcome)
+            or (isinstance(outcome, WIQLPaginationOutcome) and outcome.is_flat_result is not True)
+            or type(outcome.total_fetched) is not int
+            or outcome.total_fetched != len(page_ids)
+            or type(outcome.page_count) is not int
+            or outcome.page_count != 1
+            or type(outcome.is_truncated) is not bool
+            or len(page_ids) > top_cap
+            or outcome.is_truncated != (len(page_ids) == top_cap)
+            or clock() - started_at > skew_budget_seconds
+        ):
+            return ordered_ids, False, False
         if len(page_ids) < top_cap:
-            return ordered_ids, True
-        max_id = max(page_ids)
-        if max_id <= cursor:
-            return ordered_ids, False
-        if clock() - started_at > skew_budget_seconds:
-            return ordered_ids, False
-        cursor = max_id
+            return ordered_ids, True, False
+        cursor = previous_id
 
 
 # ---------------------------------------------------------------------------
@@ -316,7 +336,8 @@ class ADODiscoveryConfig:
 class ADODiscoveryProvider:
     def __init__(self, client: ADOClient):
         self._client = client
-        self._saved_query_cache: dict[str, dict[str, Any]] = {}
+        self._observed_query_hashes: dict[tuple[str, str, str], str] = {}
+        self._observed_query_lock = Lock()
 
     @classmethod
     def from_program(
@@ -373,6 +394,7 @@ class ADODiscoveryProvider:
         statuses: dict[str, ScopeStatus] = {}
         channel_errors: list[IntegrationError] = []
         query_results: list[DiscoveryQueryResult] = []
+        saved_query_cache: dict[str, str | None] = {}
 
         query_groups: dict[tuple[str, str], list[_ADOScope]] = {}
         for scope in _discovery_scopes(config.slice_contracts):
@@ -381,26 +403,51 @@ class ADODiscoveryProvider:
         for group_scopes in query_groups.values():
             try:
                 discovered, is_truncated, group_query_results = self._discover_scope_group(
-                    program_id, config, group_scopes, computed_at
+                    program_id, config, group_scopes, computed_at, saved_query_cache
                 )
                 refs.extend(discovered)
                 query_results.extend(group_query_results)
-                # ADF-W2.1 / spec D-3: `returned_count >= top` must never be
-                # silently reported as FULL -- a capped WIQL result is
-                # transparently re-scanned via ID-range partitioning; only a
-                # partition scan that itself could not complete (cursor
-                # stall, skew budget, or contradictory membership) is PARTIAL.
-                scope_completeness = DiscoveryCompleteness.PARTIAL if is_truncated else DiscoveryCompleteness.FULL
+                missing_wiql = any(row.failure_category == "missing_wiql" for row in group_query_results)
+                query_changed = any(row.failure_category == "saved_query_changed" for row in group_query_results)
+                unverified_pagination = any(
+                    row.failure_category == "unverified_pagination" for row in group_query_results
+                )
+                partition_query_error = any(
+                    row.failure_category == "query_error" for row in group_query_results
+                )
+                malformed_response = any(
+                    row.failure_category == "malformed_wiql_response" for row in group_query_results
+                )
+                scope_completeness = (
+                    DiscoveryCompleteness.PARTIAL
+                    if is_truncated or missing_wiql or query_changed or unverified_pagination
+                    or partition_query_error or malformed_response
+                    else DiscoveryCompleteness.FULL
+                )
                 for scope in group_scopes:
                     statuses[scope.scope_id] = ScopeStatus(
                         scope_id=scope.scope_id,
-                        status=ScopeStatusKind.SUCCESS,
+                        status=(
+                            ScopeStatusKind.ERROR
+                            if missing_wiql or query_changed or unverified_pagination
+                            or partition_query_error or malformed_response
+                            else ScopeStatusKind.SUCCESS
+                        ),
                         completeness=scope_completeness,
                         item_count=len(discovered),
                         error_message=(
-                            f"WIQL query {scope.query_id} hit cap {config.top} and its ID-range partition "
-                            "scan could not prove complete membership (cursor stall, skew budget, or "
-                            "contradictory membership) — narrow or manually partition this query"
+                            "ADO discovery failed: saved query has no usable WIQL."
+                            if missing_wiql
+                            else "ADO discovery failed: saved query changed; scope review is required."
+                            if query_changed
+                            else "ADO discovery incomplete: pagination evidence is missing or inconsistent."
+                            if unverified_pagination
+                            else "ADO discovery failed during the ID-range partition scan."
+                            if partition_query_error
+                            else "ADO discovery failed: WIQL response evidence is malformed or incomplete."
+                            if malformed_response
+                            else f"WIQL query {scope.query_id} hit cap {config.top} and could not prove complete "
+                            "membership — narrow or manually partition this query"
                             if is_truncated
                             else None
                         ),
@@ -458,14 +505,21 @@ class ADODiscoveryProvider:
         config: ADODiscoveryConfig,
         scopes: list["_ADOScope"],
         computed_at: datetime,
+        saved_query_cache: dict[str, str | None],
     ) -> tuple[tuple[DiscoveredRef, ...], bool, tuple[DiscoveryQueryResult, ...]]:
         scope = scopes[0]
-        query_payload = self._saved_query_cache.get(scope.query_id)
-        if query_payload is None:
+        if scope.query_id not in saved_query_cache:
             query_payload = self._client.get_saved_query(scope.query_id)
-            self._saved_query_cache[scope.query_id] = query_payload
-        wiql = _extract_saved_query_wiql(query_payload)
-        if wiql is None:
+            saved_query_cache[scope.query_id] = _extract_saved_query_wiql(query_payload)
+        wiql = saved_query_cache[scope.query_id]
+        query_changed = False
+        if wiql is not None:
+            definition_hash = _wiql_hash(wiql)
+            key = (program_id, config.provider_instance_id, scope.query_id)
+            with self._observed_query_lock:
+                previous_hash = self._observed_query_hashes.setdefault(key, definition_hash)
+            query_changed = previous_hash != definition_hash
+        if wiql is None or query_changed:
             return (), False, tuple(
                 DiscoveryQueryResult(
                     query_id=item.query_id,
@@ -477,7 +531,7 @@ class ADODiscoveryProvider:
                     membership_hash=_membership_hash(()),
                     cap_reached=False,
                     completeness_state="ERROR",
-                    failure_category="missing_wiql",
+                    failure_category="missing_wiql" if wiql is None else "saved_query_changed",
                 )
                 for item in scopes
             )
@@ -495,19 +549,42 @@ class ADODiscoveryProvider:
         confidence = max(s.confidence for s in scopes)
         discovered: list[DiscoveredRef] = []
         pagination_outcomes: list[PaginationOutcome] = []
-        work_item_ids = self._client.execute_wiql(
-            bounded_wiql,
-            top=config.top,
-            on_pagination=pagination_outcomes.append,
+        try:
+            work_item_ids = self._client.execute_wiql(
+                bounded_wiql,
+                top=config.top,
+                on_pagination=pagination_outcomes.append,
+            )
+        except WIQLResponseError as error:
+            work_item_ids = list(error.observed_ids)
+            malformed_response = True
+        else:
+            malformed_response = False
+        pagination = pagination_outcomes[0] if len(pagination_outcomes) == 1 else None
+        pagination_verified = (
+            not malformed_response
+            and isinstance(pagination, PaginationOutcome)
+            and type(pagination.total_fetched) is int
+            and pagination.total_fetched == len(work_item_ids)
+            and type(pagination.page_count) is int
+            and pagination.page_count > 0
+            and type(pagination.is_truncated) is bool
         )
-        is_complete = not any(outcome.is_truncated for outcome in pagination_outcomes)
-        if not is_complete:
-            # The single-page result hit the cap and is discarded in favor of
-            # a deterministic ID-ordered partition scan (spec D-3) that can
-            # prove full membership beyond one page.
-            work_item_ids, is_complete = _execute_wiql_with_id_partitioning(
+        is_truncated = pagination_verified and pagination is not None and pagination.is_truncated
+        is_complete = pagination_verified and not is_truncated
+        partition_query_error = False
+        if is_truncated and (
+            not isinstance(pagination, WIQLPaginationOutcome) or pagination.is_flat_result is True
+        ):
+            scan_ids, is_complete, partition_query_error = _execute_wiql_with_id_partitioning(
                 self._client, bounded_wiql, config.top
             )
+            if is_complete and set(work_item_ids).issubset(scan_ids):
+                work_item_ids = scan_ids
+            else:
+                is_complete = False
+                work_item_ids = list(dict.fromkeys(work_item_ids + scan_ids))
+            is_truncated = not is_complete
         for work_item_id in work_item_ids:
             ref_id = str(int(work_item_id))
             registration = ChannelRegistration(
@@ -534,15 +611,21 @@ class ADODiscoveryProvider:
                 raw_count=len(membership_ids),
                 membership_ids=membership_ids,
                 membership_hash=_membership_hash(membership_ids),
-                # A partition scan that proves complete membership is not a
-                # capped result for manifest/confirm purposes; only an
-                # unresolved cap blocks authoritative use.
-                cap_reached=not is_complete,
-                completeness_state="FULL" if is_complete else "PARTIAL",
+                # A validated scan resolves the cap for manifest purposes;
+                # independent source completeness still needs qualification.
+                cap_reached=is_truncated,
+                completeness_state=(
+                    "ERROR" if partition_query_error or malformed_response else "FULL" if is_complete else "PARTIAL"
+                ),
+                failure_category=(
+                    "malformed_wiql_response" if malformed_response
+                    else "query_error" if partition_query_error
+                    else None if pagination_verified else "unverified_pagination"
+                ),
             )
             for item in scopes
         )
-        return tuple(discovered), not is_complete, query_results
+        return tuple(discovered), is_truncated, query_results
 
 
 @dataclass(frozen=True, slots=True)

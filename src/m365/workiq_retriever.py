@@ -44,6 +44,7 @@ def retrieve_workiq_threads(
     max_wall_clock_seconds: int,
     cache_path: Path | None = None,
     one_hop: bool = False,
+    write_cache: bool = True,
 ) -> WorkIQRetrievalResult:
     """Enumerate then extract one bounded, source-keyed record per thread."""
 
@@ -107,7 +108,7 @@ def retrieve_workiq_threads(
             "extracted_at": datetime.now(timezone.utc).isoformat(),
             "algorithm": "workiq-thread-v1",
         }
-    if cache_path is not None:
+    if cache_path is not None and write_cache:
         write_workiq_freshness_cache(cache_path, cache)
     return WorkIQRetrievalResult(
         tuple(enrichments), len(records), calls, skipped, rejected, validated.rejected_source_time_count,

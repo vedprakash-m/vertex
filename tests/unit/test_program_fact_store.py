@@ -458,6 +458,50 @@ def test_load_program_facts_can_exclude_non_committed_gather_runs(tmp_path: Path
     assert {fact.gather_run_id for fact in snapshot.facts} == {committed.run_id, None}
 
 
+def test_load_program_facts_fails_closed_when_uncommitted_run_supersedes_committed_fact(tmp_path: Path) -> None:
+    """C.145/C.161 containment: a non-committed run that supersedes a committed
+    revision must not silently remove the fact from a committed-only read."""
+    from src.core.gather_run_manifest import (
+        GatherRunManifest,
+        GatherRunStatus,
+        RequiredScopeStatus,
+        commit_staging_run,
+        create_staging_manifest,
+    )
+
+    programs_root = _programs_root(tmp_path)
+    started = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    committed = GatherRunManifest(
+        "gather-committed", GatherRunStatus.RUNNING, "acme", "interactive", "test", 1,
+        started, started, RequiredScopeStatus.FULL,
+    )
+    running = GatherRunManifest(
+        "gather-running", GatherRunStatus.RUNNING, "acme", "interactive", "test", 2,
+        started, started, RequiredScopeStatus.FULL,
+    )
+    create_staging_manifest(committed, programs_root=programs_root)
+    create_staging_manifest(running, programs_root=programs_root)
+    commit_staging_run(committed, finished_at=started, programs_root=programs_root)
+
+    store = ProgramFactStore("acme", db_root=tmp_path)
+    for title, gather_run_id, recorded_at in (
+        ("committed", committed.run_id, started),
+        ("uncommitted successor", running.run_id, started + timedelta(minutes=1)),
+    ):
+        store.append_fact(
+            ProgramFactInput(
+                fact_type="action.item",
+                entity_refs=("WI:1",),
+                payload={"source": "ado", "title": title},
+                gather_run_id=gather_run_id,
+            ),
+            recorded_at=recorded_at,
+        )
+
+    with pytest.raises(ValueError, match="non-committed gather run"):
+        load_program_facts("acme", programs_root=programs_root, require_committed_gather_run=True)
+
+
 def test_load_program_facts_bounds_unstamped_facts_by_legacy_cutoff(tmp_path: Path) -> None:
     """§4.17 step 5: once a legacy-cutoff manifest exists, an unstamped fact
     is grandfathered only up to the cutoff; unstamped facts recorded after
@@ -2152,6 +2196,94 @@ def test_persist_program_fact_snapshot_writes_current_state_facts_to_store(tmp_p
     assert [action.id for action in project_action_items(historical_snapshot)] == ["action-1"]
     assert project_risk_entries(historical_snapshot) == ()
     assert project_dependencies(historical_snapshot) == ()
+
+
+def test_persist_program_fact_snapshot_preserves_gather_visibility(tmp_path: Path) -> None:
+    from src.core.gather_run_manifest import (
+        GatherRunManifest,
+        GatherRunStatus,
+        RequiredScopeStatus,
+        commit_staging_run,
+        create_staging_manifest,
+    )
+
+    programs_root = tmp_path / "programs"
+    recorded_at = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    committed = GatherRunManifest(
+        "gather-committed", GatherRunStatus.RUNNING, "acme", "interactive",
+        "test", 1, recorded_at, recorded_at, RequiredScopeStatus.FULL,
+    )
+    create_staging_manifest(committed, programs_root=programs_root)
+    commit_staging_run(committed, finished_at=recorded_at, programs_root=programs_root)
+
+    source = ProgramFactStore("acme", db_root=tmp_path / "source")
+    for ref, run_id in (
+        ("WI:committed", committed.run_id),
+        ("WI:uncommitted", "gather-uncommitted"),
+        ("WI:legacy", None),
+    ):
+        source.append_fact(
+            ProgramFactInput(
+                fact_type="action.item", entity_refs=(ref,),
+                payload={"id": ref}, gather_run_id=run_id,
+            ),
+            recorded_at=recorded_at,
+        )
+    snapshot = source.snapshot(as_of=recorded_at)
+    destination = tmp_path / "destination"
+
+    first_write = persist_program_fact_snapshot(snapshot, recorded_at=recorded_at, db_root=destination)
+    repeated = persist_program_fact_snapshot(snapshot, recorded_at=recorded_at, db_root=destination)
+    assert all(result.action == "created" for result in first_write)
+    assert all(result.action == "noop" for result in repeated)
+    assert {result.revision.entity_refs[0]: result.revision.gather_run_id for result in first_write} == {
+        "WI:committed": committed.run_id,
+        "WI:uncommitted": "gather-uncommitted",
+        "WI:legacy": None,
+    }
+
+    visible = load_program_facts(
+        "acme", as_of=recorded_at, db_root=destination, programs_root=programs_root,
+        require_committed_gather_run=True,
+    )
+    assert {fact.entity_refs[0] for fact in visible.facts} == {"WI:committed", "WI:legacy"}
+
+
+@pytest.mark.parametrize(
+    ("existing_precedence", "expected_action"),
+    (
+        (FactPrecedence.VERIFIED_SYSTEM_SIGNAL, "superseded"),
+        (FactPrecedence.ACTIVE_PM_JUDGMENT, "proposed_revision"),
+    ),
+)
+def test_persist_program_fact_snapshot_preserves_gather_id_on_revisions(
+    tmp_path: Path, existing_precedence: FactPrecedence, expected_action: str,
+) -> None:
+    recorded_at = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    source = ProgramFactStore("acme", db_root=tmp_path / "source")
+    source.append_fact(
+        ProgramFactInput(
+            fact_type="action.item", entity_refs=("WI:1",),
+            payload={"title": "New"}, gather_run_id="gather-new",
+        ),
+        recorded_at=recorded_at,
+    )
+    destination = tmp_path / "destination"
+    ProgramFactStore("acme", db_root=destination).append_fact(
+        ProgramFactInput(
+            fact_type="action.item", entity_refs=("WI:1",), payload={"title": "Old"},
+            precedence=existing_precedence, gather_run_id="gather-old",
+        ),
+        recorded_at=recorded_at,
+    )
+
+    (result,) = persist_program_fact_snapshot(
+        source.snapshot(as_of=recorded_at),
+        recorded_at=recorded_at + timedelta(seconds=1), db_root=destination,
+    )
+
+    assert result.action == expected_action
+    assert result.revision.gather_run_id == "gather-new"
 
 
 def test_load_program_facts_fact_type_filter_limits_live_shims(monkeypatch, tmp_path: Path) -> None:

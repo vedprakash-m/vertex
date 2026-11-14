@@ -42,6 +42,14 @@ class QueryError(VertexError):
     """Raised when an external query fails."""
 
 
+class WIQLResponseError(QueryError):
+    """Raised when a WIQL response cannot establish complete membership."""
+
+    def __init__(self, observed_ids: tuple[int, ...]) -> None:
+        super().__init__("ADO WIQL response is malformed or incomplete.")
+        self.observed_ids = observed_ids
+
+
 class QueryTimeoutError(QueryError):
     """Raised when an external query exceeds the configured timeout."""
 

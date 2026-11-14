@@ -145,6 +145,7 @@ def test_context_budget_alert_fires_on_rejection(tmp_path: Path) -> None:
         ContextCompileRejected,
         ContextCompileRequest,
         DeterministicContextCompiler,
+        ValidationContext,
     )
 
     compiler = DeterministicContextCompiler(programs_root=tmp_path)
@@ -162,7 +163,12 @@ def test_context_budget_alert_fires_on_rejection(tmp_path: Path) -> None:
         per_source_quotas={},
     )
     with pytest.raises(ContextCompileRejected):
-        compiler.compile(request, validation_context=SimpleNamespace())
+        compiler.compile(
+            request,
+            validation_context=ValidationContext(
+                program_id="samplealpha", run_id="run-1", execution_mode="observe", classification="internal",
+            ),
+        )
 
     alerts = read_alerts("samplealpha", programs_root=tmp_path)
     assert len(alerts) == 1

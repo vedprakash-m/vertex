@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import portalocker
@@ -11,6 +12,7 @@ import pytest
 import yaml
 
 from src.commands.ado import apply_ado_proposal
+from src.core.ado_client import ADOClient
 from src.core.ado_proposal import ADOUpdateEntry, ADOUpdateProposal, ProposalManifestLockedError, proposal_from_document, read_proposal_manifest, write_proposal_manifest
 from src.core.exceptions import AuthError, CredentialExpired, QueryError, QueryTimeoutError
 from src.core.integration_types import PaginationOutcome
@@ -514,6 +516,82 @@ def test_rollback_comment_lookup_blocks_post_and_maps_disposition(
     assert artifacts.failed_count == int(expected_status == "failed")
     assert artifacts.results[0].status == expected_status
     assert client.session.calls == []
+
+
+@pytest.mark.parametrize("operation", ["apply", "rollback"])
+@pytest.mark.parametrize("page_case", ["duplicate", "clear", "missing", "conflict", "capped"])
+def test_comment_response_reaches_real_duplicate_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, page_case: str,
+) -> None:
+    at = datetime(2026, 5, 13, 18, tzinfo=timezone.utc)
+    proposal = _comment_proposal(
+        f"prop-real-pages-{operation}-{page_case}", at,
+        entry_status="applied" if operation == "rollback" else "pending",
+    )
+    programs_root = tmp_path / "programs"
+    manifest_path = write_proposal_manifest(proposal, programs_root=programs_root)
+    client = _FakeADOClient(rows_by_id={1001: {"rev": 7, "fields": {"System.Id": 1001, "System.Rev": 7}}})
+    real_client = object.__new__(ADOClient)
+    real_client._rest_base_url = client._rest_base_url
+    requested: list[object] = []
+
+    def request(method: str, url: str, **kwargs: object) -> SimpleNamespace:
+        assert method == "GET"
+        assert url == f"{client._rest_base_url}workItems/1001/comments?api-version=7.1-preview.4"
+        requested.append(kwargs.get("params"))
+        if page_case == "capped":
+            body: dict[str, object] = {
+                "comments": [], "count": 0, "continuationToken": f"page-{len(requested) + 1}",
+            }
+            headers: dict[str, str] = {}
+        elif len(requested) == 1:
+            body = {"comments": [{"id": 1, "text": "Unrelated"}], "count": 1, "continuationToken": "page-2"}
+            headers = {}
+        elif page_case == "missing":
+            body = {"message": "private-response-detail"}
+            headers = {}
+        elif page_case == "conflict":
+            body = {"comments": [], "continuationToken": "private-body"}
+            headers = {"x-ms-continuationtoken": "private-header"}
+        else:
+            duplicate = (
+                proposal.entries[0].proposed_value if operation == "apply"
+                else "Vertex rollback action-123\nAlready recorded"
+            )
+            text = duplicate if page_case == "duplicate" else "Another unrelated comment"
+            body = {"comments": [{"id": 2, "text": text}], "count": 1}
+            headers = {}
+        return SimpleNamespace(json=lambda: body, headers=headers)
+
+    monkeypatch.setattr(real_client, "_request_response", request)
+    monkeypatch.setattr(client, "list_work_item_comments", real_client.list_work_item_comments)
+    writer = ADOWriter(client, programs_root=programs_root)
+    if operation == "apply":
+        artifacts = writer.apply_manifest(manifest_path, applied_at=at)
+        entry = artifacts.proposal.entries[0]
+        status, reason = entry.entry_status, entry.status_reason or ""
+        persisted, _ = read_proposal_manifest(manifest_path)
+        assert persisted.entries[0].entry_status == status
+    else:
+        result = writer.rollback_manifest(manifest_path, action_id="action-123", rolled_back_at=at).results[0]
+        status, reason = result.status, result.status_reason or ""
+
+    expected = {
+        "duplicate": "skipped",
+        "clear": "applied" if operation == "apply" else "rolled_back",
+        "missing": "failed",
+        "conflict": "failed",
+        "capped": "conflict",
+    }
+    assert status == expected[page_case]
+    assert len(requested) == (10 if page_case == "capped" else 2)
+    assert requested[0] is None
+    assert requested[1] == {"continuationToken": "page-2"}
+    assert len(client.session.calls) == int(page_case == "clear")
+    assert all(call["method"] == "POST" for call in client.session.calls)
+    assert "private" not in reason
+    if page_case != "clear":
+        assert read_signals("demo", programs_root=programs_root) == ()
 
 
 @pytest.mark.parametrize("operation", ["apply", "rollback"])

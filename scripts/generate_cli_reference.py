@@ -47,7 +47,8 @@ def main() -> None:
         "Installed entry points: `vertex`, `vx`.",
         "",
     ]
-    lines.extend(_render_command_tree(root_command, path=()))
+    root_context = click.Context(root_command, info_name="vertex")
+    lines.extend(_render_command_tree(root_command, path=(), ctx=root_context))
     rendered = "\n".join(lines).rstrip() + "\n"
     rendered = rendered.replace("\r\n", "\n")
     if args.check:
@@ -65,20 +66,23 @@ def main() -> None:
     print(f"Wrote {target.relative_to(REPO_ROOT)}")
 
 
-def _render_command_tree(command: click.Command, *, path: tuple[str, ...]) -> list[str]:
-    lines = _render_command(command, path=path)
+def _render_command_tree(
+    command: click.Command, *, path: tuple[str, ...], ctx: click.Context,
+) -> list[str]:
+    lines = _render_command(command, path=path, ctx=ctx)
     if _is_group(command):
-        ctx = _build_context(path)
         for name in command.list_commands(ctx):
             subcommand = command.get_command(ctx, name)
             if subcommand is None or subcommand.hidden:
                 continue
-            lines.extend(_render_command_tree(subcommand, path=(*path, name)))
+            child_ctx = click.Context(subcommand, info_name=name, parent=ctx)
+            lines.extend(_render_command_tree(subcommand, path=(*path, name), ctx=child_ctx))
     return lines
 
 
-def _render_command(command: click.Command, *, path: tuple[str, ...]) -> list[str]:
-    ctx = _build_context(path)
+def _render_command(
+    command: click.Command, *, path: tuple[str, ...], ctx: click.Context,
+) -> list[str]:
     invocation = _command_invocation(path)
     heading_level = min(2 + len(path), 4)
     lines = [
@@ -117,21 +121,6 @@ def _render_command(command: click.Command, *, path: tuple[str, ...]) -> list[st
             lines.append("")
 
     return lines
-
-
-def _build_context(path: tuple[str, ...]) -> click.Context:
-    root_command = get_command(app)
-    ctx = click.Context(root_command, info_name="vertex")
-    command: click.Command = root_command
-    for name in path:
-        if not _is_group(command):
-            raise click.ClickException(f"Command path is not a group: {' '.join(path)}")
-        subcommand = command.get_command(ctx, name)
-        if subcommand is None:
-            raise click.ClickException(f"Unknown command path: {' '.join(path)}")
-        ctx = click.Context(subcommand, info_name=name, parent=ctx)
-        command = subcommand
-    return ctx
 
 
 def _visible_options(command: click.Command) -> list[click.Option]:

@@ -9,6 +9,7 @@ from typing import Any
 
 from markupsafe import Markup
 
+from src.core.exceptions import ConfigError
 from src.core.models import DeltaKind, RiskLevel, ScorecardEvidencePacket
 from src.core.view_models import KpiTile
 
@@ -417,6 +418,11 @@ def _exec_cell(match: re.Match[str]) -> str:
         if authored.get("color", "").lower() in {"#111827", "#166534", "#92400e", "#991b1b"}:
             style += f" color:{authored['color']};"
     if "width" in kept:
+        if re.fullmatch(r"[0-9]+", kept["width"]):
+            content_width = int(kept["width"]) - 16
+            if content_width <= 0:
+                raise ConfigError("Executive narrative column width must exceed 16px to accommodate cell padding.")
+            kept["width"] = str(content_width)
         style = f"width:{kept['width']}px; " + style
     attr_text = "".join(f' {name}="{value}"' for name, value in kept.items())
     return f'<{tag}{attr_text} style="{style}">'

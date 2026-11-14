@@ -92,6 +92,22 @@ def test_renewal_heartbeat_renews_in_background_and_exposes_latest_handle(tmp_pa
     assert heartbeat.handle.expires_at > handle.expires_at
 
 
+def test_renewal_heartbeat_can_stop_after_thread_start_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    programs_root = tmp_path / "programs"
+    handle = acquire_lease("acme", "host-a", programs_root=programs_root)
+    heartbeat = LeaseRenewalHeartbeat(handle, programs_root=programs_root)
+
+    def interrupt(_thread):
+        raise OSError("synthetic thread-start failure")
+
+    monkeypatch.setattr(threading.Thread, "start", interrupt)
+    with pytest.raises(OSError, match="synthetic thread-start failure"):
+        heartbeat.start()
+    heartbeat.stop()
+
+
 def test_release_clears_lease_allowing_immediate_reacquire_by_another_host(tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     handle = acquire_lease("acme", "host-a", ttl_seconds=300, programs_root=programs_root)

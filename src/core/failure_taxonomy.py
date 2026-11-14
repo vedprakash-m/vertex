@@ -133,6 +133,16 @@ def is_retryable(category: FailureCategory) -> bool:
     return category in _RETRYABLE_CATEGORIES
 
 
+def classify_category(category: FailureCategory) -> FailureClassification:
+    """Classify an explicitly recorded category without inspecting message text."""
+    return FailureClassification(
+        category=category,
+        retryable=is_retryable(category),
+        next_command=_NEXT_COMMANDS[category],
+        detail="explicit failure category",
+    )
+
+
 def all_categories() -> tuple[FailureCategory, ...]:
     """Return the full taxonomy in stable declaration order."""
     return tuple(FailureCategory)

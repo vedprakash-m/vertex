@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -96,12 +97,17 @@ Rules:
             if not isinstance(payload, dict):
                 log.warning("ContentExtractionAgent: non-dict JSON for lane %s", ctx.lane_id)
                 return None
-        except (json.JSONDecodeError, ValueError) as exc:
-            log.warning("ContentExtractionAgent: JSON parse failed for %s: %s", ctx.lane_id, exc)
+        except (json.JSONDecodeError, ValueError):
+            log.warning("ContentExtractionAgent: JSON parse failed for %s", ctx.lane_id)
             return None
 
         risk_level = RiskLevel.from_string(payload.get("risk_level"))
-        confidence = float(payload.get("confidence") or 0.0)
+        try:
+            confidence = float(payload.get("confidence") or 0.0)
+        except ValueError:
+            raise ValueError("ContentExtractionAgent: invalid confidence") from None
+        if not math.isfinite(confidence):
+            raise ValueError("ContentExtractionAgent: invalid confidence") from None
         confidence = max(0.0, min(1.0, confidence))
 
         etas: list[EtaRecord] = []

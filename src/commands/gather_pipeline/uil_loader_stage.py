@@ -26,6 +26,7 @@ def load_ado_items_via_uil(
     run_channel_fn: Callable[..., tuple[Any | None, Any | None]],
     discovery_result_sink: list[Any] | None = None,
     channel_outcome_sink: list[Any] | None = None,
+    deferred_verifications: list[Callable[[], None]] | None = None,
 ) -> tuple[tuple[WorkItem, ...], tuple[WorkItem, ...], int]:
     run_channel_kwargs: dict[str, Any] = {
         "program_id": program.id,
@@ -38,6 +39,8 @@ def load_ado_items_via_uil(
         run_channel_kwargs["discovery_result_sink"] = discovery_result_sink
     if channel_outcome_sink is not None:
         run_channel_kwargs["channel_outcome_sink"] = channel_outcome_sink
+    if deferred_verifications is not None:
+        run_channel_kwargs["deferred_verifications"] = deferred_verifications
     hydration_result, _ = run_channel_fn(
         binding,
         _build_uil_store(program.id, programs_root),

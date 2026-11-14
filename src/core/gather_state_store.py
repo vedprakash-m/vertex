@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from src.core.exceptions import StateError
+from src.core.failure_taxonomy import FailureCategory
 from src.core.models_v2 import IntegrationError
 from src.core.program_paths import (
     get_gather_state_path,
@@ -221,6 +222,10 @@ def write_gather_state(
                 "retryable": detail.retryable,
                 "message": detail.message,
                 "operator_action": detail.operator_action,
+                **(
+                    {"failure_category": detail.failure_category.value}
+                    if detail.failure_category is not None else {}
+                ),
             }
             for detail in integration_error_details
         ],
@@ -277,6 +282,15 @@ def _parse_integration_error_details(value: Any) -> tuple[IntegrationError, ...]
     for entry in value:
         if not isinstance(entry, dict):
             continue
+        category_raw = entry.get("failure_category")
+        category = None
+        if category_raw is not None:
+            if not isinstance(category_raw, str):
+                raise StateError("Invalid integration error failure category")
+            try:
+                category = FailureCategory(category_raw)
+            except ValueError:
+                raise StateError("Invalid integration error failure category") from None
         source = str(entry.get("source") or "").strip()
         stage = str(entry.get("stage") or "").strip()
         message = str(entry.get("message") or "").strip()
@@ -291,6 +305,7 @@ def _parse_integration_error_details(value: Any) -> tuple[IntegrationError, ...]
                 retryable=bool(entry.get("retryable")),
                 message=message,
                 operator_action=operator_action,
+                failure_category=category,
             )
         )
     return tuple(details)

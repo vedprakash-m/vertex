@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+import src.core.measurement_store as measurement_store
 from src.ai.tiered_router import (
     RouteOutcome,
     RouteResult,
@@ -125,6 +126,43 @@ def test_sink_failure_is_counted_without_breaking_routing() -> None:
         unregister_decision_sink(broken_sink)
     assert result.value == "det-answer"
     assert sink_failure_count() == 1
+
+
+@pytest.mark.parametrize("after_write", [False, True])
+def test_durable_sink_failure_is_counted_without_breaking_routing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, after_write: bool,
+) -> None:
+    reset_recorded_decisions()
+    append = measurement_store.append_measurement
+
+    def fail_write(path: Path, record: object) -> None:
+        if after_write:
+            append(path, record)
+        raise OSError("synthetic write failure")
+
+    monkeypatch.setattr(measurement_store, "append_measurement", fail_write)
+    sink = make_tier_decision_sink(
+        TierDecisionSinkConfig(
+            program_id="acme", edition_id=None, run_id="failure-run",
+            execution_mode="enforce", programs_root=tmp_path,
+        )
+    )
+    captured: list[TierDecision] = []
+    register_decision_sink(sink)
+    register_decision_sink(captured.append)
+    try:
+        result = _route_deterministic_hit()
+    finally:
+        from src.ai.tiered_router import unregister_decision_sink
+
+        unregister_decision_sink(sink)
+        unregister_decision_sink(captured.append)
+
+    assert result.value == "det-answer"
+    assert sink_failure_count() == 1
+    assert len(captured) == 1
+    rows = read_measurements(tier_decision_store_path("acme", programs_root=tmp_path))
+    assert len(rows) == int(after_write)
 
 
 def _route_deterministic_hit() -> RouteResult[str]:

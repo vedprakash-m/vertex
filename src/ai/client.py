@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from threading import Lock
 from typing import Any, Callable, TypeVar
 
 from src.ai.ai_mode import AIMode, get_ai_mode
 from src.ai.context_tokenizers import resolve_token_estimator
 from src.ai.llm_trace import AITraceContext, get_current_trace_context, llm_trace
 from src.ai.request_router import AIRequestRouter
+from src.core.exceptions import ConfigError, StateError
 from src.core.policy_loader import load_ai_model_cost_policy
 
 
@@ -25,7 +28,22 @@ class AIClientError(Exception):
 
 
 class BudgetExceeded(AIClientError):
-    """Raised when the per-run AI budget has already been exhausted."""
+    """Raised when an AI feature or run budget is exceeded."""
+
+
+class BudgetConfigurationError(AIClientError):
+    """Raised when an AI budget or model pricing configuration is invalid."""
+
+
+class BudgetStateError(AIClientError, StateError):
+    """Raised when the retained AI cost state cannot be safely used."""
+
+
+class AIPreflightError(AIClientError):
+    """Raised when local request preflight cannot safely admit another attempt."""
+
+
+NON_RETRYABLE_AI_ERRORS = (BudgetExceeded, BudgetConfigurationError, BudgetStateError, AIPreflightError)
 
 
 @dataclass(slots=True)
@@ -42,6 +60,13 @@ class AIUsageStats:
         self.completion_tokens += completion_tokens
         self.total_tokens += prompt_tokens + completion_tokens
         self.call_count += 1
+
+
+class _FeatureBudgetState:
+    def __init__(self) -> None:
+        self.lock = Lock()
+        self.spent_usd = 0.0
+        self.reservations: dict[tuple[object, int], float] = {}
 
 
 class AIClient:
@@ -64,10 +89,15 @@ class AIClient:
         sleep_func: Any = time.sleep,
         time_func: Callable[[], float] = time.monotonic,
         trace_context: AITraceContext | None = None,
+        _feature_budget_state: _FeatureBudgetState | None = None,
     ) -> None:
         if not deployment.strip():
             raise RuntimeError("Azure OpenAI deployment name is required.")
-        pricing = load_ai_model_cost_policy(deployment)
+        budget_usd = _validate_budget_usd(budget_usd, label="Feature")
+        try:
+            pricing = load_ai_model_cost_policy(deployment)
+        except ConfigError:
+            raise BudgetConfigurationError("AI model pricing configuration is invalid.") from None
 
         self._deployment = deployment
         self._temperature = temperature
@@ -75,6 +105,8 @@ class AIClient:
         self._input_cost_per_1k_tokens = pricing.input_cost_per_1k_tokens
         self._output_cost_per_1k_tokens = pricing.output_cost_per_1k_tokens
         self._spent_usd = 0.0
+        self._feature_budget_state = _feature_budget_state or _FeatureBudgetState()
+        self._reservation_namespace = object()
         self._usage_stats = AIUsageStats()
         self._sleep = sleep_func
         self._time = time_func
@@ -143,30 +175,88 @@ class AIClient:
         return parser(self._extract_json_object(response))
 
     def _reserve_budget(self, *, system: str, user: str, max_tokens: int) -> Any:
-        if self._spent_usd >= self._budget_usd:
-            raise BudgetExceeded(f"Spent ${self._spent_usd:.3f} of ${self._budget_usd:.2f}")
-        reservation = None
-        if self._run_cost_guard is not None:
-            estimated_prompt_tokens = resolve_token_estimator(self._deployment).estimate(f"{system}\n{user}")
-            estimated_cost_usd = self._estimate_cost(estimated_prompt_tokens, max_tokens)
-            reservation = self._run_cost_guard.reserve_call(estimated_cost_usd)
-        return reservation
+        with self._feature_budget_state.lock:
+            if self._spent_usd >= self._budget_usd:
+                raise BudgetExceeded(f"Spent ${self._spent_usd:.3f} of ${self._budget_usd:.2f}")
+            if self._feature_budget_state.spent_usd >= self._budget_usd:
+                raise BudgetExceeded(
+                    f"Spent ${self._feature_budget_state.spent_usd:.3f} of "
+                    f"${self._budget_usd:.2f}; the feature ceiling is exhausted."
+                )
+            reservation = None
+            if self._run_cost_guard is not None:
+                max_tokens = _validate_reservation_tokens(max_tokens)
+                estimated_prompt_tokens = _validate_reservation_tokens(
+                    resolve_token_estimator(self._deployment).estimate(f"{system}\n{user}")
+                )
+                try:
+                    estimated_cost_usd = self._estimate_cost(estimated_prompt_tokens, max_tokens)
+                except OverflowError:
+                    raise BudgetConfigurationError("AI token reservation cost must be finite and nonnegative.") from None
+                if not math.isfinite(estimated_cost_usd) or estimated_cost_usd < 0:
+                    raise BudgetConfigurationError("AI token reservation cost must be finite and nonnegative.")
+                committed_usd = self._feature_budget_state.spent_usd + sum(
+                    self._feature_budget_state.reservations.values()
+                )
+                if committed_usd + estimated_cost_usd > self._budget_usd:
+                    raise BudgetExceeded(
+                        f"Spent/reserved ${committed_usd:.3f} of ${self._budget_usd:.2f}; "
+                        f"next AI spend ${estimated_cost_usd:.3f} would exceed the feature ceiling."
+                    )
+                try:
+                    reservation = self._run_cost_guard.reserve_call(estimated_cost_usd)
+                except (StateError, OSError, UnicodeError) as error:
+                    message = str(error) if isinstance(error, StateError) else "Unable to access AI cost state."
+                    raise BudgetStateError(message) from None
+                self._feature_budget_state.reservations[
+                    (self._reservation_namespace, reservation.reservation_id)
+                ] = estimated_cost_usd
+            return reservation
 
     def _record_usage(self, response: Any, *, reservation: Any) -> tuple[int, int, float, BudgetExceeded | None]:
-        usage = getattr(response, "usage", None)
-        prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
-        completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
-        self._usage_stats.add(prompt_tokens, completion_tokens)
-        cost_usd = self._estimate_cost(prompt_tokens, completion_tokens)
-        self._spent_usd += cost_usd
-        budget_error: BudgetExceeded | None = None
-        if self._run_cost_guard is not None and reservation is not None:
-            run_state = self._run_cost_guard.settle_call(reservation, cost_usd)
-            if run_state.spent_usd > run_state.budget_usd:
-                budget_error = BudgetExceeded(
-                    f"Spent ${run_state.spent_usd:.3f} of ${run_state.budget_usd:.2f}; actual AI spend exceeded the run ceiling."
+        prompt_tokens, completion_tokens, cost_usd = self._validated_response_usage(response)
+        with self._feature_budget_state.lock:
+            total_spent_usd = self._spent_usd + cost_usd
+            total_feature_spent_usd = self._feature_budget_state.spent_usd + cost_usd
+            if not math.isfinite(total_spent_usd) or not math.isfinite(total_feature_spent_usd):
+                raise BudgetStateError("AI provider usage cannot be accounted for; reconcile before retrying.")
+            self._usage_stats.add(prompt_tokens, completion_tokens)
+            self._spent_usd = total_spent_usd
+            self._feature_budget_state.spent_usd = total_feature_spent_usd
+            budget_error: BudgetExceeded | None = None
+            if self._run_cost_guard is not None and reservation is not None:
+                try:
+                    run_state = self._run_cost_guard.settle_call(reservation, cost_usd)
+                except (StateError, OSError, UnicodeError) as error:
+                    message = str(error) if isinstance(error, StateError) else "Unable to access AI cost state."
+                    raise BudgetStateError(message) from None
+                # Only successful settlement removes the local estimate.
+                self._feature_budget_state.reservations.pop(
+                    (self._reservation_namespace, reservation.reservation_id)
                 )
-        return prompt_tokens, completion_tokens, cost_usd, budget_error
+                run_budget_usd = self._run_cost_guard.effective_budget_usd(run_state)
+                if run_state.spent_usd > run_budget_usd:
+                    budget_error = BudgetExceeded(
+                        f"Spent ${run_state.spent_usd:.3f} of ${run_budget_usd:.2f}; actual AI spend exceeded the run ceiling."
+                    )
+            if budget_error is None and total_feature_spent_usd > self._budget_usd:
+                budget_error = BudgetExceeded(
+                    f"Spent ${total_feature_spent_usd:.3f} of ${self._budget_usd:.2f}; "
+                    "actual AI spend exceeded the feature ceiling."
+                )
+            return prompt_tokens, completion_tokens, cost_usd, budget_error
+
+    def _validated_response_usage(self, response: Any) -> tuple[int, int, float]:
+        usage = getattr(response, "usage", None)
+        prompt_tokens = _validate_usage_tokens(getattr(usage, "prompt_tokens", None))
+        completion_tokens = _validate_usage_tokens(getattr(usage, "completion_tokens", None))
+        try:
+            cost_usd = self._estimate_cost(prompt_tokens, completion_tokens)
+        except OverflowError:
+            raise BudgetStateError("AI provider usage cannot be accounted for; reconcile before retrying.") from None
+        if not math.isfinite(cost_usd) or cost_usd < 0:
+            raise BudgetStateError("AI provider usage cannot be accounted for; reconcile before retrying.")
+        return prompt_tokens, completion_tokens, cost_usd
 
     def _estimate_cost(self, prompt_tokens: int, completion_tokens: int) -> float:
         return (
@@ -197,8 +287,66 @@ class AIClient:
                 error=message,
             )
             raise AIClientError(message)
-        reservation = self._reserve_budget(system=system, user=user, max_tokens=max_tokens)
+        def reserve_attempt() -> tuple[Any, int | None]:
+            try:
+                attempt_reservation = self._reserve_budget(system=system, user=user, max_tokens=max_tokens)
+                attempt_id = attempt_reservation.reservation_id if attempt_reservation is not None else None
+                return attempt_reservation, attempt_id
+            except (BudgetExceeded, BudgetConfigurationError, BudgetStateError):
+                raise
+            except Exception as error:
+                raise AIPreflightError(
+                    f"AI budget reservation failed ({type(error).__name__}); "
+                    "reconcile retained reservations before retrying."
+                ) from None
+
+        reservation, cost_reservation_id = reserve_attempt()
         started = time.perf_counter()
+        response: Any = None
+        preflight_failure = False
+
+        def reserve_retry() -> None:
+            nonlocal reservation, cost_reservation_id, preflight_failure
+            preflight_failure = True
+            try:
+                try:
+                    self._write_trace(
+                        prompt_version=prompt_version,
+                        latency_ms=None,
+                        error="AI provider attempt failed before retry.",
+                        cost_reservation_id=cost_reservation_id,
+                    )
+                except (OSError, StateError, UnicodeError):
+                    logger.error("AI trace failed while reporting a retryable provider failure.")
+                reservation, cost_reservation_id = reserve_attempt()
+            except (BudgetExceeded, BudgetConfigurationError, BudgetStateError, AIPreflightError):
+                raise
+            except Exception as error:
+                raise AIPreflightError(
+                    f"AI retry preflight failed ({type(error).__name__}); "
+                    "reconcile retained reservations before retrying."
+                ) from None
+            preflight_failure = False
+
+        def reject_before_dispatch(error: Exception) -> None:
+            nonlocal preflight_failure
+            preflight_failure = True
+            if self._run_cost_guard is not None and reservation is not None:
+                with self._feature_budget_state.lock:
+                    try:
+                        self._run_cost_guard._release_undispatched_call(reservation)
+                        self._feature_budget_state.reservations.pop(
+                            (self._reservation_namespace, reservation.reservation_id)
+                        )
+                    except Exception as release_error:
+                        raise BudgetStateError(
+                            f"Unable to release undispatched AI cost reservation ({type(release_error).__name__}); "
+                            "reconcile before retrying."
+                        ) from None
+            raise AIPreflightError(
+                f"AI local request preflight failed ({type(error).__name__}); the current attempt was not dispatched."
+            ) from None
+
         try:
             response = self._router.route(
                 deployment=self._deployment,
@@ -207,19 +355,28 @@ class AIClient:
                 temperature=self._temperature,
                 max_tokens=max_tokens,
                 response_format=response_format,
+                before_retry=reserve_retry,
+                on_pre_dispatch_failure=reject_before_dispatch,
             )
             prompt_tokens, completion_tokens, cost_usd, budget_error = self._record_usage(
                 response,
                 reservation=reservation,
             )
-            self._write_trace(
-                prompt_version=prompt_version,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                latency_ms=(time.perf_counter() - started) * 1000,
-                cost_usd=cost_usd,
-                error=str(budget_error) if budget_error is not None else None,
-            )
+            try:
+                self._write_trace(
+                    prompt_version=prompt_version,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    latency_ms=(time.perf_counter() - started) * 1000,
+                    cost_usd=cost_usd,
+                    error=str(budget_error) if budget_error is not None else None,
+                    budget_exceeded=budget_error is not None,
+                    cost_reservation_id=cost_reservation_id,
+                )
+            except (OSError, StateError, UnicodeError):
+                if budget_error is None:
+                    raise
+                logger.error("AI trace failed while reporting a budget failure.")
             if budget_error is not None:
                 raise budget_error
             logger.info(
@@ -231,9 +388,35 @@ class AIClient:
                 self._spent_usd,
             )
             return response
-        except BudgetExceeded:
+        except (BudgetExceeded, BudgetConfigurationError):
+            raise
+        except BudgetStateError:
+            if preflight_failure:
+                raise
+            trace_prompt_tokens: int | None = None
+            trace_completion_tokens: int | None = None
+            trace_cost_usd: float | None = None
+            if response is not None:
+                try:
+                    trace_prompt_tokens, trace_completion_tokens, trace_cost_usd = self._validated_response_usage(response)
+                except BudgetStateError:
+                    pass
+            try:
+                self._write_trace(
+                    prompt_version=prompt_version,
+                    prompt_tokens=trace_prompt_tokens,
+                    completion_tokens=trace_completion_tokens,
+                    latency_ms=(time.perf_counter() - started) * 1000,
+                    cost_usd=trace_cost_usd,
+                    error="Unable to settle AI cost state; reconcile before retrying.",
+                    cost_reservation_id=cost_reservation_id,
+                )
+            except (OSError, StateError, UnicodeError):
+                logger.error("AI trace failed while reporting a cost-state failure.")
             raise
         except Exception as error:  # pragma: no cover - exercised through tests with fakes
+            if preflight_failure:
+                raise
             wrapped_error = AIClientError(
                 f"Azure OpenAI {mode} failed for deployment {self._deployment}: {error}"
             )
@@ -241,6 +424,7 @@ class AIClient:
                 prompt_version=prompt_version,
                 latency_ms=(time.perf_counter() - started) * 1000,
                 error=str(wrapped_error),
+                cost_reservation_id=cost_reservation_id,
             )
             raise wrapped_error from error
 
@@ -248,11 +432,13 @@ class AIClient:
         self,
         *,
         prompt_version: str | None,
-        latency_ms: float,
+        latency_ms: float | None,
         prompt_tokens: int | None = None,
         completion_tokens: int | None = None,
         cost_usd: float | None = None,
         error: str | None = None,
+        budget_exceeded: bool = False,
+        cost_reservation_id: int | None = None,
     ) -> None:
         if self._trace_context is None:
             return
@@ -269,6 +455,7 @@ class AIClient:
             latency_ms=latency_ms,
             cost_usd=cost_usd,
             error=error,
+            cost_reservation_id=cost_reservation_id,
             metadata=self._trace_context.metadata,
             trace_file=self._trace_context.trace_file,
         )
@@ -283,17 +470,19 @@ class AIClient:
             completion_tokens=completion_tokens,
             cost_usd=cost_usd,
             error=error,
+            budget_exceeded=budget_exceeded,
         )
 
     def _emit_ai_telemetry(
         self,
         *,
         prompt_version: str | None,
-        latency_ms: float,
+        latency_ms: float | None,
         prompt_tokens: int | None,
         completion_tokens: int | None,
         cost_usd: float | None,
         error: str | None,
+        budget_exceeded: bool,
     ) -> None:
         """Write one canonical :mod:`src.core.ai_telemetry` row per provider call.
 
@@ -305,9 +494,14 @@ class AIClient:
         metadata = self._trace_context.metadata if self._trace_context else {}
         feature = str(metadata.get("feature") or self._trace_context.caller if self._trace_context else "unknown")
         program_id = str(metadata.get("program_id") or self._trace_context.edition if self._trace_context else "unknown")
-        status = AiTelemetryStatus.FALLBACK if error is not None and "disabled" in str(error).lower() else (
-            AiTelemetryStatus.OTHER if error is not None else AiTelemetryStatus.OK
-        )
+        if budget_exceeded:
+            status = AiTelemetryStatus.BUDGET_EXCEEDED
+        elif error is not None and "disabled" in error.lower():
+            status = AiTelemetryStatus.FALLBACK
+        elif error is not None:
+            status = AiTelemetryStatus.OTHER
+        else:
+            status = AiTelemetryStatus.OK
         record = AiTelemetryRecord(
             ts=datetime.now(timezone.utc),
             feature=feature,
@@ -323,7 +517,7 @@ class AIClient:
         try:
             append_ai_telemetry(record)
         except Exception:  # pragma: no cover - telemetry must not break the call
-            logger.warning("AI telemetry append failed for feature=%s", feature, exc_info=True)
+            logger.warning("AI telemetry append failed.")
 
     def _extract_text(self, response: Any) -> str:
         choices = getattr(response, "choices", None) or ()
@@ -352,8 +546,8 @@ class AIClient:
             return None
 
         run_budget_usd = _resolve_run_budget_usd(trace_context.metadata, default=budget_usd)
-        if run_budget_usd <= 0:
-            return None
+        if run_budget_usd == 0:
+            raise BudgetExceeded("Run AI budget is zero; provider call blocked.")
 
         from src.ai.cost_guard import CostGuard
 
@@ -368,16 +562,34 @@ def _resolve_run_budget_usd(metadata: dict[str, Any], *, default: float) -> floa
     value = metadata.get("run_budget_usd")
     if value is None:
         return default
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        stripped = value.strip()
-        if stripped:
-            try:
-                return float(stripped)
-            except ValueError:
-                return default
-    return default
+    return _validate_budget_usd(value, label="Run", allow_string=True)
+
+
+def _validate_usage_tokens(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise BudgetStateError("AI provider usage is invalid; reconcile before retrying.")
+    return value
+
+
+def _validate_reservation_tokens(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise BudgetConfigurationError("AI token reservation requires nonnegative integer counts.")
+    return value
+
+
+def _validate_budget_usd(value: object, *, label: str, allow_string: bool = False) -> float:
+    message = f"{label} AI budget must be a finite nonnegative number."
+    if isinstance(value, bool) or not (
+        isinstance(value, (int, float)) or (allow_string and isinstance(value, str))
+    ):
+        raise BudgetConfigurationError(message)
+    try:
+        budget = float(value)
+    except (OverflowError, ValueError):
+        raise BudgetConfigurationError(message) from None
+    if not math.isfinite(budget) or budget < 0:
+        raise BudgetConfigurationError(message)
+    return budget
 
 
 def _resolve_rate_limit_scope(*, trace_context: AITraceContext | None, deployment: str) -> str:

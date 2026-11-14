@@ -2,15 +2,17 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from time import perf_counter
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 from src.core.adf_config import load_arch_data_fix
 from src.core.alerts import append_or_suppress_alert, entity_scoped_alert_id, resolve_alert
 from src.core.channel_execution_policy import channel_execution_policy_for, run_under_channel_budget
 from src.core.channel_registry_store import (
     ChannelRegistryStore,
+    RegistryMetadataError,
     ShrinkageGuardError,
     compute_registry_delta,
     normalize_discovery_result_provider_instance,
@@ -192,11 +194,12 @@ def run_channel(
     integration_error_sink: list[IntegrationError] | None = None,
     discovery_result_sink: list[Any] | None = None,
     channel_outcome_sink: list[ChannelOutcomeEntry] | None = None,
+    deferred_verifications: list[Callable[[], None]] | None = None,
     programs_root: Path = PROGRAMS_ROOT,
 ) -> tuple[Any | None, Any | None]:
     channel = binding.config.channel
     channel_started_at = perf_counter()
-    provider_instance_id = binding_provider_instance_id(binding)
+    provider_instance_id = binding_provider_instance_id(binding) or "default"
     delta = None
     discovery_degrade_reason: str | None = None
 
@@ -278,10 +281,22 @@ def run_channel(
             if discovery_result is None:
                 raise _SkipDiscoveryApplication()
             discovery_result = sanitize_discovery_result(discovery_result, binding.config)
-            discovery_result = normalize_discovery_result_provider_instance(
-                discovery_result,
-                expected_provider_instance_id=provider_instance_id,
-            )
+            try:
+                discovery_result = normalize_discovery_result_provider_instance(
+                    discovery_result,
+                    expected_provider_instance_id=provider_instance_id,
+                )
+                if discovery_result.provider_instance_id != provider_instance_id:
+                    raise RegistryMetadataError("Discovery provider instance does not match the binding")
+            except RegistryMetadataError:
+                discovery_degrade_reason = f"{channel} discovery returned invalid provider instance metadata."
+                append_integration_error_once(
+                    integration_error_sink,
+                    source=channel,
+                    stage="discovery",
+                    error=discovery_degrade_reason,
+                )
+                raise _SkipDiscoveryApplication from None
             incomplete_scope = next(
                 (
                     status for status in discovery_result.scope_statuses.values()
@@ -433,12 +448,17 @@ def run_channel(
         _record_outcome(degraded=True, reason=_runtime_error_message(channel, "hydration", error))
         return None, delta
     if not run_ctx.dry_run and hydration_result.hydrated_ref_ids:
-        store.mark_verified(
+        acknowledge = partial(
+            store.mark_verified,
             channel,
             hydration_result.hydrated_ref_ids,
             verified_at=verified_at,
             provider_instance_id=provider_instance_id,
         )
+        if deferred_verifications is None:
+            acknowledge()
+        else:
+            deferred_verifications.append(acknowledge)
     if hydration_result.failed_ref_ids:
         if not run_ctx.dry_run:
             store.mark_hydration_failed(
@@ -447,11 +467,24 @@ def run_channel(
                 provider_instance_id=provider_instance_id,
             )
         for ref_id, ref_kind in hydration_result.failed_ref_ids:
+            first_detail = next(
+                (
+                    error for error in hydration_result.errors
+                    if error.source == channel and error.stage == "hydration"
+                    and error.ref_id == ref_id and error.ref_kind == ref_kind
+                ),
+                None,
+            )
+            if first_detail is not None and first_detail.failure_category is None:
+                first_detail = None
             append_integration_error_once(
                 integration_error_sink,
                 source=channel,
                 stage="hydration",
                 error=f"Failed to hydrate {ref_kind}:{ref_id}",
+                retryable=first_detail.retryable if first_detail is not None else True,
+                operator_action=first_detail.operator_action if first_detail is not None else None,
+                failure_category=first_detail.failure_category if first_detail is not None else None,
             )
     for hydration_error in hydration_result.errors:
         append_integration_error_once(
@@ -461,6 +494,7 @@ def run_channel(
             error=hydration_error.message,
             retryable=hydration_error.retryable,
             operator_action=hydration_error.operator_action,
+            failure_category=hydration_error.failure_category,
         )
     first_hydration_error = next(iter(hydration_result.errors), None)
     is_degraded = (

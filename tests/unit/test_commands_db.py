@@ -5,12 +5,14 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import sqlite3
 
+import pytest
 from typer.testing import CliRunner
 
 from cli import app
-from src.commands.db import _SCHEMA_MIGRATIONS, _plan_observation_compaction
+from src.commands.db import _SCHEMA_MIGRATIONS, _plan_observation_compaction, maybe_run_scheduled_compaction
 from src.core.hypothesis_models import AssertionEvaluation, AssertionOperator, ChallengeKind, ChallengeSeverity, Hypothesis, HypothesisKind, HypothesisStatus, RealityChallenge, TelemetryAssertion
 from src.core.metric_models import MetricAggregation, MetricDefinition, MetricObservation, MetricQualityState, MetricSourceBinding, ObservationWindow
+from src.core.program_fact_store import ProgramFactStore
 from src.core.reality_store import RealityStore
 
 
@@ -464,6 +466,142 @@ def test_admin_db_compact_command_compacts_old_rows_and_preserves_referenced_obs
     assert second_payload["evaluation_compaction"]["summary_rows_written"] == 0
     assert second_payload["observation_compaction"]["rows_deleted"] == 0
     assert second_payload["observation_compaction"]["rows_skipped_referenced"] == 1
+
+
+@pytest.mark.parametrize("fact_schema", [False, True])
+def test_scheduled_compaction_without_reality_tables_skips_without_writes(caplog, tmp_path: Path, fact_schema: bool) -> None:
+    db_root = tmp_path / "db"
+    store = ProgramFactStore("acme", db_root=db_root)
+    if fact_schema:
+        store.initialize()
+    else:
+        store.db_path.parent.mkdir(parents=True)
+        sqlite3.connect(store.db_path).close()
+    before = store.db_path.read_bytes()
+    sentinel_path = store.db_path.parent / ".compact_last_run"
+
+    with caplog.at_level("INFO", logger="src.commands.db"):
+        for _ in range(2):
+            assert maybe_run_scheduled_compaction("acme", db_root=db_root) is None
+
+    assert store.db_path.read_bytes() == before
+    assert not sentinel_path.exists()
+    assert len(caplog.records) == 2
+    assert all("not applicable" in record.message for record in caplog.records)
+    assert all(record.exc_info is None for record in caplog.records)
+
+
+def test_scheduled_compaction_runs_after_reality_schema_is_initialized(monkeypatch, tmp_path: Path) -> None:
+    db_root = tmp_path / "db"
+    fact_store = ProgramFactStore("acme", db_root=db_root)
+    fact_store.initialize()
+    assert maybe_run_scheduled_compaction("acme", db_root=db_root) is None
+
+    store = RealityStore("acme", db_root=db_root)
+    store.initialize()
+    metric_id = _seed_db_compaction_fixture(store)
+    monkeypatch.setattr(
+        "src.commands.db.load_metric_definition_map",
+        lambda **_kwargs: {
+            metric_id: MetricDefinition(
+                id=metric_id,
+                title=metric_id,
+                unit="count",
+                aggregation=MetricAggregation.LAST,
+                retention_days=30,
+            )
+        },
+    )
+
+    payload = maybe_run_scheduled_compaction("acme", db_root=db_root)
+
+    assert payload is not None
+    assert payload["evaluation_compaction"]["rows_deleted"] == 2
+    assert payload["observation_compaction"]["rows_deleted"] == 2
+    assert Path(payload["sentinel_path"]).exists()
+    assert len(store.list_metric_observations(metric_id)) == 2
+    assert len(store.list_assertion_evaluations()) == 1
+    assert maybe_run_scheduled_compaction("acme", db_root=db_root) is None
+
+
+@pytest.mark.parametrize("schema", ["partial", "missing_column", "invalid_database"])
+def test_scheduled_compaction_keeps_schema_failures_visible(tmp_path: Path, schema: str) -> None:
+    db_root = tmp_path / "db"
+    store = RealityStore("acme", db_root=db_root)
+    store.db_path.parent.mkdir(parents=True)
+    if schema == "invalid_database":
+        store.db_path.write_bytes(b"not a SQLite database")
+    elif schema == "partial":
+        with sqlite3.connect(store.db_path) as connection:
+            connection.execute("CREATE TABLE reality_metric_observations (observation_id TEXT)")
+    else:
+        store.initialize()
+        with sqlite3.connect(store.db_path) as connection:
+            connection.execute("ALTER TABLE reality_assertion_evaluations DROP COLUMN evaluated_at")
+    sentinel_path = store.db_path.parent / ".compact_last_run"
+    sentinel_path.write_text("2020-01-01T00:00:00+00:00", encoding="utf-8")
+    before = store.db_path.read_bytes()
+
+    with pytest.raises(sqlite3.DatabaseError):
+        maybe_run_scheduled_compaction("acme", db_root=db_root)
+
+    assert store.db_path.read_bytes() == before
+    assert sentinel_path.read_text(encoding="utf-8") == "2020-01-01T00:00:00+00:00"
+
+
+def test_scheduled_compaction_rolls_back_when_later_table_is_missing(tmp_path: Path) -> None:
+    db_root = tmp_path / "db"
+    store = RealityStore("acme", db_root=db_root)
+    store.initialize()
+    _seed_db_compaction_fixture(store)
+    with sqlite3.connect(store.db_path) as connection:
+        connection.execute("DROP TABLE reality_challenges")
+        before = tuple(connection.iterdump())
+
+    with pytest.raises(sqlite3.OperationalError, match="reality_challenges"):
+        maybe_run_scheduled_compaction("acme", db_root=db_root)
+
+    with sqlite3.connect(store.db_path) as connection:
+        assert tuple(connection.iterdump()) == before
+    assert not (store.db_path.parent / ".compact_last_run").exists()
+
+
+def test_startup_maintenance_without_reality_schema_does_not_log_failure(monkeypatch, caplog, tmp_path: Path) -> None:
+    import cli
+
+    db_root = tmp_path / "db"
+    ProgramFactStore("acme", db_root=db_root).initialize()
+    monkeypatch.setenv("VERTEX_DB_PATH", str(db_root))
+    monkeypatch.setattr(cli, "_should_skip_scheduled_db_maintenance", lambda *_args: False)
+    monkeypatch.setattr(cli, "_program_for_startup", lambda _ctx: "acme")
+
+    with caplog.at_level("INFO"):
+        for _ in range(2):
+            cli._maybe_run_scheduled_db_maintenance(None)
+
+    assert not any("scheduled db maintenance failed" in record.message for record in caplog.records)
+    assert sum("not applicable" in record.message for record in caplog.records) == 2
+    assert not (db_root / "acme" / ".compact_last_run").exists()
+
+
+def test_startup_maintenance_keeps_partial_schema_failure_nonblocking(monkeypatch, caplog, tmp_path: Path) -> None:
+    import cli
+
+    db_root = tmp_path / "db"
+    store = ProgramFactStore("acme", db_root=db_root)
+    store.initialize()
+    with sqlite3.connect(store.db_path) as connection:
+        connection.execute("CREATE TABLE reality_metric_observations (observation_id TEXT)")
+    monkeypatch.setenv("VERTEX_DB_PATH", str(db_root))
+    monkeypatch.setattr(cli, "_should_skip_scheduled_db_maintenance", lambda *_args: False)
+    monkeypatch.setattr(cli, "_program_for_startup", lambda _ctx: "acme")
+
+    cli._maybe_run_scheduled_db_maintenance(None)
+
+    failures = [record for record in caplog.records if "scheduled db maintenance failed" in record.message]
+    assert len(failures) == 1
+    assert failures[0].exc_info is not None
+    assert not (db_root / "acme" / ".compact_last_run").exists()
 
 
 def test_maybe_run_scheduled_compaction_runs_when_sentinel_is_missing(monkeypatch, tmp_path: Path) -> None:

@@ -18,6 +18,7 @@ import json
 import os
 import re
 from dataclasses import asdict, dataclass
+from graphlib import CycleError, TopologicalSorter
 from pathlib import Path
 from typing import Callable
 
@@ -29,8 +30,8 @@ _CITATION_RE = re.compile(r"§(\d+(?:\.\d+)*(?:[a-z])?)")
 _VERSION_RE = re.compile(r"^\*\*Version:\*\*\s+([\d.]+)", re.MULTILINE)
 _CHANGELOG_VERSION_RE = re.compile(r"^- \*\*v([\d.]+)\s+—", re.MULTILINE)
 _HEADING_ID_RE = re.compile(r"^#{3,6}\s+(RELO-[A-Z]\d+(?:\.\d+)?)\b", re.MULTILINE)
-_WORK_ITEM_RE = re.compile(r"^\|\s+\*\*(RELO-W\d+\.\d+)\s+\|", re.MULTILINE)
 _CARD_ID_RE = re.compile(r"^id:\s+(RELO-W\d+\.\d+[a-z])\s*$", re.MULTILINE)
+_PHASE_TABLE_ERROR = "phase work-item definition table is missing or malformed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,15 +88,17 @@ def lint_specification(path: Path) -> CheckResult:
     if unresolved:
         findings.append(f"unresolved section citation(s): {', '.join(unresolved)}")
 
-    defined_ids = (
-        _HEADING_ID_RE.findall(content)
-        + _WORK_ITEM_RE.findall(content)
-        + _CARD_ID_RE.findall(content)
-    )
+    defined_ids = _HEADING_ID_RE.findall(content) + _CARD_ID_RE.findall(content)
     duplicates = _duplicates(defined_ids)
     if duplicates:
         findings.append(f"duplicate defined RELO ID(s): {', '.join(duplicates)}")
     visible_content = _markdown_visible_content(content)
+    work_definitions, malformed_phase = _phase_work_item_definitions(visible_content)
+    if malformed_phase:
+        findings.append(_PHASE_TABLE_ERROR)
+    work_ids = set(work_definitions)
+    if len(work_definitions) != len(work_ids):
+        findings.append("duplicate work-item definition(s)")
     traceability = re.search(
         r"^### 19\.2\s[^\n]*\n(.*?)(?=^#{1,3}\s|\Z)", visible_content,
         flags=re.MULTILINE | re.DOTALL,
@@ -144,7 +147,7 @@ def lint_specification(path: Path) -> CheckResult:
         )
         if missing_requirements:
             findings.append(f"missing requirement traceability row(s): {', '.join(missing_requirements)}")
-    findings.extend(_goal_traceability_findings(content))
+    findings.extend(_goal_traceability_findings(content, work_ids))
     return CheckResult(
         "RELO-SPEC-LINT",
         not findings,
@@ -240,7 +243,7 @@ def _markdown_visible_content(specification: str) -> str:
     return "".join(visible_lines)
 
 
-def _traceability_section(content: str, number: str) -> str | None:
+def _traceability_section(content: str, number: str, *, phase_heading: bool = False) -> str | None:
     parent, _, child = number.partition(".")
     section = re.search(
         rf"^##[ \t]+{re.escape(parent)}(?:\.[ \t]|[ \t])[^\n]*\n(.*?)(?=^#{{1,2}}[ \t]|\Z)",
@@ -250,15 +253,16 @@ def _traceability_section(content: str, number: str) -> str | None:
         return None
     if not child:
         return section.group(1)
+    heading_suffix = r"\.?(?:[ \t]+[^\n]*)?" if phase_heading else r"[ \t][^\n]*"
     section = re.search(
-        rf"^###[ \t]+{re.escape(number)}[ \t][^\n]*\n(.*?)(?=^#{{1,3}}[ \t]|\Z)",
+        rf"^###[ \t]+{re.escape(number)}{heading_suffix}\n(.*?)(?=^#{{1,3}}[ \t]|\Z)",
         section.group(1), re.MULTILINE | re.DOTALL,
     )
     return section.group(1) if section is not None else None
 
 
 def _markdown_table_rows(
-    section: str | None, header: tuple[str, ...], *, exact: bool = False,
+    section: str | None, header: tuple[str, ...], *, exact: bool = False, strict_rows: bool = False,
 ) -> list[str] | None:
     if section is None:
         return None
@@ -267,7 +271,7 @@ def _markdown_table_rows(
         columns = _markdown_table_cells(line)
         if columns is None or tuple(columns[:len(header)]) != header:
             continue
-        if exact and len(columns) != len(header):
+        if (exact and len(columns) != len(header)) or (strict_rows and not all(columns)):
             return None
         if index + 1 >= len(lines):
             return None
@@ -279,7 +283,13 @@ def _markdown_table_rows(
         rows = []
         for row in lines[index + 2:]:
             if not row.lstrip().startswith("|"):
+                if strict_rows and "|" in row:
+                    return None
                 break
+            if strict_rows:
+                row_cells = _markdown_table_cells(row)
+                if row_cells is None or len(row_cells) != len(columns) or not all(row_cells):
+                    return None
             rows.append(row)
         return rows
     return None
@@ -304,7 +314,39 @@ def _traceability_definition_ids(rows: list[str] | None, pattern: str) -> list[s
     return identifiers
 
 
-def _goal_traceability_findings(content: str) -> list[str]:
+def _phase_work_item_definitions(visible_content: str) -> tuple[list[str], bool]:
+    identifiers: list[str] = []
+    malformed = False
+    for section_number in range(1, 8):
+        number = f"11.{section_number}"
+        headings = re.findall(
+            rf"^###[ \t]+{re.escape(number)}(?:[ \t]|\.(?:[ \t]|$)|$)",
+            visible_content, re.MULTILINE,
+        )
+        if not headings:
+            continue
+        section = _traceability_section(visible_content, number, phase_heading=True)
+        if len(headings) != 1 or section is None:
+            malformed = True
+            continue
+        rows = _markdown_table_rows(section, ("ID", "Work item"), strict_rows=True)
+        if rows is None:
+            malformed = True
+            continue
+        for row in rows:
+            columns = _markdown_table_cells(row)
+            if not columns or len(columns) < 2 or not columns[1]:
+                malformed = True
+                continue
+            match = re.fullmatch(r"(?:\*\*(RELO-W\d+\.\d+[a-z]?)\*\*|(RELO-W\d+\.\d+[a-z]?))", columns[0])
+            if match is None:
+                malformed = True
+                continue
+            identifiers.append(match.group(1) or match.group(2))
+    return identifiers, malformed
+
+
+def _goal_traceability_findings(content: str, work_ids: set[str]) -> list[str]:
     visible = _markdown_visible_content(content)
     if re.search(r"^###[ \t]+19\.1[ \t]", visible, re.MULTILINE) is None:
         return []
@@ -336,12 +378,6 @@ def _goal_traceability_findings(content: str) -> list[str]:
     for section, pattern in (("5.5", r"RELO-FR-\d+"), ("5.6", r"RELO-NFR-\d+")):
         requirement_ids.update(_traceability_definition_ids(
             _markdown_table_rows(_traceability_section(visible, section), ("ID", "Requirement")), pattern,
-        ))
-    work_ids = set()
-    for phase in range(1, 8):
-        work_ids.update(_traceability_definition_ids(
-            _markdown_table_rows(_traceability_section(visible, f"11.{phase}"), ("ID", "Work item")),
-            r"RELO-W\d+\.\d+[a-z]?",
         ))
     features = _traceability_section(visible, "8")
     feature_ids = set(re.findall(
@@ -427,8 +463,8 @@ def lint_work_packages(repo_root: Path, *, spec_path: Path) -> CheckResult:
     """Validate RELO readiness records without interpreting their design.
 
     This enforces the issuance rules that are mechanically knowable: coverage,
-    unique IDs, valid classes and dependencies, resolving AGENT_READY paths,
-    and named §20 blockers for NEEDS_DECISION work. It never upgrades a card.
+    unique IDs, valid classes and acyclic dependencies, resolving AGENT_READY
+    paths, and named §20 blockers for NEEDS_DECISION work. It never upgrades a card.
     """
     work_packages_path = repo_root / "governance" / "relo-work-packages.yaml"
     try:
@@ -446,15 +482,10 @@ def lint_work_packages(repo_root: Path, *, spec_path: Path) -> CheckResult:
     if not isinstance(cards, list):
         return CheckResult("RELO-WORK-PACKAGES", False, "work_items must be a list")
 
-    expected = (
-        _phase_work_item_ids(specification, "11.1", "11.2")
-        | _phase_work_item_ids(specification, "11.2", "11.3")
-        | _phase_work_item_ids(specification, "11.3", "11.4")
-        | _phase_work_item_ids(specification, "11.4", "11.5")
-        | _phase_work_item_ids(specification, "11.5", "11.6")
-        | _phase_work_item_ids(specification, "11.6", "11.7")
-        | _phase_work_item_ids(specification, "11.7", "12.1")
-    )
+    work_definitions, malformed_phase = _phase_work_item_definitions(_markdown_visible_content(specification))
+    if malformed_phase:
+        return CheckResult("RELO-WORK-PACKAGES", False, _PHASE_TABLE_ERROR)
+    expected = set(work_definitions)
     ids = [card.get("id") for card in cards if isinstance(card, dict)]
     findings: list[str] = []
     duplicates = set(_duplicates([identifier for identifier in ids if isinstance(identifier, str)]))
@@ -478,11 +509,18 @@ def lint_work_packages(repo_root: Path, *, spec_path: Path) -> CheckResult:
 
     decision_ids = _decision_table_ids(specification)
     allowed_classes = {"AGENT_READY", "NEEDS_DECISION", "NEEDS_JUDGMENT"}
+    dependency_graph: dict[str, list[str]] = {}
     for position, card in enumerate(cards, start=1):
         if not isinstance(card, dict):
             findings.append("work-package card is not a mapping")
             continue
         identifier = card.get("id")
+        dependencies = card.get("depends_on")
+        if isinstance(identifier, str) and identifier and isinstance(dependencies, list):
+            dependency_graph[identifier] = [
+                dependency for dependency in dependencies
+                if isinstance(dependency, str) and dependency in actual
+            ]
         if not isinstance(identifier, str) or not identifier:
             findings.append("work-package card has invalid id")
             identifier = "<invalid id>"
@@ -493,7 +531,6 @@ def lint_work_packages(repo_root: Path, *, spec_path: Path) -> CheckResult:
             detail = "(not an allowed class)" if isinstance(card_class, str) else "(must be a string)"
             findings.append(f"{identifier}: invalid class {detail}")
             continue
-        dependencies = card.get("depends_on")
         if not isinstance(dependencies, list) or any(
             not isinstance(dependency, str) or dependency not in actual for dependency in dependencies
         ):
@@ -538,6 +575,11 @@ def lint_work_packages(repo_root: Path, *, spec_path: Path) -> CheckResult:
                             findings.append(unresolved)
                     except (OSError, ValueError):
                         findings.append(unresolved)
+    if not duplicates:
+        try:
+            TopologicalSorter(dependency_graph).prepare()
+        except CycleError:
+            findings.append("work-package dependency graph contains a cycle")
     return CheckResult(
         "RELO-WORK-PACKAGES",
         not findings,
@@ -545,15 +587,6 @@ def lint_work_packages(repo_root: Path, *, spec_path: Path) -> CheckResult:
         if not findings
         else "; ".join(findings),
     )
-
-
-def _phase_work_item_ids(specification: str, phase_heading: str, next_phase_heading: str) -> set[str]:
-    start = specification.find(f"### {phase_heading}")
-    end = specification.find(f"### {next_phase_heading}", start + 1)
-    if start < 0 or end < 0:
-        return set()
-    phase = specification[start:end]
-    return set(re.findall(r"^\|\s+(RELO-W\d+\.\d+[a-z]?)\s+\|", phase, re.MULTILINE))
 
 
 def _duplicates(values: list[str]) -> list[str]:
@@ -603,8 +636,7 @@ def _check_deployment_vars(program_path: Path) -> CheckResult:
 def _spec_obligation_count(content: str) -> int:
     """RELO-W0.12b: count RELO-P/F/W/D obligation IDs the same way the
     ratified `relo-spec-obligation-count-budget` was measured. Uses the
-    non-bold table-row pattern (matching `_phase_work_item_ids`), not the
-    dead bold-only `_WORK_ITEM_RE` (see governance ledger note on that gap).
+    original non-bold table-row pattern used for baseline measurement.
     """
     w_ids = set(re.findall(r"^\|\s+(RELO-W\d+\.\d+[a-z]?)\s+\|", content, re.MULTILINE))
     p_ids = set(re.findall(r"^#### (RELO-P\d+)", content, re.MULTILINE))

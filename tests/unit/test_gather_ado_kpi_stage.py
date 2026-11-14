@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
+import logging
 from typing import Any, cast
+
+import pytest
 
 from src.commands.gather_pipeline import ado_kpi_stage
 from src.core.ado_client import ADO_WIQL_DEFAULT_TOP
@@ -311,6 +315,100 @@ def test_build_kusto_kpi_signals_records_kusto_errors_via_callback() -> None:
             "previous_state": {"value_last_4": [4.2]},
         }
     ]
+
+
+@pytest.mark.parametrize("engine", ("kusto", "wiql", "ado_pr"))
+def test_failed_kpi_warning_omits_query_and_exception(
+    engine: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    failed = replace(_wiql_query(query_id="synthetic-private-query"), engine=engine)
+    successful = replace(_wiql_query(query_id="successful-query"), engine="kusto")
+    sink: dict[str, dict[str, Any]] = {}
+    recorded: list[tuple[str, str | None]] = []
+
+    def fail(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("synthetic private provider detail")
+
+    def execute(query: KustoQuery) -> list[dict[str, Any]]:
+        return fail() if query.id == failed.id else [{"OpenValidationItems": 1}]
+
+    def record(*args: Any, **kwargs: Any) -> None:
+        query = args[1]
+        recorded.append((query.id, kwargs.get("error")))
+
+    with caplog.at_level(logging.WARNING, logger=ado_kpi_stage.__name__):
+        signals = ado_kpi_stage.build_kusto_kpi_signals(
+            queries=(failed, successful),
+            program=_program(),
+            program_id="acme",
+            as_of=datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc),
+            workstreams=(),
+            executor=execute,
+            ado_client_factory=fail,
+            normalize_ado_team_name_fn=lambda value: value,
+            record_kusto_query_state_fn=record,
+            build_kusto_kpi_signal_fn=_build_signal,
+            summarize_pull_requests_fn=lambda **kwargs: None,
+            pull_request_provider_ref_fn=lambda pull_request, repository_name: None,
+            pull_request_entity_refs_fn=lambda pull_request, repository_name: (),
+            query_state_sink=sink,
+        )
+
+    assert [record.getMessage() for record in caplog.records] == ["KPI query failed; skipping."]
+    assert all(record.exc_info is None for record in caplog.records)
+    assert [signal.id for signal in signals] == ["acme:successful-query"]
+    if engine == "wiql":
+        assert sink[failed.id]["last_error"] == "synthetic private provider detail"
+        assert sink[failed.id]["is_degraded"] is True
+    else:
+        assert (failed.id, "synthetic private provider detail") in recorded
+    assert ("successful-query", None) in recorded
+
+
+@pytest.mark.parametrize("engine", ("kusto", "wiql", "ado_pr"))
+def test_kpi_failure_with_empty_exception_message_remains_degraded(engine: str) -> None:
+    from src.commands.gather_pipeline.kpi_projection_stage import classify_kpi_ingestion_run_status
+    from src.commands.gather_pipeline.kusto_query_helpers import record_kusto_query_state
+
+    failed = replace(_wiql_query(query_id="failed"), engine=engine, expected_cardinality="zero_ok")
+    successful = replace(_wiql_query(query_id="successful"), engine="kusto")
+    previous_success = datetime(2026, 5, 9, 8, 0, tzinfo=timezone.utc)
+    sink: dict[str, dict[str, Any]] = {}
+
+    def fail(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError()
+
+    def execute(query: KustoQuery) -> list[dict[str, Any]]:
+        return fail() if query.id == failed.id else [{"OpenValidationItems": 1}]
+
+    signals = ado_kpi_stage.build_kusto_kpi_signals(
+        queries=(failed, successful),
+        program=_program(),
+        program_id="acme",
+        as_of=datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc),
+        workstreams=(),
+        executor=execute,
+        ado_client_factory=fail,
+        normalize_ado_team_name_fn=lambda value: value,
+        record_kusto_query_state_fn=record_kusto_query_state,
+        build_kusto_kpi_signal_fn=_build_signal,
+        summarize_pull_requests_fn=lambda **kwargs: None,
+        pull_request_provider_ref_fn=lambda pull_request, repository_name: None,
+        pull_request_entity_refs_fn=lambda pull_request, repository_name: (),
+        query_state_sink=sink,
+        previous_query_states={failed.id: {"last_succeeded_at": previous_success, "value_last_4": [4.0]}},
+    )
+
+    assert [signal.id for signal in signals] == ["acme:successful"]
+    assert sink[failed.id]["last_cycle_succeeded"] is False
+    assert sink[failed.id]["is_degraded"] is True
+    assert sink[failed.id]["last_error"] == "KPI query failed."
+    assert sink[failed.id]["last_succeeded_at"] == previous_success
+    assert sink[failed.id]["value_last_4"] == [4.0]
+    assert classify_kpi_ingestion_run_status(
+        signal=None, observation=None, query_state=sink[failed.id], error_message=None,
+    ) == "failed"
+    assert sink["successful"]["last_cycle_succeeded"] is True
 
 
 def test_build_kusto_kpi_signals_marks_capped_wiql_result_degraded() -> None:

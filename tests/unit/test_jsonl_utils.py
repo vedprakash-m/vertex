@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
+import src.core.jsonl_utils as jsonl_utils
 from src.core.jsonl_utils import (
     compute_file_checksum,
     jsonl_checksum_matches,
@@ -285,6 +288,230 @@ class TestRotateJsonlIfOversize:
         # The new rotation must be the newest one (sorted oldest → newest).
         assert survivors[-1].read_text(encoding="utf-8") == '{"a":1}\n'
 
+    @pytest.mark.parametrize("retain", [1, 3, 5, 12])
+    def test_same_second_rotation_retains_newest_files(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retain: int,
+    ) -> None:
+        class FixedClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                assert tz == timezone.utc
+                return cls(2026, 1, 1, tzinfo=timezone.utc)
+
+        monkeypatch.setattr(jsonl_utils, "datetime", FixedClock)
+        path = tmp_path / "data.jsonl"
+        count = retain + 12
+        for sequence in range(count):
+            path.write_text(f'{{"sequence":{sequence}}}\n', encoding="utf-8")
+            assert rotate_jsonl_if_oversize(path, max_bytes=1, retain=retain)
+
+        survivors = list_rotated_jsonl_paths(tmp_path / "rotated", stem="data")
+        assert [json.loads(p.read_text(encoding="utf-8"))["sequence"] for p in survivors] == list(
+            range(count - retain, count)
+        )
+        assert [p.name for p in survivors] == [
+            f"data.20260101T000000Z.{sequence + 1}.jsonl"
+            for sequence in range(count - retain, count)
+        ]
+
+    def test_same_second_rotation_uses_suffix_above_existing_maximum(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        class FixedClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                assert tz == timezone.utc
+                return cls(2026, 1, 1, tzinfo=timezone.utc)
+
+        monkeypatch.setattr(jsonl_utils, "datetime", FixedClock)
+        rotated_dir = tmp_path / "rotated"
+        rotated_dir.mkdir()
+        for suffix in ("2", "10", "00012", "other"):
+            (rotated_dir / f"data.20260101T000000Z.{suffix}.jsonl").write_text(
+                suffix, encoding="utf-8"
+            )
+        path = tmp_path / "data.jsonl"
+        path.write_text('{"new":true}\n', encoding="utf-8")
+
+        assert rotate_jsonl_if_oversize(path, max_bytes=1, retain=10)
+        assert (rotated_dir / "data.20260101T000000Z.13.jsonl").read_text(
+            encoding="utf-8"
+        ) == '{"new":true}\n'
+        for suffix in ("2", "10", "00012", "other"):
+            assert (rotated_dir / f"data.20260101T000000Z.{suffix}.jsonl").read_text(
+                encoding="utf-8"
+            ) == suffix
+
+    def test_same_second_noncanonical_rotation_keeps_new_segment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        class FixedClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                assert tz == timezone.utc
+                return cls(2026, 1, 1, tzinfo=timezone.utc)
+
+        monkeypatch.setattr(jsonl_utils, "datetime", FixedClock)
+        rotated_dir = tmp_path / "rotated"
+        rotated_dir.mkdir()
+        (rotated_dir / "data.20260101T000000Z.legacy.jsonl").write_text(
+            "legacy", encoding="utf-8"
+        )
+        path = tmp_path / "data.jsonl"
+        path.write_text('{"new":true}\n', encoding="utf-8")
+
+        assert rotate_jsonl_if_oversize(path, max_bytes=1, retain=1)
+        survivors = list_rotated_jsonl_paths(rotated_dir, stem="data")
+        assert len(survivors) == 1
+        assert survivors[0].name == "data.20260101T000000Z.1.jsonl"
+        assert survivors[0].read_text(encoding="utf-8") == '{"new":true}\n'
+
+    @pytest.mark.parametrize("retain", [1, 3, 5])
+    @pytest.mark.parametrize("existing_kind", ["legacy", "future_timestamp"])
+    def test_rotation_retains_new_segment_when_existing_names_sort_later(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retain: int, existing_kind: str,
+    ) -> None:
+        class FixedClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                assert tz == timezone.utc
+                return cls(2026, 1, 1, tzinfo=timezone.utc)
+
+        monkeypatch.setattr(jsonl_utils, "datetime", FixedClock)
+        rotated_dir = tmp_path / "rotated"
+        rotated_dir.mkdir()
+        names = [
+            f"data.z{i}.jsonl" if existing_kind == "legacy"
+            else f"data.2027010{i + 1}T000000Z.1.jsonl"
+            for i in range(retain)
+        ]
+        for name in names:
+            (rotated_dir / name).write_text(name, encoding="utf-8")
+        unrelated = rotated_dir / "other.20270101T000000Z.1.jsonl"
+        unrelated.write_text("unrelated", encoding="utf-8")
+        path = tmp_path / "data.jsonl"
+        path.write_text('{"new":true}\n', encoding="utf-8")
+
+        assert rotate_jsonl_if_oversize(path, max_bytes=1, retain=retain)
+
+        new_name = "data.20260101T000000Z.1.jsonl"
+        survivors = list_rotated_jsonl_paths(rotated_dir, stem="data")
+        assert {p.name for p in survivors} == {new_name, *names[1:]}
+        assert (rotated_dir / new_name).read_text(encoding="utf-8") == '{"new":true}\n'
+        assert unrelated.read_text(encoding="utf-8") == "unrelated"
+
+    @pytest.mark.parametrize("other_stem", ["data.audit", "data.20270101T000000Z"])
+    def test_rotation_does_not_prune_canonical_segments_from_another_stem(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, other_stem: str,
+    ) -> None:
+        class FixedClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                assert tz == timezone.utc
+                return cls(2026, 1, 1, tzinfo=timezone.utc)
+
+        monkeypatch.setattr(jsonl_utils, "datetime", FixedClock)
+        rotated_dir = tmp_path / "rotated"
+        rotated_dir.mkdir()
+        unrelated = rotated_dir / f"{other_stem}.20270102T000000Z.1.jsonl"
+        unrelated.write_text("unrelated", encoding="utf-8")
+        path = tmp_path / "data.jsonl"
+        path.write_text('{"new":true}\n', encoding="utf-8")
+
+        assert rotate_jsonl_if_oversize(path, max_bytes=1, retain=1)
+
+        assert unrelated.read_text(encoding="utf-8") == "unrelated"
+        assert (rotated_dir / "data.20260101T000000Z.1.jsonl").read_text(
+            encoding="utf-8"
+        ) == '{"new":true}\n'
+
+    def test_rotation_treats_glob_metacharacters_in_stem_as_literal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        class FixedClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                assert tz == timezone.utc
+                return cls(2026, 1, 1, tzinfo=timezone.utc)
+
+        monkeypatch.setattr(jsonl_utils, "datetime", FixedClock)
+        rotated_dir = tmp_path / "rotated"
+        rotated_dir.mkdir()
+        for suffix in (1, 2):
+            (rotated_dir / f"data[1].20260101T000000Z.{suffix}.jsonl").write_text(
+                f"own-{suffix}", encoding="utf-8"
+            )
+            (rotated_dir / f"data1.20270101T000000Z.{suffix}.jsonl").write_text(
+                f"other-{suffix}", encoding="utf-8"
+            )
+        path = tmp_path / "data[1].jsonl"
+        path.write_text('{"new":true}\n', encoding="utf-8")
+
+        assert rotate_jsonl_if_oversize(path, max_bytes=1, retain=1)
+
+        assert (rotated_dir / "data[1].20260101T000000Z.3.jsonl").read_text(
+            encoding="utf-8"
+        ) == '{"new":true}\n'
+        assert not (rotated_dir / "data[1].20260101T000000Z.1.jsonl").exists()
+        assert not (rotated_dir / "data[1].20260101T000000Z.2.jsonl").exists()
+        for suffix in (1, 2):
+            assert (rotated_dir / f"data1.20270101T000000Z.{suffix}.jsonl").read_text(
+                encoding="utf-8"
+            ) == f"other-{suffix}"
+
+    @pytest.mark.parametrize("batch", [False, True])
+    def test_append_retains_new_segment_with_later_legacy_names(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, batch: bool,
+    ) -> None:
+        class FixedClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                assert tz == timezone.utc
+                return cls(2026, 1, 1, tzinfo=timezone.utc)
+
+        monkeypatch.setattr(jsonl_utils, "datetime", FixedClock)
+        rotated_dir = tmp_path / "rotated"
+        rotated_dir.mkdir()
+        for i in range(jsonl_utils.DEFAULT_MAX_ROTATED_FILES):
+            (rotated_dir / f"data.z{i}.jsonl").write_text(f"old-{i}", encoding="utf-8")
+        path = tmp_path / "data.jsonl"
+        path.write_text('{"previous":true}\n', encoding="utf-8")
+
+        if batch:
+            assert jsonl_utils.append_jsonl_lines(path, ['{"fresh":true}\n'], max_bytes=1)
+        else:
+            assert jsonl_utils.append_jsonl_line(path, '{"fresh":true}\n', max_bytes=1)
+
+        new_path = rotated_dir / "data.20260101T000000Z.1.jsonl"
+        assert new_path.read_text(encoding="utf-8") == '{"previous":true}\n'
+        assert len(list_rotated_jsonl_paths(rotated_dir, stem="data")) == jsonl_utils.DEFAULT_MAX_ROTATED_FILES
+        assert path.read_text(encoding="utf-8") == '{"fresh":true}\n'
+        assert jsonl_checksum_matches(path, path.with_suffix(".sha256")) is True
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows filenames are case-insensitive")
+    def test_same_second_rotation_accounts_for_case_insensitive_existing_names(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        class FixedClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                assert tz == timezone.utc
+                return cls(2026, 1, 1, tzinfo=timezone.utc)
+
+        monkeypatch.setattr(jsonl_utils, "datetime", FixedClock)
+        rotated_dir = tmp_path / "rotated"
+        rotated_dir.mkdir()
+        existing = rotated_dir / "DATA.20260101T000000Z.2.JSONL"
+        existing.write_text("earlier", encoding="utf-8")
+        path = tmp_path / "data.jsonl"
+        path.write_text("later", encoding="utf-8")
+
+        assert rotate_jsonl_if_oversize(path, max_bytes=1, retain=5)
+        assert (rotated_dir / "data.20260101T000000Z.3.jsonl").read_text(
+            encoding="utf-8"
+        ) == "later"
+        assert existing.read_text(encoding="utf-8") == "earlier"
+
     def test_rotation_does_not_update_checksum_sidecar(self, tmp_path: Path) -> None:
         """Rotation is intentionally minimal: it does not move or update the
         ``.sha256`` sidecar (the checksum is for the *current* file at the
@@ -329,6 +556,38 @@ class TestRotateJsonlIfOversize:
 
 
 class TestListRotatedJsonlPaths:
+    def test_scopes_canonical_segments_to_the_encoded_stem(self, tmp_path: Path) -> None:
+        names = {
+            "data.20260101T000000Z.1.jsonl",
+            "data.audit.20260101T000000Z.1.jsonl",
+            "data.audit.more.20260101T000000Z.1.jsonl",
+            "data.z-legacy.jsonl",
+        }
+        for name in names:
+            (tmp_path / name).write_text(name, encoding="utf-8")
+
+        assert {p.name for p in list_rotated_jsonl_paths(tmp_path, stem="data")} == {
+            "data.20260101T000000Z.1.jsonl",
+            "data.z-legacy.jsonl",
+        }
+        assert {p.name for p in list_rotated_jsonl_paths(tmp_path, stem="data.audit")} == {
+            "data.audit.20260101T000000Z.1.jsonl",
+        }
+        assert {p.name for p in list_rotated_jsonl_paths(tmp_path, stem="data.*")} == {
+            "data.audit.20260101T000000Z.1.jsonl",
+            "data.audit.more.20260101T000000Z.1.jsonl",
+        }
+        assert {p.name for p in list_rotated_jsonl_paths(tmp_path)} == names
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows filenames are case-insensitive")
+    def test_canonical_stem_scope_is_case_insensitive_on_windows(self, tmp_path: Path) -> None:
+        own = tmp_path / "DATA.AUDIT.20260101T000000Z.1.JSONL"
+        other = tmp_path / "DATA.AUDIT.EXTRA.20260101T000000Z.1.JSONL"
+        own.touch()
+        other.touch()
+
+        assert list_rotated_jsonl_paths(tmp_path, stem="data.audit") == (own,)
+
     def test_returns_empty_when_dir_missing(self, tmp_path: Path) -> None:
         assert list_rotated_jsonl_paths(tmp_path / "rotated") == ()
 
@@ -348,6 +607,50 @@ class TestListRotatedJsonlPaths:
         assert result[0].read_text(encoding="utf-8") == "oldest"
         assert result[1].read_text(encoding="utf-8") == "middle"
         assert result[2].read_text(encoding="utf-8") == "newest"
+
+    def test_orders_same_second_suffixes_numerically(self, tmp_path: Path) -> None:
+        rotated_dir = tmp_path / "rotated"
+        rotated_dir.mkdir()
+        names = [
+            "data.20260102T000000Z.1.jsonl",
+            "data.20260101T000000Z.11.jsonl",
+            "data.20251231T235959Z.9.jsonl",
+            "data.20260101T000000Z.2.jsonl",
+            "data.20260101T000000Z.10.jsonl",
+            "data.20260101T000000Z.9.jsonl",
+        ]
+        for name in names:
+            (rotated_dir / name).write_text("{}\n", encoding="utf-8")
+
+        assert [p.name for p in list_rotated_jsonl_paths(rotated_dir, stem="data")] == [
+            names[2], names[3], names[5], names[4], names[1], names[0],
+        ]
+
+    def test_noncanonical_names_keep_lexical_order_and_stem_filter(
+        self, tmp_path: Path,
+    ) -> None:
+        rotated_dir = tmp_path / "rotated"
+        rotated_dir.mkdir()
+        for name in ("data.z.jsonl", "other.a.jsonl", "data.a.jsonl"):
+            (rotated_dir / name).write_text("{}\n", encoding="utf-8")
+
+        assert [p.name for p in list_rotated_jsonl_paths(rotated_dir, stem="data")] == [
+            "data.a.jsonl", "data.z.jsonl",
+        ]
+
+    def test_same_second_noncanonical_suffixes_precede_numeric_suffixes(
+        self, tmp_path: Path,
+    ) -> None:
+        rotated_dir = tmp_path / "rotated"
+        rotated_dir.mkdir()
+        for suffix in ("z", "10", "a", "2"):
+            (rotated_dir / f"data.20260101T000000Z.{suffix}.jsonl").write_text(
+                "{}\n", encoding="utf-8"
+            )
+
+        assert [p.name for p in list_rotated_jsonl_paths(rotated_dir, stem="data")] == [
+            f"data.20260101T000000Z.{suffix}.jsonl" for suffix in ("a", "z", "2", "10")
+        ]
 
 
 class TestAppendJsonlLineWithRotation:
@@ -385,3 +688,27 @@ class TestAppendJsonlLineWithRotation:
                 pass
         # The 5th line is the most recent in the live file.
         assert path.read_text(encoding="utf-8") == '{"i":4}\n'
+
+
+class TestAppendJsonlLinesWithRotation:
+    def test_same_second_batched_appends_keep_newest_segments(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        class FixedClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                assert tz == timezone.utc
+                return cls(2026, 1, 1, tzinfo=timezone.utc)
+
+        monkeypatch.setattr(jsonl_utils, "datetime", FixedClock)
+        path = tmp_path / "data.jsonl"
+        for sequence in range(8):
+            jsonl_utils.append_jsonl_lines(path, [f'{{"sequence":{sequence}}}\n'], max_bytes=1)
+
+        rotated = list_rotated_jsonl_paths(tmp_path / "rotated", stem="data")
+        assert len(rotated) == jsonl_utils.DEFAULT_MAX_ROTATED_FILES
+        assert [
+            json.loads(segment.read_text(encoding="utf-8"))["sequence"]
+            for segment in (*rotated, path)
+        ] == list(range(2, 8))
+        assert jsonl_checksum_matches(path, path.with_suffix(".sha256")) is True

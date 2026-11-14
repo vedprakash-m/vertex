@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Literal
 
 from src.core.edition_resolver import PROGRAMS_ROOT
+from src.core.exceptions import StateError
 from src.core.jsonl_utils import append_jsonl_line, read_jsonl_records
 
 ComparisonChoice = Literal["a", "b", "tie", "neither"]
@@ -84,6 +85,13 @@ def record_comparison(
     """Append one blind-comparison judgment. Always durable (unlike
     ``record_proposal_event``'s opt-in no-op default) -- this harness has
     no purpose if judgments aren't recorded."""
+    if (
+        not isinstance(choice, str)
+        or choice not in ("a", "b", "tie", "neither")
+        or not isinstance(a_is_candidate, bool)
+        or not isinstance(critical_error, bool)
+    ):
+        raise ValueError("Invalid blind-comparison judgment.")
     record = ComparisonRecord(
         program_id=program_id,
         surface=surface,
@@ -122,28 +130,42 @@ def read_comparisons(
     programs_root: Path = PROGRAMS_ROOT,
 ) -> tuple[ComparisonRecord, ...]:
     path = blind_ab_comparison_path(program_id, programs_root=programs_root)
-    if not path.exists():
-        return ()
+    try:
+        rows = read_jsonl_records(path, repair_corruption=False)
+    except (OSError, UnicodeError, ValueError):
+        raise StateError(
+            "Blind-comparison journal is unreadable or malformed; preserve it and resolve the problem before retrying."
+        ) from None
     records = []
-    for raw in read_jsonl_records(path):
+    for raw in rows:
+        if raw.get("program_id") != program_id:
+            raise StateError(
+                "Blind-comparison journal has missing or mismatched program identity; "
+                "preserve it and resolve the problem before retrying."
+            )
         if surface is not None and raw.get("surface") != surface:
             continue
-        records.append(
-            ComparisonRecord(
-                program_id=raw["program_id"],
-                surface=raw["surface"],
-                item_id=raw["item_id"],
-                option_a_text=raw["option_a_text"],
-                option_b_text=raw["option_b_text"],
-                a_is_candidate=bool(raw["a_is_candidate"]),
-                choice=raw["choice"],
-                recorded_at=datetime.fromisoformat(raw["recorded_at"]),
-                notes=raw.get("notes"),
-                # Backward-compatible: comparisons recorded before this
-                # field existed default to no critical error, not unknown.
-                critical_error=bool(raw.get("critical_error", False)),
+        try:
+            records.append(
+                ComparisonRecord(
+                    program_id=raw["program_id"],
+                    surface=raw["surface"],
+                    item_id=raw["item_id"],
+                    option_a_text=raw["option_a_text"],
+                    option_b_text=raw["option_b_text"],
+                    a_is_candidate=bool(raw["a_is_candidate"]),
+                    choice=raw["choice"],
+                    recorded_at=datetime.fromisoformat(raw["recorded_at"]),
+                    notes=raw.get("notes"),
+                    # Backward-compatible: comparisons recorded before this
+                    # field existed default to no critical error, not unknown.
+                    critical_error=bool(raw.get("critical_error", False)),
+                )
             )
-        )
+        except (KeyError, TypeError, ValueError):
+            raise StateError(
+                "Blind-comparison journal has an invalid record; preserve it and resolve the problem before retrying."
+            ) from None
     return tuple(records)
 
 

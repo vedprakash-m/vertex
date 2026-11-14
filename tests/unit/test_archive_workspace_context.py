@@ -19,7 +19,15 @@ EDITION = "acme_weekly"
 
 
 def _bytes(root: Path) -> dict[str, bytes]:
-    return {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    result: dict[str, bytes] = {}
+    for path in root.rglob("*"):
+        if path.is_file():
+            if path.name == ".archive.guard":
+                assert path.stat().st_size == 0
+                result[str(path.relative_to(root))] = b""
+            else:
+                result[str(path.relative_to(root))] = path.read_bytes()
+    return result
 
 
 def _workspace(tmp_path: Path) -> tuple[Path, Path, Path]:
@@ -246,7 +254,8 @@ def test_confirmation_preserves_staged_snapshot_if_issue_becomes_locked(
     staged = edition_root / "staging" / "snapshots" / "issue_079.snapshot.json"
     after_selected = _bytes(edition_root)
     staged_name = str(staged.relative_to(edition_root))
-    assert set(after_selected) == set(before_selected) | {staged_name}
+    assert set(after_selected) == set(before_selected) | {staged_name, ".archive.guard"}
+    assert after_selected[".archive.guard"] == b""
     assert all(after_selected[name] == value for name, value in before_selected.items())
     assert snapshot_store.read_snapshot(staged).issue_number == 79
     assert snapshot_store.find_orphaned_staging(EDITION, programs_root=selected) == staged.parents[1]
@@ -377,7 +386,8 @@ def test_selected_archive_transaction_failure_restores_selected_bytes(
             archive_root=archive, programs_root=selected,
         )
     assert calls == 4
-    assert _bytes(tmp_path) == before
+    guard = selected / "acme" / "archive" / EDITION / ".archive.guard"
+    assert _bytes(tmp_path) == before | {str(guard.relative_to(tmp_path)): b""}
     assert not (selected / "acme" / "archive" / EDITION / "staging").exists()
 
 

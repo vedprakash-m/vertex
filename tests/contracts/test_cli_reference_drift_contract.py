@@ -22,6 +22,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import click
 import pytest
 import yaml
 
@@ -70,6 +71,33 @@ def test_cli_reference_drift_check() -> None:
         f"Regenerate with `python scripts/generate_cli_reference.py` and commit. "
         f"stdout={completed.stdout!r} stderr={completed.stderr!r}"
     )
+
+
+def test_cli_reference_reuses_the_command_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import generate_cli_reference
+
+    root = click.Group("vertex", commands={
+        "group": click.Group("group", commands={"child": click.Command("child")}),
+    })
+    builds = 0
+
+    def build_root(_app: object) -> click.Group:
+        nonlocal builds
+        builds += 1
+        return root
+
+    output = tmp_path / "reference.md"
+    monkeypatch.setattr(generate_cli_reference, "get_command", build_root)
+    monkeypatch.setattr(generate_cli_reference, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(generate_cli_reference, "OUTPUT_PATH", output)
+    monkeypatch.setattr(sys, "argv", ["generate_cli_reference.py", "--output", str(output)])
+
+    generate_cli_reference.main()
+
+    assert builds == 1
+    assert "#### `vertex group child`" in output.read_text(encoding="utf-8")
 
 
 def test_cli_reference_avoids_local_absolute_paths() -> None:

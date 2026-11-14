@@ -9,7 +9,7 @@ from src.core.models_v2 import Signal, SignalReviewDecision, SignalThreadLink, S
 
 @runtime_checkable
 class SignalStore(Protocol):
-    def append(self, signal: Signal) -> None: ...
+    def append(self, signal: Signal, *, append_only: bool = False) -> None: ...
 
     def read(
         self,
@@ -32,6 +32,17 @@ class SignalStore(Protocol):
     def read_threads(self, program_id: str) -> dict[str, SignalThreadLink]: ...
 
     def append_thread(self, program_id: str, link: SignalThreadLink) -> None: ...
+
+
+@runtime_checkable
+class AtomicSignalBatchStore(Protocol):
+    """Optional capability for same-program, append-only atomic signal batches."""
+
+    def append_atomic(
+        self, program_id: str, signals: tuple[Signal, ...], *,
+        replace_failed_since: datetime | None = None,
+        replace_failed_until: datetime | None = None,
+    ) -> None: ...
 
 
 @runtime_checkable

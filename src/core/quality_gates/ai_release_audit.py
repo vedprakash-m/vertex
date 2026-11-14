@@ -178,8 +178,23 @@ def released_terminal_for_run(
 ) -> ReleaseTerminal | None:
     """The most recently recorded ``ai.release_decision.v1`` terminal for
     this run, or ``None`` if no terminal decision has been recorded yet."""
+    latest = _latest_release_decision(ai_run_id, program_id=program_id, programs_root=programs_root)
+    return latest[0] if latest is not None else None
+
+
+def released_content_matches(
+    ai_run_id: str, *, program_id: str, released_content_hash: str, programs_root: Path = PROGRAMS_ROOT
+) -> bool:
+    """Check that the latest terminal releases the supplied content hash."""
+    latest = _latest_release_decision(ai_run_id, program_id=program_id, programs_root=programs_root)
+    return latest is not None and latest == (ReleaseTerminal.RELEASED, released_content_hash)
+
+
+def _latest_release_decision(
+    ai_run_id: str, *, program_id: str, programs_root: Path
+) -> tuple[ReleaseTerminal, str | None] | None:
     events = read_events(program_id, programs_root=programs_root, repair_corruption=False)
-    latest: ReleaseTerminal | None = None
+    latest: tuple[ReleaseTerminal, str | None] | None = None
     for event in events:
         if event.event_type != "ai.release_decision.v1":
             continue
@@ -189,7 +204,7 @@ def released_terminal_for_run(
             validate_event_payload(event.event_type, event.payload)
         except ValueError as error:
             raise ConfigError("Invalid AI release decision payload for this run.") from error
-        latest = ReleaseTerminal(event.payload["terminal"])
+        latest = (ReleaseTerminal(event.payload["terminal"]), event.payload.get("released_content_hash"))
     return latest
 
 
@@ -245,5 +260,6 @@ __all__ = [
     "record_ai_application_receipt",
     "record_ai_release_decision",
     "record_ai_run_lifecycle",
+    "released_content_matches",
     "released_terminal_for_run",
 ]

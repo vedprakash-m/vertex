@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 import json
 import os
 from dataclasses import fields, is_dataclass
@@ -9,6 +9,8 @@ from enum import Enum
 from pathlib import Path
 import shutil
 from typing import Any
+
+import portalocker
 
 from src.core.baseline_lock import assert_issue_unlocked
 from src.core.edition_resolver import resolve_artifact_edition
@@ -26,30 +28,46 @@ class ArchiveLock:
         self._archive_root = archive_root
         self._lock_path = archive_root / ".lock"
         self._owned = False
+        self._guard = ExitStack()
 
     def __enter__(self) -> ArchiveLock:
+        if self._owned:
+            raise StateError(f"Archive is locked by this context at {self._lock_path}")
         self._archive_root.mkdir(parents=True, exist_ok=True)
-        if self._lock_path.exists():
-            existing = _read_lock_metadata(self._lock_path)
-            started_at = _parse_datetime(existing.get("started_at"))
-            if started_at is not None and datetime.now(timezone.utc) - started_at < LOCK_MAX_AGE:
-                raise StateError(
-                    f"Archive is locked by PID {existing.get('pid', 'unknown')} at {self._lock_path}"
-                )
-            self._lock_path.unlink()
+        with ExitStack() as stack:
+            try:
+                # Keep the guard inode stable; unlinking it would split exclusion.
+                stack.enter_context(portalocker.Lock(
+                    self._archive_root / ".archive.guard", mode="a", timeout=0,
+                    flags=portalocker.LOCK_EX | portalocker.LOCK_NB,
+                ))
+            except portalocker.exceptions.LockException as error:
+                raise StateError(f"Archive is locked or locking is unavailable at {self._lock_path}") from error
+            if self._lock_path.exists():
+                existing = _read_lock_metadata(self._lock_path)
+                started_at = _parse_datetime(existing.get("started_at"))
+                if started_at is not None and datetime.now(timezone.utc) - started_at < LOCK_MAX_AGE:
+                    raise StateError(
+                        f"Archive is locked by PID {existing.get('pid', 'unknown')} at {self._lock_path}"
+                    )
+                self._lock_path.unlink()
 
-        metadata = {
-            "pid": os.getpid(),
-            "started_at": datetime.now(timezone.utc).isoformat(),
-        }
-        self._lock_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-        self._owned = True
+            metadata = {
+                "pid": os.getpid(),
+                "started_at": datetime.now(timezone.utc).isoformat(),
+            }
+            self._lock_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+            self._owned = True
+            self._guard = stack.pop_all()
         return self
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
-        if self._owned and self._lock_path.exists():
-            self._lock_path.unlink()
-        self._owned = False
+        try:
+            if self._owned and self._lock_path.exists():
+                self._lock_path.unlink()
+        finally:
+            self._owned = False
+            self._guard.close()
 
 
 def get_archive_root(

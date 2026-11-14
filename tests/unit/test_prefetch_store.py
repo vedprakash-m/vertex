@@ -587,3 +587,91 @@ def test_manifest_publication_failure_preserves_previous_committed_snapshot(
     assert tuple(path.read_bytes() for path in paths) == before
     assert read_latest_committed_snapshot("fixture_prog", "workiq", programs_root=tmp_path) == first
     assert read_snapshot_payload("fixture_prog", "workiq", first, programs_root=tmp_path) == payload
+
+
+def test_valid_content_address_without_manifest_is_absent_without_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    payload_bytes = b'{"signals":[]}'
+    snapshot_id = compute_snapshot_id(payload_bytes)
+    channel_dir = tmp_path / "fixture_prog" / "runtime" / "prefetch" / "workiq"
+    snapshot_dir = channel_dir / snapshot_id
+    snapshot_dir.mkdir(parents=True)
+    (snapshot_dir / "payload.json").write_bytes(payload_bytes)
+    pointer_path = channel_dir / "latest.json"
+    pointer_path.write_text(json.dumps({"snapshot_id": snapshot_id}), encoding="utf-8")
+    pointer_before = pointer_path.read_bytes()
+
+    assert read_latest_committed_snapshot("fixture_prog", "workiq", programs_root=tmp_path) is None
+    assert read_unexpired_committed_snapshot("fixture_prog", "workiq", programs_root=tmp_path, now=_NOW) is None
+    assert not caplog.records
+    assert not (snapshot_dir / "manifest.json").exists()
+    assert (snapshot_dir / "payload.json").read_bytes() == payload_bytes
+    assert pointer_path.read_bytes() == pointer_before
+
+
+@pytest.mark.parametrize("offset_us", [-1, 0, 1])
+def test_snapshot_expiry_boundary_is_inclusive(tmp_path: Path, offset_us: int) -> None:
+    manifest = write_prefetch_snapshot(
+        program_id="fixture_prog", channel="workiq", payload={"signals": []}, watermark=None,
+        completeness="complete", latency_ms=0, ttl_seconds=60, programs_root=tmp_path, now=_NOW,
+    )
+    at = manifest.expires_at + timedelta(microseconds=offset_us)
+    assert manifest.is_expired(at=at) is (offset_us >= 0)
+    selected = read_unexpired_committed_snapshot("fixture_prog", "workiq", programs_root=tmp_path, now=at)
+    assert selected == (manifest if offset_us < 0 else None)
+    assert read_latest_committed_snapshot("fixture_prog", "workiq", programs_root=tmp_path) == manifest
+
+
+@pytest.mark.parametrize(
+    "text",
+    ['[{' * 1500, 'escaped " quote \\ and closing }]', 'slashes \\\\" and [{"nested"}]'],
+    ids=["brackets-in-string", "escaped-quote-and-backslash", "escaped-backslashes"],
+)
+def test_payload_depth_scan_does_not_count_escaped_string_content(tmp_path: Path, text: str) -> None:
+    payload = {"text": text, "signals": []}
+    manifest = write_prefetch_snapshot(
+        program_id="fixture_prog", channel="workiq", payload=payload, watermark=None,
+        completeness="complete", latency_ms=0, ttl_seconds=3600, programs_root=tmp_path, now=_NOW,
+    )
+    assert read_snapshot_payload("fixture_prog", "workiq", manifest, programs_root=tmp_path) == payload
+
+
+@pytest.mark.parametrize("target", ["manifest.json", "latest.json"])
+def test_atomic_rename_failure_keeps_previous_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str,
+) -> None:
+    import src.core.prefetch_store as store
+
+    first = write_prefetch_snapshot(
+        program_id="fixture_prog", channel="workiq", payload={"version": 1}, watermark=None,
+        completeness="complete", latency_ms=0, ttl_seconds=3600, programs_root=tmp_path, now=_NOW,
+    )
+    channel_dir = tmp_path / "fixture_prog" / "runtime" / "prefetch" / "workiq"
+    first_dir = channel_dir / first.snapshot_id
+    paths = (first_dir / "payload.json", first_dir / "manifest.json", channel_dir / "latest.json")
+    before = tuple(path.read_bytes() for path in paths)
+    payload = {"version": 2}
+    payload_bytes = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    next_dir = channel_dir / compute_snapshot_id(payload_bytes)
+    destination = next_dir / target if target == "manifest.json" else channel_dir / target
+    original_replace = store.os.replace
+
+    def fail_selected_rename(source: Path, destination_path: Path) -> None:
+        if destination_path == destination:
+            raise PermissionError("Synthetic atomic rename failure")
+        original_replace(source, destination_path)
+
+    monkeypatch.setattr(store.os, "replace", fail_selected_rename)
+    with pytest.raises(PermissionError, match="Synthetic atomic rename failure"):
+        write_prefetch_snapshot(
+            program_id="fixture_prog", channel="workiq", payload=payload, watermark=None,
+            completeness="complete", latency_ms=0, ttl_seconds=3600, programs_root=tmp_path, now=_NOW,
+        )
+
+    assert tuple(path.read_bytes() for path in paths) == before
+    assert read_latest_committed_snapshot("fixture_prog", "workiq", programs_root=tmp_path) == first
+    assert read_snapshot_payload("fixture_prog", "workiq", first, programs_root=tmp_path) == {"version": 1}
+    assert (next_dir / "payload.json").read_bytes() == payload_bytes
+    assert (next_dir / "manifest.json").exists() is (target == "latest.json")
+    assert destination.with_name(destination.name + ".tmp").exists()

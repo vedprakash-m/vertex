@@ -315,6 +315,7 @@ from src.commands.report_pipeline.assemble_stage import (
     DraftState,
     ProgramFactSnapshotDraftState,
     _pin_program_fact_snapshot,
+    _program_context_sha256,
     _runtime_db_root_for_reports,
     _is_decision_type,
     _is_risk_type,
@@ -1459,6 +1460,7 @@ class _OutputStage:
                 exec_summary_text=ctx.render_exec_summary_text,
                 gather_run_id=ctx.gather_run_id,
                 gather_run_hash=ctx.gather_run_hash,
+                program_context_sha256=_program_context_sha256(ctx.bundle),
             ),
         )
         adaptive_card_paths = _write_report_adaptive_cards(

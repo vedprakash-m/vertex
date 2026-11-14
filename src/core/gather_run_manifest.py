@@ -22,6 +22,7 @@ same layering ``workspace_lease.py`` uses for the lease primitive it exposes.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass, fields, is_dataclass, replace
@@ -33,6 +34,9 @@ from typing import Any, Callable
 from src.core.manifest_writer import hash_content
 from src.core.program_paths import PROGRAMS_ROOT, get_runtime_dir
 from src.core.workspace_lease import is_lease_expired, read_lease_state
+from src.core.workspace_paths import is_bare_identifier
+
+_LOG = logging.getLogger(__name__)
 
 SCHEMA_VERSION = "gather-run.v1"
 
@@ -343,8 +347,10 @@ def get_verified_committed_run_state(
     Read paths use this rather than trusting a directory name or status field:
     a partially written, corrupt, or tampered manifest must never make
     gather-stamped signals or facts visible. Invalid entries are ignored so a
-    bad historical artifact cannot take down a program reader. The cutoff is
-    the earliest valid value, preserving conservative grandfathering.
+    bad historical artifact cannot take down a program reader. Candidate
+    identity, schema, status, and hash must match the containing directory.
+    The cutoff is the earliest valid value, preserving conservative
+    grandfathering.
     """
     committed_root = get_committed_root(program_id, programs_root=programs_root)
     if not committed_root.exists():
@@ -356,14 +362,11 @@ def get_verified_committed_run_state(
         if not run_dir.is_dir():
             continue
         try:
-            manifest = read_manifest(run_dir)
-        except (OSError, json.JSONDecodeError, KeyError, ValueError):
+            manifest = _read_committed_candidate(program_id, run_dir)
+        except ValueError:
+            _LOG.warning("Invalid committed gather manifest; ignoring candidate.")
             continue
-        if (
-            manifest.status is GatherRunStatus.COMMITTED
-            and manifest.manifest_hash
-            and compute_manifest_hash(manifest) == manifest.manifest_hash
-        ):
+        if manifest is not None:
             run_ids.add(manifest.run_id)
             if manifest.legacy_cutoff_at is not None:
                 cutoffs.append(manifest.legacy_cutoff_at)
@@ -375,7 +378,7 @@ def get_verified_committed_run_ids(
     *,
     programs_root: Path = PROGRAMS_ROOT,
 ) -> frozenset[str]:
-    """Return only committed run IDs whose manifests still pass hash verification."""
+    """Return committed run IDs whose manifests pass identity and hash verification."""
     return get_verified_committed_run_state(program_id, programs_root=programs_root)[0]
 
 
@@ -387,8 +390,8 @@ def get_legacy_cutoff_at(
     """§4.17 step 5: return the program's ratified legacy-cutoff timestamp, or
     ``None`` if no legacy-cutoff manifest has been created yet.
 
-    Only a hash-valid, committed manifest with ``legacy_cutoff_at`` set
-    counts — the same tamper-resistance rule as
+    Only an identity- and hash-valid, committed manifest with
+    ``legacy_cutoff_at`` set counts — the same verification rule as
     ``get_verified_committed_run_ids``. Creation is idempotent
     (``create_legacy_cutoff_manifest``), so normally at most one such manifest
     exists; if more than one is somehow present, the earliest cutoff is used
@@ -415,18 +418,24 @@ def create_legacy_cutoff_manifest(
     existing_cutoff = get_legacy_cutoff_at(program_id, programs_root=programs_root)
     if existing_cutoff is not None:
         committed_root = get_committed_root(program_id, programs_root=programs_root)
-        for run_dir in committed_root.iterdir():
-            if not run_dir.is_dir() or not run_dir.name.startswith(LEGACY_CUTOFF_RUN_ID_PREFIX):
-                continue
-            try:
-                manifest = read_manifest(run_dir)
-            except (OSError, json.JSONDecodeError, KeyError, ValueError):
-                continue
-            if manifest.legacy_cutoff_at == existing_cutoff:
-                return manifest
-        # Defensive: a valid cutoff was found but its manifest could not be
-        # re-read (should not happen). Fall through and create a fresh one
-        # rather than raise, since idempotency is best-effort convenience.
+        try:
+            for run_dir in committed_root.iterdir():
+                if not run_dir.is_dir() or not run_dir.name.startswith(LEGACY_CUTOFF_RUN_ID_PREFIX):
+                    continue
+                try:
+                    manifest = _read_committed_candidate(program_id, run_dir)
+                except ValueError:
+                    _LOG.warning("Invalid committed gather manifest; ignoring candidate.")
+                    continue
+                if (
+                    manifest is not None
+                    and manifest.actor_identity_type == ACTOR_IDENTITY_SYNTHETIC
+                    and manifest.legacy_cutoff_at == existing_cutoff
+                ):
+                    return manifest
+        except FileNotFoundError:
+            raise ValueError("verified legacy cutoff could not be revalidated") from None
+        raise ValueError("verified legacy cutoff could not be revalidated")
 
     from src.core.ledger.ulid import new_ulid
 
@@ -726,8 +735,11 @@ def _read_pointer(path: Path) -> tuple[str, str] | None:
         return None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        return str(payload["run_id"]), str(payload["manifest_hash"])
-    except (ValueError, KeyError, TypeError, OSError):
+        run_id = payload["run_id"]
+        if not isinstance(run_id, str) or not is_bare_identifier(run_id):
+            return None
+        return run_id, str(payload["manifest_hash"])
+    except (ValueError, KeyError, TypeError, OSError, RecursionError):
         return None
 
 
@@ -761,7 +773,7 @@ def _read_committed_candidate(
         }:
             return None
         candidate = _manifest_from_payload(payload)
-    except (OSError, KeyError, ValueError, TypeError, AttributeError) as exc:
+    except (OSError, KeyError, ValueError, TypeError, AttributeError, RecursionError) as exc:
         raise _RecoverableCommittedCandidateError(
             f"Invalid committed gather evidence at {run_dir}: unreadable manifest."
         ) from exc
@@ -772,7 +784,13 @@ def _read_committed_candidate(
         or candidate.schema_version != SCHEMA_VERSION
     ):
         raise ValueError(f"Invalid committed gather evidence at {run_dir}: program/run/status/schema mismatch.")
-    if not candidate.manifest_hash or compute_manifest_hash(candidate) != candidate.manifest_hash:
+    try:
+        computed_hash = compute_manifest_hash(candidate) if candidate.manifest_hash else None
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise _RecoverableCommittedCandidateError(
+            f"Invalid committed gather evidence at {run_dir}: hash verification failed."
+        ) from exc
+    if not candidate.manifest_hash or computed_hash != candidate.manifest_hash:
         raise _RecoverableCommittedCandidateError(
             f"Invalid committed gather evidence at {run_dir}: hash verification failed."
         )
@@ -857,11 +875,16 @@ def validate_pinned_gather_run(
     """
     if gather_run_id is None:
         return ()
+    if not isinstance(gather_run_id, str) or not is_bare_identifier(gather_run_id):
+        return (
+            "BLOCKED: Pinned gather run has an invalid identifier. "
+            "Re-run 'vertex report' to pin a current, verified run.",
+        )
 
     run_dir = get_committed_run_dir(program_id, gather_run_id, programs_root=programs_root)
     try:
         pinned = read_manifest(run_dir)
-    except (OSError, json.JSONDecodeError, KeyError, ValueError):
+    except (OSError, json.JSONDecodeError, KeyError, ValueError, TypeError, AttributeError, RecursionError):
         return (
             f"BLOCKED: Pinned gather run {gather_run_id} is invalid: no readable "
             "committed manifest found. Re-run 'vertex report' to pin a current run.",
@@ -878,7 +901,12 @@ def validate_pinned_gather_run(
             "Re-run 'vertex report' to pin a current, verified run.",
         )
 
-    if compute_manifest_hash(pinned) != pinned.manifest_hash or (
+    try:
+        hash_valid = compute_manifest_hash(pinned) == pinned.manifest_hash
+    except (TypeError, ValueError, RecursionError):
+        hash_valid = False
+
+    if not hash_valid or (
         gather_run_hash is not None and pinned.manifest_hash != gather_run_hash
     ):
         return (

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from src.ai._pipeline import AIPipelineError, process_generated_text
-from src.ai.client import AIClientError
+from src.ai.client import AIClientError, NON_RETRYABLE_AI_ERRORS
 from src.ai.provider import LLMProvider
 from src.ai.tiered_router import TierResult, route_through_tiers
 from src.core.ai_result_cache import AIResultCacheKey, canonical_input_hash, get_ai_result, put_ai_result
@@ -157,6 +157,10 @@ class WorkstreamSynthesizer:
                 cache_lookup_fn=lambda: _cached_response(cache_key, programs_root=programs_root),
                 cache_store_fn=lambda value: put_ai_result(cache_key, value, programs_root=programs_root),
             ).value
+        except NON_RETRYABLE_AI_ERRORS as error:
+            reason = f"Workstream synthesis stopped: {type(error).__name__}; check AI cost state before retrying."
+            _discard(ReleaseTerminal.DISCARDED, reason)
+            raise SynthesizerError(reason) from error
         except AIClientError as error:
             reason = f"Workstream synthesis failed for {workstream.id}: {error}"
             _discard(ReleaseTerminal.DISCARDED, reason)

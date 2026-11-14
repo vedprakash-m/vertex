@@ -27,9 +27,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from src.core.archive_store import _append_archive_entry, read_archive_index
+from src.core.archive_store import _append_archive_entry, _parse_archive_index_payload
+from src.core.exceptions import ConfigError, StateError
 from src.core.models import ArchiveEntry, ArchiveIndex
-from src.core.snapshot_store import ArchiveLock, find_orphaned_staging, get_archive_root, read_snapshot
+from src.core.snapshot_store import ArchiveLock, read_snapshot
+from src.core.workspace_paths import is_bare_identifier
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -39,11 +41,16 @@ def _resolve_program_root(program: str) -> Path:
 
 
 def _index_path(program_root: Path, edition: str) -> Path:
-    return get_archive_root(edition, program_root / "archive") / "index.json"
+    if not is_bare_identifier(edition):
+        raise ConfigError("Invalid edition identifier: use a bare filename stem without paths or wildcard characters.")
+    return program_root / "archive" / edition / "index.json"
 
 
 def _load_index(program_root: Path, edition: str) -> ArchiveIndex:
-    return read_archive_index(edition, archive_root=program_root / "archive")
+    path = _index_path(program_root, edition)
+    if not path.exists():
+        return ArchiveIndex(edition=edition, issues=())
+    return _parse_archive_index_payload(edition, json.loads(path.read_text(encoding="utf-8")))
 
 
 def _save_index(program_root: Path, edition: str, index: ArchiveIndex) -> Path:
@@ -80,7 +87,7 @@ def _find_issue_entry(index: ArchiveIndex, issue_number: int) -> ArchiveEntry | 
 
 
 def _canonical_issue_paths(program_root: Path, edition: str, issue_number: int) -> dict[str, Path]:
-    archive_root = get_archive_root(edition, program_root / "archive")
+    archive_root = _index_path(program_root, edition).parent
     issue_prefix = f"issue_{issue_number:03d}"
     return {
         "snapshot": archive_root / "snapshots" / f"{issue_prefix}.snapshot.json",
@@ -100,9 +107,9 @@ def _build_readd_entry(
 ) -> tuple[ArchiveEntry, list[str], dict[str, str | None]]:
     paths = _canonical_issue_paths(program_root, edition, issue_number)
     required_labels = ("snapshot", "html", "md", "manifest")
-    missing = [label for label in required_labels if not paths[label].exists()]
+    missing = [label for label in required_labels if not paths[label].is_file()]
     candidates = {
-        label: (str(path) if path.exists() else None)
+        label: (str(path) if path.is_file() else None)
         for label, path in paths.items()
     }
     if missing:
@@ -110,16 +117,19 @@ def _build_readd_entry(
             f"Cannot readd issue {issue_number:03d}; missing required archive file(s): {', '.join(missing)}"
         )
 
-    snapshot = read_snapshot(paths["snapshot"])
+    try:
+        snapshot = read_snapshot(paths["snapshot"])
+    except (OSError, ValueError, TypeError, KeyError, StateError) as exc:
+        raise RuntimeError(f"Cannot readd issue {issue_number:03d}; canonical snapshot is unreadable or invalid: {exc}") from exc
     metadata = dict(existing_entry.metadata if existing_entry is not None else {})
-    if paths["published_eml"].exists():
+    if paths["published_eml"].is_file():
         metadata.setdefault("published_eml_path", str(paths["published_eml"]))
 
     entry = ArchiveEntry(
         issue_number=issue_number,
         generated_at=snapshot.generated_at,
         kind=(existing_entry.kind if existing_entry is not None else "confirmed"),
-        eml_path=(str(paths["eml"]) if paths["eml"].exists() else None),
+        eml_path=(str(paths["eml"]) if paths["eml"].is_file() else None),
         html_path=str(paths["html"]),
         md_path=str(paths["md"]),
         snapshot_path=str(paths["snapshot"]),
@@ -139,10 +149,10 @@ def _plan_readd(
 ) -> dict[str, Any]:
     paths = _canonical_issue_paths(program_root, edition, issue_number)
     candidates = {
-        label: (str(path) if path.exists() else None)
+        label: (str(path) if path.is_file() else None)
         for label, path in paths.items()
     }
-    missing = [label for label in ("snapshot", "html", "md", "manifest") if not paths[label].exists()]
+    missing = [label for label in ("snapshot", "html", "md", "manifest") if not paths[label].is_file()]
     return {
         "strategy": "readd",
         "issue_number": issue_number,
@@ -203,13 +213,16 @@ def _delete_if_exists(path: Path) -> None:
     path.unlink()
 
 
+def _check_staging(edition_root: Path) -> None:
+    staging_root = edition_root / "staging"
+    if staging_root.exists() and any(staging_root.rglob("*")):
+        raise RuntimeError(f"Incomplete confirm detected at {staging_root}")
+
+
 def _apply_readd(program_root: Path, edition: str, issue_number: int) -> Path:
-    archive_root = program_root / "archive"
-    edition_root = get_archive_root(edition, archive_root)
+    edition_root = _index_path(program_root, edition).parent
     with ArchiveLock(edition_root):
-        orphaned_staging = find_orphaned_staging(edition, archive_root)
-        if orphaned_staging is not None:
-            raise RuntimeError(f"Incomplete confirm detected at {orphaned_staging}")
+        _check_staging(edition_root)
         current_index = _load_index(program_root, edition)
         current_entry = _find_issue_entry(current_index, issue_number)
         updated_entry, _, _ = _build_readd_entry(program_root, edition, issue_number, current_entry)
@@ -218,13 +231,10 @@ def _apply_readd(program_root: Path, edition: str, issue_number: int) -> Path:
 
 
 def _apply_drop(program_root: Path, edition: str, issue_number: int, *, wipe: bool) -> tuple[Path, list[str]]:
-    archive_root = program_root / "archive"
-    edition_root = get_archive_root(edition, archive_root)
+    edition_root = _index_path(program_root, edition).parent
     removed_files: list[str] = []
     with ArchiveLock(edition_root):
-        orphaned_staging = find_orphaned_staging(edition, archive_root)
-        if orphaned_staging is not None:
-            raise RuntimeError(f"Incomplete confirm detected at {orphaned_staging}")
+        _check_staging(edition_root)
         current_index = _load_index(program_root, edition)
         updated_index = _drop_entry(current_index, issue_number)
         index_path = _save_index(program_root, edition, updated_index)
@@ -283,10 +293,11 @@ def main(argv: list[str] | None = None) -> int:
 
     print(json.dumps(plan, indent=2))
 
-    if dry_run:
-        return 0
-
     try:
+        if dry_run:
+            if args.strategy == "readd":
+                _build_readd_entry(program_root, args.edition, args.issue, entry)
+            return 0
         if args.strategy == "readd":
             index_path = _apply_readd(program_root, args.edition, args.issue)
             result = {

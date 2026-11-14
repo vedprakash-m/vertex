@@ -8,6 +8,63 @@ from src.core.exceptions import ConfigError
 from src.core import policy_loader
 
 
+@pytest.mark.parametrize("configured_name", ["default", "selected"])
+@pytest.mark.parametrize("field_name", ["input_cost_per_1k_tokens", "output_cost_per_1k_tokens"])
+@pytest.mark.parametrize(
+    "invalid_yaml",
+    ["-0.1", ".nan", ".inf", "-.inf", "true", "'private-price-value'", "1" + "0" * 400],
+    ids=["negative", "nan", "positive-infinity", "negative-infinity", "boolean", "text", "float-overflow"],
+)
+def test_model_price_admission_rejects_invalid_policy_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    configured_name: str, field_name: str, invalid_yaml: str,
+) -> None:
+    policy_path = tmp_path / "defaults.yaml"
+    prices = {"input_cost_per_1k_tokens": "0.001", "output_cost_per_1k_tokens": "0.002"}
+    prices[field_name] = invalid_yaml
+    policy_path.write_text(
+        'policy_schema_version: "1"\n'
+        "ai:\n"
+        "  models:\n"
+        f"    {configured_name}:\n"
+        f"      input_cost_per_1k_tokens: {prices['input_cost_per_1k_tokens']}\n"
+        f"      output_cost_per_1k_tokens: {prices['output_cost_per_1k_tokens']}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(policy_loader, "DEFAULT_POLICY_PATH", policy_path)
+    policy_loader._load_policy_defaults.cache_clear()
+    try:
+        with pytest.raises(ConfigError, match="finite nonnegative") as error:
+            policy_loader.load_ai_model_cost_policy("selected")
+    finally:
+        policy_loader._load_policy_defaults.cache_clear()
+    assert "private-price-value" not in str(error.value)
+
+
+@pytest.mark.parametrize("price", ["0", "-0.0", "0.001"])
+def test_model_price_admission_preserves_finite_nonnegative_prices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, price: str,
+) -> None:
+    policy_path = tmp_path / "defaults.yaml"
+    policy_path.write_text(
+        'policy_schema_version: "1"\n'
+        "ai:\n"
+        "  models:\n"
+        "    default:\n"
+        f"      input_cost_per_1k_tokens: {price}\n"
+        f"      output_cost_per_1k_tokens: {price}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(policy_loader, "DEFAULT_POLICY_PATH", policy_path)
+    policy_loader._load_policy_defaults.cache_clear()
+    try:
+        policy = policy_loader.load_ai_model_cost_policy("selected")
+    finally:
+        policy_loader._load_policy_defaults.cache_clear()
+    assert policy.input_cost_per_1k_tokens == float(price)
+    assert policy.output_cost_per_1k_tokens == float(price)
+
+
 def test_load_ai_request_router_policy_reads_observe_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     policy_path = tmp_path / "defaults.yaml"
     policy_path.write_text(

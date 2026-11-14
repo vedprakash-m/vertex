@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
+from src.core.failure_taxonomy import FailureCategory
 from src.core.models_v2 import IntegrationError, Signal
 
 
@@ -80,6 +81,7 @@ def integration_operator_action(source: str) -> str | None:
 def build_integration_error(
     *, source: str, stage: str, error: str, retryable: bool = True,
     operator_action: str | None = None,
+    failure_category: FailureCategory | None = None,
 ) -> IntegrationError:
     normalized_error = error.strip() or "Unknown integration error"
     return IntegrationError(
@@ -88,6 +90,7 @@ def build_integration_error(
         retryable=retryable,
         message=normalized_error,
         operator_action=operator_action if operator_action is not None else integration_operator_action(source),
+        failure_category=failure_category,
     )
 
 
@@ -99,12 +102,14 @@ def append_integration_error_once(
     error: str,
     retryable: bool = True,
     operator_action: str | None = None,
+    failure_category: FailureCategory | None = None,
 ) -> bool:
     if sink is None:
         return False
     detail = build_integration_error(
         source=source, stage=stage, error=error, retryable=retryable,
         operator_action=operator_action,
+        failure_category=failure_category,
     )
     identity = (detail.source.strip().lower(), detail.stage.strip().lower(), detail.message)
     for existing in sink:

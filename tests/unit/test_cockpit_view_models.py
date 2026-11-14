@@ -236,6 +236,145 @@ def test_build_cockpit_snapshot_on_empty_fixture_program_never_raises(tmp_path: 
     assert snapshot.intelligence_summary.lineage_coverage is None
 
 
+@pytest.mark.parametrize("invalid", ["checksum", "malformed", "unreadable"])
+def test_invalid_tier_measurements_are_unavailable_without_repair(
+    tmp_path: Path, invalid: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+    from types import SimpleNamespace
+
+    import src.core.measurement_store as measurement_store
+    from src.core.measurement_store import compute_record_checksum, tier_decision_store_path
+
+    programs_root = tmp_path / "programs"
+    path = tier_decision_store_path("fixture_prog", programs_root=programs_root)
+    path.parent.mkdir(parents=True)
+    valid = {"outcome": "frontier_call", "chosen_tier": "frontier", "cache_hit": False}
+    valid["record_checksum"] = compute_record_checksum(valid)
+    bad_line = (
+        '{"private-synthetic":'
+        if invalid == "malformed"
+        else json.dumps({"outcome": "cache_hit", "chosen_tier": "cache", "record_checksum": "invalid"})
+    )
+    contents = (json.dumps(valid) + "\n" + bad_line + "\n").encode()
+    path.write_bytes(contents)
+    if invalid == "unreadable":
+        monkeypatch.setattr(measurement_store, "read_jsonl_records", Mock(side_effect=PermissionError("private-synthetic")))
+    monkeypatch.setattr(
+        cockpit_builder, "read_ai_telemetry",
+        lambda *args, **kwargs: (SimpleNamespace(cost_usd=1.25, tokens_in=321),),
+    )
+
+    snapshot = build_cockpit_snapshot("fixture_prog", programs_root=programs_root, now=_NOW)
+
+    assert snapshot.economics_summary.frontier_avoidance is None
+    assert snapshot.economics_summary.cache_hit_rate is None
+    assert snapshot.economics_summary.frontier_cost_usd == 1.25
+    assert snapshot.economics_summary.context_tokens_in == 321
+    finding = next(f for f in snapshot.findings if f.finding_id == "economics.tier_decisions.unavailable")
+    assert finding.status == "warn"
+    assert "private-synthetic" not in finding.summary + finding.detail
+    assert not any(f.finding_id == "economics.tier_decisions.empty" for f in snapshot.findings)
+    assert path.read_bytes() == contents
+    assert not (path.parent / "quarantine").exists()
+
+
+@pytest.mark.parametrize(("tier", "outcome", "frontier_called", "mode", "cache_rate"), [
+    ("none", "frontier_disabled", False, "off", 0.0),
+    ("none", "frontier_blocked", False, "enforce", 0.0),
+    ("cache", "cache_hit", False, "observe", 1.0),
+    ("frontier", "frontier_call", True, "enforce", 0.0),
+])
+def test_frontier_avoidance_requires_qualified_measurement(
+    tmp_path: Path, tier: str, outcome: str, frontier_called: bool, mode: str, cache_rate: float,
+) -> None:
+    from src.ai.tiered_router import RouteOutcome, Tier, TierDecision
+    from src.core.measurement_store import TierDecisionSinkConfig, make_tier_decision_sink, tier_decision_store_path
+
+    programs_root = tmp_path / "programs"
+    sink = make_tier_decision_sink(
+        TierDecisionSinkConfig(
+            program_id="fixture_prog", edition_id=None, run_id="run",
+            execution_mode=mode, programs_root=programs_root,
+        )
+    )
+    sink(TierDecision(
+        feature="synthetic", tier=Tier(tier), outcome=RouteOutcome(outcome),
+        confidence=1.0, frontier_called=frontier_called, trace_id=None, recorded_at=_NOW.isoformat(),
+    ))
+    path = tier_decision_store_path("fixture_prog", programs_root=programs_root)
+    original = path.read_bytes()
+
+    summary, findings = cockpit_builder._build_economics_summary(
+        "fixture_prog", programs_root=programs_root, observed_at=_NOW,
+    )
+
+    assert summary.frontier_avoidance is None
+    assert summary.cache_hit_rate == cache_rate
+    finding = next(f for f in findings if f.finding_id == "economics.tier_decisions.unqualified")
+    assert finding.status == "warn"
+    assert "eligible" in finding.detail
+    assert "active" in finding.detail
+    assert "cache" in finding.detail
+    assert path.read_bytes() == original
+
+
+def test_eligible_flags_without_complete_window_do_not_establish_frontier_avoidance(tmp_path: Path) -> None:
+    import json
+
+    from src.ai.tiered_router import RouteOutcome, Tier, TierDecision
+    from src.core.measurement_store import (
+        TierDecisionSinkConfig, compute_record_checksum, make_tier_decision_sink, tier_decision_store_path,
+    )
+
+    programs_root = tmp_path / "programs"
+    sink = make_tier_decision_sink(
+        TierDecisionSinkConfig(
+            program_id="fixture_prog", edition_id=None, run_id="run",
+            execution_mode="enforce", programs_root=programs_root,
+        )
+    )
+    for tier, outcome, called in (
+        (Tier.CACHE, RouteOutcome.CACHE_HIT, False),
+        (Tier.FRONTIER, RouteOutcome.FRONTIER_CALL, True),
+    ):
+        sink(TierDecision(
+            feature="synthetic", tier=tier, outcome=outcome, confidence=1.0,
+            frontier_called=called, trace_id=None, recorded_at=_NOW.isoformat(),
+        ))
+    path = tier_decision_store_path("fixture_prog", programs_root=programs_root)
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    for row in rows:
+        row["frontier_eligible"] = True
+        row["record_checksum"] = compute_record_checksum(row)
+    original = ("\n".join(json.dumps(row) for row in rows) + "\n").encode()
+    path.write_bytes(original)
+
+    snapshot = build_cockpit_snapshot("fixture_prog", programs_root=programs_root, now=_NOW)
+    payload = cockpit_snapshot_to_json_dict(snapshot)
+    restored = cockpit_snapshot_from_json_dict(payload)
+
+    assert snapshot.economics_summary.frontier_avoidance is None
+    assert snapshot.economics_summary.cache_hit_rate == 0.5
+    assert payload["economics_summary"]["frontier_avoidance"] is None
+    assert restored.economics_summary == snapshot.economics_summary
+    assert any(f.finding_id == "economics.tier_decisions.unqualified" for f in restored.findings)
+    assert path.read_bytes() == original
+
+
+def test_empty_tier_history_explains_frontier_evidence_requirement(tmp_path: Path) -> None:
+    summary, findings = cockpit_builder._build_economics_summary(
+        "fixture_prog", programs_root=tmp_path, observed_at=_NOW,
+    )
+
+    assert summary.frontier_avoidance is None
+    assert summary.cache_hit_rate is None
+    finding = next(f for f in findings if f.finding_id == "economics.tier_decisions.empty")
+    assert "eligible" in finding.detail
+    assert "complete" in finding.detail
+    assert "until at least one routed AI call" not in finding.detail
+
+
 def test_build_cockpit_snapshot_is_deterministic_for_same_inputs(tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     first = build_cockpit_snapshot("fixture_prog", programs_root=programs_root, now=_NOW)

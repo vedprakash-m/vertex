@@ -12,6 +12,7 @@ no M365, no AI. They verify the §17.8 Option A enforcement chain:
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -66,6 +67,7 @@ def _build_evidence(
                 source_date=date(2026, 6, 17),
                 author="operator@example.com",
                 permalink="https://outlook/x",
+                canonical_id="synthetic-native-id",
             ),
         ),
         raw_excerpts=("Gen9 is on track",),
@@ -184,7 +186,9 @@ def test_p4_0_evidence_store_decodes_source_refs_and_stale_after(tmp_path: Path)
     records = load_evidence_records("acme", programs_root=programs_root)
     assert len(records) == 1
     rec = records[0]
-    assert rec.evidence.source_refs == evidence.source_refs
+    assert rec.evidence.source_refs == (
+        replace(evidence.source_refs[0], author="[PII-FILTERED-EMAIL]"),
+    )
     assert rec.evidence.stale_after == evidence.stale_after
     assert rec.evidence.etas[0].ado_id == "900112"
 

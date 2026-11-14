@@ -2,7 +2,8 @@
 
 The deterministic ContextCompiler (``src/core/context_compiler.py``) consumes a
 ``TokenEstimator`` Protocol and ships with a Zone-A default
-(``DeterministicTokenEstimator``) that wraps ``context_budget.estimate_tokens``.
+(``DeterministicTokenEstimator``) that uses the core budget's strict tokenizer
+resolver.
 That default is sufficient when a caller does not know which provider/model a
 compile is destined for. Appendix A.1 also names ``src/ai/context_tokenizers.py``
 as the home for *provider-specific* adapters that can be *injected* when the
@@ -13,8 +14,8 @@ generic fallback.
 This module is intentionally Zone B (``src/ai``): it is the natural layering
 point for anything that must know a provider's model identity, and the Zone-A
 compiler stays provider-agnostic by depending only on the Protocol. ``tiktoken``
-is optional here just as it is in ``context_budget``: if it is not installed the
-adapters degrade to the same character heuristic.
+is optional here just as it is in ``context_budget``: if it is not installed,
+the factory selects the separately identified character heuristic.
 
 Design:
 - ``TiktokenTokenEstimator`` resolves a deployment/model name to the concrete
@@ -35,20 +36,21 @@ import importlib
 from collections.abc import Mapping
 from functools import lru_cache
 
-from src.core.context_compiler import TokenEstimator
+from src.core.context_compiler import ContextCompileRejected, TokenEstimator
 
-#: tiktoken is an optional tokenizer dependency (not a provider SDK). It is the
-#: same optional import ``context_budget.estimate_tokens`` already uses, kept in
-#: a single ``try/except`` so a missing dependency degrades identically here.
+#: tiktoken is optional; a broken package or missing internal dependency is not
+#: equivalent to the top-level package being absent.
 def _try_import_tiktoken():
     try:
         return importlib.import_module("tiktoken")
-    except ImportError:
+    except ModuleNotFoundError as error:
+        if error.name != "tiktoken":
+            raise
         return None
 
 
 #: Deployment/model -> tiktoken encoding name. tiktoken's own
-#: ``encoding_for_model`` already resolves ``gpt-4o``/``gpt-4o-mini``/``o3-*``
+#: ``encoding_name_for_model`` already resolves ``gpt-4o``/``gpt-4o-mini``/``o3-*``
 #: to ``o200k_base`` and ``gpt-4``/``gpt-35-turbo`` to ``cl100k_base``; this
 #: table exists so unrecognized Azure deployment aliases (e.g. a deployment
 #: named ``samplealpha-gpt4o`` that is actually ``gpt-4o``) can still be pinned without
@@ -71,8 +73,8 @@ def _resolve_encoding_name(tiktoken_module, model_or_deployment: str) -> str | N
     if override is not None:
         return override
     try:
-        return tiktoken_module.encoding_for_model(key).name
-    except Exception:
+        return tiktoken_module.encoding_name_for_model(key)
+    except KeyError:
         return None
 
 
@@ -83,10 +85,10 @@ class TiktokenTokenEstimator:
 
     Construction is cheap: tiktoken memoizes ``Encoding`` objects by identity, so
     repeated construction with the same encoding name returns the same cached
-    object. Encoding resolution failures raise at construction time (fail loud
-    when a caller explicitly asks for a tiktoken adapter) rather than silently
-    degrading -- callers that want graceful degradation should use
-    ``resolve_token_estimator`` instead.
+    object. An unavailable package, unrecognized model, or encoding-loading
+    failure raises at construction time. ``resolve_token_estimator`` falls back
+    only for an unavailable package or unrecognized model. Once an encoding
+    is selected, an encoding failure is not replaced with a heuristic estimate.
     """
 
     def __init__(self, deployment: str) -> None:
@@ -106,11 +108,9 @@ class TiktokenTokenEstimator:
         if not text:
             return 0
         try:
-            return len(self._encoding.encode(text))
-        except Exception:
-            # An encode failure on otherwise-resolved encoding is pathological;
-            # fall back to the heuristic rather than abort the compile.
-            return max(1, len(text) // 4)
+            return len(self._encoding.encode_ordinary(text))
+        except (ValueError, TypeError, RuntimeError, OverflowError):
+            raise ContextCompileRejected("Tokenizer failed to estimate input.") from None
 
 
 class CharHeuristicTokenEstimator:

@@ -28,10 +28,27 @@ class UnsafeWorkIQEvidenceError(ValueError):
 def sanitize_workiq_evidence(evidence: WorkstreamEvidence) -> WorkstreamEvidence:
     """Scrub ordinary PII and quarantine credential/sensitivity-marked content."""
 
+    workiq_refs = tuple(ref for ref in evidence.source_refs if ref.source_type.startswith("workiq_"))
+    if (
+        not workiq_refs
+        or any(not isinstance(ref.canonical_id, str) or not ref.canonical_id.strip() for ref in workiq_refs)
+        or any(ref.canonical_id is not None and not isinstance(ref.canonical_id, str) for ref in evidence.source_refs)
+    ):
+        raise UnsafeWorkIQEvidenceError(("missing_source_identity",))
+
+    if any(
+        not isinstance(eta.label, str)
+        or (eta.owner is not None and not isinstance(eta.owner, str))
+        for eta in evidence.etas
+    ):
+        raise UnsafeWorkIQEvidenceError(("invalid_eta_text",))
+
     persistent_text = [
         evidence.narrative_summary,
         *evidence.raw_excerpts,
         *evidence.owners,
+        *(eta.label for eta in evidence.etas),
+        *(eta.owner or "" for eta in evidence.etas),
         *(ref.description for ref in evidence.source_refs),
         *(ref.author or "" for ref in evidence.source_refs),
     ]
@@ -53,8 +70,13 @@ def sanitize_workiq_evidence(evidence: WorkstreamEvidence) -> WorkstreamEvidence
         replace(ref, description=scrub(ref.description) or "", author=scrub(ref.author))
         for ref in evidence.source_refs
     )
+    etas = tuple(
+        replace(eta, label=scrub(eta.label) or "", owner=scrub(eta.owner))
+        for eta in evidence.etas
+    )
     return replace(
         evidence,
+        etas=etas,
         owners=tuple(scrub(owner) or "" for owner in evidence.owners),
         raw_excerpts=tuple(scrub(excerpt) or "" for excerpt in evidence.raw_excerpts),
         narrative_summary=scrub(evidence.narrative_summary) or "",

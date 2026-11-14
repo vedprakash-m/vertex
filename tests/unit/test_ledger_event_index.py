@@ -1,10 +1,69 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
+from unittest.mock import Mock
 
-from src.core.ledger.event_index import load_event_entity_refs, load_indexed_events, load_vault_refs, rebuild_event_index
+import pytest
+
+from src.core.exceptions import StateError
+from src.core.ledger.event_index import (
+    get_event_index_path,
+    load_event_entity_refs,
+    load_indexed_events,
+    load_vault_refs,
+    rebuild_event_index,
+)
 from src.core.ledger.event_log import ConfidenceTier, TemporalConfidence, build_event_envelope, write_event
 from src.core.ledger.source_refs import LTDeckRef, OperatorAssertionRef
+
+
+@pytest.mark.parametrize(
+    "program_id",
+    [
+        "../synthetic-private", r"..\synthetic-private", "..", "synthetic*", "synthetic?",
+        "synthetic.", "synthetic ", "\n", pytest.param("__absolute__", id="absolute"),
+    ],
+)
+@pytest.mark.parametrize("operation", ["path", "read", "rebuild"])
+def test_event_index_rejects_non_bare_program_before_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program_id: str, operation: str,
+) -> None:
+    programs_root = tmp_path / "workspace" / "programs"
+    if program_id == "__absolute__":
+        program_id = str(tmp_path / "synthetic-private")
+    fence = Mock(side_effect=AssertionError("invalid selector reached capture fence"))
+    monkeypatch.setattr("src.core.ledger.event_index.cooperative_capture_fence", fence)
+    operations = {
+        "path": lambda: get_event_index_path(program_id, programs_root=programs_root),
+        "read": lambda: load_indexed_events(program_id, programs_root=programs_root),
+        "rebuild": lambda: rebuild_event_index(program_id, programs_root=programs_root),
+    }
+
+    with pytest.raises(StateError) as error:
+        operations[operation]()
+
+    assert "synthetic-private" not in str(error.value)
+    fence.assert_not_called()
+    assert not (tmp_path / "workspace").exists()
+
+
+@pytest.mark.parametrize("program_id", [None, 42, False, "", " "])
+def test_event_index_path_rejects_invalid_program_type_or_empty_value(tmp_path: Path, program_id: object) -> None:
+    with pytest.raises(StateError):
+        get_event_index_path(program_id, programs_root=tmp_path / "programs")  # type: ignore[arg-type]
+
+    assert not (tmp_path / "programs").exists()
+
+
+@pytest.mark.parametrize("program_id", ["samplealpha", "sample-alpha_123", "sample alpha"])
+def test_event_index_path_preserves_bare_program_mapping(tmp_path: Path, program_id: str) -> None:
+    programs_root = tmp_path / "programs"
+
+    assert get_event_index_path(program_id, programs_root=programs_root) == (
+        programs_root / program_id / "ledger" / f"{program_id}-index.sqlite3"
+    )
+    assert not programs_root.exists()
 
 
 def test_write_event_populates_event_index(tmp_path) -> None:

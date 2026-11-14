@@ -33,11 +33,15 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
+import stat
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from src.core.exceptions import StateError
 
 log = logging.getLogger(__name__)
 
@@ -76,36 +80,66 @@ def _cache_dir(program_id: str, kind: str, programs_root: Path) -> Path:
     return _cache_root(program_id, programs_root) / kind
 
 
-def _key_fingerprint(key_values: tuple[str, ...]) -> str:
+def _key_fingerprint(key_values: tuple[str, ...], *, canonical: bool = False) -> str:
     """Content-addressed fingerprint over the ordered key values."""
+    if canonical or not key_values or key_values == ("",) or any("|" in value for value in key_values):
+        encoded = json.dumps(key_values, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+        return "v2-" + hashlib.sha256(encoded).hexdigest()[:32]
     joined = "|".join(key_values)
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:32]
 
 
 def _entry_path(program_id: str, kind: str, key_values: tuple[str, ...],
-                programs_root: Path) -> Path:
-    return _cache_dir(program_id, kind, programs_root) / f"{_key_fingerprint(key_values)}.json"
+                programs_root: Path, *, canonical: bool = False) -> Path:
+    return _cache_dir(program_id, kind, programs_root) / f"{_key_fingerprint(key_values, canonical=canonical)}.json"
+
+
+def _labeled_key(key_values: tuple[str, ...], key_labels: tuple[str, ...]) -> dict[str, str]:
+    if len(key_labels) != len(key_values) or len(set(key_labels)) != len(key_labels):
+        raise ValueError("Cache key labels must be unique and match key values.")
+    return dict(zip(key_labels, key_values, strict=True))
+
+
+def _entry_matches_key(
+    data: dict[str, Any], kind: str, key_values: tuple[str, ...], expected_key: dict[str, str] | None,
+) -> bool:
+    actual_key = data.get("key")
+    if data.get("kind") != kind or not isinstance(actual_key, dict):
+        return False
+    return actual_key == expected_key if expected_key is not None else tuple(actual_key.values()) == key_values
 
 
 def _now(now_epoch: float | None) -> float:
     return time.time() if now_epoch is None else float(now_epoch)
 
 
-def _read_entry(path: Path) -> dict[str, Any] | None:
-    """Load + validate a cache entry. Returns None on any defect (never raises)."""
+def _read_entry(path: Path, *, strict_read: bool = False) -> dict[str, Any] | None:
+    """Load and validate a cache entry using the selected error policy."""
     try:
         raw = path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeError) as error:
+        if strict_read:
+            raise StateError("Cache entry cannot be read.") from None
+        if isinstance(error, UnicodeError):
+            raise
         return None
     try:
         data = json.loads(raw)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError) as error:
+        if strict_read:
+            raise StateError("Cache entry has invalid JSON.") from None
+        if isinstance(error, RecursionError):
+            raise
         log.warning("rev_cache: corrupt JSON at %s — treating as miss", path)
         return None
     if not isinstance(data, dict):
+        if strict_read:
+            raise StateError("Cache entry is not an object.")
         log.warning("rev_cache: non-object entry at %s — treating as miss", path)
         return None
     if data.get("schema_version") != CACHE_SCHEMA_VERSION:
+        if strict_read:
+            raise StateError("Cache entry has an incompatible schema.")
         # Stale-schema entry → miss (a future migration would rewrite these).
         return None
     return data
@@ -137,23 +171,74 @@ def get_cached(
     programs_root: Path,
     ttl_days: int,
     now_epoch: float | None = None,
+    strict_read: bool = False,
+    key_labels: tuple[str, ...] | None = None,
 ) -> Any | None:
     """Return the cached payload for the key, or None on miss/expiry/corrupt.
 
     On a hit the entry's ``accessed_at`` is touched (LRU freshness). An expired
-    entry is pruned best-effort and reported as a miss.
+    entry is pruned best-effort and reported as a miss. A strict read instead
+    raises on identifiable corrupt entries and never touches or prunes them.
+    Labeled reads require one unique label per key value.
     """
+    expected_key = _labeled_key(key_values, key_labels) if key_labels is not None else None
     path = _entry_path(program_id, kind, key_values, programs_root)
-    if not path.exists():
-        return None
+    canonical_path = _entry_path(program_id, kind, key_values, programs_root, canonical=True)
+    candidates = (path,) if path == canonical_path else (canonical_path, path)
+    if strict_read:
+        if expected_key is None:
+            raise ValueError("A strict cache read requires key labels.")
+        for path in candidates:
+            try:
+                entry_stat = path.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                raise StateError("Cache entry cannot be inspected.") from None
+            if not stat.S_ISREG(entry_stat.st_mode) or entry_stat.st_size > MAX_ENTRY_BYTES:
+                raise StateError("Cache entry is not a bounded regular file.")
+            break
+        else:
+            return None
+    else:
+        for path in candidates:
+            if path.exists():
+                break
+        else:
+            return None
     now = _now(now_epoch)
-    data = _read_entry(path)
+    data = _read_entry(path, strict_read=strict_read)
     if data is None:
         return None
-    if _is_expired(data, ttl_days=ttl_days, now_epoch=now):
-        _safe_unlink(path)
+    if strict_read:
+        epochs = (data.get("captured_at_epoch"), data.get("accessed_at_epoch"))
+        valid_epochs = True
+        for value in epochs:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                valid_epochs = False
+                break
+            try:
+                if not math.isfinite(value):
+                    valid_epochs = False
+                    break
+            except OverflowError:
+                valid_epochs = False
+                break
+        if (
+            not _entry_matches_key(data, kind, key_values, expected_key)
+            or data.get("payload") is None
+            or not valid_epochs
+        ):
+            raise StateError("Cache entry has invalid metadata.")
+    elif not _entry_matches_key(data, kind, key_values, expected_key):
+        log.warning("rev_cache: cache entry identity mismatch; treating as miss")
         return None
-    _touch_accessed(path, data, now_epoch=now)
+    if _is_expired(data, ttl_days=ttl_days, now_epoch=now):
+        if not strict_read:
+            _safe_unlink(path)
+        return None
+    if not strict_read:
+        _touch_accessed(path, data, now_epoch=now)
     return data.get("payload")
 
 
@@ -171,14 +256,15 @@ def put_cached(
     """Persist a cache entry atomically. Returns the entry path.
 
     Prunes stale entries + LRU-surplus after writing so the cache stays bounded.
-    Raises ``ValueError`` if the serialised payload exceeds ``MAX_ENTRY_BYTES``.
+    Raises ``ValueError`` for invalid key labels or an oversized payload.
     """
+    cache_key = _labeled_key(key_values, key_labels)
     captured = set_at_epoch if set_at_epoch is not None else _now(now_epoch)
     accessed = _now(now_epoch)
     entry = {
         "schema_version": CACHE_SCHEMA_VERSION,
         "kind": kind,
-        "key": dict(zip(key_labels, key_values)),
+        "key": cache_key,
         "captured_at_epoch": float(captured),
         "accessed_at_epoch": float(accessed),
         "payload": payload,
@@ -191,6 +277,14 @@ def put_cached(
     d = _cache_dir(program_id, kind, programs_root)
     d.mkdir(parents=True, exist_ok=True)
     path = _entry_path(program_id, kind, key_values, programs_root)
+    canonical_path = _entry_path(program_id, kind, key_values, programs_root, canonical=True)
+    if path != canonical_path:
+        if canonical_path.exists():
+            path = canonical_path
+        elif path.exists():
+            existing = _read_entry(path)
+            if existing is None or not _entry_matches_key(existing, kind, key_values, cache_key):
+                path = canonical_path
     tmp = path.with_suffix(".tmp")
     tmp.write_text(blob, encoding="utf-8")
     os.replace(tmp, path)
@@ -333,6 +427,7 @@ def get_extraction_result(
         programs_root=programs_root,
         ttl_days=EXTRACTION_TTL_DAYS,
         now_epoch=now_epoch,
+        key_labels=("source_hash", "prompt_version"),
     )
     if payload is None:
         return None
@@ -403,6 +498,7 @@ def get_judge_result(
         programs_root=programs_root,
         ttl_days=JUDGE_TTL_DAYS,
         now_epoch=now_epoch,
+        key_labels=("source_document_key", "prompt_version", "ground_truth_hash"),
     )
     if not isinstance(payload, dict):
         return None

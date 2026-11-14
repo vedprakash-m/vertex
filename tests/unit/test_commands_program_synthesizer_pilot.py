@@ -161,7 +161,7 @@ def test_run_comparison_records_blind_judgment(monkeypatch, tmp_path: Path) -> N
 
     def _prompt(_message: str) -> str:
         prompts.append(_message)
-        return "b"
+        return "b" if "Which is better?" in _message else "n"
 
     result = run_context_gateway_comparison(
         program_id="acme", seed=1234, programs_root=programs_root, prompt_fn=_prompt, echo_fn=echoed.append,
@@ -177,7 +177,6 @@ def test_run_comparison_records_blind_judgment(monkeypatch, tmp_path: Path) -> N
     assert len(records) == 1
     record = records[0]
     assert record.choice == "b"
-    # _prompt returns "b" for both prompts; "b" is not a "y"/"yes" answer.
     assert record.critical_error is False
     texts = {record.option_a_text, record.option_b_text}
     assert any("baseline through-line" in t for t in texts)

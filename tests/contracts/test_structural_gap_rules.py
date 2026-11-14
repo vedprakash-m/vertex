@@ -291,35 +291,59 @@ class TestWorkstreamNoFreshState:
         assert items == []
 
 
+def _clean_thousand_fact_index() -> dict[str, list[FactAssessment]]:
+    assessments: list[FactAssessment] = []
+    for i in range(250):
+        assessments.append(_workstream_assessment(f"WS-{i:04d}", stale=False))
+    for i in range(250):
+        assessments.append(_risk_assessment(f"R-{i:04d}", impact=RiskImpact.MEDIUM, status=RiskStatus.OPEN))
+    for i in range(250):
+        recent_date = _TODAY - timedelta(days=5)
+        assessments.append(_decision_assessment(f"D-{i:04d}", status=DecisionStatus.DECIDED, decision_date=recent_date))
+    for i in range(250):
+        future_due = _TODAY + timedelta(days=60)
+        assessments.append(_commitment_assessment(f"CM-{i:04d}", due_date=future_due, status="open"))
+    return _make_index(*assessments)
+
+
+def _all_rules_fact_index() -> dict[str, list[FactAssessment]]:
+    old_date = _TODAY - timedelta(days=60)
+    imminent_due = _TODAY + timedelta(days=5)
+    return _make_index(
+        _risk_assessment("R-001", impact=RiskImpact.CRITICAL, status=RiskStatus.OPEN),
+        _commitment_assessment("CM-001", due_date=imminent_due, status="open"),
+        _decision_assessment("D-001", status=DecisionStatus.PROPOSED, decision_date=old_date),
+        _workstream_assessment("WS-001", stale=True),
+    )
+
+
+def _assert_all_gap_rules(items: list[AttentionItem]) -> None:
+    descriptions = " ".join(i.description for i in items)
+    assert "critical_risk_no_mitigation" in descriptions
+    assert "commitment_due_untracked" in descriptions
+    assert "decision_stuck_proposed" in descriptions
+    assert "workstream_no_fresh_state" in descriptions
+
+
+def test_clean_thousand_fact_index_has_no_gaps() -> None:
+    index = _clean_thousand_fact_index()
+    assert sum(len(facts) for facts in index.values()) == 1_000
+    assert _check_structural_gaps(index, _NOW) == []
+
+
+def test_all_gap_rules_can_fire_together() -> None:
+    _assert_all_gap_rules(_check_structural_gaps(_all_rules_fact_index(), _NOW))
+
+
 # ---------------------------------------------------------------------------
 # Test: perf contract — <100ms over 1,000 seeded facts (WI-3.9 M-5)
 # ---------------------------------------------------------------------------
 
 class TestStructuralGapPerf:
+    @pytest.mark.perf
     def test_gap_evaluation_under_100ms_for_1000_facts(self) -> None:
         """Structural-gap evaluation over 1,000 seeded facts must complete in <100ms."""
-        # Build a mixed index of 1,000 facts distributed across families
-        assessments: list[FactAssessment] = []
-
-        # ~250 workstreams (all fresh)
-        for i in range(250):
-            assessments.append(_workstream_assessment(f"WS-{i:04d}", stale=False))
-
-        # ~250 risks (all medium, no gap)
-        for i in range(250):
-            assessments.append(_risk_assessment(f"R-{i:04d}", impact=RiskImpact.MEDIUM, status=RiskStatus.OPEN))
-
-        # ~250 decisions (all recently decided)
-        for i in range(250):
-            recent_date = _TODAY - timedelta(days=5)
-            assessments.append(_decision_assessment(f"D-{i:04d}", status=DecisionStatus.DECIDED, decision_date=recent_date))
-
-        # ~250 commitments (all due in 60 days)
-        for i in range(250):
-            future_due = _TODAY + timedelta(days=60)
-            assessments.append(_commitment_assessment(f"CM-{i:04d}", due_date=future_due, status="open"))
-
-        idx = _make_index(*assessments)
+        idx = _clean_thousand_fact_index()
 
         start = _time.perf_counter()
         items = _check_structural_gaps(idx, _NOW)
@@ -331,26 +355,22 @@ class TestStructuralGapPerf:
         # No gaps should fire (all facts are clean)
         assert items == []
 
+    @pytest.mark.perf
     def test_gap_evaluation_with_all_rules_firing(self) -> None:
         """All 4 gap rules can fire simultaneously without crossing 100ms."""
-        old_date = _TODAY - timedelta(days=60)
-        imminent_due = _TODAY + timedelta(days=5)
-        assessments = [
-            _risk_assessment("R-001", impact=RiskImpact.CRITICAL, status=RiskStatus.OPEN),
-            _commitment_assessment("CM-001", due_date=imminent_due, status="open"),
-            _decision_assessment("D-001", status=DecisionStatus.PROPOSED, decision_date=old_date),
-            _workstream_assessment("WS-001", stale=True),
-        ]
-        idx = _make_index(*assessments)
+        idx = _all_rules_fact_index()
 
         start = _time.perf_counter()
         items = _check_structural_gaps(idx, _NOW)
         elapsed_ms = (_time.perf_counter() - start) * 1000
 
         assert elapsed_ms < 100
-        # All 4 rules should fire
-        descriptions = " ".join(i.description for i in items)
-        assert "critical_risk_no_mitigation" in descriptions
-        assert "commitment_due_untracked" in descriptions
-        assert "decision_stuck_proposed" in descriptions
-        assert "workstream_no_fresh_state" in descriptions
+        _assert_all_gap_rules(items)
+
+
+def test_structural_gap_budgets_are_in_performance_lane() -> None:
+    for benchmark in (
+        TestStructuralGapPerf.test_gap_evaluation_under_100ms_for_1000_facts,
+        TestStructuralGapPerf.test_gap_evaluation_with_all_rules_firing,
+    ):
+        assert any(mark.name == "perf" for mark in getattr(benchmark, "pytestmark", ()))

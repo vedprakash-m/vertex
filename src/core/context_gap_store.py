@@ -20,7 +20,7 @@ import json
 from src.core.jsonl_utils import parse_jsonl_line
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import portalocker
 
@@ -122,11 +122,6 @@ def append_context_gap(
     path = _gap_path(program, programs_root=programs_root)
     now = datetime.now(timezone.utc)
 
-    if deduplicate:
-        window_start = now.timestamp() - dedup_window_days * 86400
-        if _has_recent_gap(path, feature, lane, field, since_ts=window_start):
-            return path
-
     record = ContextGapRecord(
         ts=now,
         feature=feature,
@@ -137,7 +132,15 @@ def append_context_gap(
         message=message,
         impact_estimate=impact_estimate,
     )
-    _append_jsonl(path, record.to_json())
+    skip_if = None
+    if deduplicate:
+        window_start = now.timestamp() - dedup_window_days * 86400
+
+        def skip_if(lines: list[str]) -> bool:
+            return _lines_have_recent_gap(lines, feature, lane, field, since_ts=window_start)
+
+    # C.166: the dedup check runs inside the append lock, so a concurrent writer cannot interleave.
+    _append_jsonl(path, record.to_json(), skip_if=skip_if)
     return path
 
 
@@ -147,29 +150,32 @@ def _has_recent_gap(path: Path, feature: str, lane: str | None, field: str, *, s
         return False
     try:
         with path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    import json as _json  # noqa: PLC0415
-                    d = _json.loads(line)
-                except Exception:
-                    continue
-                if (
-                    d.get("feature") == feature
-                    and d.get("lane") == lane
-                    and d.get("field") == field
-                ):
-                    ts_str = d.get("ts", "")
-                    try:
-                        ts = _parse_datetime(ts_str)
-                        if ts.timestamp() >= since_ts:
-                            return True
-                    except Exception:
-                        pass
+            return _lines_have_recent_gap(fh, feature, lane, field, since_ts=since_ts)
     except OSError:
-        pass
+        return False
+
+
+def _lines_have_recent_gap(lines: Any, feature: str, lane: str | None, field: str, *, since_ts: float) -> bool:
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(d, dict):
+            continue
+        if (
+            d.get("feature") == feature
+            and d.get("lane") == lane
+            and d.get("field") == field
+        ):
+            try:
+                if _parse_datetime(d.get("ts", "")).timestamp() >= since_ts:
+                    return True
+            except Exception:
+                pass
     return False
 
 
@@ -300,12 +306,24 @@ def _gap_path(program: str, *, programs_root: Path) -> Path:
     return programs_root / program / "_feedback" / "context_gaps.jsonl"
 
 
-def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
+def _append_jsonl(
+    path: Path, payload: dict[str, Any], *, skip_if: Callable[[list[str]], bool] | None = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    line = json.dumps(payload, ensure_ascii=False) + "\n"
-    with path.open("a", encoding="utf-8") as handle:
+    line = (json.dumps(payload, ensure_ascii=False) + os.linesep).encode("utf-8")
+    with path.open("a+b") as handle:
         portalocker.lock(handle, portalocker.LOCK_EX)
         try:
+            if skip_if is not None:
+                handle.seek(0)
+                existing = handle.read().decode("utf-8", errors="replace").splitlines()
+                if skip_if(existing):
+                    return
+            handle.seek(0, os.SEEK_END)
+            if handle.tell():
+                handle.seek(-1, os.SEEK_END)
+                if handle.read(1) != b"\n":
+                    line = b"\n" + line
             handle.write(line)
             handle.flush()
             os.fsync(handle.fileno())

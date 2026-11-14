@@ -150,6 +150,14 @@ def append_signal_thread_link(program_id: str, link: SignalThreadLink, programs_
     return target
 
 
+def _signal_is_visible_in_committed_run(
+    signal: Signal, committed_run_ids: set[str], legacy_cutoff_at: datetime | None,
+) -> bool:
+    if signal.gather_run_id is not None:
+        return signal.gather_run_id in committed_run_ids
+    return legacy_cutoff_at is None or signal.timestamp <= legacy_cutoff_at
+
+
 def read_signals(
     program_id: str,
     *,
@@ -177,17 +185,10 @@ def read_signals(
     for path in _iter_weekly_journal_paths(program_id, programs_root):
         for record in _read_jsonl(path):
             signal = _signal_from_record(record)
-            if committed_run_ids is not None:
-                if signal.gather_run_id is not None:
-                    if signal.gather_run_id not in committed_run_ids:
-                        continue
-                # §4.17 step 5: an unstamped (pre-run-lifecycle) signal is
-                # attributed to "legacy" only up to the ratified cutoff, once
-                # one exists. Before a program adopts the legacy-cutoff
-                # bootstrap, `legacy_cutoff_at` is None and unstamped signals
-                # remain unconditionally visible (unchanged prior behavior).
-                elif legacy_cutoff_at is not None and signal.timestamp > legacy_cutoff_at:
-                    continue
+            if committed_run_ids is not None and not _signal_is_visible_in_committed_run(
+                signal, committed_run_ids, legacy_cutoff_at,
+            ):
+                continue
             thread_link = thread_links.get(signal.id)
             if thread_link is not None and signal.thread_id != thread_link.thread_id:
                 signal = replace(signal, thread_id=thread_link.thread_id)

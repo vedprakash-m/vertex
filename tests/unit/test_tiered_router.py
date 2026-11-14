@@ -304,7 +304,7 @@ def test_cache_store_not_called_on_cache_hit_itself():
     assert stored == []
 
 
-def test_cache_hit_stats_counts_hits_and_avoided_calls():
+def test_cache_hit_stats_reports_observed_hits_without_unqualified_call_counts():
     route_through_tiers(
         "feature_a", frontier_fn=lambda: "x", policy=_policy(), cache_lookup_fn=lambda: "cached"
     )
@@ -313,8 +313,51 @@ def test_cache_hit_stats_counts_hits_and_avoided_calls():
     )
     stats = cache_hit_stats()
     assert stats["cache_hits"] == 1
-    assert stats["frontier_calls_avoided_by_cache"] == 1
-    assert stats["actual_frontier_calls"] == 1
+    assert stats["frontier_calls_avoided_by_cache"] is None
+    assert stats["actual_frontier_calls"] is None
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected_outcome"),
+    [
+        ("disabled", RouteOutcome.FRONTIER_DISABLED),
+        ("observe_only", RouteOutcome.FRONTIER_DISABLED),
+        ("blocked", RouteOutcome.FRONTIER_BLOCKED),
+        ("no_frontier", RouteOutcome.SKIPPED),
+        ("deterministic", RouteOutcome.DETERMINISTIC_HIT),
+    ],
+)
+def test_cache_hit_stats_does_not_infer_avoided_calls(
+    reason: str, expected_outcome: RouteOutcome
+):
+    if reason == "disabled":
+        set_ai_mode(AIMode.DISABLED)
+    elif reason == "observe_only":
+        set_ai_mode(AIMode.OBSERVE_ONLY)
+    deterministic_fn = (
+        (lambda: TierResult(value="det", confidence=1.0))
+        if reason == "deterministic"
+        else None
+    )
+    frontier_fn = None if reason == "no_frontier" else lambda: "frontier"
+    policy = _policy(frontier_eligible=reason != "blocked")
+    hit = route_through_tiers(
+        "feature_a",
+        deterministic_fn=deterministic_fn,
+        frontier_fn=frontier_fn,
+        policy=policy,
+        cache_lookup_fn=lambda: "cached",
+    )
+    control = route_through_tiers(
+        "feature_a", deterministic_fn=deterministic_fn, frontier_fn=frontier_fn, policy=policy
+    )
+
+    assert hit.decision.outcome is RouteOutcome.CACHE_HIT
+    assert control.decision.outcome is expected_outcome
+    stats = cache_hit_stats()
+    assert stats["cache_hits"] == 1
+    assert stats["frontier_calls_avoided_by_cache"] is None
+    assert stats["actual_frontier_calls"] is None
 
 
 def test_cache_hit_stats_accepts_explicit_decisions_snapshot():
@@ -324,5 +367,11 @@ def test_cache_hit_stats_accepts_explicit_decisions_snapshot():
     snapshot = recorded_decisions()
     reset_recorded_decisions()
     # The live log is now empty, but the explicit snapshot still counts.
-    assert cache_hit_stats()["cache_hits"] == 0
-    assert cache_hit_stats(snapshot)["cache_hits"] == 1
+    live = cache_hit_stats()
+    assert live["cache_hits"] == 0
+    assert live["frontier_calls_avoided_by_cache"] is None
+    assert live["actual_frontier_calls"] is None
+    saved = cache_hit_stats(snapshot)
+    assert saved["cache_hits"] == 1
+    assert saved["frontier_calls_avoided_by_cache"] is None
+    assert saved["actual_frontier_calls"] is None

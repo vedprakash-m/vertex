@@ -58,13 +58,13 @@ def _kusto(*, text: str) -> Signal:
 def test_icm_sev2_vs_nonblocking_evidence_flags_conflict() -> None:
     conflicts = detect_evidence_conflicts(
         m365_evidence=_evidence(risk_level=RiskLevel.MEDIUM),
-        icm_blockers=(_icm(incident_id="771996570", severity=2),),
+        icm_blockers=(_icm(incident_id="111111", severity=2),),
     )
     assert len(conflicts) == 1
     c = conflicts[0]
     assert c.family == "icm_vs_evidence_risk"
     assert c.open is True
-    assert "IcM:771996570" in c.entity_refs
+    assert "IcM:111111" in c.entity_refs
     assert "Sev2" in c.description
 
 

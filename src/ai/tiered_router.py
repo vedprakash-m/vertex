@@ -20,16 +20,20 @@ Tiers (§7.6):
     Tier 1 local semantic — local embeddings / fuzzy match / keyword graph (near-zero OpEx)
     Tier 2 frontier       — Azure OpenAI cloud model (budgeted + traced)
 
-The dispatcher records **every** decision (deterministic hit, local hit, frontier
-call, frontier blocked, budget/disabled skip) so OpEx can be measured and audited,
-and it never raises on a blocked frontier — it returns the best lower-tier value (or
-``None``) so callers can degrade to an empty-but-valid result (D-33).
+The dispatcher records completed routing decisions for diagnostics. These records
+alone do not establish eligible attempts, actual frontier-model calls or complete
+measurement windows. It never raises on a blocked frontier — it returns the best
+lower-tier value (or ``None``) so callers can degrade to an empty-but-valid result
+(D-33).
 """
 
 from __future__ import annotations
 
 import json
 from collections import deque
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -106,7 +110,27 @@ class RouteResult(Generic[T]):
 _DECISION_LOG: deque[TierDecision] = deque(maxlen=2048)
 _DECISION_LOCK = Lock()
 _DECISION_SINKS: list[Callable[[TierDecision], None]] = []
+_INVOCATION_SINK: ContextVar[Callable[[TierDecision], None] | None] = ContextVar(
+    "vertex_tier_invocation_sink", default=None
+)
 _SINK_FAILURE_COUNT = 0
+
+
+@contextmanager
+def use_invocation_sink(sink: Callable[[TierDecision], None] | None) -> Iterator[None]:
+    """Bind one invocation's sink and restore the preceding scope on exit."""
+    active = True
+
+    def scoped_sink(decision: TierDecision) -> None:
+        if active and sink is not None:
+            sink(decision)
+
+    token = _INVOCATION_SINK.set(scoped_sink if sink is not None else None)
+    try:
+        yield
+    finally:
+        active = False
+        _INVOCATION_SINK.reset(token)
 
 
 def register_decision_sink(sink: Callable[[TierDecision], None]) -> None:
@@ -137,11 +161,12 @@ def reset_recorded_decisions() -> None:
 
 
 def sink_failure_count() -> int:
-    """Return failed durable-sink writes for this process.
+    """Return telemetry sink calls that raised in this process.
 
-    The ring buffer is diagnostic-only. A non-zero value means durable routing
-    telemetry is incomplete and invalidates the affected measurement window.
-    Routing deliberately remains available when observability storage is down.
+    The ring buffer is diagnostic-only. A non-zero count means delivery is
+    uncertain; the affected measurement window must be treated as invalid.
+    A sink may have written before raising. Routing remains available after
+    ordinary sink errors.
     """
     with _DECISION_LOCK:
         return _SINK_FAILURE_COUNT
@@ -154,18 +179,25 @@ def reset_sink_failure_count() -> None:
         _SINK_FAILURE_COUNT = 0
 
 
-def _record(decision: TierDecision) -> None:
+def _notify_sink(sink: Callable[[TierDecision], None], decision: TierDecision) -> None:
     global _SINK_FAILURE_COUNT
+    try:
+        sink(decision)
+    except Exception:  # a sink must never break routing
+        with _DECISION_LOCK:
+            _SINK_FAILURE_COUNT += 1
+
+
+def _record(decision: TierDecision) -> None:
     with _DECISION_LOCK:
         _DECISION_LOG.append(decision)
         sinks = tuple(_DECISION_SINKS)
-    # Sinks run outside the lock so a slow/durable sink cannot stall routing.
+    invocation_sink = _INVOCATION_SINK.get()
+    # Sinks run outside the lock so they do not block access to the decision log.
     for sink in sinks:
-        try:
-            sink(decision)
-        except Exception:  # a sink must never break routing
-            with _DECISION_LOCK:
-                _SINK_FAILURE_COUNT += 1
+        _notify_sink(sink, decision)
+    if invocation_sink is not None:
+        _notify_sink(invocation_sink, decision)
 
 
 def _current_trace_id() -> Optional[str]:
@@ -317,20 +349,19 @@ def route_through_tiers(
     return RouteResult(value=value, decision=decision)
 
 
-def cache_hit_stats(decisions: Optional[tuple[TierDecision, ...]] = None) -> dict[str, int]:
-    """ADF-W5.2 acceptance evidence ("avoided-call metrics"): counts cache
-    hits and frontier calls avoided by them, from the recorded decision log
-    (or an explicitly supplied snapshot, e.g. from `flush_tier_decisions_to_jsonl`'s
-    source). A cache hit is definitionally an avoided frontier call -- the
-    two counts are always equal by construction, reported together so a
-    caller doesn't have to recompute the equivalence."""
+def cache_hit_stats(decisions: Optional[tuple[TierDecision, ...]] = None) -> dict[str, int | None]:
+    """Count observed cache hits; qualified frontier-call counts are unavailable.
+
+    The supplied snapshot or bounded in-process log does not establish whether
+    a cache hit avoided a frontier-model call or whether a routed callback
+    actually dispatched one.
+    """
     source = decisions if decisions is not None else recorded_decisions()
     cache_hits = sum(1 for decision in source if decision.outcome == RouteOutcome.CACHE_HIT)
-    frontier_calls = sum(1 for decision in source if decision.outcome == RouteOutcome.FRONTIER_CALL)
     return {
         "cache_hits": cache_hits,
-        "frontier_calls_avoided_by_cache": cache_hits,
-        "actual_frontier_calls": frontier_calls,
+        "frontier_calls_avoided_by_cache": None,
+        "actual_frontier_calls": None,
     }
 
 

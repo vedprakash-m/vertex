@@ -158,6 +158,11 @@ def _sync_decision_facts(
         if fact.fact_type == "decision.entry" and fact.lifecycle_state == FactLifecycleState.ACTIVE
     }
     current_natural_keys: set[str] = set()
+    committed_gather_run_ids = None
+    if gather_run_id is not None:
+        from src.core.gather_run_manifest import get_verified_committed_run_ids
+
+        committed_gather_run_ids = get_verified_committed_run_ids(program_id, programs_root=programs_root)
 
     for entry in entries:
         entity_refs = tuple(entry.entity_refs) or (f"DECISION:{entry.id}",)
@@ -175,6 +180,7 @@ def _sync_decision_facts(
                 gather_run_id=gather_run_id,
             ),
             recorded_at=sync_time,
+            committed_gather_run_ids=committed_gather_run_ids,
         )
         # ADF-W2.12: this loop re-syncs every entry in the passed collection
         # on every call (upsert_decisions passes existing+new merged), not

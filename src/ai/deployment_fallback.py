@@ -10,15 +10,22 @@ _MISSING_AZURE_OPENAI_DEPLOYMENT_MESSAGE = (
     f"{LEGACY_DEPLOYMENT_ALIAS_NOTICE}"
 )
 import os
+from threading import Lock
 from typing import Any, Callable, TypeVar
 
-from src.ai.client import AIClient, AIClientError, BudgetExceeded
+from src.ai.client import (
+    AIClient,
+    AIClientError,
+    NON_RETRYABLE_AI_ERRORS,
+    _FeatureBudgetState,
+)
 from src.ai.llm_trace import AITraceContext
 from src.ai.provider import LLMProvider
 from src.core.policy_loader import load_ai_feature_policy
 
 
 StructuredResponse = TypeVar("StructuredResponse")
+_BUILTIN_AI_CLIENT = AIClient
 
 
 def resolve_ai_deployments(
@@ -112,8 +119,17 @@ class FallbackAIClient:
         self._requests_per_minute = requests_per_minute
         self._trace_context = trace_context
         self._client_factory = client_factory or AIClient
+        self._feature_budget_state = (
+            _FeatureBudgetState() if self._client_factory is _BUILTIN_AI_CLIENT else None
+        )
         self._retryable_exceptions = retryable_exceptions or (AIClientError, RuntimeError)
         self._clients: dict[str, LLMProvider] = {}
+        self._clients_lock = Lock()
+
+    @property
+    def configured_deployments(self) -> tuple[str, ...]:
+        """Return the configured fallback order, not the selected deployment."""
+        return self._deployments
 
     def chat(
         self,
@@ -134,7 +150,7 @@ class FallbackAIClient:
                     max_tokens=max_tokens,
                     prompt_version=prompt_version,
                 )
-            except BudgetExceeded:
+            except NON_RETRYABLE_AI_ERRORS:
                 raise
             except self._retryable_exceptions as error:
                 last_error = error
@@ -165,7 +181,7 @@ class FallbackAIClient:
                     max_tokens=max_tokens,
                     prompt_version=prompt_version,
                 )
-            except BudgetExceeded:
+            except NON_RETRYABLE_AI_ERRORS:
                 raise
             except self._retryable_exceptions as error:
                 last_error = error
@@ -180,19 +196,26 @@ class FallbackAIClient:
         if client is not None:
             return client
 
-        client_kwargs: dict[str, Any] = {
-            "deployment": deployment,
-            "temperature": self._temperature,
-            "budget_usd": self._budget_usd,
-        }
-        if self._requests_per_minute is not None and _client_factory_supports_parameter(self._client_factory, "requests_per_minute"):
-            client_kwargs["requests_per_minute"] = self._requests_per_minute
-        if self._trace_context is not None and _client_factory_supports_parameter(self._client_factory, "trace_context"):
-            client_kwargs["trace_context"] = self._trace_context
+        with self._clients_lock:
+            client = self._clients.get(deployment)
+            if client is not None:
+                return client
 
-        client = self._client_factory(**client_kwargs)
-        self._clients[deployment] = client
-        return client
+            client_kwargs: dict[str, Any] = {
+                "deployment": deployment,
+                "temperature": self._temperature,
+                "budget_usd": self._budget_usd,
+            }
+            if self._requests_per_minute is not None and _client_factory_supports_parameter(self._client_factory, "requests_per_minute"):
+                client_kwargs["requests_per_minute"] = self._requests_per_minute
+            if self._trace_context is not None and _client_factory_supports_parameter(self._client_factory, "trace_context"):
+                client_kwargs["trace_context"] = self._trace_context
+            if self._feature_budget_state is not None:
+                client_kwargs["_feature_budget_state"] = self._feature_budget_state
+
+            client = self._client_factory(**client_kwargs)
+            self._clients[deployment] = client
+            return client
 
 
 class FallbackStructuredClient(FallbackAIClient):

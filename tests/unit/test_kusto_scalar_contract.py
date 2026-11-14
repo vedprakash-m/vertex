@@ -172,6 +172,35 @@ def _hydrate(query: KustoQuery, rows: list[dict[str, Any]], root: Path):
     return provider.hydrate((registration,), NOW, "synthetic", KustoHydrationConfig(programs_root=root))
 
 
+def test_uil_empty_provider_error_remains_failed_query_state(tmp_path: Path) -> None:
+    query = _query("zero_ok")
+    registration = ChannelRegistration(
+        channel="kusto", program_id="synthetic", provider_instance_id="default",
+        ref_id=query.id, ref_kind="kusto_query", status=RegistrationStatus.ACTIVE,
+        first_discovered_at=NOW, last_seen_at=NOW,
+    )
+
+    def fail(_query: KustoQuery) -> list[dict[str, Any]]:
+        raise RuntimeError()
+
+    provider = KustoHydrationProvider(executor=fail, query_loader=lambda *args, **kwargs: (query,))
+    config = KustoHydrationConfig(programs_root=tmp_path)
+    result = provider.hydrate((registration,), NOW, "synthetic", config)
+    assert result.failed_ref_ids == ((query.id, "kusto_query"),)
+    state: dict[str, dict[str, Any]] = {}
+    uil_loader_stage.record_uil_kusto_query_states(
+        "synthetic", binding=SimpleNamespace(hydration_provider=provider, hydration_config=config),
+        hydration_result=result, as_of=NOW, query_state_sink=state,
+        previous_query_states={query.id: PREVIOUS}, include_unvalidated=False,
+        record_kusto_query_state_fn=kusto_query_helpers.record_kusto_query_state,
+    )
+    assert state[query.id]["last_cycle_succeeded"] is False
+    assert state[query.id]["is_degraded"] is True
+    assert state[query.id]["last_error"] == "Kusto query failed."
+    assert state[query.id]["last_succeeded_at"] == datetime(2025, 12, 31, tzinfo=timezone.utc)
+    assert state[query.id]["value_last_4"] == [7.0, 8.0]
+
+
 @pytest.mark.parametrize("count", [0, 1, 2])
 def test_hydration_rejects_scalar_violation_before_slo_or_extraction(count: int, tmp_path: Path) -> None:
     result = _hydrate(_query(), _rows(count), tmp_path)

@@ -325,6 +325,48 @@ def test_resolve_hides_cached_payload_recursion_error_details(
     assert "Synthetic hidden exception details" not in caplog.text
 
 
+@pytest.mark.parametrize("exceeds_limit", [False, True], ids=["at-limit", "over-limit"])
+def test_resolve_checks_decoded_depth_independently_of_json_decoder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, exceeds_limit: bool,
+) -> None:
+    import src.commands.gather_pipeline.workiq_prefetch_stage as prefetch_stage
+
+    manifest = write_prefetch_snapshot(
+        program_id="samplealpha", channel=WORKIQ_PREFETCH_CHANNEL,
+        payload=workiq_signals_to_payload(()), watermark=None, completeness="complete",
+        latency_ms=0, ttl_seconds=3600, programs_root=tmp_path, now=_NOW,
+    )
+    channel_dir = tmp_path / "samplealpha" / "runtime" / "prefetch" / WORKIQ_PREFETCH_CHANNEL
+    paths = (
+        channel_dir / manifest.snapshot_id / manifest.payload_path,
+        channel_dir / manifest.snapshot_id / "manifest.json",
+        channel_dir / "latest.json",
+    )
+    before = tuple(path.read_bytes() for path in paths)
+    nested: object = "Synthetic hidden payload"
+    for _ in range(sys.getrecursionlimit() - 1 + int(exceeds_limit)):
+        nested = [nested]
+    decoded = {"signals": [], "extra": nested}
+    monkeypatch.setattr(prefetch_stage, "read_snapshot_payload", lambda *_args, **_kwargs: decoded)
+    live = _signal("live")
+    live_calls: list[bool] = []
+
+    def live_fetch() -> tuple[Signal, ...]:
+        live_calls.append(True)
+        return (live,)
+
+    restored = resolve_workiq_signals(
+        program_id="samplealpha", programs_root=tmp_path, live_fetch_fn=live_fetch, now=_NOW,
+    )
+    assert restored == ((live,) if exceeds_limit else ())
+    assert live_calls == ([True] if exceeds_limit else [])
+    assert ("WorkIQ cached snapshot is too deeply nested; falling back to live." in caplog.text) is exceeds_limit
+    assert "Synthetic hidden payload" not in caplog.text
+    assert str(tmp_path) not in caplog.text
+    assert manifest.snapshot_id not in caplog.text
+    assert tuple(path.read_bytes() for path in paths) == before
+
+
 @pytest.mark.parametrize(
     ("target", "error"),
     [("read_snapshot_payload", RuntimeError), ("workiq_signals_from_payload", RecursionError)],

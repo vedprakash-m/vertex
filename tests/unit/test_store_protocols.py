@@ -21,7 +21,7 @@ class InMemorySignalStore:
         self._usage_markers: list[SignalUsageMarker] = []
         self._threads: dict[str, SignalThreadLink] = {}
 
-    def append(self, signal: Signal) -> None:
+    def append(self, signal: Signal, *, append_only: bool = False) -> None:
         self._signals.append(signal)
 
     def read(
@@ -187,6 +187,17 @@ def test_file_archive_store_does_not_expose_snapshot_writes(tmp_path: Path) -> N
 
     assert not hasattr(store, "write_confirmed")
     assert not archive_root.exists()
+
+
+def test_file_signal_guard_preserves_existing_entries(tmp_path: Path) -> None:
+    store = FileSignalStore(programs_root=tmp_path)
+    signal = _build_signal()
+    repeated = replace(signal, text="Repeated signal")
+
+    store.append(signal, append_only=True)
+    store.append(repeated, append_only=True)
+
+    assert store.read(signal.program_id) == (classify_signal(signal), classify_signal(repeated))
 
 
 def test_file_signal_store_round_trips_signals_and_reviews(tmp_path: Path) -> None:

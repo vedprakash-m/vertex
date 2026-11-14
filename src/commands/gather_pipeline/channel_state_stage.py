@@ -128,7 +128,7 @@ def build_uil_channel_state(
     registry_path = resolve_channel_registry_path_for_read(program_id, programs_root=programs_root)
     config = configured_channel_config(program_id, channel, programs_root=programs_root)
     uil_enabled = bool(enabled and config is not None and config.enabled)
-    provider_instance_id = config_provider_instance_id(config) if config is not None else None
+    provider_instance_id = (config_provider_instance_id(config) or "default") if config is not None else None
     state: dict[str, Any] = {
         "uil_enabled": uil_enabled,
         "uil_registry_file_present": registry_path.exists(),

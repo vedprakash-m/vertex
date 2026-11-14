@@ -9,7 +9,7 @@ name = "vertex"
 version = "0.1.0"
 description = "Governed TPM intelligence platform for evidence, decisions, and operational program reporting."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11.5"
 dependencies = [
   "azure-identity>=1.17.1",
   "cryptography>=43.0.0",
@@ -17,6 +17,8 @@ dependencies = [
   "jsonschema>=4.23.0",
   "keyring>=25.3.0",
   "beautifulsoup4>=4.12",
+  # Beautiful Soup's selector dependency: CVE-2026-126190 is fixed in 4.0.
+  "soupsieve>=4.0",
   "icalendar>=5.0",
   "portalocker>=3.1.1",
   "pypdf>=6.21.4",
@@ -80,6 +82,8 @@ m365 = [
   # Retained as an optional dependency; removing unused integrations requires
   # a separate dependency-removal decision.
   "msgraph-sdk>=1.15.0",
+  # Graph's telemetry dependency: CVE-2026-126360 is fixed in 1.45.2.
+  "opentelemetry-api>=1.45.2",
 ]
 kusto = [
   # src/adapters/microsoft/kusto_runtime.py's load_kusto_sdk_types()

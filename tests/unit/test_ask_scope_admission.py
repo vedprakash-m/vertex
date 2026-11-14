@@ -393,7 +393,6 @@ def test_real_startup_uses_the_admitted_ask_scope(
     monkeypatch.setattr(cli, "PROGRAMS_ROOT", root)
     monkeypatch.setattr("src.ai.intent_router.PROGRAMS_ROOT", root)
     monkeypatch.setattr(cli.sys, "argv", ["vertex", *args])
-    monkeypatch.setattr(cli, "_REGISTERED_TIER_SINKS", set())
     monkeypatch.setattr(
         cli, "load_arch_data_fix", Mock(return_value=SimpleNamespace(mode=SimpleNamespace(value="off")))
     )
@@ -401,7 +400,6 @@ def test_real_startup_uses_the_admitted_ask_scope(
     compact = Mock()
     catchup = Mock()
     monkeypatch.setattr(cli, "make_tier_decision_sink", make_sink)
-    monkeypatch.setattr(cli, "register_decision_sink", Mock())
     monkeypatch.setattr(cli, "maybe_run_scheduled_compaction", compact)
     monkeypatch.setattr(cli, "_stdout_supports_interactive_catchup", lambda: True)
     monkeypatch.setattr(cli, "maybe_catchup", catchup)

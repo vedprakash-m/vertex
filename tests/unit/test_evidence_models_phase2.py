@@ -23,7 +23,7 @@ from src.commands.doctor_checks.evidence_checks import check_eta_slippage, check
 # ── BL-21: parse_workiq_latest_date ──────────────────────────────────────────
 
 def test_parse_workiq_latest_date_standard():
-    d = parse_workiq_latest_date("2026-06-17: NMAgent IcM 771996570 ACTIVE...")
+    d = parse_workiq_latest_date("2026-06-17: NMAgent IcM 111111 ACTIVE...")
     assert d == date(2026, 6, 17)
 
 
@@ -66,10 +66,10 @@ def test_extract_ado_ids_empty():
 # ── BL-21: extract_icm_ids ────────────────────────────────────────────────────
 
 def test_extract_icm_ids_multiple_formats():
-    text = "IcM 771996570 ACTIVE and ICM:788471726"
+    text = "IcM 111111 ACTIVE and ICM:222222"
     result = extract_icm_ids(text)
-    assert "771996570" in result
-    assert "788471726" in result
+    assert "111111" in result
+    assert "222222" in result
 
 
 def test_extract_icm_ids_empty():
@@ -91,17 +91,17 @@ def test_extract_pipeline_run_ids_multiple_formats():
 def test_build_placeholder_evidence_basic():
     ev = build_placeholder_evidence(
         lane_id="acme.networking",
-        workiq_latest="2026-06-17: IcM 771996570 ACTIVE. ADO 900102 blocked. PR 4312 waiting on Pipeline 88123.",
+        workiq_latest="2026-06-17: IcM 111111 ACTIVE. ADO 900102 blocked. PR 4312 waiting on Pipeline 88123.",
     )
     assert ev is not None
     assert ev.lane_id == "acme.networking"
     assert ev.confidence == 0.0
     assert ev.risk_level == RiskLevel.UNKNOWN
-    assert "IcM:771996570" in ev.blocking_items
+    assert "IcM:111111" in ev.blocking_items
     assert "ADO:900102" in ev.blocking_items
     assert "PR:4312" in ev.blocking_items
     assert "PIPELINE:88123" in ev.blocking_items
-    assert ev.narrative_summary == "2026-06-17: IcM 771996570 ACTIVE. ADO 900102 blocked. PR 4312 waiting on Pipeline 88123."
+    assert ev.narrative_summary == "2026-06-17: IcM 111111 ACTIVE. ADO 900102 blocked. PR 4312 waiting on Pipeline 88123."
 
 
 def test_build_placeholder_evidence_date_parsed():
@@ -219,9 +219,9 @@ def test_eta_slippage_with_ai_extracted_evidence():
         synthesized_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
         risk_level=RiskLevel.HIGH,
         etas=(EtaRecord(label="Perf Signoff", eta_date=date(2026, 6, 5),
-                        owner="Sukumar", status="open"),),
+                        owner="Example Owner", status="open"),),
         blocking_items=(),
-        owners=("Sukumar",),
+        owners=("Example Owner",),
         source_refs=(),
         raw_excerpts=(),
         confidence=0.85,

@@ -7,9 +7,10 @@ import sqlite3
 from typing import Any, Iterator
 
 from src.core._db import open_program_db
+from src.core.exceptions import StateError
 from src.core.ledger.event_types import get_event_schema
 from src.core.ledger.source_refs import SourceRef, source_document_key
-from src.core.workspace_paths import PROGRAMS_ROOT
+from src.core.workspace_paths import PROGRAMS_ROOT, is_bare_identifier
 from src.core.workspace_lease import cooperative_capture_fence
 
 
@@ -37,6 +38,8 @@ class IndexedEventRecord:
 
 
 def get_event_index_path(program_id: str, *, programs_root: Path = PROGRAMS_ROOT) -> Path:
+    if not isinstance(program_id, str) or not is_bare_identifier(program_id):
+        raise StateError("Event index requires a bare program identifier.")
     return programs_root / program_id / "ledger" / f"{program_id}-index.sqlite3"
 
 

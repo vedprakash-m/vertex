@@ -5,8 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from collections.abc import Iterable
 from datetime import datetime, timezone
+from fnmatch import fnmatch
+from glob import escape
 from pathlib import Path
 from typing import Any
 
@@ -143,14 +146,44 @@ def append_jsonl_lines(
 def list_rotated_jsonl_paths(
     rotated_dir: Path, stem: str = "*"
 ) -> tuple[Path, ...]:
-    """Return all rotated JSONL files for ``stem`` sorted oldest → newest.
+    """Return rotated JSONL paths in filename order, with numeric suffixes.
 
     Used by tests and operators to inspect rotation history.  ``stem`` is a
-    glob pattern (default ``*`` matches every stem).
+    glob pattern (default ``*`` matches every stem). Same-timestamp numeric
+    suffixes are ordered numerically, after any nonnumeric suffixes for that
+    timestamp; other names use lexical ordering. Canonical numeric names are
+    scoped by their encoded stem; legacy names retain prefix matching and may
+    be ambiguous. This order cannot reconstruct reused historical suffixes or
+    clock changes.
     """
     if not rotated_dir.exists():
         return ()
-    return tuple(sorted(path for path in rotated_dir.glob(f"{stem}.*.jsonl") if path.is_file()))
+
+    def matches_stem(path: Path) -> bool:
+        match = re.fullmatch(
+            r"(.+)\.[0-9]{8}T[0-9]{6}Z\.[0-9]+\.jsonl",
+            path.name,
+            flags=re.IGNORECASE if os.name == "nt" else 0,
+        )
+        return match is None or fnmatch(match.group(1), stem)
+
+    def sort_key(path: Path) -> tuple[str, int, str, str]:
+        match = re.fullmatch(
+            r"(.+\.[0-9]{8}T[0-9]{6}Z\.)(.*)\.jsonl",
+            path.name,
+            flags=re.IGNORECASE if os.name == "nt" else 0,
+        )
+        name = os.path.normcase(path.name)
+        if match is None:
+            return (name, -1, name, path.name)
+        suffix = match.group(2)
+        number = int(suffix) if suffix.isascii() and suffix.isdecimal() else -1
+        return (os.path.normcase(match.group(1)), number, name, path.name)
+
+    return tuple(sorted(
+        (path for path in rotated_dir.glob(f"{stem}.*.jsonl") if path.is_file() and matches_stem(path)),
+        key=sort_key,
+    ))
 
 
 def rotate_jsonl_if_oversize(
@@ -161,15 +194,15 @@ def rotate_jsonl_if_oversize(
 ) -> bool:
     """Rotate ``path`` to ``<dir>/rotated/<stem>.<ts>.<n>.jsonl`` if oversize.
 
-    Returns ``True`` if a rotation was performed, ``False`` otherwise.  When
-    the number of existing rotated files for the same stem already meets
-    ``retain``, the oldest one is removed first so the on-disk footprint is
-    bounded.
+    Returns ``True`` if a rotation was performed, ``False`` otherwise. After
+    rotation, the new segment is retained and matching previous files are
+    removed in listing order as needed to keep at most ``retain`` matches.
+    Legacy filename matching can include segments from another stem.
 
     The rotation is atomic at the filesystem level (``os.replace``), and the
     rotated file is the *original* with all of its appended lines, so the
-    next write starts from an empty file and previous data is preserved for
-    forensics / replay.
+    next write starts from an empty file. Files pruned by retention are not
+    preserved for forensics or replay.
     """
     if max_bytes <= 0:
         raise ValueError("max_bytes must be a positive integer.")
@@ -183,17 +216,27 @@ def rotate_jsonl_if_oversize(
     rotated_dir = path.parent / ROTATED_DIRNAME
     rotated_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    suffix = 1
+    prefix = f"{path.stem}.{timestamp}."
+    normalized_prefix = os.path.normcase(prefix)
+    suffixes = (
+        entry.name[len(prefix):-len(".jsonl")]
+        for entry in rotated_dir.iterdir()
+        if os.path.normcase(entry.name).startswith(normalized_prefix)
+        and os.path.normcase(entry.name).endswith(".jsonl")
+    )
+    suffix = max(
+        (int(value) for value in suffixes if value.isascii() and value.isdecimal()),
+        default=0,
+    ) + 1
     rotated_path = rotated_dir / f"{path.stem}.{timestamp}.{suffix}.jsonl"
     while rotated_path.exists():
         suffix += 1
         rotated_path = rotated_dir / f"{path.stem}.{timestamp}.{suffix}.jsonl"
     os.replace(path, rotated_path)
-    # Prune oldest rotated files for this stem so the on-disk footprint is
-    # bounded by ``retain``.  Sorted oldest → newest; the head is dropped.
-    rotated_for_stem = list_rotated_jsonl_paths(rotated_dir, stem=path.stem)
+    rotated_for_stem = list_rotated_jsonl_paths(rotated_dir, stem=escape(path.stem))
     if len(rotated_for_stem) > retain:
-        for stale in rotated_for_stem[: len(rotated_for_stem) - retain]:
+        previous = [entry for entry in rotated_for_stem if entry != rotated_path]
+        for stale in previous[: len(rotated_for_stem) - retain]:
             stale.unlink(missing_ok=True)
     return True
 

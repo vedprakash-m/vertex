@@ -393,6 +393,15 @@ def confirm_issue(
             "Confirmation configuration changed since the draft was generated. "
             "Re-run `vertex report --dry-run` and review the updated draft before confirming."
         )
+    expected_program_context_sha256 = draft_state.get("program_context_sha256")
+    if expected_program_context_sha256 is not None and (
+        getattr(bundle, "program_context", None) is None
+        or hash_jsonable(bundle.program_context) != expected_program_context_sha256
+    ):
+        raise ConfigError(
+            "Program context changed since the draft was generated. "
+            "Re-run `vertex report --dry-run` and review the updated draft before confirming."
+        )
     if post_weekly_summary_card:
         _validate_weekly_summary_card_request(bundle=bundle, draft_state=draft_state)
     overrides_document = _load_confirm_overrides(

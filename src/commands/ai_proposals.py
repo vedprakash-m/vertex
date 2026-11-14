@@ -56,6 +56,7 @@ from src.core.dependency_blast_radius import (
 )
 from src.core.dependency_graph import load_dependencies, save_dependencies
 from src.core.edition_resolver import PROGRAMS_ROOT, load_program
+from src.core.exceptions import StateError
 from src.core.governance_decision_brief import (
     GovernanceDecisionBriefError,
     GovernanceDecisionRequest,
@@ -466,7 +467,10 @@ def _generate_dependency_blast_radius(
             proposal_type="dependency_blast_radius", staged_ids=(),
             message=f"[dry-run] Would generate a dependency blast-radius proposal for {dependency_id!r}. No AI call made, nothing staged.",
         )
-    proposal = generate_dependency_blast_radius_proposal(request, client=client, programs_root=programs_root)
+    try:
+        proposal = generate_dependency_blast_radius_proposal(request, client=client, programs_root=programs_root)
+    except StateError:
+        raise GenerateProposalError("Dependency proposal cache or release audit failed; nothing was staged.") from None
     if proposal is None:
         return GenerateProposalResult(
             proposal_type="dependency_blast_radius", staged_ids=(),

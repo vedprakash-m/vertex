@@ -23,6 +23,7 @@ from src.core.signal_classification import classify_signal
 from src.core.signal_dedup import build_deterministic_signal_id, dedupe_signals_with_audit
 from src.core.signal_ref_utils import widen_ws_wi_refs
 from src.core.signal_review import compute_auto_approval_policies, signal_can_be_auto_approved, write_autonomy_audit_entries
+from src.core.store_protocols import AtomicSignalBatchStore
 
 
 log = logging.getLogger(__name__)
@@ -43,9 +44,16 @@ def run_persistence_stage(stage_input: PersistenceStageInput) -> PersistenceStag
             "Excluded %s WorkIQ preview-only signal(s) from persistence and downstream extraction.",
             rejected_preview_count,
         )
+    existing_signals = stage_input.existing_signals
+    if stage_input.gather_run_id is not None:
+        candidate_signals = tuple(
+            classify_signal(widen_ws_wi_refs(signal, stage_input.workstreams))
+            for signal in candidate_signals
+        )
+        existing_signals = tuple(classify_signal(signal) for signal in existing_signals)
     dedup_result = dedupe_signals_with_audit(
         candidate_signals,
-        existing_signals=stage_input.existing_signals,
+        existing_signals=existing_signals,
     )
     # Stamp every genuinely new signal (from
     # any channel -- they all funnel through this single persistence stage)
@@ -68,8 +76,20 @@ def run_persistence_stage(stage_input: PersistenceStageInput) -> PersistenceStag
         )
 
     if not stage_input.dry_run:
-        for signal in new_signals:
-            stage_input.signal_store.append(classify_signal(signal))
+        if stage_input.gather_run_id is not None and isinstance(stage_input.signal_store, AtomicSignalBatchStore):
+            stage_input.signal_store.append_atomic(
+                stage_input.program_id,
+                tuple(classify_signal(signal) for signal in new_signals),
+                replace_failed_since=stage_input.signal_window_start,
+                replace_failed_until=stage_input.current_time,
+            )
+        else:
+            for signal in new_signals:
+                classified = classify_signal(signal)
+                if stage_input.gather_run_id is None:
+                    stage_input.signal_store.append(classified)
+                else:
+                    stage_input.signal_store.append(classified, append_only=True)
         for entry in build_incident_entries(new_signals, recorded_at=stage_input.current_time):
             append_incident_entry(entry, programs_root=stage_input.programs_root)
 
@@ -87,9 +107,27 @@ def run_persistence_stage(stage_input: PersistenceStageInput) -> PersistenceStag
                     stage_input.program_id,
                     programs_root=stage_input.programs_root,
                     fact_types=("action.item",),
+                    require_committed_gather_run=stage_input.gather_run_id is not None,
                 )
             )
         }
+        if stage_input.gather_run_id is not None:
+            # The legacy action shim is not run-filtered: an action written only by
+            # an uncommitted run must still be re-stamped by this run.
+            from src.core.gather_run_manifest import get_verified_committed_run_ids
+
+            committed_run_ids = get_verified_committed_run_ids(
+                stage_input.program_id, programs_root=stage_input.programs_root,
+            )
+            existing_action_ids -= {
+                str(fact.payload["id"])
+                for fact in load_program_facts(
+                    stage_input.program_id,
+                    programs_root=stage_input.programs_root, fact_types=("action.item",),
+                ).facts
+                if fact.fact_type == "action.item"
+                and fact.gather_run_id is not None and fact.gather_run_id not in committed_run_ids
+            }
         for action in extracted_actions:
             if action.id in existing_action_ids:
                 continue
@@ -278,8 +316,8 @@ def extract_actions_with_ai(program: Program, signals: tuple[Signal, ...]) -> tu
     try:
         extractor = ActionExtractor.from_program(program)
         return extractor.extract_actions(program_id=program.id, signals=signals)
-    except (ActionExtractorError, RuntimeError) as error:
-        log.warning("AI action extraction skipped for %s: %s", program.id, error)
+    except (ActionExtractorError, RuntimeError):
+        log.warning("AI action extraction skipped due to an error.")
         return ()
 
 

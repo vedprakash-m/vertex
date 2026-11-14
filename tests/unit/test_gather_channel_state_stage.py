@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
 
 from src.commands.gather_pipeline.channel_state_stage import (
     build_gather_channel_states,
     build_uil_ado_channel_state,
+    build_uil_channel_state,
 )
 
 
@@ -152,3 +155,128 @@ def test_build_uil_ado_channel_state_reports_registry_health(monkeypatch, tmp_pa
     assert state["uil_registry_file_present"] is True
     assert state["uil_health"] == "ok"
     assert state["uil_registry_size"] == 1
+
+
+@pytest.mark.parametrize("configured_instance", [None, "", "   ", "default", "instance-a"])
+def test_build_uil_channel_state_reports_only_configured_provider_instance(
+    tmp_path: Path,
+    configured_instance: str | None,
+) -> None:
+    from src.core.channel_registry_store import ChannelRegistryStore
+    from src.core.integration_types import (
+        ChannelRegistration,
+        DiscoveredRef,
+        DiscoveryCompleteness,
+        DiscoveryResult,
+        RegistrationStatus,
+        ScopeStatus,
+        ScopeStatusKind,
+    )
+
+    program_dir = tmp_path / "demo"
+    program_dir.mkdir(parents=True)
+    instance_line = "" if configured_instance is None else f"\n    instance_id: '{configured_instance}'"
+    (program_dir / "program.yaml").write_text(
+        "schema_version: '3.0'\nid: demo\nname: Demo\nchannels:\n  ado:\n    enabled: true"
+        + instance_line + "\n",
+        encoding="utf-8",
+    )
+    store = ChannelRegistryStore(program_dir / "channel_registry.sqlite3", "demo")
+    now = datetime(2026, 6, 1, 9, 0, tzinfo=timezone.utc)
+    for instance, ids, discovered_at in (
+        ("default", ("101",), now),
+        ("instance-a", ("101", "201"), now + timedelta(hours=1)),
+    ):
+        scope_id = f"scope-{instance}"
+        refs = tuple(
+            DiscoveredRef(
+                registration=ChannelRegistration(
+                    channel="ado",
+                    program_id="demo",
+                    provider_instance_id=instance,
+                    ref_id=ref_id,
+                    ref_kind="work_item",
+                    status=RegistrationStatus.ACTIVE,
+                    first_discovered_at=discovered_at,
+                    last_seen_at=discovered_at,
+                ),
+                bindings=(),
+            )
+            for ref_id in ids
+        )
+        store.apply_discovery_result(
+            DiscoveryResult(
+                channel="ado",
+                program_id="demo",
+                provider_instance_id=instance,
+                discovered_refs=refs,
+                completeness=DiscoveryCompleteness.FULL,
+                scope_statuses={
+                    scope_id: ScopeStatus(
+                        scope_id=scope_id,
+                        status=ScopeStatusKind.SUCCESS,
+                        completeness=DiscoveryCompleteness.FULL,
+                        item_count=len(ids),
+                    )
+                },
+                scope_state_updates={},
+                errors=(),
+                computed_at=discovered_at,
+            )
+        )
+
+    selected = configured_instance.strip() if configured_instance else "default"
+    selected = selected or "default"
+    expected_count = 2 if selected == "instance-a" else 1
+    expected_time = now + timedelta(hours=1) if selected == "instance-a" else now
+    state = build_uil_channel_state(
+        "demo",
+        "ado",
+        enabled=True,
+        programs_root=tmp_path,
+        format_optional_datetime=_format_optional_datetime,
+    )
+    assert {
+        key: state[key]
+        for key in (
+            "uil_registry_size",
+            "uil_last_discovery_at",
+            "uil_last_delta_summary",
+            "uil_last_delta_shrinkage_pct",
+            "uil_last_delta_computed_at",
+            "uil_discovery_completeness",
+            "uil_scope_health",
+        )
+    } == {
+        "uil_registry_size": expected_count,
+        "uil_last_discovery_at": _format_optional_datetime(expected_time),
+        "uil_last_delta_summary": f"+{expected_count} -0 ~0 =0",
+        "uil_last_delta_shrinkage_pct": 0.0,
+        "uil_last_delta_computed_at": _format_optional_datetime(expected_time),
+        "uil_discovery_completeness": "full",
+        "uil_scope_health": {f"scope-{selected}": "ok"},
+    }
+
+
+@pytest.mark.parametrize("channel_config", ["kusto:\n    enabled: true", "ado:\n    enabled: false"])
+def test_build_uil_channel_state_skips_unconfigured_or_disabled_channel(
+    tmp_path: Path,
+    channel_config: str,
+) -> None:
+    program_dir = tmp_path / "demo"
+    program_dir.mkdir(parents=True)
+    (program_dir / "program.yaml").write_text(
+        "schema_version: '3.0'\nid: demo\nname: Demo\nchannels:\n  " + channel_config + "\n",
+        encoding="utf-8",
+    )
+    (program_dir / "channel_registry.sqlite3").touch()
+
+    state = build_uil_channel_state(
+        "demo",
+        "ado",
+        enabled=True,
+        programs_root=tmp_path,
+        format_optional_datetime=_format_optional_datetime,
+    )
+
+    assert state == {"uil_enabled": False, "uil_registry_file_present": True}

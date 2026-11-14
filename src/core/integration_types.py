@@ -5,6 +5,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Generic, TypeVar
 
+from src.core.failure_taxonomy import FailureCategory
 from src.core.models import WorkItem
 from src.core.models_v2 import Signal, TrajectoryPoint
 
@@ -145,6 +146,13 @@ class PaginationOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class WIQLPaginationOutcome(PaginationOutcome):
+    """WIQL result shape needed to prevent unsafe link-query partitioning."""
+
+    is_flat_result: bool
+
+
+@dataclass(frozen=True, slots=True)
 class IntegrationError:
     source: str
     stage: str
@@ -154,6 +162,7 @@ class IntegrationError:
     ref_id: str | None = None
     ref_kind: str | None = None
     severity: str = "error"
+    failure_category: FailureCategory | None = None
 
 
 @dataclass(frozen=True, slots=True)

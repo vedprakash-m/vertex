@@ -104,7 +104,8 @@ def build_kusto_kpi_signals(
                 rows = executor(query)
         except Exception as exc:
             duration_ms = int(round((perf_counter() - started_at) * 1000))
-            log.warning("Kusto KPI query %s failed — skipping. Error: %s", query.id, exc)
+            log.warning("KPI query failed; skipping.")
+            error = str(exc) or "KPI query failed."
             if query.engine == "wiql":
                 record_ado_wiql_query_state(
                     query_state_sink,
@@ -112,7 +113,7 @@ def build_kusto_kpi_signals(
                     work_item_count=0,
                     as_of=as_of,
                     duration_ms=duration_ms,
-                    error=str(exc),
+                    error=error,
                     previous_state=previous_states.get(query.id),
                 )
             else:
@@ -122,7 +123,7 @@ def build_kusto_kpi_signals(
                     rows=[],
                     as_of=as_of,
                     duration_ms=duration_ms,
-                    error=str(exc),
+                    error=error,
                     previous_state=previous_states.get(query.id),
                 )
             continue

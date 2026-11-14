@@ -2,17 +2,18 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, nullcontext
+from dataclasses import replace
 from datetime import datetime, timezone
 import logging
 from pathlib import Path
 import sqlite3
-from threading import Barrier
+from threading import Barrier, BrokenBarrierError
 from typing import Literal
 from unittest.mock import Mock
 
 import pytest
 
-from src.core import _db, channel_registry_store, source_candidate_store, sqlite_stores
+from src.core import _db, channel_registry_store, gather_run_manifest, source_candidate_store, sqlite_stores
 from src.core.channel_registry_store import ChannelRegistryStore
 from src.core.integration_types import RegistrationStatus
 from src.core.models import Confidence
@@ -23,6 +24,231 @@ from src.core.sqlite_stores import (
     _connect_program_db,
     get_program_sqlite_store_path,
 )
+
+
+def test_sqlite_signal_append_without_guard_retains_replacement_behavior(tmp_path: Path) -> None:
+    store = SQLiteSignalStore(programs_root=tmp_path)
+    signal = Signal(
+        id="signal-1",
+        timestamp=datetime(2026, 6, 5, tzinfo=timezone.utc),
+        source="synthetic",
+        program_id="samplealpha",
+        workstream_id=None,
+        entity_refs=(),
+        text="first",
+        raw_ref=None,
+        confidence=Confidence.MEDIUM,
+        gather_run_id="prior-run",
+    )
+    store.append(signal)
+    replacement = replace(signal, text="replacement", gather_run_id="new-run")
+
+    store.append(replacement)
+
+    assert store.read("samplealpha") == (replacement,)
+
+
+def test_guarded_sqlite_signal_append_rejects_concurrent_collision(tmp_path: Path) -> None:
+    store = SQLiteSignalStore(programs_root=tmp_path)
+    signal = Signal(
+        id="signal-1",
+        timestamp=datetime(2026, 6, 5, tzinfo=timezone.utc),
+        source="synthetic",
+        program_id="samplealpha",
+        workstream_id=None,
+        entity_refs=(),
+        text="evidence",
+        raw_ref=None,
+        confidence=Confidence.MEDIUM,
+    )
+    store.append(replace(signal, id="schema-seed"))
+    barrier = Barrier(2)
+
+    def append(run_id: str) -> str:
+        barrier.wait(timeout=10)
+        try:
+            store.append(replace(signal, gather_run_id=run_id), append_only=True)
+        except sqlite3.IntegrityError:
+            return "collision"
+        return "inserted"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = tuple(executor.map(append, ("run-1", "run-2")))
+
+    assert sorted(results) == ["collision", "inserted"]
+    stored = tuple(entry for entry in store.read("samplealpha") if entry.id == signal.id)
+    assert len(stored) == 1
+    assert stored[0].gather_run_id in {"run-1", "run-2"}
+
+
+def test_atomic_signal_batch_rolls_back_serialization_failure(tmp_path: Path) -> None:
+    store = SQLiteSignalStore(programs_root=tmp_path)
+    signal = Signal(
+        id="signal-1",
+        timestamp=datetime(2026, 6, 5, tzinfo=timezone.utc),
+        source="synthetic",
+        program_id="samplealpha",
+        workstream_id=None,
+        entity_refs=(),
+        text="evidence",
+        raw_ref=None,
+        confidence=Confidence.MEDIUM,
+    )
+    seed = replace(signal, id="seed")
+    store.append(seed)
+    invalid = replace(signal, id="invalid", metadata={"invalid": object()})
+
+    with pytest.raises(TypeError):
+        store.append_atomic("samplealpha", (signal, invalid))
+
+    assert store.read("samplealpha") == (seed,)
+
+
+def test_atomic_signal_batch_rejects_mixed_programs_before_writing(tmp_path: Path) -> None:
+    store = SQLiteSignalStore(programs_root=tmp_path)
+    signal = Signal(
+        id="signal-1",
+        timestamp=datetime(2026, 6, 5, tzinfo=timezone.utc),
+        source="synthetic",
+        program_id="samplealpha",
+        workstream_id=None,
+        entity_refs=(),
+        text="evidence",
+        raw_ref=None,
+        confidence=Confidence.MEDIUM,
+    )
+    other = replace(signal, id="signal-2", program_id="samplebeta")
+
+    with pytest.raises(ValueError, match="program"):
+        store.append_atomic("samplealpha", (signal, other))
+
+    assert not get_program_sqlite_store_path("samplealpha", programs_root=tmp_path).exists()
+    assert not get_program_sqlite_store_path("samplebeta", programs_root=tmp_path).exists()
+
+
+def test_atomic_signal_batch_rejects_duplicate_within_batch(tmp_path: Path) -> None:
+    store = SQLiteSignalStore(programs_root=tmp_path)
+    signal = Signal(
+        id="signal-1",
+        timestamp=datetime(2026, 6, 5, tzinfo=timezone.utc),
+        source="synthetic",
+        program_id="samplealpha",
+        workstream_id=None,
+        entity_refs=(),
+        text="evidence",
+        raw_ref=None,
+        confidence=Confidence.MEDIUM,
+    )
+
+    with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
+        store.append_atomic("samplealpha", (signal, replace(signal, text="different")))
+
+    assert store.read("samplealpha") == ()
+
+
+def test_atomic_signal_batch_concurrent_collision_rolls_back_losing_batch(tmp_path: Path) -> None:
+    store = SQLiteSignalStore(programs_root=tmp_path)
+    signal = Signal(
+        id="signal-1",
+        timestamp=datetime(2026, 6, 5, tzinfo=timezone.utc),
+        source="synthetic",
+        program_id="samplealpha",
+        workstream_id=None,
+        entity_refs=(),
+        text="evidence",
+        raw_ref=None,
+        confidence=Confidence.MEDIUM,
+    )
+    store.append(replace(signal, id="seed"))
+    barrier = Barrier(2)
+
+    def append(run_id: str) -> tuple[str, str]:
+        barrier.wait(timeout=10)
+        try:
+            store.append_atomic(
+                "samplealpha",
+                (replace(signal, id=run_id, gather_run_id=run_id), replace(signal, gather_run_id=run_id)),
+            )
+        except sqlite3.IntegrityError:
+            return run_id, "collision"
+        return run_id, "inserted"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = dict(executor.map(append, ("run-1", "run-2")))
+
+    assert sorted(results.values()) == ["collision", "inserted"]
+    winner = next(run_id for run_id, result in results.items() if result == "inserted")
+    stored = {entry.id: entry for entry in store.read("samplealpha")}
+    assert set(stored) == {"seed", "signal-1", winner}
+    assert stored["signal-1"].gather_run_id == winner
+
+
+def test_atomic_signal_batch_concurrent_failed_retry_preserves_winner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    now = datetime(2026, 6, 5, 12, 0, tzinfo=timezone.utc)
+    manifest = gather_run_manifest.GatherRunManifest(
+        run_id="prior-run",
+        status=gather_run_manifest.GatherRunStatus.RUNNING,
+        program_id="samplealpha",
+        actor_identity_type="interactive",
+        lease_owner="test-owner",
+        lease_fencing_token=1,
+        started_at=now,
+        scope_as_of=now,
+        required_scope_status=gather_run_manifest.RequiredScopeStatus.PARTIAL,
+    )
+    gather_run_manifest.create_staging_manifest(manifest, programs_root=tmp_path)
+    gather_run_manifest.fail_staging_run(manifest, finished_at=now, programs_root=tmp_path)
+    signal = Signal(
+        id="signal-1",
+        timestamp=now,
+        source="synthetic",
+        program_id="samplealpha",
+        workstream_id=None,
+        entity_refs=(),
+        text="evidence",
+        raw_ref=None,
+        confidence=Confidence.MEDIUM,
+        gather_run_id=manifest.run_id,
+    )
+    store = SQLiteSignalStore(programs_root=tmp_path)
+    store.append(signal)
+    start = Barrier(2)
+    after_read = Barrier(2)
+    get_failed_run_dir = gather_run_manifest.get_failed_run_dir
+
+    def synchronize_failed_lookup(program_id: str, run_id: str, *, programs_root: Path) -> Path:
+        if run_id == manifest.run_id:
+            try:
+                after_read.wait(timeout=2)
+            except BrokenBarrierError:
+                pass
+        return get_failed_run_dir(program_id, run_id, programs_root=programs_root)
+
+    monkeypatch.setattr(gather_run_manifest, "get_failed_run_dir", synchronize_failed_lookup)
+
+    def append(run_id: str) -> tuple[str, str]:
+        start.wait(timeout=10)
+        try:
+            store.append_atomic(
+                "samplealpha",
+                (replace(signal, gather_run_id=run_id), replace(signal, id=run_id, gather_run_id=run_id)),
+                replace_failed_since=now,
+                replace_failed_until=now,
+            )
+        except sqlite3.IntegrityError:
+            return run_id, "collision"
+        return run_id, "inserted"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = dict(executor.map(append, ("retry-1", "retry-2")))
+
+    assert sorted(results.values()) == ["collision", "inserted"]
+    winner = next(run_id for run_id, result in results.items() if result == "inserted")
+    stored = {entry.id: entry for entry in store.read("samplealpha")}
+    assert set(stored) == {"signal-1", winner}
+    assert stored["signal-1"].gather_run_id == winner
 
 
 @pytest.mark.parametrize(
@@ -717,6 +943,83 @@ def test_sqlite_signal_legacy_schema_reads_without_writes_and_upgrades_on_defaul
         columns = {row[1] for row in connection.execute("PRAGMA table_info(signals)")}
     assert {"gather_run_id", "workstream_ids_json"} <= columns
     assert store.read(program_id, read_only=True) == legacy
+
+
+@pytest.mark.parametrize(
+    ("cutoff", "expected_ids"),
+    [
+        (None, ("legacy",)),
+        (datetime(2026, 1, 1, tzinfo=timezone.utc), ("legacy",)),
+        (datetime(2025, 12, 31, tzinfo=timezone.utc), ()),
+    ],
+)
+def test_sqlite_committed_signal_filter_reads_legacy_schema_without_upgrading(
+    tmp_path: Path, cutoff: datetime | None, expected_ids: tuple[str, ...],
+) -> None:
+    from src.core.gather_run_manifest import create_legacy_cutoff_manifest
+
+    database_path = _seed_legacy_signal_database(tmp_path)
+    if cutoff is not None:
+        create_legacy_cutoff_manifest("samplealpha", legacy_cutoff_at=cutoff, programs_root=tmp_path)
+    before = database_path.read_bytes()
+
+    signals = SQLiteSignalStore(programs_root=tmp_path).read(
+        "samplealpha", read_only=True, require_committed_gather_run=True,
+    )
+
+    assert tuple(signal.id for signal in signals) == expected_ids
+    assert database_path.read_bytes() == before
+    with closing(sqlite3.connect(database_path)) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(signals)")}
+    assert "gather_run_id" not in columns
+    assert "workstream_ids_json" not in columns
+
+
+@pytest.mark.parametrize("committed", [False, True])
+def test_sqlite_committed_signal_filter_uses_partially_upgraded_schema(
+    tmp_path: Path, committed: bool,
+) -> None:
+    from src.core.gather_run_manifest import (
+        GatherRunManifest,
+        GatherRunStatus,
+        RequiredScopeStatus,
+        commit_staging_run,
+        create_staging_manifest,
+        fail_staging_run,
+    )
+
+    database_path = _seed_legacy_signal_database(tmp_path)
+    with closing(sqlite3.connect(database_path)) as connection, connection:
+        connection.execute("ALTER TABLE signals ADD COLUMN gather_run_id TEXT")
+        connection.execute("UPDATE signals SET gather_run_id = 'gather-legacy-signal'")
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    manifest = GatherRunManifest(
+        run_id="gather-legacy-signal",
+        status=GatherRunStatus.RUNNING,
+        program_id="samplealpha",
+        actor_identity_type="interactive",
+        lease_owner="test-owner",
+        lease_fencing_token=1,
+        started_at=now,
+        scope_as_of=now,
+        required_scope_status=RequiredScopeStatus.FULL,
+    )
+    create_staging_manifest(manifest, programs_root=tmp_path)
+    if committed:
+        commit_staging_run(manifest, finished_at=now, programs_root=tmp_path)
+    else:
+        fail_staging_run(manifest, finished_at=now, programs_root=tmp_path)
+    before = database_path.read_bytes()
+
+    signals = SQLiteSignalStore(programs_root=tmp_path).read(
+        "samplealpha", read_only=True, require_committed_gather_run=True,
+    )
+
+    assert tuple(signal.id for signal in signals) == (("legacy",) if committed else ())
+    assert database_path.read_bytes() == before
+    with closing(sqlite3.connect(database_path)) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(signals)")}
+    assert "workstream_ids_json" not in columns
 
 
 @pytest.mark.parametrize(

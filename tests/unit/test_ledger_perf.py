@@ -1,8 +1,8 @@
 """NFR-3 performance gate: 50K event log full replay must complete in < 60 s (§9.5, S2 accept).
 
-Run via:  pytest -m slow tests/unit/test_ledger_perf.py
-CI:       included on every merge to main.
-Dev loop: excluded via -m "not slow" to keep the inner-loop fast.
+Run via:  pytest -n 0 -m perf tests/unit/test_ledger_perf.py
+CI:       included on every merge to main in the serial performance lane.
+Dev loop: excluded by the default "not perf" selection.
 """
 from __future__ import annotations
 
@@ -46,6 +46,11 @@ def _build_payload(event_type: str, template: dict, i: int) -> dict:  # type: ig
     return payload
 
 
+def test_replay_budget_is_in_performance_lane() -> None:
+    assert any(mark.name == "perf" for mark in getattr(test_replay_perf_50k, "pytestmark", ()))
+
+
+@pytest.mark.perf
 @pytest.mark.slow
 def test_replay_perf_50k(tmp_path: Path) -> None:
     """Full-log replay of a 50K-event synthetic program must complete in < 60 s (NFR-3).

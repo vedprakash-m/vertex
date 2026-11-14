@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import replace
 from pathlib import Path
@@ -21,6 +22,7 @@ from src.core.stages.sor_gated_load import (
 from src.core.store_factory import build_trajectory_store_for_program_id
 
 _ALLOW_LEGACY_MILESTONE_ROLLBACK_ENV = "VERTEX_REPORT_ALLOW_LEGACY_MILESTONE_ROLLBACK"
+log = logging.getLogger(__name__)
 
 
 class _ArchiveOptions(TypedDict, total=False):
@@ -254,8 +256,8 @@ def _emit_coverage_gap_findings(program_id: str, assessments: tuple[Any, ...], *
                 impact_estimate="high",
                 programs_root=programs_root,
             )
-        except Exception:  # pragma: no cover - gap emission must never break the report
-            pass
+        except Exception:
+            log.warning("Unable to record a context gap for a milestone with incomplete evidence.")
 
 
 def _legacy_milestone_rollback_enabled() -> bool:

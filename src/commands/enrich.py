@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional, TYPE_CHECKING
@@ -54,6 +55,13 @@ def enrich_command(
         typer.echo(f"ERROR: Edition '{edition}' not found.", err=True)
         raise typer.Exit(1)
 
+    if dry_run:
+        typer.echo(
+            "(dry-run: enrich does not save evidence; WorkIQ budget and circuit-breaker state may be written; "
+            "CLI startup may also write state)",
+            err=True,
+        )
+
     program_id = resolved.paths.program_id
     _ctx = load_program_context(program_id, programs_root=programs_root, editions_root=editions_root)
 
@@ -94,10 +102,13 @@ def enrich_command(
         raise typer.Exit(1)
 
     from src.ai.content_extractor import ContentExtractionAgent, ExtractionContext
-    from src.commands.gather_pipeline.evidence_extraction_stage import persist_evidence
+    from src.commands.gather_pipeline.evidence_extraction_stage import _persist_evidence, persist_evidence
+    from src.commands.workiq_evidence_safety import UnsafeWorkIQEvidenceError, sanitize_workiq_evidence
 
     agent = ContentExtractionAgent(ask_ai_fn=lambda prompt: bridge.ask_workiq(prompt))  # type: ignore[arg-type, return-value]
     results: list[dict] = []
+    accept_rejected = False
+    progress_to_stderr = output_format == "json"
 
     # P4-17: cluster lanes that share meeting-series names into a single WorkIQ call
     # to reduce API budget from N lanes to K clusters (K << N for programs with shared meetings).
@@ -106,6 +117,7 @@ def enrich_command(
     retrieval_config = getattr(m365_config, "retrieval", None)
     per_thread_enabled = bool(retrieval_config and retrieval_config.per_thread_extraction)
     if batch and not lane and not per_thread_enabled:
+        budget_refusals: list[str] = []
         cluster_cache = _build_cluster_response_cache(
             registry_entries=registry_entries,
             since_dt=since_dt,
@@ -113,14 +125,25 @@ def enrich_command(
             programs_root=programs_root,
             bridge=bridge,
             workiq_cost_guard=workiq_cost_guard,
+            budget_refusals=budget_refusals,
         )
+        if budget_refusals:
+            # Re-Vertex C.46 containment: a cluster budget refusal stops all lane
+            # work so no unchecked extraction or per-lane WorkIQ call follows and
+            # no lane is marked zero-yield. Partial-result salvage remains undecided.
+            stop_message = f"WorkIQ budget exceeded: {budget_refusals[0]}"
+            if output_format == "json":
+                typer.echo(json.dumps({"results": [], "stopped": stop_message}, indent=2))
+            else:
+                typer.echo(f"  [stopped — {stop_message}]")
+            return
     else:
         cluster_cache = {}
 
     for entry in registry_entries:
         lane_id = entry.get("id", "?")
         lane_name = entry.get("name", lane_id)
-        typer.echo(f"  Extracting: {lane_id}...", nl=False)
+        typer.echo(f"  Extracting: {lane_id}...", nl=False, err=progress_to_stderr)
 
         if _is_workiq_lane_suspended(
             lane_entry=entry,
@@ -128,7 +151,7 @@ def enrich_command(
             edition=edition,
             programs_root=programs_root,
         ):
-            typer.echo(" [skipped — suspended after 3 zero-yield runs]")
+            typer.echo(" [skipped — suspended after 3 zero-yield runs]", err=progress_to_stderr)
             continue
 
         if per_thread_enabled and retrieval_config is not None:
@@ -140,54 +163,68 @@ def enrich_command(
                 retrieval_config=retrieval_config,
                 edition=edition,
                 programs_root=programs_root,
+                dry_run=dry_run,
             )
-            if per_thread_evidence or not has_incomplete_discovery:
+            admitted_count = 0
+            rejected_count = 0
+            for evidence in per_thread_evidence:
+                if dry_run:
+                    try:
+                        admitted_evidence = sanitize_workiq_evidence(evidence)
+                    except UnsafeWorkIQEvidenceError:
+                        admitted_evidence = None
+                else:
+                    signal_id = _enrich_signal_id(lane_id=lane_id, evidence=evidence, as_of=as_of)
+                    wrote, admitted_evidence = _persist_evidence(
+                        evidence,
+                        program_id=program_id,
+                        programs_root=programs_root,
+                        backing_signal_ids=(signal_id,),
+                        workiq_origin=True,
+                    )
+                    if wrote and admitted_evidence is not None:
+                        _emit_enrich_signal(
+                            signal_id=signal_id,
+                            lane_id=lane_id,
+                            program_id=program_id,
+                            evidence=evidence,
+                            query="per-thread WorkIQ extraction",
+                            as_of=as_of,
+                            programs_root=programs_root,
+                        )
+                        from src.core.workiq_freshness import mark_workiq_freshness_success
+
+                        source_id = admitted_evidence.source_refs[0].canonical_id if admitted_evidence.source_refs else None
+                        if source_id:
+                            mark_workiq_freshness_success(
+                                _workiq_thread_freshness_path(edition=edition, programs_root=programs_root),
+                                source_id,
+                            )
+                if admitted_evidence is None:
+                    rejected_count += 1
+                    continue
+                admitted_count += 1
+                results.append({
+                    "lane_id": lane_id,
+                    "source_id": admitted_evidence.source_refs[0].canonical_id if admitted_evidence.source_refs else None,
+                    "risk_level": admitted_evidence.risk_level.value,
+                    "etas_found": len(admitted_evidence.etas),
+                    "blocking_found": len(admitted_evidence.blocking_items),
+                    "confidence": round(admitted_evidence.confidence, 2),
+                })
+            if not dry_run and (admitted_count or not (has_incomplete_discovery or rejected_count)):
                 _record_workiq_lane_result(
                     lane_id=lane_id,
                     edition=edition,
                     program_id=program_id,
                     programs_root=programs_root,
-                    observed_yield=len(per_thread_evidence),
+                    observed_yield=admitted_count,
                     as_of=as_of,
-                    last_result="per_thread_evidence" if per_thread_evidence else "no_structured_evidence",
+                    last_result="per_thread_evidence" if admitted_count else "no_structured_evidence",
                 )
-            for evidence in per_thread_evidence:
-                results.append({
-                    "lane_id": lane_id,
-                    "source_id": evidence.source_refs[0].canonical_id if evidence.source_refs else None,
-                    "risk_level": evidence.risk_level.value,
-                    "etas_found": len(evidence.etas),
-                    "blocking_found": len(evidence.blocking_items),
-                    "confidence": round(evidence.confidence, 2),
-                })
-                if dry_run:
-                    continue
-                signal_id = _enrich_signal_id(lane_id=lane_id, evidence=evidence, as_of=as_of)
-                wrote = persist_evidence(
-                    evidence,
-                    program_id=program_id,
-                    programs_root=programs_root,
-                    backing_signal_ids=(signal_id,),
-                )
-                if wrote:
-                    _emit_enrich_signal(
-                        signal_id=signal_id,
-                        lane_id=lane_id,
-                        program_id=program_id,
-                        evidence=evidence,
-                        query="per-thread WorkIQ extraction",
-                        as_of=as_of,
-                        programs_root=programs_root,
-                    )
-                    from src.core.workiq_freshness import mark_workiq_freshness_success
-
-                    source_id = evidence.source_refs[0].canonical_id if evidence.source_refs else None
-                    if source_id:
-                        mark_workiq_freshness_success(
-                            _workiq_thread_freshness_path(edition=edition, programs_root=programs_root),
-                            source_id,
-                        )
-            typer.echo(f" sources={len(per_thread_evidence)}")
+            if rejected_count:
+                typer.echo(f" [WorkIQ: omitted {rejected_count} unsafe evidence record(s)]", err=True)
+            typer.echo(f" sources={admitted_count}", err=progress_to_stderr)
             continue
 
         # P4-17: check if a batch response is available for this lane's cluster key.
@@ -198,23 +235,24 @@ def enrich_command(
             cached = cluster_cache[cluster_key]
             if cached is None:
                 # Cluster query failed; mark this lane as zero-yield and continue.
-                _record_workiq_lane_result(
-                    lane_id=lane_id,
-                    edition=edition,
-                    program_id=program_id,
-                    programs_root=programs_root,
-                    observed_yield=0,
-                    as_of=as_of,
-                    last_result="cluster_query_failed",
-                )
-                typer.echo(" [cluster query failed]")
+                if not dry_run:
+                    _record_workiq_lane_result(
+                        lane_id=lane_id,
+                        edition=edition,
+                        program_id=program_id,
+                        programs_root=programs_root,
+                        observed_yield=0,
+                        as_of=as_of,
+                        last_result="cluster_query_failed",
+                    )
+                typer.echo(" [cluster query failed]", err=progress_to_stderr)
                 continue
             raw_response = cached
         else:
             # No cluster cache entry — issue a per-lane WorkIQ call.
             query = _build_lane_query(entry, since_dt=since_dt)
             if not query:
-                typer.echo(" [skipped — no email/transcript query configured]")
+                typer.echo(" [skipped — no email/transcript query configured]", err=progress_to_stderr)
                 continue
             estimated_query_cost_usd = _estimate_workiq_query_cost_usd(query=query)
             if workiq_cost_guard is not None:
@@ -223,7 +261,7 @@ def enrich_command(
                 try:
                     workiq_cost_guard.check(estimated_query_cost_usd)
                 except BudgetExceeded as exc:
-                    typer.echo(f" [stopped — WorkIQ budget exceeded: {exc}]")
+                    typer.echo(f" [stopped — WorkIQ budget exceeded: {exc}]", err=progress_to_stderr)
                     break
 
             try:
@@ -231,16 +269,17 @@ def enrich_command(
             except Exception as exc:
                 if workiq_cost_guard is not None:
                     workiq_cost_guard.record_actual(estimated_query_cost_usd)
-                _record_workiq_lane_result(
-                    lane_id=lane_id,
-                    edition=edition,
-                    program_id=program_id,
-                    programs_root=programs_root,
-                    observed_yield=0,
-                    as_of=as_of,
-                    last_result=f"query_error:{type(exc).__name__}",
-                )
-                typer.echo(f" [ERROR: {exc}]")
+                if not dry_run:
+                    _record_workiq_lane_result(
+                        lane_id=lane_id,
+                        edition=edition,
+                        program_id=program_id,
+                        programs_root=programs_root,
+                        observed_yield=0,
+                        as_of=as_of,
+                        last_result=f"query_error:{type(exc).__name__}",
+                    )
+                typer.echo(" [ERROR: WorkIQ query failed]", err=progress_to_stderr)
                 continue
 
             if workiq_cost_guard is not None:
@@ -249,16 +288,17 @@ def enrich_command(
                 )
 
         if raw_response is None:
-            _record_workiq_lane_result(
-                lane_id=lane_id,
-                edition=edition,
-                program_id=program_id,
-                programs_root=programs_root,
-                observed_yield=0,
-                as_of=as_of,
-                last_result="query_error:no_response",
-            )
-            typer.echo(" [ERROR: no WorkIQ response]")
+            if not dry_run:
+                _record_workiq_lane_result(
+                    lane_id=lane_id,
+                    edition=edition,
+                    program_id=program_id,
+                    programs_root=programs_root,
+                    observed_yield=0,
+                    as_of=as_of,
+                    last_result="query_error:no_response",
+                )
+            typer.echo(" [ERROR: no WorkIQ response]", err=progress_to_stderr)
             continue
 
         from src.core.models import Enrichment
@@ -282,41 +322,44 @@ def enrich_command(
         try:
             extracted_evidence = agent.extract(ctx_extract)   # single arg; enrichments are in ctx
         except Exception as exc:
-            _record_workiq_lane_result(
-                lane_id=lane_id,
-                edition=edition,
-                program_id=program_id,
-                programs_root=programs_root,
-                observed_yield=0,
-                as_of=as_of,
-                last_result=f"extraction_error:{type(exc).__name__}",
-            )
-            typer.echo(f" [extraction ERROR: {exc}]")
+            if not dry_run:
+                _record_workiq_lane_result(
+                    lane_id=lane_id,
+                    edition=edition,
+                    program_id=program_id,
+                    programs_root=programs_root,
+                    observed_yield=0,
+                    as_of=as_of,
+                    last_result=f"extraction_error:{type(exc).__name__}",
+                )
+            typer.echo(" [extraction ERROR: WorkIQ extraction failed]", err=progress_to_stderr)
             continue
 
         if extracted_evidence is None:
+            if not dry_run:
+                _record_workiq_lane_result(
+                    lane_id=lane_id,
+                    edition=edition,
+                    program_id=program_id,
+                    programs_root=programs_root,
+                    observed_yield=0,
+                    as_of=as_of,
+                    last_result="no_structured_evidence",
+                )
+            typer.echo(" [no structured evidence found]", err=progress_to_stderr)
+            continue
+
+        evidence = extracted_evidence
+        if not dry_run:
             _record_workiq_lane_result(
                 lane_id=lane_id,
                 edition=edition,
                 program_id=program_id,
                 programs_root=programs_root,
-                observed_yield=0,
+                observed_yield=1,
                 as_of=as_of,
-                last_result="no_structured_evidence",
+                last_result="structured_evidence",
             )
-            typer.echo(" [no structured evidence found]")
-            continue
-
-        evidence = extracted_evidence
-        _record_workiq_lane_result(
-            lane_id=lane_id,
-            edition=edition,
-            program_id=program_id,
-            programs_root=programs_root,
-            observed_yield=1,
-            as_of=as_of,
-            last_result="structured_evidence",
-        )
 
         results.append({
             "lane_id": lane_id,
@@ -338,6 +381,7 @@ def enrich_command(
                 program_id=program_id,
                 programs_root=programs_root,
                 backing_signal_ids=(signal_id,),
+                workiq_origin=True,
             )
             if wrote:
                 _emit_enrich_signal(
@@ -359,23 +403,33 @@ def enrich_command(
                     programs_root=programs_root,
                 )
             if accept:
-                _update_workiq_latest(
-                    lane_id=lane_id,
-                    program_id=program_id,
-                    programs_root=programs_root,
-                    evidence=evidence,
-                    as_of=as_of,
-                )
+                try:
+                    accepted_evidence = sanitize_workiq_evidence(evidence)
+                except UnsafeWorkIQEvidenceError:
+                    accept_rejected = True
+                    typer.echo(" [unsafe WorkIQ evidence; registry not updated]", err=True)
+                else:
+                    _update_workiq_latest(
+                        lane_id=lane_id,
+                        program_id=program_id,
+                        programs_root=programs_root,
+                        evidence=accepted_evidence,
+                        as_of=as_of,
+                    )
 
-        typer.echo(f" risk={evidence.risk_level.value} conf={evidence.confidence:.2f}")
+        typer.echo(
+            f" risk={evidence.risk_level.value} conf={evidence.confidence:.2f}",
+            err=progress_to_stderr,
+        )
 
     # Summary output
     if output_format == "json":
         typer.echo(json.dumps(results, indent=2))
     else:
-        typer.echo(f"\nDone. {len(results)} lanes extracted.")
-        if dry_run:
-            typer.echo("(dry-run: no files written)")
+        result_kind = "sources" if per_thread_enabled else "lanes"
+        typer.echo(f"\nDone. {len(results)} {result_kind} extracted.")
+    if accept_rejected:
+        raise typer.Exit(1)
 
 
 def _parse_since(since: str) -> int:
@@ -398,6 +452,7 @@ def _extract_per_thread_evidence(
     retrieval_config: Any,
     edition: str,
     programs_root: Path,
+    dry_run: bool = False,
 ) -> tuple[tuple["WorkstreamEvidence", ...], bool]:
     """Return source-keyed evidence and whether discovery was incomplete."""
 
@@ -428,6 +483,7 @@ def _extract_per_thread_evidence(
         max_wall_clock_seconds=retrieval_config.max_wall_clock_seconds,
         cache_path=cache_path,
         one_hop=retrieval_config.per_thread_one_hop,
+        write_cache=not dry_run,
     )
     if retrieval.rejected_identity_count:
         typer.echo(
@@ -519,7 +575,7 @@ def _build_workiq_cost_guard(
     if ai_config is None or not bool(getattr(ai_config, "enabled", False)):
         return None
     budget_usd = float(getattr(ai_config, "budget_usd_per_run", 0.0) or 0.0)
-    if budget_usd <= 0:
+    if math.isfinite(budget_usd) and budget_usd <= 0:
         return None
 
     from src.ai.cost_guard import CostGuard
@@ -756,7 +812,10 @@ def _enrich_signal_id(*, lane_id: str, evidence: "WorkstreamEvidence", as_of: da
     canonical = "|".join((
         lane_id,
         as_of.strftime("%Y-%m-%d"),
-        ",".join(ref.canonical_id or "" for ref in evidence.source_refs),
+        ",".join(
+            ref.canonical_id if isinstance(ref.canonical_id, str) else ""
+            for ref in evidence.source_refs
+        ),
         evidence.narrative_summary or "",
         ",".join(evidence.blocking_items),
         str(round(evidence.confidence, 4)),
@@ -784,11 +843,13 @@ def _emit_enrich_signal(
     This closes the §17.8 evidence-approval bypass: enrich no longer persists
     ungated evidence.
     """
+    from src.commands.workiq_evidence_safety import sanitize_workiq_evidence
     from src.core.journal import append_signal
     from src.core.models import Confidence
     from src.core.models_v2 import Signal
 
-    text = (evidence.narrative_summary or query or "")[:500]
+    sanitized = sanitize_workiq_evidence(evidence)
+    text = (sanitized.narrative_summary or "WorkIQ extraction summary unavailable.")[:500]
     sig = Signal(
         id=signal_id,
         timestamp=as_of,
@@ -851,8 +912,8 @@ def _record_enrich_provenance_and_quality(
     )
     try:
         record_provenance(prov, program_id=program_id, programs_root=programs_root)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Failed to record enrich provenance for lane %s: %s", lane_id, exc)
+    except Exception:  # noqa: BLE001
+        log.warning("Failed to record enrich provenance for lane %s", lane_id)
 
     body_chars = len(raw_response) if isinstance(raw_response, str) else len(str(raw_response))
     qrec = EvidenceQualityRecord(
@@ -868,8 +929,8 @@ def _record_enrich_provenance_and_quality(
     )
     try:
         record_evidence_quality(qrec, program_id=program_id, programs_root=programs_root)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Failed to record enrich quality for lane %s: %s", lane_id, exc)
+    except Exception:  # noqa: BLE001
+        log.warning("Failed to record enrich quality for lane %s", lane_id)
 
 
 # ── P4-17: Lane-batching helpers ──────────────────────────────────────────────
@@ -979,12 +1040,14 @@ def _build_cluster_response_cache(
     programs_root: Path,
     bridge: Any,
     workiq_cost_guard: Any,
+    budget_refusals: list[str] | None = None,
 ) -> dict[str, str | None]:
     """Pre-fetch WorkIQ responses for clusters of lanes (§16.4 P4-17).
 
     Returns a mapping from cluster_key → raw WorkIQ response (or None on failure).
     Only clusters with ≥2 lanes are batched; solo lanes are excluded (they will
-    fall through to the per-lane path in the main loop).
+    fall through to the per-lane path in the main loop). A budget refusal message
+    is appended to ``budget_refusals`` when provided.
     """
     from collections import defaultdict
 
@@ -1006,25 +1069,29 @@ def _build_cluster_response_cache(
         # Budget check before the batched call.
         estimated_cost = _estimate_workiq_query_cost_usd(query=query)
         if workiq_cost_guard is not None:
+            from src.ai.client import BudgetExceeded
+
             try:
-                from src.ai.client import BudgetExceeded
                 workiq_cost_guard.check(estimated_cost)
-            except (BudgetExceeded, Exception):
+            except BudgetExceeded as exc:
                 for entry in cluster_entries:
                     cache[cluster_key] = None
+                if budget_refusals is not None:
+                    budget_refusals.append(str(exc))
                 break
 
         try:
             raw_response = bridge.ask_workiq(query)
+        except Exception:
+            log.warning("Cluster WorkIQ call failed")
+            raw_response = None
+            if workiq_cost_guard is not None:
+                workiq_cost_guard.record_actual(estimated_cost)
+        else:
             if workiq_cost_guard is not None:
                 workiq_cost_guard.record_actual(
                     _estimate_workiq_query_cost_usd(query=query, response_text=raw_response)
                 )
-        except Exception as exc:
-            log.warning("Cluster WorkIQ call failed for key %r: %s", cluster_key, exc)
-            raw_response = None
-            if workiq_cost_guard is not None:
-                workiq_cost_guard.record_actual(estimated_cost)
 
         cache[cluster_key] = raw_response
 

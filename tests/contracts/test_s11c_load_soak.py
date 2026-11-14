@@ -83,9 +83,48 @@ def _make_events(
     return events
 
 
+@pytest.mark.parametrize(
+    "test_name",
+    (
+        "test_replay_throughput_meets_slo",
+        "test_incremental_replay_is_at_least_as_fast_as_full_rebuild",
+    ),
+)
+def test_pilot_replay_budget_is_in_performance_lane(test_name: str) -> None:
+    benchmark = getattr(TestReplayThroughput, test_name)
+    assert any(mark.name == "perf" for mark in getattr(benchmark, "pytestmark", ()))
+
+
+def test_full_workload_projects_every_event(tmp_path: Path) -> None:
+    events = _make_events("prog-throughput", _THROUGHPUT_EVENTS)
+    db_path = tmp_path / "prog-throughput" / "projection.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    result = project_events_to_sqlite(
+        "prog-throughput", events, projection_path=db_path, programs_root=tmp_path
+    )
+    assert result.event_count == _THROUGHPUT_EVENTS
+
+
+def test_large_delta_replay_projects_every_event(tmp_path: Path) -> None:
+    events = _make_events("prog-incr", _THROUGHPUT_EVENTS)
+    db_path = tmp_path / "prog-incr" / "projection.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    project_events_to_sqlite(
+        "prog-incr", events[: _THROUGHPUT_EVENTS // 2],
+        projection_path=db_path, programs_root=tmp_path,
+    )
+
+    result = project_events_incremental_to_sqlite(
+        "prog-incr", events, projection_path=db_path, programs_root=tmp_path
+    )
+    assert result.event_count == _THROUGHPUT_EVENTS
+
+
 class TestReplayThroughput:
     """G-fleet-replay: §5.8 replay throughput ≥10,000 events/min."""
 
+    @pytest.mark.perf
     def test_replay_throughput_meets_slo(self, tmp_path: Path) -> None:
         """Replay 1000 events in < 6 seconds (= ≥10,000 events/min).
 
@@ -116,6 +155,7 @@ class TestReplayThroughput:
             f"Event loss: projected {result.event_count}/{_THROUGHPUT_EVENTS} events"
         )
 
+    @pytest.mark.perf
     def test_incremental_replay_is_at_least_as_fast_as_full_rebuild(
         self, tmp_path: Path
     ) -> None:

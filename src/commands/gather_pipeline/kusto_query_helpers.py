@@ -68,12 +68,15 @@ def record_kusto_query_state(
 ) -> None:
     if query_state_sink is None:
         return
-    error = error or kusto_metric_result_error(
-        query.id, query.expected_cardinality, rows,
-        metric_id=query.metric_id, result_column=query.result_column,
-        slo_target=query.slo_target, comparison=query.comparison,
-        result_limits=query.result_limits,
-    )
+    if error is None:
+        error = kusto_metric_result_error(
+            query.id, query.expected_cardinality, rows,
+            metric_id=query.metric_id, result_column=query.result_column,
+            slo_target=query.slo_target, comparison=query.comparison,
+            result_limits=query.result_limits,
+        )
+    elif not error:
+        error = "Kusto query failed."
     timestamp = as_of.astimezone(timezone.utc)
     max_data_timestamp = extract_kusto_max_data_timestamp(rows) if error is None else None
     numeric_value = extract_kusto_query_numeric_value(query, rows) if error is None else None

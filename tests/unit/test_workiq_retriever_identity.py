@@ -5,6 +5,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -257,6 +258,163 @@ def test_enrich_cli_retains_identity_warning_and_valid_partial_results(
     assert "fixture@example.net" not in result.output
 
 
+@pytest.mark.parametrize("dry_run", [False, True], ids=["normal", "preview"])
+@pytest.mark.parametrize("invalid_first", [False, True])
+def test_enrich_cli_nonfinite_confidence_stops_before_persistence_and_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dry_run: bool, invalid_first: bool,
+) -> None:
+    import typer
+    from typer.testing import CliRunner
+    import src.commands.enrich as command
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> datetime:
+            return datetime(2026, 6, 21, tzinfo=timezone.utc)
+
+    records = [_record(id="valid-thread"), _record(id="bad-thread")]
+    if invalid_first:
+        records.reverse()
+    bridge = Bridge(records)
+
+    def ask(question: str, *, use_cache: bool = False) -> Any:
+        assert use_cache is False
+        bridge.questions.append(question)
+        if "Which of my emails" in question:
+            return {"emails": records}
+        if '"bad-thread"' in question:
+            return {"response": '{"risk_level":"low","confidence":"NaN","raw_excerpts":["synthetic-private-excerpt"]}'}
+        return {"response": BODY}
+
+    monkeypatch.setattr(bridge, "ask_workiq", ask)
+    monkeypatch.setattr(bridge, "probe", lambda: SimpleNamespace(available=True, has_workiq=True), raising=False)
+    monkeypatch.setattr("src.m365.agency_bridge.AgencyBridge", lambda **_: bridge)
+    retrieval_config = SimpleNamespace(
+        per_thread_extraction=True, per_thread_top_k=8, max_calls_per_cycle=10,
+        max_wall_clock_seconds=30, per_thread_one_hop=False,
+    )
+    resolved = SimpleNamespace(
+        paths=SimpleNamespace(program_id="synthetic"),
+        program=SimpleNamespace(m365=SimpleNamespace(retrieval=retrieval_config)),
+    )
+    monkeypatch.setattr(command, "_PROGRAMS_ROOT", tmp_path)
+    monkeypatch.setattr(command, "resolve_edition", lambda *_, **__: resolved)
+    monkeypatch.setattr(command, "load_program_context", lambda *_, **__: None)
+    monkeypatch.setattr(command, "_load_registry_lanes", lambda *_: [{"id": "synthetic", "name": "Synthetic lane"}])
+    monkeypatch.setattr(command, "_build_workiq_breaker", lambda **_: None)
+    monkeypatch.setattr(command, "_build_workiq_cost_guard", lambda **_: None)
+    monkeypatch.setattr(command, "_is_workiq_lane_suspended", lambda **_: False)
+    record_lane = MagicMock()
+    monkeypatch.setattr(command, "_record_workiq_lane_result", record_lane)
+    cache = tmp_path / "freshness.json"
+    monkeypatch.setattr(command, "_workiq_thread_freshness_path", lambda **_: cache)
+    monkeypatch.setattr(command, "datetime", Clock)
+    persist = MagicMock()
+    monkeypatch.setattr("src.commands.gather_pipeline.evidence_extraction_stage._persist_evidence", persist)
+    emit = MagicMock()
+    monkeypatch.setattr(command, "_emit_enrich_signal", emit)
+    app = typer.Typer()
+    app.command()(command.enrich_command)
+    args = ["--edition", "synthetic"] + (["--dry-run"] if dry_run else [])
+
+    for attempt in range(2):
+        result = CliRunner().invoke(app, args)
+        assert result.exit_code != 0
+        assert isinstance(result.exception, ValueError)
+        assert str(result.exception) == "ContentExtractionAgent: invalid confidence"
+        assert "synthetic-private-excerpt" not in result.output
+        assert len(bridge.questions) == 3 * (attempt + 1)
+        if dry_run:
+            assert not cache.exists()
+        else:
+            saved = json.loads(cache.read_text(encoding="utf-8"))
+            assert {entry["status"] for entry in saved.values()} == {"retrieved"}
+
+    persist.assert_not_called()
+    emit.assert_not_called()
+    record_lane.assert_not_called()
+
+
+@pytest.mark.parametrize("dry_run", [True, False], ids=["preview", "normal"])
+@pytest.mark.parametrize("existing_cache", [True, False], ids=["existing-cache", "absent-cache"])
+def test_enrich_per_thread_preview_preserves_freshness_cache(
+    dry_run: bool, existing_cache: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import MagicMock
+
+    import typer
+    from typer.testing import CliRunner
+    import src.commands.enrich as command
+    from src.core.workiq_freshness import workiq_thread_freshness_hash
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> datetime:
+            return datetime(2026, 6, 21, tzinfo=timezone.utc)
+
+    cache_path = tmp_path / "freshness.json"
+    lane_state = tmp_path / "lane-state.json"
+    new_record = _record(id="message-new", conversationId="thread-new")
+    records = [new_record]
+    original = None
+    if existing_cache:
+        records.insert(0, _record(id="message-old", conversationId="thread-old"))
+        old_cache = {
+            "thread-old": {
+                "freshness_hash": workiq_thread_freshness_hash(
+                    conversation_id="thread-old", message_count=1, newest_message_identity="message-old",
+                ),
+                "status": "success",
+            }
+        }
+        original = json.dumps(old_cache, indent=3).encode("utf-8")
+        cache_path.write_bytes(original)
+    retrieval = SimpleNamespace(
+        per_thread_extraction=True, per_thread_top_k=8, max_calls_per_cycle=10,
+        max_wall_clock_seconds=30, per_thread_one_hop=False,
+    )
+    resolved = SimpleNamespace(
+        paths=SimpleNamespace(program_id="synthetic"),
+        program=SimpleNamespace(m365=SimpleNamespace(retrieval=retrieval)),
+    )
+    bridge = Bridge(records)
+    monkeypatch.setattr(bridge, "probe", lambda: SimpleNamespace(available=True, has_workiq=True), raising=False)
+    monkeypatch.setattr("src.m365.agency_bridge.AgencyBridge", lambda **_: bridge)
+    monkeypatch.setattr(command, "resolve_edition", lambda *_, **__: resolved)
+    monkeypatch.setattr(command, "load_program_context", lambda *_, **__: None)
+    monkeypatch.setattr(command, "_PROGRAMS_ROOT", tmp_path)
+    monkeypatch.setattr(command, "_load_registry_lanes", lambda *_: [{"id": "synthetic", "name": "Synthetic lane"}])
+    monkeypatch.setattr(command, "_build_workiq_breaker", lambda **_: None)
+    monkeypatch.setattr(command, "_build_workiq_cost_guard", lambda **_: None)
+    monkeypatch.setattr(command, "_workiq_lane_state_path", lambda **_: lane_state)
+    monkeypatch.setattr(command, "_workiq_thread_freshness_path", lambda **_: cache_path)
+    monkeypatch.setattr(command, "datetime", Clock)
+    persist = MagicMock(side_effect=lambda evidence, **_: (False, evidence))
+    monkeypatch.setattr("src.commands.gather_pipeline.evidence_extraction_stage._persist_evidence", persist)
+    app = typer.Typer()
+    app.command()(command.enrich_command)
+    args = ["--edition", "synthetic"] + (["--dry-run"] if dry_run else [])
+    result = CliRunner().invoke(app, args)
+
+    assert result.exit_code == 0, result.output
+    assert "sources=1" in result.stdout
+    assert len(bridge.questions) == 2  # Discovery plus only the new thread.
+    if dry_run:
+        if existing_cache:
+            assert cache_path.read_bytes() == original
+        else:
+            assert not cache_path.exists()
+        assert not lane_state.exists()
+        persist.assert_not_called()
+    else:
+        saved = json.loads(cache_path.read_text(encoding="utf-8"))
+        assert saved["thread-new"]["status"] == "retrieved"
+        if existing_cache:
+            assert saved["thread-old"] == old_cache["thread-old"]
+        assert lane_state.exists()
+        persist.assert_called_once()
+
+
 @pytest.mark.parametrize("max_calls", [1, 10])
 def test_rich_retrieval_preserves_time_rejections_and_valid_partial_results(
     max_calls: int, tmp_path: Path,
@@ -382,6 +540,7 @@ def test_rich_retrieval_preserves_invalid_record_counts_and_valid_partial_eviden
         assert private_value not in repr(result) + repr(bridge.questions)
 
 
+@pytest.mark.parametrize("dry_run", [True, False], ids=["preview", "normal"])
 @pytest.mark.parametrize(
     ("kind", "include_native"),
     [(kind, include) for kind in (
@@ -391,7 +550,7 @@ def test_rich_retrieval_preserves_invalid_record_counts_and_valid_partial_eviden
      for include in (False, True)] + [("unavailable", False), ("malformed", False)],
 )
 def test_enrich_cli_does_not_record_rejected_only_results_as_zero_yield(
-    kind: str, include_native: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    kind: str, include_native: bool, dry_run: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import typer
     from typer.testing import CliRunner
@@ -452,30 +611,44 @@ def test_enrich_cli_does_not_record_rejected_only_results_as_zero_yield(
     monkeypatch.setattr(command, "_build_workiq_cost_guard", lambda **_: None)
     monkeypatch.setattr(command, "_workiq_thread_freshness_path", lambda **_: tmp_path / "freshness.json")
     monkeypatch.setattr(command, "datetime", Clock)
+    persist = MagicMock(side_effect=lambda evidence, **_: (False, evidence))
+    monkeypatch.setattr("src.commands.gather_pipeline.evidence_extraction_stage._persist_evidence", persist)
     app = typer.Typer()
     app.command()(command.enrich_command)
 
-    result = CliRunner().invoke(app, ["--edition", "synthetic", "--dry-run"])
+    args = ["--edition", "synthetic"] + (["--dry-run"] if dry_run else [])
+    result = CliRunner().invoke(app, args)
 
     assert result.exit_code == 0, result.output
-    if not include_native and kind in {
+    if dry_run or (not include_native and kind in {
         "missing_time", "invalid_time", "identity", "identity_missing", "unavailable", "malformed",
         "invalid_shape", "unsafe_control", "unsafe_url",
-    }:
+    }):
         assert state_path.read_bytes() == previous_state
     else:
         state = json.loads(state_path.read_text(encoding="utf-8"))["lanes"]["synthetic"]
         assert state["last_observed_yield"] == int(include_native)
-    if kind in {"missing_time", "invalid_time"}:
-        assert "missing or invalid source time" in result.stderr
-    elif kind in {"identity", "identity_missing"}:
-        assert "stable source identity" in result.stderr
-    elif kind in {"unavailable", "malformed"}:
-        assert "structured discovery response unavailable or invalid" in result.stderr
-    elif kind in {"invalid_shape", "unsafe_control", "unsafe_url"}:
-        assert "1 inspected record occurrence(s) rejected for malformed or unsafe content" in result.stderr
+    assert persist.call_count == int(include_native and not dry_run)
+    preview_warning = (
+        "(dry-run: enrich does not save evidence; WorkIQ budget and circuit-breaker state may be written; "
+        "CLI startup may also write state)\n"
+    )
+    if dry_run:
+        assert result.stderr.startswith(preview_warning)
+        diagnostics = result.stderr.removeprefix(preview_warning)
     else:
-        assert result.stderr == ""
+        assert preview_warning not in result.stderr
+        diagnostics = result.stderr
+    if kind in {"missing_time", "invalid_time"}:
+        assert "missing or invalid source time" in diagnostics
+    elif kind in {"identity", "identity_missing"}:
+        assert "stable source identity" in diagnostics
+    elif kind in {"unavailable", "malformed"}:
+        assert "structured discovery response unavailable or invalid" in diagnostics
+    elif kind in {"invalid_shape", "unsafe_control", "unsafe_url"}:
+        assert "1 inspected record occurrence(s) rejected for malformed or unsafe content" in diagnostics
+    else:
+        assert diagnostics == ""
     assert f"sources={int(include_native)}" in result.stdout
     for private_value in (
         "private-rejected", "turn1search2", "Synthetic private subject", "fixture@example.net",

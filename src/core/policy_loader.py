@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -90,11 +91,11 @@ def load_ai_model_cost_policy(deployment: str) -> AIModelCostPolicy:
         raw_policy = models.get("default")
     model_policy = _required_mapping(raw_policy, field_name=f"ai.models.{deployment_key or 'default'}")
     return AIModelCostPolicy(
-        input_cost_per_1k_tokens=_required_float(
+        input_cost_per_1k_tokens=_required_model_price(
             model_policy.get("input_cost_per_1k_tokens"),
             field_name="ai.models.*.input_cost_per_1k_tokens",
         ),
-        output_cost_per_1k_tokens=_required_float(
+        output_cost_per_1k_tokens=_required_model_price(
             model_policy.get("output_cost_per_1k_tokens"),
             field_name="ai.models.*.output_cost_per_1k_tokens",
         ),
@@ -275,6 +276,17 @@ def _required_float(value: object, *, field_name: str) -> float:
     if isinstance(value, (int, float)):
         return float(value)
     raise ConfigError(f"{field_name} must be a float in {DEFAULT_POLICY_PATH}")
+
+
+def _required_model_price(value: object, *, field_name: str) -> float:
+    message = f"{field_name} must be a finite nonnegative number in {DEFAULT_POLICY_PATH}"
+    try:
+        price = _required_float(value, field_name=field_name)
+    except (ConfigError, OverflowError):
+        raise ConfigError(message) from None
+    if not math.isfinite(price) or price < 0:
+        raise ConfigError(message)
+    return price
 
 
 def _required_int(value: object, *, field_name: str) -> int:

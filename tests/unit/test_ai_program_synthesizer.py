@@ -4,9 +4,11 @@ live feature to call it."""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from unittest.mock import Mock
 
 import pytest
 
@@ -15,6 +17,7 @@ from src.ai.program_synthesizer import (
     generate_program_synthesis,
     generate_program_synthesis_via_context_gateway,
 )
+from src.core.exceptions import StateError
 from src.core.program_synthesis import (
     ProgramSynthesisRequest,
     SynthesisInputItem,
@@ -64,6 +67,31 @@ def _valid_response() -> dict[str, Any]:
         "inferences": ["The delay may push the milestone."],
         "recommendations": [{"text": "Escalate vendor delay to leadership.", "evidence_refs": ["risk-1"]}],
     }
+
+
+@pytest.mark.parametrize("generate", [generate_program_synthesis, generate_program_synthesis_via_context_gateway])
+@pytest.mark.parametrize("program_id", ["../synthetic-private", r"..\synthetic-private"])
+def test_program_synthesis_refuses_invalid_program_before_lifecycle_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    generate: Callable[..., ProgramSynthesisOutcome],
+    program_id: str,
+) -> None:
+    programs_root = tmp_path / "workspace" / "programs"
+    client = _FakeClient(response=_valid_response())
+    validator = Mock(side_effect=AssertionError("invalid program reached outbound validation"))
+    compiler = Mock(side_effect=AssertionError("invalid program reached compiler"))
+    monkeypatch.setattr("src.ai.program_synthesizer.validate_bounded_payload", validator)
+    monkeypatch.setattr("src.ai.program_synthesizer.DeterministicContextCompiler", compiler)
+
+    with pytest.raises(StateError) as error:
+        generate(replace(_request(), program_id=program_id), client=client, programs_root=programs_root)
+
+    assert "synthetic-private" not in str(error.value)
+    assert not (tmp_path / "workspace").exists()
+    assert client.calls == 0
+    validator.assert_not_called()
+    compiler.assert_not_called()
 
 
 def test_valid_response_is_released_and_persisted(tmp_path: Path) -> None:

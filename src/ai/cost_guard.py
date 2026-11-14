@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from src.ai.client import BudgetExceeded
-from src.core._db import open_program_db
+from src.core._db import open_program_db_with_retry as open_program_db
 from src.core.edition_resolver import get_program_output_dir, PROGRAMS_ROOT
 from src.core.exceptions import StateError
+
+
+_MAX_SQLITE_INTEGER = 2**63 - 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +42,15 @@ class CostReservation:
     reservation_id: int
     estimated_cost_usd: float
     state: CostRunState
+    _ledger_path: Path | None = field(default=None, repr=False)
+
+
+def _enforce_run_budget(state: CostRunState, estimated_cost_usd: float, budget_usd: float) -> None:
+    if state.spent_usd + state.reserved_usd + estimated_cost_usd > budget_usd:
+        raise BudgetExceeded(
+            f"Spent/reserved ${state.spent_usd + state.reserved_usd:.3f} of ${budget_usd:.2f}; "
+            f"next AI spend ${estimated_cost_usd:.3f} would exceed the run ceiling."
+        )
 
 
 class CostGuard:
@@ -52,7 +66,7 @@ class CostGuard:
     ) -> None:
         self._edition = edition
         self._run_id = run_id
-        self._budget_usd = budget_usd
+        self._budget_usd = _validate_live_amount(budget_usd, field_name="budget_usd")
         self._programs_root = programs_root if programs_root is not None else PROGRAMS_ROOT
 
     @property
@@ -63,12 +77,14 @@ class CostGuard:
     def ledger_path(self) -> Path:
         return _cost_guard_ledger_path(self._edition, programs_root=self._programs_root)
 
+    def effective_budget_usd(self, state: CostRunState) -> float:
+        return min(state.budget_usd, self._budget_usd)
+
     def current_state(self) -> CostRunState:
         sqlite_state = _load_sqlite_run_state(
             self.ledger_path,
             edition=self._edition,
             run_id=self._run_id,
-            budget_usd=self._budget_usd,
         )
         if sqlite_state is not None:
             return sqlite_state
@@ -84,11 +100,9 @@ class CostGuard:
         return _state_from_payload(self._edition, self._run_id, self._budget_usd, run_payload)
 
     def check(self, estimated_cost_usd: float = 0.0) -> None:
-        state = self.current_state()
-        if state.spent_usd + state.reserved_usd + estimated_cost_usd > state.budget_usd:
-            raise BudgetExceeded(
-                f"Spent/reserved ${state.spent_usd + state.reserved_usd:.3f} of ${state.budget_usd:.2f}; next AI spend ${estimated_cost_usd:.3f} would exceed the run ceiling."
-            )
+        estimated_cost_usd = _validate_live_amount(estimated_cost_usd, field_name="estimated_cost_usd")
+        current = self.current_state()
+        _enforce_run_budget(current, estimated_cost_usd, self.effective_budget_usd(current))
 
     def reserve(self, estimated_cost_usd: float) -> CostRunState:
         """Durably reserve worst-case spend before one remote dispatch.
@@ -109,11 +123,11 @@ class CostGuard:
         first reservation before it can dispatch; a fallback attempt gets a
         separate reservation and cannot borrow the failed attempt's budget.
         """
-        if estimated_cost_usd < 0:
-            raise ValueError("estimated_cost_usd must not be negative")
+        estimated_cost_usd = _validate_live_amount(estimated_cost_usd, field_name="estimated_cost_usd")
         fallback_state = self.current_state()
+        ledger_path = self.ledger_path.resolve()
         try:
-            with open_program_db(self.ledger_path, durability="strict") as connection:
+            with open_program_db(ledger_path, durability="strict") as connection:
                 _ensure_sqlite_schema(connection)
                 connection.execute("BEGIN IMMEDIATE")
                 row = connection.execute(
@@ -121,12 +135,9 @@ class CostGuard:
                     "FROM ai_cost_runs WHERE edition = ? AND run_id = ?",
                     (self._edition, self._run_id),
                 ).fetchone()
-                current = _state_from_sqlite_row(row, budget_usd=self._budget_usd) if row is not None else fallback_state
-                if current.spent_usd + current.reserved_usd + estimated_cost_usd > current.budget_usd:
-                    raise BudgetExceeded(
-                        f"Spent/reserved ${current.spent_usd + current.reserved_usd:.3f} of ${current.budget_usd:.2f}; "
-                        f"next AI spend ${estimated_cost_usd:.3f} would exceed the run ceiling."
-                    )
+                current = _state_from_sqlite_row(row) if row is not None else fallback_state
+                _enforce_run_budget(current, estimated_cost_usd, self.effective_budget_usd(current))
+                _projection_payload_for_write(self.state_path, edition=self._edition)
                 updated = _replace_state(current, reserved_usd=current.reserved_usd + estimated_cost_usd)
                 _upsert_sqlite_state(connection, updated)
                 cursor = connection.execute(
@@ -137,33 +148,45 @@ class CostGuard:
                 assert reservation_id is not None
         except sqlite3.DatabaseError as error:
             raise StateError(f"Unable to reserve cost guard SQLite ledger at {self.ledger_path}") from error
-        self._persist_projection(updated)
-        return CostReservation(reservation_id=reservation_id, estimated_cost_usd=estimated_cost_usd, state=updated)
+        reservation = CostReservation(
+            reservation_id=reservation_id,
+            estimated_cost_usd=estimated_cost_usd,
+            state=updated,
+            _ledger_path=ledger_path,
+        )
+        try:
+            self._persist_projection(updated)
+        except (StateError, OSError, UnicodeError):
+            try:
+                self._finish_call(
+                    reservation, actual_cost_usd=0.0, ai_calls=0,
+                    undispatched=True, refresh_projection=False,
+                )
+            except (StateError, OSError, UnicodeError) as error:
+                raise StateError(
+                    f"Unable to release undispatched cost reservation ({type(error).__name__}); "
+                    "reconcile before retrying."
+                ) from None
+            raise
+        return reservation
 
     def settle_reservation(self, reserved_cost_usd: float, actual_cost_usd: float, *, ai_calls: int = 1) -> CostRunState:
         """Convert a known reservation into actual spend after a response."""
-        if reserved_cost_usd < 0 or actual_cost_usd < 0:
-            raise ValueError("cost values must not be negative")
+        reserved_cost_usd = _validate_live_amount(reserved_cost_usd, field_name="reserved_cost_usd")
+        actual_cost_usd = _validate_live_amount(actual_cost_usd, field_name="actual_cost_usd")
+        ai_calls = _validate_live_call_count(ai_calls)
         reservation = self._find_legacy_reservation(reserved_cost_usd)
         if reservation is not None:
             return self.settle_call(reservation, actual_cost_usd, ai_calls=ai_calls)
-        current = self.current_state()
-        if reserved_cost_usd > current.reserved_usd + 1e-12:
-            raise StateError("Cannot settle a cost reservation that is not present in the run state")
-        updated = _replace_state(
-            current,
-            spent_usd=current.spent_usd + actual_cost_usd,
-            reserved_usd=max(0.0, current.reserved_usd - reserved_cost_usd),
-            ai_calls=current.ai_calls + ai_calls,
-        )
-        return self._persist_state(updated)
+        return self._record_spend(actual_cost_usd, ai_calls=ai_calls, reserved_cost_usd=reserved_cost_usd)
 
     def _find_legacy_reservation(self, reserved_cost_usd: float) -> CostReservation | None:
         """Bridge state-only callers onto the new per-call ledger when possible."""
-        if not self.ledger_path.exists():
+        ledger_path = self.ledger_path.resolve()
+        if not ledger_path.exists():
             return None
         try:
-            with open_program_db(self.ledger_path, read_only=True) as connection:
+            with open_program_db(ledger_path, read_only=True) as connection:
                 row = connection.execute(
                     "SELECT reservation_id FROM ai_cost_reservations WHERE edition = ? AND run_id = ? "
                     "AND status = 'reserved' AND ABS(reserved_usd - ?) < 0.000000000001 ORDER BY reservation_id LIMIT 1",
@@ -181,14 +204,34 @@ class CostGuard:
             reservation_id=int(row["reservation_id"]),
             estimated_cost_usd=reserved_cost_usd,
             state=self.current_state(),
+            _ledger_path=ledger_path,
         )
 
     def settle_call(self, reservation: CostReservation, actual_cost_usd: float, *, ai_calls: int = 1) -> CostRunState:
         """Settle exactly the call reservation that preceded a response."""
-        if actual_cost_usd < 0:
-            raise ValueError("actual_cost_usd must not be negative")
+        actual_cost_usd = _validate_live_amount(actual_cost_usd, field_name="actual_cost_usd")
+        ai_calls = _validate_live_call_count(ai_calls)
+        return self._finish_call(reservation, actual_cost_usd=actual_cost_usd, ai_calls=ai_calls)
+
+    def _release_undispatched_call(self, reservation: CostReservation) -> CostRunState:
+        return self._finish_call(reservation, actual_cost_usd=0.0, ai_calls=0, undispatched=True)
+
+    def _finish_call(
+        self,
+        reservation: CostReservation,
+        *,
+        actual_cost_usd: float,
+        ai_calls: int,
+        undispatched: bool = False,
+        refresh_projection: bool = True,
+    ) -> CostRunState:
+        ledger_path = self.ledger_path.resolve()
+        if reservation._ledger_path is None:
+            raise StateError("Cost reservation is not bound to a ledger")
+        if reservation._ledger_path != ledger_path:
+            raise StateError("Cost reservation belongs to a different ledger")
         try:
-            with open_program_db(self.ledger_path, durability="strict") as connection:
+            with open_program_db(ledger_path, durability="strict") as connection:
                 _ensure_sqlite_schema(connection)
                 connection.execute("BEGIN IMMEDIATE")
                 reservation_row = connection.execute(
@@ -207,48 +250,112 @@ class CostGuard:
                 ).fetchone()
                 if state_row is None:
                     raise StateError("Cost reservation has no run state")
-                current = _state_from_sqlite_row(state_row, budget_usd=self._budget_usd)
+                current = _state_from_sqlite_row(state_row)
                 if reserved_cost_usd > current.reserved_usd + 1e-12:
                     raise StateError("Cost reservation exceeds the run's reserved balance")
                 updated = _replace_state(
                     current,
-                    spent_usd=current.spent_usd + actual_cost_usd,
+                    spent_usd=_coerce_state_float(current.spent_usd + actual_cost_usd, field_name="spent_usd"),
                     reserved_usd=max(0.0, current.reserved_usd - reserved_cost_usd),
-                    ai_calls=current.ai_calls + ai_calls,
+                    ai_calls=_coerce_state_int(current.ai_calls + ai_calls, field_name="ai_calls"),
                 )
                 _upsert_sqlite_state(connection, updated)
                 connection.execute(
                     "UPDATE ai_cost_reservations SET status = 'settled', actual_usd = ?, settled_at = ? WHERE reservation_id = ?",
                     (actual_cost_usd, updated.updated_at.isoformat(), reservation.reservation_id),
                 )
+                if undispatched:
+                    connection.execute(
+                        "CREATE TABLE IF NOT EXISTS ai_cost_non_dispatch_releases ("
+                        "reservation_id INTEGER PRIMARY KEY REFERENCES ai_cost_reservations(reservation_id), "
+                        "released_at TEXT NOT NULL)"
+                    )
+                    connection.execute(
+                        "INSERT INTO ai_cost_non_dispatch_releases (reservation_id, released_at) VALUES (?, ?)",
+                        (reservation.reservation_id, updated.updated_at.isoformat()),
+                    )
         except sqlite3.DatabaseError as error:
             raise StateError(f"Unable to settle cost guard SQLite ledger at {self.ledger_path}") from error
-        self._persist_projection(updated)
+        if refresh_projection:
+            self._persist_projection(updated)
         return updated
 
     def record(self, cost_usd: float, *, ai_calls: int = 1) -> CostRunState:
+        ai_calls = _validate_live_call_count(ai_calls)
         self.check(cost_usd)
-        return self.record_actual(cost_usd, ai_calls=ai_calls)
+        cost_usd = _validate_live_amount(cost_usd, field_name="cost_usd")
+        return self._record_spend(cost_usd, ai_calls=ai_calls, check_budget=True)
 
     def record_actual(self, cost_usd: float, *, ai_calls: int = 1) -> CostRunState:
-        current = self.current_state()
-        updated_state = _replace_state(current, spent_usd=current.spent_usd + cost_usd, ai_calls=current.ai_calls + ai_calls)
-        return self._persist_state(updated_state)
+        cost_usd = _validate_live_amount(cost_usd, field_name="cost_usd")
+        ai_calls = _validate_live_call_count(ai_calls)
+        return self._record_spend(cost_usd, ai_calls=ai_calls)
 
-    def _persist_state(self, state: CostRunState) -> CostRunState:
-        _write_sqlite_state(self.ledger_path, state)
-
-        self._persist_projection(state)
-        return state
+    def _record_spend(
+        self,
+        cost_usd: float,
+        *,
+        ai_calls: int,
+        reserved_cost_usd: float | None = None,
+        check_budget: bool = False,
+    ) -> CostRunState:
+        fallback_state = self.current_state()
+        try:
+            with open_program_db(self.ledger_path, durability="strict") as connection:
+                _ensure_sqlite_schema(connection)
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT edition, run_id, budget_usd, reserved_usd, spent_usd, ai_calls, started_at, updated_at "
+                    "FROM ai_cost_runs WHERE edition = ? AND run_id = ?",
+                    (self._edition, self._run_id),
+                ).fetchone()
+                current = _state_from_sqlite_row(row) if row is not None else fallback_state
+                if check_budget:
+                    _enforce_run_budget(current, cost_usd, self.effective_budget_usd(current))
+                remaining_reserved = current.reserved_usd
+                if reserved_cost_usd is not None:
+                    tracked_reserved = 0.0
+                    for reservation_row in connection.execute(
+                        "SELECT reserved_usd FROM ai_cost_reservations "
+                        "WHERE edition = ? AND run_id = ? AND status = 'reserved'",
+                        (self._edition, self._run_id),
+                    ):
+                        tracked_reserved = _coerce_state_float(
+                            tracked_reserved + _coerce_state_float(reservation_row["reserved_usd"], field_name="reserved_usd"),
+                            field_name="reserved_usd",
+                        )
+                    if reserved_cost_usd > current.reserved_usd - tracked_reserved + 1e-12:
+                        raise StateError("Cannot settle a cost reservation that is not present in the run state")
+                    remaining_reserved = max(0.0, current.reserved_usd - reserved_cost_usd)
+                updated = _replace_state(
+                    current,
+                    spent_usd=_coerce_state_float(current.spent_usd + cost_usd, field_name="spent_usd"),
+                    reserved_usd=remaining_reserved,
+                    ai_calls=_coerce_state_int(current.ai_calls + ai_calls, field_name="ai_calls"),
+                )
+                _upsert_sqlite_state(connection, updated)
+        except sqlite3.DatabaseError as error:
+            raise StateError(f"Unable to persist cost guard SQLite ledger at {self.ledger_path}") from error
+        self._persist_projection(updated)
+        return updated
 
     def _persist_projection(self, state: CostRunState) -> None:
-
-        payload = _projection_payload_for_write(self.state_path, edition=self._edition)
-        runs = payload.setdefault("runs", {})
-        if not isinstance(runs, dict):
-            raise StateError(f"Invalid cost guard format in {self.state_path}")
-        runs[self._run_id] = _state_to_payload(state)
-        _write_atomic_json(self.state_path, payload)
+        try:
+            with open_program_db(self.ledger_path, durability="strict") as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT edition, run_id, budget_usd, reserved_usd, spent_usd, ai_calls, started_at, updated_at "
+                    "FROM ai_cost_runs WHERE edition = ? AND run_id = ?",
+                    (state.edition, state.run_id),
+                ).fetchone()
+                if row is None:
+                    raise StateError("Cannot project cost guard state that is not present in the ledger")
+                payload = _projection_payload_for_write(self.state_path, edition=self._edition)
+                runs = payload["runs"]
+                runs[state.run_id] = _state_to_payload(_state_from_sqlite_row(row))
+                _write_atomic_json(self.state_path, payload)
+        except sqlite3.DatabaseError as error:
+            raise StateError(f"Unable to project cost guard SQLite ledger at {self.ledger_path}") from error
 
 
 def load_run_states(
@@ -313,13 +420,12 @@ def _load_payload(path: Path, *, edition: str) -> dict[str, Any]:
 
 def _projection_payload_for_write(path: Path, *, edition: str) -> dict[str, Any]:
     try:
-        return _load_payload(path, edition=edition)
+        payload = _load_payload(path, edition=edition)
     except StateError:
-        return {
-            "schema_version": "1.0",
-            "edition": edition,
-            "runs": {},
-        }
+        raise StateError("Unable to read cost guard projection; preserve it and reconcile before retrying.") from None
+    if not isinstance(payload["runs"], dict):
+        raise StateError("Unable to read cost guard projection; preserve it and reconcile before retrying.")
+    return payload
 
 
 def _new_state(edition: str, run_id: str, budget_usd: float) -> CostRunState:
@@ -377,22 +483,40 @@ def _raise_missing_state_datetime(field_name: str) -> datetime:
     raise StateError(f"Invalid cost guard {field_name} value: None")
 
 
+def _validate_live_amount(value: float, *, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise StateError(f"Invalid cost guard {field_name} value")
+    return _coerce_state_float(value, field_name=field_name)
+
+
+def _validate_live_call_count(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise StateError("Invalid cost guard ai_calls value")
+    return _coerce_state_int(value, field_name="ai_calls")
+
+
 def _coerce_state_float(value: Any, *, field_name: str) -> float:
     if isinstance(value, bool):
-        raise StateError(f"Invalid cost guard {field_name} value: {value!r}")
+        raise StateError(f"Invalid cost guard {field_name} value")
     try:
-        return float(value)
-    except (TypeError, ValueError) as error:
-        raise StateError(f"Invalid cost guard {field_name} value: {value!r}") from error
+        amount = float(value)
+    except (OverflowError, TypeError, ValueError):
+        raise StateError(f"Invalid cost guard {field_name} value") from None
+    if not math.isfinite(amount) or amount < 0:
+        raise StateError(f"Invalid cost guard {field_name} value")
+    return amount
 
 
 def _coerce_state_int(value: Any, *, field_name: str) -> int:
-    if isinstance(value, bool):
-        raise StateError(f"Invalid cost guard {field_name} value: {value!r}")
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise StateError(f"Invalid cost guard {field_name} value")
     try:
-        return int(value)
-    except (TypeError, ValueError) as error:
-        raise StateError(f"Invalid cost guard {field_name} value: {value!r}") from error
+        result = int(value)
+    except (OverflowError, TypeError, ValueError):
+        raise StateError(f"Invalid cost guard {field_name} value") from None
+    if (isinstance(value, float) and not value.is_integer()) or not 0 <= result <= _MAX_SQLITE_INTEGER:
+        raise StateError(f"Invalid cost guard {field_name} value")
+    return result
 
 
 def _state_to_payload(state: CostRunState) -> dict[str, Any]:
@@ -411,55 +535,55 @@ def _load_sqlite_run_state(
     *,
     edition: str,
     run_id: str,
-    budget_usd: float,
 ) -> CostRunState | None:
-    if not path.exists():
+    rows = _read_sqlite_run_rows(
+        path,
+        """
+        SELECT edition, run_id, budget_usd, reserved_usd, spent_usd, ai_calls, started_at, updated_at
+        FROM ai_cost_runs
+        WHERE edition = ? AND run_id = ?
+        LIMIT 1
+        """,
+        (edition, run_id),
+    )
+    if not rows:
         return None
-    try:
-        with open_program_db(path, read_only=True) as connection:
-            row = connection.execute(
-                """
-                SELECT edition, run_id, budget_usd, reserved_usd, spent_usd, ai_calls, started_at, updated_at
-                FROM ai_cost_runs
-                WHERE edition = ? AND run_id = ?
-                """,
-                (edition, run_id),
-            ).fetchone()
-    except sqlite3.DatabaseError as error:
-        raise StateError(f"Invalid cost guard SQLite ledger in {path}") from error
-    if row is None:
-        return None
-    return _state_from_sqlite_row(row, budget_usd=budget_usd)
+    return _state_from_sqlite_row(rows[0])
 
 
 def _load_sqlite_run_states(path: Path, *, edition: str) -> tuple[CostRunState, ...] | None:
-    if not path.exists():
-        return None
-    try:
-        with open_program_db(path, read_only=True) as connection:
-            rows = connection.execute(
-                """
-                SELECT edition, run_id, budget_usd, reserved_usd, spent_usd, ai_calls, started_at, updated_at
-                FROM ai_cost_runs
-                WHERE edition = ?
-                ORDER BY updated_at DESC, run_id DESC
-                """,
-                (edition,),
-            ).fetchall()
-    except sqlite3.DatabaseError as error:
-        raise StateError(f"Invalid cost guard SQLite ledger in {path}") from error
+    rows = _read_sqlite_run_rows(
+        path,
+        """
+        SELECT edition, run_id, budget_usd, reserved_usd, spent_usd, ai_calls, started_at, updated_at
+        FROM ai_cost_runs
+        WHERE edition = ?
+        ORDER BY updated_at DESC, run_id DESC
+        """,
+        (edition,),
+    )
     if not rows:
         return None
-    return tuple(_state_from_sqlite_row(row, budget_usd=0.0) for row in rows)
+    states = (_state_from_sqlite_row(row) for row in rows)
+    return tuple(sorted(states, key=lambda state: (state.updated_at, state.run_id), reverse=True))
 
 
-def _write_sqlite_state(path: Path, state: CostRunState) -> None:
-    try:
-        with open_program_db(path, durability="strict") as connection:
-            _ensure_sqlite_schema(connection)
-            _upsert_sqlite_state(connection, state)
-    except sqlite3.DatabaseError as error:
-        raise StateError(f"Unable to persist cost guard SQLite ledger at {path}") from error
+def _read_sqlite_run_rows(path: Path, query: str, parameters: tuple[str, ...]) -> list[sqlite3.Row] | None:
+    if not path.exists():
+        return None
+    attempts = 0
+    while True:
+        try:
+            with open_program_db(path, read_only=True) as connection:
+                return connection.execute(query, parameters).fetchall()
+        except sqlite3.OperationalError as error:
+            # A newly created SQLite file can be visible before its schema exists.
+            if str(error) != "no such table: ai_cost_runs" or attempts >= 7:
+                raise StateError(f"Invalid cost guard SQLite ledger in {path}") from error
+            time.sleep(0.02 * 2**attempts)
+            attempts += 1
+        except sqlite3.DatabaseError as error:
+            raise StateError(f"Invalid cost guard SQLite ledger in {path}") from error
 
 
 def _ensure_sqlite_schema(connection: sqlite3.Connection) -> None:
@@ -513,12 +637,11 @@ def _upsert_sqlite_state(connection: sqlite3.Connection, state: CostRunState) ->
     )
 
 
-def _state_from_sqlite_row(row: sqlite3.Row, *, budget_usd: float) -> CostRunState:
-    stored_budget = _coerce_state_float(row["budget_usd"], field_name="budget_usd")
+def _state_from_sqlite_row(row: sqlite3.Row) -> CostRunState:
     return CostRunState(
         edition=str(row["edition"]),
         run_id=str(row["run_id"]),
-        budget_usd=stored_budget if stored_budget > 0 else budget_usd,
+        budget_usd=_coerce_state_float(row["budget_usd"], field_name="budget_usd"),
         spent_usd=_coerce_state_float(row["spent_usd"], field_name="spent_usd"),
         reserved_usd=_coerce_state_float(row["reserved_usd"], field_name="reserved_usd"),
         ai_calls=_coerce_state_int(row["ai_calls"], field_name="ai_calls"),
@@ -556,11 +679,11 @@ def _parse_datetime(value: Any) -> datetime | None:
         return None
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except (ValueError, OverflowError):
         return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
 
 
 def _parse_state_datetime(value: Any, *, field_name: str) -> datetime | None:
@@ -568,5 +691,5 @@ def _parse_state_datetime(value: Any, *, field_name: str) -> datetime | None:
         return None
     parsed = _parse_datetime(value)
     if parsed is None:
-        raise StateError(f"Invalid cost guard {field_name} value: {value!r}")
+        raise StateError(f"Invalid cost guard {field_name} value") from None
     return parsed

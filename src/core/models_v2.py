@@ -6,6 +6,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from src.core.failure_taxonomy import FailureCategory
 from src.core.kusto_result_limits import KustoResultLimits
 from src.core.hypothesis_models import (
     AssertionEvaluation,
@@ -376,6 +377,7 @@ class IntegrationError:
     retryable: bool
     message: str
     operator_action: str | None = None
+    failure_category: FailureCategory | None = None
 
 
 @dataclass(frozen=True, slots=True)

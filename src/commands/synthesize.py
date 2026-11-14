@@ -15,7 +15,7 @@ import click
 import typer
 
 from src.ai.ai_mode import AIMode, get_ai_mode
-from src.ai.client import AIClient, AIClientError
+from src.ai.client import AIClient, AIClientError, NON_RETRYABLE_AI_ERRORS
 from src.ai.deployment_fallback import LEGACY_DEPLOYMENT_ALIAS_NOTICE, resolve_ai_deployments_for_feature
 from src.ai.llm_trace import AITraceContext, use_trace_context
 from src.ai.synthesizer import SynthesizedProposalDraft, SynthesizerError, WorkstreamSynthesizer, build_synthesizer_from_client
@@ -119,7 +119,16 @@ class _FallbackWorkstreamSynthesizer:
                     contradictions=contradictions,
                     programs_root=programs_root,
                 )
-            except (AIClientError, RuntimeError, SynthesizerError) as error:
+            except NON_RETRYABLE_AI_ERRORS as error:
+                raise SynthesizerError(
+                    f"Workstream synthesis stopped: {type(error).__name__}; check AI cost state before retrying."
+                ) from error
+            except SynthesizerError as error:
+                if isinstance(error.__cause__, NON_RETRYABLE_AI_ERRORS):
+                    raise
+                last_error = error
+                continue
+            except (AIClientError, RuntimeError) as error:
                 last_error = error
                 continue
 

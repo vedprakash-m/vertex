@@ -54,6 +54,33 @@ jobs:
       - name: Run full test suite
         run: python -m pytest tests/ -q
 
+      - name: Run chart performance budget
+        timeout-minutes: 3
+        run: python -m pytest -n 0 -m perf tests/unit/test_declarative_chart_builder.py::test_render_under_2_seconds -q
+
+      - name: Run ledger replay performance budget
+        timeout-minutes: 10
+        run: python -m pytest -n 0 -m perf tests/unit/test_ledger_perf.py::test_replay_perf_50k -q
+
+      - name: Run structural gap performance budgets
+        timeout-minutes: 3
+        run: python -m pytest -n 0 -m perf tests/contracts/test_structural_gap_rules.py::TestStructuralGapPerf -q
+
+      - name: Run pilot replay throughput budgets
+        timeout-minutes: 3
+        run: python -m pytest -n 0 -m perf tests/contracts/test_s11c_load_soak.py::TestReplayThroughput -q
+
+      - name: Run persona evaluation performance budget
+        timeout-minutes: 3
+        run: python -m pytest -n 0 -m perf tests/unit/test_persona_checker.py::test_full_registry_evaluation_under_500ms -q
+
+      - name: Run gather performance baseline
+        timeout-minutes: 3
+        working-directory: ${{ runner.temp }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: python -m pytest -n 0 -m perf "${{ github.workspace }}/tests/perf/test_perf_baseline.py::test_perf_baseline_50_item_fixture" -q
+
       - name: Run contract suite
         run: python -m pytest tests/contracts/ -q
 

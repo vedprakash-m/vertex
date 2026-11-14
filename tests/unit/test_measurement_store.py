@@ -10,6 +10,7 @@ import pytest
 from src.core.measurement_store import (
     DEFAULT_MEASUREMENT_MAX_BYTES,
     MEASUREMENT_SCHEMA_VERSION,
+    MeasurementReadError,
     TierDecisionRecord,
     TierDecisionSinkConfig,
     compute_record_checksum,
@@ -100,6 +101,59 @@ def test_read_measurements_missing_file_returns_empty(tmp_path: Path) -> None:
     assert read_measurements(tmp_path / "absent.jsonl") == ()
 
 
+@pytest.mark.parametrize("invalid", ["missing-checksum", "mismatch", "malformed", "nonobject", "invalid-utf8"])
+def test_read_measurements_refuses_invalid_rows_without_repair(tmp_path: Path, invalid: str) -> None:
+    path = tmp_path / "tier_decisions.jsonl"
+    valid = _sample_record().to_payload()
+    damaged = _sample_record(feature="private-synthetic").to_payload()
+    if invalid == "missing-checksum":
+        del damaged["record_checksum"]
+    elif invalid == "mismatch":
+        damaged["outcome"] = "frontier_call"
+    bad_line = {
+        "malformed": b'{"private-synthetic":\n',
+        "nonobject": b'["private-synthetic"]\n',
+        "invalid-utf8": b"\xff\n",
+    }.get(invalid, (json.dumps(damaged) + "\n").encode())
+    contents = (json.dumps(valid) + "\n").encode() + bad_line
+    path.write_bytes(contents)
+
+    with pytest.raises(MeasurementReadError) as error:
+        read_measurements(path)
+
+    assert "private-synthetic" not in str(error.value)
+    assert path.read_bytes() == contents
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["tier_decisions.jsonl"]
+
+
+def test_read_measurements_reports_unreadable_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unreadable(*args: object, **kwargs: object) -> tuple[dict[str, object], ...]:
+        raise PermissionError("private-synthetic")
+
+    monkeypatch.setattr("src.core.measurement_store.read_jsonl_records", unreadable)
+    path = tmp_path / "tier_decisions.jsonl"
+    path.touch()
+    with pytest.raises(MeasurementReadError) as error:
+        read_measurements(path)
+    assert "private-synthetic" not in str(error.value)
+
+
+def test_read_measurements_propagates_unexpected_reader_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failure = RuntimeError("unexpected reader failure")
+
+    def broken(*args: object, **kwargs: object) -> tuple[dict[str, object], ...]:
+        raise failure
+
+    monkeypatch.setattr("src.core.measurement_store.read_jsonl_records", broken)
+    with pytest.raises(RuntimeError) as error:
+        read_measurements(tmp_path / "tier_decisions.jsonl")
+    assert error.value is failure
+
+
 def test_records_survive_simulated_restart(tmp_path: Path) -> None:
     path = tmp_path / "tier_decisions.jsonl"
     append_measurement(path, _sample_record(feature="first"))
@@ -174,8 +228,9 @@ def test_tier_decision_sink_persists_decision(tmp_path: Path) -> None:
     assert rows[0]["execution_mode"] == "observe"
 
 
-def test_tier_decision_sink_survives_write_error(tmp_path: Path) -> None:
-    """A durable sink must never break routing (existing sink contract)."""
+def test_tier_decision_sink_exposes_write_error_to_caller(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from src.ai.tiered_router import TierDecision
 
     config = TierDecisionSinkConfig(
@@ -183,11 +238,14 @@ def test_tier_decision_sink_survives_write_error(tmp_path: Path) -> None:
         edition_id=None,
         run_id="run-err",
         execution_mode="enforce",
-        programs_root=tmp_path / "readonly",  # nonexistent parent is fine; force error below
+        programs_root=tmp_path,
     )
     sink = make_tier_decision_sink(config)
-    # Corrupt the store path to force an exception inside the sink.
-    sink.store_path = tmp_path / "nested" / "deep" / "tier_decisions.jsonl"  # type: ignore[attr-defined]
+
+    def fail_write(_path: Path, _record: object) -> None:
+        raise OSError("synthetic write failure")
+
+    monkeypatch.setattr("src.core.measurement_store.append_measurement", fail_write)
     decision = TierDecision(
         feature="x",
         tier=Tier.FRONTIER,
@@ -197,8 +255,8 @@ def test_tier_decision_sink_survives_write_error(tmp_path: Path) -> None:
         trace_id=None,
         recorded_at="2026-07-11T12:06:00+00:00",
     )
-    # Should not raise even though the path may be unwritable in some envs.
-    sink(decision)
+    with pytest.raises(OSError, match="synthetic write failure"):
+        sink(decision)
 
 
 def test_default_max_bytes_is_set() -> None:

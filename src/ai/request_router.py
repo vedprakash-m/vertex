@@ -47,9 +47,8 @@ class AIRequestRouter:
         self._time = time_func
         self._rate_limit_scope = rate_limit_scope
 
-        client_class, rate_limit_error_type, api_status_error_type = self._get_sdk_types()
+        client_class, rate_limit_error_type, _ = self._get_sdk_types()
         self._rate_limit_error_type = rate_limit_error_type
-        self._api_status_error_type = api_status_error_type
         self._client = client_class(
             azure_endpoint=resolved_endpoint,
             api_key=resolved_api_key,
@@ -67,17 +66,31 @@ class AIRequestRouter:
         temperature: float,
         max_tokens: int,
         response_format: dict[str, Any] | None = None,
+        before_retry: Callable[[], None] | None = None,
+        on_pre_dispatch_failure: Callable[[Exception], None] | None = None,
     ) -> Any:
-        mode = get_ai_mode()
-        if mode == AIMode.DISABLED:
-            raise RuntimeError("AI execution is disabled for this invocation.")
-        if mode == AIMode.OBSERVE_ONLY:
-            raise RuntimeError("AI request router is in observe-only mode; frontier calls are blocked.")
+        try:
+            mode = get_ai_mode()
+            if mode == AIMode.DISABLED:
+                raise RuntimeError("AI execution is disabled for this invocation.")
+            if mode == AIMode.OBSERVE_ONLY:
+                raise RuntimeError("AI request router is in observe-only mode; frontier calls are blocked.")
+        except Exception as error:
+            if on_pre_dispatch_failure is not None:
+                on_pre_dispatch_failure(error)
+            raise
 
-        self._wait_for_request_slot()
         last_error: Exception | None = None
 
         for attempt in range(self.MAX_RETRIES + 1):
+            if attempt and before_retry is not None:
+                before_retry()
+            try:
+                self._wait_for_request_slot()
+            except Exception as error:
+                if on_pre_dispatch_failure is not None:
+                    on_pre_dispatch_failure(error)
+                raise
             try:
                 request_payload: dict[str, Any] = {
                     "model": deployment,
@@ -140,16 +153,7 @@ class AIRequestRouter:
             return True
 
         status_code = getattr(error, "status_code", None)
-        if status_code == 429:
-            return True
-        if isinstance(status_code, int) and 500 <= status_code < 600:
-            return True
-
-        if self._api_status_error_type is not Exception and isinstance(error, self._api_status_error_type):
-            normalized = str(error).lower()
-            return "429" in normalized or "5" in normalized
-
-        return False
+        return isinstance(status_code, int) and (status_code == 429 or 500 <= status_code < 600)
 
 
 def _normalize_requests_per_minute(value: int | None) -> int | None:

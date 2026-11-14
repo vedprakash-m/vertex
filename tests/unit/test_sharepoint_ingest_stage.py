@@ -10,10 +10,10 @@ Test cases:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
@@ -24,7 +24,10 @@ from src.commands.gather_pipeline.sharepoint_ingest_stage import (
     run_sharepoint_ingest_stage,
 )
 from src.core.ledger.candidate_store import CandidateEvent
-from src.core.models_v2 import Confidence, ReviewPolicy, Signal
+from src.core.ledger.source_refs import SharePointDocRef
+from src.core.models_v2 import Confidence, Program, ReviewPolicy, Signal, SignalReviewDecision
+from src.core.signal_review import signal_is_approved_for_evidence, signal_needs_review
+from src.core.store_factory import build_program_signal_store
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +139,56 @@ def test_ingest_candidates_empty_batch() -> None:
     )
     assert count == 0
     assert len(store.signals) == 0
+
+
+@pytest.mark.parametrize("backend", ("file", "sqlite"))
+@pytest.mark.parametrize("pipeline", ("lt_deck", "sharepoint"))
+@pytest.mark.parametrize("decision", ("approved", "dismissed", "deferred"))
+def test_real_store_preserves_pending_signal_and_review_decision(
+    tmp_path: Path,
+    backend: str,
+    pipeline: str,
+    decision: Literal["approved", "dismissed", "deferred"],
+) -> None:
+    program = Program(schema_version="1", id="acme", name="Acme", storage_backend=backend)
+    store = build_program_signal_store(program, programs_root=tmp_path)
+    candidate = _make_candidate(pipeline=pipeline)
+    if pipeline == "sharepoint":
+        candidate = replace(
+            candidate,
+            source_ref=SharePointDocRef(
+                site="https://example.test",
+                doc_path="/documents/status.docx",
+            ),
+        )
+
+    assert ingest_sharepoint_candidates(
+        (candidate,),
+        program_id="acme",
+        existing_signals=(),
+        signal_store=store,
+    ) == 1
+    signals = store.read("acme")
+    assert len(signals) == 1
+    signal = signals[0]
+    assert signal.id == candidate.candidate_id
+    assert signal.source == pipeline
+    assert signal.review_policy == ReviewPolicy.PENDING
+    assert not signal_is_approved_for_evidence(signal, store.read_reviews("acme"))
+    assert signal_needs_review(signal, store.read_reviews("acme"))
+
+    store.append_review(
+        "acme",
+        SignalReviewDecision(
+            signal_id=signal.id,
+            decision=decision,
+            reviewed_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+            reviewed_by="reviewer",
+        ),
+    )
+    reviews = store.read_reviews("acme")
+    assert signal_is_approved_for_evidence(signal, reviews) is (decision == "approved")
+    assert signal_needs_review(signal, reviews) is (decision == "deferred")
 
 
 # ---------------------------------------------------------------------------

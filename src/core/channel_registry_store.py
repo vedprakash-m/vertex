@@ -77,16 +77,33 @@ def compute_registry_delta(previous_refs: tuple[DiscoveredRef, ...], result: Dis
     result = normalize_discovery_result_provider_instance(result)
     previous_by_key = {_ref_key(ref.registration): ref for ref in previous_refs}
     current_by_key = {_ref_key(ref.registration): ref for ref in result.discovered_refs}
+    successful_full_scopes = {
+        scope_id
+        for scope_id, status in result.scope_statuses.items()
+        if status.status is ScopeStatusKind.SUCCESS and status.completeness is DiscoveryCompleteness.FULL
+    }
+    if result.completeness is DiscoveryCompleteness.PARTIAL:
+        for key in current_by_key.keys() & previous_by_key.keys():
+            current = current_by_key[key]
+            observed_keys = {(binding.workstream_id, binding.scope_id) for binding in current.bindings}
+            retained = tuple(
+                binding for binding in previous_by_key[key].bindings
+                if binding.scope_id not in successful_full_scopes
+                and (binding.workstream_id, binding.scope_id) not in observed_keys
+            )
+            if retained:
+                bindings = (*current.bindings, *retained)
+                workstreams = tuple(dict.fromkeys(
+                    binding.workstream_id for binding in bindings if binding.workstream_id is not None
+                ))
+                current_by_key[key] = replace(
+                    current, bindings=bindings, registration=replace(current.registration, workstream_ids=workstreams),
+                )
     added_keys = tuple(key for key in current_by_key if key not in previous_by_key)
     removed_keys: tuple[tuple[str, str, str, str, str], ...] = ()
     if result.completeness is DiscoveryCompleteness.FULL:
         removed_keys = tuple(key for key in previous_by_key if key not in current_by_key)
     elif result.completeness is DiscoveryCompleteness.PARTIAL:
-        successful_full_scopes = {
-            scope_id
-            for scope_id, status in result.scope_statuses.items()
-            if status.status is ScopeStatusKind.SUCCESS and status.completeness is DiscoveryCompleteness.FULL
-        }
         removed: list[tuple[str, str, str, str, str]] = []
         for key, previous in previous_by_key.items():
             if key in current_by_key:
@@ -304,8 +321,19 @@ class ChannelRegistryStore:
             if delta.is_shrinkage_guarded(threshold_pct=shrinkage_threshold_pct, floor=shrinkage_floor) and not accept_shrinkage:
                 conn.rollback()
                 raise ShrinkageGuardError(delta.shrinkage_pct, delta)
+            complete_scope_ids = (
+                tuple(
+                    scope_id for scope_id, status in result.scope_statuses.items()
+                    if status.status is ScopeStatusKind.SUCCESS
+                    and status.completeness is DiscoveryCompleteness.FULL
+                )
+                if result.completeness is DiscoveryCompleteness.PARTIAL else None
+            )
             for discovered_ref in result.discovered_refs:
-                self._upsert_discovered_ref(conn, discovered_ref, ttl_days=ttl_days, seen_at=result.computed_at)
+                self._upsert_discovered_ref(
+                    conn, discovered_ref, ttl_days=ttl_days, seen_at=result.computed_at,
+                    complete_scope_ids=complete_scope_ids,
+                )
             for removed in delta.removed:
                 conn.execute(
                     """
@@ -1127,7 +1155,10 @@ class ChannelRegistryStore:
             grouped.setdefault(key, []).append(_binding_from_row(row))
         return {key: tuple(values) for key, values in grouped.items()}
 
-    def _upsert_discovered_ref(self, conn: sqlite3.Connection, discovered_ref: DiscoveredRef, *, ttl_days: int | None, seen_at: datetime) -> None:
+    def _upsert_discovered_ref(
+        self, conn: sqlite3.Connection, discovered_ref: DiscoveredRef, *, ttl_days: int | None, seen_at: datetime,
+        complete_scope_ids: tuple[str, ...] | None = None,
+    ) -> None:
         registration = discovered_ref.registration
         if registration.program_id != self.program_id:
             registration = replace(registration, program_id=self.program_id)
@@ -1184,16 +1215,72 @@ class ChannelRegistryStore:
                 json.dumps(list(registration.work_item_ids)),
             ),
         )
+        bindings = discovered_ref.bindings or (
+            RegistrationBinding(None, "default", "unknown", registration.confidence, registration.confidence_source),
+        )
+        nullable_rows: dict[str, int | None] = {}
+        for binding in bindings:
+            if binding.workstream_id is not None or binding.scope_id in nullable_rows:
+                continue
+            rows = conn.execute(
+                """
+                SELECT rowid AS binding_rowid, status FROM registration_bindings
+                WHERE channel = ? AND program_id = ? AND provider_instance_id = ?
+                  AND ref_id = ? AND ref_kind = ? AND workstream_id IS NULL AND scope_id = ?
+                  AND status IN (?, ?, ?, ?)
+                ORDER BY last_seen_at DESC, rowid DESC
+                """,
+                (
+                    registration.channel, self.program_id, registration.provider_instance_id,
+                    registration.ref_id, registration.ref_kind, binding.scope_id,
+                    *_LIVE_BINDING_STATUSES, RegistrationStatus.RETIRED.value,
+                ),
+            ).fetchall()
+            live_rows = [row for row in rows if row["status"] in _LIVE_BINDING_STATUSES]
+            if len(live_rows) > 1:
+                raise RegistryError(
+                    "Cannot rediscover multiple live null-workstream bindings; inspect the registry before retrying."
+                )
+            candidates = live_rows or rows
+            nullable_rows[binding.scope_id] = int(candidates[0]["binding_rowid"]) if candidates else None
+        scope_clause = ""
+        if complete_scope_ids is not None:
+            scope_clause = (
+                f" AND scope_id IN ({','.join('?' for _ in complete_scope_ids)})"
+                if complete_scope_ids else " AND 0"
+            )
         conn.execute(
-            """
+            f"""
             UPDATE registration_bindings
             SET status = ?, retired_at = ?
             WHERE channel = ? AND program_id = ? AND provider_instance_id = ? AND ref_id = ? AND ref_kind = ?
+              AND (workstream_id IS NOT NULL OR status != 'retired'){scope_clause}
             """,
-            (RegistrationStatus.RETIRED.value, _format_datetime(seen_at), registration.channel, self.program_id, registration.provider_instance_id, registration.ref_id, registration.ref_kind),
+            (
+                RegistrationStatus.RETIRED.value, _format_datetime(seen_at), registration.channel, self.program_id,
+                registration.provider_instance_id, registration.ref_id, registration.ref_kind, *(complete_scope_ids or ()),
+            ),
         )
-        for binding in discovered_ref.bindings or (RegistrationBinding(None, "default", "unknown", registration.confidence, registration.confidence_source),):
-            conn.execute(
+        for binding in bindings:
+            rowid = nullable_rows.get(binding.scope_id) if binding.workstream_id is None else None
+            if rowid is not None:
+                conn.execute(
+                    """
+                    UPDATE registration_bindings SET
+                        status = ?, confidence = ?, confidence_source = ?,
+                        pm_confirmed = MAX(pm_confirmed, ?), promoted = MAX(promoted, ?),
+                        signal_yield_0 = ?, signal_yield_1 = ?, signal_yield_2 = ?,
+                        last_seen_at = ?, retired_at = NULL
+                    WHERE rowid = ?
+                    """,
+                    (
+                        binding.status.value, binding.confidence, binding.confidence_source,
+                        int(binding.pm_confirmed), int(binding.promoted),
+                        *binding.signal_yield_last_3, _format_datetime(seen_at), rowid,
+                    ),
+                )
+                continue
+            cursor = conn.execute(
                 """
                 INSERT INTO registration_bindings(
                     channel, program_id, provider_instance_id, ref_id, ref_kind, workstream_id,
@@ -1234,6 +1321,8 @@ class ChannelRegistryStore:
                     _format_datetime(seen_at),
                 ),
             )
+            if binding.workstream_id is None:
+                nullable_rows[binding.scope_id] = cursor.lastrowid
         self._refresh_governance(
             conn,
             registration.channel,
@@ -1656,7 +1745,14 @@ def _ref_key(registration: ChannelRegistration) -> tuple[str, str, str, str, str
 
 
 def _comparison_projection(ref: DiscoveredRef) -> tuple[Any, ...]:
-    bindings = tuple(sorted((binding.workstream_id, binding.scope_id, binding.source_type, binding.confidence, binding.confidence_source, binding.pm_confirmed, binding.promoted, binding.status.value) for binding in ref.bindings))
+    bindings = tuple(sorted(
+        (
+            binding.workstream_id is not None, binding.workstream_id or "", binding.scope_id,
+            binding.source_type, binding.confidence, binding.confidence_source,
+            binding.pm_confirmed, binding.promoted, binding.status.value,
+        )
+        for binding in ref.bindings
+    ))
     registration = ref.registration
     return (
         bindings,

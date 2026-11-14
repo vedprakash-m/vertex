@@ -300,6 +300,12 @@ def test_trend_description_shows_direction():
 # Performance
 # ---------------------------------------------------------------------------
 
+def test_render_budget_is_in_performance_lane():
+    marks = getattr(test_render_under_2_seconds, "pytestmark", ())
+    assert any(mark.name == "perf" for mark in marks)
+
+
+@pytest.mark.perf
 def test_render_under_2_seconds():
     """Renderer must complete < 2s for ≤200 rows — spec §7 runtime budget."""
     import time

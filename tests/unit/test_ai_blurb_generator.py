@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
+from src.ai.client import AIPreflightError, BudgetConfigurationError, BudgetExceeded, BudgetStateError
 from src.ai.blurb_generator import BlurbGenerationError, _derive_ai_confidence, generate_workstream_blurb
 from src.core.config_loader import EditionVerbosityLimits, EditorialRules, VerbositySettings, VoiceContractSettings
 from src.core.evidence_models import EtaRecord, SourceRef, WorkstreamEvidence
@@ -703,7 +705,7 @@ def test_p4_8_icm_blockers_render_as_structured_prompt_context(tmp_path: Path) -
     bundle = WorkstreamEvidenceBundle(
         lane_id="deployment",
         m365_evidence=_m365_evidence(),
-        icm_blockers=(_icm_blocker_signal(incident_id="771996570"),),
+        icm_blockers=(_icm_blocker_signal(incident_id="111111"),),
         as_of=datetime(2026, 6, 18, 9, 0, tzinfo=timezone.utc),
     )
 
@@ -721,7 +723,7 @@ def test_p4_8_icm_blockers_render_as_structured_prompt_context(tmp_path: Path) -
 
     assert client.last_user is not None
     assert "icm_blocker:" in client.last_user
-    assert "IcM:771996570" in client.last_user
+    assert "IcM:111111" in client.last_user
     assert "owner=Acme-Infra" in client.last_user
 
 
@@ -910,7 +912,7 @@ def test_p4_8_p4_9_augment_folds_icm_into_blocking_items_and_kusto_into_narrativ
     from src.commands.report_ai import _augment_evidence_with_quantitative_signals
 
     evidence = _m365_evidence()  # blocking_items=("ADO:900112",), narrative ends with "sign-off."
-    icm = [_icm_blocker_signal(incident_id="771996570")]
+    icm = [_icm_blocker_signal(incident_id="111111")]
     kusto = [_kusto_metric_signal(text="EXAMPLETEAM compliance now at 73.4%.")]
 
     augmented = _augment_evidence_with_quantitative_signals(
@@ -918,7 +920,7 @@ def test_p4_8_p4_9_augment_folds_icm_into_blocking_items_and_kusto_into_narrativ
     )
 
     assert augmented is not None
-    assert "IcM:771996570" in augmented.blocking_items
+    assert "IcM:111111" in augmented.blocking_items
     assert "ADO:900112" in augmented.blocking_items  # original preserved
     assert augmented.narrative_summary.startswith("BIOS AP Gen9 rollout is blocked on burn-in sign-off.")
     assert "EXAMPLETEAM compliance now at 73.4%." in augmented.narrative_summary
@@ -929,7 +931,7 @@ def test_p4_8_p4_9_augment_folds_icm_into_blocking_items_and_kusto_into_narrativ
     again = _augment_evidence_with_quantitative_signals(
         augmented, icm_blockers=icm, kusto_metrics=[],
     )
-    assert again.blocking_items.count("IcM:771996570") == 1
+    assert again.blocking_items.count("IcM:111111") == 1
 
     # None evidence passes through unchanged.
     assert _augment_evidence_with_quantitative_signals(
@@ -941,6 +943,40 @@ def test_p4_8_p4_9_augment_folds_icm_into_blocking_items_and_kusto_into_narrativ
         evidence, icm_blockers=[], kusto_metrics=[],
     )
     assert same is evidence
+
+
+@pytest.mark.parametrize("error_type", [AIPreflightError, BudgetExceeded, BudgetConfigurationError, BudgetStateError])
+def test_generate_workstream_blurb_discards_nonretryable_cost_failure(tmp_path, monkeypatch, error_type) -> None:
+    from src.core.ledger.event_log import read_events
+
+    failure = error_type("private synthetic cost detail")
+    client = _FakeAIClient("")
+    client.structured = Mock(side_effect=failure)
+    monkeypatch.setattr(
+        "src.ai.blurb_generator.route_through_tiers",
+        lambda _feature, **kwargs: kwargs["frontier_fn"](),
+    )
+
+    with pytest.raises(error_type) as caught:
+        generate_workstream_blurb(
+            client=client,
+            program_id="acme",
+            programs_root=tmp_path,
+            workstream_name="Deployment",
+            items=(_item(101, "Cache warmup safeguard"),),
+            evidence_by_item={101: _evidence(101, Confidence.HIGH)},
+            deltas=(_delta(101, DeltaKind.NEW),),
+            editorial_rules=_editorial_rules(),
+        )
+
+    assert caught.value is failure
+    decisions = [
+        event for event in read_events("acme", programs_root=tmp_path)
+        if event.event_type == "ai.release_decision.v1"
+    ]
+    assert len(decisions) == 1
+    assert decisions[0].payload["terminal"] == "discarded"
+    assert "private synthetic cost detail" not in str(decisions[0].payload)
 
 
 def test_generate_workstream_blurb_records_released_terminal_on_success(tmp_path: Path) -> None:

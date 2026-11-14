@@ -200,7 +200,7 @@ class LeaseRenewalHeartbeat:
 
     def stop(self) -> None:
         self._stop_event.set()
-        if self._thread is not None and self._thread is not current_thread():
+        if self._thread is not None and self._thread.ident is not None and self._thread is not current_thread():
             self._thread.join(timeout=max(1.0, self._interval_seconds))
 
     def assert_current(self) -> None:

@@ -20,13 +20,14 @@ import yaml
 from typer.testing import CliRunner
 
 import src.ai.dependency_blast_radius_generator as blast_radius_generator
+import src.ai.deployment_fallback as deployment_fallback
 import src.ai.governance_decision_brief_generator as brief_generator
 import src.ai.risk_proposal_generator as risk_generator
 import src.commands.ai_proposals as ai_proposals
 from cli import app
 from src.core.adoption_telemetry import GoldenWorkflow, read_adoption_events
 from src.core.ai_review_proposal_store import load_proposal, load_proposals, stage_proposal
-from src.core.ledger.event_log import read_events
+from src.core.ledger.event_log import get_event_logs_dir, read_events
 from src.core.proposal_audit import read_proposal_audit
 from src.core.proposal_autonomy_ladder import advance_proposal_class_autonomy, promote_proposal_class_explicit
 from src.core.dependency_blast_radius import DependencyBlastRadiusProposal
@@ -247,6 +248,41 @@ def test_generate_cli_keeps_matched_evidence_supported(
     assert len(load_proposals("acme", proposal_type=proposal_type, programs_root=programs_root)) == 1
 
 
+def test_generate_dependency_cli_partitions_real_fallback_client_by_deployment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    proposal_type = "dependency_blast_radius"
+    programs_root, _ = _setup_pairing_cli(
+        monkeypatch, tmp_path, proposal_type, "selected-ref", check_admission=False,
+    )
+    monkeypatch.setattr(ai_proposals, "FallbackAIClient", deployment_fallback.FallbackAIClient)
+    monkeypatch.setattr(
+        ai_proposals, "resolve_ai_deployments_for_feature",
+        lambda **kwargs: kwargs["primary_candidates"],
+    )
+    calls: list[str] = []
+
+    def factory(*, deployment: str, **kwargs: Any) -> _ProposalGenerationClient:
+        calls.append(deployment)
+        response = _pairing_cli_response(proposal_type, "selected-ref")
+        response["next_proving_event"] = f"Verify delivery through {deployment} at the next checkpoint."
+        return _ProposalGenerationClient(response)
+
+    monkeypatch.setattr(deployment_fallback, "AIClient", factory)
+    args = _pairing_cli_args(proposal_type, ("selected-ref",), ("selected text",))
+    for deployment in ("synthetic-alpha", "synthetic-alpha", "synthetic-beta"):
+        result = runner.invoke(app, [*args, "--deployment", deployment])
+        assert result.exit_code == 0, result.stdout
+
+    staged = load_proposals("acme", proposal_type=proposal_type, programs_root=programs_root)
+    assert calls == ["synthetic-alpha", "synthetic-beta"]
+    assert len(staged) == 3
+    assert sorted(proposal.next_proving_event for proposal in staged) == sorted(
+        f"Verify delivery through {deployment} at the next checkpoint."
+        for deployment in ("synthetic-alpha", "synthetic-alpha", "synthetic-beta")
+    )
+
+
 @pytest.mark.parametrize("proposal_type", ("governance_decision_brief", "dependency_blast_radius"))
 def test_generate_cli_keeps_both_empty_evidence_supported(
     proposal_type: str,
@@ -272,6 +308,140 @@ def test_generate_cli_keeps_risk_empty_evidence_restriction(
     assert "at least one --evidence-text are required" in result.output
     assert client.calls == 0
     assert load_proposals("acme", proposal_type="risk", programs_root=programs_root) == ()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("next_proving_event", 42),
+        ("blast_radius_narrative", {"synthetic": "response-private-marker"}),
+        ("evidence_refs", ["selected-ref", 42]),
+    ],
+)
+def test_dependency_cli_rejects_malformed_response_before_staging(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_cli_startup: None, field: str, value: object,
+) -> None:
+    proposal_type = "dependency_blast_radius"
+    programs_root, client = _setup_pairing_cli(
+        monkeypatch, tmp_path, proposal_type, "selected-ref", check_admission=False,
+    )
+    client.response[field] = value
+    args = _pairing_cli_args(proposal_type, ("selected-ref",), ("selected text",))
+
+    rejected = runner.invoke(app, args)
+
+    assert rejected.exit_code == 0, rejected.output
+    assert "discarded or rejected" in rejected.output
+    assert "Nothing was staged." in rejected.output
+    assert "response-private-marker" not in rejected.output
+    assert load_proposals("acme", proposal_type=proposal_type, programs_root=programs_root) == ()
+    assert list((programs_root / "acme" / "rev_cache" / "ai_result").glob("*.json")) == []
+    assert [
+        event.payload["terminal"] for event in read_events("acme", programs_root=programs_root)
+        if event.event_type == "ai.release_decision.v1"
+    ] == ["rejected"]
+
+    client.response = _pairing_cli_response(proposal_type, "selected-ref")
+    accepted = runner.invoke(app, args)
+    assert accepted.exit_code == 0, accepted.output
+    assert len(load_proposals("acme", proposal_type=proposal_type, programs_root=programs_root)) == 1
+    assert client.calls == 2
+
+
+def test_dependency_release_cache_cli_retries_rejected_output_and_stages_only_released_content(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_cli_startup: None,
+) -> None:
+    proposal_type = "dependency_blast_radius"
+    programs_root, client = _setup_pairing_cli(
+        monkeypatch, tmp_path, proposal_type, "selected-ref", check_admission=False,
+    )
+    args = _pairing_cli_args(proposal_type, ("selected-ref",), ("selected text",))
+    client.response["next_proving_event"] = ""
+
+    rejected = runner.invoke(app, args)
+    assert rejected.exit_code == 0, rejected.output
+    assert "discarded or rejected" in rejected.output
+    assert load_proposals("acme", proposal_type=proposal_type, programs_root=programs_root) == ()
+    assert list((programs_root / "acme" / "rev_cache" / "ai_result").glob("*.json")) == []
+
+    client.response = _pairing_cli_response(proposal_type, "selected-ref")
+    client.response["next_proving_event"] = "Contact synthetic@example.invalid due to the review."
+    client.response["extra_private_field"] = "synthetic-secret-extra"
+    accepted = runner.invoke(app, args)
+    replayed = runner.invoke(app, args)
+
+    assert accepted.exit_code == 0, accepted.output
+    assert replayed.exit_code == 0, replayed.output
+    assert client.calls == 2
+    staged = load_proposals("acme", proposal_type=proposal_type, programs_root=programs_root)
+    assert len(staged) == 2
+    assert all("[PII-FILTERED-EMAIL]" in item.next_proving_event for item in staged)
+    cached = next((programs_root / "acme" / "rev_cache" / "ai_result").glob("*.json")).read_text(encoding="utf-8")
+    assert "synthetic@example.invalid" not in cached
+    assert "synthetic-secret-extra" not in cached
+
+
+def test_dependency_release_cache_cli_write_failure_never_stages_proposal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_cli_startup: None,
+) -> None:
+    proposal_type = "dependency_blast_radius"
+    programs_root, client = _setup_pairing_cli(
+        monkeypatch, tmp_path, proposal_type, "selected-ref", check_admission=False,
+    )
+    monkeypatch.setattr(blast_radius_generator, "new_ai_run_id", lambda: "synthetic-cli-cache-failure")
+
+    def fail_cache_write(*args: object, **kwargs: object) -> None:
+        raise OSError("synthetic-secret-cache-detail")
+
+    monkeypatch.setattr(blast_radius_generator, "put_ai_result", fail_cache_write)
+    result = runner.invoke(app, _pairing_cli_args(proposal_type, ("selected-ref",), ("selected text",)))
+
+    assert result.exit_code != 0
+    assert "cache" in result.output.lower()
+    assert "synthetic-secret-cache-detail" not in result.output
+    assert client.calls == 1
+    assert load_proposals("acme", proposal_type=proposal_type, programs_root=programs_root) == ()
+    releases = [
+        event.payload["terminal"] for event in read_events("acme", programs_root=programs_root)
+        if event.event_type == "ai.release_decision.v1"
+        and event.payload.get("ai_run_id") == "synthetic-cli-cache-failure"
+    ]
+    assert releases == ["released"]
+
+
+@pytest.mark.parametrize("damage", ["cache", "ledger", "both"])
+def test_dependency_release_cache_cli_refuses_corrupt_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_cli_startup: None, damage: str,
+) -> None:
+    proposal_type = "dependency_blast_radius"
+    programs_root, client = _setup_pairing_cli(
+        monkeypatch, tmp_path, proposal_type, "selected-ref", check_admission=False,
+    )
+    args = _pairing_cli_args(proposal_type, ("selected-ref",), ("selected text",))
+    first = runner.invoke(app, args)
+    assert first.exit_code == 0, first.output
+    staged = load_proposals("acme", proposal_type=proposal_type, programs_root=programs_root)
+    assert len(staged) == 1
+
+    cache_path = next((programs_root / "acme" / "rev_cache" / "ai_result").glob("*.json"))
+    ledger_path = next(get_event_logs_dir("acme", programs_root=programs_root).glob("*.events.jsonl"))
+    if damage in {"cache", "both"}:
+        cache_path.write_text('{"synthetic-private-cache":', encoding="utf-8")
+    if damage in {"ledger", "both"}:
+        ledger_path.write_bytes(ledger_path.read_bytes() + b'{"synthetic-private-ledger":')
+    cache_before = cache_path.read_bytes()
+    ledger_before = ledger_path.read_bytes()
+
+    refused = runner.invoke(app, args)
+
+    assert refused.exit_code != 0
+    assert "cache or release audit failed" in refused.output.lower()
+    assert "synthetic-private" not in refused.output
+    assert client.calls == 1
+    assert load_proposals("acme", proposal_type=proposal_type, programs_root=programs_root) == staged
+    assert cache_path.read_bytes() == cache_before
+    if damage in {"ledger", "both"}:
+        assert ledger_path.read_bytes() == ledger_before
 
 
 def _risk_proposal(**overrides: object) -> RiskProposal:

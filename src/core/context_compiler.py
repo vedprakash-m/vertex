@@ -37,19 +37,24 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
+import os
+import tempfile
 import time
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
+from threading import Lock
 from typing import Protocol
 
 from src.core.alerts import append_or_suppress_alert
 from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.exceptions import StateError
 from src.core.injection_detector import InjectionDetector
+from src.core.workspace_paths import is_bare_identifier
 
 log = logging.getLogger(__name__)
 
@@ -168,27 +173,41 @@ class CompiledContext:
 
 
 class ContextCompileRejected(Exception):
-    """QG-32 (Appendix B.2 step 1): reserved tokens alone (system +
-    schema + required evidence + reserved output) exceed max_input_tokens.
-    The caller must use its deterministic fallback -- this is not retried
-    with a smaller evidence set inside the compiler."""
+    """Reject an unsafe or unbuildable context without dropping required evidence."""
 
 
 class DeterministicTokenEstimator:
-    """Default ``TokenEstimator``: wraps the existing Zone-A tokenizer
-    (``context_budget.estimate_tokens``, ADF-W0.14) rather than duplicating
-    tokenization logic. Provider-specific tokenizer adapters (Appendix A.1's
-    "src/ai/context_tokenizers.py") can be injected instead when needed."""
+    """Default ``TokenEstimator`` using the Zone-A strict tokenizer resolver.
 
-    tokenizer_id = "context_budget.estimate_tokens"
+    Provider-specific adapters can be injected instead when needed.
+    """
 
     def __init__(self, *, model: str = "gpt-4o-mini") -> None:
         self._model = model
+        self._resolution_lock = Lock()
+        self._estimate: Callable[[str], int] | None = None
+        self.tokenizer_id = self._identity("unresolved")
+
+    def _identity(self, backend: str) -> str:
+        return "context_budget.estimate_tokens:" + json.dumps(
+            [self._model, backend], separators=(",", ":"), ensure_ascii=True,
+        )
 
     def estimate(self, text: str) -> int:
-        from src.core.context_budget import estimate_tokens
+        if not text:
+            return 0
+        from src.core.context_budget import _resolve_strict_tokenizer
 
-        return estimate_tokens(text, model=self._model)
+        try:
+            with self._resolution_lock:
+                estimate = self._estimate
+                if estimate is None:
+                    backend, estimate = _resolve_strict_tokenizer(self._model)
+                    self.tokenizer_id = self._identity(backend)
+                    self._estimate = estimate
+            return estimate(text)
+        except (ImportError, KeyError, ValueError, TypeError, RuntimeError, OverflowError, OSError):
+            raise ContextCompileRejected("Tokenizer failed to estimate input.") from None
 
 
 class DeterministicContextCompiler:
@@ -200,12 +219,41 @@ class DeterministicContextCompiler:
         injection_detector: InjectionDetector | None = None,
         programs_root: Path = PROGRAMS_ROOT,
     ) -> None:
-        self._token_estimator = token_estimator or DeterministicTokenEstimator()
+        self._token_estimator = token_estimator if token_estimator is not None else DeterministicTokenEstimator()
         self._weights = dict(salience_weights or _DEFAULT_SALIENCE_WEIGHTS)
-        self._injection_detector = injection_detector or InjectionDetector()
+        self._injection_detector = injection_detector if injection_detector is not None else InjectionDetector()
         self._programs_root = programs_root
 
     def compile(self, request: ContextCompileRequest, *, validation_context: ValidationContext) -> CompiledContext:
+        if not isinstance(request.program_id, str) or not is_bare_identifier(request.program_id):
+            raise ContextCompileRejected("Context compiler requires a bare program identifier.")
+        if request.program_id != validation_context.program_id:
+            raise ContextCompileRejected("Context compiler program identifiers do not match.")
+        if any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
+            for value in (request.max_input_tokens, request.reserved_output_tokens)
+        ):
+            raise ContextCompileRejected("Context compiler token budgets must be non-negative integers.")
+        if any(span.required is not True for span in request.required_evidence) or any(
+            span.required is not False for span in request.optional_evidence
+        ):
+            raise ContextCompileRejected("Context compiler evidence requiredness does not match its collection.")
+        quota_error = "Context compiler source quotas must map source-family strings to non-negative integers."
+        if not isinstance(request.per_source_quotas, Mapping):
+            raise ContextCompileRejected(quota_error)
+        source_quotas = dict(request.per_source_quotas)
+        if any(
+            not isinstance(source, str) or not isinstance(quota, int) or isinstance(quota, bool) or quota < 0
+            for source, quota in source_quotas.items()
+        ):
+            raise ContextCompileRejected(quota_error)
+        if any(
+            not isinstance(span.injection_screen, str)
+            or span.injection_screen not in ("pass", "flagged", "excluded")
+            for span in (*request.required_evidence, *request.optional_evidence)
+        ):
+            raise ContextCompileRejected("Context compiler injection-screen verdicts must be pass, flagged, or excluded.")
+
         start = time.perf_counter()
         excluded: list[ExcludedSpan] = []
 
@@ -239,7 +287,20 @@ class DeterministicContextCompiler:
             if span.injection_screen == "excluded":
                 excluded.append(_excluded(span, reason="injection_excluded"))
             else:
-                optional_after_injection.append(span)
+                salience_error = "Context compiler consumed salience inputs must be numbers between 0 and 1."
+                if not isinstance(span.salience_inputs, Mapping):
+                    raise ContextCompileRejected(salience_error)
+                salience_inputs = dict(span.salience_inputs)
+                if any(
+                    (factor == "source_authority" or factor in self._weights)
+                    and (
+                        isinstance(value, bool) or not isinstance(value, (int, float))
+                        or not 0 <= value <= 1
+                    )
+                    for factor, value in salience_inputs.items()
+                ):
+                    raise ContextCompileRejected(salience_error)
+                optional_after_injection.append(replace(span, salience_inputs=salience_inputs))
 
         # Step 5: request-local redundancy collapse (optional evidence only;
         # required evidence is preserved whole per step 3).
@@ -250,43 +311,53 @@ class DeterministicContextCompiler:
         ranked_optional = _rank_by_salience(deduped_optional, self._weights)
 
         # Step 9 (part 1) / QG-32: reserved-token check.
-        required_tokens = sum(span.token_estimate for span in required_spans)
-        fixed_tokens = (
-            self._token_estimator.estimate(request.system_instructions)
-            + self._token_estimator.estimate(request.output_schema_text)
-            + required_tokens
-        )
-        reserved_tokens = fixed_tokens + request.reserved_output_tokens
-        if reserved_tokens > request.max_input_tokens:
-            # ADF-W5.8 (Section 8.2.5's "context budget exceeded" category):
-            # best-effort, must never mask the real QG-32 rejection below.
-            try:
-                append_or_suppress_alert(
-                    program_id=request.program_id, category="context_budget_exceeded",
-                    entity_type="feature", entity_id=request.feature, severity="warn",
-                    message=f"reserved tokens ({reserved_tokens}) exceed max_input_tokens ({request.max_input_tokens}) (QG-32).",
-                    next_command=f"vertex cockpit show --program {request.program_id}",
-                    programs_root=self._programs_root,
-                )
-            except (OSError, StateError):
-                pass
-            raise ContextCompileRejected(
-                f"reserved tokens ({reserved_tokens}) exceed max_input_tokens "
-                f"({request.max_input_tokens}) for feature {request.feature!r} (QG-32)"
-            )
+        required_prompt = _render_prompt(request, tuple(required_spans))
+        required_tokens = self._estimate_tokens(required_prompt)
+        reserved_tokens = required_tokens + request.reserved_output_tokens
+        self._check_budget(request, total_tokens=reserved_tokens, label="reserved tokens")
 
         # Step 8: per-source quotas.
-        quota_kept, quota_excluded = _apply_source_quotas(ranked_optional, request.per_source_quotas)
+        quota_kept, quota_excluded = _apply_source_quotas(ranked_optional, source_quotas)
         excluded.extend(quota_excluded)
 
         # Step 9 (part 2): greedy token-budget packing.
         packing_ceiling = request.max_input_tokens - request.reserved_output_tokens
-        packed, packing_excluded = _pack_within_budget(quota_kept, running_total=fixed_tokens, ceiling=packing_ceiling)
+        packed: list[EvidenceSpan] = []
+        packing_excluded: list[ExcludedSpan] = []
+        prompt_text = required_prompt
+        token_estimate_total = required_tokens
+        if quota_kept:
+            separator_tokens = self._estimate_tokens("\n\n")
+            for span in quota_kept[:2]:
+                candidate_prompt = _render_prompt(request, (*required_spans, *packed, span))
+                candidate_tokens = self._estimate_tokens(candidate_prompt)
+                if candidate_tokens <= packing_ceiling:
+                    packed.append(span)
+                    prompt_text = candidate_prompt
+                    token_estimate_total = candidate_tokens
+                else:
+                    packing_excluded.append(_excluded(span, reason="token_budget"))
+            if len(quota_kept) > 2:
+                first_prefix_tokens = separator_tokens
+                if not packed and not required_spans:
+                    first_prefix = ("\n\n" if required_prompt else "") + "Evidence:\n\n"
+                    first_prefix_tokens = self._estimate_tokens(first_prefix)
+                later_packed, later_excluded = _pack_within_budget(
+                    quota_kept[2:], running_total=token_estimate_total, ceiling=packing_ceiling,
+                    first_prefix_tokens=first_prefix_tokens, separator_tokens=separator_tokens,
+                )
+                packed.extend(later_packed)
+                packing_excluded.extend(later_excluded)
+                if later_packed:
+                    prompt_text = _render_prompt(request, (*required_spans, *packed))
+                    token_estimate_total = self._estimate_tokens(prompt_text)
         excluded.extend(packing_excluded)
 
         included = tuple(required_spans) + tuple(packed)
-        prompt_text = _render_prompt(request, included)
-        token_estimate_total = fixed_tokens + sum(span.token_estimate for span in packed)
+        self._check_budget(
+            request, total_tokens=token_estimate_total + request.reserved_output_tokens,
+            label="rendered prompt and reserved output tokens",
+        )
 
         source_distribution: dict[str, int] = {}
         for span in included:
@@ -294,7 +365,8 @@ class DeterministicContextCompiler:
 
         compiled_at = datetime.now(timezone.utc)
         context_hash = hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
-        cache_key = _build_cache_key(request, context_hash)
+        tokenizer_id = self._token_estimator.tokenizer_id
+        cache_key = _build_cache_key(request, context_hash, tokenizer_id=tokenizer_id)
         compile_ms = (time.perf_counter() - start) * 1000
 
         manifest = ContextManifest(
@@ -303,7 +375,7 @@ class DeterministicContextCompiler:
             feature=request.feature,
             prompt_version=request.prompt_version,
             policy_version=_POLICY_VERSION,
-            tokenizer_id=self._token_estimator.tokenizer_id,
+            tokenizer_id=tokenizer_id,
             model_deployment=None,
             included_evidence_ids=tuple(span.evidence_id for span in included),
             excluded=tuple(excluded),
@@ -319,6 +391,31 @@ class DeterministicContextCompiler:
         )
         _persist_manifest_best_effort(manifest, programs_root=self._programs_root)
         return CompiledContext(prompt_text=prompt_text, included=included, excluded=tuple(excluded), manifest=manifest)
+
+    def _estimate_tokens(self, text: str) -> int:
+        estimate = self._token_estimator.estimate(text)
+        if not isinstance(estimate, int) or isinstance(estimate, bool) or estimate < 0:
+            raise ContextCompileRejected("Context compiler token estimates must be non-negative integers.")
+        return estimate
+
+    def _check_budget(self, request: ContextCompileRequest, *, total_tokens: int, label: str) -> None:
+        if total_tokens <= request.max_input_tokens:
+            return
+        message = f"{label} ({total_tokens}) exceed max_input_tokens ({request.max_input_tokens})"
+        # ADF-W5.8: alert persistence must not mask the QG-32 rejection.
+        try:
+            append_or_suppress_alert(
+                program_id=request.program_id, category="context_budget_exceeded",
+                entity_type="feature", entity_id=request.feature, severity="warn",
+                message=f"{message} (QG-32).",
+                next_command=f"vertex cockpit show --program {request.program_id}",
+                programs_root=self._programs_root,
+            )
+        except (OSError, StateError):
+            log.warning(
+                "context_compiler: unable to record context budget alert; QG-32 rejection remains in effect"
+            )
+        raise ContextCompileRejected(f"{message} for feature {request.feature!r} (QG-32)")
 
     def _screen_span(self, span: EvidenceSpan) -> EvidenceSpan:
         if span.injection_screen != "pass":
@@ -336,7 +433,7 @@ class DeterministicContextCompiler:
         representation (the same header+text `_render_span_text` builds),
         so accounting reflects what is truly emitted into the prompt, not
         raw span text alone."""
-        return replace(span, token_estimate=self._token_estimator.estimate(_render_span_text(span)))
+        return replace(span, token_estimate=self._estimate_tokens(_render_span_text(span)))
 
 
 def _content_hash(text: str) -> str:
@@ -382,7 +479,14 @@ def _collapse_redundancy(spans: list[EvidenceSpan]) -> tuple[list[EvidenceSpan],
 
 
 def _score_span(span: EvidenceSpan, weights: Mapping[str, float]) -> float:
-    return sum(weight * span.salience_inputs.get(factor, 0.0) for factor, weight in weights.items())
+    message = "Context compiler salience score must be a finite number."
+    try:
+        score = sum(weight * span.salience_inputs.get(factor, 0.0) for factor, weight in weights.items())
+        if math.isfinite(score):
+            return score
+    except (TypeError, OverflowError):
+        raise ContextCompileRejected(message) from None
+    raise ContextCompileRejected(message)
 
 
 def _rank_by_salience(spans: list[EvidenceSpan], weights: Mapping[str, float]) -> list[EvidenceSpan]:
@@ -410,18 +514,18 @@ def _apply_source_quotas(
 
 
 def _pack_within_budget(
-    spans: list[EvidenceSpan], *, running_total: int, ceiling: int
+    spans: list[EvidenceSpan], *, running_total: int, ceiling: int,
+    first_prefix_tokens: int, separator_tokens: int,
 ) -> tuple[list[EvidenceSpan], list[ExcludedSpan]]:
-    """Appendix B.2 steps 3/4: greedily add spans (already in salience
-    order) while running_total + span.token_estimate <= ceiling; spans are
-    included whole or excluded whole (no mid-span truncation)."""
+    """Greedily pack whole spans using separately estimated prompt boundaries."""
     packed: list[EvidenceSpan] = []
     excluded: list[ExcludedSpan] = []
     total = running_total
     for span in spans:
-        if total + span.token_estimate <= ceiling:
+        prefix_tokens = separator_tokens if packed else first_prefix_tokens
+        if total + prefix_tokens + span.token_estimate <= ceiling:
             packed.append(span)
-            total += span.token_estimate
+            total += prefix_tokens + span.token_estimate
         else:
             excluded.append(_excluded(span, reason="token_budget"))
     return packed, excluded
@@ -445,17 +549,32 @@ def _render_prompt(request: ContextCompileRequest, included: tuple[EvidenceSpan,
     return "\n\n".join(part for part in parts if part)
 
 
-def _build_cache_key(request: ContextCompileRequest, context_hash: str) -> str:
-    """Section 8.8.3's full cache-key contract also includes
-    model/deployment and output-schema-version -- not available at compile
-    time (model/deployment is resolved by the tier router that calls this
-    compiler, a separate not-yet-built piece; ADF-W2.7 does not invent that
-    routing layer). This is the compile-time-available subset."""
-    raw = "|".join((request.program_id, request.feature, request.prompt_version, _POLICY_VERSION, context_hash))
+def _build_cache_key(request: ContextCompileRequest, context_hash: str, *, tokenizer_id: str) -> str:
+    """Hash the compile-time identity subset; deployment and versioned
+    schema and validator identities are not available here."""
+    raw = json.dumps(
+        (
+            request.program_id,
+            request.feature,
+            request.prompt_version,
+            _POLICY_VERSION,
+            tokenizer_id,
+            request.output_schema_text.strip(),
+            context_hash,
+        ),
+        separators=(",", ":"),
+    )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def context_manifest_path(manifest: ContextManifest, *, programs_root: Path = PROGRAMS_ROOT) -> Path:
+    if (
+        not isinstance(manifest.program_id, str)
+        or not is_bare_identifier(manifest.program_id)
+        or not isinstance(manifest.context_hash, str)
+        or not is_bare_identifier(manifest.context_hash)
+    ):
+        raise StateError("Context manifest path requires bare program and hash identifiers.")
     return programs_root / manifest.program_id / "runtime" / "context_manifests" / f"{manifest.context_hash}.json"
 
 
@@ -485,20 +604,99 @@ def _manifest_to_dict(manifest: ContextManifest) -> dict[str, object]:
     }
 
 
+def _reject_duplicate_manifest_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate manifest key")
+        result[key] = value
+    return result
+
+
+def _warn_if_manifest_differs(path: Path, expected: dict[str, object], serialized: str) -> None:
+    limit = 2 * len(serialized)
+    try:
+        for attempt in range(6):
+            try:
+                with path.open("rb") as stream:
+                    raw = stream.read(limit + 1)
+                break
+            except PermissionError:
+                if os.name != "nt" or attempt == 5:
+                    raise
+                # A concurrent Windows rename can briefly deny destination reads.
+                time.sleep(0.01)
+        if len(raw) > limit:
+            log.warning("context_compiler: unable to verify existing context manifest")
+            return
+        existing = json.loads(raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_manifest_keys)
+    except (OSError, UnicodeError, ValueError, RecursionError):
+        log.warning("context_compiler: unable to verify existing context manifest")
+        return
+
+    if not isinstance(existing, dict):
+        log.warning("context_compiler: existing context manifest differs from compilation")
+        return
+    compiled_at = existing.pop("compiled_at", None)
+    compile_ms = existing.pop("compile_ms", None)
+    expected.pop("compiled_at")
+    expected.pop("compile_ms")
+    valid_time = False
+    if isinstance(compiled_at, str):
+        try:
+            timestamp = datetime.fromisoformat(compiled_at)
+            valid_time = timestamp.utcoffset() == timezone.utc.utcoffset(timestamp)
+        except ValueError:
+            pass
+    valid_duration = (
+        isinstance(compile_ms, (int, float))
+        and not isinstance(compile_ms, bool)
+        and compile_ms >= 0
+        and (not isinstance(compile_ms, float) or math.isfinite(compile_ms))
+    )
+    if (
+        not valid_time
+        or not valid_duration
+        or json.dumps(existing, sort_keys=True) != json.dumps(expected, sort_keys=True)
+    ):
+        log.warning("context_compiler: existing context manifest differs from compilation")
+
+
 def _persist_manifest_best_effort(manifest: ContextManifest, *, programs_root: Path) -> None:
-    """Content-addressed (Appendix A.1): identical context_hash means an
-    identical manifest was already persisted, so this is a no-op on
-    collision. Best-effort -- a local disk write failure must never break
-    the compile itself (the caller already has the CompiledContext in
-    memory; the manifest file is an audit artifact, not the source of truth)."""
+    """Persist a content-addressed manifest without replacing an existing one."""
+    temp_path: Path | None = None
     try:
         path = context_manifest_path(manifest, programs_root=programs_root)
+        payload = _manifest_to_dict(manifest)
+        serialized = json.dumps(payload, indent=2, sort_keys=True)
         if path.exists():
+            _warn_if_manifest_differs(path, payload, serialized)
             return
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(_manifest_to_dict(manifest), indent=2, sort_keys=True), encoding="utf-8")
+        fd, temp_name = tempfile.mkstemp(prefix=".context-manifest-", suffix=".tmp", dir=path.parent)
+        temp_path = Path(temp_name)
+        os.close(fd)
+        temp_path.write_text(serialized, encoding="utf-8")
+        try:
+            os.link(temp_path, path)
+        except FileExistsError:
+            _warn_if_manifest_differs(path, payload, serialized)
+        except OSError:
+            if os.name != "nt":
+                raise
+            try:
+                # Windows rename refuses an existing destination; POSIX rename may replace it.
+                os.rename(temp_path, path)
+            except FileExistsError:
+                _warn_if_manifest_differs(path, payload, serialized)
     except Exception:  # pragma: no cover - audit write must never break compile
-        log.warning("context_compiler: failed to persist manifest %s", manifest.context_hash, exc_info=True)
+        log.warning("context_compiler: failed to persist context manifest")
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                log.warning("context_compiler: failed to remove temporary context manifest")
 
 
 __all__ = [

@@ -79,7 +79,7 @@ LINE_BUDGETS = {
     # need an --edition value), and adds prefetch_enabled/kusto_enabled flag threading through the
     # id-doctor and kusto-validation-check call sites.
     "src/commands/doctor.py": 1692,
-    "src/commands/confirm.py": 1716,  # +5: DECK edition type guard to skip HTMLRenderer (82e07c4); +105: GAP-9/23/33 (QG-DM surfacing + shim-persist SoR guard + baseline dual-write SoR guard) (2026-06-17); +1 (2026-07-17, synthetic gather lifecycle contract D-17): gather_run_id/gather_run_hash read back from draft state into provisional/final RunManifest; +65 (2026-07-22, synthetic gather lifecycle contract D-17/ARM-GATHER-11 AG-6.2/6.3): validate_pinned_gather_run gating (both dry-run and real confirm) + dry-run-only hash-bound risk-register delta preview computation, plus reusing one resolve_edition() call instead of two
+    "src/commands/confirm.py": 1723,  # +7 (2026-11-13, re-vertex C.167): fail-closed program_context_sha256 draft binding check; +5: DECK edition type guard to skip HTMLRenderer (82e07c4); +105: GAP-9/23/33 (QG-DM surfacing + shim-persist SoR guard + baseline dual-write SoR guard) (2026-06-17); +1 (2026-07-17, synthetic gather lifecycle contract D-17): gather_run_id/gather_run_hash read back from draft state into provisional/final RunManifest; +65 (2026-07-22, synthetic gather lifecycle contract D-17/ARM-GATHER-11 AG-6.2/6.3): validate_pinned_gather_run gating (both dry-run and real confirm) + dry-run-only hash-bound risk-register delta preview computation, plus reusing one resolve_edition() call instead of two
     # D-31 → WI-6.2 (2026-06-15): report.py decomposed into report_pipeline/assemble_stage.py;
     # LOC ratchet satisfied (1,413 ≤ 1,500). Budget updated after report output path refactor (+1 issue_dir var).
     # +35: P4-15 (2026-06-18) — auto-run enrich before report when workiq_enrich_schedule=pre_report.
@@ -100,9 +100,10 @@ LINE_BUDGETS = {
     # kind="report_run") right next to the existing record_adoption() call -- never calls
     # WorkIQ itself (INV-ADF-2 is unaffected; only a between-runs alert row is written).
     # +10 (2026-11-05): retain the observe-only program verdict and its bound inputs.
-    "src/commands/report.py": 1583,
+    # +2 (2026-11-13, re-vertex C.167): program_context_sha256 threaded into DraftState.
+    "src/commands/report.py": 1585,
     "src/core/reality_store.py": 2339,  # +6 (2026-07-13): ADF root-cause fix for the PS-14 split-brain -- _resolve_reality_db_root now defaults to programs_root.parent/"vertex-db" instead of ~/.vertex
-    "src/core/channel_registry_store.py": 1976,  # +79: discovery registration persistence helpers already present on branch (2026-06-02)
+    "src/core/channel_registry_store.py": 2056,  # +79: discovery registration persistence helpers already present on branch (2026-06-02); +80 (2026-11-13, re-vertex saved-query containment): PARTIAL-run binding retention and null-workstream binding row reuse with explicit multi-live-row failure
 }
 
 # W1.8 retired the critical broad-exception debt enough that we can now prevent

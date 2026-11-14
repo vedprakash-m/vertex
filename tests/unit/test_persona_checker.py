@@ -1437,10 +1437,15 @@ def test_schema_conditional_regex_present_requires_pattern() -> None:
 # PERFORMANCE
 # =============================================================================
 
-def test_full_registry_evaluation_under_500ms() -> None:
-    """Gap 7: complete persona evaluation for a representative workload must complete under 500ms."""
-    import time as _time
+def test_full_registry_budget_is_in_performance_lane() -> None:
+    assert any(
+        mark.name == "perf"
+        for mark in getattr(test_full_registry_evaluation_under_500ms, "pytestmark", ())
+    )
 
+
+@pytest.fixture
+def _full_registry_workload() -> tuple[PersonaRegistry, dict[str, str]]:
     personas = tuple(
         PersonaDefinition(
             id=f"persona_{i}",
@@ -1465,6 +1470,36 @@ def test_full_registry_evaluation_under_500ms() -> None:
         personas=personas,
     )
     narratives = {f"ws_{k}": f"Checkpoint 2026-06-{k+1:02d} gate confirmed." for k in range(10)}
+    return registry, narratives
+
+
+def test_full_registry_workload_is_evaluated(
+    _full_registry_workload: tuple[PersonaRegistry, dict[str, str]],
+) -> None:
+    registry, narratives = _full_registry_workload
+    report = run_persona_checks(
+        registry=registry,
+        exec_summary_text="Gate decision confirmed.",
+        workstream_blurbs={},
+        loaded_narratives=narratives,
+        rendered_html="", subject_line="",
+        ban_rule_results=(), structural_rule_results=(),
+        editorial_rules=_make_rules(), overrides=None,
+        program_phase=None, evaluation_date=date(2026, 5, 28),
+    )
+    assert report is not None
+    assert report.total_checks == 45
+    assert report.total_evaluations == 450
+
+
+@pytest.mark.perf
+def test_full_registry_evaluation_under_500ms(
+    _full_registry_workload: tuple[PersonaRegistry, dict[str, str]],
+) -> None:
+    """Gap 7: complete persona evaluation for a representative workload must complete under 500ms."""
+    import time as _time
+
+    registry, narratives = _full_registry_workload
 
     start = _time.monotonic()
     report = run_persona_checks(

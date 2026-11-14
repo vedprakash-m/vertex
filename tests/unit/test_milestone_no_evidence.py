@@ -124,7 +124,9 @@ def test_report_health_summary_counts_unknown_alongside_known_statuses() -> None
     assert _build_milestone_health_summary((milestone, other), (unknown, known)) == "Milestones: 1 on track, 1 unknown."
 
 
-def test_future_gap_emission_preserves_actual_reason_not_past_due_claim(tmp_path: Path) -> None:
+def test_future_gap_emission_preserves_actual_reason_not_past_due_claim(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
     from src.core.context_gap_store import load_context_gaps
     from src.core.stages.milestone_stage import _emit_coverage_gap_findings
 
@@ -138,6 +140,75 @@ def test_future_gap_emission_preserves_actual_reason_not_past_due_claim(tmp_path
     assert assessment.reasoning in records[0].message
     assert "past target" not in records[0].message
     assert records[0].severity == "quality_degraded"
+    assert not caplog.records
+
+
+@pytest.mark.parametrize("error", [OSError("private detail"), ValueError("private detail")])
+def test_gap_write_failure_warns_and_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, error: Exception,
+) -> None:
+    import logging
+    from dataclasses import replace
+    from unittest.mock import Mock
+
+    from src.core.stages import milestone_stage
+
+    assessment = assess_milestone_health(_milestone(target_date=date(2026, 12, 1)), (), {}, _AS_OF)
+    following = replace(assessment, milestone_id="private-milestone")
+    not_a_gap = replace(assessment, coverage_gap=False)
+    append = Mock(side_effect=[error, tmp_path / "synthetic.jsonl"])
+    monkeypatch.setattr(milestone_stage, "append_context_gap", append)
+
+    with caplog.at_level(logging.WARNING, logger=milestone_stage.__name__):
+        milestone_stage._emit_coverage_gap_findings(
+            "private-program", (assessment, not_a_gap, following), programs_root=tmp_path,
+        )
+
+    assert append.call_count == 2
+    assert append.call_args.kwargs["message"].startswith("Milestone private-milestone")
+    assert [record.getMessage() for record in caplog.records] == [
+        "Unable to record a context gap for a milestone with incomplete evidence."
+    ]
+    assert "private" not in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)
+
+
+def test_milestone_stage_continues_after_gap_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+    from types import SimpleNamespace
+
+    from src.core.pipeline import StageContext
+    from src.core.stages import milestone_stage
+
+    milestone = _milestone(target_date=date(2026, 12, 1))
+    monkeypatch.setattr(milestone_stage, "resolve_family_sor_mode", lambda *args, **kwargs: "legacy")
+    monkeypatch.setattr(milestone_stage, "_load_current_milestones", lambda *args, **kwargs: (milestone,))
+    monkeypatch.setattr(milestone_stage, "_load_current_dependencies", lambda *args, **kwargs: ())
+    monkeypatch.setattr(milestone_stage, "build_trajectory_store_for_program_id", lambda *args, **kwargs: object())
+    monkeypatch.setattr(milestone_stage, "capture_milestone_trajectory_snapshot", lambda *args, **kwargs: None)
+
+    def fail_append(**kwargs: object) -> None:
+        raise OSError("private detail")
+
+    monkeypatch.setattr(milestone_stage, "append_context_gap", fail_append)
+    ctx = StageContext(
+        programs_root=tmp_path, data_as_of=_AS_OF,
+        resolved_v2=SimpleNamespace(paths=SimpleNamespace(program_id="samplealpha")),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=milestone_stage.__name__):
+        result = milestone_stage.MilestoneStage().execute(ctx)
+
+    assert result.milestones == (milestone,)
+    assert result.milestone_assessments[0].coverage_gap
+    assert result.milestone_assessments[0].computed_health == MilestoneStatus.UNKNOWN
+    assert result.milestone_warnings == ()
+    assert [record.getMessage() for record in caplog.records] == [
+        "Unable to record a context gap for a milestone with incomplete evidence."
+    ]
+    assert "private detail" not in caplog.text
 
 
 @pytest.mark.parametrize("linked_ids", [(1,), (1, 901), (901,)])

@@ -4,6 +4,9 @@ import logging
 import sys
 import uuid
 from copy import copy
+from enum import Enum, EnumMeta
+from functools import partial
+from inspect import getattr_static
 from pathlib import Path
 
 try:
@@ -14,11 +17,11 @@ except ImportError:
 
 import click
 import typer
-from typer.core import TyperGroup
+from typer.core import TyperArgument, TyperCommand, TyperGroup, TyperOption
 
 from src.ai.ai_mode import AIMode, set_ai_mode
 from src.ai.intent_router import IntentRouterError, _resolve_ask_edition
-from src.ai.tiered_router import register_decision_sink
+from src.ai.tiered_router import use_invocation_sink
 from src.commands.actions import app as actions_app
 from src.commands.ado import app as ado_app
 from src.commands.ai_proposals import app as ai_proposals_app
@@ -144,11 +147,77 @@ from src.core.catchup_runner import maybe_catchup
 from src.core.edition_resolver import PROGRAMS_ROOT, resolve_edition_paths
 from src.core.adf_config import load_arch_data_fix
 from src.core.measurement_store import TierDecisionSinkConfig, make_tier_decision_sink
+from src.core.workspace_paths import is_bare_identifier
 
 
-# One CLI process may invoke the callback more than once in embedded/test use.
-# Keep exactly one durable routing sink per program/edition for its lifetime.
-_REGISTERED_TIER_SINKS: set[tuple[str, str | None]] = set()
+_CLICK_UNSET = getattr(click.core, "UNSET", None)
+_TYPER_CHOICE = getattr(typer.main, "TyperChoice", click.Choice)
+_TYPER_PATH = getattr(typer.models, "TyperPath", click.Path)
+
+
+def _safe_startup_value(value: object) -> bool:
+    if value is None or value is _CLICK_UNSET:
+        return True
+    value_type = type(value)
+    if any(value_type is allowed for allowed in (str, int, float, bool, bytes, type(Path()))):
+        return True
+    if type(value_type) is EnumMeta and issubclass(value_type, Enum):
+        return (
+            getattr_static(value_type, "__str__", None) is Enum.__str__
+            and (
+                getattr_static(value_type, "__getattribute__", None) is object.__getattribute__
+                or (
+                    issubclass(value_type, str)
+                    and getattr_static(value_type, "__getattribute__", None) is str.__getattribute__
+                )
+            )
+            and getattr_static(value_type, "value", None) is getattr_static(Enum, "value")
+            and getattr_static(value, "__class__", None) is getattr_static(object, "__class__")
+            and type(getattr_static(value, "_name_", None)) is str
+            and type(getattr_static(value, "_value_", None)) is str
+        )
+    if type(value) is tuple or type(value) is list:
+        return all(
+            type(item) is not tuple and type(item) is not list and _safe_startup_value(item)
+            for item in value
+        )
+    return False
+
+
+def _safe_startup_type(param_type: click.ParamType) -> bool:
+    if any(type(param_type) is allowed for allowed in (
+        click.types.StringParamType, click.types.IntParamType, click.types.FloatParamType,
+        click.types.BoolParamType, click.types.UUIDParameterType,
+    )):
+        return True
+    if (
+        (type(param_type) is click.IntRange or type(param_type) is click.FloatRange)
+        and isinstance(param_type, (click.IntRange, click.FloatRange))
+    ):
+        return all(
+            bound is None or type(bound) is int or type(bound) is float
+            for bound in (param_type.min, param_type.max)
+        )
+    if (
+        (type(param_type) is click.Choice or type(param_type) is _TYPER_CHOICE)
+        and isinstance(param_type, click.Choice)
+    ):
+        return (type(param_type.choices) is tuple or type(param_type.choices) is list) and all(
+            any(type(choice) is allowed for allowed in (str, int, float, bool))
+            for choice in param_type.choices
+        )
+    if (
+        (type(param_type) is click.Path or type(param_type) is _TYPER_PATH)
+        and isinstance(param_type, click.Path)
+    ):
+        return any(param_type.type is allowed for allowed in (None, str, bytes, Path))
+    if type(param_type) is click.DateTime:
+        return (type(param_type.formats) is tuple or type(param_type.formats) is list) and all(
+            type(value) is str for value in param_type.formats
+        )
+    if type(param_type) is click.Tuple:
+        return all(type(item) is not click.Tuple and _safe_startup_type(item) for item in param_type.types)
+    return False
 
 
 def _ask_startup_scope(edition: object, program: object) -> tuple[str, str | None] | None:
@@ -167,14 +236,105 @@ def _ask_startup_scope(edition: object, program: object) -> tuple[str, str | Non
     return None
 
 
+def _parsed_startup_scope(
+    parent: click.Context, name: str, command: click.Command, args: list[str],
+) -> tuple[str | None, str | None] | None:
+    if parent.default_map is not None or parent.token_normalize_func is not None:
+        return None
+    program: str | None = None
+    edition: str | None = None
+    while True:
+        if (
+            not any(type(command) is allowed for allowed in (click.Command, click.Group, TyperCommand, TyperGroup))
+            or command.context_class is not click.Context
+            or type(command.context_settings) is not dict
+            or command.context_settings.get("default_map") is not None
+            or command.context_settings.get("token_normalize_func") is not None
+        ):
+            return None
+        for parameter in command.params:
+            if (
+                not any(type(parameter) is allowed for allowed in (click.Option, click.Argument, TyperOption, TyperArgument))
+                or parameter.callback is not None
+                or not _safe_startup_type(parameter.type)
+            ):
+                return None
+            if parameter.name in {"program", "edition"} and (
+                type(parameter.type) is not click.types.StringParamType
+                or not parameter.expose_value or parameter.multiple or parameter.nargs != 1
+            ):
+                return None
+        settings = dict(command.context_settings)
+        settings.update(info_name=name, parent=parent, default_map={})
+        probe = command.context_class(command, **settings)
+        try:
+            options, remaining, _ = command.make_parser(probe).parse_args(list(args))
+        except click.UsageError:
+            return None
+        if options.get("help") is True:
+            return None, None
+        for parameter in command.params:
+            value = options.get(parameter.name, _CLICK_UNSET) if parameter.name is not None else _CLICK_UNSET
+            if value is None or value is _CLICK_UNSET:
+                default = parameter.get_default(probe, call=False)
+                if not _safe_startup_value(default):
+                    return None
+                if parameter.required and (default is None or default is _CLICK_UNSET):
+                    return None
+                if parameter.name in {"program", "edition"} and (
+                    parameter.envvar is not None or probe.auto_envvar_prefix is not None
+                    or (isinstance(parameter, click.Option) and parameter.prompt is not None)
+                    or not (
+                        default is None or default is _CLICK_UNSET
+                        or (type(default) is str and default == "")
+                    )
+                ):
+                    return None
+                continue
+            if not _safe_startup_value(value):
+                return None
+            if parameter.name not in {"program", "edition"}:
+                continue
+            if type(value) is not str or not is_bare_identifier(value):
+                return None
+            if parameter.name == "program":
+                if program is not None and program != value:
+                    return None
+                program = value
+            else:
+                if edition is not None and edition != value:
+                    return None
+                edition = value
+        if not isinstance(command, click.Group):
+            return None if remaining and not probe.allow_extra_args else (program, edition)
+        if command.chain:
+            return None
+        if not remaining:
+            return (program, edition) if command.invoke_without_command else None
+        name, *args = remaining
+        child = command.get_command(probe, name)
+        if child is None:
+            return None
+        parent, command = probe, child
+
+
 class VertexRootGroup(TyperGroup):
     def resolve_command(
         self,
         ctx: click.Context,
         args: list[str],
     ) -> tuple[str | None, click.Command | None, list[str]]:
+        edition = ctx.params.get("edition")
+        global_edition = ["--edition", edition] if isinstance(edition, str) and edition else []
+        ctx.meta["vertex_invocation_argv"] = [*global_edition, *args]
+        ctx.meta["vertex_command_argv"] = list(args)
         try:
             resolved = super().resolve_command(ctx, args)
+            if resolved[0] != "ask":
+                ctx.meta["vertex_startup_scope"] = (
+                    _parsed_startup_scope(ctx, resolved[0], resolved[1], resolved[2])
+                    if resolved[0] is not None and resolved[1] is not None else None
+                )
             if resolved[0] == "context" and resolved[2] and resolved[2][0] in {
                 "import-reply", "solicit", "extract", "verify-reply-origin",
             }:
@@ -201,19 +361,25 @@ class VertexRootGroup(TyperGroup):
                 )
                 with probe:
                     ctx.meta["offline_rev_health_command"] = probe.params.get("rev_health") is True
-            elif resolved[0] == "migrate" and resolved[1] is not None and any(
-                arg == "--dry-run" or arg.startswith("--dry-run=") for arg in resolved[2]
+            elif resolved[0] in {"migrate", "enrich"} and resolved[1] is not None and (
+                resolved[0] == "enrich" or any(
+                    arg == "--dry-run" or arg.startswith("--dry-run=") for arg in resolved[2]
+                )
             ):
+                command_name = "migrate" if resolved[0] == "migrate" else "enrich"
                 probe_args = [
                     "--dry-run" if arg.startswith("--dry-run=") else arg
                     for arg in resolved[2]
                 ]
                 probe = resolved[1].make_context(
-                    "migrate", probe_args, parent=ctx, resilient_parsing=True,
+                    command_name, probe_args, parent=ctx, resilient_parsing=True,
                     help_option_names=[], ignore_unknown_options=True, allow_extra_args=True,
                 )
                 with probe:
-                    ctx.meta["offline_migrate_dry_run"] = probe.params.get("dry_run") is True
+                    key = "offline_migrate_dry_run" if command_name == "migrate" else "enrich_dry_run"
+                    ctx.meta[key] = probe.params.get("dry_run") is True
+                    if command_name == "enrich":
+                        ctx.meta["enrich_json_output"] = probe.params.get("output_format") == "json"
             elif resolved[0] == "ask" and resolved[1] is not None:
                 probe_command = copy(resolved[1])
                 probe_command.params = [copy(parameter) for parameter in resolved[1].params]
@@ -291,6 +457,7 @@ def main(
     no_catchup: bool = typer.Option(False, "--no-catchup", help="Skip the session-start catchup scan for this invocation."),
     edition: str = typer.Option("", "--edition", help="Default edition for natural-language routing (e.g. 'acme_weekly')."),
 ) -> None:
+    ctx.with_resource(use_invocation_sink(None))
     if ctx.invoked_subcommand == "ask" and ctx.meta.get("ask_skip_startup") is True:
         if skip_issue_flag:
             raise typer.BadParameter("--skip-issue cannot be combined with a subcommand.")
@@ -336,6 +503,8 @@ def main(
         ):
             return
         _maybe_register_tier_decision_sink(ctx)
+        if ctx.invoked_subcommand == "enrich" and ctx.meta.get("enrich_dry_run") is True:
+            return
         _maybe_run_scheduled_db_maintenance(ctx)
         _maybe_run_session_catchup(ctx, no_catchup=no_catchup)
         return
@@ -360,10 +529,15 @@ def _maybe_run_session_catchup(ctx: typer.Context, *, no_catchup: bool) -> None:
     program_id = _program_for_startup(ctx)
     if program_id is None:
         return
+    emit = (
+        partial(typer.echo, err=True)
+        if ctx.invoked_subcommand == "enrich" and ctx.meta.get("enrich_json_output") is True
+        else typer.echo
+    )
     maybe_catchup(
         program_id,
         programs_root=PROGRAMS_ROOT,
-        emit=typer.echo,
+        emit=emit,
         event_builder=build_catchup_event_builder(program_id, programs_root=PROGRAMS_ROOT),
     )
 
@@ -372,7 +546,7 @@ def _maybe_register_tier_decision_sink(ctx: typer.Context) -> None:
     """ADF-W0.7: persist every AI routing decision made during this invocation.
 
     Registers a durable JSONL sink (``programs/<id>/runtime/tier_decisions.jsonl``)
-    for the process lifetime. Best-effort: a sink-setup failure must never block
+    for this invocation. Best-effort: a sink-setup failure must never block
     a CLI command (INV-ADF-5 governs missing *provider* telemetry, not this
     registration step, so failures here are swallowed after logging).
     """
@@ -385,10 +559,12 @@ def _maybe_register_tier_decision_sink(ctx: typer.Context) -> None:
         if ctx.invoked_subcommand == "ask":
             selected_edition = ctx.meta.get("ask_startup_edition")
             edition_id = selected_edition if isinstance(selected_edition, str) else None
+        elif "vertex_startup_scope" in ctx.meta:
+            scope = ctx.meta["vertex_startup_scope"]
+            edition_id = scope[1] if isinstance(scope, tuple) else None
         else:
-            edition_id = _extract_option(sys.argv[1:], "--edition")
-        sink_key = (program_id, edition_id)
-        if sink_key in _REGISTERED_TIER_SINKS:
+            edition_id = _extract_option(_startup_argv(ctx), "--edition")
+        if ctx.meta.get("vertex_tier_sink_registered") is True:
             return
         try:
             execution_mode = load_arch_data_fix(program_id, programs_root=PROGRAMS_ROOT).mode.value
@@ -401,8 +577,8 @@ def _maybe_register_tier_decision_sink(ctx: typer.Context) -> None:
             execution_mode=execution_mode,
             programs_root=PROGRAMS_ROOT,
         )
-        register_decision_sink(make_tier_decision_sink(sink_config))
-        _REGISTERED_TIER_SINKS.add(sink_key)
+        ctx.with_resource(use_invocation_sink(make_tier_decision_sink(sink_config)))
+        ctx.meta["vertex_tier_sink_registered"] = True
     except Exception:  # pragma: no cover - registration must never break the CLI
         logging.getLogger(__name__).warning("tier decision sink registration failed", exc_info=True)
 
@@ -414,7 +590,10 @@ def _maybe_run_scheduled_db_maintenance(ctx: typer.Context) -> None:
     block a CLI command, so exceptions are swallowed after logging, matching
     the same best-effort contract as ``_maybe_register_tier_decision_sink``.
     """
-    if _should_skip_scheduled_db_maintenance(ctx, sys.argv[1:]):
+    command_argv = getattr(ctx, "meta", {}).get("vertex_command_argv")
+    if _should_skip_scheduled_db_maintenance(
+        ctx, command_argv if isinstance(command_argv, list) else sys.argv[1:],
+    ):
         return
     program_id = _program_for_startup(ctx)
     if program_id is None:
@@ -453,21 +632,61 @@ def _should_skip_scheduled_db_maintenance(ctx: typer.Context, argv: list[str]) -
 def _resolve_program_for_session_catchup(argv: list[str]) -> str | None:
     program = _extract_option(argv, "--program")
     if program is not None:
-        return program
+        return program if is_bare_identifier(program) else None
     edition = _extract_option(argv, "--edition")
-    if edition is None:
+    if edition is None or not is_bare_identifier(edition):
         return None
     resolved = resolve_edition_paths(edition, programs_root=PROGRAMS_ROOT)
-    if resolved is None:
+    if resolved is None or not is_bare_identifier(resolved.program_id):
         return None
     return resolved.program_id
 
 
+def _warn_startup_scope_unavailable(ctx: typer.Context) -> None:
+    if ctx.meta.get("vertex_startup_scope_warning") is not True:
+        logging.getLogger(__name__).warning("startup scope unavailable; scoped startup effects skipped")
+        ctx.meta["vertex_startup_scope_warning"] = True
+
+
 def _program_for_startup(ctx: typer.Context) -> str | None:
+    meta = getattr(ctx, "meta", {})
     if ctx.invoked_subcommand == "ask":
-        program = ctx.meta.get("ask_startup_program")
-        return program if isinstance(program, str) else None
-    return _resolve_program_for_session_catchup(sys.argv[1:])
+        program = meta.get("ask_startup_program")
+        return program if isinstance(program, str) and is_bare_identifier(program) else None
+    if "vertex_startup_scope" in meta:
+        if "vertex_startup_program" in meta:
+            cached = meta["vertex_startup_program"]
+            return cached if isinstance(cached, str) else None
+        meta["vertex_startup_program"] = None
+        scope = meta["vertex_startup_scope"]
+        if not isinstance(scope, tuple) or len(scope) != 2:
+            _warn_startup_scope_unavailable(ctx)
+            return None
+        program, edition = scope
+        if (
+            (program is not None and (not isinstance(program, str) or not is_bare_identifier(program)))
+            or (edition is not None and (not isinstance(edition, str) or not is_bare_identifier(edition)))
+        ):
+            _warn_startup_scope_unavailable(ctx)
+            return None
+        resolved = resolve_edition_paths(edition, programs_root=PROGRAMS_ROOT) if edition is not None else None
+        if edition is not None and (
+            resolved is None or not is_bare_identifier(resolved.program_id)
+        ):
+            _warn_startup_scope_unavailable(ctx)
+            return None
+        if program is not None and resolved is not None and program != resolved.program_id:
+            _warn_startup_scope_unavailable(ctx)
+            return None
+        selected = program if program is not None else resolved.program_id if resolved is not None else None
+        meta["vertex_startup_program"] = selected
+        return selected
+    return _resolve_program_for_session_catchup(_startup_argv(ctx))
+
+
+def _startup_argv(ctx: typer.Context) -> list[str]:
+    argv = getattr(ctx, "meta", {}).get("vertex_invocation_argv")
+    return argv if isinstance(argv, list) else sys.argv[1:]
 
 
 def _extract_option(argv: list[str], option_name: str) -> str | None:

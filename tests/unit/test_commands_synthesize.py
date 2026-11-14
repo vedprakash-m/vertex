@@ -3,10 +3,13 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import click
 import pytest
 from src.ai.ai_mode import AIMode, set_ai_mode
+from src.ai.client import AIClientError, AIPreflightError, BudgetConfigurationError, BudgetExceeded, BudgetStateError
 from typer.testing import CliRunner
 
 from cli import app
@@ -757,6 +760,87 @@ def test_build_synthesizer_falls_back_to_backup_deployment_when_primary_generati
         "builder:backup-deployment",
     ]
     assert trace_contexts == [None, None]
+
+
+@pytest.mark.parametrize("error_type", [AIPreflightError, BudgetExceeded, BudgetConfigurationError, BudgetStateError])
+@pytest.mark.parametrize("origin", ["factory", "provider"])
+@pytest.mark.parametrize("failure_deployment", ["primary", "backup"])
+def test_synthesizer_stops_fallback_for_nonretryable_cost_errors(
+    tmp_path, monkeypatch, error_type, origin, failure_deployment,
+) -> None:
+    from src.core.ledger.event_log import read_events
+
+    failure = error_type("synthetic cost refusal")
+    constructed = []
+
+    def factory(*, deployment, **_kwargs):
+        constructed.append(deployment)
+        if deployment == failure_deployment and origin == "factory":
+            raise failure
+        client = Mock()
+        client.deployment = deployment
+        if deployment == failure_deployment:
+            client.structured.side_effect = failure
+        elif deployment == "primary":
+            client.structured.side_effect = AIClientError("ordinary synthetic provider failure")
+        else:
+            client.structured.return_value = {
+                "overall_assessment": "The synthetic workstream is on track.",
+                "proposed_risk": RiskLevel.LOW.value,
+                "confidence": Confidence.HIGH.value,
+                "key_findings": [],
+                "evidence_refs": [],
+                "open_questions": [],
+                "recommended_actions": [],
+            }
+        return client
+
+    monkeypatch.setattr(synthesize, "AIClient", factory)
+    monkeypatch.setattr(
+        "src.ai.synthesizer.route_through_tiers",
+        lambda _feature, **kwargs: SimpleNamespace(value=kwargs["frontier_fn"]()),
+    )
+    fallback = synthesize._FallbackWorkstreamSynthesizer(
+        deployments=("primary", "backup", "third"),
+        temperature=0.2,
+        budget_usd=1.0,
+    )
+
+    with pytest.raises(SynthesizerError) as caught:
+        fallback.generate(
+            program=Program(schema_version="2.0", id="acme", name="Acme"),
+            workstream=Workstream(id="networking", name="Networking"),
+            signals=(_approved_signal("sig-1"),),
+            drift_patterns=(),
+            programs_root=tmp_path,
+        )
+
+    assert caught.value.__cause__ is failure
+    assert constructed == (["primary"] if failure_deployment == "primary" else ["primary", "backup"])
+    decisions = [
+        event for event in read_events("acme", programs_root=tmp_path)
+        if event.event_type == "ai.release_decision.v1"
+    ]
+    expected_decisions = (failure_deployment == "backup") + (origin == "provider")
+    assert len(decisions) == expected_decisions
+    assert all(event.payload["terminal"] == "discarded" for event in decisions)
+    if origin == "provider":
+        assert "synthetic cost refusal" not in str(decisions[-1].payload)
+
+
+def test_synthesize_command_converts_cost_refusal_to_cli_error(monkeypatch) -> None:
+    cause = AIPreflightError("synthetic cost refusal")
+    failure = SynthesizerError("synthetic synthesis failure")
+    failure.__cause__ = cause
+    monkeypatch.setattr(synthesize, "synthesize_workstream", Mock(side_effect=failure))
+
+    with pytest.raises(click.BadParameter, match="synthetic synthesis failure") as caught:
+        synthesize.synthesize_command(
+            workstream="networking", program="acme", edition=None, reviewer=None,
+            window_days=30, format="human",
+        )
+
+    assert caught.value.__cause__ is failure
 
 
 def test_build_synthesizer_surfaces_vertex_first_missing_deployment_guidance(monkeypatch) -> None:

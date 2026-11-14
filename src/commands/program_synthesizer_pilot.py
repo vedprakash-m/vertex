@@ -37,14 +37,15 @@ from src.ai.program_synthesizer import (
     generate_program_synthesis_via_context_gateway,
 )
 from src.ai.provider import LLMProvider
+from src.commands.blind_ab_prompt import prompt_comparison_judgment
 from src.core.blind_ab_comparison import (
-    ComparisonChoice,
     read_comparisons,
     recommend_swap_decision,
     record_comparison,
     summarize_comparisons,
 )
 from src.core.edition_resolver import PROGRAMS_ROOT, load_program
+from src.core.exceptions import StateError
 from src.core.program_synthesis import ProgramSynthesis, assemble_program_synthesis_request
 
 app = typer.Typer(
@@ -54,7 +55,6 @@ app = typer.Typer(
 
 _SURFACE = "program_synthesizer"
 _DEPLOYMENT_FALLBACK_ENVS = ("VERTEX_AI_DEPLOYMENT", "VERTEX_EXEC_DEPLOYMENT", "AZURE_OPENAI_DEPLOYMENT")
-_VALID_CHOICES = ("a", "b", "tie", "neither")
 
 
 class ProgramSynthesizerPilotError(Exception):
@@ -134,20 +134,10 @@ def run_context_gateway_comparison(
     echo_fn(f"\n=== Program synthesis: {program_id} ===")
     echo_fn(f"[A]\n{option_a}\n")
     echo_fn(f"[B]\n{option_b}")
-    raw_choice = prompt_fn("Which is better? [a/b/tie/neither]").strip().lower()
-    if raw_choice == "a":
-        choice: ComparisonChoice = "a"
-    elif raw_choice == "b":
-        choice = "b"
-    elif raw_choice == "tie":
-        choice = "tie"
-    else:
-        choice = "neither"
     # BL-D3's pre-registered rubric: a critical error (hallucinated/
     # unsupported claim) is recorded independent of the win/loss/tie
-    # choice above -- it disqualifies a swap regardless of win rate.
-    critical_raw = prompt_fn("Did either option contain a critical error (hallucinated/unsupported claim)? [y/N]").strip().lower()
-    critical_error = critical_raw in ("y", "yes")
+    # choice -- it disqualifies a swap regardless of win rate.
+    choice, critical_error = prompt_comparison_judgment(prompt_fn, echo_fn)
     record_comparison(
         program_id=program_id,
         surface=_SURFACE,
@@ -208,7 +198,11 @@ def summary_command(
 ) -> None:
     """Report the cumulative blind-comparison tally recorded so far for
     ``program_synthesizer``'s context-gateway pilot."""
-    records = read_comparisons(program, surface=_SURFACE)
+    try:
+        records = read_comparisons(program, surface=_SURFACE)
+    except StateError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=2) from None
     summary = summarize_comparisons(records, surface=_SURFACE)
     typer.echo(f"program_synthesizer context-gateway pilot: {summary.total} comparison(s) recorded.")
     if summary.total:

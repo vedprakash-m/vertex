@@ -292,6 +292,15 @@ def _apply_bound_proposal(
                     action="skipped_stale",
                     note=f"current_value_hash mismatch: live={live_hash[:8]} expected={proposal.current_value_hash[:8]}",
                 )
+        elif not (proposal.current_value or "").strip():
+            # C.169 containment: extracted against an absent value; refuse if a value appeared since.
+            current_raw = _read_current_value(proposal, programs_root=programs_root)
+            if current_raw is not None and current_raw.strip():
+                return NcflApplyResult(
+                    proposal_id=pid, target_store=target_store, target_key=target_key,
+                    target_field=target_field, action="skipped_stale",
+                    note="Target value appeared after extraction; re-review before applying.",
+                )
 
         if dry_run:
             return NcflApplyResult(

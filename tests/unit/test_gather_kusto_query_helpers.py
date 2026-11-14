@@ -180,6 +180,21 @@ def test_record_kusto_query_state_preserves_last_success_on_error() -> None:
     assert state["value_last_4"] == [7.5, 7.5, 7.5]
 
 
+@pytest.mark.parametrize("rows", [[], [{"P50": 9.0}]])
+def test_record_kusto_query_state_empty_error_remains_failure(rows: list[dict]) -> None:
+    state: dict = {}
+    kusto_query_helpers.record_kusto_query_state(
+        state, _kusto_query(), rows=rows,
+        as_of=datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc), duration_ms=1,
+        error="", previous_state={"last_succeeded_at": "2026-05-09T08:00:00+00:00", "value_last_4": [7.5]},
+    )
+    assert state["query-a"]["last_cycle_succeeded"] is False
+    assert state["query-a"]["is_degraded"] is True
+    assert state["query-a"]["last_error"] == "Kusto query failed."
+    assert state["query-a"]["last_succeeded_at"] == datetime(2026, 5, 9, 8, 0, tzinfo=timezone.utc)
+    assert state["query-a"]["value_last_4"] == [7.5]
+
+
 @pytest.mark.parametrize("metric_id", [None, "p50"])
 @pytest.mark.parametrize("previous_values", [[], [7.5, 7.5, 7.5]])
 def test_failed_numeric_result_cannot_advance_successful_history(

@@ -19,7 +19,7 @@ import yaml
 from cli import app
 from src.ai._pipeline import AIPipelineError
 from src.ai.edit_learner import append_edit_patterns, build_edit_patterns
-from src.ai.client import AIClientError
+from src.ai.client import AIClientError, AIPreflightError, BudgetExceeded
 from src.commands.report_lookback import _build_lookback_ai_retrospective_rows
 from src.commands import report_deck as report_deck_module
 from src.commands import report_health as report_health_module
@@ -8929,6 +8929,83 @@ def test_generate_report_draft_v2_ai_falls_back_to_backup_deployments(
     }
     assert any("primary deployment failed (fake-exec); trying backup deployment." in warning for warning in artifacts.warnings)
     assert any("fallback deployment succeeded (fake-exec-backup)." in warning for warning in artifacts.warnings)
+
+
+@pytest.mark.parametrize(
+    ("origin", "error_type"),
+    [("factory", BudgetExceeded), ("provider", AIPreflightError)],
+)
+def test_generate_report_draft_v2_does_not_fallback_after_nonretryable_ai_error(
+    repo_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    origin: str,
+    error_type: type[AIClientError],
+) -> None:
+    reports_root, archive_root = _seed_v2_report_layout(repo_root, tmp_path)
+    programs_root = reports_root.parent / "programs"
+    _enable_v2_program_ai(programs_root)
+    program_path = programs_root / "acme" / "program.yaml"
+    program_doc = yaml.safe_load(program_path.read_text(encoding="utf-8"))
+    program_doc["ai"]["exec_summary_backup_deployment"] = "fake-exec-backup"
+    program_path.write_text(yaml.safe_dump(program_doc, sort_keys=False), encoding="utf-8")
+    _write_v2_summary_seed(
+        programs_root,
+        workstream_id="acme",
+        text="Deployment remains the gating lane until the example service closes the next checkpoint.",
+    )
+    failure = error_type("synthetic private cost detail")
+    deployments = []
+    exec_calls = []
+    blurb_calls = []
+
+    def fake_create_ai_client(**kwargs):
+        deployment = kwargs["deployment"]
+        deployments.append(deployment)
+        if deployment == "fake-exec" and origin == "factory":
+            raise failure
+        if deployment == "fake-exec-backup":
+            raise AssertionError("A non-retryable error must not reach the backup deployment.")
+        return SimpleNamespace(
+            deployment=deployment,
+            usage_stats=SimpleNamespace(call_count=0),
+            spent_usd=0.0,
+        )
+
+    def fake_exec_summary(**kwargs):
+        exec_calls.append(kwargs)
+        raise failure
+
+    def fake_workstream_blurb(**kwargs):
+        blurb_calls.append(kwargs)
+        return WorkstreamBlurb(
+            text=f"AI narrative for {kwargs['workstream_name']}.",
+            prompt_version="workstream_blurb.v1",
+            cited_work_item_ids=(kwargs["items"][0].id,),
+            ai_confidence=Confidence.HIGH,
+        )
+
+    monkeypatch.setattr("src.commands.report_pipeline.assemble_stage._create_ai_client", fake_create_ai_client)
+    monkeypatch.setattr("src.commands.report_pipeline.assemble_stage.draft_exec_summary", fake_exec_summary)
+    monkeypatch.setattr("src.commands.report_pipeline.assemble_stage.generate_workstream_blurb", fake_workstream_blurb)
+    artifacts = generate_report_draft(
+        edition_name="acme_weekly",
+        issue_number=1,
+        reports_root=reports_root,
+        archive_root=archive_root,
+        programs_root=programs_root,
+        as_of=datetime(2026, 5, 5, 18, 0, tzinfo=timezone.utc),
+        work_item_loader=lambda bundle, timestamp: (_sample_items(timestamp), 0),
+        kusto_query_executor=lambda query: [],
+        open_browser=False,
+    )
+
+    assert "fake-exec" in deployments
+    assert "fake-exec-backup" not in deployments
+    assert len(exec_calls) == (1 if origin == "provider" else 0)
+    assert blurb_calls
+    assert f"AI exec summary synthesis skipped: {error_type.__name__}." in artifacts.warnings
+    assert "synthetic private cost detail" not in " ".join(artifacts.warnings)
 
 
 def test_report_cli_rejects_range_without_lookback(monkeypatch, repo_root: Path, tmp_path: Path) -> None:
