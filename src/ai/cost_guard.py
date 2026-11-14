@@ -177,7 +177,10 @@ class CostGuard:
         ai_calls = _validate_live_call_count(ai_calls)
         reservation = self._find_legacy_reservation(reserved_cost_usd)
         if reservation is not None:
-            return self.settle_call(reservation, actual_cost_usd, ai_calls=ai_calls)
+            return self._finish_call(
+                reservation, actual_cost_usd=actual_cost_usd, ai_calls=ai_calls,
+                require_unique_legacy_match=True,
+            )
         return self._record_spend(actual_cost_usd, ai_calls=ai_calls, reserved_cost_usd=reserved_cost_usd)
 
     def _find_legacy_reservation(self, reserved_cost_usd: float) -> CostReservation | None:
@@ -224,6 +227,7 @@ class CostGuard:
         ai_calls: int,
         undispatched: bool = False,
         refresh_projection: bool = True,
+        require_unique_legacy_match: bool = False,
     ) -> CostRunState:
         ledger_path = self.ledger_path.resolve()
         if reservation._ledger_path is None:
@@ -242,6 +246,14 @@ class CostGuard:
                     raise StateError("Unknown cost reservation")
                 if reservation_row["status"] != "reserved":
                     raise StateError("Cost reservation has already been settled")
+                if require_unique_legacy_match:
+                    matches = connection.execute(
+                        "SELECT reservation_id FROM ai_cost_reservations WHERE edition = ? AND run_id = ? "
+                        "AND status = 'reserved' AND ABS(reserved_usd - ?) < 0.000000000001 LIMIT 2",
+                        (self._edition, self._run_id, reservation.estimated_cost_usd),
+                    ).fetchall()
+                    if len(matches) != 1 or matches[0]["reservation_id"] != reservation.reservation_id:
+                        raise StateError("Legacy cost reservation match is ambiguous or changed; reconcile before retrying.")
                 reserved_cost_usd = _coerce_state_float(reservation_row["reserved_usd"], field_name="reserved_usd")
                 state_row = connection.execute(
                     "SELECT edition, run_id, budget_usd, reserved_usd, spent_usd, ai_calls, started_at, updated_at "

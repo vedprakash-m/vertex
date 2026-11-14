@@ -994,6 +994,147 @@ def test_legacy_settlement_cannot_consume_tracked_call_reservation(tmp_path) -> 
         ).fetchone() == ("reserved",)
 
 
+@pytest.mark.parametrize(
+    ("amount", "first_amount", "second_amount"),
+    [
+        (0.25, 0.25, 0.25),
+        (0.25, 0.25, 0.2500000000005),
+        (0.25, 0.24999999999925, 0.25000000000075),
+        (0.0, 0.0, 0.0),
+    ],
+    ids=["equal", "within-tolerance", "opposite-tolerance-edges", "zero"],
+)
+def test_legacy_settlement_refuses_ambiguous_tracked_matches(
+    tmp_path, amount, first_amount, second_amount,
+) -> None:
+    guard = CostGuard(edition=EDITION_NAME, run_id="ambiguous-legacy", budget_usd=1.0, programs_root=tmp_path)
+    uncertain = guard.reserve_call(first_amount)
+    resolved = guard.reserve_call(second_amount)
+    other_run = CostGuard(edition=EDITION_NAME, run_id="other-run", budget_usd=1.0, programs_root=tmp_path)
+    other = other_run.reserve_call(amount)
+    previous_state = guard.current_state()
+    previous_projection = guard.state_path.read_bytes()
+
+    with pytest.raises(StateError, match="ambiguous"):
+        guard.settle_reservation(amount, 0.07)
+
+    assert guard.current_state() == previous_state
+    assert guard.state_path.read_bytes() == previous_projection
+    with sqlite3.connect(guard.ledger_path) as connection:
+        assert connection.execute(
+            "SELECT status FROM ai_cost_reservations ORDER BY reservation_id"
+        ).fetchall() == [("reserved",), ("reserved",), ("reserved",)]
+
+    state = guard.settle_call(resolved, 0.07)
+    assert state.spent_usd == pytest.approx(0.07)
+    assert state.reserved_usd == pytest.approx(first_amount)
+    with sqlite3.connect(guard.ledger_path) as connection:
+        assert connection.execute(
+            "SELECT reservation_id, status FROM ai_cost_reservations ORDER BY reservation_id"
+        ).fetchall() == [
+            (uncertain.reservation_id, "reserved"),
+            (resolved.reservation_id, "settled"),
+            (other.reservation_id, "reserved"),
+        ]
+
+
+def test_legacy_settlement_refuses_match_that_becomes_ambiguous(tmp_path, monkeypatch) -> None:
+    guard = CostGuard(edition=EDITION_NAME, run_id="late-ambiguous-legacy", budget_usd=1.0, programs_root=tmp_path)
+    uncertain = guard.reserve_call(0.25)
+    writer = CostGuard(edition=EDITION_NAME, run_id="late-ambiguous-legacy", budget_usd=1.0, programs_root=tmp_path)
+    captured, resume = Event(), Event()
+    find_reservation = writer._find_legacy_reservation
+
+    def pause_after_lookup(amount):
+        reservation = find_reservation(amount)
+        captured.set()
+        if not resume.wait(10):
+            raise TimeoutError("interleaved call reservation did not finish")
+        return reservation
+
+    monkeypatch.setattr(writer, "_find_legacy_reservation", pause_after_lookup)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(writer.settle_reservation, 0.25, 0.07)
+        try:
+            assert captured.wait(10)
+            resolved = guard.reserve_call(0.25)
+            previous_state = guard.current_state()
+            previous_projection = guard.state_path.read_bytes()
+        finally:
+            resume.set()
+        with pytest.raises(StateError, match="ambiguous"):
+            future.result(timeout=10)
+
+    assert guard.current_state() == previous_state
+    assert guard.state_path.read_bytes() == previous_projection
+    with sqlite3.connect(guard.ledger_path) as connection:
+        assert connection.execute(
+            "SELECT reservation_id, status FROM ai_cost_reservations ORDER BY reservation_id"
+        ).fetchall() == [(uncertain.reservation_id, "reserved"), (resolved.reservation_id, "reserved")]
+
+
+@pytest.mark.parametrize("replacement", [False, True], ids=["no-match", "different-match"])
+def test_legacy_settlement_refuses_changed_tracked_match(tmp_path, monkeypatch, replacement) -> None:
+    guard = CostGuard(edition=EDITION_NAME, run_id="changed-legacy", budget_usd=1.0, programs_root=tmp_path)
+    original = guard.reserve_call(0.25)
+    writer = CostGuard(edition=EDITION_NAME, run_id="changed-legacy", budget_usd=1.0, programs_root=tmp_path)
+    captured, resume = Event(), Event()
+    find_reservation = writer._find_legacy_reservation
+
+    def pause_after_lookup(amount):
+        reservation = find_reservation(amount)
+        captured.set()
+        if not resume.wait(10):
+            raise TimeoutError("interleaved reservation change did not finish")
+        return reservation
+
+    monkeypatch.setattr(writer, "_find_legacy_reservation", pause_after_lookup)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(writer.settle_reservation, 0.25, 0.07)
+        try:
+            assert captured.wait(10)
+            with sqlite3.connect(guard.ledger_path) as connection:
+                connection.execute(
+                    "UPDATE ai_cost_reservations SET reserved_usd = ? WHERE reservation_id = ?",
+                    (0.2, original.reservation_id),
+                )
+                connection.execute(
+                    "UPDATE ai_cost_runs SET reserved_usd = ? WHERE edition = ? AND run_id = ?",
+                    (0.2, EDITION_NAME, "changed-legacy"),
+                )
+            if replacement:
+                guard.reserve_call(0.25)
+            previous_state = guard.current_state()
+            previous_projection = guard.state_path.read_bytes()
+        finally:
+            resume.set()
+        with pytest.raises(StateError, match="changed"):
+            future.result(timeout=10)
+
+    assert guard.current_state() == previous_state
+    assert guard.state_path.read_bytes() == previous_projection
+    with sqlite3.connect(guard.ledger_path) as connection:
+        statuses = connection.execute("SELECT status FROM ai_cost_reservations").fetchall()
+    assert statuses == [("reserved",)] * (1 + replacement)
+
+
+def test_legacy_settlement_retains_unique_tolerant_match_across_runs(tmp_path) -> None:
+    guard = CostGuard(edition=EDITION_NAME, run_id="unique-legacy", budget_usd=1.0, programs_root=tmp_path)
+    guard.reserve(0.25)
+    other_run = CostGuard(edition=EDITION_NAME, run_id="other-run", budget_usd=1.0, programs_root=tmp_path)
+    other = other_run.reserve_call(0.25)
+
+    state = guard.settle_reservation(0.2500000000005, 0.07)
+
+    assert state.spent_usd == pytest.approx(0.07)
+    assert state.reserved_usd == 0.0
+    with sqlite3.connect(guard.ledger_path) as connection:
+        assert connection.execute(
+            "SELECT status FROM ai_cost_reservations WHERE reservation_id = ?",
+            (other.reservation_id,),
+        ).fetchone() == ("reserved",)
+
+
 def test_legacy_settlement_cannot_consume_interleaved_call_reservation(tmp_path, monkeypatch) -> None:
     guard = CostGuard(edition=EDITION_NAME, run_id="interleaved-legacy", budget_usd=1.0, programs_root=tmp_path)
     guard.record_actual(0.0, ai_calls=0)
@@ -1436,7 +1577,7 @@ def test_cost_reservation_projection_failure_release_preserves_unexpected_cleanu
         ).fetchall() == [("reserved", None)]
 
 
-def test_cost_reservation_projection_failure_release_preserves_equal_legacy_race(
+def test_cost_reservation_projection_failure_release_rejects_equal_legacy_race(
     tmp_path, monkeypatch,
 ) -> None:
     first = CostGuard(edition=EDITION_NAME, run_id="legacy-race", budget_usd=1.0, programs_root=tmp_path)
@@ -1454,21 +1595,26 @@ def test_cost_reservation_projection_failure_release_preserves_equal_legacy_race
         try:
             assert entered.wait(timeout=10)
             second.reserve(0.2)
-            second.settle_reservation(0.2, 0.07)
+            with pytest.raises(StateError, match="ambiguous"):
+                second.settle_reservation(0.2, 0.07)
         finally:
             finish.set()
-        with pytest.raises(StateError, match="release.*reconcile"):
+        with pytest.raises(OSError, match="synthetic projection failure"):
             pending.result(timeout=10)
 
     state = second.current_state()
-    assert (state.spent_usd, state.reserved_usd, state.ai_calls) == pytest.approx((0.07, 0.2, 1))
+    assert (state.spent_usd, state.reserved_usd, state.ai_calls) == pytest.approx((0.0, 0.2, 0))
+    projection = json.loads(second.state_path.read_text(encoding="utf-8"))
+    assert projection["runs"]["legacy-race"]["reserved_usd"] == pytest.approx(0.4)
     with sqlite3.connect(first.ledger_path) as connection:
         assert connection.execute(
             "SELECT status, actual_usd FROM ai_cost_reservations ORDER BY reservation_id"
-        ).fetchall() == [("settled", 0.07), ("reserved", None)]
+        ).fetchall() == [("settled", 0.0), ("reserved", None)]
         assert connection.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'ai_cost_non_dispatch_releases'"
-        ).fetchone() == (0,)
+            "SELECT reservation_id FROM ai_cost_non_dispatch_releases"
+        ).fetchall() == [(1,)]
+    settled = second.settle_reservation(0.2, 0.07)
+    assert (settled.spent_usd, settled.reserved_usd, settled.ai_calls) == pytest.approx((0.07, 0.0, 1))
 
 
 @pytest.mark.parametrize("failure", [ValueError("unexpected failure"), KeyboardInterrupt()])
