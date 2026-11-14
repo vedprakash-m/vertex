@@ -267,6 +267,130 @@ def test_workspace_takeover_before_classification_rejects_old_handle(tmp_path: P
     assert read_lease_state("fixture", mutation_domain=current.mutation_domain, programs_root=root) == current
 
 
+@pytest.mark.parametrize(
+    ("outbox_offset_us", "workspace_offset_us", "classifies"),
+    [
+        (-500_000, 30_000_000, True),
+        (0, 30_000_000, True),
+        (1, 30_000_000, False),
+        (-10_000_000, -500_000, False),
+        (-10_000_000, 0, False),
+        (-10_000_000, 1, True),
+    ],
+)
+def test_classification_compares_expiry_instants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    outbox_offset_us: int, workspace_offset_us: int, classifies: bool,
+) -> None:
+    import src.core.workspace_lease as workspace
+    from src.core.ledger import durable_outbox_store as store
+
+    root = tmp_path / "programs"
+    db = root / "fixture" / "runtime" / "outbox.db"
+    now = datetime(2026, 1, 1, 0, 0, 0, 500_000, tzinfo=timezone.utc)
+    outbox_expiry = now + timedelta(microseconds=outbox_offset_us)
+    workspace_expiry = now + timedelta(microseconds=workspace_offset_us)
+    monkeypatch.setattr(store, "_now", lambda: outbox_expiry - timedelta(seconds=1))
+    enqueue(db, "key", domain=workspace.ACTUATION_DISPATCH_DOMAIN, correlation_id="key", payload_json="{}")
+    leased = lease_next(db, workspace.ACTUATION_DISPATCH_DOMAIN, owner="old", ttl_seconds=1)
+    assert leased is not None
+    observed = mark_dispatched(db, "key", owner="old", fencing_token=leased.lease_fencing_token)
+    monkeypatch.setattr(workspace, "_now", lambda: workspace_expiry - timedelta(seconds=300))
+    handle = workspace.acquire_lease(
+        "fixture", "new", mutation_domain=workspace.ACTUATION_DISPATCH_DOMAIN, programs_root=root,
+    )
+    monkeypatch.setattr(store, "_now", lambda: now)
+
+    if classifies:
+        result = store.classify_expired_dispatched(db, observed, workspace_lease=handle, programs_root=root)
+        assert result.status == "uncertain_remote_state"
+    else:
+        with pytest.raises(LeaseNoLongerCurrent):
+            store.classify_expired_dispatched(db, observed, workspace_lease=handle, programs_root=root)
+        assert load_entry(db, "key") == observed
+
+
+@pytest.mark.parametrize("replacement", ["reacquired", "renewed"])
+def test_classification_refuses_changed_same_owner_workspace_handle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replacement: str,
+) -> None:
+    import src.core.workspace_lease as workspace
+    from src.core.ledger import durable_outbox_store as store
+
+    root, db, observed, old = _expired_dispatch_fixture(tmp_path)
+    monkeypatch.setattr(workspace, "_now", lambda: old.acquired_at + timedelta(seconds=1))
+    if replacement == "reacquired":
+        workspace.release_lease(old, programs_root=root)
+        current = workspace.acquire_lease(
+            "fixture", old.owner, mutation_domain=old.mutation_domain, programs_root=root,
+        )
+    else:
+        current = workspace.renew_lease(old, programs_root=root)
+    assert current.owner == old.owner and current.fencing_token == old.fencing_token
+    assert (current.acquired_at, current.expires_at) != (old.acquired_at, old.expires_at)
+    monkeypatch.setattr(store, "_now", lambda: old.acquired_at + timedelta(seconds=2))
+
+    with pytest.raises(LeaseNoLongerCurrent):
+        store.classify_expired_dispatched(db, observed, workspace_lease=old, programs_root=root)
+    assert load_entry(db, "key") == observed
+    assert workspace.read_lease_state("fixture", mutation_domain=old.mutation_domain, programs_root=root) == current
+
+
+@pytest.mark.parametrize("invalid", ["outbox", "workspace_expiry", "workspace_acquired"])
+def test_classification_refuses_timezone_naive_expiry(
+    tmp_path: Path, invalid: str,
+) -> None:
+    from dataclasses import replace
+    from src.core.ledger import durable_outbox_store as store
+
+    root, db, observed, handle = _expired_dispatch_fixture(tmp_path)
+    if invalid == "outbox":
+        with open_program_db_with_retry(db, durability="strict") as connection:
+            connection.execute("UPDATE outbox SET lease_expires_at = '2000-01-01T00:00:00'")
+        observed = load_entry(db, "key")
+        assert observed is not None
+    elif invalid == "workspace_expiry":
+        handle = replace(handle, expires_at=handle.expires_at.replace(tzinfo=None))
+    else:
+        handle = replace(handle, acquired_at=handle.acquired_at.replace(tzinfo=None))
+    with pytest.raises(LeaseNoLongerCurrent):
+        store.classify_expired_dispatched(db, observed, workspace_lease=handle, programs_root=root)
+    assert load_entry(db, "key") == observed
+
+
+@pytest.mark.parametrize("invalid", ["outbox", "workspace_expiry", "workspace_acquired"])
+def test_dispatch_fence_refuses_timezone_naive_evidence(tmp_path: Path, invalid: str) -> None:
+    from dataclasses import replace
+    import src.core.workspace_lease as workspace
+    from src.core.ledger import durable_outbox_store as store
+
+    root = tmp_path / "programs"
+    db = root / "fixture" / "runtime" / "outbox.db"
+    enqueue(db, "key", domain=workspace.ACTUATION_DISPATCH_DOMAIN, correlation_id="key", payload_json="{}")
+    handle = workspace.acquire_lease(
+        "fixture", "worker", mutation_domain=workspace.ACTUATION_DISPATCH_DOMAIN, programs_root=root,
+    )
+    original_handle = handle
+    observed = lease_next(db, workspace.ACTUATION_DISPATCH_DOMAIN, owner="worker")
+    assert observed is not None
+    if invalid == "outbox":
+        with open_program_db_with_retry(db, durability="strict") as connection:
+            connection.execute("UPDATE outbox SET lease_expires_at = REPLACE(lease_expires_at, 'Z', '')")
+        observed = load_entry(db, "key")
+        assert observed is not None
+    elif invalid == "workspace_expiry":
+        handle = replace(handle, expires_at=handle.expires_at.replace(tzinfo=None))
+    else:
+        handle = replace(handle, acquired_at=handle.acquired_at.replace(tzinfo=None))
+
+    with pytest.raises(LeaseNoLongerCurrent):
+        store.mark_dispatched_with_workspace_lease(db, observed, workspace_lease=handle, programs_root=root)
+    assert load_entry(db, "key") == observed
+    assert workspace.read_lease_state(
+        "fixture", mutation_domain=workspace.ACTUATION_DISPATCH_DOMAIN, programs_root=root,
+    ) == original_handle
+
+
 def test_old_worker_completion_waits_then_is_fenced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from concurrent.futures import ThreadPoolExecutor
     from threading import Event

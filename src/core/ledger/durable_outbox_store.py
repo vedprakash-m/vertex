@@ -314,7 +314,16 @@ def classify_expired_dispatched(
         "outbox": db_path,
         "fence": get_workspace_lease_db_path(workspace_lease.program_id, programs_root=programs_root),
     }) as transaction:
-        now = _wire(_now())
+        now = _now()
+        if (
+            observed.lease_expires_at is None
+            or observed.lease_expires_at.utcoffset() is None
+            or workspace_lease.acquired_at.utcoffset() is None
+            or workspace_lease.expires_at.utcoffset() is None
+            or observed.lease_expires_at > now
+            or workspace_lease.expires_at <= now
+        ):
+            raise LeaseNoLongerCurrent(observed.outbox_id)
         row = transaction.connection.execute(
             """
             UPDATE outbox SET status = 'uncertain_remote_state', lease_owner = ?,
@@ -322,10 +331,10 @@ def classify_expired_dispatched(
                 failure_reason = ?, updated_at = ?
             WHERE outbox_id = ? AND domain = ? AND correlation_id = ? AND payload_json = ?
                 AND status = 'dispatched' AND lease_owner = ? AND lease_owner <> ?
-                AND lease_fencing_token = ? AND lease_expires_at = ? AND lease_expires_at <= ?
+                AND lease_fencing_token = ? AND lease_expires_at = ?
                 AND EXISTS (
                     SELECT 1 FROM fence.workspace_lease WHERE mutation_domain = ?
-                        AND owner = ? AND fencing_token = ? AND expires_at > ?
+                        AND owner = ? AND fencing_token = ? AND acquired_at = ? AND expires_at = ?
                 )
             RETURNING outbox_id, domain, correlation_id, payload_json, status, lease_owner,
                 lease_fencing_token, lease_expires_at, attempt_count, next_attempt_at,
@@ -334,10 +343,11 @@ def classify_expired_dispatched(
             (
                 workspace_lease.owner,
                 "Expired dispatched attempt; remote outcome unknown; manual reconciliation required.",
-                now, observed.outbox_id, workspace_lease.mutation_domain, observed.outbox_id,
+                _wire(now), observed.outbox_id, workspace_lease.mutation_domain, observed.outbox_id,
                 observed.payload_json, observed.lease_owner, workspace_lease.owner,
-                observed.lease_fencing_token, _wire(observed.lease_expires_at), now, workspace_lease.mutation_domain,
-                workspace_lease.owner, workspace_lease.fencing_token, now,
+                observed.lease_fencing_token, _wire(observed.lease_expires_at), workspace_lease.mutation_domain,
+                workspace_lease.owner, workspace_lease.fencing_token,
+                _wire(workspace_lease.acquired_at), _wire(workspace_lease.expires_at),
             ),
         ).fetchone()
         if row is None:
@@ -395,6 +405,73 @@ def _transition(
 
 def mark_dispatched(db_path: Path, outbox_id: str, *, owner: str, fencing_token: int, remote_request_hash: str | None = None) -> OutboxEntry:
     return _transition(db_path, outbox_id, owner=owner, fencing_token=fencing_token, new_status="dispatched", extra_columns={"remote_request_hash": remote_request_hash})
+
+
+def mark_dispatched_with_workspace_lease(
+    db_path: Path,
+    observed: OutboxEntry,
+    *,
+    workspace_lease: LeaseHandle,
+    programs_root: Path,
+) -> OutboxEntry:
+    with open_unit_of_work({
+        "outbox": db_path,
+        "fence": get_workspace_lease_db_path(workspace_lease.program_id, programs_root=programs_root),
+    }) as transaction:
+        now = _now()
+        fence = transaction.connection.execute(
+            "SELECT owner, fencing_token, acquired_at, expires_at FROM fence.workspace_lease WHERE mutation_domain = ?",
+            (workspace_lease.mutation_domain,),
+        ).fetchone()
+        if (
+            workspace_lease.mutation_domain != ACTUATION_DISPATCH_DOMAIN
+            or workspace_lease.acquired_at.utcoffset() is None
+            or workspace_lease.expires_at.utcoffset() is None
+            or fence is None
+            or fence["owner"] != workspace_lease.owner
+            or fence["fencing_token"] != workspace_lease.fencing_token
+            or fence["acquired_at"] != _wire(workspace_lease.acquired_at)
+            or fence["expires_at"] != _wire(workspace_lease.expires_at)
+            or workspace_lease.expires_at <= now
+        ):
+            raise LeaseNoLongerCurrent(observed.outbox_id)
+        row = transaction.connection.execute(
+            "SELECT outbox_id, domain, correlation_id, payload_json, status, lease_owner, "
+            "lease_fencing_token, lease_expires_at, attempt_count, next_attempt_at, "
+            "remote_request_hash, remote_response_hash, failure_reason, created_at, updated_at "
+            "FROM outbox WHERE outbox_id = ?",
+            (observed.outbox_id,),
+        ).fetchone()
+        if row is None:
+            raise LeaseNoLongerCurrent(observed.outbox_id)
+        try:
+            current = _entry_from_row(tuple(row))
+        except (AttributeError, OverflowError, TypeError, ValueError) as error:
+            raise LeaseNoLongerCurrent(observed.outbox_id) from error
+        if current.lease_owner != workspace_lease.owner or current.lease_fencing_token != observed.lease_fencing_token:
+            raise LeaseNoLongerCurrent(observed.outbox_id)
+        if current.status in _TRUE_TERMINALS:
+            raise OutboxError(f"outbox row {observed.outbox_id!r} is terminal ({current.status!r}); automatic transition refused")
+        if current.status != "leased":
+            raise OutboxError(f"outbox row {observed.outbox_id!r}: transition {current.status!r} -> 'dispatched' refused")
+        if (
+            current != observed
+            or observed.domain != ACTUATION_DISPATCH_DOMAIN
+            or observed.lease_expires_at is None
+            or observed.lease_expires_at.utcoffset() is None
+            or observed.lease_expires_at <= now
+        ):
+            raise LeaseNoLongerCurrent(observed.outbox_id)
+        row = transaction.connection.execute(
+            "UPDATE outbox SET status = 'dispatched', remote_request_hash = NULL, updated_at = ? "
+            "WHERE outbox_id = ? RETURNING outbox_id, domain, correlation_id, payload_json, status, lease_owner, "
+            "lease_fencing_token, lease_expires_at, attempt_count, next_attempt_at, "
+            "remote_request_hash, remote_response_hash, failure_reason, created_at, updated_at",
+            (_wire(now), observed.outbox_id),
+        ).fetchone()
+        assert row is not None
+        result = _entry_from_row(tuple(row))
+    return result
 
 
 def mark_succeeded(

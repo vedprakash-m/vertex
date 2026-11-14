@@ -252,7 +252,7 @@ import os
 import sys
 from pathlib import Path
 import src.core.actuation_outbox as service
-original = service.mark_dispatched
+original = service.mark_dispatched_with_workspace_lease
 def crash(*args, **kwargs):
     original(*args, **kwargs)
     if os.environ.get("RVX_GUARD_SUMMARY"):
@@ -262,11 +262,11 @@ def crash(*args, **kwargs):
 def forbidden(entry):
     Path(sys.argv[3]).write_text("callback reached", encoding="utf-8")
     raise AssertionError("provider callback reached")
-service.mark_dispatched = crash
+service.mark_dispatched_with_workspace_lease = crash
 service.dispatch_leased_create_task(
     program_id="fixture_prog", idempotency_key=sys.argv[2], owner="dead-worker",
     dispatch_fn=forbidden, programs_root=Path(sys.argv[1]),
-    workspace_lease_ttl_seconds=0, outbox_lease_ttl_seconds=0,
+    workspace_lease_ttl_seconds=300, outbox_lease_ttl_seconds=120,
 )
 '''
     process = subprocess.run(
@@ -275,6 +275,13 @@ service.dispatch_leased_create_task(
     )
     assert process.returncode == 86, process.stderr
     db = outbox_db_path(_PROGRAM_ID, programs_root=programs_root)
+    from src.core._db import open_program_db_with_retry
+    from src.core.workspace_lease import get_workspace_lease_db_path
+    with open_program_db_with_retry(db, durability="strict") as connection:
+        connection.execute("UPDATE outbox SET lease_expires_at = '2000-01-01T00:00:00Z' WHERE outbox_id = ?", (key,))
+    lease_db = get_workspace_lease_db_path(_PROGRAM_ID, programs_root=programs_root)
+    with open_program_db_with_retry(lease_db, durability="strict") as connection:
+        connection.execute("UPDATE workspace_lease SET expires_at = '2000-01-01T00:00:00Z'")
     before = load_entry(db, key)
     assert before is not None and before.status == "dispatched"
     backlog = _enqueue(programs_root, operation_intent_id="backlog")

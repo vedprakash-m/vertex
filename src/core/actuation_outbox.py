@@ -36,6 +36,7 @@ from typing import Callable
 from src.core.exceptions import CredentialExpired
 from src.core.journal import PROGRAMS_ROOT
 from src.core.ledger.durable_outbox_store import (
+    LeaseNoLongerCurrent,
     OutboxEntry,
     OutboxError,
     classify_expired_dispatched,
@@ -45,12 +46,12 @@ from src.core.ledger.durable_outbox_store import (
     load_success_receipt,
     mark_audited,
     mark_completed,
-    mark_dispatched,
+    mark_dispatched_with_workspace_lease,
     mark_failed_terminal,
     mark_succeeded,
     mark_uncertain_remote_state,
 )
-from src.core.workspace_lease import ACTUATION_DISPATCH_DOMAIN, acquire_lease, release_lease
+from src.core.workspace_lease import ACTUATION_DISPATCH_DOMAIN, LeaseHandle, acquire_lease, release_lease
 
 _MAX_DRAIN_ITERATIONS = 50
 
@@ -173,6 +174,7 @@ def dispatch_leased_create_task(
         raise OutboxError(f"Requested outbox row is not dispatchable ({observed.status!r})")
     if observed.status == "dispatched" and (
         observed.lease_expires_at is None
+        or observed.lease_expires_at.utcoffset() is None
         or observed.lease_expires_at > datetime.now(timezone.utc)
         or observed.lease_owner == owner
     ):
@@ -184,6 +186,7 @@ def dispatch_leased_create_task(
         ttl_seconds=workspace_lease_ttl_seconds,
         programs_root=programs_root,
     )
+    fence_lost = False
     try:
         if observed.status == "dispatched":
             classified = classify_expired_dispatched(
@@ -202,6 +205,7 @@ def dispatch_leased_create_task(
                 program_id=program_id,
                 dispatch_fn=dispatch_fn,
                 programs_root=programs_root,
+                workspace_lease=lease_handle,
             )
             if leased.outbox_id == idempotency_key:
                 outcome = drained
@@ -217,8 +221,12 @@ def dispatch_leased_create_task(
                 "the row was not found pending/leaseable under this call's workspace lease."
             )
         return outcome
+    except LeaseNoLongerCurrent:
+        fence_lost = True
+        raise
     finally:
-        release_lease(lease_handle, programs_root=programs_root)
+        if not fence_lost:
+            release_lease(lease_handle, programs_root=programs_root, require_unchanged=True)
 
 
 def _drive_one(
@@ -229,6 +237,7 @@ def _drive_one(
     program_id: str,
     dispatch_fn: Callable[[OutboxEntry], DispatchResult],
     programs_root: Path,
+    workspace_lease: LeaseHandle,
 ) -> ActuationDispatchOutcome:
     fencing = leased.lease_fencing_token
     try:
@@ -241,7 +250,9 @@ def _drive_one(
     org = str(payload_fields.get("org") or "")
     project = str(payload_fields.get("project") or "")
 
-    dispatched = mark_dispatched(db_path, leased.outbox_id, owner=owner, fencing_token=fencing)
+    dispatched = mark_dispatched_with_workspace_lease(
+        db_path, leased, workspace_lease=workspace_lease, programs_root=programs_root,
+    )
 
     # Fault-injection item 3 ("after dispatch before response"): definite
     # rejections become failed results; 408/5xx/redirect or malformed-response

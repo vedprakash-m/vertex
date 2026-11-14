@@ -367,22 +367,27 @@ def renew_lease(
         )
 
 
-def release_lease(handle: LeaseHandle, *, programs_root: Path = PROGRAMS_ROOT) -> None:
+def release_lease(
+    handle: LeaseHandle, *, programs_root: Path = PROGRAMS_ROOT, require_unchanged: bool = False,
+) -> None:
     """Release a held lease. Idempotent no-op if the lease is already gone
-    or has been superseded by a newer fencing token (nothing to release)."""
+    or has been superseded by a newer fencing token (nothing to release).
+    When requested, also retain a lease whose recorded timestamps changed."""
     path = get_workspace_lease_db_path(handle.program_id, programs_root=programs_root)
     with open_program_db(path, durability="strict") as connection:
         _ensure_schema(connection)
         connection.execute("BEGIN IMMEDIATE")
         row = connection.execute(
-            "SELECT owner, fencing_token FROM workspace_lease WHERE mutation_domain = ?",
+            "SELECT owner, fencing_token, acquired_at, expires_at FROM workspace_lease WHERE mutation_domain = ?",
             (handle.mutation_domain,),
         ).fetchone()
         if row is None:
             return
-        current_owner, current_token = row
+        current_owner, current_token, acquired_at, expires_at = row
         if int(current_token) != handle.fencing_token or current_owner != handle.owner:
             return  # already superseded; nothing to release
+        if require_unchanged and (acquired_at, expires_at) != (_wire(handle.acquired_at), _wire(handle.expires_at)):
+            return
         connection.execute("DELETE FROM workspace_lease WHERE mutation_domain = ?", (handle.mutation_domain,))
 
 
