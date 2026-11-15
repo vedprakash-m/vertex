@@ -52,6 +52,10 @@ class ProjectionResult:
     coverage_latest: str | None
 
 
+class ProjectionConflictError(RuntimeError):
+    """The projection changed after its incremental base was selected."""
+
+
 _INCREMENTAL_ENTITY_TABLES = {
     "risk": ("proj_risk", "risk_id"),
     "milestone": ("proj_milestone", "milestone_id"),
@@ -263,6 +267,7 @@ def project_events_incremental_to_sqlite(
         projection_path=projection_path,
         as_of=as_of,
         triage_decisions=decisions,
+        expected_meta=existing_meta,
     )
 
 
@@ -274,6 +279,7 @@ def _incremental_fold(
     projection_path: Path,
     as_of: datetime | None,
     triage_decisions: tuple[CandidateDecisionRecord, ...],
+    expected_meta: list[dict[str, Any]],
 ) -> ProjectionResult:
     """Apply a small, non-correction delta directly to an existing projection DB.
 
@@ -308,6 +314,10 @@ def _incremental_fold(
     coverage_earliest, coverage_latest = _coverage_range(effective_events)
 
     with connect_projection_db(projection_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        if _dump_projection_meta(connection) != expected_meta:
+            raise ProjectionConflictError("projection base changed during incremental rebuild")
+
         # Wipe stale rows for affected entities so re-fold starts clean
         _delete_affected_rows(connection, affected_entity_ids)
         for event in (*visible_events, *effective_events):

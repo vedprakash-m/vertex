@@ -63,7 +63,7 @@ from src.core.ledger.verification_assertions import (
     effective_verification_state,
     is_candidate_verified,
 )
-from src.core.ledger.program_views import _LOCKABLE_FIELDS, canonical_projection_dump, collapse_orphan_links, collapse_shadow_links, get_current_projection_path, project_events_incremental_to_sqlite, project_events_to_memory, project_events_to_sqlite, project_program_events
+from src.core.ledger.program_views import ProjectionConflictError, _LOCKABLE_FIELDS, canonical_projection_dump, collapse_orphan_links, collapse_shadow_links, get_current_projection_path, project_events_incremental_to_sqlite, project_events_to_memory, project_events_to_sqlite, project_program_events
 from src.core.edition_resolver import load_program
 from src.core.quality_gates.editorial import summarize_open_material_conflicts
 from src.core.ledger.verify_status import load_ledger_verify_status, write_ledger_verify_status
@@ -2235,13 +2235,19 @@ def _maybe_rebuild_program_projection(program_id: str, *, programs_root: Path) -
     if not _auto_projection_rebuild_enabled():
         return
     try:
-        events = read_events(program_id, programs_root=programs_root)
-        project_events_incremental_to_sqlite(
-            program_id,
-            events,
-            projection_path=get_current_projection_path(program_id, programs_root=programs_root),
-            programs_root=programs_root,
-        )
+        for attempt in range(2):
+            events = read_events(program_id, programs_root=programs_root)
+            try:
+                project_events_incremental_to_sqlite(
+                    program_id,
+                    events,
+                    projection_path=get_current_projection_path(program_id, programs_root=programs_root),
+                    programs_root=programs_root,
+                )
+                break
+            except ProjectionConflictError:
+                if attempt:
+                    raise
     except Exception:
         log.error(
             "projection: incremental rebuild raised for program=%s after ledger write — "

@@ -26,7 +26,7 @@ def _deck_ref() -> LTDeckRef:
     return LTDeckRef(file_path="deck.pptx", deck_date=datetime(2025, 3, 20, tzinfo=timezone.utc).date(), slide_number=4)
 
 
-def _risk_raised(program_id: str, risk_id: str, recorded_at: datetime, *, title: str = "Risk", severity: str = "high") -> object:
+def _risk_raised(program_id: str, risk_id: str, recorded_at: datetime, *, title: str = "Risk", severity: str = "high") -> EventEnvelope:
     return build_event_envelope(
         program_id=program_id,
         event_type="risk.raised.v1",
@@ -40,7 +40,7 @@ def _risk_raised(program_id: str, risk_id: str, recorded_at: datetime, *, title:
     )
 
 
-def _risk_status(program_id: str, risk_id: str, recorded_at: datetime, *, new_status: str = "blocked") -> object:
+def _risk_status(program_id: str, risk_id: str, recorded_at: datetime, *, new_status: str = "blocked") -> EventEnvelope:
     return build_event_envelope(
         program_id=program_id,
         event_type="risk.status_changed.v1",
@@ -202,6 +202,36 @@ def test_incremental_write_failure_preserves_projection_and_input_stamp(tmp_path
     assert canonical_projection_dump(path) == before
     project_events_incremental_to_sqlite("acme", events, projection_path=path, **options)
     full = tmp_path / "full.sqlite3"
+    project_events_to_sqlite("acme", events, projection_path=full, **options)
+    assert canonical_projection_dump(path) == canonical_projection_dump(full)
+
+
+@pytest.mark.parametrize("cutoff", [None, "as_of", "knowledge_as_of"])
+def test_direct_incremental_caller_rejects_a_changed_base_without_replacing_inputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cutoff: str | None,
+) -> None:
+    start = datetime(2025, 3, 20, tzinfo=timezone.utc)
+    events = (
+        _risk_raised("acme", "risk:r1", start),
+        _risk_status("acme", "risk:r1", datetime(2025, 3, 21, tzinfo=timezone.utc)),
+        _risk_status("acme", "risk:r1", datetime(2025, 3, 22, tzinfo=timezone.utc), new_status="closed"),
+    )
+    path, full = tmp_path / "incremental.sqlite3", tmp_path / "full.sqlite3"
+    options: dict[str, Any] = dict(programs_root=tmp_path / "programs")
+    if cutoff is not None:
+        options[cutoff] = datetime(2025, 3, 22, tzinfo=timezone.utc)
+    project_events_incremental_to_sqlite("acme", events[:1], projection_path=path, **options)
+    fold = program_views._incremental_fold
+
+    def competing_fold(program_id: str, **kwargs):
+        monkeypatch.setattr(program_views, "_incremental_fold", fold)
+        project_events_incremental_to_sqlite("acme", events, projection_path=path, **options)
+        return fold(program_id, **kwargs)
+
+    monkeypatch.setattr(program_views, "_incremental_fold", competing_fold)
+    monkeypatch.setattr(program_views, "read_events", Mock(side_effect=AssertionError("Unexpected event-log read")))
+    with pytest.raises(program_views.ProjectionConflictError, match="projection base changed"):
+        project_events_incremental_to_sqlite("acme", events[:2], projection_path=path, **options)
     project_events_to_sqlite("acme", events, projection_path=full, **options)
     assert canonical_projection_dump(path) == canonical_projection_dump(full)
 

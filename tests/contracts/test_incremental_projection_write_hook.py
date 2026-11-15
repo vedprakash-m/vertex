@@ -3,13 +3,15 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import logging
+import multiprocessing
 import threading
 import time
 
 import pytest
 
+from src.commands import ledger
 from src.commands.ledger import _maybe_rebuild_program_projection, _persist_event, _persist_events
-from src.core.ledger.event_log import ConfidenceTier, TemporalConfidence, build_event_envelope, read_events, write_event
+from src.core.ledger.event_log import ConfidenceTier, EventEnvelope, TemporalConfidence, build_event_envelope, read_events, write_event
 import src.core.ledger.program_views as program_views
 from src.core.ledger.program_views import canonical_projection_dump, get_current_projection_path, project_events_to_sqlite
 from src.core.ledger.source_refs import LTDeckRef
@@ -31,7 +33,7 @@ def _risk_raised(
     *,
     title: str | None = None,
     severity: str = "high",
-) -> object:
+) -> EventEnvelope:
     return build_event_envelope(
         program_id=program_id,
         event_type="risk.raised.v1",
@@ -45,7 +47,7 @@ def _risk_raised(
     )
 
 
-def _risk_status(program_id: str, risk_id: str, recorded_at: datetime, *, new_status: str = "blocked") -> object:
+def _risk_status(program_id: str, risk_id: str, recorded_at: datetime, *, new_status: str = "blocked") -> EventEnvelope:
     return build_event_envelope(
         program_id=program_id,
         event_type="risk.status_changed.v1",
@@ -138,17 +140,9 @@ def _track_full_rebuild_calls(monkeypatch) -> tuple[list[int], list[int]]:
             triage_decisions=triage_decisions,
         )
 
-    def _wrapped_incremental(program_id, *, visible_events, delta_events, projection_path, programs_root, as_of, triage_decisions):
-        incremental_calls.append(len(delta_events))
-        return original_incremental(
-            program_id,
-            visible_events=visible_events,
-            delta_events=delta_events,
-            projection_path=projection_path,
-            programs_root=programs_root,
-            as_of=as_of,
-            triage_decisions=triage_decisions,
-        )
+    def _wrapped_incremental(program_id, **kwargs):
+        incremental_calls.append(len(kwargs["delta_events"]))
+        return original_incremental(program_id, **kwargs)
 
     monkeypatch.setattr(program_views, "project_events_to_sqlite", _wrapped_full)
     monkeypatch.setattr(program_views, "_incremental_fold", _wrapped_incremental)
@@ -383,6 +377,176 @@ def test_auto_projection_rebuild_failure_does_not_block_writes(monkeypatch, tmp_
     events = read_events("acme", programs_root=programs_root)
     assert events[-1].event_id == persisted.event_id
     assert any("projection: incremental rebuild raised for program=acme" in record.message for record in caplog.records)
+
+
+@pytest.mark.parametrize("first_commit", ["older", "newer"])
+def test_competing_incremental_hooks_match_full_projection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, first_commit: str,
+) -> None:
+    root = tmp_path / "programs"
+    monkeypatch.delenv("VERTEX_DISABLE_AUTO_PROJECTION_REBUILD", raising=False)
+    start = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    _persist_event(_risk_raised("acme", "risk:r1", start), programs_root=root)
+    ready = {name: threading.Event() for name in ("older", "newer")}
+    release = {name: threading.Event() for name in ("older", "newer")}
+    errors: list[BaseException] = []
+    fold = program_views._incremental_fold
+
+    def paused_fold(program_id: str, **kwargs):
+        name = threading.current_thread().name
+        if name in ready and not ready[name].is_set():
+            ready[name].set()
+            if not release[name].wait(timeout=30):
+                raise TimeoutError("projection interleaving did not complete")
+        return fold(program_id, **kwargs)
+
+    monkeypatch.setattr(program_views, "_incremental_fold", paused_fold)
+
+    def write(offset: int, status: str) -> None:
+        try:
+            _persist_event(
+                _risk_status("acme", "risk:r1", start + timedelta(seconds=offset), new_status=status),
+                programs_root=root,
+            )
+        except BaseException as error:
+            errors.append(error)
+
+    older = threading.Thread(target=write, args=(1, "blocked"), name="older")
+    newer = threading.Thread(target=write, args=(2, "mitigated"), name="newer")
+    with caplog.at_level(logging.ERROR, logger="src.commands.ledger"):
+        older.start()
+        try:
+            assert ready["older"].wait(timeout=30)
+            newer.start()
+            assert ready["newer"].wait(timeout=30)
+            release[first_commit].set()
+            first = older if first_commit == "older" else newer
+            first.join(timeout=30)
+            assert not first.is_alive()
+        finally:
+            release["older"].set()
+            release["newer"].set()
+            older.join(timeout=30)
+            if newer.ident is not None:
+                newer.join(timeout=30)
+
+    assert not older.is_alive() and not newer.is_alive()
+    assert not errors
+    assert not any("projection: incremental rebuild raised" in record.message for record in caplog.records)
+    _assert_projection_matches_full_rebuild("acme", programs_root=root, expected_path=tmp_path / "expected.sqlite3")
+
+
+def _paused_process_writer(root: Path, ready, release, queue) -> None:
+    ledger._maybe_bridge_event_to_fact_store = lambda *_args, **_kwargs: None
+    fold = program_views._incremental_fold
+    messages: list[str] = []
+
+    class CaptureErrors(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    handler = CaptureErrors(level=logging.ERROR)
+    ledger.log.addHandler(handler)
+
+    def paused_fold(program_id: str, **kwargs):
+        if not ready.is_set():
+            ready.set()
+            if not release.wait(timeout=30):
+                raise TimeoutError("projection interleaving did not complete")
+        return fold(program_id, **kwargs)
+
+    program_views._incremental_fold = paused_fold
+    try:
+        _persist_event(
+            _risk_status("acme", "risk:r1", datetime(2025, 1, 1, 0, 0, 1, tzinfo=timezone.utc)),
+            programs_root=root,
+        )
+        queue.put(messages)
+    except BaseException as error:
+        queue.put([repr(error)])
+    finally:
+        ledger.log.removeHandler(handler)
+
+
+def test_competing_incremental_hooks_match_full_projection_across_processes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    root = tmp_path / "programs"
+    monkeypatch.delenv("VERTEX_DISABLE_AUTO_PROJECTION_REBUILD", raising=False)
+    _persist_event(_risk_raised("acme", "risk:r1", datetime(2025, 1, 1, tzinfo=timezone.utc)), programs_root=root)
+    context = multiprocessing.get_context("spawn")
+    ready, release, queue = context.Event(), context.Event(), context.Queue()
+    process = context.Process(target=_paused_process_writer, args=(root, ready, release, queue))
+    process.start()
+    try:
+        assert ready.wait(timeout=30)
+        with caplog.at_level(logging.ERROR, logger="src.commands.ledger"):
+            _persist_event(
+                _risk_status("acme", "risk:r1", datetime(2025, 1, 1, 0, 0, 2, tzinfo=timezone.utc), new_status="mitigated"),
+                programs_root=root,
+            )
+    finally:
+        release.set()
+        process.join(timeout=30)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=30)
+    assert process.exitcode == 0
+    assert queue.get(timeout=5) == []
+    assert not any("projection: incremental rebuild raised" in record.message for record in caplog.records)
+    _assert_projection_matches_full_rebuild("acme", programs_root=root, expected_path=tmp_path / "expected.sqlite3")
+
+
+def test_hook_retries_conflict_with_fresh_authoritative_events(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "programs"
+    monkeypatch.delenv("VERTEX_DISABLE_AUTO_PROJECTION_REBUILD", raising=False)
+    _persist_event(_risk_raised("acme", "risk:r1", datetime(2025, 1, 1, tzinfo=timezone.utc)), programs_root=root)
+    original = ledger.project_events_incremental_to_sqlite
+    seen: list[int] = []
+
+    def conflict_once(program_id: str, events, **kwargs):
+        seen.append(len(events))
+        if len(seen) == 1:
+            write_event(
+                _risk_status("acme", "risk:r1", datetime(2025, 1, 1, 0, 0, 2, tzinfo=timezone.utc), new_status="mitigated"),
+                programs_root=root,
+            )
+            raise program_views.ProjectionConflictError("synthetic conflict")
+        return original(program_id, events, **kwargs)
+
+    monkeypatch.setattr(ledger, "project_events_incremental_to_sqlite", conflict_once)
+    _persist_event(
+        _risk_status("acme", "risk:r1", datetime(2025, 1, 1, 0, 0, 1, tzinfo=timezone.utc)),
+        programs_root=root,
+    )
+    assert seen == [2, 3]
+    _assert_projection_matches_full_rebuild("acme", programs_root=root, expected_path=tmp_path / "expected.sqlite3")
+
+
+def test_hook_logs_exhausted_conflict_and_preserves_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    root = tmp_path / "programs"
+    monkeypatch.delenv("VERTEX_DISABLE_AUTO_PROJECTION_REBUILD", raising=False)
+    _persist_event(_risk_raised("acme", "risk:r1", datetime(2025, 1, 1, tzinfo=timezone.utc)), programs_root=root)
+    path = get_current_projection_path("acme", programs_root=root)
+    before = canonical_projection_dump(path)
+    attempts: list[int] = []
+
+    def conflict(*_args, **_kwargs):
+        attempts.append(1)
+        raise program_views.ProjectionConflictError("synthetic conflict")
+
+    monkeypatch.setattr(ledger, "project_events_incremental_to_sqlite", conflict)
+    with caplog.at_level(logging.ERROR, logger="src.commands.ledger"):
+        persisted = _persist_event(
+            _risk_status("acme", "risk:r1", datetime(2025, 1, 1, 0, 0, 1, tzinfo=timezone.utc)),
+            programs_root=root,
+        )
+    assert len(attempts) == 2
+    assert read_events("acme", programs_root=root)[-1].event_id == persisted.event_id
+    assert canonical_projection_dump(path) == before
+    assert any("projection: incremental rebuild raised" in record.message for record in caplog.records)
 
 
 @pytest.mark.parametrize("fail_replace", [False, True])
