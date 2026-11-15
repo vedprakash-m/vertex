@@ -4,6 +4,7 @@
 
 | Feature | Change |
 |---|---|
+| Incremental projection contention, partial | Refuse a changed projection base under the write transaction and retry one conflict in the automatic hook using freshly read events. Direct callers receive the conflict; full-file replacement concurrency remains open. |
 | Shared outbox timing, partial | Compare retry, lease-expiry and creation instants under the write lock, start the lease after the scan, and return the transaction's own claim rather than a successor's row; refuse malformed applicable scheduling evidence or a selected lease's malformed retained retry timestamp before changing a row. Expired-handler, large-queue and provider qualification remain open. |
 | Create dispatch fencing, partial | Reject naive dispatched-row expiry before lease acquisition, check retained row and workspace leases before the create callback, retain changed successor leases on refusal, and classify expired dispatched rows using aware timestamps and the full observed workspace handle. Provider-side fencing and recovery remain unqualified. |
 | Legacy cost-reservation integrity, partial | Refuse invalid active amounts encountered during the amount-only tracked-match scan; explicit-handle settlement and out-of-scope reservations are unchanged. Retained data is not repaired, and scan performance remains unqualified. |
@@ -16,6 +17,8 @@
 | Chart-cache numeric containment, partial | Refuse non-finite float row cells on write and load; invalid cached rows trigger live gather, while successful live charts retain their existing observation behavior if cache writeback is refused. |
 | Chart policy loading, partial | Reject malformed publish-blocking and cache-TTL settings consistently across query loaders, including edition policies that golden-query selection would discard; preserve those settings for inline program queries and reject active required inline charts that golden-query selection would discard. |
 | Chart privacy and gates, partial | Scrub chart rows before rendering and caching; reject numeric values and strings with remaining digits under recognized phone/SSN columns, including nested values; withhold rows on scrub failure; and recheck matching caches. Selected cache failure diagnostics omit arbitrary exception text; invalid UTF-8 cache reads return a corrupt-cache miss without rewriting the file. Carry required-chart policy into reports, preserve degraded failures through fallbacks, and apply size checks to legacy and routed charts. Omit chart gates when no chart settings or active chart work exist; disabled charts render scrubbed tables without discovery or chart gates. Historical caches, full PII classification, other diagnostics, live cache fallback and complete chart configuration wiring remain open. |
+
+Incremental projection contention: `src/core/ledger/program_views.py`, `src/commands/ledger.py`, `specs/vertex-tech-spec.md`. Tests: `tests/contracts/test_incremental_projection_write_hook.py`, `tests/unit/test_ledger_incremental_projection.py`.
 
 Shared outbox timing: `src/core/ledger/durable_outbox_store.py`, `specs/vertex-tech-spec.md`. Tests: `tests/unit/test_durable_outbox_store.py`, `tests/unit/test_people_registry_outbox.py`, `tests/unit/test_actuation_outbox.py`.
 

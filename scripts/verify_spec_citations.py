@@ -112,19 +112,19 @@ CITATIONS: tuple[Citation, ...] = (
     Citation(
         claim="Track A (closed 2026-07-07): bridge-disabled early return now gated by _ledger_fact_bridge_enabled, with a reactive warning added alongside it",
         path="src/commands/ledger.py",
-        line=2320,
+        line=2326,
         must_contain="_ledger_fact_bridge_enabled",
     ),
     Citation(
         claim="Track A (closed 2026-07-07): PASSTHROUGH branch now logs at debug (previously a bare silent return, per PS-2's v1.1 addition)",
         path="src/commands/ledger.py",
-        line=2341,
+        line=2347,
         must_contain='"bridge: event type %r is PASSTHROUGH',
     ),
     Citation(
         claim="Track A (closed 2026-07-07): bridge except-Exception handler (logs ERROR, now also records to bridge_failures.jsonl for the backlog doctor check)",
         path="src/commands/ledger.py",
-        line=2389,
+        line=2395,
         must_contain="except Exception as exc:",
     ),
     Citation(
