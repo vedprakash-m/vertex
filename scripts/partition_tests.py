@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 from pathlib import Path
+import subprocess
 from typing import Mapping, Sequence
 
 
@@ -11,12 +13,79 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TESTS_ROOT = REPO_ROOT / "tests"
 
 
-def discover_test_files(root: Path) -> list[str]:
-    return sorted(
+def _decorator_excluded(node: ast.AST) -> bool:
+    for child in ast.walk(node):
+        if not isinstance(child, ast.Attribute):
+            continue
+        if child.attr in {"integration", "operator", "perf"}:
+            return True
+    return False
+
+
+def _functional_test_file(path: Path) -> bool:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in tree.body:
+        if (
+            isinstance(node, (ast.Assign, ast.AnnAssign))
+            and any(
+                isinstance(target, ast.Name) and target.id == "pytestmark"
+                for target in (
+                    node.targets if isinstance(node, ast.Assign) else [node.target]
+                )
+            )
+            and (
+                _decorator_excluded(node)
+                or any(
+                    phrase in ast.unparse(node).casefold()
+                    for phrase in (
+                        "requires local",
+                        "private data",
+                        "operator-local",
+                        "operator data",
+                    )
+                )
+            )
+        ):
+            return False
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not node.name.startswith("test_"):
+            continue
+        if not any(_decorator_excluded(decorator) for decorator in node.decorator_list):
+            return True
+    return False
+
+
+def discover_test_files(root: Path, *, functional_only: bool = False) -> list[str]:
+    if root.resolve() == DEFAULT_TESTS_ROOT.resolve():
+        result = subprocess.run(
+            ["git", "ls-files", "-z", "--", "tests/**/test_*.py"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout:
+            relative_paths = [
+                Path(path).relative_to("tests").as_posix()
+                for path in result.stdout.decode("utf-8").split("\0")
+                if path
+            ]
+            if functional_only:
+                relative_paths = [
+                    path
+                    for path in relative_paths
+                    if _functional_test_file(root / path)
+                ]
+            return sorted(relative_paths)
+    paths = sorted(
         path.relative_to(root).as_posix()
         for path in root.rglob("test_*.py")
         if "__pycache__" not in path.parts
     )
+    if functional_only:
+        paths = [path for path in paths if _functional_test_file(root / path)]
+    return paths
 
 
 def partition_paths(

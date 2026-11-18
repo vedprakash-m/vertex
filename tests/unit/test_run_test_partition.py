@@ -25,8 +25,8 @@ def test_runner_passes_disjoint_paths_directly_to_pytest(
     module = _load_module()
     tests = tmp_path / "tests"
     tests.mkdir()
-    (tests / "test_one.py").write_text("", encoding="utf-8")
-    (tests / "test_two.py").write_text("", encoding="utf-8")
+    (tests / "test_one.py").write_text("def test_one():\n    pass\n", encoding="utf-8")
+    (tests / "test_two.py").write_text("def test_two():\n    pass\n", encoding="utf-8")
     calls: list[list[str]] = []
     monkeypatch.setattr(
         module.subprocess,

@@ -30,7 +30,8 @@ def main(argv: list[str] | None = None) -> int:
     if pytest_args[:1] == ["--"]:
         pytest_args.pop(0)
     root = args.tests_root.resolve()
-    files = discover_test_files(root)
+    files = discover_test_files(root, functional_only=True)
+    print(f"Discovered {len(files)} tracked test files", flush=True)
     weights = _default_weights(files, root)
     weights.update(_load_weights(args.weights))
     shards = partition_paths(files, args.count, weights)

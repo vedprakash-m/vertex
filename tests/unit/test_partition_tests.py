@@ -4,6 +4,7 @@ import importlib.util
 import sys
 from pathlib import Path
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -84,3 +85,44 @@ def test_cli_supports_nul_delimited_file_lists(tmp_path: Path) -> None:
     paths = [item.decode() for item in completed.stdout.split(b"\0") if item]
     assert paths
     assert all(path.endswith(".py") and path.startswith("tests/") for path in paths)
+
+
+def test_real_checkout_inventory_prefers_git_tracked_files(
+    tmp_path: Path, monkeypatch
+) -> None:
+    module = _load_module()
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    monkeypatch.setattr(module, "DEFAULT_TESTS_ROOT", tests)
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=b"tests/unit/test_one.py\0tests/contracts/test_two.py\0",
+        ),
+    )
+    assert module.discover_test_files(tests) == [
+        "contracts/test_two.py",
+        "unit/test_one.py",
+    ]
+
+
+def test_functional_inventory_excludes_marker_only_file(tmp_path: Path) -> None:
+    module = _load_module()
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_functional.py").write_text(
+        "def test_visible():\n    pass\n", encoding="utf-8"
+    )
+    (tests / "test_performance.py").write_text(
+        "import pytest\n@pytest.mark.perf\ndef test_perf():\n    pass\n",
+        encoding="utf-8",
+    )
+    (tests / "test_live.py").write_text(
+        "import pytest\npytestmark = pytest.mark.integration\n\ndef test_live():\n    pass\n",
+        encoding="utf-8",
+    )
+    assert module.discover_test_files(tests, functional_only=True) == [
+        "test_functional.py"
+    ]
