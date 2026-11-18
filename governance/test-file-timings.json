@@ -939,6 +939,9 @@
     "unit/test_azure_logging.py": {
       "seconds": 0.002
     },
+    "unit/test_backfill_archive_to_journal.py": {
+      "seconds": 0.001
+    },
     "unit/test_backfill_loader.py": {
       "seconds": 0.017
     },
@@ -959,6 +962,9 @@
     },
     "unit/test_blind_ab_pilot_prompts.py": {
       "seconds": 0.291
+    },
+    "unit/test_bootstrap_trajectories.py": {
+      "seconds": 0.001
     },
     "unit/test_bridge_idempotency_parameterized.py": {
       "seconds": 0.201
@@ -3047,6 +3053,9 @@
     },
     "unit/test_section_proposal_store.py": {
       "seconds": 0.045
+    },
+    "unit/test_section_roster_freeze.py": {
+      "seconds": 1.5
     },
     "unit/test_selection_identity.py": {
       "seconds": 0.002
