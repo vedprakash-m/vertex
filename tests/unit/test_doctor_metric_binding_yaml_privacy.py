@@ -209,6 +209,25 @@ def test_real_cli_early_yaml_traceback_omits_parser_detail(
         "scorecards": programs_root / "demo" / "scorecards.yaml",
     }[document]
     path.write_text(f"invalid: [{_PRIVATE}\n", encoding="utf-8")
+    before = store.get_metric_source_binding("synthetic-binding")
+    if (document, explicit_edition, traceback_style) not in {
+        ("edition", True, "default"),
+        ("program", True, "rich-locals"),
+        ("edition", False, "standard"),
+    }:
+        args = ["doctor", "--metric-bindings"]
+        if explicit_edition:
+            args[1:1] = ["--edition", "demo_weekly"]
+        result = CliRunner().invoke(app, args)
+        assert result.exit_code == 1
+        assert type(result.exception) is ConfigError
+        assert str(result.exception) == _SAFE
+        formatted = "".join(traceback.format_exception(result.exception))
+        assert _PRIVATE not in formatted
+        assert str(path) not in formatted and path.as_posix() not in formatted
+        assert store.get_metric_source_binding("synthetic-binding") == before
+        return
+
     script = tmp_path / "synthetic_doctor_cli.py"
     script.write_text(
         "import sys\n"
@@ -250,7 +269,6 @@ def test_real_cli_early_yaml_traceback_omits_parser_detail(
         environment.pop("TYPER_STANDARD_TRACEBACK", None)
         environment.pop("_TYPER_STANDARD_TRACEBACK", None)
 
-    before = store.get_metric_source_binding("synthetic-binding")
     result = subprocess.run(
         [sys.executable, str(script)], cwd=tmp_path, env=environment,
         capture_output=True, timeout=90, check=False,

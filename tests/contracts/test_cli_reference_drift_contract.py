@@ -134,7 +134,7 @@ def test_ci_checks_cli_reference_before_running_tests() -> None:
     assert len(reference_commands) == 1
     _, command = reference_commands[0]
     assert command == "python scripts/generate_cli_reference.py --check"
-    assert workflow["jobs"]["static"]["steps"] is not None
+    assert workflow["jobs"]["guard"]["steps"] is not None
 
 
 def test_cli_reference_check_rejects_stale_snapshot_without_rewriting(

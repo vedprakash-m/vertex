@@ -20,9 +20,9 @@ def test_perf_lane_marker_is_registered() -> None:
 def test_chart_budget_runs_serially_in_ci() -> None:
     workflow_path = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "ci.yml"
     workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
-    job = workflow["jobs"]["performance"]
+    job = workflow["jobs"]["performance-and-install-smoke"]
     assert job["runs-on"] == "ubuntu-latest"
-    assert job["timeout-minutes"] == 10
+    assert job["timeout-minutes"] == 12
     command = next(
         step["run"]
         for step in job["steps"]
@@ -48,7 +48,7 @@ def test_named_performance_budgets_run_serially_in_ci(node_id: str) -> None:
     workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
     command = next(
         step["run"]
-        for step in workflow["jobs"]["performance"]["steps"]
+        for step in workflow["jobs"]["performance-and-install-smoke"]["steps"]
         if step.get("name") == "Run seven bounded performance nodes"
     )
     assert node_id in command
@@ -60,7 +60,7 @@ def test_gather_baseline_runs_serially_outside_checkout_in_ci(tmp_path: Path) ->
     workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
     step, = [
         step
-        for step in workflow["jobs"]["performance"]["steps"]
+        for step in workflow["jobs"]["performance-and-install-smoke"]["steps"]
         if step.get("name") == "Run gather performance baseline"
     ]
     assert step["working-directory"] == "${{ runner.temp }}"
