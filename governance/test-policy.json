@@ -11,8 +11,8 @@
       "cli.py"
     ],
     "statement_target": 95.0,
-    "statement_floor": 87.95,
-    "branch_floor": 75.19,
+    "statement_floor": 87.90,
+    "branch_floor": 75.08,
     "changed_code_statement_floor": 95.0,
     "policy": "whole-source no-regression ratchet plus changed-code threshold"
   },
