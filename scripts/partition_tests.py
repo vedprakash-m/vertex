@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -74,6 +75,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--index", type=int, required=True)
     parser.add_argument("--weights", type=Path)
     parser.add_argument("--verify", action="store_true")
+    parser.add_argument("--nul", action="store_true")
     args = parser.parse_args(argv)
 
     root = args.tests_root.resolve()
@@ -86,8 +88,15 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("partition inventory is incomplete or overlapping")
     selected = select_partition(shards, args.index)
     prefix = "tests" if root == DEFAULT_TESTS_ROOT else root.name
-    for relative in selected:
-        print(f"{prefix}/{relative}".replace("\\", "/"))
+    encoded = [
+        f"{prefix}/{relative}".replace("\\", "/")
+        for relative in selected
+    ]
+    if args.nul:
+        os.write(1, b"".join((path + "\0").encode("utf-8") for path in encoded))
+    else:
+        for path in encoded:
+            print(path)
     return 0
 
 

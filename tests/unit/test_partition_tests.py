@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -56,3 +57,30 @@ def test_discover_test_files_excludes_non_test_python(tmp_path: Path) -> None:
     (tests / "__pycache__").mkdir()
     (tests / "__pycache__" / "test_cached.py").write_text("", encoding="utf-8")
     assert module.discover_test_files(tests) == ["test_real.py"]
+
+
+def test_cli_supports_nul_delimited_file_lists(tmp_path: Path) -> None:
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    for index in range(3):
+        (tests / f"test_{index}.py").write_text("", encoding="utf-8")
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "partition_tests.py"),
+            "--tests-root",
+            str(tests),
+            "--count",
+            "2",
+            "--index",
+            "0",
+            "--verify",
+            "--nul",
+        ],
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0
+    paths = [item.decode() for item in completed.stdout.split(b"\0") if item]
+    assert paths
+    assert all(path.endswith(".py") and path.startswith("tests/") for path in paths)

@@ -113,10 +113,10 @@ jobs:
             --count 12 \
             --index "$SHARD" \
             --weights governance/test-file-timings.json \
-            --verify > "$RUNNER_TEMP/vertex-ci/files-${SHARD}.txt"
-          test -s "$RUNNER_TEMP/vertex-ci/files-${SHARD}.txt"
-          echo "Shard ${SHARD} has $(wc -l < "$RUNNER_TEMP/vertex-ci/files-${SHARD}.txt") test files"
-          xargs -d '\n' -a "$RUNNER_TEMP/vertex-ci/files-${SHARD}.txt" \
+            --verify --nul > "$RUNNER_TEMP/vertex-ci/files-${SHARD}.nul"
+          test -s "$RUNNER_TEMP/vertex-ci/files-${SHARD}.nul"
+          echo "Shard ${SHARD} has $(tr -cd '\0' < "$RUNNER_TEMP/vertex-ci/files-${SHARD}.nul" | wc -c) test files"
+          xargs -0 -a "$RUNNER_TEMP/vertex-ci/files-${SHARD}.nul" \
             python -m pytest -q -n 4 --dist load \
             -m "not perf and not integration and not operator" \
             --strict-markers \
