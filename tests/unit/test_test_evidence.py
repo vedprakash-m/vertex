@@ -93,7 +93,7 @@ def test_coverage_baseline_requires_exact_source_bytes(tmp_path: Path, monkeypat
         "schema_version": 1,
         "sources": {
             "src/example.py": __import__("hashlib").sha256(
-                source.read_bytes()
+                source.read_bytes().replace(b"\r\n", b"\n")
             ).hexdigest(),
         },
         "files": {
@@ -116,7 +116,7 @@ def test_coverage_baseline_requires_exact_source_bytes(tmp_path: Path, monkeypat
             baseline, tmp_path, expected_files={"src/example.py"},
         )
     except ValueError as error:
-        assert "source bytes changed" in str(error)
+        assert "normalized source bytes changed" in str(error)
     else:
         raise AssertionError("A stale coverage baseline must fail closed")
 

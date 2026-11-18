@@ -233,9 +233,12 @@ def load_coverage_baseline(
         source_path = root / normalized
         if not source_path.is_file():
             raise ValueError(f"coverage baseline source is missing: {normalized}")
-        actual_hash = hashlib.sha256(source_path.read_bytes()).hexdigest()
+        normalized_source = source_path.read_bytes().replace(b"\r\n", b"\n")
+        actual_hash = hashlib.sha256(normalized_source).hexdigest()
         if expected_hash != actual_hash:
-            raise ValueError(f"coverage baseline invalid: source bytes changed for {normalized}")
+            raise ValueError(
+                f"coverage baseline invalid: normalized source bytes changed for {normalized}"
+            )
     if observed_sources != expected_files:
         missing = sorted(expected_files - observed_sources)
         unexpected = sorted(observed_sources - expected_files)
