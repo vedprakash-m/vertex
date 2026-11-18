@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import html
+import json
 import re
 import threading
 from dataclasses import dataclass, replace
@@ -10,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.core.ado_client import ADOClient
+from src.core.ado_hydration_checkpoints import CheckpointAdvance, HydrationCheckpoint, HydrationSubresource
 from src.core.ado_enrichment import (
     ADO_RISK_ASSESSMENT_COMMENT_FIELD,
     ADO_RISK_ASSESSMENT_FIELD,
@@ -69,9 +72,13 @@ class ADOHydrationProvider:
         client: ADOClient,
         *,
         detail_client_factory: Callable[[], ADOClient] | None = None,
+        checkpoint_reader: Callable[
+            [tuple[int, ...]], dict[tuple[int, HydrationSubresource], HydrationCheckpoint]
+        ] | None = None,
     ):
         self._client = client
         self._detail_client_factory = detail_client_factory
+        self._checkpoint_reader = checkpoint_reader
 
     @classmethod
     def from_program(
@@ -82,7 +89,7 @@ class ADOHydrationProvider:
         *,
         programs_root: Path = PROGRAMS_ROOT,
     ) -> tuple["ADOHydrationProvider", ADOHydrationConfig]:
-        del workstreams, channel_config, programs_root
+        del workstreams, channel_config
         if program.ado is None:
             raise ValueError(f"Program '{program.id}' has no ADO config")
         client = ADOClient(
@@ -96,7 +103,19 @@ class ADOHydrationProvider:
             # and connection pool while retaining the cached auth boundary.
             return client.fork_read_client()
 
-        return cls(client, detail_client_factory=_make_detail_client), ADOHydrationConfig()
+        def _read_checkpoints(
+            work_item_ids: tuple[int, ...],
+        ) -> dict[tuple[int, HydrationSubresource], HydrationCheckpoint]:
+            from src.core.channel_registry_store import ChannelRegistryStore
+            from src.core.program_paths import get_channel_registry_path
+
+            store = ChannelRegistryStore(get_channel_registry_path(program.id, programs_root=programs_root), program.id)
+            return store.read_hydration_checkpoints(work_item_ids)
+
+        return (
+            cls(client, detail_client_factory=_make_detail_client, checkpoint_reader=_read_checkpoints),
+            ADOHydrationConfig(),
+        )
 
     @property
     def channel(self) -> str:
@@ -181,6 +200,17 @@ class ADOHydrationProvider:
             rows_by_id = {_row_work_item_id(row): row for row in rows}
             fetched_at = datetime.now(timezone.utc)
             registrations_by_id = {int(reg.ref_id): reg for reg in work_item_regs if reg.ref_id.isdigit()}
+            # RELO-W2.3: an `unknown` history checkpoint (legacy item or older
+            # checkpoint version) forces full revision/comment rehydration.
+            forced_detail_ids: frozenset[int] = frozenset()
+            if mode is HydrationMode.FULL and self._checkpoint_reader is not None:
+                checkpoints = self._checkpoint_reader(work_item_ids)
+                forced_detail_ids = frozenset(
+                    work_item_id
+                    for work_item_id in work_item_ids
+                    for sub in (HydrationSubresource.REVISIONS, HydrationSubresource.COMMENTS)
+                    if (checkpoint := checkpoints.get((work_item_id, sub))) is None or checkpoint.state != "current"
+                )
             detail_rows_by_id, detail_errors, detail_failed_ids, detail_api_calls = self._hydrate_item_details(
                 work_item_ids=work_item_ids,
                 rows_by_id=rows_by_id,
@@ -188,6 +218,7 @@ class ADOHydrationProvider:
                 since=since,
                 mode=mode,
                 config=config,
+                forced_detail_ids=forced_detail_ids,
             )
             api_calls += detail_api_calls
             errors.extend(detail_errors)
@@ -247,6 +278,17 @@ class ADOHydrationProvider:
         # already hydrated -- it surfaces as a non-fatal error and empty relations.
         relations: tuple[WorkItemRelation, ...] = ()
         relation_truncation = None
+        hydrated_work_item_ids = {int(ref_id) for ref_id, kind in hydrated_ref_ids if kind == "work_item"}
+        advances: list[CheckpointAdvance] = []
+        if work_item_ids:
+            for work_item_id, (revision_rows, comment_rows) in detail_rows_by_id.items():
+                if work_item_id in hydrated_work_item_ids:
+                    advances.append(
+                        CheckpointAdvance(work_item_id, HydrationSubresource.REVISIONS, _revision_cursor(revision_rows))
+                    )
+                    advances.append(
+                        CheckpointAdvance(work_item_id, HydrationSubresource.COMMENTS, str(len(comment_rows)))
+                    )
         if mode is HydrationMode.FULL and work_item_ids:
             relation_loader = getattr(self._client, "get_work_item_relations", None)
             if callable(relation_loader):
@@ -262,6 +304,7 @@ class ADOHydrationProvider:
                     relations = traversal.edges
                     relation_truncation = traversal.truncation
                     errors.extend(traversal.errors)
+                    advances.extend(_relation_checkpoint_advances(raw_relations, hydrated_work_item_ids))
                 except QueryError as error:
                     description = "Failed to hydrate work item relations"
                     errors.append(
@@ -272,7 +315,12 @@ class ADOHydrationProvider:
                             retryable=True,
                         )
                     )
-        output = replace(output, relations=relations, relation_truncation=relation_truncation)
+        output = replace(
+            output,
+            relations=relations,
+            relation_truncation=relation_truncation,
+            checkpoint_advances=tuple(advances),
+        )
         return HydrationResult(
             channel="ado",
             resources=output,
@@ -291,6 +339,7 @@ class ADOHydrationProvider:
         since: datetime,
         mode: HydrationMode,
         config: ADOHydrationConfig,
+        forced_detail_ids: frozenset[int] = frozenset(),
     ) -> tuple[dict[int, tuple[list[dict[str, Any]], list[dict[str, Any]]]], list[IntegrationError], list[str], int]:
         """Fetch required revision/comment detail with deterministic results.
 
@@ -303,12 +352,12 @@ class ADOHydrationProvider:
             work_item_id
             for work_item_id in work_item_ids
             if (row := rows_by_id.get(work_item_id)) is not None
-            and _requires_item_detail(
+            and (work_item_id in forced_detail_ids or _requires_item_detail(
                 row=row,
                 registration=registrations_by_id.get(work_item_id),
                 since=since,
                 mode=mode,
-            )
+            ))
         )
         if not detail_ids:
             return {}, [], [], 0
@@ -452,6 +501,43 @@ def _requires_item_detail(
     # without ever collecting its initial revisions/comments.
     never_verified = registration is None or registration.last_verified_at is None
     return never_verified or _row_changed_since(row, effective_since)
+
+
+def _revision_cursor(revision_rows: list[dict[str, Any]]) -> str:
+    revs = [row["rev"] for row in revision_rows if type(row.get("rev")) is int]
+    return str(max(revs)) if revs else str(len(revision_rows))
+
+
+def _fingerprint(values: list[object]) -> str:
+    payload = json.dumps(values, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _relation_checkpoint_advances(raw_relations: object, work_item_ids: set[int]) -> list[CheckpointAdvance]:
+    """Fingerprint link and attachment metadata; attachment content is never fetched."""
+    advances: list[CheckpointAdvance] = []
+    for raw in raw_relations if isinstance(raw_relations, list) else ():
+        work_item_id = _parse_int(str(raw.get("id"))) if isinstance(raw, dict) else None
+        if work_item_id is None or work_item_id not in work_item_ids:
+            continue
+        rows = [row for row in raw.get("relations") or () if isinstance(row, dict)]
+        links = sorted(
+            ([str(row.get("rel")), str(row.get("url"))] for row in rows if row.get("rel") != "AttachedFile"),
+        )
+        attachments = sorted(
+            (
+                [str(row.get("url")), str(details.get("name")), str(details.get("resourceSize"))]
+                for row in rows
+                if row.get("rel") == "AttachedFile"
+                for attrs in [row.get("attributes")]
+                for details in [attrs if isinstance(attrs, dict) else {}]
+            ),
+        )
+        advances.append(CheckpointAdvance(work_item_id, HydrationSubresource.RELATIONS, _fingerprint(list(links))))
+        advances.append(
+            CheckpointAdvance(work_item_id, HydrationSubresource.ATTACHMENT_META, _fingerprint(list(attachments)))
+        )
+    return advances
 
 
 def _chunks(values: tuple[int, ...], size: int) -> tuple[tuple[int, ...], ...]:

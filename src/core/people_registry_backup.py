@@ -77,10 +77,10 @@ def _collect_registry_backup_paths(knowledge_root: Path) -> tuple[Path, ...]:
     """Every artifact §7.10 names: "the registry generation, journal/
     archive, transaction recovery records, policies/bindings, and
     encrypted artifacts." Deliberately excludes
-    `.state/registry_lease.sqlite3` (ephemeral operational lock state, not
-    durable data) and `.state/registry_outbox.sqlite3` (durable but not
-    yet carrying real payloads -- PPL-W1.6 is not wired into commit yet;
-    revisit once it is)."""
+    `.state/registry_lease.sqlite3` and `.state/registry_outbox.sqlite3`.
+    The lease database now retains fencing history; excluding it means this
+    snapshot cannot establish fencing continuity after a restore. The outbox
+    is not yet carrying real payloads -- PPL-W1.6 is not wired into commit yet."""
     candidates = [
         registry_config_path(knowledge_root),
         registry_manifest_path(knowledge_root),

@@ -99,12 +99,12 @@
       <p style="margin:16px 0 0 0; font-size:14px; line-height:1.6; color:#111827;"><strong>Best documented:</strong> WI:910001 — 0 ADO touches in the last 7 days by Example Owner</p>
       <p style="margin:8px 0 0 0; font-size:14px; line-height:1.6; color:#111827;"><strong>Trend:</strong> 18% (baseline issue)</p>
       <p style="margin:16px 0 8px 0; font-size:14px; line-height:1.6; color:#111827;"><strong>Needs ADO update:</strong></p>
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0; border:1px solid #E5E7EB; table-layout:fixed;">
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; margin:0; border:1px solid #E5E7EB; table-layout:fixed;">
         <tr style="background-color:#F3F4F6;">
-          <td style="padding:8px 10px; border:1px solid #E5E7EB; font-size:12px; line-height:1.4; font-weight:600; color:#111827; width:20%;">Workstream</td>
-          <td style="padding:8px 10px; border:1px solid #E5E7EB; font-size:12px; line-height:1.4; font-weight:600; color:#111827; width:28%;">Workstream Owner + ADO Assignee</td>
-          <td style="padding:8px 10px; border:1px solid #E5E7EB; font-size:12px; line-height:1.4; font-weight:600; color:#111827; width:26%;">Stale or Missing ADOs</td>
-          <td style="padding:8px 10px; border:1px solid #E5E7EB; font-size:12px; line-height:1.4; font-weight:600; color:#111827; width:26%;">What Field Needs Update</td>
+          <th scope="col" style="padding:8px 10px; border:1px solid #E5E7EB; font-size:12px; line-height:1.4; font-weight:600; color:#111827; width:20%; text-align:left;">Workstream</th>
+          <th scope="col" style="padding:8px 10px; border:1px solid #E5E7EB; font-size:12px; line-height:1.4; font-weight:600; color:#111827; width:28%; text-align:left;">Workstream Owner + ADO Assignee</th>
+          <th scope="col" style="padding:8px 10px; border:1px solid #E5E7EB; font-size:12px; line-height:1.4; font-weight:600; color:#111827; width:26%; text-align:left;">Stale or Missing ADOs</th>
+          <th scope="col" style="padding:8px 10px; border:1px solid #E5E7EB; font-size:12px; line-height:1.4; font-weight:600; color:#111827; width:26%; text-align:left;">What Field Needs Update</th>
         </tr>
         <tr>
           <td style="padding:8px 10px; border:1px solid #E5E7EB; vertical-align:top; font-size:13px; line-height:1.5; color:#111827;">Networking</td>
@@ -209,12 +209,12 @@
   </tr>
   <tr>
     <td style="padding:0 16px 16px 16px;">
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; table-layout:fixed;">
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; table-layout:fixed;">
         <tr>
-          <td style="width:32px; padding:8px 8px 8px 0; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">#</td>
-          <td style="width:23%; padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">Workstream</td>
-          <td style="padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">Status / Business Impact</td>
-          <td style="width:84px; padding:8px 0 8px 8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280; text-align:right;">Risk</td>
+          <th scope="col" style="width:32px; padding:8px 8px 8px 0; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280; text-align:left;">#</th>
+          <th scope="col" style="width:23%; padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280; text-align:left;">Workstream</th>
+          <th scope="col" style="padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280; text-align:left;">Status / Business Impact</th>
+          <th scope="col" style="width:84px; padding:8px 0 8px 8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280; text-align:right;">Risk</th>
         </tr>
         <tr>
           <td style="padding:10px 8px 10px 0; border-bottom:1px solid #E5E7EB; font-size:13px; line-height:1.5; color:#111827; vertical-align:top;">1</td>
@@ -225,7 +225,7 @@
             <p style="margin:0 0 6px 0; color:#111827;">1 items tracked.</p>
 <p style="margin:0 0 6px 0; color:#4B5563;">Current state: Active. Next checkpoint: May 10.</p><p style="margin:0 0 6px 0; color:#6B7280;">Active · ETA May 10</p><p style="margin:0;"><a href="https://dev.azure.com/your-org/ExampleProject/_workitems/edit/910001" style="color:#2563EB; text-decoration:underline;">&rarr; ADO #910001</a></p>          </td>
           <td style="padding:10px 0 10px 8px; border-bottom:1px solid #E5E7EB; text-align:right; vertical-align:top;">
-            <span style="display:inline-block; padding:4px 8px; border-radius:999px; background-color:#C00000; color:#FFFFFF; font-size:12px; line-height:1.2; font-weight:700;">Needs Input</span>
+            <span role="img" aria-label="Needs Input risk" style="display:inline-block; padding:4px 8px; border-radius:999px; background-color:#C00000; color:#FFFFFF; font-size:12px; line-height:1.2; font-weight:700;">Needs Input</span>
           </td>
         </tr>
         <tr>
@@ -237,7 +237,7 @@
             <p style="margin:0 0 6px 0; color:#111827;">1 items tracked.</p>
 <p style="margin:0 0 6px 0; color:#4B5563;">Current state: Active. Next checkpoint: May 10.</p><p style="margin:0 0 6px 0; color:#6B7280;">Active · ETA May 10</p><p style="margin:0;"><a href="https://dev.azure.com/your-org/ExampleProject/_workitems/edit/910001" style="color:#2563EB; text-decoration:underline;">&rarr; ADO #910001</a></p>          </td>
           <td style="padding:10px 0 10px 8px; border-bottom:1px solid #E5E7EB; text-align:right; vertical-align:top;">
-            <span style="display:inline-block; padding:4px 8px; border-radius:999px; background-color:#C00000; color:#FFFFFF; font-size:12px; line-height:1.2; font-weight:700;">Needs Input</span>
+            <span role="img" aria-label="Needs Input risk" style="display:inline-block; padding:4px 8px; border-radius:999px; background-color:#C00000; color:#FFFFFF; font-size:12px; line-height:1.2; font-weight:700;">Needs Input</span>
           </td>
         </tr>
       </table>
@@ -250,12 +250,12 @@
   </tr>
   <tr>
     <td style="padding:0 16px 16px 16px;">
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; table-layout:fixed;">
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; table-layout:fixed;">
         <tr>
-          <td style="width:32px; padding:8px 8px 8px 0; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">#</td>
-          <td style="width:23%; padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">Workstream</td>
-          <td style="padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">Status / Business Impact</td>
-          <td style="width:84px; padding:8px 0 8px 8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280; text-align:right;">Risk</td>
+          <th scope="col" style="width:32px; padding:8px 8px 8px 0; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280; text-align:left;">#</th>
+          <th scope="col" style="width:23%; padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280; text-align:left;">Workstream</th>
+          <th scope="col" style="padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280; text-align:left;">Status / Business Impact</th>
+          <th scope="col" style="width:84px; padding:8px 0 8px 8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280; text-align:right;">Risk</th>
         </tr>
         <tr>
           <td style="padding:10px 8px 10px 0; border-bottom:1px solid #E5E7EB; font-size:13px; line-height:1.5; color:#111827; vertical-align:top;">1</td>
@@ -266,7 +266,7 @@
             <p style="margin:0 0 6px 0; color:#111827;">1 items tracked.</p>
 <p style="margin:0 0 6px 0; color:#4B5563;">Current state: At Risk. Next checkpoint: May 08.</p><p style="margin:0 0 6px 0; color:#6B7280;">At Risk · ETA May 08</p><p style="margin:0;"><a href="https://dev.azure.com/your-org/ExampleProject/_workitems/edit/910002" style="color:#2563EB; text-decoration:underline;">&rarr; ADO #910002</a></p>          </td>
           <td style="padding:10px 0 10px 8px; border-bottom:1px solid #E5E7EB; text-align:right; vertical-align:top;">
-            <span style="display:inline-block; padding:4px 8px; border-radius:999px; background-color:#FFE699; color:#000000; font-size:12px; line-height:1.2; font-weight:700;">Medium</span>
+            <span role="img" aria-label="Medium risk" style="display:inline-block; padding:4px 8px; border-radius:999px; background-color:#FFE699; color:#000000; font-size:12px; line-height:1.2; font-weight:700;">Medium</span>
           </td>
         </tr>
       </table>
@@ -279,12 +279,12 @@
   </tr>
   <tr>
     <td style="padding:0 16px 16px 16px;">
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; table-layout:fixed;">
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; table-layout:fixed;">
         <tr>
-          <td style="width:32px; padding:8px 8px 8px 0; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">#</td>
-          <td style="width:23%; padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">Workstream</td>
-          <td style="padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">Status / Business Impact</td>
-          <td style="width:84px; padding:8px 0 8px 8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280; text-align:right;">Risk</td>
+          <th scope="col" style="width:32px; padding:8px 8px 8px 0; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280; text-align:left;">#</th>
+          <th scope="col" style="width:23%; padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280; text-align:left;">Workstream</th>
+          <th scope="col" style="padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280; text-align:left;">Status / Business Impact</th>
+          <th scope="col" style="width:84px; padding:8px 0 8px 8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280; text-align:right;">Risk</th>
         </tr>
         <tr>
           <td style="padding:10px 8px 10px 0; border-bottom:1px solid #E5E7EB; font-size:13px; line-height:1.5; color:#111827; vertical-align:top;">1</td>
@@ -295,7 +295,7 @@
             <p style="margin:0 0 6px 0; color:#111827;">1 items tracked.</p>
 <p style="margin:0 0 6px 0; color:#4B5563;">Current state: Proposed. Next checkpoint: May 12.</p><p style="margin:0 0 6px 0; color:#6B7280;">Proposed · ETA May 12</p><p style="margin:0;"><a href="https://dev.azure.com/your-org/ExampleProject/_workitems/edit/910003" style="color:#2563EB; text-decoration:underline;">&rarr; ADO #910003</a></p>          </td>
           <td style="padding:10px 0 10px 8px; border-bottom:1px solid #E5E7EB; text-align:right; vertical-align:top;">
-            <span style="display:inline-block; padding:4px 8px; border-radius:999px; background-color:#C00000; color:#FFFFFF; font-size:12px; line-height:1.2; font-weight:700;">Needs Input</span>
+            <span role="img" aria-label="Needs Input risk" style="display:inline-block; padding:4px 8px; border-radius:999px; background-color:#C00000; color:#FFFFFF; font-size:12px; line-height:1.2; font-weight:700;">Needs Input</span>
           </td>
         </tr>
       </table>
@@ -308,12 +308,12 @@
   </tr>
   <tr>
     <td style="padding:0 16px 16px 16px;">
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; table-layout:fixed;">
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; table-layout:fixed;">
         <tr>
-          <td style="width:32px; padding:8px 8px 8px 0; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">#</td>
-          <td style="width:23%; padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">Workstream</td>
-          <td style="padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">Status / Business Impact</td>
-          <td style="width:84px; padding:8px 0 8px 8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280; text-align:right;">Risk</td>
+          <th scope="col" style="width:32px; padding:8px 8px 8px 0; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280; text-align:left;">#</th>
+          <th scope="col" style="width:23%; padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280; text-align:left;">Workstream</th>
+          <th scope="col" style="padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280; text-align:left;">Status / Business Impact</th>
+          <th scope="col" style="width:84px; padding:8px 0 8px 8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280; text-align:right;">Risk</th>
         </tr>
         <tr>
           <td style="padding:10px 8px 10px 0; border-bottom:1px solid #E5E7EB; font-size:13px; line-height:1.5; color:#111827; vertical-align:top;">1</td>
@@ -324,7 +324,7 @@
             <p style="margin:0 0 6px 0; color:#111827;">1 items tracked.</p>
 <p style="margin:0 0 6px 0; color:#4B5563;">Current state: Active. Next checkpoint: May 15.</p><p style="margin:0 0 6px 0; color:#6B7280;">Active · ETA May 15</p><p style="margin:0;"><a href="https://dev.azure.com/your-org/ExampleProject/_workitems/edit/910004" style="color:#2563EB; text-decoration:underline;">&rarr; ADO #910004</a></p>          </td>
           <td style="padding:10px 0 10px 8px; border-bottom:1px solid #E5E7EB; text-align:right; vertical-align:top;">
-            <span style="display:inline-block; padding:4px 8px; border-radius:999px; background-color:#C00000; color:#FFFFFF; font-size:12px; line-height:1.2; font-weight:700;">Needs Input</span>
+            <span role="img" aria-label="Needs Input risk" style="display:inline-block; padding:4px 8px; border-radius:999px; background-color:#C00000; color:#FFFFFF; font-size:12px; line-height:1.2; font-weight:700;">Needs Input</span>
           </td>
         </tr>
       </table>
@@ -337,12 +337,12 @@
   </tr>
   <tr>
     <td style="padding:0 16px 16px 16px;">
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; table-layout:fixed;">
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; table-layout:fixed;">
         <tr>
-          <td style="width:32px; padding:8px 8px 8px 0; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">#</td>
-          <td style="width:23%; padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">Workstream</td>
-          <td style="padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280;">Status / Business Impact</td>
-          <td style="width:84px; padding:8px 0 8px 8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280; text-align:right;">Risk</td>
+          <th scope="col" style="width:32px; padding:8px 8px 8px 0; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280; text-align:left;">#</th>
+          <th scope="col" style="width:23%; padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280; text-align:left;">Workstream</th>
+          <th scope="col" style="padding:8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280; text-align:left;">Status / Business Impact</th>
+          <th scope="col" style="width:84px; padding:8px 0 8px 8px; border-bottom:1px solid #E5E7EB; font-size:11px; line-height:1.4; font-weight:600; color:#6B7280; text-align:right;">Risk</th>
         </tr>
         <tr>
           <td style="padding:10px 8px 10px 0; border-bottom:1px solid #E5E7EB; font-size:13px; line-height:1.5; color:#111827; vertical-align:top;">1</td>
@@ -353,7 +353,7 @@
             <p style="margin:0 0 6px 0; color:#111827;">1 items tracked.</p>
 <p style="margin:0 0 6px 0; color:#4B5563;">Current state: At Risk. Next checkpoint: May 08.</p><p style="margin:0 0 6px 0; color:#6B7280;">At Risk · ETA May 08</p><p style="margin:0;"><a href="https://dev.azure.com/your-org/ExampleProject/_workitems/edit/910002" style="color:#2563EB; text-decoration:underline;">&rarr; ADO #910002</a></p>          </td>
           <td style="padding:10px 0 10px 8px; border-bottom:1px solid #E5E7EB; text-align:right; vertical-align:top;">
-            <span style="display:inline-block; padding:4px 8px; border-radius:999px; background-color:#FFE699; color:#000000; font-size:12px; line-height:1.2; font-weight:700;">Medium</span>
+            <span role="img" aria-label="Medium risk" style="display:inline-block; padding:4px 8px; border-radius:999px; background-color:#FFE699; color:#000000; font-size:12px; line-height:1.2; font-weight:700;">Medium</span>
           </td>
         </tr>
         <tr>
@@ -365,7 +365,7 @@
             <p style="margin:0 0 6px 0; color:#111827;">1 items tracked.</p>
 <p style="margin:0 0 6px 0; color:#4B5563;">Current state: At Risk. Next checkpoint: May 08.</p><p style="margin:0 0 6px 0; color:#6B7280;">At Risk · ETA May 08</p><p style="margin:0;"><a href="https://dev.azure.com/your-org/ExampleProject/_workitems/edit/910002" style="color:#2563EB; text-decoration:underline;">&rarr; ADO #910002</a></p>          </td>
           <td style="padding:10px 0 10px 8px; border-bottom:1px solid #E5E7EB; text-align:right; vertical-align:top;">
-            <span style="display:inline-block; padding:4px 8px; border-radius:999px; background-color:#FFE699; color:#000000; font-size:12px; line-height:1.2; font-weight:700;">Medium</span>
+            <span role="img" aria-label="Medium risk" style="display:inline-block; padding:4px 8px; border-radius:999px; background-color:#FFE699; color:#000000; font-size:12px; line-height:1.2; font-weight:700;">Medium</span>
           </td>
         </tr>
       </table>

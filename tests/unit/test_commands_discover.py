@@ -587,7 +587,7 @@ def test_discover_candidates_source_newsletter_uses_pdf_as_fallback_without_dupl
 def test_discover_candidates_source_email_stages_candidates_records_run_and_writes_evidence(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("cli.maybe_run_scheduled_compaction", lambda *_args, **_kwargs: None)
     programs_root = tmp_path / "programs"
-    source_dir = tmp_path / "DDPF_daily"
+    source_dir = tmp_path / "contoso_daily"
     source_dir.mkdir(parents=True)
     (source_dir / "2025-03-20 daily.eml").write_text(
         "\n".join(
@@ -644,7 +644,7 @@ def test_discover_candidates_source_email_stages_candidates_records_run_and_writ
 def test_discover_candidates_source_email_collapses_same_week_duplicate_candidates(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("cli.maybe_run_scheduled_compaction", lambda *_args, **_kwargs: None)
     programs_root = tmp_path / "programs"
-    source_dir = tmp_path / "DDPF_daily"
+    source_dir = tmp_path / "contoso_daily"
     source_dir.mkdir(parents=True)
     (source_dir / "2025-03-17 daily.eml").write_text(
         "\n".join(
@@ -709,7 +709,7 @@ def test_discover_candidates_source_email_collapses_same_week_duplicate_candidat
 def test_discover_candidates_source_email_filters_by_header_date_not_filename(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("cli.maybe_run_scheduled_compaction", lambda *_args, **_kwargs: None)
     programs_root = tmp_path / "programs"
-    source_dir = tmp_path / "DDPF_daily"
+    source_dir = tmp_path / "contoso_daily"
     source_dir.mkdir(parents=True)
     (source_dir / "RE_ [Contoso] Action required_ 2 slipping items need closure ASAP.eml").write_text(
         "\n".join(
@@ -772,7 +772,7 @@ def test_discover_candidates_source_email_filters_by_header_date_not_filename(mo
 def test_discover_candidates_source_email_zero_yield_records_gap(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("cli.maybe_run_scheduled_compaction", lambda *_args, **_kwargs: None)
     programs_root = tmp_path / "programs"
-    source_dir = tmp_path / "DDPF_daily"
+    source_dir = tmp_path / "contoso_daily"
     source_dir.mkdir(parents=True)
     (source_dir / "2025-03-20 daily.eml").write_text(
         "\n".join(

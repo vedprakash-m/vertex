@@ -654,7 +654,7 @@ vertex/
 │   │   └── digest.j2               # Digest variant
 │   └── partials/                   # 25 reusable partial templates
 │
-├── tests/                          # Test suite (2755 collected tests)
+├── tests/                          # Test suite (count derived by derive_spec_counts.py)
 ├── scripts/                        # Utility scripts
 ├── specs/                          # Specifications
 ├── cli.py                          # CLI entry point (Typer)
@@ -1110,6 +1110,7 @@ The `PROVIDER_REGISTRY` in `channel_wiring.py` maps channel names to their provi
   single active override file retains its reset behavior. Later draft seeding
   and review still apply; preservation is not approval.
 - Where a program has activated `gather-run.v1` manifests (see Tech Spec §11.3), confirm binds to exactly one pinned committed gather run (run id + content hash) and computes a non-mutating risk-delta preview (new/updated/no-change rows, plus a stable preview hash) before any real archive write. A stale, partial, or hash-mismatched pinned run blocks confirm rather than silently drafting off unverified evidence; the first trusted confirm for a program is a non-destructive but effectively irreversible baseline commit — later corrections happen through new governed records, not rollback.
+- An ordinary program-backed report in gather enforcement mode refuses to render if its retained fact snapshot contains facts outside verified committed runs or the eligible legacy cutoff; it preserves the pin rather than silently changing its membership.
 
 ### 9.6 Freshness Report (`vertex freshness`)
 
@@ -1959,7 +1960,7 @@ Quality gates are evaluated during `vertex confirm`. Gate phases:
 | Phase | Gates | Blocking? |
 |-------|-------|-----------|
 | Phase 1a | Ban-list violations, verbosity violations, manifest integrity, risk input completeness | Hard block on `❓ Needs Input` (QG-8); warnings on others |
-| Phase 1b | Freshness violations, overdue targets, material-change narrative coverage, claim contradictions, chronic high-risk escalation, contradiction-narrative acknowledgment (QG-17), and high-risk signal coverage (QG-13 hard block) | Configurable (QG-13 is never overridable) |
+| Phase 1b | Freshness violations, overdue targets, material-change narrative coverage, claim contradictions, chronic high-risk escalation, contradiction-narrative acknowledgment (QG-17), and high-risk signal coverage (QG-13 hard block) | Configurable (QG-11 and QG-13 are never overridable) |
 | Phase 1c | Review status, HTML leak detection, and Outlook/email compatibility checks (QG-18) | Configurable |
 | Phase 1d | High-risk next-best-action coverage, open actions with owner/due-date coverage, milestone risk-link coverage, and cross-program dependency cascade resolution planning (QG-19) | Advisory (forceable) |
 | Chart gates | QG-20 chart freshness advisory, QG-21 decoded PNG size hard gate (100 KiB), QG-22 publish-blocking chart staleness | QG-21/22 are hard blocks; QG-20 is advisory (forceable) |
@@ -1983,7 +1984,7 @@ Quality gates are evaluated during `vertex confirm`. Gate phases:
 | QG-7 | Archive index consistent | No | Yes |
 | QG-9 | No overdue target dates on non-terminal items | No | Yes |
 | QG-10 | High-risk/closed items since last issue have authored narrative coverage | No | Yes |
-| QG-11 | No contradictions between current ADO state and prior-issue claims | No | Yes |
+| QG-11 | No contradictions between current ADO state and prior-issue claims | Yes | No |
 | QG-12 | No scorecard dimension at High risk for ≥3 consecutive issues without escalation | No | Yes |
 | QG-17 | Workstreams with multiple contradiction packets must acknowledge at least one contradicted work item in their authored narrative | No | Yes |
 | QG-18 | Rendered email HTML must remain Outlook-safe: no `<style>` blocks, no flex/grid inline layout, table styling stays inline, and inline hex colors stay within the canonical palette | No | Yes |
@@ -2074,21 +2075,29 @@ Every published fact must be source-traceable (INV-8). Three tiers:
 
 ### 15.1 Test Suite Structure
 
-2755 collected tests across 4 categories:
+The test-file and collected-case counts are derived by
+`scripts/derive_spec_counts.py`; they must not be hard-coded. The suite is
+partitioned by measured test-file duration in CI and remains one deterministic
+functional selection.
 
 | Category | Location | Purpose |
 |----------|---------|---------|
 | Unit tests | `tests/unit/` | Per-module correctness — engines, stores, renderers, commands |
-| Contract tests | `tests/contracts/` | Zone boundary enforcement (AST-level import checks) |
+| Contract tests | `tests/contracts/` | Zone boundaries, source authority, workflow integrity, publish and effect contracts |
 | Golden file tests | `tests/golden/` | Byte-level output comparison against checked-in reference files |
-| Integration markers | `@pytest.mark.integration` | Live ADO connectivity tests (opt-in via `--run-integration`) |
+| Deterministic integration tests | `tests/integration/` | Local provider cassettes and synthetic end-to-end workflows |
+| Live integration markers | `@pytest.mark.integration` | Authorized provider qualification (`--run-integration`) |
+| Performance lane | `@pytest.mark.perf` | Bounded latency, replay, and scale checks |
+| Operator qualification | `@pytest.mark.operator` | Private-data or operator-only checks excluded from public CI |
 
 ### 15.2 Test Infrastructure
 
-- **Fixtures:** `tests/fixtures/` — sample journal, trajectory, knowledge, edition, program configs
-- **Cassettes:** `tests/cassettes/` — recorded ADO API responses for deterministic replay
+- **Fixtures:** `tests/data/` — tracked synthetic journal, provider, evaluation, and edition data
 - **Shared helpers:** `tests/support/report_test_setup.py` — stages V2 temp workspace
 - **Golden update:** `--update-golden` flag to refresh golden files after reviewed changes
+- **Selection policy:** `governance/test-policy.json` — mandatory lanes, critical nodes, and coverage policy
+- **Partitioning:** `scripts/partition_tests.py` plus `governance/test-file-timings.json` produce disjoint CI shards
+- **Evidence:** `scripts/check_test_evidence.py` validates all required JUnit and combined coverage inputs before `Vertex required` can pass
 
 ### 15.3 Key Test Contracts
 
@@ -2103,11 +2112,10 @@ Every published fact must be source-traceable (INV-8). Three tiers:
 ### 15.4 Test Execution
 
 ```bash
-pytest tests/ -q                            # Full suite (2755 collected tests)
-pytest tests/contracts/ -q                  # Contract tests
-pytest tests/golden/ -q                     # Golden file tests
-pytest tests/ -k "v2 or journal" -q         # V2-specific tests
-pytest tests/ --run-integration             # Live ADO tests
+pytest tests/ -q -m "not perf and not integration and not operator"  # Public deterministic suite
+pytest tests/ -q -n 4 -m "not perf and not integration and not operator"
+pytest tests/ -q -m perf                    # Explicit bounded/scheduled performance lane
+pytest tests/ --run-integration             # Authorized live qualification only
 ```
 
 ---
@@ -2121,7 +2129,7 @@ pytest tests/ --run-integration             # Live ADO tests
 | ADO fetch (50 items) | <30 seconds | OData batch + REST batch hydration, configurable timeout |
 | Draft render | <5 seconds (cached data) | Jinja2 template rendering, deterministic pipeline |
 | Gather (ADO-only) | <60 seconds (100 items) | Batched revision fetching, trajectory dedup |
-| Full test suite | <120 seconds | No network I/O in unit tests; cassette replay |
+| Full deterministic functional lane | <120 seconds | 12 measured disjoint shards, explicit workers, no live network; cassette replay included |
 
 ### 16.2 Reliability
 

@@ -11,8 +11,11 @@ from typing import Any, cast
 import typer
 import yaml
 from src.commands.confirm_stages.deserialization import deserialize_items as _deserialize_items
-from src.commands.confirm_stages.deserialization import deserialize_kusto_sections as _deserialize_kusto_sections
+from src.commands.confirm_stages.deserialization import deserialize_kusto_sections as _deserialize_kusto_sections, restore_chart_placements as _restore_chart_placements
 from src.commands.confirm_stages.deserialization import parse_datetime_required as _parse_datetime_required
+from src.commands.confirm_stages.draft_loaders import ChartFreshnessExpired as _ChartFreshnessExpired
+from src.commands.confirm_stages.draft_loaders import chart_gate_failure_report as _chart_gate_failure_report
+from src.commands.confirm_stages.draft_loaders import require_retained_chart_freshness as _require_retained_chart_freshness
 from src.commands.confirm_stages.draft_loaders import load_confirm_overrides as _load_confirm_overrides
 from src.commands.confirm_stages.draft_loaders import load_confirm_review_status as _load_confirm_review_status
 from src.commands.confirm_stages.draft_loaders import ConfirmDraftManifest, load_confirm_draft_manifest as _load_confirm_draft_manifest
@@ -41,6 +44,7 @@ from src.commands.confirm_stages.post_confirm_artifacts import record_review_tra
 from src.commands.confirm_stages.post_confirm_artifacts import record_workstream_associations as _record_workstream_associations_impl
 from src.commands.confirm_stages.post_confirm_support import build_confirmed_eml_bytes as _build_confirmed_eml_bytes_impl
 from src.commands.confirm_stages.post_confirm_support import add_chart_index, render_confirm_result
+from src.commands.confirm_stages.post_confirm_support import collect_chart_cache_entries as _collect_chart_cache_entries
 from src.commands.confirm_stages.post_confirm_support import load_draft_continuation_contract_path as _load_draft_continuation_contract_path_impl
 from src.commands.confirm_stages.post_confirm_support import next_issue_narrative_templates as _next_issue_narrative_templates_impl
 from src.commands.confirm_stages.post_confirm_support import next_issue_number as _next_issue_number_impl
@@ -246,6 +250,9 @@ def confirm_command(
                 post_weekly_summary_card=post_weekly_summary_card,
                 skip_ncfl=skip_ncfl,
             )
+        except _ChartFreshnessExpired as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=3) from exc
         except ConfigError as exc:
             typer.echo(str(exc), err=True)
             raise typer.Exit(code=2) from exc
@@ -700,21 +707,9 @@ def confirm_issue(
             )
 
     # P4-3: collect chart cache entries for all chart-image kusto sections
-    chart_cache_entries: dict[str, dict[str, Any]] | None = None
-    if program_id is not None and kusto_sections:
-        chart_cache_entries = {}
-        for ks in kusto_sections:
-            if getattr(ks, "render_mode", None) == "chart_image" and ks.query_id:
-                entry = load_chart_cache(program_id, ks.query_id, programs_root=programs_root)
-                if entry is not None:
-                    chart_cache_entries[ks.query_id] = {
-                        "program_id": entry.program_id,
-                        "query_id": entry.query_id,
-                        "captured_at": entry.captured_at.isoformat(),
-                        "chart_config_hash": entry.chart_config_hash,
-                        "row_count": entry.row_count,
-                        "schema_version": entry.schema_version,
-                    }
+    chart_cache_entries = _collect_chart_cache_entries(
+        program_id, kusto_sections, programs_root=programs_root, load_chart_cache_fn=load_chart_cache,
+    )
 
     # P4-3: enrich manifest with chart index entries per spec R3-054
     if chart_cache_entries:
@@ -741,6 +736,7 @@ def confirm_issue(
             evaluate_fact_drift_fn=evaluate_program_fact_drift_from_draft,
             validate_pinned_gather_run_fn=_validate_pinned_gather_run,
         )
+        _require_retained_chart_freshness(draft_manifest, draft_state, datetime.now(timezone.utc))
 
     archive_transaction = _execute_archive_transaction_impl(
         edition_name=edition_name,
@@ -1359,7 +1355,9 @@ def _build_confirm_artifacts(
         type_scale_v2=bundle.config.type_scale_v2, executive_style=bundle.config.executive_style,
         continuity=continuity_render,
         show_footer=not _is_continuity_layout(bundle),
+        hidden_render_sections=frozenset(overrides_document.removed_sections),
     )
+    render_context = _restore_chart_placements(render_context, draft_state)
     if resolved_edition_type == EditionType.DECK:
         html_body = ""
         _deck_md = get_program_output_dir(edition_name, programs_root=programs_root) / f"issue_{issue_number:03d}" / f"issue_{issue_number:03d}.deck.md"
@@ -1606,7 +1604,11 @@ def _build_confirm_artifacts(
         program_id=program_id or "",
         programs_root=programs_root,
     )
-    qg_report = combine_gate_reports(qg_phase_1a, qg_phase_1b, qg_phase_1c, continuity_qg, bridge_qg, readiness_qg, context_integrity_qg)
+    chart_failures = _chart_gate_failure_report(draft_manifest, draft_state, started_at)
+    qg_report = combine_gate_reports(
+        qg_phase_1a, qg_phase_1b, qg_phase_1c, continuity_qg, bridge_qg, readiness_qg,
+        context_integrity_qg, chart_failures,
+    )
     source_health_qg = evaluate_source_health_gates(
         program_id=program_id,
         edition_name=edition_name,

@@ -9,7 +9,7 @@ from src.core.ledger.evidence_vault import evidence_vault_entry_status
 
 def test_extract_email_candidates_reads_structured_marker_lines_and_stores_evidence(tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
-    source_path = tmp_path / "DDPF_daily" / "2025-03-20 daily.eml"
+    source_path = tmp_path / "contoso_daily" / "2025-03-20 daily.eml"
     source_path.parent.mkdir(parents=True)
     source_path.write_text(
         "\n".join(
@@ -48,7 +48,7 @@ def test_extract_email_candidates_reads_structured_marker_lines_and_stores_evide
 
 def test_extract_email_candidates_ignores_unstructured_body_lines(tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
-    source_path = tmp_path / "DDPF_daily" / "2025-03-20 daily.eml"
+    source_path = tmp_path / "contoso_daily" / "2025-03-20 daily.eml"
     source_path.parent.mkdir(parents=True)
     source_path.write_text(
         "\n".join(

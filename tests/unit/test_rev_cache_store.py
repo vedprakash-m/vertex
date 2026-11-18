@@ -16,6 +16,7 @@ from typing import Any, Callable, TypeVar
 
 import pytest
 
+from src.core.rev import rev_cache_store
 from src.core.rev.rev_cache_store import (
     CACHE_SCHEMA_VERSION,
     EXTRACTION_MAXSIZE,
@@ -150,26 +151,79 @@ class TestExtractionCacheStore:
             programs_root=tmp_path, now_epoch=T0,
         ) is not None
 
-    def test_lru_eviction_at_maxsize(self, tmp_path: Path) -> None:
-        # Insert MAXSIZE+1 entries with strictly increasing accessed_at.
-        # After the (MAXSIZE+1)-th put, put_cached auto-evicts the oldest-accessed.
-        for i in range(EXTRACTION_MAXSIZE + 1):
+    def test_lru_eviction_at_maxsize(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(rev_cache_store, "EXTRACTION_MAXSIZE", 3)
+        for i in range(4):
             put_extraction_result(
                 program_id="p1", source_hash=f"h{i:04d}", prompt_version="rev_extractor.v1",
                 claims=[], programs_root=tmp_path, set_at_epoch=T0 + i, now_epoch=T0 + i,
             )
         stats = cache_stats("p1", "extraction", tmp_path)
-        assert stats.count == EXTRACTION_MAXSIZE
+        assert stats.count == 3
         # The oldest-accessed entry (h0000) was evicted; the newest (last) survives.
         assert get_extraction_result(
             program_id="p1", source_hash="h0000", prompt_version="rev_extractor.v1",
             programs_root=tmp_path, now_epoch=T0 + EXTRACTION_MAXSIZE,
         ) is None
         assert get_extraction_result(
-            program_id="p1", source_hash=f"h{EXTRACTION_MAXSIZE:04d}",
+            program_id="p1", source_hash="h0003",
             prompt_version="rev_extractor.v1",
-            programs_root=tmp_path, now_epoch=T0 + EXTRACTION_MAXSIZE,
+            programs_root=tmp_path, now_epoch=T0 + 3,
         ) is not None
+
+    def test_default_capacity_overflow_still_evicts_oldest(self, tmp_path: Path) -> None:
+        from src.core.rev.rev_cache_store import _entry_path
+
+        cache_dir = tmp_path / "p1" / "rev_cache" / "extraction"
+        cache_dir.mkdir(parents=True)
+        for index in range(EXTRACTION_MAXSIZE):
+            source_hash = f"default-{index:04d}"
+            path = _entry_path(
+                "p1",
+                "extraction",
+                (source_hash, "rev_extractor.v1"),
+                tmp_path,
+            )
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": CACHE_SCHEMA_VERSION,
+                        "kind": "extraction",
+                        "key": {
+                            "source_hash": source_hash,
+                            "prompt_version": "rev_extractor.v1",
+                        },
+                        "captured_at_epoch": T0 + index,
+                        "accessed_at_epoch": T0 + index,
+                        "payload": {
+                            "prompt_version": "rev_extractor.v1",
+                            "claims": [],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+        put_extraction_result(
+            program_id="p1",
+            source_hash=f"default-{EXTRACTION_MAXSIZE:04d}",
+            prompt_version="rev_extractor.v1",
+            claims=[],
+            programs_root=tmp_path,
+            set_at_epoch=T0 + EXTRACTION_MAXSIZE,
+            now_epoch=T0 + EXTRACTION_MAXSIZE,
+        )
+
+        assert cache_stats("p1", "extraction", tmp_path).count == EXTRACTION_MAXSIZE
+        assert get_extraction_result(
+            program_id="p1",
+            source_hash="default-0000",
+            prompt_version="rev_extractor.v1",
+            programs_root=tmp_path,
+            now_epoch=T0 + EXTRACTION_MAXSIZE,
+        ) is None
 
     def test_read_touches_accessed_at_saving_it_from_lru(self, tmp_path: Path) -> None:
         # Insert two old entries, then read the first so it becomes freshest.

@@ -8,191 +8,237 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  PYTHONDONTWRITEBYTECODE: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
 jobs:
-  validate:
+  guard:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.11"
-
-      - name: Install dependencies
-        # BL-C5: requirements.txt is retired. This installs the base package
-        # plus every optional extra (dev/ai/ai-local/m365/kusto/render) --
-        # the same superset requirements.txt + `pip install -e .` used to
-        # provide, now declared in one place (pyproject.toml).
-        #
-        # setuptools upgrade (2026-07-27, first real CI run): pyproject.toml's
-        # [build-system].requires only governs the ephemeral, discarded build
-        # isolation env `pip install -e .` uses to build the wheel -- it does
-        # NOT touch the setuptools already present in THIS target environment,
-        # which actions/setup-python@v5 ships pre-installed (79.0.1 as of this
-        # writing, vulnerable per PYSEC-2026-3447). Must upgrade it here
-        # explicitly or the pip-audit step below fails on every run.
+      - name: Install guard dependencies
+        run: python -m pip install --disable-pip-version-check "PyYAML==6.0.3"
+      - name: Verify candidate identity and base ancestry
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          python -m pip install --upgrade pip setuptools
-          python -m pip install -e ".[dev,ai,ai-local,m365,kusto,render]"
-
-      - name: Supply-chain audit (WS-7 — pip-audit against OSV)
-        # Runs `pip-audit --strict` against the currently installed
-        # environment (no --requirement flag; requirements.txt is retired).
-        # `--strict` makes pip-audit exit non-zero on ANY known
-        # vulnerability. OSV is the default keyless vulnerability service;
-        # no GitHub/GHSA token is needed for public PRs. Findings block the
-        # PR (continue-on-error is intentionally false).
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          if [[ "$BASE_SHA" =~ ^0{40}$ ]]; then
+            echo "Initial push has no event base; no ancestry comparison is possible."
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git merge-base --is-ancestor "$BASE_SHA" "$HEAD_SHA"
+            git merge-base --is-ancestor "$HEAD_SHA" "$GITHUB_SHA"
+          else
+            git cat-file -e "$BASE_SHA^{commit}"
+          fi
+      - name: Check canonical spec citations and drift
         run: |
-          python scripts/run_pip_audit.py --strict
+          python scripts/check_spec_drift.py
+          python scripts/check_backlog_citations.py specs/vertex-prd.md specs/vertex-tech-spec.md specs/vertex-ux-spec.md
+          python scripts/verify_spec_citations.py
+      - name: Check canonical spec bulk deletion
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          if [[ "$BASE_SHA" =~ ^0{40}$ ]]; then
+            echo "Initial push has no compare base; bulk-deletion comparison deferred."
+          else
+            python scripts/check_spec_bulk_deletion.py --base "$BASE_SHA" --head "$GITHUB_SHA"
+          fi
+      - name: Check privacy and secrets in changed publication content
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          if [[ "$BASE_SHA" =~ ^0{40}$ ]]; then
+            python scripts/check_publication_content.py
+          else
+            python scripts/check_publication_content.py --range "$BASE_SHA...$GITHUB_SHA"
+          fi
 
+  static:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-vertex
       - name: Check generated CLI reference
         run: python scripts/generate_cli_reference.py --check
+      - name: Type check
+        run: python -m mypy src/ --ignore-missing-imports --no-error-summary
+      - name: Check frozen install
+        run: python -m pip check
 
-      - name: Run full test suite
-        run: python -m pytest tests/ -q
+  functional:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-vertex
+      - name: Run functional shard with coverage
+        env:
+          SHARD: ${{ matrix.shard }}
+          COVERAGE_FILE: ${{ runner.temp }}/vertex-functional.coverage-${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/vertex-ci"
+          mapfile -t test_files < <(
+            python scripts/partition_tests.py \
+              --count 12 \
+              --index "$SHARD" \
+              --weights governance/test-file-timings.json \
+              --verify
+          )
+          python -m pytest "${test_files[@]}" -q -n 4 --dist load \
+            -m "not perf and not integration and not operator" \
+            --strict-markers \
+            --cov=src --cov=cli --cov-branch \
+            --cov-report="json:$RUNNER_TEMP/vertex-ci/coverage-${SHARD}.json" \
+            --junitxml="$RUNNER_TEMP/vertex-ci/functional-${SHARD}.xml" \
+            --durations=25 --durations-min=0.1
+      - name: Upload functional evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: functional-${{ matrix.shard }}
+          path: |
+            ${{ runner.temp }}/vertex-ci/functional-${{ matrix.shard }}.xml
+            ${{ runner.temp }}/vertex-ci/coverage-${{ matrix.shard }}.json
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 14
 
-      - name: Run chart performance budget
-        timeout-minutes: 3
-        run: python -m pytest -n 0 -m perf tests/unit/test_declarative_chart_builder.py::test_render_under_2_seconds -q
-
-      - name: Run ledger replay performance budget
-        timeout-minutes: 10
-        run: python -m pytest -n 0 -m perf tests/unit/test_ledger_perf.py::test_replay_perf_50k -q
-
-      - name: Run structural gap performance budgets
-        timeout-minutes: 3
-        run: python -m pytest -n 0 -m perf tests/contracts/test_structural_gap_rules.py::TestStructuralGapPerf -q
-
-      - name: Run pilot replay throughput budgets
-        timeout-minutes: 3
-        run: python -m pytest -n 0 -m perf tests/contracts/test_s11c_load_soak.py::TestReplayThroughput -q
-
-      - name: Run persona evaluation performance budget
-        timeout-minutes: 3
-        run: python -m pytest -n 0 -m perf tests/unit/test_persona_checker.py::test_full_registry_evaluation_under_500ms -q
-
+  performance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-vertex
+      - name: Run seven bounded performance nodes
+        run: |
+          python -m pytest -q -n 0 -m perf \
+            tests/unit/test_declarative_chart_builder.py::test_render_under_2_seconds \
+            tests/unit/test_ledger_perf.py::test_replay_perf_50k \
+            tests/contracts/test_structural_gap_rules.py::TestStructuralGapPerf::test_gap_evaluation_under_100ms_for_1000_facts \
+            tests/contracts/test_structural_gap_rules.py::TestStructuralGapPerf::test_gap_evaluation_with_all_rules_firing \
+            tests/contracts/test_s11c_load_soak.py::TestReplayThroughput::test_replay_throughput_meets_slo \
+            tests/contracts/test_s11c_load_soak.py::TestReplayThroughput::test_incremental_replay_is_at_least_as_fast_as_full_rebuild \
+            tests/unit/test_persona_checker.py::test_full_registry_evaluation_under_500ms \
+            --junitxml="$RUNNER_TEMP/performance-core.xml"
       - name: Run gather performance baseline
-        timeout-minutes: 3
         working-directory: ${{ runner.temp }}
         env:
           PYTHONPATH: ${{ github.workspace }}
-        run: python -m pytest -n 0 -m perf "${{ github.workspace }}/tests/perf/test_perf_baseline.py::test_perf_baseline_50_item_fixture" -q
+        run: |
+          python -m pytest -q -n 0 -m perf \
+            "$GITHUB_WORKSPACE/tests/perf/test_perf_baseline.py::test_perf_baseline_50_item_fixture" \
+            --junitxml="$RUNNER_TEMP/performance-gather.xml"
+      - name: Upload performance evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: performance
+          path: |
+            ${{ runner.temp }}/performance-core.xml
+            ${{ runner.temp }}/performance-gather.xml
+          if-no-files-found: warn
+          retention-days: 14
 
-      - name: Run contract suite
-        run: python -m pytest tests/contracts/ -q
-
-      - name: Run golden smoke
-        run: python -m pytest tests/golden/test_report_pipeline_snapshots.py -q
-
-      - name: Run coverage baseline suite
-        run: python -m pytest tests/unit/test_observability.py tests/unit/test_commands_gather.py tests/contracts/test_ai_safety_pipeline.py tests/contracts/test_import_boundaries.py -q --cov=src --cov-report=json:output/__coverage_tmp.json
-
-      - name: Check coverage baseline
-        run: python scripts/check_coverage_baseline.py output/__coverage_tmp.json
-
-      - name: Type check (mypy)
-        run: python -m mypy src/ --ignore-missing-imports --no-error-summary
-
-      - name: Spec drift guard (WS-9)
-        run: python scripts/check_spec_drift.py
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-vertex
+      - name: Audit the resolved environment
+        run: python scripts/run_pip_audit.py --strict
 
   extras-offline-wheel-check:
-    # BL-C5 (specs/backlog.md §7): pydantic-core (openai's transitive
-    # dependency, isolated into the `ai` extra so a base install never
-    # needs it) is a compiled/Rust wheel. If no prebuilt wheel exists for a
-    # given platform/Python combination, `pip install` silently falls back
-    # to a source build requiring a Rust toolchain most CI runners and
-    # locked-down operator machines don't have. This job proves (1) a base
-    # install genuinely never pulls in pydantic (the isolation this extras
-    # split exists for), and (2) every optional extra installs from
-    # prebuilt wheels only (`--only-binary=:all:`), so a missing-wheel
-    # regression is caught here rather than by a user's fresh install.
     runs-on: ubuntu-latest
+    timeout-minutes: 8
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.11"
-
-      - name: Base package installs wheel-only, no extras
+      - name: Base package installs wheel-only without AI transitive dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install --only-binary=:all: -e .
-
-      - name: Confirm base install does not pull in pydantic (extras isolation)
-        run: |
-          python -c "
-          import importlib.util
-          import sys
-          if importlib.util.find_spec('pydantic') is not None:
-              print('FAIL: pydantic importable from a base-only install; the ai extra is not actually isolated.', file=sys.stderr)
-              sys.exit(1)
-          print('OK: pydantic is not present in a base-only install.')
-          "
-
+          python -c "import importlib.util,sys; assert importlib.util.find_spec('pydantic') is None; sys.exit(0)"
       - name: Every optional extra installs wheel-only
         run: |
           set -euo pipefail
           for extra in ai ai-local m365 kusto render dev; do
-            echo "--- pip install --only-binary=:all: -e .[$extra] ---"
             python -m pip install --only-binary=:all: -e ".[$extra]"
           done
 
   fresh-clone-smoke:
-    # WS-16: fresh-clone → pip install → vertex --help → setup → doctor → migrate round-trip.
-    # Runs on a CLEAN clone with NO programs/ data. The repo is checked out fresh by
-    # `actions/checkout@v4` (no cache), then we `pip install`, then we run the
-    # smoke chain against a temporary programs-root that the job wipes on exit.
-    # Any failure here = a real user hitting `pip install` + `vertex ...` for the
-    # first time WILL fail. This is the ratchet that makes "does it install
-    # cleanly on a new machine?" a contract, not a vibe.
     runs-on: ubuntu-latest
+    timeout-minutes: 12
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.11"
-
-      - name: "Install dependencies (no cache, mirrors a fresh pip install)"
-        # BL-C5: requirements.txt is retired; extras replace the old
-        # `-r requirements.txt` + `pip install -e .` two-step.
+      - name: Install dependencies (no cache)
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip setuptools
           python -m pip install -e ".[dev,ai,ai-local,m365,kusto,render]"
-
-      - name: "Confirm vertex entry point is installed and CLI loads"
-        # `--help` must exit 0; any non-zero exit means the Typer tree is broken
-        # (typer/click pins, missing app.command, broken app.add_typer).
+      - name: Confirm vertex entry point is installed and CLI loads
         run: |
           set -euo pipefail
           vertex --help
           vx --help
           python -c "from cli import app; import typer; typer.main.get_command(app)"
-
       - name: Set up isolated test program on a temp programs-root
-        # We deliberately do NOT touch the repo's `programs/` (program data is gitignored
-        # and operator-managed; CI must not depend on it). Instead we materialize
-        # the tracked `_templates/example_tpm` into a tmpdir and point every
-        # command at it via VERTEX_PROGRAMS_ROOT.
         run: |
           set -euo pipefail
           TMP_PROGRAMS=$(mktemp -d -t vertex-fresh-clone-XXXXXX)
           echo "TMP_PROGRAMS=${TMP_PROGRAMS}" >> "$GITHUB_ENV"
-          # Copy the tracked template into our isolated root
           mkdir -p "${TMP_PROGRAMS}/_templates"
           cp -R programs/_templates/example_tpm "${TMP_PROGRAMS}/_templates/"
-          python scripts/setup_test_program.py \
-            --template example_tpm \
-            --program freshclone \
-            --programs-root "${TMP_PROGRAMS}"
-          # Sanity: the program materialized
+          python scripts/setup_test_program.py --template example_tpm --program freshclone --programs-root "${TMP_PROGRAMS}"
           test -f "${TMP_PROGRAMS}/freshclone/program.yaml"
-          test -f "${TMP_PROGRAMS}/freshclone/.bootstrapped"
+          if [ -d programs/freshclone ]; then
+            echo "FAIL: setup wrote into the checkout programs directory" >&2
+            exit 1
+          fi
           python - "${TMP_PROGRAMS}" <<'PY'
           import sys
           from pathlib import Path
@@ -207,15 +253,7 @@ jobs:
               data[field] = "freshclone"
               path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
           PY
-          # And is gitignored-friendly: nothing leaked into the real programs/
-          # directory in the repo working tree.
-          if [ -d programs/freshclone ]; then
-            echo "FAIL: setup_test_program wrote into the repo's programs/ — should be isolated" >&2
-            exit 1
-          fi
-
-      - name: "vertex doctor against the fresh-clone program"
-        # Completed unhealthy reports are expected without credentials; crashes are not.
+      - name: vertex doctor against the fresh-clone program
         env:
           VERTEX_PROGRAMS_ROOT: ${{ env.TMP_PROGRAMS }}
         run: |
@@ -224,7 +262,6 @@ jobs:
           import json
           import os
           import subprocess
-          import sys
 
           if not os.environ.get("VERTEX_PROGRAMS_ROOT"):
               raise SystemExit("FAIL: doctor smoke requires an isolated programs root")
@@ -233,7 +270,7 @@ jobs:
               capture_output=True, text=True, timeout=600, check=False,
           )
           print(result.stdout, end="")
-          print(result.stderr, end="", file=sys.stderr)
+          print(result.stderr, end="", file=__import__("sys").stderr)
           if result.returncode not in (0, 1):
               raise SystemExit(f"FAIL: unexpected doctor exit code {result.returncode}")
           if "Traceback (most recent call last):" in result.stdout + result.stderr:
@@ -250,117 +287,139 @@ jobs:
           failures = sum(check["status"] in ("fail", "error") for check in checks)
           warnings = sum(check["status"] == "warn" for check in checks)
           if (
-              type(payload.get("failures")) is not int or payload["failures"] != failures
-              or type(payload.get("warnings")) is not int or payload["warnings"] != warnings
+              type(payload.get("failures")) is not int
+              or payload["failures"] != failures
+              or type(payload.get("warnings")) is not int
+              or payload["warnings"] != warnings
               or payload.get("overall") != ("UNHEALTHY" if failures else "HEALTHY")
               or result.returncode != int(failures > 0)
           ):
               raise SystemExit("FAIL: doctor exit code and health summary disagree")
-          print(f"Doctor smoke completed: {len(checks)} checks, {failures} failed, {warnings} warned")
           subprocess.run(["vertex", "doctor", "--help"], timeout=600, check=True)
           PY
-
-      - name: "Schema-major migration round-trip: file to sqlite to file (with rollback)"
-        # Spec WS-16 acceptance: "schema-major migration round-trips with
-        # rollback; existing programs upgrade cleanly." We seed a tiny file
-        # history, migrate file->sqlite, verify counts, then file->sqlite
-        # rollback path, then a final dry-run to prove idempotence.
-        # VERTEX_PROGRAMS_ROOT env var points all vertex commands at the
-        # isolated tmpdir so they never touch the repo's programs/ directory.
+      - name: Schema-major migration and analytics round-trip
         env:
           VERTEX_PROGRAMS_ROOT: ${{ env.TMP_PROGRAMS }}
         run: |
           set -euo pipefail
-          python - <<'PY'
-          """Seed a deterministic file-side history on the fresh program and
-          prove the file->sqlite round-trip is lossless."""
-          import json, os
-          from datetime import datetime, timezone
-          from pathlib import Path
-
-          programs_root = Path(os.environ["TMP_PROGRAMS"])
-          prog = programs_root / "freshclone"
-          captured_at = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc).isoformat()
-
-          # Seed two signal files (file-backend history)
-          (prog / "signals").mkdir(parents=True, exist_ok=True)
-          for i, sig in enumerate([
-              {"id": "smoke-1", "kind": "smoke", "captured_at": captured_at, "payload": {"i": 1}},
-              {"id": "smoke-2", "kind": "smoke", "captured_at": captured_at, "payload": {"i": 2}},
-          ], start=1):
-              (prog / "signals" / f"{sig['id']}.json").write_text(json.dumps(sig, indent=2), encoding="utf-8")
-
-          # Seed one review decision (file-backend review log)
-          reviews = prog / "reviews.jsonl"
-          with reviews.open("a", encoding="utf-8") as fh:
-              fh.write(json.dumps({
-                  "signal_id": "smoke-1",
-                  "decision": "accept",
-                  "captured_at": captured_at,
-              }) + "\n")
-
-          print(f"OK: seeded {len(list((prog/'signals').glob('*.json')))} signals + 1 review")
-          PY
-
-          # Round-trip 1: file -> sqlite (with --dry-run, then real)
-          echo "--- file -> sqlite (dry run) ---"
           vertex migrate --program freshclone --to sqlite --dry-run
-          echo "--- file -> sqlite (real) ---"
-          vertex migrate --program freshclone --to sqlite
-
-          # Verify program.yaml was updated AND the sqlite store was written
-          python - <<'PY'
-          import os, yaml
-          from pathlib import Path
-          programs_root = Path(os.environ["TMP_PROGRAMS"])
-          prog_yaml = yaml.safe_load((programs_root / "freshclone" / "program.yaml").read_text(encoding="utf-8"))
-          assert prog_yaml.get("storage_backend") == "sqlite", f"storage_backend not flipped: {prog_yaml}"
-          sqlite_path = programs_root / "freshclone" / "vertex_store.sqlite3"
-          assert sqlite_path.exists(), f"expected {sqlite_path} to exist after migration"
-          print(f"OK: storage_backend=sqlite + vertex_store.sqlite3 exists ({sqlite_path.stat().st_size} bytes)")
-          PY
-
-          # Round-trip 2: sqlite -> file (rollback path)
-          echo "--- sqlite -> file (rollback) ---"
-          vertex migrate --program freshclone --to file
-
-          # Verify program.yaml was flipped back AND the sqlite store was removed
-          python - <<'PY'
-          import os, yaml
-          from pathlib import Path
-          programs_root = Path(os.environ["TMP_PROGRAMS"])
-          prog_yaml = yaml.safe_load((programs_root / "freshclone" / "program.yaml").read_text(encoding="utf-8"))
-          # After file rollback, the key MUST be gone or explicitly 'file'
-          backend = prog_yaml.get("storage_backend")
-          assert backend in (None, "file"), f"rollback did not remove sqlite backend: {backend!r}"
-          sqlite_path = programs_root / "freshclone" / "vertex_store.sqlite3"
-          assert not sqlite_path.exists(), f"sqlite store should be removed on rollback; still at {sqlite_path}"
-          # And the file-side history is still there (round-trip is lossless)
-          assert (programs_root / "freshclone" / "signals" / "smoke-1.json").exists()
-          assert (programs_root / "freshclone" / "reviews.jsonl").exists()
-          print("OK: rollback removed sqlite store + kept file history intact")
-          PY
-
-      - name: Analytics rebuild (--rebuild-analytics) round-trip
-        # The second migration verb is --rebuild-analytics (a no-migration
-        # in-place rebuild of the per-program analytics projection). We
-        # re-flip to sqlite, then run --rebuild-analytics, then assert the
-        # projection is non-empty. This is the third leg of the round-trip
-        # contract: migration -> projection rebuild -> still readable.
-        env:
-          VERTEX_PROGRAMS_ROOT: ${{ env.TMP_PROGRAMS }}
-        run: |
-          set -euo pipefail
           vertex migrate --program freshclone --to sqlite
           vertex migrate --program freshclone --rebuild-analytics
           vertex migrate --program freshclone --to file
-          echo "OK: --rebuild-analytics round-trip closed"
-
       - name: Tidy up isolated test program
         if: always()
-        # Even if a step failed we should not leave the temp dir on the
-        # runner; actions/checkout is by default clean: true on the
-        # next job, but a cross-runner leak would be ugly. GITHUB_ENV
-        # already points us at the path.
+        run: rm -rf "${TMP_PROGRAMS:-/tmp/vertex-fresh-clone-noop}"
+
+  windows-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-vertex
+      - name: Run selected Windows-specific tests
+        shell: pwsh
         run: |
-          rm -rf "${TMP_PROGRAMS:-/tmp/vertex-fresh-clone-noop}" || true
+          python -m pytest -q -n 0 `
+            tests/unit/test_cli_help_encoding.py::test_cli_help_with_legacy_windows_output_encoding `
+            tests/unit/test_fact_sor_state.py::test_fact_sor_reader_retries_transient_replacement_contention `
+            tests/unit/test_fact_sor_state.py::test_fact_sor_reader_surfaces_persistent_permission_failure `
+            tests/unit/test_fact_sor_state.py::test_fact_sor_writer_retries_transient_replacement_contention `
+            tests/unit/test_jsonl_utils.py::TestRotateJsonlIfOversize::test_same_second_rotation_accounts_for_case_insensitive_existing_names `
+            tests/unit/test_jsonl_utils.py::TestListRotatedJsonlPaths::test_canonical_stem_scope_is_case_insensitive_on_windows `
+            tests/unit/test_confirm_archive_evidence_recheck_process.py::test_actual_confirm_fences_cooperating_writer_in_another_process `
+            --junitxml="$env:RUNNER_TEMP\windows-smoke.xml"
+      - name: Upload Windows evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-smoke
+          path: ${{ runner.temp }}/windows-smoke.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+  vertex-required:
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs:
+      - guard
+      - static
+      - functional
+      - performance
+      - audit
+      - fresh-clone-smoke
+      - extras-offline-wheel-check
+      - windows-smoke
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: functional-*
+          path: ${{ runner.temp }}/vertex-evidence
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: performance
+          path: ${{ runner.temp }}/vertex-evidence
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: windows-smoke
+          path: ${{ runner.temp }}/vertex-evidence
+      - name: Require successful child jobs
+        env:
+          RESULTS: ${{ toJson(needs) }}
+        run: |
+          python - "$RESULTS" <<'PY'
+          import json
+          import sys
+
+          results = json.loads(sys.argv[1])
+          failed = {
+              name: detail.get("result")
+              for name, detail in results.items()
+              if detail.get("result") != "success"
+          }
+          if failed:
+              raise SystemExit(f"Required jobs did not succeed: {failed}")
+          PY
+      - name: Validate complete functional, performance, and coverage evidence
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          python scripts/check_test_evidence.py \
+            --policy governance/test-policy.json \
+            --base "$BASE_SHA" \
+            --junit \
+              "${{ runner.temp }}/vertex-evidence/functional-0.xml" \
+              "${{ runner.temp }}/vertex-evidence/functional-1.xml" \
+              "${{ runner.temp }}/vertex-evidence/functional-2.xml" \
+              "${{ runner.temp }}/vertex-evidence/functional-3.xml" \
+              "${{ runner.temp }}/vertex-evidence/functional-4.xml" \
+              "${{ runner.temp }}/vertex-evidence/functional-5.xml" \
+              "${{ runner.temp }}/vertex-evidence/functional-6.xml" \
+              "${{ runner.temp }}/vertex-evidence/functional-7.xml" \
+              "${{ runner.temp }}/vertex-evidence/functional-8.xml" \
+              "${{ runner.temp }}/vertex-evidence/functional-9.xml" \
+              "${{ runner.temp }}/vertex-evidence/functional-10.xml" \
+              "${{ runner.temp }}/vertex-evidence/functional-11.xml" \
+              "${{ runner.temp }}/vertex-evidence/performance-core.xml" \
+              "${{ runner.temp }}/vertex-evidence/performance-gather.xml" \
+              "${{ runner.temp }}/vertex-evidence/windows-smoke.xml" \
+            --coverage \
+              "${{ runner.temp }}/vertex-evidence/coverage-0.json" \
+              "${{ runner.temp }}/vertex-evidence/coverage-1.json" \
+              "${{ runner.temp }}/vertex-evidence/coverage-2.json" \
+              "${{ runner.temp }}/vertex-evidence/coverage-3.json" \
+              "${{ runner.temp }}/vertex-evidence/coverage-4.json" \
+              "${{ runner.temp }}/vertex-evidence/coverage-5.json" \
+              "${{ runner.temp }}/vertex-evidence/coverage-6.json" \
+              "${{ runner.temp }}/vertex-evidence/coverage-7.json" \
+              "${{ runner.temp }}/vertex-evidence/coverage-8.json" \
+              "${{ runner.temp }}/vertex-evidence/coverage-9.json" \
+              "${{ runner.temp }}/vertex-evidence/coverage-10.json" \
+              "${{ runner.temp }}/vertex-evidence/coverage-11.json"

@@ -18,6 +18,7 @@ from src.m365.workiq_ask_support import (
     DiscoveryRequest,
     _is_native_workiq_identity,
     _normalize_discovery_identity,
+    _parse_iso_datetime,
     build_structured_discovery_question,
     validate_structured_discovery_payload_with_diagnostics,
 )
@@ -82,13 +83,15 @@ def retrieve_workiq_threads(
         if cached.get("freshness_hash") == freshness and cached.get("status") == "success":
             skipped += 1
             continue
+        timestamp = _parse_iso_datetime(record.get("receivedDateTime"))
+        if timestamp is None:
+            raise ValueError("Invalid validated WorkIQ source time")
         question = _thread_extraction_question(record, request=request, one_hop=one_hop)
         raw = bridge.ask_workiq(question, use_cache=False)
         calls += 1
         body = _response_text(raw)
         if not body:
             continue
-        timestamp = _parse_timestamp(record.get("receivedDateTime"))
         enrichments.append(
             Enrichment(
                 source="mail",
@@ -157,14 +160,6 @@ def _sender_text(value: Any) -> str:
     if isinstance(value, dict):
         return str(value.get("emailAddress", {}).get("address") or value.get("address") or value.get("name") or "workiq")[:120]
     return "workiq"
-
-
-def _parse_timestamp(value: Any) -> datetime:
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return datetime.now(timezone.utc)
-    return parsed.replace(tzinfo=parsed.tzinfo or timezone.utc).astimezone(timezone.utc)
 
 
 def _bounded_message_count(value: Any) -> int:

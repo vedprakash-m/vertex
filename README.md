@@ -222,9 +222,10 @@ python -m venv .venv
 source .venv/bin/activate  # On Windows: .\.venv\Scripts\activate
 
 # Install the platform (editable) plus every optional integration and dev tool.
-# Drop extras you don't need, e.g. `pip install -e .` for a minimal core install.
 pip install -e ".[dev,ai,ai-local,m365,kusto,render]"
 ```
+
+This editable install from a source checkout is the only supported install mode. Vertex is not distributed as a wheel or published package.
 
 Configure your local environment by copying the example:
 ```bash
@@ -236,8 +237,18 @@ Canonical specs live in `specs/vertex-prd.md`, `specs/vertex-tech-spec.md`, and 
 
 ### 3. Verify
 ```bash
-pytest tests/ -q
+pytest tests/ -q -m "not perf and not integration and not operator"
+# Opt into measured local parallelism:
+pytest tests/ -q -n 4 -m "not perf and not integration and not operator"
+# Explicit bounded performance lane:
+pytest tests/ -q -m perf
 ```
+
+The public deterministic selection includes offline provider cassettes and
+synthetic integration tests. `integration` is reserved for authorized live
+provider use; `operator` is reserved for private-data or scheduled operator
+qualification. CI uses measured disjoint shards, complete line/branch coverage,
+and a fail-closed `Vertex required` aggregate.
 
 Report and nudge regression fixtures are deliberately synthetic and live under `tests/data/`; public rendering baselines live under `tests/golden/public_snapshots/`. They do not require private program trees or recorded operational cassettes. Regenerate a baseline only with an explicit `--update-golden` run after reviewing the intended change, then rerun without that option. Synthetic tests do not establish operational readiness.
 

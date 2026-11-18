@@ -6,6 +6,7 @@ from textwrap import dedent, indent
 import unittest
 from unittest.mock import patch
 
+import pytest
 import yaml
 
 from src.core.config_loader import discover_report_editions, load_bundle_with_mode, load_editorial_rules, load_program_context, load_report_bundle, load_report_config
@@ -167,13 +168,13 @@ people:
 schema_version: "1.0"
 queries:
   - id: velocity-p50
-    cluster: https://adventure.kusto.windows.net
+    cluster: https://kusto.example.invalid
     database: ExampleDb4
     kql: Demo | take 1
     section: Demo Telemetry
     render_as: table
     confidence: high
-    reference_url: https://adventure.kusto.windows.net
+    reference_url: https://kusto.example.invalid
     program_ids: [demo]
     validated: true
 """.strip(),
@@ -708,21 +709,23 @@ scorecards:
             self.assertEqual(linked_settings.description, "Shared deployment evidence")
             self.assertEqual(linked_settings.ado_filter, "tag contains 'Deployment'")
 
-    def test_load_bundle_with_mode_includes_canonical_ddpf_diag_dimension_in_live_nova_config(self) -> None:
+    @pytest.mark.operator
+    def test_load_bundle_with_mode_includes_canonical_contoso_diag_dimension_in_live_nova_config(self) -> None:
       from src.core.edition_resolver import EDITIONS_ROOT
       if not (EDITIONS_ROOT / "acme_weekly.yaml").exists():
           self.skipTest("Requires local edition data")
       bundle = load_report_bundle("acme_weekly")
 
-      ddpf_scorecard = next(
+      contoso_scorecard = next(
         scorecard for scorecard in bundle.config.scorecards if scorecard.name == "Contoso Pilot Readiness"
       )
-      dimension_names = tuple(dimension.name for dimension in ddpf_scorecard.dimensions)
+      dimension_names = tuple(dimension.name for dimension in contoso_scorecard.dimensions)
 
       self.assertIn("Deploy. Velocity", dimension_names)
       self.assertIn("Repairs & Safety", dimension_names)
       self.assertEqual(len(dimension_names), 9)
 
+    @pytest.mark.operator
     def test_discover_report_editions_returns_nova(self) -> None:
         from src.core.edition_resolver import EDITIONS_ROOT
         if not (EDITIONS_ROOT / "acme_weekly.yaml").exists():
@@ -732,6 +735,7 @@ scorecards:
             ("samplefleet_nudge", "fabrikam_weekly", "nova_daily", "nova_lt_deck", "nova_nudge", "nova_quarterly", "acme_weekly"),
         )
 
+    @pytest.mark.operator
     def test_load_bundle_with_mode_reads_new_v2_nova_editions(self) -> None:
         from src.core.edition_resolver import EDITIONS_ROOT
         if not (EDITIONS_ROOT / "nova_daily.yaml").exists():
@@ -755,6 +759,7 @@ scorecards:
         self.assertEqual(fabrikam.bundle.program_context.program_name, "Fabrikam")
         self.assertEqual(fabrikam.bundle.config.scorecards[0].name, "Fabrikam Weekly Update")
 
+    @pytest.mark.operator
     def test_load_report_config_returns_expected_shape(self) -> None:
         from src.core.edition_resolver import EDITIONS_ROOT
         if not (EDITIONS_ROOT / "acme_weekly.yaml").exists():
@@ -829,20 +834,21 @@ scorecards:
         self.assertEqual(config.m365.offline.newsletter_dir, "offline/emails")
         self.assertEqual(config.m365.offline.transcript_dir, "offline/transcripts")
 
-    def test_resolve_edition_includes_live_ddpf_saved_query_ids(self) -> None:
+    @pytest.mark.operator
+    def test_resolve_edition_includes_live_contoso_saved_query_ids(self) -> None:
       from src.core.edition_resolver import EDITIONS_ROOT
       if not (EDITIONS_ROOT / "acme_weekly.yaml").exists():
           self.skipTest("Requires local edition data")
       resolved = resolve_edition("acme_weekly")
 
       assert resolved is not None
-      ddpf_workstream = next(
+      contoso_workstream = next(
         workstream for workstream in resolved.workstreams if workstream.id == "exd_on_exn"
         )
 
-      self.assertGreaterEqual(len(ddpf_workstream.ado_saved_query_ids), 4)
-      self.assertIn("00000000-0000-4000-8000-000000000001", ddpf_workstream.ado_saved_query_ids)
-      self.assertIn("00000000-0000-4000-8000-000000000003", ddpf_workstream.ado_saved_query_ids)
+      self.assertGreaterEqual(len(contoso_workstream.ado_saved_query_ids), 4)
+      self.assertIn("00000000-0000-4000-8000-000000000001", contoso_workstream.ado_saved_query_ids)
+      self.assertIn("00000000-0000-4000-8000-000000000003", contoso_workstream.ado_saved_query_ids)
 
     def test_load_report_config_reads_timeout_alias_and_ux_flags(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -905,6 +911,7 @@ ado_fetch_timeout_seconds: 45
 
         self.assertEqual(config.ado.proposal_ttl_hours, 96)
 
+    @pytest.mark.operator
     def test_load_report_config_substitutes_present_env_values(self) -> None:
         with patch.dict(
             "os.environ",
@@ -947,6 +954,7 @@ ado_fetch_timeout_seconds: 45
         self.assertEqual(config.ai.exec_summary_deployment, "primary-exec")
         self.assertEqual(config.ai.exec_summary_backup_deployment, "backup-exec")
 
+    @pytest.mark.operator
     def test_load_report_bundle_includes_program_context_and_rules(self) -> None:
         from src.core.edition_resolver import EDITIONS_ROOT
         if not (EDITIONS_ROOT / "acme_weekly.yaml").exists():

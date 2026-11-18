@@ -903,7 +903,7 @@ Use --drill to run the rollback in a sandbox and record proof s7a_rollback_drill
 | --no-seed | boolean | No | False | Skip trusted-baseline narrative seeding for this run and render from scaffold templates or existing narratives instead. |
 | --offline | boolean | No | False | Render from the newest cached snapshot without live ADO or Kusto calls. |
 | --diff | boolean | No | False | Compare the current draft against the last dry-run and print a diff summary. |
-| --send-draft | boolean | No | False | Send the rendered draft to the author's mailbox for Outlook preview. |
+| --send-draft | boolean | No | False | Send the rendered draft to the author's mailbox for Outlook preview; incompatible with --dry-run. |
 | --ai-review | boolean | No | False | Run advisory draft review suggestions after rendering the dry-run draft. |
 | --no-ai | boolean | No | False | Suppress optional AI-powered draft review helpers. |
 | --as-of [%Y-%m-%d\|%Y-%m-%dT%H:%M:%S\|%Y-%m-%d %H:%M:%S] | datetime | No |  | Override ADO data timestamp in UTC. |
@@ -941,7 +941,7 @@ Use --drill to run the rollback in a sandbox and record proof s7a_rollback_drill
 | --no-seed | boolean | No | False | Skip trusted-baseline narrative seeding for this run and render from scaffold templates or existing narratives instead. |
 | --offline | boolean | No | False | Render from the newest cached snapshot without live ADO or Kusto calls. |
 | --diff | boolean | No | False | Compare the current draft against the last dry-run and print a diff summary. |
-| --send-draft | boolean | No | False | Send the rendered draft to the author's mailbox for Outlook preview. |
+| --send-draft | boolean | No | False | Send the rendered draft to the author's mailbox for Outlook preview; incompatible with --dry-run. |
 | --ai-review | boolean | No | False | Run advisory draft review suggestions after rendering the dry-run draft. |
 | --no-ai | boolean | No | False | Suppress optional AI-powered draft review helpers. |
 | --as-of [%Y-%m-%d\|%Y-%m-%dT%H:%M:%S\|%Y-%m-%d %H:%M:%S] | datetime | No |  | Override ADO data timestamp in UTC. |
@@ -2442,6 +2442,7 @@ Program/platform/economics/value cockpit (read-only projection).
 | `autonomy-evaluate` | ADF-W5.12 (Section 8.15.1): runs the automatic evidence-based L0/L1/L2 |
 | `autonomy-promote` | The explicit, human-gated path -- required for L3/L4 (Section 8.15.1's |
 | `autonomy-demote` | Manual one-level demotion for a material contradiction, duplicate |
+| `exceptions` | RELO-W4.12: read-only prioritized exception queue ranked from existing |
 
 #### `vertex cockpit show`
 
@@ -2626,6 +2627,20 @@ evaluator cannot detect (Section 8.15.1).
 | --program TEXT | text | Yes |  | Program id, e.g. acme. |
 | --class TEXT | text | Yes |  | One of: risk, meeting_action, top_three, governance_decision_brief, dependency_blast_radius. |
 | --reason TEXT | text | Yes |  | Why this class is being demoted. |
+
+#### `vertex cockpit exceptions`
+
+**Usage:** `vertex cockpit exceptions [OPTIONS]`
+
+RELO-W4.12: read-only prioritized exception queue ranked from existing
+risk-register and action-journal signals. Writes nothing.
+
+**Options**
+
+| Option | Type | Required | Default | Description |
+|---|---|---|---|---|
+| --program TEXT | text | Yes |  | Program id, e.g. acme. |
+| --as-of TEXT | text | No |  | Date (YYYY-MM-DD) for age checks, not historical replay (default: today, UTC). |
 
 ### `vertex calibration`
 

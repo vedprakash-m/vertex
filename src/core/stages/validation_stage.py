@@ -340,6 +340,22 @@ class ValidationStage:
             metadata={
                 **manifest_metadata,
                 "draft_readiness": draft_readiness.to_payload(),
+                **({
+                    "chart_binding_edition_type": report.edition.value,
+                    "chart_routing_capture": "v1",
+                    "chart_freshness_evidence": tuple(
+                        {
+                            "query_id": section.query_id,
+                            "chart_blocks_publish": section.chart_blocks_publish,
+                            "is_degraded": section.is_degraded,
+                            "chart_cache_ttl_hours": section.chart_cache_ttl_hours,
+                            "captured_at": section.captured_at,
+                            "cache_captured_at": section.cache_captured_at,
+                        }
+                        for section in chart_gate_sections
+                        if section.chart_blocks_publish and section.is_degraded
+                    ),
+                } if render_state.chart_gates_enabled else {}),
             },
             gather_run_id=ctx.gather_run_id,
             gather_run_hash=ctx.gather_run_hash,

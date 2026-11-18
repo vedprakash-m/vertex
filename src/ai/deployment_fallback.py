@@ -16,8 +16,11 @@ from typing import Any, Callable, TypeVar
 from src.ai.client import (
     AIClient,
     AIClientError,
+    AIPreflightError,
     NON_RETRYABLE_AI_ERRORS,
     _FeatureBudgetState,
+    open_cost_chain,
+    run_in_cost_chain,
 )
 from src.ai.llm_trace import AITraceContext
 from src.ai.provider import LLMProvider
@@ -25,6 +28,7 @@ from src.core.policy_loader import load_ai_feature_policy
 
 
 StructuredResponse = TypeVar("StructuredResponse")
+ResultT = TypeVar("ResultT")
 _BUILTIN_AI_CLIENT = AIClient
 
 
@@ -139,26 +143,9 @@ class FallbackAIClient:
         max_tokens: int = 800,
         prompt_version: str | None = None,
     ) -> str:
-        last_error: BaseException | None = None
-
-        for deployment in self._deployments:
-            try:
-                client = self._get_client(deployment)
-                return client.chat(
-                    system,
-                    user,
-                    max_tokens=max_tokens,
-                    prompt_version=prompt_version,
-                )
-            except NON_RETRYABLE_AI_ERRORS:
-                raise
-            except self._retryable_exceptions as error:
-                last_error = error
-                continue
-
-        if last_error is not None:
-            raise AIClientError(str(last_error)) from last_error
-        raise AIClientError(_MISSING_AZURE_OPENAI_DEPLOYMENT_MESSAGE)
+        return self._dispatch(system, user, max_tokens, lambda client: client.chat(
+            system, user, max_tokens=max_tokens, prompt_version=prompt_version,
+        ))
 
     def structured(
         self,
@@ -169,18 +156,49 @@ class FallbackAIClient:
         max_tokens: int = 800,
         prompt_version: str | None = None,
     ) -> StructuredResponse:
+        return self._dispatch(system, user, max_tokens, lambda client: client.structured(
+            system, user, parser=parser, max_tokens=max_tokens, prompt_version=prompt_version,
+        ))
+
+    def _dispatch(self, system: str, user: str, max_tokens: int, invoke: Callable[[LLMProvider], ResultT]) -> ResultT:
+        failed: dict[str, BaseException] = {}
+        chain = self._open_cost_chain(failed)
+        return run_in_cost_chain(chain, lambda: self._fallback(invoke, failed))
+
+    def _open_cost_chain(self, failed: dict[str, BaseException]) -> Any:
+        """Price the whole retry/fallback chain before the first dispatch (RELO-W1.4).
+
+        The first constructible client prices every deployment; backups stay lazily
+        constructed. Non-``AIClient`` providers keep per-attempt admission.
+        """
+        for index, deployment in enumerate(self._deployments):
+            try:
+                primary = self._get_client(deployment)
+            except NON_RETRYABLE_AI_ERRORS:
+                raise
+            except self._retryable_exceptions as error:
+                failed[deployment] = error
+                continue
+            try:
+                return open_cost_chain(primary, self._deployments[index:])
+            except NON_RETRYABLE_AI_ERRORS:
+                raise
+            except Exception as error:
+                raise AIPreflightError(
+                    f"AI budget reservation failed ({type(error).__name__}); "
+                    "reconcile retained reservations before retrying."
+                ) from None
+        return None
+
+    def _fallback(self, invoke: Callable[[LLMProvider], ResultT], failed: dict[str, BaseException]) -> ResultT:
         last_error: BaseException | None = None
 
         for deployment in self._deployments:
+            if deployment in failed:
+                last_error = failed[deployment]
+                continue
             try:
-                client = self._get_client(deployment)
-                return client.structured(
-                    system,
-                    user,
-                    parser=parser,
-                    max_tokens=max_tokens,
-                    prompt_version=prompt_version,
-                )
+                return invoke(self._get_client(deployment))
             except NON_RETRYABLE_AI_ERRORS:
                 raise
             except self._retryable_exceptions as error:

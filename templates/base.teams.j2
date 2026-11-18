@@ -61,6 +61,10 @@ Risk Load: {{ '%.1f' | format(health.risk_load) }}{% if health.risk_load_incompl
 {% elif section.kind == "exec_summary" %}
 ## Executive Summary
 {{ report.exec_summary_text }}
+{% if exec_summary_chart and (exec_summary_chart.render_mode == "chart" or (exec_summary_chart.render_mode == "chart_image" and exec_summary_chart.image_data_url)) %}
+{% set ks = exec_summary_chart %}
+{% include "partials/teams_chart_summary.j2" %}
+{% endif %}
 
 {% elif section.kind == "incident_learning" %}
 {% set incident_learning = section.incident_learning %}
@@ -182,6 +186,11 @@ Query {{ subgroup.query_id }} · {{ subgroup.source_label }} · Confidence {{ su
 {% if ws.kpi_tiles %}KPIs:
 {% for tile in ws.kpi_tiles %}- **{{ tile.label }}**{% if tile.shared %} _(shared)_{% endif %}: {{ tile.value }}{% if tile.confidence %} ({{ tile.confidence | lower }} confidence){% endif %}{% if tile.as_of %} | as of {{ tile.as_of | format_date("%b %d") }}{% endif %}
 {% endfor %}{% endif %}
+{% for ks in ws.attached_charts %}
+{% if ks.render_mode == "chart" or (ks.render_mode == "chart_image" and ks.image_data_url) %}
+{% include "partials/teams_chart_summary.j2" %}
+{% endif %}
+{% endfor %}
 {% if ws.significant_findings %}ADO findings:
 {% for finding in ws.significant_findings %}- {{ finding | linkify_ado_tokens_markdown }}
 {% endfor %}{% endif %}

@@ -32,6 +32,15 @@ _CHANGELOG_VERSION_RE = re.compile(r"^- \*\*v([\d.]+)\s+—", re.MULTILINE)
 _HEADING_ID_RE = re.compile(r"^#{3,6}\s+(RELO-[A-Z]\d+(?:\.\d+)?)\b", re.MULTILINE)
 _CARD_ID_RE = re.compile(r"^id:\s+(RELO-W\d+\.\d+[a-z])\s*$", re.MULTILINE)
 _PHASE_TABLE_ERROR = "phase work-item definition table is missing or malformed"
+_WORK_PACKAGE_STATUSES = frozenset({"planned", "partial", "blocked", "completed", "deferred"})
+_OPEN_ACCEPTANCE_RE = re.compile(
+    r"\b(?:not\s+completion\b|(?:the\s+)?acceptance\s+remains?\s+open\b|"
+    r"reconcile\b.{0,100}\bacceptance\b.{0,100}\b(?:before|prior to)\b.{0,60}\b(?:closure|completion)\b|"
+    r"remains an owner decision\b|nullable[- ]time expansion remains deferred\b|"
+    r"no anti[- ]entropy or reseed added;\s*status unchanged\b|"
+    r"older[- ]history replay.{0,100}source qualification remain open\b)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -526,6 +535,16 @@ def lint_work_packages(repo_root: Path, *, spec_path: Path) -> CheckResult:
             identifier = "<invalid id>"
         elif identifier not in expected:
             identifier = f"<unknown card at entry {position}>"
+        status = card.get("status")
+        if not isinstance(status, str) or status not in _WORK_PACKAGE_STATUSES:
+            findings.append(f"{identifier}: invalid status (must be one of {', '.join(sorted(_WORK_PACKAGE_STATUSES))})")
+        elif status == "completed":
+            completion_text = " ".join(
+                value for field in ("evidence", "rationale")
+                if isinstance((value := card.get(field)), str)
+            )
+            if _OPEN_ACCEPTANCE_RE.search(completion_text):
+                findings.append(f"{identifier}: completed status contradicts open acceptance evidence")
         card_class = card.get("class")
         if not isinstance(card_class, str) or card_class not in allowed_classes:
             detail = "(not an allowed class)" if isinstance(card_class, str) else "(must be a string)"

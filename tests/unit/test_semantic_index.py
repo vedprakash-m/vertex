@@ -199,6 +199,66 @@ def test_search_archive_semantic_index_builds_local_index_and_returns_ranked_mat
     assert get_semantic_index_state_path(EDITION_NAME, archive_root=archive_root).exists()
 
 
+def test_search_archive_semantic_index_uses_rapidfuzz_fallback_for_typos(tmp_path: Path) -> None:
+    archive_root = tmp_path / "archive"
+    _write_confirmed_issue(
+        archive_root,
+        issue_number=3,
+        markdown_body="# Issue 003\nUD chunking latency regression remains the gating risk for deployment readiness.\n",
+    )
+    _write_confirmed_issue(
+        archive_root,
+        issue_number=4,
+        markdown_body="# Issue 004\nRepair workstream improved its follow-through and reduced stale asks.\n",
+    )
+
+    matches = search_archive_semantic_index(EDITION_NAME, "chunkng latncy", archive_root=archive_root)
+
+    assert matches
+    assert matches[0].issue_number == 3
+    assert "UD chunking latency regression" in matches[0].excerpt
+    assert all(match.issue_number != 4 for match in matches)
+
+
+def test_search_archive_semantic_index_fuzzy_ties_order_by_recency_then_doc_id(tmp_path: Path) -> None:
+    archive_root = tmp_path / "archive"
+    for issue_number in (5, 6):
+        _write_confirmed_issue(
+            archive_root,
+            issue_number=issue_number,
+            markdown_body=f"# Issue {issue_number:03d}\nLatency regression persists.\n",
+        )
+
+    first = search_archive_semantic_index(EDITION_NAME, "latncy", archive_root=archive_root)
+    second = search_archive_semantic_index(EDITION_NAME, "latncy", archive_root=archive_root)
+
+    assert [match.issue_number for match in first] == [6, 5]
+    assert first == second
+
+
+def test_search_archive_semantic_index_degrades_to_exact_lexical_without_rapidfuzz(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys
+
+    import src.core.semantic_index as semantic_index_module
+
+    archive_root = tmp_path / "archive"
+    _write_confirmed_issue(
+        archive_root,
+        issue_number=3,
+        markdown_body="# Issue 003\nUD chunking latency regression remains the gating risk for deployment readiness.\n",
+    )
+    monkeypatch.setitem(sys.modules, "rapidfuzz", None)
+    monkeypatch.setattr(semantic_index_module, "_fts_enabled", lambda connection: False)
+
+    assert search_archive_semantic_index(EDITION_NAME, "chunkng latncy", archive_root=archive_root) == ()
+    exact = search_archive_semantic_index(EDITION_NAME, "chunking latency", archive_root=archive_root)
+    assert exact
+    assert exact[0].issue_number == 3
+
+
 def test_semantic_index_dirty_state_clears_after_incremental_issue_refresh(tmp_path: Path) -> None:
     archive_root = tmp_path / "archive"
     _write_confirmed_issue(

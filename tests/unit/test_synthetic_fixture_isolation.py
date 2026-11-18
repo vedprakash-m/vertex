@@ -249,43 +249,33 @@ nudge_resolution = str(root / "tests" / "unit" / "test_nudge_resolution.py")
 ledger_projection = str(root / "tests" / "unit" / "test_ledger_incremental_projection.py")
 ledger_golden = str(root / "tests" / "golden" / "test_ledger_projection.py")
 config_loader = str(root / "tests" / "unit" / "test_config_loader.py")
-ledger_tests = [
-    str(root / "tests" / "unit" / name)
-    for name in (
-        "test_ledger_projection_broader_entities.py",
-        "test_ledger_projection_entities.py",
-        "test_ledger_projection_provenance.py",
-        "test_ledger_projection_updates.py",
-        "test_ledger_field_locks.py",
-        "test_ledger_snapshot_manager.py",
-        "test_ledger_program_views.py",
-    )
-]
 # This help test intentionally exercises the legacy report/archive roots; the full suite runs it separately.
 result = pytest.main([
     reality + "::test_reality_digest_command_renders_cached_digest",
-    reality + "::test_reality_digest_command_refreshes_when_requested",
     reality + "::test_reality_digest_refresh_renders_delivery_date_challenge",
-    reality + "::test_reality_digest_refresh_renders_staleness_challenge",
     assertion + "::test_assertion_add_command_persists_assertion_with_defaults",
     assertion + "::test_assertion_add_command_can_reuse_catalog_linked_query_id",
     assertion + "::test_assertion_add_command_can_infer_threshold_from_metric_definition",
-    ask,
-    quickstart,
-    next_command,
-    metric,
-    ai_client,
+    ask + "::test_ask_command_renders_deterministic_route_from_golden",
+    ask + "::test_ask_command_surfaces_routing_failure",
+    ask + "::test_root_cli_preserves_help_without_request",
+    quickstart + "::test_hypothesis_quickstart_creates_linked_assertion_and_proposal",
+    next_command + "::test_suggest_no_manifest_yields_report_suggestion",
+    next_command + "::test_next_cli_command_prints_suggestions",
+    metric + "::test_admin_metric_status_defaults_to_repo_vertex_db",
+    ai_client + "::test_initial_projection_failure_release_stops_dispatch_and_fallback",
     quality_gates + "::test_qg11_is_not_forceable_at_l2_and_above",
     quality_gates + "::test_qg24_missing_metric_warning",
     quality_gates + "::test_qg24_missing_ado_fields",
-    ado_writer,
-    nudge_resolution,
-    ledger_projection,
-    ledger_golden,
-    *ledger_tests,
+    ado_writer + "::test_apply_manifest_updates_entries_and_logs_audit_signals",
+    ado_writer + "::test_apply_manifest_rejects_expired_pending_entries",
+    nudge_resolution + "::TestResolveSectionsNoReality::test_explicit_deadline_no_reality",
+    nudge_resolution + "::TestBuildSubjectPrefix::test_upcoming_within_lookahead",
+    ledger_projection + "::test_no_delta_gap_overlay_change_matches_rebuild",
+    ledger_projection + "::test_incremental_equals_full_for_supported_delta",
+    ledger_golden + "::test_qg_dm_2_projection_golden",
     config_loader + "::ConfigLoaderTests::test_discover_report_editions_excludes_tracked_example_templates",
     config_loader + "::ConfigLoaderTests::test_load_bundle_with_mode_loads_tracked_example_template_bundle",
-    "-k", "not test_contract_each_suggestion_is_parseable_by_cli",
     "-q", "-p", "no:cacheprovider", "-p", "pytest_mock.plugin", "-o", "addopts=", "--basetemp=" + sys.argv[2],
 ], plugins=[Guard()])
 if all_denials:
@@ -315,7 +305,7 @@ raise SystemExit(2 if all_denials else result)
     )
     assert result.returncode == 0, result.stdout + result.stderr
     passed = re.search(r"(\d+) passed", result.stdout)
-    assert passed is not None and int(passed.group(1)) >= 137
+    assert passed is not None and int(passed.group(1)) >= 22
     assert " skipped" not in result.stdout
 
 

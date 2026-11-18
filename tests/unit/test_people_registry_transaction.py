@@ -8,18 +8,22 @@ mismatch) that don't need real concurrency."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from src.core.exceptions import ConfigError
+from src.core import people_registry_lease, people_registry_transaction
 from src.core.people_registry_identity import bootstrap_registry_identity, load_registry_manifest
 from src.core.people_registry_lease import (
     RegistryLeaseFencingTokenStale,
+    RegistryLeaseHeldByAnotherOwner,
     acquire_registry_lease,
     force_release_registry_lease,
     read_registry_lease_state,
+    release_registry_lease,
+    renew_registry_lease,
 )
 from src.core.people_registry_transaction import (
     PreparedRegistryTransaction,
@@ -31,6 +35,7 @@ from src.core.people_registry_transaction import (
     abort_prepared_registry_transaction,
     commit_registry_transaction,
     prepare_registry_transaction,
+    recover_registry_transactions,
     synthetic_records_path,
     transactions_root,
 )
@@ -56,6 +61,59 @@ def _valid_record(record_id: str = "rec-1", **overrides: object) -> SyntheticReg
 
 def _upsert(record: SyntheticRegistryRecord) -> RegistryFieldOperation:
     return RegistryFieldOperation(kind=RegistryOperationKind.UPSERT, record=record)
+
+
+def test_expired_lease_refuses_synthetic_commit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    knowledge_root = tmp_path / "knowledge"
+    _bootstrap(knowledge_root)
+    prepared = prepare_registry_transaction(knowledge_root, (_upsert(_valid_record()),), owner="writer-1")
+    manifest = (knowledge_root / "registry_manifest.json").read_bytes()
+    monkeypatch.setattr(people_registry_lease, "_now", lambda: prepared.lease.expires_at)
+
+    with pytest.raises(ConfigError, match="expired"):
+        commit_registry_transaction(prepared, knowledge_root=knowledge_root)
+
+    assert not synthetic_records_path(knowledge_root).exists()
+    assert (knowledge_root / "registry_manifest.json").read_bytes() == manifest
+
+
+def test_expiry_before_synthetic_manifest_retains_recoverable_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    knowledge_root = tmp_path / "knowledge"
+    _bootstrap(knowledge_root)
+    prepared = prepare_registry_transaction(knowledge_root, (_upsert(_valid_record()),), owner="writer-1")
+    manifest = (knowledge_root / "registry_manifest.json").read_bytes()
+    replace = people_registry_transaction._replace_with_bounded_retry
+
+    def replace_and_expire(source: Path, destination: Path) -> None:
+        replace(source, destination)
+        monkeypatch.setattr(people_registry_lease, "_now", lambda: prepared.lease.expires_at)
+
+    monkeypatch.setattr(people_registry_transaction, "_replace_with_bounded_retry", replace_and_expire)
+    with pytest.raises(ConfigError, match="expired"):
+        commit_registry_transaction(prepared, knowledge_root=knowledge_root)
+
+    assert synthetic_records_path(knowledge_root).exists()
+    assert (knowledge_root / "registry_manifest.json").read_bytes() == manifest
+    recover_registry_transactions(knowledge_root)
+    assert not synthetic_records_path(knowledge_root).exists()
+
+
+def test_commit_uses_renewed_lease_expiry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    knowledge_root = tmp_path / "knowledge"
+    _bootstrap(knowledge_root)
+    prepared = prepare_registry_transaction(knowledge_root, (_upsert(_valid_record()),), owner="writer-1")
+    monkeypatch.setattr(
+        people_registry_lease, "_now", lambda: prepared.lease.acquired_at + timedelta(seconds=100)
+    )
+    renew_registry_lease(prepared.lease, knowledge_root=knowledge_root)
+    monkeypatch.setattr(
+        people_registry_lease, "_now", lambda: prepared.lease.expires_at + timedelta(seconds=1)
+    )
+
+    commit_registry_transaction(prepared, knowledge_root=knowledge_root)
+    assert synthetic_records_path(knowledge_root).exists()
 
 
 def test_prepare_requires_bootstrap_first(tmp_path: Path) -> None:
@@ -222,6 +280,19 @@ def test_commit_writes_live_files_matching_the_manifest_preview_and_releases_lea
     assert read_registry_lease_state(knowledge_root=knowledge_root) is None
 
 
+def test_second_same_owner_prepare_does_not_supersede_live_transaction(tmp_path: Path) -> None:
+    knowledge_root = tmp_path / "knowledge"
+    _bootstrap(knowledge_root)
+    prepared = prepare_registry_transaction(knowledge_root, (_upsert(_valid_record()),), owner="writer-1", as_of=_NOW)
+
+    with pytest.raises(RegistryLeaseHeldByAnotherOwner):
+        prepare_registry_transaction(knowledge_root, (_upsert(_valid_record("rec-2")),), owner="writer-1", as_of=_NOW)
+
+    assert read_registry_lease_state(knowledge_root=knowledge_root) == prepared.lease
+    committed = commit_registry_transaction(prepared, knowledge_root=knowledge_root, as_of=_NOW)
+    assert committed.manifest.generation_id == prepared.manifest_preview.generation_id
+
+
 def test_commit_raises_on_fencing_mismatch_when_lease_was_taken_over(tmp_path: Path) -> None:
     knowledge_root = tmp_path / "knowledge"
     _bootstrap(knowledge_root)
@@ -243,3 +314,19 @@ def test_commit_raises_on_fencing_mismatch_when_lease_was_taken_over(tmp_path: P
 
     # No live file was touched -- the fencing check happens before the irreversible replace.
     assert not synthetic_records_path(knowledge_root).exists()
+
+
+def test_prepared_transaction_remains_fenced_after_successor_releases(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    knowledge_root = tmp_path / "knowledge"
+    _bootstrap(knowledge_root)
+    prepared = prepare_registry_transaction(knowledge_root, (_upsert(_valid_record()),), owner="writer-1", as_of=_NOW)
+    monkeypatch.setattr(people_registry_lease, "_now", lambda: prepared.lease.expires_at + timedelta(microseconds=1))
+    successor = acquire_registry_lease("writer-1", knowledge_root=knowledge_root)
+    release_registry_lease(successor, knowledge_root=knowledge_root)
+    current = acquire_registry_lease("writer-1", knowledge_root=knowledge_root)
+
+    with pytest.raises(RegistryLeaseFencingTokenStale):
+        commit_registry_transaction(prepared, knowledge_root=knowledge_root, as_of=_NOW)
+
+    assert not synthetic_records_path(knowledge_root).exists()
+    assert read_registry_lease_state(knowledge_root=knowledge_root) == current

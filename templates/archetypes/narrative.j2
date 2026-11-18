@@ -15,7 +15,9 @@
 {% for ws in workstreams %}
 {% include "partials/workstream.j2" %}
 {% endfor %}
+{% if "exec_summary" not in hidden_render_sections and "exec-summary" not in hidden_render_sections %}
 {% include "partials/exec_summary.j2" %}
+{% endif %}
 {% endblock %}
 
 {% block footer %}

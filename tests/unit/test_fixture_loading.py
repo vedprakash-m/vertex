@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 
+
+@pytest.mark.operator
 def test_nova_ado_sample_fixture_loads() -> None:
     fixture_path = Path(__file__).resolve().parents[1] / "fixtures" / "nova_ado_sample.json"
     if not fixture_path.exists():

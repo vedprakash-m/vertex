@@ -54,6 +54,7 @@ from src.core.alerts import append_or_suppress_alert
 from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.exceptions import StateError
 from src.core.injection_detector import InjectionDetector
+from src.core.selection_identity import UNVERIFIED, selection_identity_v1
 from src.core.workspace_paths import is_bare_identifier
 
 log = logging.getLogger(__name__)
@@ -83,8 +84,17 @@ _DEFAULT_SALIENCE_WEIGHTS: dict[str, float] = {
 #: flag it (softer imperative/override phrasing).
 _HARD_INJECTION_SIGNAL_TYPES = frozenset({"base64", "data_uri", "webhook"})
 
+#: RELO-W1.2/W1.5/W1.6: cumulative estimator input per compile on the exact
+#: whole-prefix path, measured as UTF-8 bytes of every text passed to
+#: ``estimate()``. 250 candidates measured ~3.4 MB; 1,000 measured ~54 MB.
+_MAX_PACKING_ESTIMATOR_INPUT_BYTES = 8 * 1024 * 1024
+
 
 class TokenEstimator(Protocol):
+    """An estimator may set ``incremental_estimates = True`` to declare that
+    whole-prompt estimates equal the sum of separately estimated parts; it then
+    uses linear packing. Otherwise packing re-estimates each whole prefix."""
+
     tokenizer_id: str
 
     def estimate(self, text: str) -> int: ...
@@ -162,6 +172,7 @@ class ContextManifest:
     cache_key: str
     context_hash: str
     compiled_at: datetime
+    selection_identity: str = UNVERIFIED
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,10 +181,15 @@ class CompiledContext:
     included: tuple[EvidenceSpan, ...]
     excluded: tuple[ExcludedSpan, ...]
     manifest: ContextManifest
+    selection_identity: str = UNVERIFIED
 
 
 class ContextCompileRejected(Exception):
     """Reject an unsafe or unbuildable context without dropping required evidence."""
+
+
+class ContextPackingUnavailable(ContextCompileRejected):
+    """Exact packing would exceed the per-compile estimator-input bound; no prompt is produced."""
 
 
 class DeterministicTokenEstimator:
@@ -256,14 +272,21 @@ class DeterministicContextCompiler:
 
         start = time.perf_counter()
         excluded: list[ExcludedSpan] = []
+        incremental = getattr(self._token_estimator, "incremental_estimates", False) is True
+        # Per-compile UTF-8 byte meter for estimate-only estimators (None = unmetered linear path).
+        meter: list[int] | None = None if incremental else [0]
 
         # Step 2: injection screening. RELO-W1.2 (Sec 8.2.1): every span's
         # token_estimate is recomputed here from its actual rendered
         # representation (header + text, matching _render_prompt exactly) --
         # a caller-supplied token_estimate is advisory only and never trusted
         # for budget math from this point on.
-        required_spans = [self._recompute_tokens(self._screen_span(span)) for span in request.required_evidence]
-        screened_optional = [self._recompute_tokens(self._screen_span(span)) for span in request.optional_evidence]
+        required_spans = [
+            self._recompute_tokens(self._screen_span(span), meter) for span in request.required_evidence
+        ]
+        screened_optional = [
+            self._recompute_tokens(self._screen_span(span), meter) for span in request.optional_evidence
+        ]
 
         # RELO-W1.2 (Sec 8.2.1): a required span carrying a hard-injection
         # verdict rejects the whole compilation with an evidence-gap record,
@@ -312,7 +335,7 @@ class DeterministicContextCompiler:
 
         # Step 9 (part 1) / QG-32: reserved-token check.
         required_prompt = _render_prompt(request, tuple(required_spans))
-        required_tokens = self._estimate_tokens(required_prompt)
+        required_tokens = self._estimate_tokens(required_prompt, meter)
         reserved_tokens = required_tokens + request.reserved_output_tokens
         self._check_budget(request, total_tokens=reserved_tokens, label="reserved tokens")
 
@@ -326,7 +349,19 @@ class DeterministicContextCompiler:
         packing_excluded: list[ExcludedSpan] = []
         prompt_text = required_prompt
         token_estimate_total = required_tokens
-        if quota_kept:
+        if quota_kept and not incremental:
+            # Exact whole-prefix greedy: every candidate is judged on the full
+            # assembled prompt, so non-additive estimators cannot overflow.
+            for span in quota_kept:
+                candidate_prompt = _render_prompt(request, (*required_spans, *packed, span))
+                candidate_tokens = self._estimate_tokens(candidate_prompt, meter)
+                if candidate_tokens <= packing_ceiling:
+                    packed.append(span)
+                    prompt_text = candidate_prompt
+                    token_estimate_total = candidate_tokens
+                else:
+                    packing_excluded.append(_excluded(span, reason="token_budget"))
+        elif quota_kept:
             separator_tokens = self._estimate_tokens("\n\n")
             for span in quota_kept[:2]:
                 candidate_prompt = _render_prompt(request, (*required_spans, *packed, span))
@@ -365,6 +400,11 @@ class DeterministicContextCompiler:
 
         compiled_at = datetime.now(timezone.utc)
         context_hash = hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
+        # source_ref = source_family, fact_id = evidence_id, span hash over raw span text.
+        selection_identity = selection_identity_v1(
+            (span.source_family, span.evidence_id, hashlib.sha256(span.text.encode("utf-8")).hexdigest())
+            for span in included
+        )
         tokenizer_id = self._token_estimator.tokenizer_id
         cache_key = _build_cache_key(request, context_hash, tokenizer_id=tokenizer_id)
         compile_ms = (time.perf_counter() - start) * 1000
@@ -388,11 +428,23 @@ class DeterministicContextCompiler:
             cache_key=cache_key,
             context_hash=context_hash,
             compiled_at=compiled_at,
+            selection_identity=selection_identity,
         )
         _persist_manifest_best_effort(manifest, programs_root=self._programs_root)
-        return CompiledContext(prompt_text=prompt_text, included=included, excluded=tuple(excluded), manifest=manifest)
+        return CompiledContext(
+            prompt_text=prompt_text, included=included, excluded=tuple(excluded), manifest=manifest,
+            selection_identity=selection_identity,
+        )
 
-    def _estimate_tokens(self, text: str) -> int:
+    def _estimate_tokens(self, text: str, meter: list[int] | None = None) -> int:
+        if meter is not None:
+            consumed = meter[0] + len(text.encode("utf-8"))
+            if consumed > _MAX_PACKING_ESTIMATOR_INPUT_BYTES:
+                raise ContextPackingUnavailable(
+                    "Unavailable: exact context packing would exceed the per-compile estimator input bound "
+                    f"of {_MAX_PACKING_ESTIMATOR_INPUT_BYTES} UTF-8 bytes; no prompt was produced."
+                )
+            meter[0] = consumed
         estimate = self._token_estimator.estimate(text)
         if not isinstance(estimate, int) or isinstance(estimate, bool) or estimate < 0:
             raise ContextCompileRejected("Context compiler token estimates must be non-negative integers.")
@@ -427,13 +479,13 @@ class DeterministicContextCompiler:
             return replace(span, injection_screen="excluded")
         return replace(span, injection_screen="flagged", origin=ContentOrigin.EXTERNAL_UNVERIFIED, trust_level="downgraded")
 
-    def _recompute_tokens(self, span: EvidenceSpan) -> EvidenceSpan:
+    def _recompute_tokens(self, span: EvidenceSpan, meter: list[int] | None) -> EvidenceSpan:
         """RELO-W1.2 (Sec 8.2.1): a caller-supplied ``token_estimate`` is
         advisory only. Recompute centrally from the span's actual rendered
         representation (the same header+text `_render_span_text` builds),
         so accounting reflects what is truly emitted into the prompt, not
         raw span text alone."""
-        return replace(span, token_estimate=self._estimate_tokens(_render_span_text(span)))
+        return replace(span, token_estimate=self._estimate_tokens(_render_span_text(span), meter))
 
 
 def _content_hash(text: str) -> str:
@@ -601,7 +653,18 @@ def _manifest_to_dict(manifest: ContextManifest) -> dict[str, object]:
         "cache_key": manifest.cache_key,
         "context_hash": manifest.context_hash,
         "compiled_at": manifest.compiled_at.isoformat(),
+        "selection_identity": manifest.selection_identity,
     }
+
+
+def read_context_manifest_selection_identity(path: Path) -> str:
+    """Return the stored selection identity; legacy or unreadable manifests read as UNVERIFIED."""
+    try:
+        stored = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError, RecursionError):
+        return UNVERIFIED
+    value = stored.get("selection_identity") if isinstance(stored, dict) else None
+    return value if isinstance(value, str) else UNVERIFIED
 
 
 def _reject_duplicate_manifest_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -641,6 +704,9 @@ def _warn_if_manifest_differs(path: Path, expected: dict[str, object], serialize
     compile_ms = existing.pop("compile_ms", None)
     expected.pop("compiled_at")
     expected.pop("compile_ms")
+    if "selection_identity" not in existing:
+        # Legacy manifest: compare the remaining fields; it reads as UNVERIFIED and is never rewritten.
+        expected.pop("selection_identity", None)
     valid_time = False
     if isinstance(compiled_at, str):
         try:
@@ -705,6 +771,7 @@ __all__ = [
     "ContextCompileRejected",
     "ContextCompileRequest",
     "ContextManifest",
+    "ContextPackingUnavailable",
     "DeterministicContextCompiler",
     "DeterministicTokenEstimator",
     "EvidenceSpan",
@@ -712,4 +779,5 @@ __all__ = [
     "TokenEstimator",
     "ValidationContext",
     "context_manifest_path",
+    "read_context_manifest_selection_identity",
 ]

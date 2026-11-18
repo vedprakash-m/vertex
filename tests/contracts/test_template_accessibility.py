@@ -33,10 +33,18 @@ from pathlib import Path
 import re
 
 from jinja2 import Environment, FileSystemLoader
+import pytest
 
-from src.core.jinja_filters import JINJA_FILTERS, JINJA_GLOBALS
-from src.core.models import RiskLevel
-from src.core.view_models import HealthSummary
+from src.core.html_renderer import HTMLRenderer
+from src.core.jinja_filters import JINJA_FILTERS, JINJA_GLOBALS, risk_label
+from src.core.models import ReviewState, RiskLevel
+from src.core.view_models import (
+    AdoVitalityAccountabilityRow,
+    AdoVitalitySectionData,
+    ContinuityChapterData,
+    ContinuityChapterRowData,
+    HealthSummary,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _TEMPLATES_ROOT = _REPO_ROOT / "templates"
@@ -69,6 +77,132 @@ class _TableSemanticsParser(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         if tag == "table" and self._stack:
             self.closed_tables.append(self._stack.pop())
+
+
+class _RenderedAccessibilityParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._table_stack: list[int] = []
+        self._header_table: int | None = None
+        self._header_text: list[str] = []
+        self.table_roles: list[str | None] = []
+        self.header_scopes: list[list[str | None]] = []
+        self.header_labels: list[list[str]] = []
+        self.chip_names: list[tuple[str | None, str | None]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        if tag == "table":
+            self.table_roles.append(attributes.get("role"))
+            self.header_scopes.append([])
+            self.header_labels.append([])
+            self._table_stack.append(len(self.table_roles) - 1)
+        elif tag == "th" and self._table_stack:
+            self._header_table = self._table_stack[-1]
+            self._header_text = []
+            self.header_scopes[self._header_table].append(attributes.get("scope"))
+        elif tag == "span":
+            self.chip_names.append((attributes.get("role"), attributes.get("aria-label")))
+
+    def handle_data(self, data: str) -> None:
+        if self._header_table is not None:
+            self._header_text.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "th" and self._header_table is not None:
+            self.header_labels[self._header_table].append("".join(self._header_text).strip())
+            self._header_table = None
+        elif tag == "table" and self._table_stack:
+            self._table_stack.pop()
+
+
+def _continuity_chapter(risk: RiskLevel) -> ContinuityChapterData:
+    return ContinuityChapterData(
+        chapter_id="example",
+        anchor_id="example",
+        title="Example",
+        note="",
+        chapter_owner=None,
+        rows=(
+            ContinuityChapterRowData(
+                row_number=1,
+                label="Synthetic workstream",
+                risk=risk,
+                owner="Example Owner",
+                team="Example Team",
+                state_label="Active",
+                eta_label="Nov 30",
+                issue_text="Synthetic issue",
+                approach_text="Synthetic approach",
+                ado_work_item_id=123,
+                ado_url="https://example.invalid/123",
+            ),
+        ),
+        review_state=ReviewState.PENDING,
+    )
+
+
+def _assert_data_table_has_column_headers(rendered: str, expected_labels: list[str]) -> None:
+    parser = _RenderedAccessibilityParser()
+    parser.feed(rendered)
+    header_tables = [
+        (role, scopes, labels)
+        for role, scopes, labels in zip(parser.table_roles, parser.header_scopes, parser.header_labels)
+        if scopes
+    ]
+    assert header_tables == [(None, ["col"] * 4, expected_labels)]
+
+
+def test_continuity_data_table_has_semantic_column_headers(tmp_path: Path) -> None:
+    rendered = HTMLRenderer("synthetic", reports_root=tmp_path).render_fragment(
+        "partials/continuity_chapter.j2", chapter=_continuity_chapter(RiskLevel.HIGH)
+    )
+    _assert_data_table_has_column_headers(rendered, ["#", "Workstream", "Status / Business Impact", "Risk"])
+
+
+@pytest.mark.parametrize(
+    "risk",
+    (RiskLevel.BLOCKED, RiskLevel.HIGH, RiskLevel.MEDIUM, RiskLevel.LOW, RiskLevel.DONE, RiskLevel.UNKNOWN),
+)
+def test_continuity_risk_chip_has_accessible_name(risk: RiskLevel, tmp_path: Path) -> None:
+    rendered = HTMLRenderer("synthetic", reports_root=tmp_path).render_fragment(
+        "partials/continuity_chapter.j2", chapter=_continuity_chapter(risk)
+    )
+    parser = _RenderedAccessibilityParser()
+    parser.feed(rendered)
+    assert ("img", f"{risk_label(risk)} risk") in parser.chip_names
+
+
+def test_ado_accountability_table_has_semantic_column_headers(tmp_path: Path) -> None:
+    vitality = AdoVitalitySectionData(
+        section_id="ado",
+        title="ADO",
+        items_updated=1,
+        items_total=1,
+        updated_percentage=100,
+        freshness_average_days=1.0,
+        freshness_known_items=1,
+        leakage_events=0,
+        best_documented_label=None,
+        best_documented_detail=None,
+        trend_summary="Stable",
+        accountability_rows=(
+            AdoVitalityAccountabilityRow(
+                workstream="Synthetic",
+                owners_and_assignee="Example Owner",
+                ado_label="ADO #123",
+                ado_title="Synthetic item",
+                fields_to_update=("State",),
+            ),
+        ),
+    )
+    rendered = HTMLRenderer("synthetic", reports_root=tmp_path).render_fragment(
+        "partials/ado_vitality.j2", ado_vitality=vitality
+    )
+    _assert_data_table_has_column_headers(
+        rendered,
+        ["Workstream", "Workstream Owner + ADO Assignee", "Stale or Missing ADOs", "What Field Needs Update"],
+    )
 
 
 def _template_files() -> tuple[Path, ...]:

@@ -6,6 +6,7 @@ from enum import Enum
 from typing import Generic, TypeVar
 
 from src.core.failure_taxonomy import FailureCategory
+from src.core.ado_hydration_checkpoints import CheckpointAdvance
 from src.core.models import WorkItem
 from src.core.models_v2 import Signal, TrajectoryPoint
 
@@ -329,6 +330,8 @@ class ADOHydrationOutput:
     # ADF-W4.1 (Section 8.4.3): typed directed edges + any traversal truncation.
     relations: tuple[WorkItemRelation, ...] = ()
     relation_truncation: PaginationOutcome | None = None
+    # RELO-W2.3: per-subresource checkpoints to commit with verification.
+    checkpoint_advances: tuple[CheckpointAdvance, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

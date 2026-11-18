@@ -5,17 +5,23 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import hashlib
+import os
 from pathlib import Path
 import sqlite3
+import tempfile
 from typing import Any, Iterable, Iterator
 
+import portalocker
+
 from src.core._db import open_program_db
+from src.core.exceptions import ConfigError
 from src.core.ledger.candidate_store import CandidateDecisionRecord, load_triage_decisions
-from src.core.ledger.event_log import EventEnvelope, EventWriteResult, read_events
+from src.core.ledger.event_log import EventEnvelope, EventWriteResult, get_event_logs_dir, read_events
 from src.core.ledger.event_index import load_entity_event_ids, load_event_entity_refs
 from src.core.ledger.event_types import get_event_schema, support_table_update
 from src.core.projections.program_projection import FieldCandidate, choose_field_winner
 from src.core.protection.supersession import apply_supersession, find_tombstoned_targets
+from src.core.workspace_lease import cooperative_capture_fence
 from src.core.workspace_paths import PROGRAMS_ROOT
 
 
@@ -53,7 +59,7 @@ class ProjectionResult:
 
 
 class ProjectionConflictError(RuntimeError):
-    """The projection changed after its incremental base was selected."""
+    """The selected projection base or authoritative inputs changed."""
 
 
 _INCREMENTAL_ENTITY_TABLES = {
@@ -106,6 +112,49 @@ _CREATION_EVENT_TYPES = {
 }
 
 
+@contextmanager
+def _projection_writer_fence(
+    program_id: str, *, programs_root: Path, projection_path: Path,
+) -> Iterator[None]:
+    ledger_path = get_event_logs_dir(program_id, programs_root=programs_root).parent
+    with cooperative_capture_fence(ledger_path):
+        try:
+            target = projection_path.resolve()
+            lock_path = target.with_name(target.name + ".writer.lock")
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            lock = portalocker.Lock(
+                lock_path, mode="a", timeout=5,
+                flags=portalocker.LOCK_EX | portalocker.LOCK_NB,
+            )
+            lock.acquire()
+        except (portalocker.exceptions.LockException, OSError) as error:
+            raise ConfigError("Projection writer fence unavailable. Retry after the competing operation finishes.") from error
+        try:
+            yield
+        finally:
+            lock.release()
+
+
+def _validate_current_projection_inputs(
+    program_id: str,
+    visible_events: tuple[EventEnvelope, ...],
+    *,
+    projection_path: Path,
+    programs_root: Path,
+    as_of: datetime | None,
+    knowledge_as_of: datetime | None,
+) -> None:
+    if projection_path.resolve() != get_current_projection_path(program_id, programs_root=programs_root).resolve():
+        return
+    authoritative = tuple(sorted(
+        read_events(program_id, programs_root=programs_root),
+        key=lambda event: (event.recorded_at, event.event_id),
+    ))
+    selected = _filter_events(authoritative, as_of=as_of, knowledge_as_of=knowledge_as_of)
+    if _event_input_digest(program_id, visible_events) != _event_input_digest(program_id, selected):
+        raise ProjectionConflictError("projection inputs changed before rebuild")
+
+
 def project_program_events(
     program_id: str,
     *,
@@ -114,16 +163,14 @@ def project_program_events(
     as_of: datetime | None = None,
     knowledge_as_of: datetime | None = None,
 ) -> ProjectionResult:
-    events = read_events(program_id, programs_root=programs_root)
     target_path = projection_path or get_current_projection_path(program_id, programs_root=programs_root)
-    return project_events_to_sqlite(
-        program_id,
-        events,
-        projection_path=target_path,
-        programs_root=programs_root,
-        as_of=as_of,
-        knowledge_as_of=knowledge_as_of,
-    )
+    with _projection_writer_fence(program_id, programs_root=programs_root, projection_path=target_path):
+        events = read_events(program_id, programs_root=programs_root)
+        decisions = load_triage_decisions(program_id, programs_root=programs_root)
+        return _project_events_to_sqlite_locked(
+            program_id, events, projection_path=target_path, as_of=as_of,
+            knowledge_as_of=knowledge_as_of, triage_decisions=decisions,
+        )
 
 
 def project_events_to_sqlite(
@@ -136,42 +183,72 @@ def project_events_to_sqlite(
     knowledge_as_of: datetime | None = None,
     triage_decisions: tuple[CandidateDecisionRecord, ...] | None = None,
 ) -> ProjectionResult:
+    with _projection_writer_fence(program_id, programs_root=programs_root, projection_path=projection_path):
+        ordered_events = tuple(sorted(events, key=lambda event: (event.recorded_at, event.event_id)))
+        visible_events = _filter_events(ordered_events, as_of=as_of, knowledge_as_of=knowledge_as_of)
+        _validate_current_projection_inputs(
+            program_id, visible_events, projection_path=projection_path, programs_root=programs_root,
+            as_of=as_of, knowledge_as_of=knowledge_as_of,
+        )
+        is_current = projection_path.resolve() == get_current_projection_path(program_id, programs_root=programs_root).resolve()
+        if triage_decisions is None or is_current:
+            decisions = load_triage_decisions(program_id, programs_root=programs_root)
+            if triage_decisions is not None and _acknowledged_gaps_digest(triage_decisions) != _acknowledged_gaps_digest(decisions):
+                raise ProjectionConflictError("projection decisions changed before rebuild")
+            if triage_decisions is not None:
+                decisions = triage_decisions
+        else:
+            decisions = triage_decisions
+        return _project_events_to_sqlite_locked(
+            program_id, visible_events, projection_path=projection_path, as_of=as_of,
+            knowledge_as_of=knowledge_as_of, triage_decisions=decisions,
+        )
+
+
+def _project_events_to_sqlite_locked(
+    program_id: str,
+    events: Iterable[EventEnvelope],
+    *,
+    projection_path: Path,
+    as_of: datetime | None,
+    knowledge_as_of: datetime | None,
+    triage_decisions: tuple[CandidateDecisionRecord, ...],
+) -> ProjectionResult:
     ordered_events = tuple(sorted(events, key=lambda event: (event.recorded_at, event.event_id)))
     visible_events = _filter_events(ordered_events, as_of=as_of, knowledge_as_of=knowledge_as_of)
     effective_events = apply_supersession(visible_events)
     tombstoned_targets = find_tombstoned_targets(visible_events)
-    decisions = (
-        load_triage_decisions(program_id, programs_root=programs_root)
-        if triage_decisions is None else triage_decisions
-    )
     projection_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = projection_path.with_suffix(projection_path.suffix + ".tmp")
-    if temp_path.exists():
-        temp_path.unlink()
-    with connect_projection_db(temp_path) as connection:
-        _ensure_schema(connection)
-        _clear_projection_tables(connection)
-        _fold_events(connection, effective_events, visible_events, as_of=as_of)
-        _record_orphan_links(connection, visible_events=visible_events, effective_events=effective_events, tombstoned_targets=tombstoned_targets)
-        _overlay_gap_acknowledgements_from_decisions(connection, triage_decisions=decisions)
-        watermark = visible_events[-1].event_id if visible_events else ""
-        coverage_earliest, coverage_latest = _coverage_range(effective_events)
-        connection.execute(
-            "INSERT INTO projection_meta (schema_version, built_at, event_watermark, as_of, knowledge_as_of, coverage_earliest, coverage_latest, projector_version, event_input_digest, acknowledged_gaps_digest) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                PROJECTION_SCHEMA_VERSION,
-                datetime.now(timezone.utc).isoformat(),
-                watermark,
-                as_of.isoformat() if as_of is not None else None,
-                knowledge_as_of.isoformat() if knowledge_as_of is not None else None,
-                coverage_earliest,
-                coverage_latest,
-                _PROJECTOR_VERSION,
-                _event_input_digest(program_id, visible_events),
-                _acknowledged_gaps_digest(decisions),
-            ),
-        )
-    temp_path.replace(projection_path)
+    descriptor, temp_name = tempfile.mkstemp(prefix=projection_path.name + ".", suffix=".tmp", dir=projection_path.parent)
+    os.close(descriptor)
+    temp_path = Path(temp_name)
+    try:
+        with connect_projection_db(temp_path) as connection:
+            _ensure_schema(connection)
+            _clear_projection_tables(connection)
+            _fold_events(connection, effective_events, visible_events, as_of=as_of)
+            _record_orphan_links(connection, visible_events=visible_events, effective_events=effective_events, tombstoned_targets=tombstoned_targets)
+            _overlay_gap_acknowledgements_from_decisions(connection, triage_decisions=triage_decisions)
+            watermark = visible_events[-1].event_id if visible_events else ""
+            coverage_earliest, coverage_latest = _coverage_range(effective_events)
+            connection.execute(
+                "INSERT INTO projection_meta (schema_version, built_at, event_watermark, as_of, knowledge_as_of, coverage_earliest, coverage_latest, projector_version, event_input_digest, acknowledged_gaps_digest) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    PROJECTION_SCHEMA_VERSION,
+                    datetime.now(timezone.utc).isoformat(),
+                    watermark,
+                    as_of.isoformat() if as_of is not None else None,
+                    knowledge_as_of.isoformat() if knowledge_as_of is not None else None,
+                    coverage_earliest,
+                    coverage_latest,
+                    _PROJECTOR_VERSION,
+                    _event_input_digest(program_id, visible_events),
+                    _acknowledged_gaps_digest(triage_decisions),
+                ),
+            )
+        temp_path.replace(projection_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
     return ProjectionResult(
         program_id=program_id,
         projection_path=projection_path,
@@ -191,13 +268,34 @@ def project_events_incremental_to_sqlite(
     as_of: datetime | None = None,
     knowledge_as_of: datetime | None = None,
 ) -> ProjectionResult:
-    ordered_events = tuple(sorted(events, key=lambda event: (event.recorded_at, event.event_id)))
-    visible_events = _filter_events(ordered_events, as_of=as_of, knowledge_as_of=knowledge_as_of)
-    decisions = load_triage_decisions(program_id, programs_root=programs_root)
+    with _projection_writer_fence(program_id, programs_root=programs_root, projection_path=projection_path):
+        ordered_events = tuple(sorted(events, key=lambda event: (event.recorded_at, event.event_id)))
+        visible_events = _filter_events(ordered_events, as_of=as_of, knowledge_as_of=knowledge_as_of)
+        _validate_current_projection_inputs(
+            program_id, visible_events, projection_path=projection_path, programs_root=programs_root,
+            as_of=as_of, knowledge_as_of=knowledge_as_of,
+        )
+        decisions = load_triage_decisions(program_id, programs_root=programs_root)
+        return _project_events_incremental_to_sqlite_locked(
+            program_id, visible_events, projection_path=projection_path, as_of=as_of,
+            knowledge_as_of=knowledge_as_of, triage_decisions=decisions,
+        )
+
+
+def _project_events_incremental_to_sqlite_locked(
+    program_id: str,
+    visible_events: tuple[EventEnvelope, ...],
+    *,
+    projection_path: Path,
+    as_of: datetime | None,
+    knowledge_as_of: datetime | None,
+    triage_decisions: tuple[CandidateDecisionRecord, ...],
+) -> ProjectionResult:
+    decisions = triage_decisions
 
     def rebuild() -> ProjectionResult:
-        return project_events_to_sqlite(
-            program_id, visible_events, projection_path=projection_path, programs_root=programs_root,
+        return _project_events_to_sqlite_locked(
+            program_id, visible_events, projection_path=projection_path,
             as_of=as_of, knowledge_as_of=knowledge_as_of, triage_decisions=decisions,
         )
 

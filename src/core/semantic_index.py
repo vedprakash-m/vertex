@@ -8,7 +8,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 import re
 import sqlite3
-from typing import cast
+from typing import Callable, cast
 
 from src.core._db import open_program_db
 from src.core.archive_store import find_latest_confirmed_entry, read_archive_index
@@ -65,6 +65,8 @@ class _SemanticDocument:
 
 
 _TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
+_FUZZY_MIN_TOKEN_LENGTH = 4
+_FUZZY_MIN_RATIO = 0.80
 _WHITESPACE_PATTERN = re.compile(r"\s+")
 _MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\([^\)]+\)")
 _ISSUE_HEADING_PATTERN = re.compile(r"^issue\s+\d+$", re.IGNORECASE)
@@ -676,8 +678,10 @@ def _search_without_fts(
     source_types: tuple[str, ...] | None,
 ) -> tuple[SemanticMatch, ...]:
     rows = connection.execute(
-        "SELECT issue_number, generated_at, source_type, excerpt, risk_level, source_ref FROM archive_documents"
+        "SELECT doc_id, issue_number, generated_at, source_type, excerpt, risk_level, source_ref "
+        "FROM archive_documents ORDER BY doc_id"
     ).fetchall()
+    fuzzy_ratio = _load_fuzzy_ratio()
     scored_rows: list[tuple[float, sqlite3.Row]] = []
     for row in rows:
         if source_types and str(row["source_type"]) not in source_types:
@@ -685,18 +689,34 @@ def _search_without_fts(
         excerpt_tokens = set(_normalize_tokens(str(row["excerpt"])))
         if not excerpt_tokens:
             continue
-        overlap = len(excerpt_tokens.intersection(tokens))
-        if overlap == 0:
+        matched = 0.0
+        for token in tokens:
+            if token in excerpt_tokens:
+                matched += 1.0
+            elif fuzzy_ratio is not None and len(token) >= _FUZZY_MIN_TOKEN_LENGTH:
+                best = max(fuzzy_ratio(token, candidate) for candidate in excerpt_tokens) / 100.0
+                if best >= _FUZZY_MIN_RATIO:
+                    matched += best
+        if matched == 0.0:
             continue
-        score = -float(overlap) / float(len(tokens))
+        score = -matched / float(len(tokens))
         scored_rows.append((score, row))
     scored_rows.sort(
         key=lambda item: (
             item[0],
             -datetime.fromisoformat(str(item[1]["generated_at"])).timestamp(),
+            -int(item[1]["doc_id"]),
         )
     )
     return tuple(_row_to_match(row, score=score) for score, row in scored_rows[:top_k])
+
+
+def _load_fuzzy_ratio() -> Callable[[str, str], float] | None:
+    try:
+        from rapidfuzz import fuzz
+    except ImportError:
+        return None
+    return fuzz.ratio
 
 
 def _row_to_match(row: sqlite3.Row, *, score: float | None = None) -> SemanticMatch:

@@ -152,7 +152,7 @@ class DeclarativeChartBuilder:
                 format="png",
                 bbox_inches="tight",
                 pad_inches=0.1,
-                pil_kwargs={"optimize": True, "compress_level": 6},
+                pil_kwargs={"optimize": False, "compress_level": 3},
             )
             buf.seek(0)
             png_bytes = buf.getvalue()

@@ -101,9 +101,8 @@ def evaluate_claim_contradiction_gate(
     workstreams: tuple[Workstream, ...],
     programs_root: Path,
 ) -> GateEvaluation:
-    forceable = _forceable_below_level(program_maturity_level, threshold=2)
     if program_id is None or not items or not workstreams:
-        return GateEvaluation("QG-11", True, "Claim contradiction gate passed.", 2, forceable=forceable)
+        return GateEvaluation("QG-11", True, "Claim contradiction gate passed.", 3)
 
     discrepancies = tuple(
         discrepancy
@@ -118,7 +117,7 @@ def evaluate_claim_contradiction_gate(
         if discrepancy.kind in {"claim_eta", "workstream_area"}
     )
     if not discrepancies:
-        return GateEvaluation("QG-11", True, "Claim contradiction gate passed.", 2, forceable=forceable)
+        return GateEvaluation("QG-11", True, "Claim contradiction gate passed.", 3)
 
     labels = ", ".join(
         f"{discrepancy.context} (WI:{discrepancy.work_item_id})"
@@ -130,8 +129,7 @@ def evaluate_claim_contradiction_gate(
         "QG-11",
         False,
         f"Open claims contradicted by current ADO state without acknowledgment: {labels}",
-        2,
-        forceable=forceable,
+        3,
     )
 
 
@@ -237,10 +235,6 @@ def evaluate_high_risk_next_action_gate(
         2,
         forceable=True,
     )
-
-
-def _forceable_below_level(program_maturity_level: int, *, threshold: int) -> bool:
-    return program_maturity_level < threshold
 
 
 def _group_contradictions_by_workstream(packets: tuple[Any, ...]) -> dict[str, tuple[Any, ...]]:

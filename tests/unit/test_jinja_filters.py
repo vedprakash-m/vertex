@@ -20,6 +20,13 @@ def test_risk_filters_return_canonical_tokens() -> None:
     assert risk_bg(RiskLevel.DONE) == "#4EA72E"
 
 
+def test_legacy_uppercase_risk_renders_as_needs_input() -> None:
+    risk = RiskLevel("UNKNOWN")
+
+    assert risk_label(risk) == "Needs Input"
+    assert risk_bg(risk) == risk_bg(RiskLevel.UNKNOWN)
+
+
 def test_delta_label_formats_risk_and_eta_changes() -> None:
     assert delta_label(DeltaKind.RISK_UP, RiskLevel.LOW, RiskLevel.HIGH) == "▲ was Low"
     assert delta_label(DeltaKind.ETA_CHANGED, date(2026, 5, 1), date(2026, 5, 8)) == "05/01 → 05/08"

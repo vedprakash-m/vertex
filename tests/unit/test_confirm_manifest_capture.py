@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import json
 from dataclasses import FrozenInstanceError, asdict, replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,9 +12,11 @@ from typer import BadParameter
 
 from src.commands import confirm
 from src.commands.confirm_stages import draft_loaders
+from src.commands.confirm_stages.deserialization import deserialize_retained_blocking_charts
 from src.core.exceptions import ConfigError
 from src.core.manifest_writer import hash_jsonable
 from src.core.overrides_store import OverridesDocument
+from src.core.quality_gates import evaluate_chart_gates
 from tests.unit.test_run_evidence_contracts import _capture, _wire
 
 
@@ -29,8 +32,8 @@ def _manifest(root: Path, payload: object) -> Path:
 def test_capture_reads_one_revision_for_identity_and_both_metadata_fields(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    first = {"manifest_id": "first", "config_hash": hash_jsonable({"revision": "first"}), "metadata": {"ai_safety": {"revision": "first"}, "draft_readiness": {"revision": "first"}}}
-    second = {"manifest_id": "second", "config_hash": hash_jsonable({"revision": "second"}), "metadata": {"ai_safety": {"revision": "second"}, "draft_readiness": {"revision": "second"}}}
+    first = {"manifest_id": "first", "config_hash": hash_jsonable({"revision": "first"}), "qg_results": {"QG-21": False}, "metadata": {"ai_safety": {"revision": "first"}, "draft_readiness": {"revision": "first"}}}
+    second = {"manifest_id": "second", "config_hash": hash_jsonable({"revision": "second"}), "qg_results": {"QG-22": False}, "metadata": {"ai_safety": {"revision": "second"}, "draft_readiness": {"revision": "second"}}}
     path = _manifest(tmp_path, first)
     original = Path.read_text
     reads = []
@@ -48,12 +51,14 @@ def test_capture_reads_one_revision_for_identity_and_both_metadata_fields(
     assert captured.config_hash == first["config_hash"]
     assert captured.ai_safety == {"revision": "first"}
     assert captured.draft_readiness == {"revision": "first"}
+    assert captured.chart_hard_gate_failures == ("QG-21",)
     assert reads == [path]
     with pytest.raises(FrozenInstanceError):
         setattr(captured, "manifest_id", "changed")
     newer = draft_loaders.load_confirm_draft_manifest("fixture", 7, draft_state={}, programs_root=tmp_path)
     assert newer.manifest_id == "second"
     assert newer.config_hash == second["config_hash"]
+    assert newer.chart_hard_gate_failures == ("QG-22",)
     assert reads == [path, path]
 
 
@@ -79,6 +84,230 @@ def test_capture_preserves_optional_legacy_metadata(tmp_path: Path, metadata: ob
     assert captured.draft_readiness is None
     assert captured.milestone_assessments is None
     assert captured.milestone_trajectory_snapshot is None
+
+
+@pytest.mark.parametrize("qg_results", [None, [], "invalid", {"QG-21": 0}, {"QG-22": None}])
+def test_invalid_recorded_chart_gate_results_are_refused(tmp_path: Path, qg_results: object) -> None:
+    _manifest(tmp_path, {"manifest_id": "id", "qg_results": qg_results})
+
+    with pytest.raises(BadParameter, match="chart gate"):
+        draft_loaders.load_confirm_draft_manifest("fixture", 7, draft_state={}, programs_root=tmp_path)
+
+
+@pytest.mark.parametrize("evidence", [
+    None, {}, [None], [{}],
+    [{"query_id": "chart", "chart_blocks_publish": False, "is_degraded": True,
+      "chart_cache_ttl_hours": 26, "captured_at": None, "cache_captured_at": None}],
+    [{"query_id": "chart", "chart_blocks_publish": True, "is_degraded": False,
+      "chart_cache_ttl_hours": 26, "captured_at": None, "cache_captured_at": None}],
+])
+def test_invalid_manifest_chart_freshness_evidence_is_refused(tmp_path: Path, evidence: object) -> None:
+    _manifest(tmp_path, {"manifest_id": "id", "metadata": {"chart_freshness_evidence": evidence}})
+    with pytest.raises(BadParameter, match="chart freshness evidence"):
+        draft_loaders.load_confirm_draft_manifest("fixture", 7, draft_state={}, programs_root=tmp_path)
+
+
+def _bound_chart_payload() -> tuple[dict[str, object], dict[str, object]]:
+    evidence = [{
+        "query_id": "chart", "chart_blocks_publish": True, "is_degraded": True,
+        "chart_cache_ttl_hours": 26, "captured_at": "2026-01-01T00:00:00+00:00",
+        "cache_captured_at": None,
+    }]
+    gates = {"QG-21": True, "QG-22": True}
+    sections = [{"query_id": "standalone"}]
+    payload: dict[str, object] = {
+        "manifest_id": "id", "qg_results": gates,
+        "metadata": {"chart_freshness_evidence": evidence},
+    }
+    state: dict[str, object] = {
+        "kusto_sections": sections,
+        "chart_gate_evidence_sha256": hash_jsonable({
+            "manifest_id": "id", "chart_gate_results": gates,
+            "chart_freshness_evidence": evidence, "kusto_sections": sections,
+        }),
+    }
+    return payload, state
+
+
+@pytest.mark.parametrize("change", (
+    "evidence", "missing_evidence", "gate", "missing_gate", "manifest_id", "sections",
+    "missing_sections", "missing_reference", "invalid_reference",
+))
+def test_chart_evidence_binding_refuses_mismatched_artifacts(
+    tmp_path: Path, change: str,
+) -> None:
+    payload, state = _bound_chart_payload()
+    metadata = payload["metadata"]
+    assert isinstance(metadata, dict)
+    if change == "evidence":
+        metadata["chart_freshness_evidence"] = []
+    elif change == "missing_evidence":
+        del metadata["chart_freshness_evidence"]
+    elif change == "gate":
+        payload["qg_results"] = {"QG-21": True, "QG-22": False}
+    elif change == "missing_gate":
+        payload["qg_results"] = {"QG-21": True}
+    elif change == "manifest_id":
+        payload["manifest_id"] = "other"
+    elif change == "sections":
+        state["kusto_sections"] = []
+    elif change == "missing_sections":
+        del state["kusto_sections"]
+    elif change == "missing_reference":
+        del state["chart_gate_evidence_sha256"]
+    else:
+        state["chart_gate_evidence_sha256"] = "invalid"
+    _manifest(tmp_path, payload)
+
+    with pytest.raises(BadParameter, match="chart.*binding"):
+        draft_loaders.load_confirm_draft_manifest("fixture", 7, draft_state=state, programs_root=tmp_path)
+
+
+def test_matching_chart_evidence_binding_is_accepted(tmp_path: Path) -> None:
+    payload, state = _bound_chart_payload()
+    _manifest(tmp_path, payload)
+    captured = draft_loaders.load_confirm_draft_manifest(
+        "fixture", 7, draft_state=state, programs_root=tmp_path,
+    )
+    assert captured.recorded_qg22_passed
+    assert len(captured.chart_freshness_evidence) == 1
+
+
+def test_chart_binding_refuses_changed_effective_edition_type(tmp_path: Path) -> None:
+    payload, state = _bound_chart_payload()
+    metadata = payload["metadata"]
+    assert isinstance(metadata, dict)
+    metadata["chart_binding_edition_type"] = "detailed"
+    state["edition_type"] = "lookback"
+    _manifest(tmp_path, payload)
+
+    with pytest.raises(BadParameter, match="chart.*binding"):
+        draft_loaders.load_confirm_draft_manifest(
+            "fixture", 7, draft_state=state, programs_root=tmp_path,
+        )
+
+
+@pytest.mark.parametrize("edition_type", ("detailed", "focused"))
+def test_chart_binding_accepts_matching_effective_edition_type(tmp_path: Path, edition_type: str) -> None:
+    payload, state = _bound_chart_payload()
+    metadata = payload["metadata"]
+    assert isinstance(metadata, dict)
+    metadata["chart_binding_edition_type"] = edition_type
+    state["edition_type"] = edition_type
+    state["chart_gate_evidence_sha256"] = hash_jsonable({
+        "manifest_id": "id", "chart_gate_results": payload["qg_results"],
+        "chart_freshness_evidence": metadata["chart_freshness_evidence"],
+        "kusto_sections": state["kusto_sections"], "edition_type": edition_type,
+    })
+    _manifest(tmp_path, payload)
+
+    captured = draft_loaders.load_confirm_draft_manifest(
+        "fixture", 7, draft_state=state, programs_root=tmp_path,
+    )
+    assert captured.recorded_qg22_passed
+
+    del metadata["chart_binding_edition_type"]
+    _manifest(tmp_path, payload)
+    with pytest.raises(BadParameter, match="chart.*binding"):
+        draft_loaders.load_confirm_draft_manifest(
+            "fixture", 7, draft_state=state, programs_root=tmp_path,
+        )
+
+
+def test_unbound_empty_chart_evidence_is_refused(tmp_path: Path) -> None:
+    _manifest(tmp_path, {
+        "manifest_id": "id", "metadata": {"chart_freshness_evidence": []},
+    })
+    with pytest.raises(BadParameter, match="chart.*binding"):
+        draft_loaders.load_confirm_draft_manifest("fixture", 7, draft_state={}, programs_root=tmp_path)
+
+
+@pytest.mark.parametrize("edition_type", ("detailed", "focused", "condensed", "narrative", "deck"))
+def test_unbound_ordinary_qg22_pass_is_refused(tmp_path: Path, edition_type: str) -> None:
+    _manifest(tmp_path, {"manifest_id": "id", "qg_results": {"QG-22": True}})
+    with pytest.raises(BadParameter, match="chart.*binding"):
+        draft_loaders.load_confirm_draft_manifest(
+            "fixture", 7, draft_state={"edition_type": edition_type, "kusto_sections": []}, programs_root=tmp_path,
+        )
+
+
+def test_legacy_lookback_qg22_pass_remains_unqualified(tmp_path: Path) -> None:
+    _manifest(tmp_path, {"manifest_id": "id", "qg_results": {"QG-22": True}})
+    captured = draft_loaders.load_confirm_draft_manifest(
+        "fixture", 7, draft_state={"edition_type": "lookback", "kusto_sections": []}, programs_root=tmp_path,
+    )
+    assert captured.recorded_qg22_passed
+    assert not captured.chart_freshness_evidence
+
+
+@pytest.mark.parametrize(
+    ("qg_results", "failures"),
+    [(None, ()), ({}, ()), ({"QG-21": True, "QG-22": True}, ()), ({"QG-21": True, "QG-22": False}, ("QG-22",))],
+)
+def test_capture_records_only_explicit_hard_chart_failures(
+    tmp_path: Path, qg_results: object, failures: tuple[str, ...],
+) -> None:
+    payload: dict[str, object] = {"manifest_id": "id"}
+    if qg_results is not None:
+        payload["qg_results"] = qg_results
+    _manifest(tmp_path, payload)
+
+    captured = draft_loaders.load_confirm_draft_manifest("fixture", 7, draft_state={}, programs_root=tmp_path)
+
+    assert captured.chart_hard_gate_failures == failures
+    assert captured.recorded_qg22_passed is (
+        isinstance(qg_results, dict) and qg_results.get("QG-22") is True
+    )
+
+
+def _retained_chart() -> dict[str, object]:
+    return {
+        "section_id": "chart", "title": "Chart", "query_id": "chart",
+        "render_mode": "chart_image", "source_label": "Synthetic", "confidence": "high",
+        "is_degraded": True, "chart_blocks_publish": True, "chart_cache_ttl_hours": 26,
+        "captured_at": "2026-01-01T00:00:00+00:00",
+        "cache_captured_at": "2026-01-01T00:00:00+00:00",
+    }
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("chart_blocks_publish", "true"), ("is_degraded", 1),
+    ("chart_cache_ttl_hours", 0), ("chart_cache_ttl_hours", True),
+    ("chart_cache_ttl_hours", None), ("captured_at", "invalid"),
+    ("cache_captured_at", []), ("query_id", None), ("query_id", " "),
+])
+def test_invalid_retained_blocking_chart_evidence_is_refused(field: str, value: object) -> None:
+    chart = _retained_chart()
+    chart[field] = value
+    with pytest.raises(BadParameter, match="retained chart|retained blocking chart"):
+        deserialize_retained_blocking_charts((chart,))
+
+
+@pytest.mark.parametrize(("age", "passed"), [
+    (timedelta(hours=26), True),
+    (timedelta(hours=26, seconds=1), False),
+    (timedelta(seconds=-1), False),
+])
+def test_retained_blocking_chart_freshness_uses_cache_timestamp(age: timedelta, passed: bool) -> None:
+    chart = _retained_chart()
+    chart["captured_at"] = "2026-01-03T00:00:00+00:00"
+    captured = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    gates = evaluate_chart_gates(
+        deserialize_retained_blocking_charts((chart,)), current_time=captured + age,
+    )
+    assert next(gate for gate in gates.results if gate.gate_id == "QG-22").passed is passed
+
+
+def test_missing_timestamp_blocks_and_nonblocking_or_legacy_sections_are_not_evidence() -> None:
+    chart = _retained_chart()
+    chart["captured_at"] = None
+    chart["cache_captured_at"] = None
+    sections = deserialize_retained_blocking_charts((
+        chart, {**chart, "chart_blocks_publish": False}, {"section_id": "legacy"},
+    ))
+    assert len(sections) == 1
+    gates = evaluate_chart_gates(sections, current_time=datetime(2026, 1, 1, tzinfo=timezone.utc))
+    assert next(gate for gate in gates.results if gate.gate_id == "QG-22").passed is False
 
 
 @pytest.mark.parametrize("capture_version", ["absent", "v1", "v2-unbound"])

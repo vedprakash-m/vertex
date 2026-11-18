@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
+import os
 from pathlib import Path
+import time
+from typing import TypeVar
 
 import yaml
 
@@ -14,6 +18,18 @@ from src.core.workspace_lease import cooperative_capture_fence
 
 # Valid modes for program-level and per-family SoR state.
 _VALID_MODES = frozenset({"legacy", "shadow", "primary"})
+_T = TypeVar("_T")
+
+
+def _with_windows_sharing_retry(operation: Callable[[], _T]) -> _T:
+    for delay in (0.01, 0.02, 0.04, 0.08, 0.16):
+        try:
+            return operation()
+        except PermissionError:
+            if os.name != "nt":
+                raise
+            time.sleep(delay)
+    return operation()
 
 # Authority families defined in source_authority.yaml (§6.2.2).
 AUTHORITY_FAMILIES: tuple[str, ...] = (
@@ -101,7 +117,8 @@ def load_fact_sor_state(program_id: str, *, programs_root: Path = PROGRAMS_ROOT)
     if not path.exists():
         return None
     try:
-        document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        text = _with_windows_sharing_retry(lambda: path.read_text(encoding="utf-8"))
+        document = yaml.safe_load(text) or {}
     except yaml.YAMLError as error:
         raise ConfigError(f"Invalid YAML in {path}.") from error
     if not isinstance(document, dict):
@@ -174,10 +191,12 @@ def save_fact_sor_state(
     path = get_fact_sor_state_path(program_id, programs_root=programs_root)
     with cooperative_capture_fence(path):
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
+        temp_path = path.with_suffix(path.suffix + ".tmp")
+        temp_path.write_text(
             yaml.safe_dump(document, sort_keys=False, allow_unicode=False),
             encoding="utf-8",
         )
+        _with_windows_sharing_retry(lambda: os.replace(temp_path, path))
     return state
 
 

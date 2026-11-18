@@ -19,12 +19,13 @@ from dataclasses import replace
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING
 
 import typer
 
 from src.commands.report_email import _distribution_to, _resolve_email_subject
 from src.core.archive_store import ArchiveEntry
+from src.core.chart_cache_store import ChartCacheEntry
 from src.core.context_snapshot_store import load_context_snapshot, write_context_snapshot
 from src.core.eml_writer import build_eml_bytes
 from src.core.models import ReportData, RunManifest
@@ -119,6 +120,31 @@ def add_chart_index(
         for query_id, entry in chart_cache_entries.items()
     ]
     return replace(manifest, metadata={**manifest.metadata, "chart_index": chart_index_entries})
+
+
+def collect_chart_cache_entries(
+    program_id: str | None,
+    kusto_sections: tuple[KustoSectionData, ...],
+    *,
+    programs_root: Path,
+    load_chart_cache_fn: Callable[..., ChartCacheEntry | None],
+) -> dict[str, dict[str, Any]] | None:
+    if program_id is None or not kusto_sections:
+        return None
+    entries: dict[str, dict[str, Any]] = {}
+    for section in kusto_sections:
+        if getattr(section, "render_mode", None) == "chart_image" and section.query_id:
+            entry = load_chart_cache_fn(program_id, section.query_id, programs_root=programs_root)
+            if entry is not None:
+                entries[section.query_id] = {
+                    "program_id": entry.program_id,
+                    "query_id": entry.query_id,
+                    "captured_at": entry.captured_at.isoformat(),
+                    "chart_config_hash": entry.chart_config_hash,
+                    "row_count": entry.row_count,
+                    "schema_version": entry.schema_version,
+                }
+    return entries
 
 
 def write_context_snapshot_for_issue(

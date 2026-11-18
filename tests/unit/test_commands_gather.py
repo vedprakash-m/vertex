@@ -11014,7 +11014,7 @@ def test_gather_program_records_frozen_pull_request_query_state_history(monkeypa
                     "status": "active",
                     "creationDate": "2026-05-02T08:00:00Z",
                     "isDraft": False,
-                    "repository": {"id": repository_id, "name": "XStoreApp"},
+                    "repository": {"id": repository_id, "name": "ExampleApp"},
                 },
                 {
                     "pullRequestId": 302,
@@ -11022,7 +11022,7 @@ def test_gather_program_records_frozen_pull_request_query_state_history(monkeypa
                     "status": "active",
                     "creationDate": "2026-05-08T08:00:00Z",
                     "isDraft": True,
-                    "repository": {"id": repository_id, "name": "XStoreApp"},
+                    "repository": {"id": repository_id, "name": "ExampleApp"},
                 },
             ]
 
@@ -12814,7 +12814,7 @@ def test_load_pipeline_signals_appends_open_pull_request_summary(monkeypatch) ->
                     "status": "active",
                     "creationDate": "2026-05-02T08:00:00Z",
                     "isDraft": False,
-                    "repository": {"id": repository_id, "name": "XStoreApp"},
+                    "repository": {"id": repository_id, "name": "ExampleApp"},
                 },
                 {
                     "pullRequestId": 302,
@@ -12822,7 +12822,7 @@ def test_load_pipeline_signals_appends_open_pull_request_summary(monkeypatch) ->
                     "status": "active",
                     "creationDate": "2026-05-08T08:00:00Z",
                     "isDraft": True,
-                    "repository": {"id": repository_id, "name": "XStoreApp"},
+                    "repository": {"id": repository_id, "name": "ExampleApp"},
                 },
             ]
 
@@ -12834,8 +12834,8 @@ def test_load_pipeline_signals_appends_open_pull_request_summary(monkeypatch) ->
     assert len(signals) == 1
     assert signals[0].source == "ado/pr"
     assert signals[0].workstream_id == "deployment_readiness"
-    assert "repo XStoreApp has 2 open PRs; P90 age 10.0d; oldest #301 10.0d" in signals[0].text
-    assert signals[0].entity_refs == ("PR:XStoreApp/301", "WI:12345", "PR:XStoreApp/302", "WS:deployment_readiness")
+    assert "repo ExampleApp has 2 open PRs; P90 age 10.0d; oldest #301 10.0d" in signals[0].text
+    assert signals[0].entity_refs == ("PR:ExampleApp/301", "WI:12345", "PR:ExampleApp/302", "WS:deployment_readiness")
     assert signals[0].metadata is not None
     assert signals[0].metadata["repository_ids"] == ["repo-42"]
     assert signals[0].metadata["repositories"][0]["open_pr_count"] == 2
@@ -13456,8 +13456,8 @@ def test_gather_command_with_pull_request_signals_records_distinct_pr_ingestion_
                     source="ado/pr",
                     program_id="acme",
                     workstream_id="acme",
-                    entity_refs=("PR:XStoreApp/301",),
-                    text="Acme: repo XStoreApp has 1 open PR; P90 age 10.0d; oldest #301 10.0d",
+                    entity_refs=("PR:ExampleApp/301",),
+                    text="Acme: repo ExampleApp has 1 open PR; P90 age 10.0d; oldest #301 10.0d",
                     raw_ref="ado-pr:acme:repo-42:2026-05-12",
                     confidence=Confidence.HIGH,
                     metadata={"repository_ids": ["repo-42"]},
@@ -14453,14 +14453,14 @@ kpis:
                         "title": "Stabilize rollout for WI:12345",
                         "status": "active",
                         "creationDate": "2026-05-02T08:00:00Z",
-                        "repository": {"id": repository_id, "name": "XStoreApp"},
+                        "repository": {"id": repository_id, "name": "ExampleApp"},
                     },
                     {
                         "pullRequestId": 302,
                         "title": "Tune validation gates",
                         "status": "active",
                         "creationDate": "2026-05-08T08:00:00Z",
-                        "repository": {"id": repository_id, "name": "XStoreApp"},
+                        "repository": {"id": repository_id, "name": "ExampleApp"},
                     },
                 ]
             if repository_id == "repo-99":
@@ -14496,9 +14496,9 @@ kpis:
     assert kpi_signals[0].metadata["engine"] == "ado_pr"
     assert kpi_signals[0].metadata["result_value"] == "10.0"
     assert kpi_signals[0].entity_refs == (
-        "PR:XStoreApp/301",
+        "PR:ExampleApp/301",
         "WI:12345",
-        "PR:XStoreApp/302",
+        "PR:ExampleApp/302",
         "PR:ExampleNetworkInfra/401",
         "WI:45678",
         "WS:acme",

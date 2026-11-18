@@ -244,7 +244,7 @@ from src.core.journal import load_latest_review_decisions, read_signals
 from src.core.jinja_filters import build_anchor, configure_ado_web_url, configure_scorecard_labels, risk_label
 from src.core.kusto_client import build_live_kusto_query_executor
 from src.core.kusto_query_loader import load_kpi_queries
-from src.core.kusto_rendering import KustoQueryExecutor, build_kusto_sections
+from src.core.kusto_rendering import KustoQueryExecutor, build_kusto_sections, build_offline_kpi_chart_sections, chart_pipeline_enabled
 from src.core.manifest_writer import build_run_manifest, write_run_manifest
 from src.core.narrative_store import build_workstream_narrative_history
 from src.core.notification_state_store import load_latest_notification_state
@@ -257,7 +257,7 @@ from src.core.overrides_store import DecisionStripAck, DimensionOverride, Overri
 from src.core.overrides_store import _resolve_artifact_edition, apply_pending_overrides, get_overrides_path, load_overrides, merge_overrides
 from src.core.pipeline import StageContext, run_pipeline
 from src.core.program_fact_store import FactSnapshotPin, ProgramFactStore, _resolve_fact_db_root
-from src.core.quality_gates import QualityGateReport, combine_gate_reports, evaluate_continuity_gates, evaluate_phase_1a_gates, evaluate_phase_1b_gates, evaluate_phase_1c_gates
+from src.core.quality_gates import QualityGateReport, combine_gate_reports, evaluate_chart_gates, evaluate_continuity_gates, evaluate_phase_1a_gates, evaluate_phase_1b_gates, evaluate_phase_1c_gates
 from src.core.quality_gates import evaluate_workiq_budget_gate
 from src.core.quality_matrix_engine import QualityMatrix, build_quality_matrix, render_quality_matrix_markdown
 from src.core.query_builder import build_odata_filter
@@ -361,6 +361,8 @@ class DraftState:
     override_snapshot: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
     program_fact_snapshot: ProgramFactSnapshotDraftState | None = None
     run_evidence_snapshot_sha256: str | None = None
+    chart_gate_evidence_sha256: str | None = None
+    routed_chart_sections: tuple[KustoSectionData, ...] | None = None
     top_3_now: tuple[str, ...] = ()
     exec_summary_text: str = ""
     # D-17: gather run lineage, pinned once at draft creation (see
@@ -1403,6 +1405,7 @@ def _generate_lookback_draft(
     reports_root: Path,
     archive_root: Path,
     open_browser: bool,
+    offline: bool = False,
     gather_run_id: str | None = None,
     gather_run_hash: str | None = None,
     programs_root: Path | None = None,
@@ -1640,6 +1643,7 @@ def _generate_lookback_draft(
                 # Retrospective AI synthesis is a best-effort enhancement for lookback editions.
                 # Fail closed to the deterministic retrospective rows rather than blocking report generation.
                 pass
+    kusto_sections = build_offline_kpi_chart_sections(bundle.config.kusto) if offline else ()
     render_context = RenderContext(
         title=title,
         subtitle=subtitle,
@@ -1649,7 +1653,7 @@ def _generate_lookback_draft(
         health=health,
         top_items=(),
         scorecards=scorecards,
-        kusto_sections=(),
+        kusto_sections=kusto_sections,
         workstreams=(),
         charter_review=charter_review,
         assumption_lifecycle=assumption_lifecycle,
@@ -1820,6 +1824,14 @@ def _generate_lookback_draft(
         archive_inconsistencies=find_archive_index_inconsistencies(edition_name, archive_root=archive_root),
     )
     qg_reports = [qg_phase_1a, qg_phase_1b, qg_phase_1c]
+    if offline and bundle.config.charts is not None:
+        qg_reports.append(
+            evaluate_chart_gates(
+                kusto_sections,
+                current_time=started_at,
+                edition_charts_enabled=chart_pipeline_enabled(bundle.config.charts.enabled),
+            )
+        )
     # P4-4 (spec §14.1): QG-WIQ-4 — WorkIQ/AI run-cost info gate (report surface).
     # Surfaces a note when spend exceeds 80% of the configured per-run budget; never blocks.
     qg_reports.append(
@@ -1957,7 +1969,7 @@ def _generate_lookback_draft(
             ai_prompt_versions={},
             ai_confidences={},
             ai_trace_run_id=lookback_trace_run_id,
-            kusto_sections=(),
+            kusto_sections=kusto_sections,
             override_snapshot=override_snapshot,
             program_fact_snapshot=_pin_program_fact_snapshot(
                 draft_program_id,
@@ -2006,7 +2018,7 @@ def _generate_lookback_draft(
         overrides_path=overrides_path,
         narratives_dir=narratives_dir,
         review_status_path=review_status_path,
-        kusto_sections=(),
+        kusto_sections=kusto_sections,
         warnings=blocking_warnings + non_blocking_warnings,
         draft_readiness=None,
         diff_summary=diff_summary,

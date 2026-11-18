@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.core.effective_completeness import EffectiveCompleteness, load_effective_completeness
 from src.core.jsonl_utils import read_jsonl_records
 from src.core.ledger.candidate_store import PROGRAMS_ROOT, load_pending_candidates, load_triage_decisions
 from src.core.ledger.rev_evidence import RETENTION_CLASS_ACCEPTED_EVENT, load_rev_evidence_metadata
@@ -227,6 +228,8 @@ class RevHealthReport:
     warnings: tuple[str, ...] = ()                      # aggregated human-readable alerts
     # W3-1: Platform-level completeness vector (§6.1)
     completeness_vector: RealityCompletenessVector | None = None
+    # RELO-W2.4: downgrade-only projection shared with cockpit
+    effective_completeness: EffectiveCompleteness | None = None
 
     def to_dict(self) -> dict[str, Any]:
         last = None
@@ -278,6 +281,44 @@ class RevHealthReport:
             "warnings": list(self.warnings),
             "completeness_vector": self.completeness_vector.to_dict() if self.completeness_vector is not None else None,
         }
+
+
+def _compute_effective_completeness(
+    program_id: str,
+    *,
+    programs_root: Path,
+    last_cycle: LastCycleSummary | None,
+    inbox: InboxTelemetry | None,
+) -> tuple[RealityCompletenessVector | None, EffectiveCompleteness]:
+    try:
+        vector = compute_reality_completeness_vector(
+            program_id,
+            programs_root=programs_root,
+            last_cycle_stop=last_cycle.stop_category if last_cycle else None,
+            last_cycle_enumerated=last_cycle.enumerated if last_cycle else None,
+            inbox_newest_age_days=inbox.inbox_newest_age_days if inbox else None,
+            inbox_stale=inbox.inbox_stale if inbox else False,
+        )
+    except Exception as exc:
+        log.warning("rev-health: failed to compute completeness vector for %s: %s", program_id, exc)
+        vector = None
+    return vector, load_effective_completeness(vector, program_id, programs_root=programs_root)
+
+
+def build_program_effective_completeness(
+    program_id: str, *, programs_root: Path = PROGRAMS_ROOT
+) -> EffectiveCompleteness:
+    last_cycle = _read_last_cycle(program_id, programs_root)
+    inbox = _inbox_telemetry(
+        program_id,
+        programs_root,
+        stale_days=DEFAULT_INBOX_STALE_DAYS,
+        purge_days=DEFAULT_QUARANTINE_PURGE_DAYS,
+    )
+    _, effective = _compute_effective_completeness(
+        program_id, programs_root=programs_root, last_cycle=last_cycle, inbox=inbox
+    )
+    return effective
 
 
 def build_rev_health_report(
@@ -450,22 +491,12 @@ def build_rev_health_report(
 
     # W3-1/2: Compute the platform-level RealityCompletenessVector (incremental —
     # pass already-loaded inbox data to avoid double I/O).
-    inbox_newest_age = inbox.inbox_newest_age_days if inbox is not None else None
-    inbox_is_stale = inbox.inbox_stale if inbox is not None else False
-    try:
-        completeness_vector = compute_reality_completeness_vector(
-            program_id,
-            programs_root=programs_root,
-            last_cycle_stop=last_cycle.stop_category if last_cycle else None,
-            last_cycle_enumerated=last_cycle.enumerated if last_cycle else None,
-            inbox_newest_age_days=inbox_newest_age,
-            inbox_stale=inbox_is_stale,
-        )
-    except Exception as exc:
-        log.warning("rev-health: failed to compute completeness vector for %s: %s", program_id, exc)
-        completeness_vector = None
+    completeness_vector, effective_completeness = _compute_effective_completeness(
+        program_id, programs_root=programs_root, last_cycle=last_cycle, inbox=inbox
+    )
 
     return RevHealthReport(
+        effective_completeness=effective_completeness,
         program_id=program_id,
         candidates_pending=candidates_pending,
         run_state_distribution=dict(run_dist),
@@ -587,6 +618,9 @@ def render_rev_health_human(report: RevHealthReport) -> str:
     # W3-3: completeness vector section
     if report.completeness_vector is not None:
         lines.append(render_completeness_vector_human(report.completeness_vector).rstrip("\n"))
+    effective = report.effective_completeness
+    if effective is not None and effective.downgraded:
+        lines.append(f"    effective_completeness=unknown (downgraded; reasons: {', '.join(effective.reasons)})")
     return "\n".join(lines) + "\n"
 
 
@@ -594,6 +628,7 @@ __all__ = [
     "RevHealthReport",
     "LastCycleSummary",
     "InboxTelemetry",
+    "build_program_effective_completeness",
     "build_rev_health_report",
     "render_rev_health_human",
     "REV_HEALTH_SCHEMA_VERSION",

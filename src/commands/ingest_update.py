@@ -9,6 +9,7 @@ Apply via vertex context apply (unified per §16.2 Q-X-1 resolution — no separ
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from email import policy
 from email.parser import BytesParser
@@ -20,6 +21,7 @@ import typer
 
 from src.core.config_loader import REPORTS_ROOT
 from src.core.edition_resolver import PROGRAMS_ROOT, resolve_edition_paths
+from src.core.ncfl_apply import read_target_prior_state
 from src.core.ncfl_models import ContextUpdateProposal, EXTRACTION_METHOD_CONFIDENCE, NCFL_EXTRACTOR_VERSION
 from src.core.ncfl_proposal_store import stage_extracted_proposals
 from src.core.yaml_utils import load_yaml_mapping
@@ -162,7 +164,8 @@ def _extract_proposals_from_eml(
 
     deduped: dict[tuple[str, str], ContextUpdateProposal] = {}
     for proposal in proposals:
-        deduped[(proposal.conflict_key, proposal.source_value)] = proposal
+        prior_state = read_target_prior_state(proposal, programs_root=programs_root)
+        deduped[(proposal.conflict_key, proposal.source_value)] = replace(proposal, prior_state=prior_state)
     return tuple(sorted(deduped.values(), key=lambda entry: (entry.conflict_key, entry.proposal_id)))
 
 

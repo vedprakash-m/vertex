@@ -141,7 +141,7 @@ def test_pre_dispatch_feature_budget_factory_failure_does_not_block_reuse(client
 
 def _token_budget_client(
     tmp_path, monkeypatch, *, estimate, custom_retry, budget=1.0, run_budget=None,
-    default_factory=False, explicit_builtin_factory=False, client_class=FallbackAIClient,
+    default_factory=False, explicit_builtin_factory=False, client_class=FallbackAIClient, trace_metadata=None,
 ):
     estimator = Mock()
     estimator.estimate.return_value = estimate
@@ -166,7 +166,7 @@ def _token_budget_client(
     factory_mock = Mock(side_effect=factory)
     trace = AITraceContext(
         edition="acme_weekly", run_id="token-budget", caller="test",
-        metadata={} if run_budget is None else {"run_budget_usd": run_budget},
+        metadata={**({} if run_budget is None else {"run_budget_usd": run_budget}), **(trace_metadata or {})},
     )
     client = client_class(
         deployments=("summary-model", "summary-backup"), temperature=0.2, budget_usd=budget,
@@ -175,6 +175,106 @@ def _token_budget_client(
         retryable_exceptions=(Exception,) if custom_retry else None,
     )
     return client, clients, factory_mock, router, trace_writer, estimator
+
+
+_CHAIN_ATTEMPT_USD = 0.0002 + 0.00125  # default model price for 1k prompt + 1k output tokens
+
+
+def _chain_run_state():
+    return CostGuard(edition="acme_weekly", run_id="token-budget", budget_usd=1.0).current_state()
+
+
+@pytest.mark.parametrize("default_factory", [False, True])
+@pytest.mark.parametrize("method", ["chat", "structured"])
+def test_fallback_chain_reserves_worst_case_once_before_first_dispatch(
+    tmp_path, monkeypatch, method, default_factory,
+) -> None:
+    client, _clients, _factory, router, _trace_writer, _estimator = _token_budget_client(
+        tmp_path, monkeypatch, estimate=1000, custom_retry=False, run_budget=1.0, default_factory=default_factory,
+    )
+    reserved_at_dispatch: list[float] = []
+    response = router.route.return_value
+
+    def route(**kwargs):
+        reserved_at_dispatch.append(_chain_run_state().reserved_usd)
+        return response
+
+    router.route.side_effect = route
+    arguments = {"parser": lambda value: value} if method == "structured" else {}
+
+    getattr(client, method)("system", "user", max_tokens=1000, **arguments)
+
+    attempts = (AIClient.MAX_RETRIES + 1) * 2
+    assert reserved_at_dispatch == pytest.approx([attempts * _CHAIN_ATTEMPT_USD])
+    state = _chain_run_state()
+    assert (state.spent_usd, state.reserved_usd, state.ai_calls) == pytest.approx((0.0, 0.0, 1))
+
+
+@pytest.mark.parametrize("method", ["chat", "structured"])
+def test_fallback_chain_refuses_before_dispatch_when_worst_case_exceeds_ceiling(
+    tmp_path, monkeypatch, method,
+) -> None:
+    short = 5 * _CHAIN_ATTEMPT_USD
+    client, _clients, _factory, router, _trace_writer, _estimator = _token_budget_client(
+        tmp_path, monkeypatch, estimate=1000, custom_retry=True, default_factory=True, budget=1.0, run_budget=short,
+    )
+    arguments = {"parser": lambda value: value} if method == "structured" else {}
+
+    with pytest.raises(BudgetExceeded):
+        getattr(client, method)("system", "user", max_tokens=1000, **arguments)
+
+    router.route.assert_not_called()
+    assert _chain_run_state().reserved_usd == 0.0
+
+
+@pytest.mark.parametrize("method", ["chat", "structured"])
+def test_fallback_chain_refuses_unknown_backup_price_before_primary_dispatch(tmp_path, monkeypatch, method) -> None:
+    from src.core.exceptions import ConfigError
+    from src.core.policy_loader import load_ai_model_cost_policy
+
+    def pricing(deployment):
+        if deployment == "summary-backup":
+            raise ConfigError("synthetic missing price")
+        return load_ai_model_cost_policy(deployment)
+
+    monkeypatch.setattr("src.ai.client.load_ai_model_cost_policy", pricing)
+    client, _clients, _factory, router, _trace_writer, _estimator = _token_budget_client(
+        tmp_path, monkeypatch, estimate=1000, custom_retry=True, run_budget=1.0,
+    )
+    arguments = {"parser": lambda value: value} if method == "structured" else {}
+
+    with pytest.raises(BudgetConfigurationError):
+        getattr(client, method)("system", "user", max_tokens=1000, **arguments)
+
+    router.route.assert_not_called()
+
+
+@pytest.mark.parametrize("method", ["chat", "structured"])
+def test_fallback_chain_refuses_unknown_feature_before_dispatch(tmp_path, monkeypatch, method) -> None:
+    client, _clients, _factory, router, _trace_writer, _estimator = _token_budget_client(
+        tmp_path, monkeypatch, estimate=1000, custom_retry=True, run_budget=1.0,
+        trace_metadata={"ai_feature": "synthetic-unknown-feature"},
+    )
+    arguments = {"parser": lambda value: value} if method == "structured" else {}
+
+    with pytest.raises(BudgetConfigurationError, match="feature"):
+        getattr(client, method)("system", "user", max_tokens=1000, **arguments)
+
+    router.route.assert_not_called()
+    assert _chain_run_state().reserved_usd == 0.0
+
+
+def test_fallback_chain_retains_uncertain_attempt_and_releases_remainder(tmp_path, monkeypatch) -> None:
+    client, _clients, _factory, router, _trace_writer, _estimator = _token_budget_client(
+        tmp_path, monkeypatch, estimate=1000, custom_retry=False, run_budget=1.0,
+    )
+    response = router.route.return_value
+    router.route.side_effect = [AIClientError("synthetic uncertain outcome"), response]
+
+    client.chat("system", "user", max_tokens=1000)
+
+    state = _chain_run_state()
+    assert (state.spent_usd, state.reserved_usd, state.ai_calls) == pytest.approx((0.0, _CHAIN_ATTEMPT_USD, 1))
 
 
 @pytest.mark.parametrize(
@@ -407,8 +507,9 @@ def test_pre_dispatch_feature_budget_allows_exact_remaining(
         "src.ai.client.load_ai_model_cost_policy",
         lambda _: SimpleNamespace(input_cost_per_1k_tokens=0.0, output_cost_per_1k_tokens=1.0),
     )
+    # RELO-W1.4: the run ceiling must admit the whole-chain worst case (3 attempts x 2 deployments).
     client, clients, factory, router, trace_writer, _ = _token_budget_client(
-        tmp_path, monkeypatch, estimate=0, custom_retry=True, budget=0.25, run_budget=1.0,
+        tmp_path, monkeypatch, estimate=0, custom_retry=True, budget=0.25, run_budget=10.0,
     )
     tokens = 125 if already_spent else 250
     router.route.return_value.usage.completion_tokens = tokens
@@ -913,7 +1014,9 @@ def test_pre_dispatch_feature_budget_counts_fallback_inflight(
             assert trace_writer.call_count == 1
             guard = cast(AIClient, client._clients["summary-model"])._run_cost_guard
             state = guard.current_state()
-            assert state.spent_usd == 0.0 and state.reserved_usd == 0.8 and state.ai_calls == 0
+            # RELO-W1.4: the in-flight chain holds its worst case (0.4 x 3 attempts x 2 deployments)
+            # alongside the refused chain's retained uncertain attempt.
+            assert state.spent_usd == 0.0 and state.reserved_usd == pytest.approx(2.8) and state.ai_calls == 0
         finally:
             release.set()
         assert first.result(timeout=10) == ({} if method == "structured" else "{}")
@@ -1163,7 +1266,8 @@ def test_post_usage_feature_budget_rejects_actual_overrun(
     arguments = {"parser": parser} if method == "structured" else {}
 
     with pytest.raises(BudgetExceeded, match=f"actual AI spend exceeded the {ceiling} ceiling"):
-        getattr(client, method)("system", "user", max_tokens=500, **arguments)
+        # RELO-W1.4: max_tokens keeps the whole-chain worst case (0.6) inside the 1.0 run ceiling.
+        getattr(client, method)("system", "user", max_tokens=100, **arguments)
 
     primary = cast(AIClient, client._clients["summary-model"])
     assert set(client._clients) == {"summary-model"}
@@ -1348,7 +1452,8 @@ def test_post_usage_feature_budget_trace_failure_remains_nonretryable(
     arguments = {"parser": parser} if method == "structured" else {}
 
     with pytest.raises(BudgetExceeded, match=f"actual AI spend exceeded the {ceiling} ceiling"):
-        getattr(client, method)("system", "user", max_tokens=500, **arguments)
+        # RELO-W1.4: max_tokens keeps the whole-chain worst case (0.6) inside the 1.0 run ceiling.
+        getattr(client, method)("system", "user", max_tokens=100, **arguments)
 
     factory.assert_called_once()
     router.route.assert_called_once()

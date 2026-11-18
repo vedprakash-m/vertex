@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "functional_selection": "not perf and not integration and not operator",
+  "functional_shards": 12,
+  "workers_per_shard": 4,
+  "performance_reports": 2,
+  "windows_reports": 1,
+  "coverage": {
+    "sources": [
+      "src",
+      "cli.py"
+    ],
+    "statement_target": 95.0,
+    "statement_floor": 87.95,
+    "branch_floor": 75.19,
+    "changed_code_statement_floor": 95.0,
+    "policy": "whole-source no-regression ratchet plus changed-code threshold"
+  },
+  "performance_nodes": [
+    "tests/unit/test_declarative_chart_builder.py::test_render_under_2_seconds",
+    "tests/unit/test_ledger_perf.py::test_replay_perf_50k",
+    "tests/contracts/test_structural_gap_rules.py::TestStructuralGapPerf::test_gap_evaluation_under_100ms_for_1000_facts",
+    "tests/contracts/test_structural_gap_rules.py::TestStructuralGapPerf::test_gap_evaluation_with_all_rules_firing",
+    "tests/contracts/test_s11c_load_soak.py::TestReplayThroughput::test_replay_throughput_meets_slo",
+    "tests/contracts/test_s11c_load_soak.py::TestReplayThroughput::test_incremental_replay_is_at_least_as_fast_as_full_rebuild",
+    "tests/unit/test_persona_checker.py::test_full_registry_evaluation_under_500ms",
+    "tests/perf/test_perf_baseline.py::test_perf_baseline_50_item_fixture"
+  ],
+  "windows_nodes": [
+    "tests/unit/test_cli_help_encoding.py::test_cli_help_with_legacy_windows_output_encoding",
+    "tests/unit/test_fact_sor_state.py::test_fact_sor_reader_retries_transient_replacement_contention",
+    "tests/unit/test_fact_sor_state.py::test_fact_sor_reader_surfaces_persistent_permission_failure",
+    "tests/unit/test_fact_sor_state.py::test_fact_sor_writer_retries_transient_replacement_contention",
+    "tests/unit/test_jsonl_utils.py::TestRotateJsonlIfOversize::test_same_second_rotation_accounts_for_case_insensitive_existing_names",
+    "tests/unit/test_jsonl_utils.py::TestListRotatedJsonlPaths::test_canonical_stem_scope_is_case_insensitive_on_windows",
+    "tests/unit/test_confirm_archive_evidence_recheck_process.py::test_actual_confirm_fences_cooperating_writer_in_another_process"
+  ],
+  "critical_obligations": [
+    {
+      "id": "QG-4",
+      "node": "tests/unit/test_quality_gates.py::test_qg4_and_qg5_report_violation_counts"
+    },
+    {
+      "id": "QG-5",
+      "node": "tests/unit/test_quality_gates.py::test_qg4_and_qg5_report_violation_counts"
+    },
+    {
+      "id": "QG-6",
+      "node": "tests/unit/test_quality_gates.py::test_qg6_uses_exit_code_three_for_manifest_hash_mismatch"
+    },
+    {
+      "id": "QG-8",
+      "node": "tests/contracts/test_architecture_fitness.py::test_inv6_qg8_needs_input_is_hard_block"
+    },
+    {
+      "id": "QG-11",
+      "node": "tests/unit/test_quality_gates.py::test_qg11_is_not_forceable_at_l2_and_above"
+    },
+    {
+      "id": "QG-13",
+      "node": "tests/unit/test_quality_gates.py::test_qg13_blocks_uncovered_high_risk_items"
+    },
+    {
+      "id": "QG-21",
+      "node": "tests/unit/test_chart_quality_gates.py::test_qg21_blocks_over_limit"
+    },
+    {
+      "id": "QG-22",
+      "node": "tests/unit/test_chart_quality_gates.py::test_qg22_blocks_when_publish_blocked_and_stale"
+    },
+    {
+      "id": "QG-27",
+      "node": "tests/contracts/test_e2e_disagreeing_sources.py::TestAct2ConflictPipeline::test_material_conflict_fires_disputed_fact_attention"
+    },
+    {
+      "id": "QG-SG-20",
+      "node": "tests/unit/test_quality_gate_fact_drift.py::test_drift_gate_with_drift_blocks_and_samples"
+    },
+    {
+      "id": "QG-DM-1",
+      "node": "tests/unit/test_quality_gates.py::test_qg_dm_1_fails_when_event_log_is_tampered"
+    },
+    {
+      "id": "QG-DM-2",
+      "node": "tests/golden/test_ledger_projection.py::test_qg_dm_2_golden_log_order_independence"
+    },
+    {
+      "id": "QG-DM-4",
+      "node": "tests/unit/test_quality_gates.py::test_qg_dm_4_fails_when_previous_confirmed_issue_manifest_has_no_matching_hardlock"
+    },
+    {
+      "id": "QG-DM-8",
+      "node": "tests/contracts/test_source_ref_policy_contract.py::test_all_external_origin_runtime_variants_fail_shared_validator_without_vault_hash"
+    },
+    {
+      "id": "QG-DM-11",
+      "node": "tests/golden/test_knowledge_context.py::test_qg_dm_11_knowledge_context_golden"
+    },
+    {
+      "id": "QG-DM-12",
+      "node": "tests/contracts/test_source_ref_policy_contract.py::test_all_external_origin_runtime_variants_fail_shared_validator_without_vault_hash"
+    },
+    {
+      "id": "QG-29",
+      "node": "tests/unit/test_ai_release_audit.py::test_evaluate_ai_release_gate_matches_qg29"
+    },
+    {
+      "id": "INV-2",
+      "node": "tests/contracts/test_architecture_fitness.py::test_inv2_write_confirmed_single_write_path"
+    },
+    {
+      "id": "INV-7",
+      "node": "tests/contracts/test_architecture_fitness.py::test_inv7_dry_run_never_writes_to_archive"
+    },
+    {
+      "id": "ZONE-BOUNDARY",
+      "node": "tests/contracts/test_import_boundaries.py::ImportBoundaryTests::test_core_has_no_ai_m365_or_commands_imports"
+    }
+  ],
+  "control_nodes": [
+    "tests/contracts/test_ci_optimization_policy.py::test_workflow_has_fail_closed_parallel_lanes_and_aggregate",
+    "tests/contracts/test_ci_optimization_policy.py::test_workflow_actions_are_pinned_to_full_commit_shas",
+    "tests/contracts/test_ci_lane_separation.py::test_chart_budget_runs_serially_in_ci",
+    "tests/contracts/test_cli_reference_drift_contract.py::test_ci_checks_cli_reference_before_running_tests"
+  ],
+  "forbidden_skip_patterns": [
+    "requires local",
+    "private data",
+    "programs/acme",
+    "programs/fabrikam",
+    "operator-local",
+    "operator data",
+    "gold corpus",
+    "fixture data"
+  ]
+}

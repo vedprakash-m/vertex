@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
-from enum import Enum
+from enum import Enum, nonmember
 from typing import Any, ClassVar, Literal, Self, cast
 
 
@@ -14,10 +14,17 @@ class EnumParserMixin:
     _default_member_name: ClassVar[str | None] = None
 
     @classmethod
+    def _missing_(cls, value: object) -> Self | None:
+        # Older releases exposed fallback names as enum values.
+        if isinstance(value, str) and value == cls._default_member_name:
+            return cast(Self, getattr(cls, value))
+        return None
+
+    @classmethod
     def from_string(cls, value: str | None) -> Self:
         normalized = value.strip().lower() if value is not None else ""
         for member in cls:
-            if member.name != "_default_member_name" and member.value.lower() == normalized:
+            if member.value.lower() == normalized:
                 return cast(Self, member)
         if cls._default_member_name is not None:
             return cast(Self, getattr(cls, cls._default_member_name))
@@ -25,7 +32,7 @@ class EnumParserMixin:
 
 
 class RiskLevel(EnumParserMixin, str, Enum):
-    _default_member_name = "UNKNOWN"
+    _default_member_name = nonmember("UNKNOWN")
 
     BLOCKED = "blocked"
     HIGH = "high"
@@ -46,7 +53,7 @@ class DeltaKind(EnumParserMixin, str, Enum):
 
 
 class Confidence(EnumParserMixin, str, Enum):
-    _default_member_name = "NONE"
+    _default_member_name = nonmember("NONE")
 
     HIGH = "high"
     MEDIUM = "medium"

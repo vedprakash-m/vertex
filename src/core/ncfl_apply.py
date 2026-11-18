@@ -41,9 +41,11 @@ from src.core.ncfl_apply_policy import (
     is_valid_apply_transition,
 )
 from src.core.ncfl_models import ContextUpdateProposal
-from src.core.exceptions import StateError
+from src.core.exceptions import ConfigError, StateError
+from src.core.knowledge_store import get_shared_knowledge_root
 from src.core.ncfl_proposal_store import _queue_lock, _update_proposal_status, load_proposals
 from src.core.ncfl_store_policy import is_ncfl_apply_writable_target_store
+from src.core.people_registry_identity import load_registry_manifest
 from src.core.people_registry_writer import (
     RegistryPatchOperation,
     apply_shared_registry_patch,
@@ -110,7 +112,7 @@ class NcflApplyResult:
     target_store: str
     target_key: str
     target_field: str
-    action: str   # "applied" | "skipped_not_writable" | "skipped_stale" | "skipped_already_applied" | "refused_unbound_approval" | "needs_repair"
+    action: str   # "applied" | "skipped_not_writable" | "skipped_stale" | "skipped_already_applied" | "refused_unbound_approval" | "needs_repair" | "needs_rereview"
     note: str
 
 
@@ -270,39 +272,46 @@ def _apply_bound_proposal(
             note="A previous apply requires reconciliation; preserve its journal and resolve it before retrying.",
         )
 
+    # RELO-W4.11: a proposal must say what target state it was extracted against.
+    expected = proposal.prior_state or (
+        f"sha256:{proposal.current_value_hash}" if proposal.current_value_hash is not None else None
+    )
+    if expected is None or (expected != "absent_verified" and not expected.startswith("sha256:")):
+        return NcflApplyResult(
+            proposal_id=pid, target_store=target_store, target_key=target_key,
+            target_field=target_field, action="needs_rereview",
+            note="Proposal does not record the target state it was extracted against; re-review before applying.",
+        )
+
     journal = _journal_path(proposal.program_id, pid, programs_root=programs_root)
 
     try:
-        # Guard 4: optimistic concurrency — verify current_value_hash matches live YAML
-        if proposal.current_value_hash is not None:
-            current_raw = _read_current_value(proposal, programs_root=programs_root)
-            if current_raw is None:
+        registry_generation = None
+        if target_store in {"people_directory", "teams"}:
+            registry_generation = _shared_registry_generation(programs_root)
+            if registry_generation is None:
                 return NcflApplyResult(
                     proposal_id=pid, target_store=target_store, target_key=target_key,
                     target_field=target_field, action="skipped_stale",
-                    note="Current target value is unavailable; re-review before applying.",
+                    note="Shared registry generation is unavailable; re-review before applying.",
                 )
-            live_hash = hashlib.sha256(str(current_raw).encode()).hexdigest()
-            if live_hash != proposal.current_value_hash:
-                return NcflApplyResult(
-                    proposal_id=pid,
-                    target_store=target_store,
-                    target_key=target_key,
-                    target_field=target_field,
-                    action="skipped_stale",
-                    note=f"current_value_hash mismatch: live={live_hash[:8]} expected={proposal.current_value_hash[:8]}",
-                )
-        elif not (proposal.current_value or "").strip():
-            # C.169 containment: extracted against an absent value; refuse if a value appeared since.
-            current_raw = _read_current_value(proposal, programs_root=programs_root)
-            if current_raw is not None and current_raw.strip():
-                return NcflApplyResult(
-                    proposal_id=pid, target_store=target_store, target_key=target_key,
-                    target_field=target_field, action="skipped_stale",
-                    note="Target value appeared after extraction; re-review before applying.",
-                )
+        # Guard 4: optimistic concurrency — compare the live target with prior_state.
+        stale_note = _prior_state_mismatch(
+            expected, _read_current_value(proposal, programs_root=programs_root),
+        )
+        if stale_note is not None:
+            return NcflApplyResult(
+                proposal_id=pid, target_store=target_store, target_key=target_key,
+                target_field=target_field, action="skipped_stale", note=stale_note,
+            )
 
         if dry_run:
+            if registry_generation is not None and _shared_registry_generation(programs_root) != registry_generation:
+                return NcflApplyResult(
+                    proposal_id=pid, target_store=target_store, target_key=target_key,
+                    target_field=target_field, action="skipped_stale",
+                    note="Shared registry generation changed during preview; re-review before applying.",
+                )
             return NcflApplyResult(
                 proposal_id=pid,
                 target_store=target_store,
@@ -315,7 +324,13 @@ def _apply_bound_proposal(
         _write_journal(journal, pid, "write_started", note="apply started")
 
         # Step 1: write YAML (store-specific)
-        _write_to_store(proposal, actor=actor, programs_root=programs_root)
+        if registry_generation is None:
+            _write_to_store(proposal, actor=actor, programs_root=programs_root)
+        else:
+            _write_to_store(
+                proposal, actor=actor, programs_root=programs_root,
+                expected_registry_generation=registry_generation,
+            )
         _write_journal(journal, pid, "yaml_written", note="YAML updated")
 
         # Step 2: write changelog entry
@@ -390,11 +405,55 @@ _LIST_KEY_BY_STORE: dict[str, str] = {
 }
 
 
+_UNAVAILABLE: Any = object()  # sentinel: target state cannot be determined (distinct from absent)
+
+
+def _prior_state_mismatch(expected: str, current: Any) -> str | None:
+    """Return a refusal note when the live target no longer matches ``expected``."""
+    if current is _UNAVAILABLE:
+        return "Current target value is unavailable; re-review before applying."
+    if expected == "absent_verified":
+        if current is not None and str(current).strip():
+            return "Target value appeared after extraction; re-review before applying."
+        return None
+    if current is None:
+        return "Target value is unavailable (removed after extraction); re-review before applying."
+    raw = str(current)
+    live_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    # Extractor hashes the trimmed value; knowledge-doc synthesis hashes the raw document.
+    trimmed_hash = hashlib.sha256(raw.strip().encode("utf-8")).hexdigest()
+    expected_hash = expected.removeprefix("sha256:")
+    if expected_hash not in (live_hash, trimmed_hash):
+        return f"current_value_hash mismatch: live={live_hash[:8]} expected={expected_hash[:8]}"
+    return None
+
+
+def read_target_prior_state(proposal: ContextUpdateProposal, *, programs_root: Path) -> str | None:
+    """Return the ``prior_state`` apply will verify for this target, or None when unavailable."""
+    current = _read_current_value(proposal, programs_root=programs_root)
+    if current is _UNAVAILABLE:
+        return None
+    if current is None or not str(current).strip():
+        return "absent_verified"
+    return f"sha256:{hashlib.sha256(str(current).encode('utf-8')).hexdigest()}"
+
+
+def _shared_registry_generation(programs_root: Path) -> str | None:
+    try:
+        manifest = load_registry_manifest(get_shared_knowledge_root(programs_root))
+    except (ConfigError, OSError, ValueError, TypeError, AttributeError) as exc:
+        log.warning("Shared registry generation is unavailable: %s", exc)
+        return None
+    return manifest.generation_id if manifest is not None else None
+
+
 def _read_current_value(
     proposal: ContextUpdateProposal, *, programs_root: Path
-) -> str | None:
+) -> Any:
     """Read the current field value from the live YAML for optimistic concurrency.
 
+    Returns the value, None when the target is verifiably absent, or
+    ``_UNAVAILABLE`` when its state cannot be determined.
     Each store keeps a list of records (with an ``id`` field), not a flat dict.
     For ``dimension_risk_level`` on risk_register, match by ``dimension_id``.
     """
@@ -403,29 +462,36 @@ def _read_current_value(
 
     target_pol = target_policy_by_store().get(proposal.target_store)
     if proposal.target_store in {"people_directory", "teams"}:
-        return read_shared_registry_factual_value(
-            programs_root=programs_root,
-            target_store=proposal.target_store,
-            target_key=proposal.target_key,
-            target_field=proposal.target_field,
-        )
+        try:
+            return read_shared_registry_factual_value(
+                programs_root=programs_root,
+                target_store=proposal.target_store,
+                target_key=proposal.target_key,
+                target_field=proposal.target_field,
+            )
+        except Exception:  # noqa: BLE001
+            return _UNAVAILABLE
     if proposal.target_store == "knowledge_doc":
         doc_path = _knowledge_doc_target_path(
             proposal.program_id, proposal.target_key, proposal.target_field, programs_root,
         )
         try:
             return doc_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
+        except FileNotFoundError:
             return None
+        except (OSError, UnicodeError):
+            return _UNAVAILABLE
     if target_pol is None or target_pol.root_yaml is None:
-        return None
+        return _UNAVAILABLE
     yaml_path = programs_root / proposal.program_id / target_pol.root_yaml
     if not yaml_path.exists():
         return None
     try:
-        doc = _yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+        doc = _yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+        if doc is None:
+            doc = {}
         if not isinstance(doc, dict):
-            return None
+            return _UNAVAILABLE
 
         store_name = proposal.target_store
 
@@ -454,13 +520,14 @@ def _read_current_value(
                     return str(ws.get(proposal.target_field, ""))
             return None
 
-        return None
+        return _UNAVAILABLE
     except Exception:  # noqa: BLE001
-        return None
+        return _UNAVAILABLE
 
 
 def _write_to_store(
-    proposal: ContextUpdateProposal, *, actor: str, programs_root: Path
+    proposal: ContextUpdateProposal, *, actor: str, programs_root: Path,
+    expected_registry_generation: str | None = None,
 ) -> None:
     """Dispatch to the canonical save_* function for the target store.
 
@@ -486,6 +553,7 @@ def _write_to_store(
             source="ncfl_apply",
             source_ref=proposal.proposal_id,
             apply=True,
+            expected_generation_id=expected_registry_generation,
         )
         return
     dispatch: dict[str, Any] = {

@@ -97,7 +97,7 @@ def test_backfill_plan_nova_compat_includes_nova_newsletter_kinds(tmp_path: Path
           - kind: contoso_newsletters
             glob: "docs/newsletters/Contoso/*.eml"
           - kind: contoso_daily
-            glob: "docs/newsletters/DDPF_daily/*.eml"
+            glob: "docs/newsletters/contoso_daily/*.eml"
           - kind: transcripts
             glob: "backfill/transcripts/*.vtt"
         extract:

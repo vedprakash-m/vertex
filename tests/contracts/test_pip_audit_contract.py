@@ -54,7 +54,7 @@ def test_pip_audit_in_pyproject_optional_dependencies() -> None:
 
 
 def test_pip_audit_step_in_ci_workflow() -> None:
-    """The CI workflow must invoke pip-audit AFTER pip install, BEFORE test runs."""
+    """The CI workflow audits the independently installed locked environment."""
     assert CI_YML.exists(), "ci.yml missing"
     text = _read(CI_YML)
 
@@ -67,19 +67,20 @@ def test_pip_audit_step_in_ci_workflow() -> None:
         "WS-7 supply-chain CI step missing"
     )
 
-    # And the step must appear AFTER the "Install dependencies" step in the
-    # `validate` job (not just somewhere in the file).
-    install_idx = text.find("Install dependencies")
-    audit_idx = max(
-        text.find("pip-audit", install_idx) if inline_match else -1,
-        text.find("run_pip_audit.py", install_idx) if delegated_match else -1,
+    workflow = __import__("yaml").safe_load(text)
+    audit_steps = workflow["jobs"]["audit"]["steps"]
+    assert any(step.get("uses") == "./.github/actions/setup-vertex" for step in audit_steps)
+    audit_index = next(
+        index
+        for index, step in enumerate(audit_steps)
+        if "run_pip_audit.py" in step.get("run", "")
     )
-    assert install_idx != -1, "ci.yml missing 'Install dependencies' step"
-    assert audit_idx != -1, "pip-audit invocation not found AFTER install"
-    assert audit_idx > install_idx, (
-        f"pip-audit (idx={audit_idx}) appears BEFORE install (idx={install_idx}) — "
-        "audit must run on a fully-resolved tree"
+    setup_index = next(
+        index
+        for index, step in enumerate(audit_steps)
+        if step.get("uses") == "./.github/actions/setup-vertex"
     )
+    assert audit_index > setup_index
 
 
 def test_run_pip_audit_script_exists() -> None:

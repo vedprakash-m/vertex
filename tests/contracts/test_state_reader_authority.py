@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from src.core.state_reader_registry import STATE_READER_REGISTRY
+from tests.support.source_index import parse_python_source_index
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -64,14 +65,17 @@ _RISK_UPDATES_ALLOWLIST = {
 }
 
 
+def _source_index():
+    return parse_python_source_index(SRC_ROOT, REPO_ROOT)
+
+
 def test_gather_state_reads_flow_through_owner_module() -> None:
     violations: list[str] = []
-    for file_path in sorted(SRC_ROOT.rglob("*.py")):
-        relative = file_path.relative_to(REPO_ROOT).as_posix()
+    for source in _source_index():
+        relative = source.relative
         if relative in _GATHER_STATE_ALLOWLIST:
             continue
-        tree = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
-        if _references_gather_state_filename(tree):
+        if _references_gather_state_filename(source):
             violations.append(relative)
 
     assert violations == []
@@ -79,12 +83,11 @@ def test_gather_state_reads_flow_through_owner_module() -> None:
 
 def test_claim_log_reads_flow_through_owner_module() -> None:
     violations: list[str] = []
-    for file_path in sorted(SRC_ROOT.rglob("*.py")):
-        relative = file_path.relative_to(REPO_ROOT).as_posix()
+    for source in _source_index():
+        relative = source.relative
         if relative in _CLAIMS_ALLOWLIST:
             continue
-        tree = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
-        if _references_filename(tree, "claims.jsonl"):
+        if _references_filename(source, "claims.jsonl"):
             violations.append(relative)
 
     assert violations == []
@@ -92,12 +95,11 @@ def test_claim_log_reads_flow_through_owner_module() -> None:
 
 def test_autonomy_audit_reads_flow_through_owner_module() -> None:
     violations: list[str] = []
-    for file_path in sorted(SRC_ROOT.rglob("*.py")):
-        relative = file_path.relative_to(REPO_ROOT).as_posix()
+    for source in _source_index():
+        relative = source.relative
         if relative in _AUTONOMY_AUDIT_ALLOWLIST:
             continue
-        tree = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
-        if _references_filename(tree, "autonomy_audit.jsonl"):
+        if _references_filename(source, "autonomy_audit.jsonl"):
             violations.append(relative)
 
     assert violations == []
@@ -105,12 +107,11 @@ def test_autonomy_audit_reads_flow_through_owner_module() -> None:
 
 def test_review_policy_audit_reads_flow_through_owner_module() -> None:
     violations: list[str] = []
-    for file_path in sorted(SRC_ROOT.rglob("*.py")):
-        relative = file_path.relative_to(REPO_ROOT).as_posix()
+    for source in _source_index():
+        relative = source.relative
         if relative in _REVIEW_POLICY_AUDIT_ALLOWLIST:
             continue
-        tree = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
-        if _references_filename(tree, "review_policy_audit.jsonl"):
+        if _references_filename(source, "review_policy_audit.jsonl"):
             violations.append(relative)
 
     assert violations == []
@@ -118,12 +119,11 @@ def test_review_policy_audit_reads_flow_through_owner_module() -> None:
 
 def test_review_log_reads_flow_through_owner_module() -> None:
     violations: list[str] = []
-    for file_path in sorted(SRC_ROOT.rglob("*.py")):
-        relative = file_path.relative_to(REPO_ROOT).as_posix()
+    for source in _source_index():
+        relative = source.relative
         if relative in _REVIEWS_ALLOWLIST:
             continue
-        tree = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
-        if _references_filename(tree, "reviews.jsonl"):
+        if _references_filename(source, "reviews.jsonl"):
             violations.append(relative)
 
     assert violations == []
@@ -131,12 +131,11 @@ def test_review_log_reads_flow_through_owner_module() -> None:
 
 def test_signal_threads_reads_flow_through_owner_module() -> None:
     violations: list[str] = []
-    for file_path in sorted(SRC_ROOT.rglob("*.py")):
-        relative = file_path.relative_to(REPO_ROOT).as_posix()
+    for source in _source_index():
+        relative = source.relative
         if relative in _SIGNAL_THREADS_ALLOWLIST:
             continue
-        tree = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
-        if _references_filename(tree, "signal_threads.jsonl"):
+        if _references_filename(source, "signal_threads.jsonl"):
             violations.append(relative)
 
     assert violations == []
@@ -144,12 +143,11 @@ def test_signal_threads_reads_flow_through_owner_module() -> None:
 
 def test_actions_reads_flow_through_owner_module() -> None:
     violations: list[str] = []
-    for file_path in sorted(SRC_ROOT.rglob("*.py")):
-        relative = file_path.relative_to(REPO_ROOT).as_posix()
+    for source in _source_index():
+        relative = source.relative
         if relative in _ACTIONS_ALLOWLIST:
             continue
-        tree = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
-        if _references_filename(tree, "actions.jsonl"):
+        if _references_filename(source, "actions.jsonl"):
             violations.append(relative)
 
     assert violations == []
@@ -157,12 +155,11 @@ def test_actions_reads_flow_through_owner_module() -> None:
 
 def test_ai_proposals_reads_flow_through_owner_module() -> None:
     violations: list[str] = []
-    for file_path in sorted(SRC_ROOT.rglob("*.py")):
-        relative = file_path.relative_to(REPO_ROOT).as_posix()
+    for source in _source_index():
+        relative = source.relative
         if relative in _AI_PROPOSALS_ALLOWLIST:
             continue
-        tree = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
-        if _references_filename(tree, "ai_proposals.jsonl"):
+        if _references_filename(source, "ai_proposals.jsonl"):
             violations.append(relative)
 
     assert violations == []
@@ -170,12 +167,11 @@ def test_ai_proposals_reads_flow_through_owner_module() -> None:
 
 def test_edit_patterns_reads_flow_through_owner_module() -> None:
     violations: list[str] = []
-    for file_path in sorted(SRC_ROOT.rglob("*.py")):
-        relative = file_path.relative_to(REPO_ROOT).as_posix()
+    for source in _source_index():
+        relative = source.relative
         if relative in _EDIT_PATTERNS_ALLOWLIST:
             continue
-        tree = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
-        if _references_filename(tree, "edit_patterns.jsonl"):
+        if _references_filename(source, "edit_patterns.jsonl"):
             violations.append(relative)
 
     assert violations == []
@@ -183,26 +179,22 @@ def test_edit_patterns_reads_flow_through_owner_module() -> None:
 
 def test_risk_updates_reads_flow_through_owner_module() -> None:
     violations: list[str] = []
-    for file_path in sorted(SRC_ROOT.rglob("*.py")):
-        relative = file_path.relative_to(REPO_ROOT).as_posix()
+    for source in _source_index():
+        relative = source.relative
         if relative in _RISK_UPDATES_ALLOWLIST:
             continue
-        tree = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
-        if _references_filename(tree, "risk_updates.jsonl"):
+        if _references_filename(source, "risk_updates.jsonl"):
             violations.append(relative)
 
     assert violations == []
 
 
-def _references_gather_state_filename(tree: ast.AST) -> bool:
-    return _references_filename(tree, "gather_state.json")
+def _references_gather_state_filename(source) -> bool:
+    return _references_filename(source, "gather_state.json")
 
 
-def _references_filename(tree: ast.AST, filename: str) -> bool:
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value == filename:
-            return True
-    return False
+def _references_filename(source, filename: str) -> bool:
+    return filename in source.string_constants
 
 
 # States covered by dedicated per-state tests above, or with variable path patterns.
@@ -277,12 +269,11 @@ def test_no_direct_sidecar_reads_outside_registry(state_name: str) -> None:
     )
 
     violations: list[str] = []
-    for file_path in sorted(SRC_ROOT.rglob("*.py")):
-        relative = file_path.relative_to(REPO_ROOT).as_posix()
+    for source in _source_index():
+        relative = source.relative
         if relative in allowlist:
             continue
-        tree = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
-        if _references_filename(tree, filename):
+        if _references_filename(source, filename):
             violations.append(relative)
 
     assert violations == [], (

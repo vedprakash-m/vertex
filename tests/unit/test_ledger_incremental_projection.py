@@ -7,6 +7,7 @@ always falls through to full rebuild.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -159,8 +160,8 @@ def test_input_stamp_mismatch_uses_full_rebuild(tmp_path: Path, monkeypatch, mut
             payload={"issue_number": 1, "snapshot_hash": "synthetic", "event_id_watermark": events[0].event_id,
                      "contributing_event_count": 1},
         ),)
-    rebuild = Mock(wraps=project_events_to_sqlite)
-    monkeypatch.setattr(program_views, "project_events_to_sqlite", rebuild)
+    rebuild = Mock(wraps=program_views._project_events_to_sqlite_locked)
+    monkeypatch.setattr(program_views, "_project_events_to_sqlite_locked", rebuild)
     monkeypatch.setattr(program_views, "_incremental_fold", Mock(side_effect=AssertionError("Unsafe cache reuse")))
     project_events_incremental_to_sqlite("acme", events, projection_path=path, **options)
     rebuild.assert_called_once()
@@ -174,7 +175,7 @@ def test_identical_inputs_reuse_cache_without_write(tmp_path: Path, monkeypatch)
     options = dict(programs_root=tmp_path / "programs")
     project_events_incremental_to_sqlite("acme", events, projection_path=path, **options)
     before = path.read_bytes()
-    monkeypatch.setattr(program_views, "project_events_to_sqlite", Mock(side_effect=AssertionError("Unexpected rebuild")))
+    monkeypatch.setattr(program_views, "_project_events_to_sqlite_locked", Mock(side_effect=AssertionError("Unexpected rebuild")))
     monkeypatch.setattr(program_views, "_incremental_fold", Mock(side_effect=AssertionError("Unexpected fold")))
     result = project_events_incremental_to_sqlite("acme", events, projection_path=path, **options)
     assert result.event_watermark == events[0].event_id and path.read_bytes() == before
@@ -224,8 +225,10 @@ def test_direct_incremental_caller_rejects_a_changed_base_without_replacing_inpu
     fold = program_views._incremental_fold
 
     def competing_fold(program_id: str, **kwargs):
-        monkeypatch.setattr(program_views, "_incremental_fold", fold)
-        project_events_incremental_to_sqlite("acme", events, projection_path=path, **options)
+        with monkeypatch.context() as patch:
+            patch.setattr(program_views, "_incremental_fold", fold)
+            patch.setattr(program_views, "_projection_writer_fence", lambda *args, **kwargs: nullcontext())
+            project_events_incremental_to_sqlite("acme", events, projection_path=path, **options)
         return fold(program_id, **kwargs)
 
     monkeypatch.setattr(program_views, "_incremental_fold", competing_fold)
@@ -284,9 +287,10 @@ def test_derived_control_outputs_match_full_rebuild(tmp_path: Path, monkeypatch,
     project_events_incremental_to_sqlite("acme", base, projection_path=path, **options)
     if transition == "expiry":
         options["as_of"] = t3
-    else:
-        monkeypatch.setattr(program_views, "project_events_to_sqlite", Mock(side_effect=AssertionError("Expected incremental fold")))
-    project_events_incremental_to_sqlite("acme", events, projection_path=path, **options)
+    with monkeypatch.context() as patch:
+        if transition != "expiry":
+            patch.setattr(program_views, "_project_events_to_sqlite_locked", Mock(side_effect=AssertionError("Expected incremental fold")))
+        project_events_incremental_to_sqlite("acme", events, projection_path=path, **options)
     project_events_to_sqlite("acme", events, projection_path=full, **options)
     assert canonical_projection_dump(path) == canonical_projection_dump(full)
 
@@ -303,8 +307,9 @@ def test_gap_support_delta_matches_full_rebuild(tmp_path: Path, monkeypatch) -> 
     path, full = tmp_path / "incremental.sqlite3", tmp_path / "full.sqlite3"
     options = dict(programs_root=tmp_path / "programs")
     project_events_incremental_to_sqlite("acme", base, projection_path=path, **options)
-    monkeypatch.setattr(program_views, "project_events_to_sqlite", Mock(side_effect=AssertionError("Expected incremental fold")))
-    project_events_incremental_to_sqlite("acme", (*base, gap), projection_path=path, **options)
+    with monkeypatch.context() as patch:
+        patch.setattr(program_views, "_project_events_to_sqlite_locked", Mock(side_effect=AssertionError("Expected incremental fold")))
+        project_events_incremental_to_sqlite("acme", (*base, gap), projection_path=path, **options)
     project_events_to_sqlite("acme", (*base, gap), projection_path=full, **options)
     assert canonical_projection_dump(path) == canonical_projection_dump(full)
 
@@ -688,7 +693,6 @@ def test_dependency_incremental_full_canonical_parity(
     def reject_full_rebuild(*args: object, **kwargs: object) -> None:
         pytest.fail("Second call must exercise the affected-entity incremental fold")
 
-    monkeypatch.setattr(program_views, "project_events_to_sqlite", reject_full_rebuild)
     events = base
     for day in (2, 3):
         delta = (
@@ -708,9 +712,11 @@ def test_dependency_incremental_full_canonical_parity(
         )
         events = (*events, delta)
         project_events_to_sqlite("acme", events, projection_path=full_path, programs_root=programs_root)
-        result = project_events_incremental_to_sqlite(
-            "acme", events, projection_path=incremental_path, programs_root=programs_root,
-        )
+        with monkeypatch.context() as patch:
+            patch.setattr(program_views, "_project_events_to_sqlite_locked", reject_full_rebuild)
+            result = project_events_incremental_to_sqlite(
+                "acme", events, projection_path=incremental_path, programs_root=programs_root,
+            )
         actual = canonical_projection_dump(incremental_path)
         expected = canonical_projection_dump(full_path)
         assert result.event_watermark == delta.event_id
@@ -723,9 +729,11 @@ def test_dependency_incremental_full_canonical_parity(
             row for row in before["entity_links"] if row["event_id"] == untouched.event_id
         ]
         assert actual == expected
-        replay = project_events_incremental_to_sqlite(
-            "acme", events, projection_path=incremental_path, programs_root=programs_root,
-        )
+        with monkeypatch.context() as patch:
+            patch.setattr(program_views, "_project_events_to_sqlite_locked", reject_full_rebuild)
+            replay = project_events_incremental_to_sqlite(
+                "acme", events, projection_path=incremental_path, programs_root=programs_root,
+            )
         assert replay.event_watermark == result.event_watermark
         assert canonical_projection_dump(incremental_path) == expected
 
@@ -754,8 +762,8 @@ def test_old_projector_rebuilds_stale_dependency_links_without_new_events(
             ("milestone:a", "depends_on", "milestone:b", initial.event_id),
         )
     assert canonical_projection_dump(incremental_path)["entity_links"] != canonical_projection_dump(full_path)["entity_links"]
-    rebuild = Mock(wraps=project_events_to_sqlite)
-    monkeypatch.setattr(program_views, "project_events_to_sqlite", rebuild)
+    rebuild = Mock(wraps=program_views._project_events_to_sqlite_locked)
+    monkeypatch.setattr(program_views, "_project_events_to_sqlite_locked", rebuild)
     result = project_events_incremental_to_sqlite(
         "acme", events, projection_path=incremental_path, programs_root=programs_root,
     )
@@ -789,7 +797,7 @@ def test_full_rebuild_preserves_existing_projection_through_replacement(
     observed: list[tuple[bool, bool]] = []
 
     def replacement(source: Path, target: Path) -> Path:
-        if source == path.with_suffix(".sqlite3.tmp") and target == path:
+        if source.parent == path.parent and source.name.startswith(path.name + ".") and source.suffix == ".tmp" and target == path:
             exists = path.exists()
             observed.append((exists, path.read_bytes() == old_bytes if exists else False))
             if fail_replace:
@@ -825,7 +833,7 @@ def test_first_projection_replacement_failure_is_retryable(
     calls: list[Path] = []
 
     def replacement(source: Path, target: Path) -> Path:
-        if source == path.with_suffix(".sqlite3.tmp") and target == path:
+        if source.parent == path.parent and source.name.startswith(path.name + ".") and source.suffix == ".tmp" and target == path:
             calls.append(source)
             raise OSError("Synthetic first replacement failure")
         return original_replace(source, target)
@@ -835,7 +843,8 @@ def test_first_projection_replacement_failure_is_retryable(
         with pytest.raises(OSError, match="Synthetic first replacement failure"):
             builder("acme", (event,), projection_path=path, programs_root=programs_root)
 
-    assert calls == [path.with_suffix(".sqlite3.tmp")]
+    assert len(calls) == 1
+    assert not calls[0].exists()
     assert not path.exists()
     builder("acme", (event,), projection_path=path, programs_root=programs_root)
     assert canonical_projection_dump(path)["proj_risk"][0]["risk_id"] == "risk:r1"

@@ -705,6 +705,58 @@ def test_idempotency_key_formula_matches_sec_8_11_3() -> None:
     assert key == "samplealpha:contoso/One:create_task.v1:new:abc123"
 
 
+def test_capability_key_for_create_task_is_byte_identical_to_legacy_key() -> None:
+    from src.core.actuation_outbox import actuation_idempotency_key
+
+    key = actuation_idempotency_key(
+        program_id="samplealpha", org="contoso", project="One",
+        operation="create_task.v1", target_identity="new", operation_intent_id="abc123",
+    )
+    assert key == "samplealpha:contoso/One:create_task.v1:new:abc123"
+    assert key == create_task_idempotency_key(program_id="samplealpha", org="contoso", project="One", operation_intent_id="abc123")
+
+
+def test_capability_keys_are_distinct_per_operation_target_and_payload() -> None:
+    from src.core.actuation_outbox import actuation_idempotency_key
+
+    base = dict(program_id="samplealpha", org="contoso", project="One", target_identity="42", operation_intent_id="p1")
+    keys = {
+        actuation_idempotency_key(**base, operation="add_comment.v1"),
+        actuation_idempotency_key(**base, operation="add_tag.v1"),
+        actuation_idempotency_key(**base, operation="set_field.v1"),
+        actuation_idempotency_key(**dict(base, target_identity="43"), operation="set_field.v1"),
+        actuation_idempotency_key(**dict(base, operation_intent_id="p2"), operation="set_field.v1"),
+    }
+    assert len(keys) == 5
+
+
+def test_duplicate_enqueue_of_non_create_operation_is_idempotent(tmp_path: Path) -> None:
+    from src.core.actuation_outbox import actuation_idempotency_key
+
+    programs_root = tmp_path / "programs"
+    key = actuation_idempotency_key(
+        program_id="samplealpha", org="contoso", project="One",
+        operation="add_comment.v1", target_identity="42", operation_intent_id="p1",
+    )
+    payload = '{"operation": "add_comment.v1"}'
+    kwargs = dict(
+        program_id="samplealpha", idempotency_key=key, operation_intent_id="p1", proposal_id="prop-1",
+        payload_json=payload, programs_root=programs_root, operation="add_comment.v1", target_identity="42",
+    )
+    first = enqueue_create_task_intent(**kwargs)
+    second = enqueue_create_task_intent(**kwargs)
+    assert first.outbox_id == second.outbox_id == key
+    assert second.status == "pending"
+
+
+@pytest.mark.parametrize("operation", ["add_comment.v1", "add_tag.v1", "set_field.v1"])
+def test_non_create_operations_are_not_dispatchable(operation: str) -> None:
+    from src.core.actuation_outbox import OutboxError, require_dispatchable_operation
+
+    with pytest.raises(OutboxError, match="draft/manual only"):
+        require_dispatchable_operation(operation)
+
+
 def test_idempotency_key_excludes_approval_event_id() -> None:
     # Sec 8.11.3: the approval event id must NOT influence the key -- two
     # separate approvals of the same intent produce the same key.

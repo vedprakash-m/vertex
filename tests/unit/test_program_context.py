@@ -374,15 +374,16 @@ def test_fresh_registry_no_staleness_flag(tmp_path: Path) -> None:
     assert not stale, "Fresh lane should have no staleness flag"
 
 
-def _reviewed_program(tmp_path: Path) -> Path:
+def _reviewed_program(tmp_path: Path, *, today: date | None = None) -> Path:
     root = _minimal_program(tmp_path)
     program_dir = root / "test_prog"
+    today = today or date.today()
     for filename in ("program.yaml", "workstreams.yaml", "workstream_registry.yaml"):
         path = program_dir / filename
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
-        data["last_reviewed_date"] = date.today().isoformat()
+        data["last_reviewed_date"] = today.isoformat()
         for entry in data.get("workstreams", []):
-            entry["last_reviewed_date"] = date.today().isoformat()
+            entry["last_reviewed_date"] = today.isoformat()
             if filename == "workstream_registry.yaml":
                 entry["area_paths"] = ["Example\\Delivery"]
         _write_yaml(path, data)
@@ -442,20 +443,21 @@ def test_unknown_file_review_is_visible_and_caps_maturity(
         }),
     ],
 )
-@pytest.mark.parametrize("reviewed", [None, "2099-01-01", date.today().isoformat()])
+@pytest.mark.parametrize("reviewed", [None, "2099-01-01", "fresh"])
 def test_entity_reviews_preserve_unknown_and_fresh_states(
     tmp_path: Path, filename: str, key: str, entry: dict[str, object], reviewed: str | None,
 ) -> None:
-    root = _reviewed_program(tmp_path)
-    entry = {**entry, "last_reviewed_date": reviewed}
+    today = date.today()
+    root = _reviewed_program(tmp_path, today=today)
+    entry = {**entry, "last_reviewed_date": today.isoformat() if reviewed == "fresh" else reviewed}
     _write_yaml(root / "test_prog" / filename, {
-        "schema_version": "1.0", "last_reviewed_date": date.today().isoformat(), key: [entry],
+        "schema_version": "1.0", "last_reviewed_date": today.isoformat(), key: [entry],
     })
 
-    ctx = load_program_context("test_prog", programs_root=root, raise_on_error=False)
+    ctx = load_program_context("test_prog", programs_root=root, today=today, raise_on_error=False)
 
     flags = [f for f in ctx.staleness_flags if f.file == filename and f.entity_id == entry["id"]]
-    if reviewed == date.today().isoformat():
+    if reviewed == "fresh":
         assert not flags
         assert ctx.maturity_level == MaturityLevel.L4
         return

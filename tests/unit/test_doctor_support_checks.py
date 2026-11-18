@@ -22,6 +22,17 @@ def test_mail_preview_check_warns_when_graph_env_missing() -> None:
     assert "GRAPH_TENANT_ID" in check.detail
 
 
+def test_mail_preview_check_suggests_a_command_that_can_send() -> None:
+    check = mail_preview_check(
+        environ={"GRAPH_TENANT_ID": "tenant", "GRAPH_CLIENT_ID": "client"},
+        find_spec_fn=lambda _name: object(),
+    )
+
+    assert check.status == "ok"
+    assert "vertex draft --edition myprogram_weekly --send-draft" in check.detail
+    assert "--dry-run" not in check.detail
+
+
 def test_agency_cli_check_lists_detected_servers() -> None:
     check = agency_cli_check(
         AgencyCapabilities(

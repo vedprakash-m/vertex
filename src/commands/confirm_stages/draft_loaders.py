@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from collections.abc import Mapping
+from datetime import datetime
 from pathlib import Path
 import re
 from typing import Any
@@ -20,14 +21,20 @@ from typing import Any
 import typer
 import yaml
 
+from src.commands.confirm_stages.deserialization import deserialize_retained_blocking_charts
 from src.core.edition_resolver import find_edition_yaml, get_program_output_dir, PROGRAMS_ROOT
 from src.core.draft_artifact_store import load_draft_state as load_optional_draft_state
 from src.core.draft_artifact_store import load_draft_manifest as load_optional_draft_manifest
 from src.core.exceptions import ConfigError, StateError
-from src.core.manifest_writer import load_run_evidence_snapshot
+from src.core.manifest_writer import chart_gate_evidence_sha256, load_run_evidence_snapshot
 from src.core.models import ReviewSection, ReviewState, ReviewStatus, RunEvidenceSnapshot
 from src.core.overrides_store import OverridesDocument, load_overrides, merge_overrides
+from src.core.quality_gates import GateEvaluation, QualityGateReport, evaluate_chart_gates
 from src.core.review_status_store import load_review_status
+
+
+class ChartFreshnessExpired(ConfigError):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +49,9 @@ class ConfirmDraftManifest:
     milestone_assessments: Any
     milestone_trajectory_snapshot: Any
     run_evidence_snapshot: RunEvidenceSnapshot | None = None
+    chart_hard_gate_failures: tuple[str, ...] = ()
+    recorded_qg22_passed: bool = False
+    chart_freshness_evidence: tuple[dict[str, Any], ...] = ()
 
     def validate_scope(self, edition_name: str, issue_number: int, programs_root: Path) -> None:
         if (
@@ -69,6 +79,44 @@ class ConfirmDraftManifest:
                 "This program-backed draft has no source-selector-bound capture. "
                 "Preserve the existing artifacts, re-run `vertex report --dry-run` and review before confirming."
             )
+
+
+def retained_chart_freshness_failures(
+    draft_manifest: ConfirmDraftManifest, draft_state: Mapping[str, Any], current_time: datetime,
+) -> tuple[GateEvaluation, ...]:
+    if not draft_manifest.recorded_qg22_passed:
+        return ()
+    retained_charts = tuple(dict.fromkeys(deserialize_retained_blocking_charts(
+        draft_manifest.chart_freshness_evidence + tuple(draft_state.get("kusto_sections", []))
+    )))
+    return tuple(
+        result for result in evaluate_chart_gates(retained_charts, current_time=current_time).failing_results
+        if result.gate_id == "QG-22"
+    )
+
+
+def chart_gate_failure_report(
+    draft_manifest: ConfirmDraftManifest, draft_state: Mapping[str, Any], current_time: datetime,
+) -> QualityGateReport:
+    recorded = tuple(
+        GateEvaluation(
+            gate_id=gate_id,
+            passed=False,
+            message=f"{gate_id}: The draft recorded a chart hard-gate failure. Re-run and review the draft before confirming.",
+            exit_code=3,
+            forceable=False,
+        )
+        for gate_id in draft_manifest.chart_hard_gate_failures
+    )
+    return QualityGateReport(results=recorded + retained_chart_freshness_failures(draft_manifest, draft_state, current_time))
+
+
+def require_retained_chart_freshness(
+    draft_manifest: ConfirmDraftManifest, draft_state: Mapping[str, Any], current_time: datetime,
+) -> None:
+    failures = retained_chart_freshness_failures(draft_manifest, draft_state, current_time)
+    if failures:
+        raise ChartFreshnessExpired("; ".join(result.message for result in failures))
 
 
 def load_confirm_draft_manifest(
@@ -100,6 +148,71 @@ def load_confirm_draft_manifest(
             "This program-backed draft has no source-selector-bound capture. "
             "Preserve the existing artifacts, re-run `vertex report --dry-run` and review before confirming."
         )
+    qg_results = payload.get("qg_results", {}) if payload is not None else {}
+    if not isinstance(qg_results, dict) or any(
+        gate_id in qg_results and not isinstance(qg_results[gate_id], bool)
+        for gate_id in ("QG-21", "QG-22")
+    ):
+        raise typer.BadParameter(
+            "Invalid recorded chart gate results in the draft manifest. "
+            "Preserve the existing artifact and re-run `vertex report --dry-run` before confirming."
+        )
+    chart_evidence = _project_draft_metadata_value(payload, "chart_freshness_evidence", edition_name, issue_number)
+    metadata = payload.get("metadata") if payload is not None else None
+    expected_chart_fields = {
+        "query_id", "chart_blocks_publish", "is_degraded", "chart_cache_ttl_hours",
+        "captured_at", "cache_captured_at",
+    }
+    if isinstance(metadata, dict) and "chart_freshness_evidence" in metadata and (
+        not isinstance(chart_evidence, list)
+        or any(
+            not isinstance(row, dict)
+            or set(row) != expected_chart_fields
+            or row["chart_blocks_publish"] is not True
+            or row["is_degraded"] is not True
+            for row in chart_evidence
+        )
+    ):
+        raise typer.BadParameter(
+            "Invalid chart freshness evidence in the draft manifest. "
+            "Preserve the existing artifact and re-run `vertex report --dry-run` before confirming."
+        )
+    chart_reference = draft_state.get("chart_gate_evidence_sha256")
+    has_chart_evidence = isinstance(metadata, dict) and "chart_freshness_evidence" in metadata
+    has_binding_type = isinstance(metadata, dict) and "chart_binding_edition_type" in metadata
+    binding_type = metadata.get("chart_binding_edition_type") if isinstance(metadata, dict) else None
+    has_routing_marker = isinstance(metadata, dict) and "chart_routing_capture" in metadata
+    routing_marker = metadata.get("chart_routing_capture") if isinstance(metadata, dict) else None
+    routed_sections = draft_state.get("routed_chart_sections")
+    ordinary_qg22_pass = qg_results.get("QG-22") is True and draft_state.get("edition_type") in (
+        "detailed", "focused", "condensed", "narrative", "deck",
+    )
+    if chart_reference is not None or has_chart_evidence or has_binding_type or ordinary_qg22_pass or has_routing_marker or routed_sections is not None:
+        sections = draft_state.get("kusto_sections")
+        if (
+            not has_chart_evidence
+            or not isinstance(chart_reference, str)
+            or not isinstance(sections, list)
+            or (has_binding_type and (
+                not isinstance(binding_type, str)
+                or not binding_type
+                or binding_type != draft_state.get("edition_type")
+            ))
+            or ((has_routing_marker or routed_sections is not None) and (
+                not has_routing_marker
+                or routing_marker != "v1"
+                or not isinstance(routed_sections, list)
+                or any(not isinstance(section, dict) for section in routed_sections)
+            ))
+            or chart_reference != chart_gate_evidence_sha256(
+                manifest_id, qg_results, chart_evidence, sections, edition_type=binding_type,
+                routed_chart_sections=routed_sections,
+            )
+        ):
+            raise typer.BadParameter(
+                "Invalid or missing chart evidence binding between the draft and manifest. "
+                "Preserve the existing artifacts and re-run `vertex report --dry-run` before confirming."
+            )
     return ConfirmDraftManifest(
         edition_name=edition_name,
         issue_number=issue_number,
@@ -115,6 +228,11 @@ def load_confirm_draft_manifest(
         milestone_trajectory_snapshot=_project_draft_metadata_value(
             payload, "milestone_trajectory_snapshot", edition_name, issue_number,
         ),
+        chart_hard_gate_failures=tuple(
+            gate_id for gate_id in ("QG-21", "QG-22") if qg_results.get(gate_id) is False
+        ),
+        recorded_qg22_passed=qg_results.get("QG-22") is True,
+        chart_freshness_evidence=tuple(chart_evidence or ()),
     )
 
 

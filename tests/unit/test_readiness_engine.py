@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from src.core import readiness_engine
 from src.core.readiness_engine import (
   ReadinessConfig,
@@ -237,6 +239,7 @@ dimensions:
   }
 
 
+@pytest.mark.operator
 def test_nova_readiness_config_covers_full_default_rd_gate_series() -> None:
   programs_root = Path(__file__).resolve().parents[2] / "programs"
   if not (programs_root / "acme" / "readiness.yaml").exists():

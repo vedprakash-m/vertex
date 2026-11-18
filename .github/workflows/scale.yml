@@ -1,0 +1,61 @@
+name: Scale Qualification
+
+on:
+  schedule:
+    - cron: "0 9 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scale-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  registry-scale:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-vertex
+      - name: Run registry scale and recovery qualification
+        run: |
+          python -m pytest -q -n 0 -m perf \
+            tests/perf/test_people_registry_scale.py \
+            --junitxml="$RUNNER_TEMP/registry-scale.xml"
+      - name: Upload scale evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: registry-scale
+          path: ${{ runner.temp }}/registry-scale.xml
+          if-no-files-found: warn
+          retention-days: 30
+
+  macos-smoke:
+    runs-on: macos-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-vertex
+      - name: Confirm installed CLI and bounded core smoke
+        run: |
+          vertex --help
+          python -m pytest -q -n 0 \
+            tests/unit/test_fact_sor_state.py \
+            tests/unit/test_jsonl_utils.py \
+            tests/unit/test_confirm_archive_evidence_recheck_process.py \
+            --junitxml="$RUNNER_TEMP/macos-smoke.xml"
+      - name: Upload macOS evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: macos-smoke
+          path: ${{ runner.temp }}/macos-smoke.xml
+          if-no-files-found: warn
+          retention-days: 30

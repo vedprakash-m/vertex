@@ -436,6 +436,46 @@ def test_rich_retrieval_preserves_time_rejections_and_valid_partial_results(
     assert all("private-missing" not in question and "private-invalid" not in question for question in bridge.questions)
 
 
+@pytest.mark.parametrize("invalid_time", [None, "private-invalid-time", 123, "0001-01-01T00:00:00+14:00"])
+@pytest.mark.parametrize("existing_cache", [False, True])
+def test_rich_retrieval_refuses_invalid_validated_time_before_extraction(
+    invalid_time: Any, existing_cache: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.m365.workiq_retriever as retriever
+
+    validate = retriever.validate_structured_discovery_payload_with_diagnostics
+
+    def corrupt_validated_time(*args: Any, **kwargs: Any) -> Any:
+        result = validate(*args, **kwargs)
+        result.payload["emails"][0]["receivedDateTime"] = invalid_time
+        return result
+
+    monkeypatch.setattr(retriever, "validate_structured_discovery_payload_with_diagnostics", corrupt_validated_time)
+    bridge = Bridge([_record(id="valid")])
+    cache = tmp_path / "freshness.json"
+    if existing_cache:
+        cache.write_text('{"existing": {}}', encoding="utf-8")
+        original_cache = cache.read_bytes()
+
+    with pytest.raises(ValueError, match="Invalid validated WorkIQ source time") as error:
+        _retrieve(bridge, cache_path=cache)
+
+    assert str(error.value) == "Invalid validated WorkIQ source time"
+    assert len(bridge.questions) == 1
+    if existing_cache:
+        assert cache.read_bytes() == original_cache
+    else:
+        assert not cache.exists()
+
+
+def test_rich_retrieval_retains_normalized_naive_source_time() -> None:
+    bridge = Bridge([_record(id="valid", receivedDateTime="2026-06-20T10:00:00")])
+
+    result = _retrieve(bridge)
+
+    assert result.enrichments[0].timestamp == datetime(2026, 6, 20, 10, tzinfo=timezone.utc)
+
+
 @pytest.mark.parametrize("max_calls, expected_rejected", [(1, 1), (10, 2)])
 def test_rich_retrieval_combines_disjoint_identity_rejections(
     max_calls: int, expected_rejected: int, tmp_path: Path,

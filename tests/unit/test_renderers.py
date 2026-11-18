@@ -1352,6 +1352,102 @@ def _chart_section(placement, *, title="Deployment", message=None):
     )
 
 
+@pytest.mark.parametrize("mode", ["registry", "legacy"])
+def test_teams_renders_routed_chart_summaries_at_their_targets(mode):
+    from src.core.stages.render_stage import _route_chart_placements
+
+    original = _render_context()
+    target = original.workstreams[0]
+    executive = replace(
+        _chart_section(mode, title="Executive chart", message="Executive trend"),
+        section_placement="exec_summary", reference_url="https://example.invalid/executive",
+    )
+    workstream = replace(
+        _chart_section(mode, title="Workstream chart"),
+        section_placement=f"workstream:{target.section_id}", reference_url=None,
+    )
+    sections, executive_chart, workstreams = _route_chart_placements((executive, workstream), (target,))
+    rendered = TeamsRenderer("acme_weekly").render(
+        replace(original, kusto_sections=sections, exec_summary_chart=executive_chart, workstreams=workstreams)
+    )
+
+    executive_summary = "Executive chart: Executive trend. [View chart →](https://example.invalid/executive)"
+    workstream_summary = "Workstream chart. [View chart →](#)"
+    assert rendered.count(executive_summary) == 1
+    assert rendered.count(workstream_summary) == 1
+    assert rendered.index("## Executive Summary") < rendered.index(executive_summary) < rendered.index(f"## {target.title}")
+    assert rendered.index(f"## {target.title}") < rendered.index(workstream_summary)
+    assert "data:image/png;base64" not in rendered
+
+
+@pytest.mark.parametrize("removed", [None, "exec_summary", "exec-summary"])
+def test_narrative_respects_removed_executive_chart(removed, tmp_path, repo_root):
+    from src.core.stages.render_stage import _route_chart_placements
+
+    original = _render_context()
+    section = replace(_chart_section("registry", title="Executive chart"), section_placement="exec_summary")
+    sections, executive, workstreams = _route_chart_placements((section,), original.workstreams)
+    context = replace(
+        original,
+        report=replace(original.report, edition=EditionType.NARRATIVE, exec_summary_text="Synthetic executive text"),
+        kusto_sections=sections,
+        exec_summary_chart=executive,
+        workstreams=workstreams,
+        hidden_render_sections=frozenset((removed,)) if removed else frozenset(),
+    )
+    html = HTMLRenderer("acme_weekly", reports_root=tmp_path, templates_root=repo_root / "templates").render(context)
+    markdown = TeamsRenderer("acme_weekly", reports_root=tmp_path, templates_root=repo_root / "templates").render(context)
+
+    for body in (html, markdown):
+        assert ("Synthetic executive text" in body) is (removed is None)
+        assert ("Executive chart" in body) is (removed is None)
+    assert ('<a id="exec-summary"></a>' in html) is (removed is None)
+    if removed is not None:
+        assert 'href="#exec-summary"' not in html
+    assert "Deployment velocity regressed this week" in html
+
+
+@pytest.mark.parametrize("target_state", ["missing", "invisible", "visible"])
+def test_confirm_restores_chart_with_current_workstream_visibility(target_state, tmp_path, repo_root):
+    from dataclasses import asdict
+    from src.commands.confirm_stages.deserialization import restore_chart_placements
+
+    original = _render_context()
+    target = original.workstreams[0]
+    section = replace(_chart_section("workstream_registry"), section_placement=f"workstream:{target.section_id}")
+    workstreams = (
+        () if target_state == "missing"
+        else (replace(target, blurb="", items=()),) if target_state == "invisible"
+        else (target,)
+    )
+    context = restore_chart_placements(
+        replace(original, workstreams=workstreams, kusto_sections=()),
+        {"routed_chart_sections": [asdict(section)]},
+    )
+
+    if target_state == "visible":
+        assert not context.kusto_sections
+        assert tuple(chart.title for chart in context.workstreams[0].attached_charts) == ("Deployment",)
+    else:
+        assert tuple(chart.title for chart in context.kusto_sections) == ("Deployment",)
+    rendered = HTMLRenderer("acme_weekly", reports_root=tmp_path, templates_root=repo_root / "templates").render(context)
+    assert [image["alt"] for image in _chart_images(rendered)] == ["Deployment chart"]
+
+
+def test_draft_renders_chart_when_target_workstream_is_invisible(tmp_path, repo_root):
+    from src.core.stages.render_stage import _route_chart_placements
+
+    original = _render_context()
+    target = replace(original.workstreams[0], blurb=" ", items=())
+    section = replace(_chart_section("workstream_registry"), section_placement=f"workstream:{target.section_id}")
+    sections, executive, workstreams = _route_chart_placements((section,), (target,))
+    context = replace(original, workstreams=workstreams, kusto_sections=sections, exec_summary_chart=executive)
+
+    assert tuple(chart.title for chart in context.kusto_sections) == ("Deployment",)
+    rendered = HTMLRenderer("acme_weekly", reports_root=tmp_path, templates_root=repo_root / "templates").render(context)
+    assert [image["alt"] for image in _chart_images(rendered)] == ["Deployment chart"]
+
+
 @pytest.mark.parametrize(
     "placement",
     ["standalone_registry", "standalone_legacy", "workstream_registry", "workstream_legacy", "executive"],

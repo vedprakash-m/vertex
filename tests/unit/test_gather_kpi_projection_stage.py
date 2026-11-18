@@ -1139,7 +1139,7 @@ def test_project_kpi_signals_to_observations_records_partial_run_when_binding_mi
         source="kusto_kpi",
         program_id="acme",
         workstream_id="acme",
-        entity_refs=("PR:XStoreApp/301", "WS:acme"),
+        entity_refs=("PR:ExampleApp/301", "WS:acme"),
         text="KPI Open PR Age P90: 10.0",
         raw_ref="kusto_kpi:acme-open-pr-age-p90",
         confidence=Confidence.MEDIUM,

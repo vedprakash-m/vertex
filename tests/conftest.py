@@ -25,6 +25,18 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 _DOTENV_PATCH = pytest.MonkeyPatch()
+_PRIVATE_SKIP_REASON_PATTERNS = (
+    "private data",
+    "private program",
+    "operator-local",
+    "operator data",
+    "local programs/",
+    "programs/acme",
+    "programs/fabrikam",
+    "gold corpus",
+    "editions/",
+    "fixture data",
+)
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -79,6 +91,13 @@ def isolated_cli_startup(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(f"cli.{name}", lambda *_args, **_kwargs: None)
 
 
+@pytest.fixture(scope="session")
+def synthetic_report_seed(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    from tests.support.synthetic_report_source import build_synthetic_report_source
+
+    return build_synthetic_report_source(tmp_path_factory.mktemp("synthetic-report-seed"))
+
+
 # Data-dependent tests that bypass the guarded `stage_v2_report_workspace` helper
 # and assume private programs/acme or editions/acme_weekly config directly. These are
 # gitignored, so on the fresh-clone CI these tests must skip rather than fail. (Tests
@@ -116,6 +135,16 @@ _REQUIRES_FABRIKAM_EDITION: frozenset[str] = frozenset(
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    for item in items:
+        for marker_name in ("skip", "skipif"):
+            marker = item.get_closest_marker(marker_name)
+            if marker is None:
+                continue
+            reason = " ".join(str(value) for value in marker.args)
+            reason += " " + " ".join(str(value) for value in marker.kwargs.values())
+            if any(pattern in reason.casefold() for pattern in _PRIVATE_SKIP_REASON_PATTERNS):
+                item.add_marker(pytest.mark.operator)
+
     # Skip live-data-dependent tests when private programs/acme data is absent
     # (fresh-clone CI). Runs regardless of the --run-integration flag.
     from tests.support.data_guards import live_program_data_available
@@ -126,6 +155,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         )
         for item in items:
             if item.name.split("[")[0] in _REQUIRES_LIVE_PROGRAM_DATA:
+                item.add_marker(pytest.mark.operator)
                 item.add_marker(skip_no_data)
 
     gold_corpus = REPO_ROOT / "programs" / "acme" / "gold_corpus"
@@ -133,15 +163,17 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     for item in items:
         test_name = item.name.split("[")[0]
         if test_name in _REQUIRES_GOLD_CORPUS and not gold_corpus.is_dir():
+            item.add_marker(pytest.mark.operator)
             item.add_marker(pytest.mark.skip(reason="Requires local programs/acme/gold_corpus data"))
         if test_name in _REQUIRES_FABRIKAM_EDITION and not fabrikam_edition.is_file():
+            item.add_marker(pytest.mark.operator)
             item.add_marker(pytest.mark.skip(reason="Requires local programs/fabrikam edition data"))
 
     if config.getoption("--run-integration"):
         return
     skip_integration = pytest.mark.skip(reason="need --run-integration to run")
     for item in items:
-        if "integration" in item.keywords:
+        if item.get_closest_marker("integration") is not None:
             item.add_marker(skip_integration)
 
 

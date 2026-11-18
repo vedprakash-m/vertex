@@ -4518,6 +4518,7 @@ def test_context_rejection_guidance_preserves_required_evidence(
                     -1 if rejection == "invalid-estimate"
                     else len(text) + (5 if "\n\n[EVIDENCE opt " in text else 0)
                 ),
+                incremental_estimates=True,
             ),
             programs_root=tmp_path / "programs",
         )

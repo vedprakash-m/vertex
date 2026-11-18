@@ -4,9 +4,11 @@ fenced registry lease (src/core/people_registry_lease.py)."""
 from __future__ import annotations
 
 from pathlib import Path
+import sqlite3
 
 import pytest
 
+from src.core import people_registry_lease
 from src.core.exceptions import ConfigError
 from src.core.people_registry_identity import bootstrap_registry_identity
 from src.core.people_registry_lease import (
@@ -14,6 +16,7 @@ from src.core.people_registry_lease import (
     RegistryLeaseHeldByAnotherOwner,
     acquire_registry_lease,
     force_release_registry_lease,
+    get_registry_lease_db_path,
     is_registry_lease_expired,
     read_force_release_audit_records,
     read_registry_lease_state,
@@ -31,9 +34,19 @@ def test_acquire_lease_when_none_held_starts_at_fencing_token_one(tmp_path: Path
     assert handle.owner == "owner-a"
 
 
-def test_acquire_lease_by_same_owner_is_a_renewal_that_increments_token(tmp_path: Path) -> None:
+def test_acquire_lease_by_same_owner_while_live_is_refused(tmp_path: Path) -> None:
     knowledge_root = tmp_path / "knowledge"
     first = acquire_registry_lease("owner-a", knowledge_root=knowledge_root)
+
+    with pytest.raises(RegistryLeaseHeldByAnotherOwner):
+        acquire_registry_lease("owner-a", knowledge_root=knowledge_root)
+
+    assert read_registry_lease_state(knowledge_root=knowledge_root) == first
+
+
+def test_acquire_lease_by_same_owner_after_expiry_succeeds(tmp_path: Path) -> None:
+    knowledge_root = tmp_path / "knowledge"
+    first = acquire_registry_lease("owner-a", ttl_seconds=-1, knowledge_root=knowledge_root)
 
     second = acquire_registry_lease("owner-a", knowledge_root=knowledge_root)
 
@@ -68,6 +81,17 @@ def test_renew_lease_requires_current_fencing_token(tmp_path: Path) -> None:
     assert renewed.expires_at > handle.expires_at or renewed.expires_at == handle.expires_at
 
 
+def test_expired_current_lease_cannot_be_renewed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    knowledge_root = tmp_path / "knowledge"
+    handle = acquire_registry_lease("owner-a", knowledge_root=knowledge_root)
+    monkeypatch.setattr(people_registry_lease, "_now", lambda: handle.expires_at)
+
+    with pytest.raises(ConfigError, match="expired"):
+        renew_registry_lease(handle, knowledge_root=knowledge_root)
+
+    assert read_registry_lease_state(knowledge_root=knowledge_root) == handle
+
+
 def test_renew_lease_with_stale_token_raises(tmp_path: Path) -> None:
     knowledge_root = tmp_path / "knowledge"
     handle = acquire_registry_lease("owner-a", ttl_seconds=-1, knowledge_root=knowledge_root)
@@ -86,9 +110,38 @@ def test_release_lease_is_idempotent_and_frees_it_for_others(tmp_path: Path) -> 
     release_registry_lease(handle, knowledge_root=knowledge_root)  # Idempotent no-op.
 
     assert read_registry_lease_state(knowledge_root=knowledge_root) is None
+    with sqlite3.connect(get_registry_lease_db_path(knowledge_root)) as connection:
+        assert connection.execute("SELECT owner FROM registry_lease").fetchone() == ("",)
     # Now available for a different owner without waiting for TTL.
     new_handle = acquire_registry_lease("owner-b", knowledge_root=knowledge_root)
     assert new_handle.owner == "owner-b"
+    assert new_handle.fencing_token > handle.fencing_token
+
+
+def test_released_handle_cannot_renew_or_release_a_later_same_owner_lease(tmp_path: Path) -> None:
+    knowledge_root = tmp_path / "knowledge"
+    stale = acquire_registry_lease("owner-a", knowledge_root=knowledge_root)
+    release_registry_lease(stale, knowledge_root=knowledge_root)
+    current = acquire_registry_lease("owner-a", knowledge_root=knowledge_root)
+
+    with pytest.raises(RegistryLeaseFencingTokenStale):
+        renew_registry_lease(stale, knowledge_root=knowledge_root)
+    release_registry_lease(stale, knowledge_root=knowledge_root)
+    assert read_registry_lease_state(knowledge_root=knowledge_root) == current
+
+
+def test_release_preserves_fencing_independently_per_mutation_domain(tmp_path: Path) -> None:
+    knowledge_root = tmp_path / "knowledge"
+    first = acquire_registry_lease("owner-a", mutation_domain="one", knowledge_root=knowledge_root)
+    other = acquire_registry_lease("owner-b", mutation_domain="two", knowledge_root=knowledge_root)
+
+    release_registry_lease(first, knowledge_root=knowledge_root)
+    current = acquire_registry_lease("owner-a", mutation_domain="one", knowledge_root=knowledge_root)
+
+    assert current.fencing_token > first.fencing_token
+    assert read_registry_lease_state(mutation_domain="two", knowledge_root=knowledge_root) == other
+    release_registry_lease(first, knowledge_root=knowledge_root)
+    assert read_registry_lease_state(mutation_domain="one", knowledge_root=knowledge_root) == current
 
 
 def test_release_lease_with_superseded_token_is_a_no_op(tmp_path: Path) -> None:
@@ -175,3 +228,46 @@ def test_force_release_with_no_lease_held_still_authorizes_and_audits(tmp_path: 
     records = read_force_release_audit_records(knowledge_root)
     assert len(records) == 1
     assert records[0]["prior_owner"] is None
+
+
+@pytest.mark.parametrize("operation", ("renew", "release"))
+def test_force_released_handle_cannot_affect_a_later_same_owner_lease(tmp_path: Path, operation: str) -> None:
+    knowledge_root = tmp_path / "knowledge"
+    _bootstrap_with_steward(knowledge_root, steward_principal="ACME\\authorized_steward")
+    stale = acquire_registry_lease("owner-a", knowledge_root=knowledge_root)
+    force_release_registry_lease(
+        authorized_principal="ACME\\authorized_steward",
+        reason="test",
+        knowledge_root=knowledge_root,
+    )
+    successor = acquire_registry_lease("owner-b", knowledge_root=knowledge_root)
+    release_registry_lease(successor, knowledge_root=knowledge_root)
+    current = acquire_registry_lease("owner-a", knowledge_root=knowledge_root)
+
+    if operation == "renew":
+        rejected = False
+        try:
+            renew_registry_lease(stale, knowledge_root=knowledge_root)
+        except RegistryLeaseFencingTokenStale:
+            rejected = True
+        assert rejected, "A force-released handle renewed a later lease."
+    else:
+        release_registry_lease(stale, knowledge_root=knowledge_root)
+        assert read_registry_lease_state(knowledge_root=knowledge_root) == current
+
+
+def test_force_release_after_ordinary_release_audits_no_held_owner(tmp_path: Path) -> None:
+    knowledge_root = tmp_path / "knowledge"
+    _bootstrap_with_steward(knowledge_root, steward_principal="ACME\\authorized_steward")
+    handle = acquire_registry_lease("owner-a", knowledge_root=knowledge_root)
+    release_registry_lease(handle, knowledge_root=knowledge_root)
+
+    force_release_registry_lease(
+        authorized_principal="ACME\\authorized_steward",
+        reason="test",
+        knowledge_root=knowledge_root,
+    )
+
+    record = read_force_release_audit_records(knowledge_root)[0]
+    assert record["prior_owner"] is None
+    assert record["new_fencing_token"] > handle.fencing_token

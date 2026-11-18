@@ -302,7 +302,7 @@ def test_registry_set_id_normalizes_short_meeting_link_and_chat_path(monkeypatch
             "--pm-alias",
             "operator",
             "--series-id",
-            "https://teams.microsoft.com/meet/258356881302011?p=LOPGasWbahdOPtbWK9",
+            "https://teams.microsoft.com/meet/123456789012345?p=fixture-passcode",
         ],
     )
     thread_result = runner.invoke(
@@ -316,7 +316,7 @@ def test_registry_set_id_normalizes_short_meeting_link_and_chat_path(monkeypatch
             "--pm-alias",
             "operator",
             "--thread-id",
-            "https://teams.microsoft.com/l/chat/19:8c5eec9e0e4f4daa8b5e8c32fec26b7a@thread.v2/conversations?context=%7B%22contextType%22%3A%22chat%22%7D",
+            "https://teams.microsoft.com/l/chat/19:00000000000000000000000000000000@thread.v2/conversations?context=%7B%22contextType%22%3A%22chat%22%7D",
         ],
     )
 
@@ -326,8 +326,8 @@ def test_registry_set_id_normalizes_short_meeting_link_and_chat_path(monkeypatch
 
     assert series_result.exit_code == 0
     assert thread_result.exit_code == 0
-    assert series_artifact.series_id == "258356881302011"
-    assert chat_artifact.thread_id == "19:8c5eec9e0e4f4daa8b5e8c32fec26b7a@thread.v2"
+    assert series_artifact.series_id == "123456789012345"
+    assert chat_artifact.thread_id == "19:00000000000000000000000000000000@thread.v2"
 
 
 def test_registry_set_id_reassigns_placeholder_uil_registration(monkeypatch, tmp_path: Path) -> None:

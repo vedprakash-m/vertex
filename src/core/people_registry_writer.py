@@ -59,7 +59,9 @@ from src.core.people_membership_schema import (
 )
 from src.core.people_registry_governance import require_adopted_registry
 from src.core.people_registry_identity import RegistryConfig, RegistryManifest, load_registry_config, load_registry_manifest
+from src.core.people_registry_lease import acquire_registry_lease, release_registry_lease
 from src.core.people_registry_transaction import (
+    RegistryGenerationStale,
     commit_registry_files_transaction,
     prepare_registry_files_transaction,
     transactions_root,
@@ -281,13 +283,31 @@ def _commit(
     build_current,
     apply: bool,
     as_of: datetime,
+    expected_generation_id: str | None = None,
 ) -> SharedRegistryWriteResult:
     if not actor.strip():
         raise ConfigError(f"{consumer} requires an authenticated operator principal.")
     if not reason.strip():
         raise ConfigError(f"{consumer} requires a non-empty reason.")
-    if not apply or not preview.affected_paths:
+    if not apply:
         return preview
+    if not preview.affected_paths:
+        if expected_generation_id is None:
+            return preview
+        lease = acquire_registry_lease(actor, knowledge_root=knowledge_root)
+        try:
+            current_manifest = load_registry_manifest(knowledge_root)
+            if current_manifest is None:
+                raise ConfigError("Shared registry manifest is unavailable; re-review before applying.")
+            if current_manifest.generation_id != expected_generation_id:
+                raise RegistryGenerationStale(expected_generation_id, current_manifest.generation_id)
+            require_adopted_registry(knowledge_root, consumer=consumer)
+            current, _ = _state_for_result(build_current, _load_state(knowledge_root, workspace_id=config.workspace_id))
+            if current.affected_paths:
+                raise ConfigError(f"{consumer} inputs changed while waiting for the registry lease; re-run the preview.")
+            return current
+        finally:
+            release_registry_lease(lease, knowledge_root=knowledge_root)
 
     committed_result: SharedRegistryWriteResult | None = None
 
@@ -316,7 +336,7 @@ def _commit(
         owner=actor,
         write_staged_files=write_staged_files,
         validate_staged_files=validate_staged_files,
-        expected_generation_id=manifest.generation_id,
+        expected_generation_id=expected_generation_id if expected_generation_id is not None else manifest.generation_id,
         as_of=as_of,
     )
     committed = commit_registry_files_transaction(prepared, knowledge_root=knowledge_root, as_of=as_of)
@@ -930,12 +950,15 @@ def apply_shared_registry_patch(
     source_ref: str | None = None,
     apply: bool,
     as_of: datetime | None = None,
+    expected_generation_id: str | None = None,
 ) -> SharedRegistryWriteResult:
     """Preview or commit a factual KB/NCFL patch through the staged writer."""
 
     now = _now(as_of)
     knowledge_root = get_shared_knowledge_root(programs_root)
     config, manifest = _require_registry(knowledge_root, consumer="Shared factual update")
+    if expected_generation_id is not None and expected_generation_id != manifest.generation_id:
+        raise RegistryGenerationStale(expected_generation_id, manifest.generation_id)
 
     def build_current(state: _RegistryState | None = None):
         return _patch_state(
@@ -961,6 +984,7 @@ def apply_shared_registry_patch(
         build_current=build_current,
         apply=apply,
         as_of=now,
+        expected_generation_id=expected_generation_id,
     )
 
 
@@ -974,11 +998,11 @@ def read_shared_registry_factual_value(
     """Read a factual field for NCFL's optimistic-concurrency check."""
 
     if not shared_registry_is_active(programs_root):
-        return None
+        raise ConfigError("Shared registry is inactive; factual target state is unavailable.")
     knowledge_root = get_shared_knowledge_root(programs_root)
     config = load_registry_config(knowledge_root)
     if config is None:
-        return None
+        raise ConfigError("Shared registry configuration is unavailable.")
     state = _load_state(knowledge_root, workspace_id=config.workspace_id)
     if target_store == "people_directory":
         person = _resolve_person(state, target_key)

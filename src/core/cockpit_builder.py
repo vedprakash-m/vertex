@@ -96,6 +96,7 @@ def build_cockpit_snapshot(
 
     source_summary, source_findings = _build_source_summary(config, observed_at=generated_at)
     findings.extend(source_findings)
+    findings.extend(_build_completeness_findings(program_id, programs_root=programs_root, observed_at=generated_at))
 
     intelligence_summary, intelligence_findings = _build_intelligence_summary(
         program_id, programs_root=programs_root, observed_at=generated_at
@@ -434,6 +435,32 @@ def _build_program_summary(
         next_action=None,
     )
     return summary, findings
+
+
+def _build_completeness_findings(
+    program_id: str, *, programs_root: Path, observed_at: datetime
+) -> list[CockpitFinding]:
+    from src.core.rev.health import build_program_effective_completeness
+
+    try:
+        effective = build_program_effective_completeness(program_id, programs_root=programs_root)
+    except Exception:  # cockpit stays renderable; doctor surfaces the underlying failure
+        return []
+    if effective is None or not effective.downgraded:
+        return []
+    return [
+        CockpitFinding(
+            finding_id="source.completeness.downgraded",
+            area="source",
+            status="warn",
+            summary="Completeness is unknown: a source in the latest run was partial, truncated, failed or quarantined.",
+            detail=f"Reported completeness {effective.base:.0%} downgraded to unknown; reasons: {', '.join(effective.reasons)}.",
+            owner=None,
+            next_command=f"vertex doctor --rev-health --program {program_id}",
+            evidence_refs=effective.reasons,
+            observed_at=observed_at,
+        )
+    ]
 
 
 def _build_source_summary(

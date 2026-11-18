@@ -8,7 +8,7 @@ the snapshot; all values come from :mod:`src.core.cockpit_builder`.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
 
@@ -44,6 +44,9 @@ from src.core.cockpit_models import (
     select_cockpit_exceptions,
 )
 from src.core.workspace_paths import is_bare_identifier
+from src.core.action_tracker import get_actions_path, load_actions
+from src.core.exception_queue import build_exception_queue
+from src.core.risk_register_engine import get_risk_register_path, load_risk_register
 from src.core.alerts import StateError, append_or_suppress_alert, read_alerts
 from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.lineage_regression_detector import (
@@ -841,6 +844,53 @@ def cockpit_autonomy_demote(
     typer.echo(f"{proposal_class}: demoted to {entry.level} ({reason})")
 
 
+@app.command("exceptions")
+def cockpit_exceptions(
+    program: str = typer.Option(..., "--program", help="Program id, e.g. acme."),
+    as_of: str | None = typer.Option(
+        None, "--as-of", help="Date (YYYY-MM-DD) for age checks, not historical replay (default: today, UTC).",
+    ),
+) -> None:
+    """RELO-W4.12: read-only prioritized exception queue ranked from existing
+    risk-register and action-journal signals. Writes nothing."""
+    _validate_cockpit_selection(program, PROGRAMS_ROOT)
+    try:
+        as_of_date = datetime.now(timezone.utc).date() if as_of is None else date.fromisoformat(as_of)
+        if as_of is not None and as_of != as_of_date.isoformat():
+            raise ValueError("Noncanonical date")
+    except ValueError as error:
+        raise typer.BadParameter("--as-of must be an ISO date (YYYY-MM-DD).") from error
+    risk_present = get_risk_register_path(program, PROGRAMS_ROOT).exists()
+    actions_present = get_actions_path(program, PROGRAMS_ROOT).exists()
+    actions = load_actions(program, PROGRAMS_ROOT, repair_corruption=False) if actions_present else ()
+    queue = build_exception_queue(load_risk_register(program, PROGRAMS_ROOT), actions, as_of_date)
+    lines = [f"Exception queue ({program}, as of {as_of_date.isoformat()}): {len(queue)}"]
+    lines.extend(
+        f"  {index}. [{item.kind}] {item.subject_id} ({item.age_days}d) {item.reason} <{item.evidence}>"
+        for index, item in enumerate(queue, start=1)
+    )
+    if not queue:
+        lines.append("  No matching exceptions in available inputs.")
+    missing_inputs = []
+    if not risk_present:
+        missing_inputs.append("risk register")
+    if not actions_present:
+        missing_inputs.append("action journal")
+    if missing_inputs:
+        lines.append(f"  Inputs not detected when checked: {', '.join(missing_inputs)}.")
+    lines.append(
+        "  Scope: unassessed risks, overdue actions, and stale risks only; "
+        "other exceptions and input completeness are not evaluated."
+    )
+    lines.append("  Risk exceptions use the risk register; primary judgment facts are not evaluated.")
+    lines.append(
+        "  Only the current action journal is read; rotated or pruned actions and status updates may be omitted. "
+        "Action statuses may be stale."
+    )
+    lines.append("  Current files are evaluated using this date; historical state is not reconstructed.")
+    typer.echo("\n".join(lines))
+
+
 __all__ = [
     "app",
     "cockpit_adoption",
@@ -850,6 +900,7 @@ __all__ = [
     "cockpit_autonomy_promote",
     "cockpit_build",
     "cockpit_compare",
+    "cockpit_exceptions",
     "cockpit_explain",
     "cockpit_measure",
     "cockpit_show",

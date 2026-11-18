@@ -627,6 +627,18 @@ def _replace_with_bounded_retry(source: Path, destination: Path) -> None:
     ) from last_error
 
 
+def _validate_commit_lease(handle: RegistryLeaseHandle, knowledge_root: Path) -> None:
+    current = read_registry_lease_state(mutation_domain=handle.mutation_domain, knowledge_root=knowledge_root)
+    if current is None or current.owner != handle.owner or current.fencing_token != handle.fencing_token:
+        raise RegistryLeaseFencingTokenStale(
+            handle.fencing_token,
+            current.fencing_token if current is not None else 0,
+            mutation_domain=handle.mutation_domain,
+        )
+    if is_registry_lease_expired(current):
+        raise ConfigError("Registry lease has expired; acquire a new lease before writing.")
+
+
 def commit_registry_transaction(
     prepared: PreparedRegistryTransaction,
     *,
@@ -645,6 +657,8 @@ def commit_registry_transaction(
     staged_data_path = prepared.staged_dir / _SYNTHETIC_RECORDS_FILENAME
     checkpoint_dir = _checkpoint_dir(prepared.staged_dir)
     state_path = _transaction_state_path(prepared.staged_dir)
+
+    _validate_commit_lease(prepared.lease, knowledge_root)
 
     # Step 7: checkpoint the OLD live files (before anything live is
     # touched) + an explicit PREPARED recovery record.
@@ -675,19 +689,14 @@ def commit_registry_transaction(
     # irreversible replace, then replace the data file(s) in deterministic
     # order (a single file today; multiple real files sort by name once
     # Phase 2a's real schemas land).
-    current_lease = read_registry_lease_state(knowledge_root=knowledge_root)
-    if current_lease is None or current_lease.owner != prepared.lease.owner or current_lease.fencing_token != prepared.lease.fencing_token:
-        raise RegistryLeaseFencingTokenStale(
-            prepared.lease.fencing_token,
-            current_lease.fencing_token if current_lease is not None else 0,
-            mutation_domain=prepared.lease.mutation_domain,
-        )
+    _validate_commit_lease(prepared.lease, knowledge_root)
     _replace_with_bounded_retry(staged_data_path, live_data_path)
     if _simulate_crash_after_step == 8:
         return CommittedRegistryTransaction(transaction_id=prepared.transaction_id, manifest=_manifest_from_preview(prepared.manifest_preview, committed_at=now))
 
     # Step 9: replace registry_manifest.json LAST, making the new
     # generation visible to lock-free readers.
+    _validate_commit_lease(prepared.lease, knowledge_root)
     new_manifest = _manifest_from_preview(prepared.manifest_preview, committed_at=now)
     write_registry_manifest(live_manifest_path, new_manifest)
     if _simulate_crash_after_step == 9:
@@ -723,6 +732,7 @@ def commit_registry_files_transaction(
     checkpoint_dir = _checkpoint_dir(prepared.staged_dir)
     state_path = _transaction_state_path(prepared.staged_dir)
     source_hashes = dict(prepared.manifest_preview.source_hashes)
+    _validate_commit_lease(prepared.lease, knowledge_root)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     existing_paths: list[str] = []
     for relative_path in prepared.relative_paths:
@@ -751,19 +761,10 @@ def commit_registry_files_transaction(
     _write_json_atomic(state_path, state)
 
     for relative_path in prepared.relative_paths:
-        current_lease = read_registry_lease_state(knowledge_root=knowledge_root)
-        if (
-            current_lease is None
-            or current_lease.owner != prepared.lease.owner
-            or current_lease.fencing_token != prepared.lease.fencing_token
-        ):
-            raise RegistryLeaseFencingTokenStale(
-                prepared.lease.fencing_token,
-                current_lease.fencing_token if current_lease is not None else 0,
-                mutation_domain=prepared.lease.mutation_domain,
-            )
+        _validate_commit_lease(prepared.lease, knowledge_root)
         _replace_with_bounded_retry(prepared.staged_dir / relative_path, knowledge_root / relative_path)
 
+    _validate_commit_lease(prepared.lease, knowledge_root)
     new_manifest = _manifest_from_preview(prepared.manifest_preview, committed_at=now)
     write_registry_manifest(registry_manifest_path(knowledge_root), new_manifest)
     _write_generation_snapshots(
@@ -836,7 +837,9 @@ def recover_registry_transactions(knowledge_root: Path, *, as_of: datetime | Non
         new_data_hashes = state.get("new_data_hashes")
         if not isinstance(new_data_hashes, dict):
             new_data_hashes = {_SYNTHETIC_RECORDS_FILENAME: state["new_data_hash"]}
-        relative_paths = tuple(sorted(str(path) for path in new_data_hashes))
+            relative_paths = (_SYNTHETIC_RECORDS_FILENAME,)
+        else:
+            relative_paths = tuple(sorted(state["relative_paths"]))
         replaced_paths = tuple(
             relative_path
             for relative_path in relative_paths

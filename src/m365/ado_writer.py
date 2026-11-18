@@ -16,8 +16,8 @@ from typing import Any, Iterator
 
 import portalocker
 
-from src.core.actuation_outbox import DispatchResult, create_task_idempotency_key, dispatch_leased_create_task, enqueue_create_task_intent, outbox_db_path
-from src.core.ledger.durable_outbox_store import load_entry
+from src.core.actuation_outbox import DispatchResult, actuation_idempotency_key, create_task_idempotency_key, dispatch_leased_create_task, enqueue_create_task_intent, outbox_db_path
+from src.core.ledger.durable_outbox_store import OutboxError, load_entry
 from src.core.ado_client import ADOClient
 from src.core.ado_proposal import ADOUpdateEntry, ADOUpdateProposal, open_locked_proposal_manifest, read_proposal_manifest_from_handle, write_proposal_manifest_to_handle
 from src.core.exceptions import AuthError, ConfigError, CredentialExpired, MutationOutcomeUnknown, QueryError, QueryTimeoutError, StateError
@@ -32,6 +32,8 @@ from src.core.workspace_lease import ACTUATION_DISPATCH_DOMAIN, LeaseHeldByAnoth
 
 
 log = logging.getLogger(__name__)
+# Non-create ADO writes retain the existing direct path pending an owner ruling.
+_ROUTE_ADO_MUTATIONS_VIA_OUTBOX = False
 _ACTION_ASSOCIATION_WARNING = (
     "ADO entry is applied; local action association may be incomplete. Review the action history."
 )
@@ -457,6 +459,19 @@ class ADOWriter:
                 )
             if duplicate:
                 return replace(entry, entry_status="skipped", status_reason="duplicate comment")
+            if _ROUTE_ADO_MUTATIONS_VIA_OUTBOX:
+                status, reason, response = self._dispatch_mutation_via_outbox(
+                    proposal, entry, operation="add_comment.v1", method="POST",
+                    url=f"{self._client._rest_base_url}workItems/{entry.work_item_id}/comments?api-version=7.1-preview.4",
+                    json_body={"text": entry.proposed_value}, content_type="application/json",
+                )
+                if status != "completed":
+                    return replace(entry, entry_status="failed", status_reason=reason)
+                self._append_audit_signal(
+                    proposal, entry, applied_at=applied_at, existing_signals=existing_signals,
+                    signal_store=signal_store, raw_ref=_comment_raw_ref(response),
+                )
+                return replace(entry, entry_status="applied", remote_rev=live_rev)
             with self._actuation_lease(proposal.program_id):
                 response = self._request_json(
                     "POST",
@@ -480,6 +495,11 @@ class ADOWriter:
             tag_patch: list[dict[str, Any]] = [{"op": "add", "path": "/fields/System.Tags", "value": tag_value}]
             if entry.revision_id is not None:
                 tag_patch = _prepend_test_op(tag_patch, entry.revision_id)
+            if _ROUTE_ADO_MUTATIONS_VIA_OUTBOX and entry.action == "add_tag":
+                return self._apply_patch_via_outbox(
+                    proposal, entry, operation="add_tag.v1", patch=tag_patch, live_rev=live_rev,
+                    applied_at=applied_at, existing_signals=existing_signals, signal_store=signal_store,
+                )
             try:
                 with self._actuation_lease(proposal.program_id):
                     self._request_json(
@@ -508,6 +528,11 @@ class ADOWriter:
             field_patch: list[dict[str, Any]] = [{"op": "add", "path": f"/fields/{entry.field_or_tag}", "value": entry.proposed_value}]
             if entry.revision_id is not None:
                 field_patch = _prepend_test_op(field_patch, entry.revision_id)
+            if _ROUTE_ADO_MUTATIONS_VIA_OUTBOX:
+                return self._apply_patch_via_outbox(
+                    proposal, entry, operation="set_field.v1", patch=field_patch, live_rev=live_rev,
+                    applied_at=applied_at, existing_signals=existing_signals, signal_store=signal_store,
+                )
             try:
                 with self._actuation_lease(proposal.program_id):
                     self._request_json(
@@ -873,6 +898,86 @@ class ADOWriter:
             )
         return body
 
+    def _apply_patch_via_outbox(
+        self, proposal: ADOUpdateProposal, entry: ADOUpdateEntry, *, operation: str, patch: list[dict[str, Any]],
+        live_rev: int | None, applied_at: datetime, existing_signals: list[Signal], signal_store,
+    ) -> ADOUpdateEntry:
+        status, reason, _ = self._dispatch_mutation_via_outbox(
+            proposal, entry, operation=operation, method="PATCH",
+            url=f"{self._client._rest_base_url}workItems/{entry.work_item_id}?api-version=7.1",
+            json_body=patch, content_type="application/json-patch+json",
+        )
+        if status == "failed_terminal":
+            return replace(entry, entry_status="conflict", status_reason="test op rejected (race)", remote_rev=live_rev)
+        if status != "completed":
+            return replace(entry, entry_status="failed", status_reason=reason)
+        self._append_audit_signal(
+            proposal, entry, applied_at=applied_at, existing_signals=existing_signals, signal_store=signal_store,
+        )
+        return replace(entry, entry_status="applied", remote_rev=live_rev)
+
+    def _dispatch_mutation_via_outbox(
+        self, proposal: ADOUpdateProposal, entry: ADOUpdateEntry, *, operation: str, method: str, url: str,
+        json_body: Any, content_type: str,
+    ) -> tuple[str, str | None, dict[str, Any]]:
+        """Enqueue -> dispatch -> record one ADO mutation; returns (status, reason, response)."""
+        request = {"operation": operation, "work_item_id": entry.work_item_id, "method": method, "url": url, "body": json_body}
+        operation_intent_id = hashlib.sha256(
+            json.dumps({**request, "proposal_id": proposal.id}, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+        ).hexdigest()
+        idempotency_key = actuation_idempotency_key(
+            program_id=proposal.program_id, org=self._client.organization, project=self._client.project,
+            operation=operation, target_identity=str(entry.work_item_id), operation_intent_id=operation_intent_id,
+        )
+        payload_json = json.dumps({
+            **request, "content_type": content_type, "operation_intent_id": operation_intent_id,
+            "proposal_id": proposal.id, "org": self._client.organization, "project": self._client.project,
+        })
+        enqueue_create_task_intent(
+            program_id=proposal.program_id, idempotency_key=idempotency_key, operation_intent_id=operation_intent_id,
+            proposal_id=proposal.id, payload_json=payload_json, programs_root=self._programs_root,
+            operation=operation, target_identity=str(entry.work_item_id),
+        )
+        retained = load_entry(outbox_db_path(proposal.program_id, programs_root=self._programs_root), idempotency_key)
+        if retained is not None and retained.status == "completed":
+            return "completed", None, {}
+        self._last_mutation_response: dict[str, Any] = {}
+        try:
+            outcome = dispatch_leased_create_task(
+                program_id=proposal.program_id, idempotency_key=idempotency_key,
+                owner=f"ado_writer:{uuid.uuid4().hex[:12]}",
+                dispatch_fn=self._dispatch_create_task_outbox_entry, programs_root=self._programs_root,
+            )
+        except LeaseHeldByAnotherOwner as error:
+            return "failed", f"actuation dispatch lease busy, retry later: {error}", {}
+        except OutboxError as error:
+            return "failed", f"actuation dispatch not possible: {error}", {}
+        if outcome.status == "uncertain_remote_state":
+            return outcome.status, (
+                f"ADO {operation} outcome uncertain (outbox key {idempotency_key}); operator must reconcile before retrying"
+            ), {}
+        return outcome.status, outcome.entry.failure_reason, self._last_mutation_response
+
+    def _dispatch_ado_mutation(self, fields: dict[str, Any]) -> DispatchResult:
+        try:
+            response = self._request_json(
+                fields["method"], fields["url"], json_body=fields["body"], content_type=fields["content_type"],
+            )
+        except (MutationOutcomeUnknown, QueryTimeoutError):
+            return DispatchResult(
+                succeeded=False, uncertain=True,
+                failure_reason=f"ADO {fields['operation']} response is inconclusive; reconciliation required, no automatic retry",
+            )
+        except QueryError as error:
+            return DispatchResult(succeeded=False, failure_reason=f"ADO {fields['operation']} failed: {error}")
+        self._last_mutation_response = response
+        return DispatchResult(
+            succeeded=True, remote_id=fields["work_item_id"],
+            remote_response_hash=hashlib.sha256(
+                json.dumps(response, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+            ).hexdigest(),
+        )
+
     def _dispatch_create_task_outbox_entry(self, outbox_entry: Any) -> DispatchResult:
         """ADF-W1.3: the ``dispatch_fn`` handed to ``dispatch_leased_create_task``.
 
@@ -891,6 +996,8 @@ class ADOWriter:
             or fields.get("project") != self._client.project
         ):
             return DispatchResult(succeeded=False, failure_reason="outbox payload has missing or mismatched ADO destination")
+        if fields.get("operation", "create_task.v1") != "create_task.v1":
+            return self._dispatch_ado_mutation(fields)
         patch = _build_create_task_patch(fields)
         try:
             response = self._request_json(

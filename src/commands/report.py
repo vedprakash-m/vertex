@@ -245,7 +245,7 @@ from src.core.jinja_filters import build_anchor, configure_ado_web_url, configur
 from src.core.kusto_client import build_live_kusto_query_executor
 from src.core.kusto_query_loader import load_kpi_queries
 from src.core.kusto_rendering import KustoQueryExecutor, build_kusto_sections
-from src.core.manifest_writer import build_run_evidence_snapshot, build_run_manifest, write_run_manifest
+from src.core.manifest_writer import build_run_evidence_snapshot, build_run_manifest, chart_gate_evidence_sha256, write_run_manifest
 from src.core.narrative_store import build_workstream_narrative_history
 from src.core.notification_state_store import load_latest_notification_state
 from src.core.observability import RunLoggerAdapter, configure_file_logging, get_command_trace_path
@@ -443,7 +443,7 @@ def report_command(
     no_seed: bool = typer.Option(False, "--no-seed", help="Skip trusted-baseline narrative seeding for this run and render from scaffold templates or existing narratives instead."),
     offline: bool = typer.Option(False, "--offline", help="Render from the newest cached snapshot without live ADO or Kusto calls."),
     diff_mode: bool = typer.Option(False, "--diff", help="Compare the current draft against the last dry-run and print a diff summary."),
-    send_draft: bool = typer.Option(False, "--send-draft", help="Send the rendered draft to the author's mailbox for Outlook preview."),
+    send_draft: bool = typer.Option(False, "--send-draft", help="Send the rendered draft to the author's mailbox for Outlook preview; incompatible with --dry-run."),
     ai_review: bool = typer.Option(False, "--ai-review", help="Run advisory draft review suggestions after rendering the dry-run draft."),
     no_ai: bool = typer.Option(False, "--no-ai", help="Suppress optional AI-powered draft review helpers."),
     as_of: datetime | None = typer.Option(None, "--as-of", help="Override ADO data timestamp in UTC."),
@@ -461,6 +461,8 @@ def report_command(
         raise typer.BadParameter("--send-draft cannot be combined with --stdout.")
     if stdout and ai_review:
         raise typer.BadParameter("--ai-review cannot be combined with --stdout.")
+    if dry_run and send_draft:
+        raise typer.BadParameter("--send-draft cannot be combined with --dry-run.")
     if offline and send_draft:
         raise typer.BadParameter("--offline cannot be combined with --send-draft.")
     if offline and as_of is not None:
@@ -946,7 +948,7 @@ def _execute_report_pipeline(
     trace_logger: RunLoggerAdapter | None = None,
 ) -> StageContext:
     progress_callback = _build_report_pipeline_progress_callback(show_progress=show_progress, trace_logger=trace_logger)
-    resolution_stage = ResolutionStage()
+    resolution_stage = ResolutionStage(validate_report_fact_capture=True)
     resolution_started = perf_counter()
     resolved_ctx = resolution_stage.execute(request_ctx)
     resolved_ctx = _pin_gather_run_lineage(resolved_ctx)
@@ -1178,6 +1180,7 @@ class _LookbackStage:
                 reports_root=ctx.reports_root,
                 archive_root=ctx.archive_root,
                 open_browser=ctx.open_browser,
+                offline=ctx.offline,
                 gather_run_id=ctx.gather_run_id,
                 gather_run_hash=ctx.gather_run_hash,
                 programs_root=ctx.programs_root if ctx.resolved_v2 is not None else None,
@@ -1392,6 +1395,20 @@ class _OutputStage:
                 override_snapshot=ctx.override_snapshot,
                 program_fact_snapshot=draft_fact_snapshot,
                 run_evidence_snapshot_sha256=capture.sha256 if capture is not None else None,
+                chart_gate_evidence_sha256=(
+                    chart_gate_evidence_sha256(
+                        validation_state.manifest.manifest_id, validation_state.manifest.qg_results,
+                        validation_state.manifest.metadata["chart_freshness_evidence"],
+                        render_state.kusto_sections,
+                        edition_type=validation_state.manifest.metadata["chart_binding_edition_type"],
+                        routed_chart_sections=render_state.routed_chart_sections,
+                    )
+                    if "chart_freshness_evidence" in validation_state.manifest.metadata else None
+                ),
+                routed_chart_sections=(
+                    render_state.routed_chart_sections
+                    if "chart_freshness_evidence" in validation_state.manifest.metadata else None
+                ),
                 top_3_now=ctx.top_3_now,
                 exec_summary_text=ctx.render_exec_summary_text,
                 gather_run_id=ctx.gather_run_id,

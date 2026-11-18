@@ -17,7 +17,7 @@ or local tier avoided a frontier (cloud) call — was invisible.
 Tiers (§7.6):
 
     Tier 0 deterministic  — regex / structured parsing / state-machine extraction (zero tokens)
-    Tier 1 local semantic — local embeddings / fuzzy match / keyword graph (near-zero OpEx)
+    Tier 1 local semantic — FTS5/BM25 lexical index / rapidfuzz fuzzy match (no embeddings) (near-zero OpEx)
     Tier 2 frontier       — Azure OpenAI cloud model (budgeted + traced)
 
 The dispatcher records completed routing decisions for diagnostics. These records

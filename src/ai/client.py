@@ -6,21 +6,23 @@ import json
 import logging
 import math
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import Lock
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Sequence, TypeVar
 
 from src.ai.ai_mode import AIMode, get_ai_mode
 from src.ai.context_tokenizers import resolve_token_estimator
 from src.ai.llm_trace import AITraceContext, get_current_trace_context, llm_trace
 from src.ai.request_router import AIRequestRouter
 from src.core.exceptions import ConfigError, StateError
-from src.core.policy_loader import load_ai_model_cost_policy
+from src.core.policy_loader import _load_ai_policy_document, load_ai_model_cost_policy
 
 
 logger = logging.getLogger(__name__)
 StructuredResponse = TypeVar("StructuredResponse")
+ResultT = TypeVar("ResultT")
 
 
 class AIClientError(Exception):
@@ -67,6 +69,109 @@ class _FeatureBudgetState:
         self.lock = Lock()
         self.spent_usd = 0.0
         self.reservations: dict[tuple[object, int], float] = {}
+
+
+class _CostChain:
+    """Priced retry/fallback chain; its worst case is held with the first attempt's reservation."""
+
+    __slots__ = ("guard", "prices", "attempts", "reservation")
+
+    def __init__(self, guard: Any, prices: dict[str, tuple[float, float]], attempts: int) -> None:
+        self.guard = guard
+        self.prices = prices
+        self.attempts = attempts
+        self.reservation: Any = None
+
+    def covers(self, client: AIClient) -> bool:
+        guard = client._run_cost_guard
+        return (
+            guard is not None
+            and client.deployment in self.prices
+            and _guard_identity(guard) == _guard_identity(self.guard)
+        )
+
+    def worst_case_usd(self, prompt_tokens: int, max_tokens: int) -> float:
+        """Sum over deployments x attempts of (input tokens x input price + max_tokens x output price)."""
+        try:
+            total_usd = self.attempts * math.fsum(
+                (prompt_tokens / 1000) * input_per_1k + (max_tokens / 1000) * output_per_1k
+                for input_per_1k, output_per_1k in self.prices.values()
+            )
+        except OverflowError:
+            total_usd = math.inf
+        if not math.isfinite(total_usd) or total_usd < 0:
+            raise BudgetConfigurationError("AI token reservation cost must be finite and nonnegative.")
+        return total_usd
+
+
+_ACTIVE_COST_CHAIN: ContextVar[_CostChain | None] = ContextVar("vertex_ai_cost_chain", default=None)
+
+
+def _guard_identity(guard: Any) -> tuple[str, str, Any]:
+    return (guard._edition, guard._run_id, guard.ledger_path.resolve())
+
+
+def open_cost_chain(primary: Any, deployments: Sequence[str]) -> _CostChain | None:
+    """Price a retry/fallback chain before any dispatch (RELO-W1.4).
+
+    Raises before any ledger write or dispatch when the feature ID or any
+    deployment's price is unknown.  The first attempt's reservation then holds
+    the worst case for every deployment x (MAX_RETRIES + 1) attempts against
+    the run ceiling; later attempts draw from that hold.  Backup deployments
+    are priced without constructing their clients.
+    """
+    if not isinstance(primary, AIClient) or primary._run_cost_guard is None:
+        return None
+    assert primary._trace_context is not None
+    feature = primary._trace_context.metadata.get("ai_feature")
+    if feature is not None:
+        try:
+            known_features = _load_ai_policy_document().get("ai_features") or {}
+        except ConfigError:
+            raise BudgetConfigurationError("AI feature policy configuration is invalid.") from None
+        if str(feature).strip() not in known_features:
+            raise BudgetConfigurationError(f"Unknown AI feature {feature!r}; provider call refused.")
+    prices: dict[str, tuple[float, float]] = {}
+    for deployment in dict.fromkeys(deployments):
+        if deployment == primary.deployment:
+            prices[deployment] = (primary._input_cost_per_1k_tokens, primary._output_cost_per_1k_tokens)
+            continue
+        try:
+            pricing = load_ai_model_cost_policy(deployment)
+        except ConfigError:
+            raise BudgetConfigurationError("AI model pricing configuration is invalid.") from None
+        prices[deployment] = (pricing.input_cost_per_1k_tokens, pricing.output_cost_per_1k_tokens)
+    return _CostChain(primary._run_cost_guard, prices, primary.MAX_RETRIES + 1)
+
+
+def close_cost_chain(chain: _CostChain | None, *, refresh_projection: bool = True) -> None:
+    """Release the undrawn remainder; drawn attempt rows keep their own settle/retain outcome."""
+    if chain is None or chain.reservation is None:
+        return
+    try:
+        chain.guard.release_chain(chain.reservation, refresh_projection=refresh_projection)
+    except Exception as error:
+        raise BudgetStateError(
+            f"Unable to release AI cost chain remainder ({type(error).__name__}); reconcile before retrying."
+        ) from None
+
+
+def run_in_cost_chain(chain: _CostChain | None, call: Callable[[], ResultT]) -> ResultT:
+    """Run ``call`` with ``chain`` active, then release its undrawn remainder."""
+    token = _ACTIVE_COST_CHAIN.set(chain)
+    try:
+        result = call()
+    except BaseException as error:
+        _ACTIVE_COST_CHAIN.reset(token)
+        try:
+            # After a cost-state failure the projection is left as the failed attempt left it.
+            close_cost_chain(chain, refresh_projection=not isinstance(error, BudgetStateError))
+        except BudgetStateError:
+            logger.error("AI cost chain remainder could not be released after a failed request.")
+        raise
+    _ACTIVE_COST_CHAIN.reset(token)
+    close_cost_chain(chain)
+    return result
 
 
 class AIClient:
@@ -203,8 +308,18 @@ class AIClient:
                         f"Spent/reserved ${committed_usd:.3f} of ${self._budget_usd:.2f}; "
                         f"next AI spend ${estimated_cost_usd:.3f} would exceed the feature ceiling."
                     )
+                chain = _ACTIVE_COST_CHAIN.get()
                 try:
-                    reservation = self._run_cost_guard.reserve_call(estimated_cost_usd)
+                    if chain is not None and chain.covers(self) and chain.reservation is not None:
+                        reservation = self._run_cost_guard.reserve_call(estimated_cost_usd, chain=chain.reservation)
+                    elif chain is not None and chain.covers(self):
+                        reservation = self._run_cost_guard.reserve_call(
+                            estimated_cost_usd,
+                            chain_total_usd=chain.worst_case_usd(estimated_prompt_tokens, max_tokens),
+                        )
+                        chain.reservation = reservation
+                    else:
+                        reservation = self._run_cost_guard.reserve_call(estimated_cost_usd)
                 except (StateError, OSError, UnicodeError) as error:
                     message = str(error) if isinstance(error, StateError) else "Unable to access AI cost state."
                     raise BudgetStateError(message) from None

@@ -75,9 +75,10 @@ def _assert_no_mixed_generation_state(knowledge_root: Path) -> None:
     assert compute_file_checksum(data_path) == expected_hash
 
 
-def test_concurrent_acquire_attempts_only_one_winner(tmp_path: Path) -> None:
+@pytest.mark.parametrize("same_owner", (False, True))
+def test_concurrent_acquire_attempts_only_one_winner(tmp_path: Path, same_owner: bool) -> None:
     knowledge_root = tmp_path / "knowledge"
-    owners = [f"owner-{i}" for i in range(8)]
+    owners = ["shared-owner" if same_owner else f"owner-{i}" for i in range(8)]
 
     def _attempt(owner: str) -> tuple[str, bool]:
         try:

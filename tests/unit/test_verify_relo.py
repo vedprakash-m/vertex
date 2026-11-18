@@ -1028,8 +1028,8 @@ def test_verifier_cli_rejects_duplicate_phase_work_items_without_mutation(
     )
     (tmp_path / "governance" / "relo-work-packages.yaml").write_text(
         "schema_version: '1'\nwork_items:\n"
-        "  - {id: RELO-W0.1, class: NEEDS_JUDGMENT, depends_on: []}\n"
-        "  - {id: RELO-W0.2, class: NEEDS_JUDGMENT, depends_on: []}\n",
+        "  - {id: RELO-W0.1, class: NEEDS_JUDGMENT, depends_on: [], status: planned}\n"
+        "  - {id: RELO-W0.2, class: NEEDS_JUDGMENT, depends_on: [], status: planned}\n",
         encoding="utf-8",
     )
     before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
@@ -1475,8 +1475,8 @@ def test_verifier_cli_rejects_goal_traceability_without_mutation(tmp_path, capsy
     )
     (tmp_path / "governance" / "relo-work-packages.yaml").write_text(
         "schema_version: '1'\nwork_items:\n"
-        "  - {id: RELO-W0.1, class: NEEDS_JUDGMENT, depends_on: []}\n"
-        "  - {id: RELO-W0.2, class: NEEDS_JUDGMENT, depends_on: []}\n",
+        "  - {id: RELO-W0.1, class: NEEDS_JUDGMENT, depends_on: [], status: planned}\n"
+        "  - {id: RELO-W0.2, class: NEEDS_JUDGMENT, depends_on: [], status: planned}\n",
         encoding="utf-8",
     )
     before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
@@ -1515,8 +1515,8 @@ def test_goal_traceability_standalone_json_cli_preserves_inputs(
     )
     (tmp_path / "governance" / "relo-work-packages.yaml").write_text(
         "schema_version: '1'\nwork_items:\n"
-        "  - {id: RELO-W0.1, class: NEEDS_JUDGMENT, depends_on: []}\n"
-        "  - {id: RELO-W0.2, class: NEEDS_JUDGMENT, depends_on: []}\n",
+        "  - {id: RELO-W0.1, class: NEEDS_JUDGMENT, depends_on: [], status: planned}\n"
+        "  - {id: RELO-W0.2, class: NEEDS_JUDGMENT, depends_on: [], status: planned}\n",
         encoding="utf-8",
     )
     before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
@@ -1566,6 +1566,7 @@ def _ready_work_package(identifier="RELO-W0.1"):
     return {
         "id": identifier,
         "class": "AGENT_READY",
+        "status": "planned",
         "depends_on": [],
         "read_first": ["existing.py"],
         "change": ["existing.py"],
@@ -1575,7 +1576,7 @@ def _ready_work_package(identifier="RELO-W0.1"):
     }
 
 
-def _write_work_package_fixture(tmp_path, cards, identifiers=("RELO-W0.1",)):
+def _write_work_package_fixture(tmp_path, cards, identifiers=("RELO-W0.1",), *, default_status=True):
     (tmp_path / "governance").mkdir(exist_ok=True)
     (tmp_path / "existing.py").write_text("# synthetic\n", encoding="utf-8")
     spec = tmp_path / "relo.md"
@@ -1589,6 +1590,11 @@ def _write_work_package_fixture(tmp_path, cards, identifiers=("RELO-W0.1",)):
         "### 11.3 Next\n| ID | Work item |\n|---|---|\n**RELO-D1**\n",
         encoding="utf-8",
     )
+    if default_status:
+        cards = [
+            {**card, "status": card.get("status", "planned")} if isinstance(card, dict) else card
+            for card in cards
+        ]
     (tmp_path / "governance" / "relo-work-packages.yaml").write_text(
         json.dumps({"schema_version": "1", "work_items": cards}),
         encoding="utf-8",
@@ -1867,8 +1873,8 @@ def test_goal_and_work_package_phase_coverage_use_the_same_bold_definition(tmp_p
         json.dumps({
             "schema_version": "1",
             "work_items": [
-                {"id": "RELO-W0.1", "class": "NEEDS_JUDGMENT", "depends_on": []},
-                {"id": "RELO-W0.2", "class": "NEEDS_JUDGMENT", "depends_on": []},
+                {"id": "RELO-W0.1", "class": "NEEDS_JUDGMENT", "depends_on": [], "status": "planned"},
+                {"id": "RELO-W0.2", "class": "NEEDS_JUDGMENT", "depends_on": [], "status": "planned"},
             ],
         }),
         encoding="utf-8",
@@ -1998,12 +2004,18 @@ def test_work_package_lint_rejects_invalid_id_without_declared_cards(tmp_path, i
 
 def test_work_package_lint_preserves_valid_classes_and_aggregates_invalid_cards(tmp_path) -> None:
     ready = _ready_work_package()
-    judgment = {"id": "RELO-W0.2", "class": "NEEDS_JUDGMENT", "depends_on": ["RELO-W0.1"]}
+    judgment = {
+        "id": "RELO-W0.2",
+        "class": "NEEDS_JUDGMENT",
+        "depends_on": ["RELO-W0.1"],
+        "status": "planned",
+    }
     decision = {
         "id": "RELO-W0.3",
         "class": "NEEDS_DECISION",
         "depends_on": ["RELO-W0.2"],
         "blocking_decisions": ["RELO-D1"],
+        "status": "planned",
     }
     spec = _write_work_package_fixture(
         tmp_path, [ready, judgment, decision], identifiers=("RELO-W0.1", "RELO-W0.2", "RELO-W0.3"),
@@ -2028,6 +2040,57 @@ def test_work_package_lint_preserves_valid_classes_and_aggregates_invalid_cards(
     assert "RELO-W0.1: invalid class" in result.detail
     assert "RELO-W0.2: unresolved depends_on" in result.detail
     assert "RELO-W0.3: NEEDS_DECISION must name" in result.detail
+
+
+@pytest.mark.parametrize("status", ["planned", "partial", "blocked", "completed", "deferred"])
+def test_work_package_lint_accepts_declared_statuses(tmp_path, status) -> None:
+    card = _ready_work_package()
+    card["status"] = status
+    spec = _write_work_package_fixture(tmp_path, [card])
+
+    assert lint_work_packages(tmp_path, spec_path=spec).passed is True
+
+
+@pytest.mark.parametrize("status", [None, "done", {}, []])
+def test_work_package_lint_rejects_undeclared_statuses(tmp_path, status) -> None:
+    card = _ready_work_package()
+    card["status"] = status
+    spec = _write_work_package_fixture(tmp_path, [card])
+
+    result = lint_work_packages(tmp_path, spec_path=spec)
+
+    assert result.passed is False
+    assert "invalid status" in result.detail
+
+
+def test_work_package_lint_rejects_missing_status(tmp_path) -> None:
+    card = _ready_work_package()
+    card.pop("status")
+    spec = _write_work_package_fixture(tmp_path, [card], default_status=False)
+
+    result = lint_work_packages(tmp_path, spec_path=spec)
+
+    assert result.passed is False
+    assert "invalid status" in result.detail
+
+
+@pytest.mark.parametrize(("field", "statement"), [
+    ("evidence", "This is not completion of W3.3b."),
+    ("evidence", "Nullable-time expansion remains deferred."),
+    ("evidence", "No anti-entropy or reseed added; status unchanged."),
+    ("rationale", "The acceptance remains open."),
+    ("rationale", "Reconcile that acceptance before declaring closure."),
+    ("rationale", "This remains an owner decision."),
+])
+def test_work_package_lint_rejects_completed_cards_with_open_acceptance(tmp_path, field, statement) -> None:
+    card = _ready_work_package()
+    card.update(status="completed", **{field: statement})
+    spec = _write_work_package_fixture(tmp_path, [card])
+
+    result = lint_work_packages(tmp_path, spec_path=spec)
+
+    assert result.passed is False
+    assert "completed status contradicts" in result.detail
 
 
 @pytest.mark.parametrize(("dependencies", "cyclic"), [
@@ -2317,7 +2380,13 @@ def test_work_package_decisions_require_declared_section_20_ids(
                 "## 21. Next\n| **RELO-D11** | outside section |\n"
             )
     spec.write_text(content, encoding="utf-8")
-    card = {"id": "RELO-W0.1", "class": "NEEDS_DECISION", "depends_on": [], "blocking_decisions": blockers}
+    card = {
+        "id": "RELO-W0.1",
+        "class": "NEEDS_DECISION",
+        "depends_on": [],
+        "blocking_decisions": blockers,
+        "status": "planned",
+    }
     if case == "missing_value":
         del card["blocking_decisions"]
     ledger = root / "governance" / "relo-work-packages.yaml"

@@ -335,10 +335,46 @@ class VertexRootGroup(TyperGroup):
                     _parsed_startup_scope(ctx, resolved[0], resolved[1], resolved[2])
                     if resolved[0] is not None and resolved[1] is not None else None
                 )
+            report = resolved[1]
+            if (
+                resolved[0] in {"report", "draft"}
+                and type(report) is TyperCommand
+                and getattr_static(report.callback, "__wrapped__", None) is report_command
+                and report.context_class is click.Context
+                and type(report.context_settings) is dict
+                and report.context_settings.get("default_map") is None
+                and report.context_settings.get("token_normalize_func") is None
+                and ctx.default_map is None
+                and ctx.token_normalize_func is None
+                and all(
+                    type(parameter) is TyperOption
+                    and parameter.callback is None
+                    and _safe_startup_type(parameter.type)
+                    and _safe_startup_value(parameter.default)
+                    for parameter in report.params
+                )
+            ):
+                settings = dict(report.context_settings)
+                settings.update(info_name=resolved[0], parent=ctx)
+                probe = click.Context(report, **settings)
+                try:
+                    options, _, _ = report.make_parser(probe).parse_args(list(resolved[2]))
+                except click.UsageError:
+                    pass  # The actual invocation reports the parse error.
+                else:
+                    ctx.meta["report_conflicting_send"] = (
+                        options.get("dry_run") is True
+                        and options.get("send_draft") is True
+                        and options.get("help") is not True
+                    )
             if resolved[0] == "context" and resolved[2] and resolved[2][0] in {
                 "import-reply", "solicit", "extract", "verify-reply-origin",
             }:
                 ctx.meta["offline_context_command"] = True
+            elif resolved[0] == "cockpit" and (
+                resolved[2][:1] == ["exceptions"] or resolved[2][:2] == ["--", "exceptions"]
+            ):
+                ctx.meta["offline_cockpit_exceptions"] = True
             elif resolved[0] == "admin" and resolved[2][:2] == ["metric", "history"]:
                 ctx.meta["offline_metric_history_command"] = True
             elif resolved[0] == "doctor" and resolved[1] is not None and any(
@@ -458,7 +494,13 @@ def main(
     edition: str = typer.Option("", "--edition", help="Default edition for natural-language routing (e.g. 'acme_weekly')."),
 ) -> None:
     ctx.with_resource(use_invocation_sink(None))
-    if ctx.invoked_subcommand == "ask" and ctx.meta.get("ask_skip_startup") is True:
+    if (
+        ctx.invoked_subcommand == "ask" and ctx.meta.get("ask_skip_startup") is True
+    ) or (
+        ctx.invoked_subcommand == "cockpit" and ctx.meta.get("offline_cockpit_exceptions") is True
+    ) or (
+        ctx.invoked_subcommand in {"report", "draft"} and ctx.meta.get("report_conflicting_send") is True
+    ):
         if skip_issue_flag:
             raise typer.BadParameter("--skip-issue cannot be combined with a subcommand.")
         return

@@ -22,7 +22,12 @@ import functools
 
 from src.core.chart_cache_store import load_chart_cache
 from src.core.chart_renderer_registry import build_default_registry
-from src.core.kusto_rendering import TelemetryObservation, build_kusto_sections, chart_pipeline_enabled
+from src.core.kusto_rendering import (
+    TelemetryObservation,
+    build_kusto_sections,
+    build_offline_kpi_chart_sections,
+    chart_pipeline_enabled,
+)
 from src.core.theme_context import build_theme_context
 from src.core.kusto_templates import KustoTemplateContext
 from src.core.models import EditionType, ReportData, ReviewState, ReviewStatus, RiskLevel, Snapshot, WorkItem
@@ -86,6 +91,7 @@ class RenderStageState:
     chart_gate_sections: tuple[Any, ...] = ()
     chart_gate_failures: tuple[Any, ...] = ()
     chart_gates_enabled: bool = True
+    routed_chart_sections: tuple[Any, ...] = ()
 
 
 class RenderStage:
@@ -407,6 +413,8 @@ class RenderStage:
         chart_gate_failures = tuple(
             section for section in kusto_sections if section.is_degraded and section.chart_blocks_publish
         )
+        if ctx.offline:
+            kusto_sections = (*kusto_sections, *build_offline_kpi_chart_sections(ctx.bundle.config.kusto))
         kusto_sections, telemetry_observations, kusto_warnings = _apply_kusto_fallbacks(
             ctx=ctx,
             kusto_sections=kusto_sections,
@@ -707,6 +715,10 @@ class RenderStage:
                 chart_gate_sections=chart_gate_sections,
                 chart_gate_failures=chart_gate_failures,
                 chart_gates_enabled=chart_gates_enabled,
+                routed_chart_sections=(
+                    ((exec_summary_chart,) if exec_summary_chart is not None else ())
+                    + tuple(chart for ws in workstream_data for chart in ws.attached_charts)
+                ),
             ),
         )
 
@@ -963,7 +975,9 @@ def _route_chart_placements(
                 remaining.append(section)
         elif placement.startswith("workstream:"):
             ws_target = placement[len("workstream:") :]
-            if ws_target in workstream_map:
+            if ws_target in workstream_map and (
+                workstream_map[ws_target].blurb.strip() or workstream_map[ws_target].items
+            ):
                 ws = workstream_map[ws_target]
                 workstream_map[ws_target] = _with_attached_chart(ws, section)
             else:

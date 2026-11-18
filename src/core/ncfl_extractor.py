@@ -377,6 +377,9 @@ def _build_proposal(
         source_value=source_value,
         current_value=normalized_current,
         current_value_hash=(_hash_value(normalized_current) if normalized_current is not None else None),
+        prior_state=(
+            "absent_verified" if normalized_current is None else f"sha256:{_hash_value(normalized_current)}"
+        ),
         confidence=confidence,
         batch_eligible=(confidence == "high" and normalized_current is not None),
         extraction_method_rationale=rationale,

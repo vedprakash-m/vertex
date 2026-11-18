@@ -443,6 +443,9 @@ def _build_knowledge_doc_proposal(inputs: SynthesisInputs, draft: KnowledgeDocDr
         source_value=source_value,
         current_value=current_value,
         current_value_hash=current_value_hash,
+        prior_state=(
+            f"sha256:{current_value_hash}" if current_value_hash is not None else "absent_verified"
+        ),
         confidence=confidence,
         batch_eligible=False,  # Zone B proposals are never batch-eligible (§23.4)
         extraction_method_rationale=(

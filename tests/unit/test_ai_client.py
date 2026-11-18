@@ -446,12 +446,12 @@ def test_retry_reservation_id_refusal_stops_dispatch_and_fallback(
         reserve_call = guard.reserve_call
         reserve_calls = 0
 
-        def fail_second_reservation(estimated_cost: float) -> object:
+        def fail_second_reservation(estimated_cost: float, **chain: object) -> object:
             nonlocal reserve_calls
             reserve_calls += 1
             if reserve_calls == 2:
                 raise StateError("synthetic reservation failure")
-            return reserve_call(estimated_cost)
+            return reserve_call(estimated_cost, **chain)  # type: ignore[arg-type]
 
         monkeypatch.setattr(guard, "reserve_call", fail_second_reservation)
     elif refusal == "after-commit":
@@ -489,6 +489,13 @@ def test_retry_reservation_id_refusal_stops_dispatch_and_fallback(
     with pytest.raises(error_type):
         getattr(target, method)("system", "user", max_tokens=100, **arguments)
     parser.assert_not_called()
+    if via_fallback and refusal == "run":
+        # RELO-W1.4: the whole-chain worst case (0.2 x 3 attempts x 2 deployments) exceeds the run ceiling,
+        # so the chain is refused before its first dispatch.
+        assert _FakeAzureOpenAI.create_calls == 0
+        assert _retry_reservation_rows(client) == []
+        assert guard.current_state().reserved_usd == 0.0
+        return
     assert _FakeAzureOpenAI.create_calls == 1
     assert factory.call_count == (1 if via_fallback else 0)
     rows = _retry_reservation_rows(client)
@@ -597,7 +604,8 @@ def test_initial_projection_failure_release_failure_stops_fallback(
     assert not trace_path.exists()
     assert not read_ai_telemetry("synthetic", programs_root=tmp_path / "telemetry")
     assert not client._feature_budget_state.reservations
-    assert guard.current_state().reserved_usd == pytest.approx(0.2)
+    # RELO-W1.4: a failed attempt cleanup also retains the undrawn whole-chain hold (1.2 - 0.2) for reconcile.
+    assert guard.current_state().reserved_usd == pytest.approx(1.2)
     assert guard.state_path.read_bytes() == projection_before
     assert [row[1:] for row in _retry_reservation_rows(client)] == [("reserved", 0.2, None)]
     with sqlite3.connect(guard.ledger_path) as connection:
@@ -636,7 +644,8 @@ def test_initial_projection_failure_release_unexpected_cleanup_stops_fallback(
     assert not trace_path.exists()
     assert not read_ai_telemetry("synthetic", programs_root=tmp_path / "telemetry")
     assert not client._feature_budget_state.reservations
-    assert guard.current_state().reserved_usd == pytest.approx(0.2)
+    # RELO-W1.4: a failed attempt cleanup also retains the undrawn whole-chain hold (1.2 - 0.2) for reconcile.
+    assert guard.current_state().reserved_usd == pytest.approx(1.2)
     assert [row[1:] for row in _retry_reservation_rows(client)] == [("reserved", 0.2, None)]
 
 

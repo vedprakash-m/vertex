@@ -35,7 +35,7 @@ def test_summarize_pull_requests_builds_refs_and_p90_age() -> None:
                 "status": "active",
                 "creationDate": "2026-05-02T08:00:00Z",
                 "isDraft": False,
-                "repository": {"id": "repo-42", "name": "XStoreApp"},
+                "repository": {"id": "repo-42", "name": "ExampleApp"},
             },
             {
                 "pullRequestId": 302,
@@ -43,15 +43,15 @@ def test_summarize_pull_requests_builds_refs_and_p90_age() -> None:
                 "status": "active",
                 "creationDate": "2026-05-08T08:00:00Z",
                 "isDraft": True,
-                "repository": {"id": "repo-42", "name": "XStoreApp"},
+                "repository": {"id": "repo-42", "name": "ExampleApp"},
             },
         ),
         as_of=datetime(2026, 5, 12, 8, 0, tzinfo=timezone.utc),
     )
 
     assert summary is not None
-    assert "repo XStoreApp has 2 open PRs; P90 age 10.0d; oldest #301 10.0d" == summary["text"]
-    assert summary["entity_refs"] == ("PR:XStoreApp/301", "WI:12345", "PR:XStoreApp/302")
+    assert "repo ExampleApp has 2 open PRs; P90 age 10.0d; oldest #301 10.0d" == summary["text"]
+    assert summary["entity_refs"] == ("PR:ExampleApp/301", "WI:12345", "PR:ExampleApp/302")
     assert summary["metadata"]["draft_pr_count"] == 1
     assert summary["metadata"]["p90_age_days"] == 10.0
 

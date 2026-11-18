@@ -58,7 +58,7 @@ Architecture decision records, superseded plans, and completed feature specs: `.
 
 ```bash
 pip install -e ".[dev,ai,ai-local,m365,kusto,render]"
-python -m pytest tests/ -q
+python -m pytest tests/ -q -m "not perf and not integration and not operator"
 ```
 
 ## Feature Development Lifecycle
@@ -66,7 +66,7 @@ python -m pytest tests/ -q
 **Follow in order; do not skip steps:**
 1. **Spec:** write `specs/<feature>.md` covering requirements, data model, alternatives considered, risks, assumptions, and acceptance criteria. Iterate with the user until approved; **no implementation before approval**.
 2. **TDD:** write failing tests first, then implement to pass.
-3. **Validate:** `pytest tests/`, coverage >= 95%, `python scripts/check_spec_drift.py`, `python scripts/verify_spec_citations.py`, and parity checks. Report pre-existing failures and excluded qualification explicitly; do not treat bounded checks as full-suite certification.
+3. **Validate:** `pytest tests/ -n 4 -m "not perf and not integration and not operator"`, ≥95% changed executable-code coverage plus the whole-source line/branch no-regression policy in `governance/test-policy.json`, `python scripts/check_spec_drift.py`, `python scripts/verify_spec_citations.py`, and parity checks. Report pre-existing failures and excluded qualification explicitly; do not treat bounded checks as full-suite certification.
 4. **UAT:** generate real HTML (`vertex report --edition <edition> --dry-run`); visually confirm default and projector profiles.
 5. **Finalize:**
    - Backfill the three canonical specs if the feature added components/rules.

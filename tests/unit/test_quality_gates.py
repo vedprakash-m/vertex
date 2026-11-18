@@ -1369,7 +1369,7 @@ def test_qg13_treats_caller_supplied_covered_items_as_narrative_coverage() -> No
     assert report.qg_results["QG-13"] is True
 
 
-def test_qg11_flags_open_claims_contradicted_by_current_ado_state(tmp_path: Path) -> None:
+def test_qg11_blocks_open_claims_contradicted_by_current_ado_state_without_force_path_below_l2(tmp_path: Path) -> None:
     append_claim_entry(
         ClaimEntry(
             id="claim-1",
@@ -1397,7 +1397,8 @@ def test_qg11_flags_open_claims_contradicted_by_current_ado_state(tmp_path: Path
 
     assert report.qg_results["QG-11"] is False
     qg11 = next(result for result in report.failing_results if result.gate_id == "QG-11")
-    assert qg11.forceable is True
+    assert qg11.forceable is False
+    assert qg11.exit_code == 3
 
 
 def test_qg11_is_not_forceable_at_l2_and_above(monkeypatch, tmp_path: Path) -> None:

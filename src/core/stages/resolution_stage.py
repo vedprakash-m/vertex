@@ -9,12 +9,14 @@ from src.core.archive_store import find_latest_confirmed_entry, load_previous_co
 from src.core.config_loader import REPORTS_ROOT, load_bundle
 from src.core.draft_artifact_store import load_draft_state
 from src.core.edition_resolver import find_edition_yaml, resolve_edition
+from src.core.exceptions import ConfigError
+from src.core.gather_run_manifest import get_verified_committed_run_state
 from src.core.models import ArchiveIndex, EditionType
 from src.core.narrative_store import delete_narratives_dir
 from src.core.overrides_store import seed_overrides_from_prior
 from src.core.overrides_store import delete_seedable_overrides
 from src.core.pipeline import StageContext
-from src.core.program_fact_store import ProgramFactStore, _resolve_fact_db_root
+from src.core.program_fact_store import ProgramFactStore, _fact_visible_under_committed_gather, _resolve_fact_db_root
 from src.core.snapshot_store import ARCHIVE_ROOT
 from src.core.snapshot_store import read_snapshot
 from src.core.trusted_baseline_store import load_trusted_baseline_issue
@@ -25,6 +27,9 @@ _NATIVE_DATETIME = datetime
 
 
 class ResolutionStage:
+    def __init__(self, *, validate_report_fact_capture: bool = False) -> None:
+        self._validate_report_fact_capture = validate_report_fact_capture
+
     def name(self) -> str:
         return "resolution"
 
@@ -79,6 +84,34 @@ class ResolutionStage:
             )
             if _prior is not None:
                 trusted_baseline_issue_number = _prior.issue_number
+        resolved_edition_type = EditionType.from_string(ctx.edition_type_override or bundle.config.edition.type)
+        fact_snapshot_pin = None
+        fact_snapshot = None
+        if (
+            self._validate_report_fact_capture
+            and resolved_v2 is not None
+            and resolved_v2.program.gather.requires_committed_gather_run
+            and resolved_edition_type != EditionType.LOOKBACK
+        ):
+            fact_store = ProgramFactStore(
+                resolved_v2.program.id, db_root=_resolve_fact_db_root(programs_root),
+            )
+            fact_snapshot_pin = fact_store.pin_snapshot(
+                metadata={"edition_name": ctx.edition_name, "issue_number": resolved_issue_number},
+                created_at=started_at,
+            )
+            fact_snapshot = fact_store.load_pinned_snapshot(fact_snapshot_pin.snapshot_id)
+            committed_run_ids, legacy_cutoff_at = get_verified_committed_run_state(
+                resolved_v2.program.id, programs_root=programs_root,
+            )
+            if any(
+                not _fact_visible_under_committed_gather(fact, committed_run_ids, legacy_cutoff_at)
+                for fact in fact_snapshot.facts
+            ):
+                raise ConfigError(
+                    "Report blocked: retained snapshot contains ineligible facts. "
+                    "Inspect fact provenance, gather evidence and the legacy cutoff before retrying."
+                )
         if ctx.reseed:
             delete_narratives_dir(
                 ctx.edition_name,
@@ -101,7 +134,6 @@ class ResolutionStage:
             **artifact_root_kwargs,
             trusted_issue_number=trusted_baseline_issue_number,
         )
-        resolved_edition_type = EditionType.from_string(ctx.edition_type_override or bundle.config.edition.type)
         overrides_seeding = (
             seed_overrides_from_prior(
                 ctx.edition_name,
@@ -114,9 +146,7 @@ class ResolutionStage:
             if trusted_baseline_issue_number is not None
             else None
         )
-        fact_snapshot_pin = None
-        fact_snapshot = None
-        if resolved_v2 is not None and resolved_edition_type != EditionType.LOOKBACK:
+        if resolved_v2 is not None and resolved_edition_type != EditionType.LOOKBACK and fact_snapshot_pin is None:
             fact_store = ProgramFactStore(
                 resolved_v2.program.id, db_root=_resolve_fact_db_root(programs_root),
             )

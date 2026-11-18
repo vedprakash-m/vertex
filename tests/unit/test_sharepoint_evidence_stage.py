@@ -13,13 +13,14 @@ from src.commands.gather_pipeline.sharepoint_evidence_stage import (
     _build_workstream_keyword_map,
     _derive_risk_level,
     _deserialize_signal,
+    _load_ado_risk_levels,
     _parse_eta_from_milestone,
     _route_signal_to_lane,
     run_sharepoint_evidence_stage,
 )
 from src.core.evidence_models import SourceRef, WorkstreamEvidence
 from src.core.evidence_store import load_approved_evidence_by_lane, load_evidence_records
-from src.core.models import RiskLevel
+from src.core.models import Confidence, RiskLevel
 
 
 _AS_OF = datetime(2026, 6, 18, 12, tzinfo=timezone.utc)
@@ -66,6 +67,21 @@ def test_missing_signal_journal_produces_no_evidence(tmp_path: Path) -> None:
 
     assert (result.lanes_updated, result.evidence_written, result.gaps) == (0, 0, ())
     assert not (tmp_path / "acme" / "journal" / "evidence_store.jsonl").exists()
+
+
+def test_legacy_uppercase_risk_in_evidence_is_canonical(tmp_path: Path) -> None:
+    path = tmp_path / "acme" / "journal" / "evidence_store.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"lane_id": "acme.delivery", "risk_level": "UNKNOWN"}) + "\n", encoding="utf-8")
+
+    assert _load_ado_risk_levels(tmp_path, "acme")["acme.delivery"] is RiskLevel.UNKNOWN
+
+
+def test_legacy_uppercase_confidence_in_signal_is_canonical() -> None:
+    record = _signal("legacy", "Historical synthetic signal")
+    record["confidence"] = "NONE"
+
+    assert _deserialize_signal(record).confidence is Confidence.NONE
 
 
 def test_only_approved_sharepoint_sources_are_processed(tmp_path: Path) -> None:

@@ -9,7 +9,9 @@ from src.core.dependency_graph import dependency_source_label, dependency_target
 from src.core.exceptions import ConfigError
 from src.core.edition_resolver import PROGRAMS_ROOT, ResolvedEdition, filter_workstreams, resolve_area_paths, resolve_edition
 from src.core.knowledge_store import KnowledgeStore, load_program_knowledge
+from src.core.kusto_query_loader import load_kpi_queries
 from src.core.program_fact_store import load_program_facts, project_dependencies
+from src.core.yaml_utils import load_yaml_mapping
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +67,7 @@ def _build_report_config_document(resolved: ResolvedEdition, knowledge: Knowledg
         ado["api_timeout_seconds"] = resolved.edition.ado_fetch_timeout_seconds
 
     raw_queries = _queries_from_knowledge(knowledge, program_id=resolved.paths.program_id)
+    raw_queries += _kpi_chart_queries(resolved, golden_ids={query["id"] for query in raw_queries})
     if raw_queries:
         inline_queries = kusto.get("queries")
         if isinstance(inline_queries, list):
@@ -323,6 +326,61 @@ def _queries_from_knowledge(knowledge: KnowledgeStore, *, program_id: str) -> li
                 "reference_url": query.reference_url,
                 "chart_blocks_publish": query.chart_blocks_publish,
                 "chart_cache_ttl_hours": query.chart_cache_ttl_hours,
+            }
+        )
+        if query.result_limits is not None:
+            queries[-1]["result_limits"] = asdict(query.result_limits)
+        if query.expected_cardinality != "zero_ok":
+            queries[-1]["expected_cardinality"] = query.expected_cardinality
+    return queries
+
+
+def _kpi_chart_queries(resolved: ResolvedEdition, *, golden_ids: set[str]) -> list[dict[str, Any]]:
+    kpi_charts = resolved.raw_edition.get("kpi_charts")
+    if kpi_charts is None:
+        return []
+    if not isinstance(kpi_charts, list) or not all(isinstance(item, str) and item.strip() for item in kpi_charts):
+        raise ConfigError(f"Edition '{resolved.edition.id}': kpi_charts must be a list of KPI id strings")
+    seen: set[str] = set()
+    for kpi_id in kpi_charts:
+        if kpi_id in seen or kpi_id in golden_ids:
+            raise ConfigError(f"Duplicate Kusto query id '{kpi_id}' in kpi_charts for edition '{resolved.edition.id}'")
+        seen.add(kpi_id)
+
+    program_id = resolved.paths.program_id
+    kpis_path = resolved.paths.program_dir / "kpis.yaml"
+    loaded = {
+        query.id: query
+        for query in load_kpi_queries(program_id, programs_root=resolved.paths.program_dir.parent)
+        if query.id not in golden_ids
+    }
+    raw_entries = load_yaml_mapping(kpis_path).get("kpis", []) if kpis_path.exists() else []
+    required_by_id = {
+        str(entry.get("id")): entry.get("required", False) for entry in raw_entries if isinstance(entry, dict)
+    }
+    queries: list[dict[str, Any]] = []
+    for kpi_id in kpi_charts:
+        query = loaded.get(kpi_id)
+        if query is None:
+            raise ConfigError(f"Edition '{resolved.edition.id}': kpi_charts id '{kpi_id}' is not defined in {kpis_path}")
+        required = required_by_id.get(kpi_id, False)
+        if not isinstance(required, bool):
+            raise ConfigError(f"KPI '{kpi_id}' in {kpis_path}: required must be a boolean")
+        queries.append(
+            {
+                "id": query.id,
+                "cluster": query.cluster,
+                "database": query.database,
+                "kql": query.kql,
+                "section": query.section,
+                "render_as": "chart_image",
+                "confidence": query.confidence,
+                "kusto_section_validates_slice": query.kusto_section_validates_slice,
+                "caveats": list(query.caveats),
+                "reference_url": query.reference_url,
+                "chart_blocks_publish": query.chart_blocks_publish or required,
+                "chart_cache_ttl_hours": query.chart_cache_ttl_hours,
+                "kpi_chart": True,
             }
         )
         if query.result_limits is not None:

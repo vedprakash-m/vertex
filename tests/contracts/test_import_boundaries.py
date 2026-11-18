@@ -4,6 +4,8 @@ import ast
 from pathlib import Path
 import unittest
 
+from tests.support.source_index import parse_python_source_index
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CORE_ROOT = REPO_ROOT / "src" / "core"
@@ -25,50 +27,36 @@ FORBIDDEN_PROVIDER_SDK_PREFIXES = (
 )
 
 
+def _core_sources():
+    return parse_python_source_index(CORE_ROOT, REPO_ROOT)
+
+
 class ImportBoundaryTests(unittest.TestCase):
     def test_core_has_no_ai_m365_or_commands_imports(self) -> None:
         violations: list[str] = []
-        for file_path in CORE_ROOT.rglob("*.py"):
-            module = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
-            for node in ast.walk(module):
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        if alias.name.startswith(FORBIDDEN_PREFIXES):
-                            violations.append(f"{file_path}: import {alias.name}")
-                elif isinstance(node, ast.ImportFrom) and node.module:
-                    if node.module.startswith(FORBIDDEN_PREFIXES):
-                        violations.append(f"{file_path}: from {node.module} import ...")
+        for source in _core_sources():
+            for imported in source.imports:
+                if imported.startswith(FORBIDDEN_PREFIXES):
+                    violations.append(f"{source.path}: import {imported}")
         self.assertEqual(violations, [])
 
     def test_core_outside_feedback_does_not_import_feedback_modules(self) -> None:
         violations: list[str] = []
-        for file_path in CORE_ROOT.rglob("*.py"):
-            relative = file_path.relative_to(CORE_ROOT)
+        for source in _core_sources():
+            relative = source.path.relative_to(CORE_ROOT)
             if relative.parts and relative.parts[0] == "feedback":
                 continue
-            module = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
-            for node in ast.walk(module):
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        if alias.name.startswith(FORBIDDEN_FEEDBACK_PREFIX):
-                            violations.append(f"{file_path}: import {alias.name}")
-                elif isinstance(node, ast.ImportFrom) and node.module:
-                    if node.module.startswith(FORBIDDEN_FEEDBACK_PREFIX):
-                        violations.append(f"{file_path}: from {node.module} import ...")
+            for imported in source.imports:
+                if imported.startswith(FORBIDDEN_FEEDBACK_PREFIX):
+                    violations.append(f"{source.path}: import {imported}")
         self.assertEqual(violations, [])
 
     def test_core_has_no_direct_provider_sdk_imports(self) -> None:
         violations: list[str] = []
-        for file_path in CORE_ROOT.rglob("*.py"):
-            module = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
-            for node in ast.walk(module):
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        if alias.name.startswith(FORBIDDEN_PROVIDER_SDK_PREFIXES):
-                            violations.append(f"{file_path}: import {alias.name}")
-                elif isinstance(node, ast.ImportFrom) and node.module:
-                    if node.module.startswith(FORBIDDEN_PROVIDER_SDK_PREFIXES):
-                        violations.append(f"{file_path}: from {node.module} import ...")
+        for source in _core_sources():
+            for imported in source.imports:
+                if imported.startswith(FORBIDDEN_PROVIDER_SDK_PREFIXES):
+                    violations.append(f"{source.path}: import {imported}")
         self.assertEqual(violations, [])
 
 
@@ -77,7 +65,7 @@ class ImportBoundaryTests(unittest.TestCase):
         chart_cache_path = CORE_ROOT / "chart_cache_store.py"
         if not chart_cache_path.exists():
             self.skipTest("chart_cache_store.py not found")
-        module = ast.parse(chart_cache_path.read_text(encoding="utf-8"), filename=str(chart_cache_path))
+        module = next(source.tree for source in _core_sources() if source.path == chart_cache_path)
         violations: list[str] = []
         for node in ast.walk(module):
             if isinstance(node, ast.Import):
@@ -95,16 +83,12 @@ class ImportBoundaryTests(unittest.TestCase):
         if not charts_root.exists():
             self.skipTest("src/core/charts/ directory not found")
         violations: list[str] = []
-        for file_path in charts_root.rglob("*.py"):
-            module = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
-            for node in ast.walk(module):
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        if alias.name.startswith(("src.ai", "src.m365")):
-                            violations.append(f"{file_path.name}: import {alias.name}")
-                elif isinstance(node, ast.ImportFrom) and node.module:
-                    if node.module.startswith(("src.ai", "src.m365")):
-                        violations.append(f"{file_path.name}: from {node.module} import ...")
+        for source in _core_sources():
+            if not source.path.is_relative_to(charts_root):
+                continue
+            for imported in source.imports:
+                if imported.startswith(("src.ai", "src.m365")):
+                    violations.append(f"{source.path.name}: import {imported}")
         self.assertEqual(violations, [], "src/core/charts/ files must stay in Zone A (no AI/M365 imports)")
 
     def test_chart_renderers_no_provider_sdks(self) -> None:
@@ -113,16 +97,12 @@ class ImportBoundaryTests(unittest.TestCase):
         if not charts_root.exists():
             self.skipTest("src/core/charts/ directory not found")
         violations: list[str] = []
-        for file_path in charts_root.rglob("*.py"):
-            module = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
-            for node in ast.walk(module):
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        if alias.name.startswith(FORBIDDEN_PROVIDER_SDK_PREFIXES):
-                            violations.append(f"{file_path.name}: import {alias.name}")
-                elif isinstance(node, ast.ImportFrom) and node.module:
-                    if node.module.startswith(FORBIDDEN_PROVIDER_SDK_PREFIXES):
-                        violations.append(f"{file_path.name}: from {node.module} import ...")
+        for source in _core_sources():
+            if not source.path.is_relative_to(charts_root):
+                continue
+            for imported in source.imports:
+                if imported.startswith(FORBIDDEN_PROVIDER_SDK_PREFIXES):
+                    violations.append(f"{source.path.name}: import {imported}")
         self.assertEqual(violations, [], "src/core/charts/ must not import provider SDKs")
 
 

@@ -287,6 +287,54 @@ def test_apply_manifest_updates_entries_and_logs_audit_signals(tmp_path: Path) -
     assert len(read_signals("demo", programs_root=programs_root)) == 3
 
 
+@pytest.mark.parametrize(
+    ("entry", "row", "operation", "method"),
+    [
+        (
+            ADOUpdateEntry(work_item_id=1001, action="add_comment", field_or_tag="comment", current_value=None,
+                           proposed_value="Vertex demo_weekly issue #007\nRisk: high.", reason="r", revision_id=7),
+            {"rev": 7, "fields": {"System.Id": 1001, "System.Rev": 7}},
+            "add_comment.v1",
+            "POST",
+        ),
+        (
+            ADOUpdateEntry(work_item_id=1001, action="add_tag", field_or_tag="System.Tags", current_value="alpha",
+                           proposed_value="Needs-PM-Review", reason="r", revision_id=7),
+            {"rev": 7, "fields": {"System.Id": 1001, "System.Rev": 7, "System.Tags": "alpha"}},
+            "add_tag.v1",
+            "PATCH",
+        ),
+        (
+            ADOUpdateEntry(work_item_id=1001, action="set_field", field_or_tag="Custom.RiskLevel", current_value="high",
+                           proposed_value="medium", reason="r", revision_id=7),
+            {"rev": 7, "fields": {"System.Id": 1001, "System.Rev": 7, "Custom.RiskLevel": "high"}},
+            "set_field.v1",
+            "PATCH",
+        ),
+    ],
+)
+def test_non_create_mutation_keeps_existing_direct_path_pending_owner_ruling(
+    tmp_path: Path, entry: ADOUpdateEntry, row: dict[str, Any], operation: str, method: str,
+) -> None:
+    from src.core.actuation_outbox import outbox_db_path
+
+    programs_root = tmp_path / "programs"
+    applied_at = datetime(2026, 5, 13, 18, 0, tzinfo=timezone.utc)
+    proposal = replace(_comment_proposal(f"prop-{operation}", applied_at), entries=(entry,))
+    manifest_path = write_proposal_manifest(proposal, programs_root=programs_root)
+    client = _FakeADOClient(rows_by_id={1001: row})
+
+    artifacts = ADOWriter(client, programs_root=programs_root).apply_manifest(manifest_path, applied_at=applied_at)
+    rerun = ADOWriter(client, programs_root=programs_root).apply_manifest(manifest_path, applied_at=applied_at)
+
+    assert artifacts.applied_count == rerun.applied_count == 1
+    assert len(client.session.calls) == 1
+    db = outbox_db_path("demo", programs_root=programs_root)
+    assert not db.exists()
+    assert client.session.calls[0]["method"] == method
+    assert "workItems/1001" in client.session.calls[0]["url"]
+
+
 def test_apply_manifest_writes_sqlite_backed_audit_signals(tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     program_dir = programs_root / "demo"
@@ -716,6 +764,8 @@ class _FakeADOClient:
         self.comment_lookup_error = comment_lookup_error
         self.comment_lookup_count = 0
         self.timeout = 30
+        self.organization = "your-org"
+        self.project = "One"
         self._rest_base_url = "https://dev.azure.com/your-org/One/_apis/wit/"
         self._session = _FakeSession(self, fail_patch_for=fail_patch_for or set())
         # ADF-W1.1: ADOWriter._request_json now routes mutations through the

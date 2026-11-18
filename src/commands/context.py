@@ -291,7 +291,7 @@ def apply_command(
     typer.echo(f"{prefix}{result.action}: {result.note}")
     if result.action == "needs_repair":
         raise typer.Exit(code=3)
-    if result.action == "refused_unbound_approval":
+    if result.action in {"refused_unbound_approval", "needs_rereview", "skipped_stale"}:
         raise typer.Exit(code=1)
 
 
@@ -328,7 +328,7 @@ def apply_batch_command(
     typer.echo(f"{prefix}Done: {len(results)} proposal(s), {repairs} need repair.")
     if repairs:
         raise typer.Exit(code=3)
-    if any(result.action == "refused_unbound_approval" for result in results):
+    if any(result.action in {"refused_unbound_approval", "needs_rereview", "skipped_stale"} for result in results):
         raise typer.Exit(code=1)
 
 

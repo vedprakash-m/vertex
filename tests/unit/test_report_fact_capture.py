@@ -1,9 +1,10 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from dataclasses import replace
 import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 import src.commands.report as report_module
 from src.commands.report import generate_report_draft
@@ -12,7 +13,11 @@ from src.core.edition_resolver import get_program_output_dir
 from src.core.exceptions import ConfigError
 from src.core.forecast_engine import ETAForecast
 from src.core.models import Confidence, RiskLevel
-from src.core.gather_run_manifest import QueryResultEntry, get_committed_run_dir
+from src.core.gather_run_manifest import (
+    GatherRunManifest, GatherRunStatus, QueryResultEntry, RequiredScopeStatus,
+    create_legacy_cutoff_manifest, create_staging_manifest, fail_staging_run,
+    get_committed_run_dir,
+)
 from src.core.manifest_writer import hash_jsonable
 from src.core.program_fact_store import ProgramFactInput, ProgramFactStore
 from tests.support.report_test_setup import disable_kusto_in_report_copy, stage_v2_report_workspace
@@ -20,6 +25,99 @@ from tests.unit.test_commands_confirm import _isolate_fact_store_db as _isolate_
 from tests.unit.test_commands_report import _sample_items
 from tests.support.synthetic_report_source import synthetic_report_root as repo_root
 from tests.unit.test_report_gather_run_lineage import _commit_gather_run
+
+
+@pytest.mark.parametrize(("mode", "fact_source", "blocked"), [
+    ("enforce", "failed", True),
+    ("enforce", "running", True),
+    ("enforce", "post_cutoff", True),
+    ("enforce", "committed", False),
+    ("enforce", "at_cutoff", False),
+    ("enforce", "unstamped", False),
+    ("off", "failed", False),
+    ("shadow", "failed", False),
+])
+def test_report_rejects_ineligible_retained_facts_before_reseeding_or_output(
+    repo_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    mode: str, fact_source: str, blocked: bool,
+) -> None:
+    from src.core.fact_sor_state import save_fact_sor_state
+    from src.core.narrative_store import get_narratives_dir
+    from src.core.overrides_store import get_overrides_path
+    from src.core.risk_register_engine import _risk_fact_payload
+    from tests.unit.test_program_verdict import _risk
+
+    reports = stage_v2_report_workspace(repo_root, tmp_path)
+    root = reports.parent / "programs"
+    disable_kusto_in_report_copy(reports)
+    monkeypatch.setenv("VERTEX_DB_PATH", str(tmp_path / "fact-db"))
+    config_path = root / "acme" / "program.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["gather"] = {"run_manifest_mode": mode}
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    as_of = datetime(2026, 5, 5, 18, tzinfo=timezone.utc)
+    selected = _commit_gather_run(root)
+    failed = GatherRunManifest(
+        "gather-failed", GatherRunStatus.RUNNING, "acme", "interactive",
+        "synthetic", 1, as_of, as_of, RequiredScopeStatus.FULL,
+    )
+    create_staging_manifest(failed, programs_root=root)
+    fail_staging_run(failed, finished_at=as_of, programs_root=root)
+    running = replace(failed, run_id="gather-running")
+    create_staging_manifest(running, programs_root=root)
+    if fact_source in {"post_cutoff", "at_cutoff"}:
+        create_legacy_cutoff_manifest("acme", legacy_cutoff_at=as_of, programs_root=root)
+    recorded_at = as_of + timedelta(seconds=1) if fact_source == "post_cutoff" else as_of
+    run_id = {
+        "committed": selected.run_id, "failed": failed.run_id, "running": running.run_id,
+    }.get(fact_source)
+    store = ProgramFactStore("acme", db_root=tmp_path / "fact-db")
+    risk = _risk(program_id="acme", kind="strategic")
+    revision = store.append_fact(ProgramFactInput(
+        fact_type="risk.entry", scope="program", entity_refs=("RISK:risk-1",),
+        payload=_risk_fact_payload(risk), natural_key="risk:risk-1", gather_run_id=run_id,
+    ), recorded_at=recorded_at).revision
+    save_fact_sor_state("acme", mode="primary", recorded_at=as_of, programs_root=root)
+    output = get_program_output_dir("acme_weekly", programs_root=root) / "issue_001" / "issue_001.html"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text("previous reviewed artifact", encoding="utf-8")
+    narrative = get_narratives_dir("acme_weekly", 1, reports, programs_root=root) / "exec_summary.md"
+    narrative.parent.mkdir(parents=True, exist_ok=True)
+    narrative.write_text("previous narrative", encoding="utf-8")
+    overrides = get_overrides_path("acme_weekly", reports, issue_number=1, programs_root=root)
+    if blocked:
+        overrides.parent.mkdir(parents=True, exist_ok=True)
+        overrides.write_text("issue_number: 1\nscorecards: {}\n", encoding="utf-8")
+
+    def run_report():
+        return generate_report_draft(
+            edition_name="acme_weekly", reports_root=reports, programs_root=root,
+            archive_root=tmp_path / "archive", as_of=as_of, reseed=blocked,
+            work_item_loader=lambda bundle, timestamp: (_sample_items(timestamp), 0),
+            open_browser=False,
+        )
+
+    if blocked:
+        def unexpected_fetch(*args, **kwargs):
+            raise AssertionError("Ineligible capture must stop before acquisition.")
+
+        monkeypatch.setattr(report_module.FetchStage, "execute", unexpected_fetch)
+        with pytest.raises(ConfigError, match="(?i)ineligible.*fact") as exc:
+            run_report()
+        assert "gather-failed" not in str(exc.value)
+        assert "risk:risk-1" not in str(exc.value)
+        assert output.read_text(encoding="utf-8") == "previous reviewed artifact"
+        assert narrative.read_text(encoding="utf-8") == "previous narrative"
+        assert overrides.read_text(encoding="utf-8") == "issue_number: 1\nscorecards: {}\n"
+    else:
+        result = run_report()
+        observation = result.manifest.metadata["program_verdict_observation"]
+        assert [row.id for row in observation.inputs.risks] == [risk.id]
+    with store._connect() as connection:
+        pins = connection.execute("SELECT snapshot_id FROM program_fact_snapshot_pins").fetchall()
+    assert len(pins) == 1
+    pinned = store.load_pinned_snapshot(pins[0][0])
+    assert {fact.revision_id for fact in pinned.facts} == {revision.revision_id}
 
 
 @pytest.mark.parametrize("change", ["addition", "replacement", "content"])

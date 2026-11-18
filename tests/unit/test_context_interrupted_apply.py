@@ -42,6 +42,7 @@ def _workspace(tmp_path: Path, *, bound_current_hash: bool) -> tuple[Path, Path,
         target_store="assumptions", target_key="sample-assumption", target_field="text",
         source_value="new text", current_value="old text",
         current_value_hash=hashlib.sha256(b"old text").hexdigest() if bound_current_hash else None,
+        prior_state=None if bound_current_hash else "sha256:" + hashlib.sha256(b"old text").hexdigest(),
         confidence="high", batch_eligible=True, extraction_method_rationale="direct extraction",
         conflict_key="assumptions:sample-assumption:text", status="pending",
     )

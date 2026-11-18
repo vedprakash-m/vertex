@@ -7488,6 +7488,232 @@ def test_report_cli_rejects_verbose_without_stdout(monkeypatch, repo_root: Path,
     assert "--verbose requires --stdout." in result.output
 
 
+@pytest.mark.parametrize("command", ["report", "draft"])
+def test_report_cli_rejects_dry_run_draft_send_without_sending(
+    monkeypatch, repo_root: Path, tmp_path: Path, isolated_cli_startup, command: str,
+) -> None:
+    from unittest.mock import Mock
+
+    reports_root, archive_root = _seed_v2_report_layout(repo_root, tmp_path)
+    sent_messages = []
+    preflight = Mock(wraps=report_module._preflight_report_workspace)
+    monkeypatch.setattr("src.commands.report.REPORTS_ROOT", reports_root)
+    monkeypatch.setattr("src.commands.report.PROGRAMS_ROOT", reports_root.parent / "programs")
+    monkeypatch.setattr("src.commands.report.ARCHIVE_ROOT", archive_root)
+    monkeypatch.setattr("src.commands.report._preflight_report_workspace", preflight)
+    monkeypatch.setattr(
+        "src.commands.report._load_live_work_items",
+        lambda bundle, timestamp: (_sample_items(timestamp), 0),
+    )
+    monkeypatch.setattr("src.commands.report.webbrowser.open", lambda url: True)
+    monkeypatch.setattr(
+        "src.commands.report._build_draft_email_sender",
+        lambda: (lambda message: sent_messages.append(message)),
+    )
+
+    result = runner.invoke(app, [command, "--edition", EDITION_NAME, "--dry-run", "--send-draft"])
+
+    assert result.exit_code == 2, result.output
+    assert "--send-draft cannot be combined with --dry-run." in result.output
+    assert sent_messages == []
+    preflight.assert_not_called()
+
+
+@pytest.fixture
+def report_startup_calls(monkeypatch) -> list[str]:
+    import cli
+
+    calls: list[str] = []
+    for name in (
+        "_set_invocation_ai_mode",
+        "_preflight_report_workspace",
+        "_maybe_register_tier_decision_sink",
+        "_maybe_run_scheduled_db_maintenance",
+        "_maybe_run_session_catchup",
+    ):
+        monkeypatch.setattr(
+            cli, name, lambda *_args, _name=name, **_kwargs: calls.append(_name),
+        )
+    return calls
+
+
+@pytest.mark.parametrize("command", ["report", "draft"])
+@pytest.mark.parametrize(
+    ("flags", "message"),
+    [
+        (["--dry-run", "--send-draft"], "--send-draft cannot be combined with --dry-run."),
+        (["--send-draft", "--dry-run"], "--send-draft cannot be combined with --dry-run."),
+        (["--dry-run", "--send-draft", "--stdout"], "--send-draft cannot be combined with --stdout."),
+    ],
+)
+def test_report_conflicting_flags_reject_before_root_startup(
+    monkeypatch, report_startup_calls: list[str], command: str, flags: list[str], message: str,
+) -> None:
+    from unittest.mock import Mock
+
+    handler_preflight = Mock()
+    sender = Mock()
+    monkeypatch.setattr(report_module, "_preflight_report_workspace", handler_preflight)
+    monkeypatch.setattr(report_module, "_build_draft_email_sender", sender)
+
+    result = runner.invoke(app, [command, "--edition", "fixture_weekly", *flags])
+
+    assert result.exit_code == 2, result.output
+    assert message in result.output
+    assert report_startup_calls == []
+    handler_preflight.assert_not_called()
+    sender.assert_not_called()
+
+
+@pytest.mark.parametrize("command", ["report", "draft"])
+def test_report_conflicting_flags_reject_before_invalid_edition_resolution(
+    report_startup_calls: list[str], command: str,
+) -> None:
+    result = runner.invoke(
+        app, [command, "--edition", "../invalid", "--dry-run", "--send-draft"],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "--send-draft cannot be combined with --dry-run." in result.output
+    assert report_startup_calls == []
+
+
+@pytest.mark.parametrize("command", ["report", "draft"])
+def test_report_conflicting_flags_preserve_click_type_error(
+    report_startup_calls: list[str], command: str,
+) -> None:
+    result = runner.invoke(
+        app, [command, "--edition", "fixture", "--dry-run", "--send-draft", "--as-of", "invalid"],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "Invalid value for '--as-of'" in result.output
+    assert report_startup_calls == []
+
+
+@pytest.mark.parametrize("command", ["report", "draft"])
+def test_report_conflicting_flags_preserve_skip_issue_error(
+    report_startup_calls: list[str], command: str,
+) -> None:
+    result = runner.invoke(
+        app, ["--skip-issue", command, "--edition", "fixture", "--dry-run", "--send-draft"],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "--skip-issue cannot be combined with a subcommand." in result.output
+    assert report_startup_calls == []
+
+
+@pytest.mark.parametrize("command", ["report", "draft"])
+@pytest.mark.parametrize(
+    ("args", "exit_code"),
+    [
+        (["--edition", "fixture_weekly", "--dry-run"], 71),
+        (["--edition", "fixture_weekly", "--send-draft"], 71),
+        (["--edition=--dry-run", "--send-draft"], 71),
+        (["--edition", "fixture_weekly", "--format", "--send-draft", "--dry-run"], 71),
+        (["--edition", "fixture_weekly", "--", "--dry-run", "--send-draft"], 2),
+        (["--help", "--dry-run", "--send-draft"], 0),
+    ],
+)
+def test_report_nonconflicting_flags_preserve_root_startup(
+    monkeypatch, report_startup_calls: list[str], command: str, args: list[str], exit_code: int,
+) -> None:
+    def stop_after_startup():
+        raise typer.Exit(71)
+
+    monkeypatch.setattr(report_module, "_preflight_report_workspace", stop_after_startup)
+    result = runner.invoke(app, [command, *args])
+
+    assert result.exit_code == exit_code, result.output
+    assert report_startup_calls == [
+        "_set_invocation_ai_mode",
+        "_preflight_report_workspace",
+        "_maybe_register_tier_decision_sink",
+        "_maybe_run_scheduled_db_maintenance",
+        "_maybe_run_session_catchup",
+    ]
+
+
+@pytest.mark.parametrize("command", ["report", "draft"])
+def test_report_startup_probe_does_not_repeat_custom_option_processing(
+    report_startup_calls: list[str], command: str,
+) -> None:
+    from unittest.mock import Mock
+
+    import click
+    from click.testing import CliRunner as ClickRunner
+    from typer.main import get_command
+
+    parser_calls: list[str] = []
+
+    class CustomOption(click.Option):
+        def add_to_parser(self, parser, ctx):
+            parser_calls.append("added")
+            return super().add_to_parser(parser, ctx)
+
+    handler = Mock()
+    root = get_command(app)
+    root.commands[command] = click.Command(
+        command,
+        callback=handler,
+        params=[
+            click.Option(["--edition"]),
+            click.Option(["--dry-run"], is_flag=True),
+            CustomOption(
+                ["--send-draft"], is_flag=True,
+                callback=lambda _ctx, _param, _value: False,
+            ),
+        ],
+    )
+    result = ClickRunner().invoke(root, [command, "--edition", "fixture", "--dry-run", "--send-draft"])
+
+    assert result.exit_code == 0, result.output
+    handler.assert_called_once_with(edition="fixture", dry_run=True, send_draft=False)
+    assert parser_calls == ["added"]
+    assert report_startup_calls == [
+        "_set_invocation_ai_mode",
+        "_preflight_report_workspace",
+        "_maybe_register_tier_decision_sink",
+        "_maybe_run_scheduled_db_maintenance",
+        "_maybe_run_session_catchup",
+    ]
+
+
+@pytest.mark.parametrize("command", ["report", "draft"])
+@pytest.mark.parametrize("conflicting", [True, False])
+def test_report_conflicting_flags_skip_due_synthetic_compaction(
+    monkeypatch, tmp_path: Path, command: str, conflicting: bool,
+) -> None:
+    import cli
+    from src.commands import db as db_module
+    from src.core.reality_store import RealityStore
+
+    db_root = tmp_path / "synthetic-db"
+    store = RealityStore("fixture", db_root=db_root)
+    store.initialize()
+    sentinel = store.db_path.parent / ".compact_last_run"
+    monkeypatch.setenv("VERTEX_DB_PATH", str(db_root))
+    monkeypatch.setattr(cli, "_program_for_startup", lambda ctx: "fixture")
+    monkeypatch.setattr(cli, "_preflight_report_workspace", lambda: None)
+    monkeypatch.setattr(cli, "_set_invocation_ai_mode", lambda argv: None)
+    monkeypatch.setattr(cli, "_maybe_register_tier_decision_sink", lambda ctx: None)
+    monkeypatch.setattr(cli, "_maybe_run_session_catchup", lambda ctx, **kwargs: None)
+    monkeypatch.setattr(db_module, "load_metric_definition_map", lambda **kwargs: {})
+
+    def stop_after_startup():
+        raise typer.Exit(71)
+
+    monkeypatch.setattr(report_module, "_preflight_report_workspace", stop_after_startup)
+    args = [command, "--edition", "fixture_weekly", "--dry-run"]
+    if conflicting:
+        args.append("--send-draft")
+    result = runner.invoke(app, args)
+
+    assert result.exit_code == (2 if conflicting else 71), result.output
+    assert sentinel.exists() == (not conflicting)
+
+
 def test_report_cli_send_draft_sends_to_author_mailbox(monkeypatch, repo_root: Path, tmp_path: Path) -> None:
     reports_root, archive_root = _seed_v2_report_layout(repo_root, tmp_path)
     author_email = load_report_bundle(EDITION_NAME, reports_root=reports_root, programs_root=reports_root.parent / "programs").config.author.email
@@ -7510,7 +7736,7 @@ def test_report_cli_send_draft_sends_to_author_mailbox(monkeypatch, repo_root: P
         lambda: (lambda message: sent_messages.append(message)),
     )
 
-    result = runner.invoke(app, ["report", "--edition", EDITION_NAME, "--dry-run", "--send-draft"])
+    result = runner.invoke(app, ["report", "--edition", EDITION_NAME, "--send-draft"])
 
     assert result.exit_code == 3
     assert "Draft email sent to " in result.output
@@ -7557,7 +7783,6 @@ def test_report_cli_send_draft_surfaces_transport_error(monkeypatch, repo_root: 
             "report",
             "--edition",
             EDITION_NAME,
-            "--dry-run",
             "--send-draft",
         ],
     )

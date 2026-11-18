@@ -91,6 +91,7 @@ reality:
     assert program.expected_gather_cadence_hours == 24.0
 
 
+@pytest.mark.operator
 def test_load_metric_definition_map_includes_live_nova_fleet_health_definitions() -> None:
     metrics_root = Path(__file__).resolve().parents[2] / "knowledge" / "metrics"
     if not (metrics_root / "acme.yaml").exists():

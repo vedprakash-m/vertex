@@ -103,7 +103,7 @@ LINE_BUDGETS = {
     # +2 (2026-11-13, re-vertex C.167): program_context_sha256 threaded into DraftState.
     "src/commands/report.py": 1585,
     "src/core/reality_store.py": 2339,  # +6 (2026-07-13): ADF root-cause fix for the PS-14 split-brain -- _resolve_reality_db_root now defaults to programs_root.parent/"vertex-db" instead of ~/.vertex
-    "src/core/channel_registry_store.py": 2056,  # +79: discovery registration persistence helpers already present on branch (2026-06-02); +80 (2026-11-13, re-vertex saved-query containment): PARTIAL-run binding retention and null-workstream binding row reuse with explicit multi-live-row failure
+    "src/core/channel_registry_store.py": 2075,  # +79: discovery registration persistence helpers already present on branch (2026-06-02); +80 (2026-11-13, re-vertex saved-query containment): PARTIAL-run binding retention and null-workstream binding row reuse with explicit multi-live-row failure; +19 (RELO-W2.3/W2.9): hydration checkpoints must advance inside mark_verified's transaction, so the store owns the advance/read wiring (logic lives in ado_hydration_checkpoints.py)
 }
 
 # W1.8 retired the critical broad-exception debt enough that we can now prevent

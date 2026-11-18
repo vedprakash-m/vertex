@@ -39,8 +39,10 @@ from src.core.ledger.durable_outbox_store import (
     LeaseNoLongerCurrent,
     OutboxEntry,
     OutboxError,
+    bind_effect,
     classify_expired_dispatched,
     enqueue,
+    load_effect_outbox_id,
     lease_next,
     load_entry,
     load_success_receipt,
@@ -48,6 +50,8 @@ from src.core.ledger.durable_outbox_store import (
     mark_completed,
     mark_dispatched_with_workspace_lease,
     mark_failed_terminal,
+    mark_reconciled_absent,
+    mark_reconciled_confirmed,
     mark_succeeded,
     mark_uncertain_remote_state,
 )
@@ -60,14 +64,54 @@ def outbox_db_path(program_id: str, *, programs_root: Path = PROGRAMS_ROOT) -> P
     return programs_root / program_id / "runtime" / "actuation" / "outbox.db"
 
 
-def create_task_idempotency_key(*, program_id: str, org: str, project: str, operation_intent_id: str) -> str:
+def actuation_idempotency_key(
+    *, program_id: str, org: str, project: str, operation: str, target_identity: str, operation_intent_id: str,
+) -> str:
     """Sec 8.11.3 formula: ``program_id : tenant/provider : operation_type+version
-    : target_identity : operation_intent_id``. ``create_task`` has no
+    : target_identity : operation_intent_id``."""
+    return f"{program_id}:{org}/{project}:{operation}:{target_identity}:{operation_intent_id}"
+
+
+def create_task_idempotency_key(*, program_id: str, org: str, project: str, operation_intent_id: str) -> str:
+    """``create_task`` has no
     pre-existing target identity (the work item does not exist yet); the
     ``operation_intent_id`` is what makes re-approval idempotent (Appendix
     B.8), so ``target_identity`` is the fixed literal ``"new"``. The
     approval-event id is deliberately NOT part of the key (Sec 8.11.3)."""
-    return f"{program_id}:{org}/{project}:create_task.v1:new:{operation_intent_id}"
+    return actuation_idempotency_key(
+        program_id=program_id, org=org, project=project,
+        operation="create_task.v1", target_identity="new", operation_intent_id=operation_intent_id,
+    )
+
+
+# Only these ADO writer capabilities may leave the outbox; every other operation stays draft/manual.
+DISPATCHABLE_OPERATIONS = frozenset({"create_task.v1"})
+
+_EFFECT_STATES = {
+    "pending": "intent", "leased": "intent", "failed_retryable": "intent",
+    "dispatched": "dispatched",
+    "succeeded": "confirmed", "audited": "confirmed", "completed": "confirmed",
+    "uncertain_remote_state": "uncertain",
+}
+
+
+def effect_id_v1(*, operation: str, target: str, payload: dict[str, object], approval_id: str, audience: str) -> str:
+    """sha256 over canonical JSON (sorted keys, compact separators, UTF-8) of the effect identity."""
+    canonical = json.dumps(
+        {"operation": operation, "target": target, "payload": payload, "approval_id": approval_id, "audience": audience},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def require_dispatchable_operation(operation: str) -> None:
+    if operation not in DISPATCHABLE_OPERATIONS:
+        raise OutboxError(f"Operation {operation!r} is draft/manual only; it cannot be dispatched")
+
+
+def effect_state(entry: OutboxEntry) -> str:
+    """Map an outbox status to its effect state: intent, dispatched, confirmed or uncertain."""
+    return _EFFECT_STATES.get(entry.status, entry.status)
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +149,9 @@ def enqueue_create_task_intent(
     proposal_id: str,
     payload_json: str,
     programs_root: Path = PROGRAMS_ROOT,
+    effect_id: str | None = None,
+    operation: str = "create_task.v1",
+    target_identity: str = "new",
 ) -> OutboxEntry:
     """Idempotent: fault-injection item 1 (crash after enqueue, before
     lease). A caller that re-derives the same ``idempotency_key`` (the
@@ -113,8 +160,18 @@ def enqueue_create_task_intent(
     already-enqueued row instead of a duplicate. Concurrent enqueue of the
     *same* key from two processes is prevented upstream by the proposal
     manifest's own file lock, not by this function.
+
+    When ``effect_id`` is given and already bound to an outbox row, that row
+    is returned and no second effect is enqueued.
     """
     db_path = outbox_db_path(program_id, programs_root=programs_root)
+    if effect_id is not None:
+        bound_id = load_effect_outbox_id(db_path, effect_id)
+        if bound_id is not None:
+            bound = load_entry(db_path, bound_id)
+            if bound is None:
+                raise OutboxError("Effect id is bound to a missing outbox row")
+            return bound
     existing = load_entry(db_path, idempotency_key)
     if existing is not None:
         if (
@@ -123,6 +180,7 @@ def enqueue_create_task_intent(
             or existing.payload_json != payload_json
         ):
             raise OutboxError("Existing outbox key has different domain, correlation or payload")
+        _bind_effect_or_raise(db_path, effect_id, existing.outbox_id)
         return existing
     entry = enqueue(
         db_path,
@@ -131,12 +189,15 @@ def enqueue_create_task_intent(
         correlation_id=idempotency_key,
         payload_json=payload_json,
     )
+    _bind_effect_or_raise(db_path, effect_id, entry.outbox_id)
     _emit_intent_created_best_effort(
         program_id=program_id,
         operation_intent_id=operation_intent_id,
         idempotency_key=idempotency_key,
         proposal_id=proposal_id,
         programs_root=programs_root,
+        operation=operation,
+        target_identity=target_identity,
     )
     return entry
 
@@ -332,7 +393,7 @@ def _drive_one(
         "schema_version": "1",
         "program_id": program_id,
         "outbox_id": leased.outbox_id,
-        "operation": "create_task.v1",
+        "operation": payload_fields.get("operation", "create_task.v1"),
         "operation_intent_id": payload_fields.get("operation_intent_id"),
         "proposal_id": payload_fields.get("proposal_id"),
         "org": payload_fields.get("org"),
@@ -368,6 +429,74 @@ def _drive_one(
     )
 
 
+def _bind_effect_or_raise(db_path: Path, effect_id: str | None, outbox_id: str) -> None:
+    if effect_id is not None and bind_effect(db_path, effect_id, outbox_id) != outbox_id:
+        raise OutboxError("Effect id is already bound to a different outbox row")
+
+
+def reconcile_uncertain_create_task(
+    *,
+    program_id: str,
+    idempotency_key: str,
+    marker_lookup: Callable[[OutboxEntry], int | None],
+    reconciled_by: str,
+    programs_root: Path = PROGRAMS_ROOT,
+) -> ActuationDispatchOutcome:
+    """Resolve an ``uncertain_remote_state`` create-task only by marker lookup
+    (the ``vertex-intent-<operation_intent_id>`` tag); this never dispatches.
+
+    ``marker_lookup`` returns the remote work-item id when the marker is
+    found, ``None`` when the marker is verifiably absent, and raises when the
+    lookup cannot prove either. Found -> completed with a reconciled receipt;
+    absent -> pending, so the same key and effect may be dispatched again;
+    lookup failure or an invalid id -> the row stays uncertain.
+    """
+    db_path = outbox_db_path(program_id, programs_root=programs_root)
+    entry = load_entry(db_path, idempotency_key)
+    if entry is None or entry.status != "uncertain_remote_state":
+        raise OutboxError("Marker reconciliation applies only to an uncertain_remote_state row")
+    try:
+        found = marker_lookup(entry)
+    except Exception:
+        return ActuationDispatchOutcome(entry=entry, remote_id=None, status="uncertain_remote_state")
+    if found is None:
+        absent = mark_reconciled_absent(
+            db_path, entry.outbox_id, reconciled_by=reconciled_by, reason="marker verified absent",
+        )
+        return ActuationDispatchOutcome(entry=absent, remote_id=None, status="pending")
+    if type(found) is not int or found <= 0:
+        return ActuationDispatchOutcome(entry=entry, remote_id=None, status="uncertain_remote_state")
+    payload_fields = json.loads(entry.payload_json)
+    receipt_json = json.dumps({
+        "schema_version": "1",
+        "program_id": program_id,
+        "outbox_id": entry.outbox_id,
+        "operation": "create_task.v1",
+        "operation_intent_id": payload_fields.get("operation_intent_id"),
+        "proposal_id": payload_fields.get("proposal_id"),
+        "org": payload_fields.get("org"),
+        "project": payload_fields.get("project"),
+        "payload_sha256": hashlib.sha256(entry.payload_json.encode("utf-8")).hexdigest(),
+        "remote_id": found,
+        "remote_rev": None,
+        "remote_response_hash": None,
+        "acknowledged_at": datetime.now(timezone.utc).isoformat(),
+        "attempt_count": entry.attempt_count,
+        "reconciled_by_marker": True,
+        "reconciled_by": reconciled_by,
+    }, sort_keys=True, separators=(",", ":"))
+    confirmed = mark_reconciled_confirmed(
+        db_path, entry.outbox_id, reconciled_by=reconciled_by, receipt_json=receipt_json,
+    )
+    _emit_receipt_recorded_best_effort(
+        program_id=program_id, operation_intent_id=str(payload_fields.get("operation_intent_id") or ""),
+        receipt_state="succeeded", remote_id=found, org=str(payload_fields.get("org") or ""),
+        project=str(payload_fields.get("project") or ""),
+        provider_summary={"remote_id": str(found), "reconciled_by_marker": "true"}, programs_root=programs_root,
+    )
+    return ActuationDispatchOutcome(entry=confirmed, remote_id=found, status="completed")
+
+
 def _emit_intent_created_best_effort(
     *,
     program_id: str,
@@ -375,6 +504,8 @@ def _emit_intent_created_best_effort(
     idempotency_key: str,
     proposal_id: str,
     programs_root: Path,
+    operation: str = "create_task.v1",
+    target_identity: str = "new",
 ) -> None:
     try:
         from src.core.ledger.event_log import ConfidenceTier, TemporalConfidence, build_event_envelope, write_event
@@ -392,8 +523,8 @@ def _emit_intent_created_best_effort(
             payload={
                 "operation_intent_id": operation_intent_id,
                 "idempotency_key": idempotency_key,
-                "operation_type": "create_task.v1",
-                "target_identity": "new",
+                "operation_type": operation,
+                "target_identity": target_identity,
                 "proposal_id": proposal_id,
                 # No standalone immutable "approval event" is emitted yet
                 # (Sec 8.11.2 lists it as a separate chain step); the
@@ -483,10 +614,16 @@ def _emit_uncertain_remote_state_alert_best_effort(
 
 
 __all__ = [
+    "DISPATCHABLE_OPERATIONS",
     "ActuationDispatchOutcome",
     "DispatchResult",
+    "actuation_idempotency_key",
     "create_task_idempotency_key",
     "dispatch_leased_create_task",
+    "effect_id_v1",
+    "effect_state",
     "enqueue_create_task_intent",
     "outbox_db_path",
+    "reconcile_uncertain_create_task",
+    "require_dispatchable_operation",
 ]

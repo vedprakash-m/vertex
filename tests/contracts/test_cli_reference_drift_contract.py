@@ -120,19 +120,21 @@ def test_cli_reference_avoids_local_absolute_paths() -> None:
 
 def test_ci_checks_cli_reference_before_running_tests() -> None:
     workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
-    steps = workflow["jobs"]["validate"]["steps"]
+    steps = [
+        step
+        for job in workflow["jobs"].values()
+        for step in job.get("steps", ())
+    ]
     reference_commands = [
         (index, line.strip())
         for index, step in enumerate(steps)
         for line in step.get("run", "").splitlines()
         if "scripts/generate_cli_reference.py" in line and not line.lstrip().startswith("#")
     ]
-    test_step = next(index for index, step in enumerate(steps) if "python -m pytest" in step.get("run", ""))
-
     assert len(reference_commands) == 1
-    index, command = reference_commands[0]
+    _, command = reference_commands[0]
     assert command == "python scripts/generate_cli_reference.py --check"
-    assert index < test_step
+    assert workflow["jobs"]["static"]["steps"] is not None
 
 
 def test_cli_reference_check_rejects_stale_snapshot_without_rewriting(

@@ -58,6 +58,7 @@ def _make_proposal(
     source_value: str = "new assumption text",
     current_value: str | None = None,
     current_value_hash: str | None = None,
+    prior_state: str | None = None,
     status: str = "accepted",
 ) -> ContextUpdateProposal:
     return ContextUpdateProposal(
@@ -82,6 +83,7 @@ def _make_proposal(
         extraction_method_rationale="direct field extraction",
         conflict_key=f"{target_store}:{target_key}:{target_field}",
         status=status,
+        prior_state=prior_state,
     )
 
 
@@ -139,7 +141,7 @@ class TestHappyPath:
         programs_root = tmp_path / "programs"
         (programs_root / "alpha").mkdir(parents=True, exist_ok=True)
 
-        p = _accepted(programs_root)
+        p = _accepted(programs_root, prior_state="absent_verified")
         result = apply_proposal(p, actor="test", programs_root=programs_root, dry_run=True)
 
         assert result.action == "applied"
@@ -196,7 +198,7 @@ class TestSkipGuards:
         programs_root = tmp_path / "programs"
         prog_dir = programs_root / "alpha"
         prog_dir.mkdir(parents=True, exist_ok=True)
-        p = _accepted(programs_root)
+        p = _accepted(programs_root, prior_state="absent_verified")
         _write_assumptions_yaml(prog_dir, [_minimal_assumption("assume-alpha", text="created later")])
 
         for dry_run in (True, False):
@@ -233,7 +235,7 @@ class TestIdempotency:
         prog_dir.mkdir(parents=True, exist_ok=True)
         _write_assumptions_yaml(prog_dir, [_minimal_assumption("assume-alpha")])
 
-        p = _accepted(programs_root, current_value="old")
+        p = _accepted(programs_root, current_value="old", prior_state=_PLACEHOLDER_STATE)
         with patch("src.core.ncfl_apply._update_proposal_status"):
             r1 = apply_proposal(p, actor="test", programs_root=programs_root)
         assert r1.action == "applied"
@@ -282,7 +284,7 @@ class TestCrashRecovery:
         programs_root = tmp_path / "programs"
         (programs_root / "alpha").mkdir(parents=True, exist_ok=True)
 
-        p = _accepted(programs_root)
+        p = _accepted(programs_root, prior_state="absent_verified")
         with patch("src.core.ncfl_apply._write_to_store", side_effect=OSError("disk full")):
             result = apply_proposal(p, actor="test", programs_root=programs_root)
 
@@ -302,7 +304,7 @@ class TestCrashRecovery:
         prog_dir.mkdir(parents=True, exist_ok=True)
         _write_assumptions_yaml(prog_dir, [_minimal_assumption("assume-alpha")])
 
-        p = _accepted(programs_root, current_value="old")
+        p = _accepted(programs_root, current_value="old", prior_state=_PLACEHOLDER_STATE)
         with patch("src.core.ncfl_apply._write_changelog_entry", side_effect=OSError("io error")):
             result = apply_proposal(p, actor="test", programs_root=programs_root)
 
@@ -331,6 +333,7 @@ class TestBatchApply:
                 proposal_id=f"prop-{i:03d}",
                 target_key=f"assume-{i}",
                 current_value="old",
+                prior_state=_PLACEHOLDER_STATE,
             )
             for i in range(3)
         )
@@ -347,9 +350,155 @@ class TestBatchApply:
         (programs_root / "alpha").mkdir(parents=True, exist_ok=True)
 
         proposals = tuple(
-            _accepted(programs_root, proposal_id=f"prop-{i:03d}", target_key=f"key-{i}")
+            _accepted(programs_root, proposal_id=f"prop-{i:03d}", target_key=f"key-{i}", prior_state="absent_verified")
             for i in range(2)
         )
         results = apply_proposals_batch(proposals, actor="test", programs_root=programs_root, dry_run=True)
         assert all(r.action == "applied" for r in results)
         assert not (programs_root / "alpha" / "assumptions.yaml").exists()
+
+
+_PLACEHOLDER_STATE = "sha256:" + hashlib.sha256(b"placeholder").hexdigest()
+
+
+def _tree(programs_root: Path) -> dict[Path, bytes]:
+    return {
+        path: path.read_bytes() for path in programs_root.rglob("*")
+        if path.is_file() and path.name != "_apply.lock"
+    }
+
+
+class TestPriorState:
+    """RELO-W4.11: apply distinguishes an absent target from an unavailable one."""
+
+    def test_extractor_records_absent_verified_or_sha256(self) -> None:
+        from src.core.ncfl_extractor import _build_proposal
+
+        common = dict(
+            program_id="alpha", edition_id="e", issue_number=1, source_artifact="a",
+            source_field="f", source_value="v", extraction_method="overrides_yaml",
+            target_store="decisions", target_key="k", target_field="decision", rationale="r",
+        )
+        assert _build_proposal(current_value=None, **common).prior_state == "absent_verified"
+        assert _build_proposal(current_value="  ", **common).prior_state == "absent_verified"
+        assert _build_proposal(current_value="live", **common).prior_state == (
+            "sha256:" + hashlib.sha256(b"live").hexdigest()
+        )
+
+    def test_apply_hashes_trimmed_value_like_extractor(self) -> None:
+        from src.core.ncfl_apply import _prior_state_mismatch
+
+        expected = "sha256:" + hashlib.sha256(b"live").hexdigest()
+        assert _prior_state_mismatch(expected, "  live\n") is None
+
+    def test_prior_state_round_trips_and_is_approval_bound(self) -> None:
+        legacy = _make_proposal()
+        assert "prior_state" not in legacy.to_json()
+        bound = _make_proposal(prior_state="absent_verified")
+        assert ContextUpdateProposal.from_json(bound.to_json()) == bound
+        assert bound.approval_payload_digest() != legacy.approval_payload_digest()
+
+    @pytest.mark.parametrize("dry_run", [True, False])
+    def test_absent_verified_writes_when_target_still_absent(self, tmp_path, dry_run) -> None:
+        programs_root = tmp_path / "programs"
+        prog_dir = programs_root / "alpha"
+        prog_dir.mkdir(parents=True)
+        _write_assumptions_yaml(prog_dir, [_minimal_assumption("other")])
+        p = _accepted(programs_root, prior_state="absent_verified")
+
+        with patch("src.core.ncfl_apply._write_to_store") as write:
+            result = apply_proposal(p, actor="test", programs_root=programs_root, dry_run=dry_run)
+
+        assert result.action == "applied"
+        assert write.called is not dry_run
+
+    def test_absent_verified_refuses_when_target_appeared(self, tmp_path) -> None:
+        programs_root = tmp_path / "programs"
+        prog_dir = programs_root / "alpha"
+        prog_dir.mkdir(parents=True)
+        p = _accepted(programs_root, prior_state="absent_verified")
+        _write_assumptions_yaml(prog_dir, [_minimal_assumption("assume-alpha", text="created later")])
+        before = _tree(programs_root)
+
+        for dry_run in (True, False):
+            result = apply_proposal(p, actor="test", programs_root=programs_root, dry_run=dry_run)
+            assert result.action == "skipped_stale"
+            assert "appeared" in result.note
+        assert _tree(programs_root) == before
+
+    @pytest.mark.parametrize("prior_state", ["absent_verified", _PLACEHOLDER_STATE])
+    @pytest.mark.parametrize("content", ["[: unparseable", "- just\n- a list\n"])
+    def test_unavailable_target_refuses(self, tmp_path, prior_state, content) -> None:
+        programs_root = tmp_path / "programs"
+        prog_dir = programs_root / "alpha"
+        prog_dir.mkdir(parents=True)
+        p = _accepted(programs_root, prior_state=prior_state)
+        (prog_dir / "assumptions.yaml").write_text(content, encoding="utf-8")
+        before = _tree(programs_root)
+
+        for dry_run in (True, False):
+            result = apply_proposal(p, actor="test", programs_root=programs_root, dry_run=dry_run)
+            assert result.action == "skipped_stale"
+            assert "unavailable" in result.note
+        assert _tree(programs_root) == before
+
+    def test_sha256_prior_state_matches_and_writes(self, tmp_path) -> None:
+        programs_root = tmp_path / "programs"
+        prog_dir = programs_root / "alpha"
+        prog_dir.mkdir(parents=True)
+        _write_assumptions_yaml(prog_dir, [_minimal_assumption("assume-alpha")])
+        p = _accepted(programs_root, current_value="placeholder", prior_state=_PLACEHOLDER_STATE)
+
+        with patch("src.core.ncfl_apply._update_proposal_status"):
+            result = apply_proposal(p, actor="test", programs_root=programs_root)
+
+        assert result.action == "applied"
+
+    @pytest.mark.parametrize("live", [[_minimal_assumption("assume-alpha", text="changed")], []])
+    def test_sha256_prior_state_refuses_changed_or_removed_target(self, tmp_path, live) -> None:
+        programs_root = tmp_path / "programs"
+        prog_dir = programs_root / "alpha"
+        prog_dir.mkdir(parents=True)
+        p = _accepted(programs_root, current_value="placeholder", prior_state=_PLACEHOLDER_STATE)
+        _write_assumptions_yaml(prog_dir, live)
+        before = _tree(programs_root)
+
+        result = apply_proposal(p, actor="test", programs_root=programs_root)
+
+        assert result.action == "skipped_stale"
+        assert _tree(programs_root) == before
+
+    @pytest.mark.parametrize("current_value", [None, "old"])
+    @pytest.mark.parametrize("dry_run", [True, False])
+    def test_legacy_proposal_without_hash_or_prior_state_needs_rereview(
+        self, tmp_path, current_value, dry_run,
+    ) -> None:
+        programs_root = tmp_path / "programs"
+        prog_dir = programs_root / "alpha"
+        prog_dir.mkdir(parents=True)
+        _write_assumptions_yaml(prog_dir, [_minimal_assumption("other")])
+        p = _accepted(programs_root, current_value=current_value)
+        before = _tree(programs_root)
+
+        result = apply_proposal(p, actor="test", programs_root=programs_root, dry_run=dry_run)
+
+        assert result.action == "needs_rereview"
+        assert _tree(programs_root) == before
+        assert not _journal_path("alpha", p.proposal_id, programs_root=programs_root).exists()
+
+    def test_shared_registry_read_failure_is_unavailable(self, tmp_path) -> None:
+        programs_root = tmp_path / "programs"
+        (programs_root / "alpha").mkdir(parents=True)
+        p = _accepted(
+            programs_root, target_store="people_directory", target_key="a@example.com",
+            target_field="display_name", prior_state="absent_verified",
+        )
+        with patch("src.core.ncfl_apply._shared_registry_generation", return_value="generation"), patch(
+            "src.core.ncfl_apply.read_shared_registry_factual_value", side_effect=OSError("locked"),
+        ) as read, patch("src.core.ncfl_apply._write_to_store") as write:
+            result = apply_proposal(p, actor="test", programs_root=programs_root)
+
+        assert result.action == "skipped_stale"
+        assert "unavailable" in result.note
+        read.assert_called_once()
+        write.assert_not_called()

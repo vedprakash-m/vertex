@@ -101,6 +101,22 @@ def hash_jsonable(value: Any) -> str:
 _hash_jsonable = hash_jsonable
 
 
+def chart_gate_evidence_sha256(
+    manifest_id: str, qg_results: Mapping[str, bool], chart_freshness_evidence: Any,
+    kusto_sections: Any, *, edition_type: str | None = None, routed_chart_sections: Any = None,
+) -> str:
+    return hash_jsonable({
+        "manifest_id": manifest_id,
+        "chart_gate_results": {
+            gate: qg_results[gate] for gate in ("QG-21", "QG-22") if gate in qg_results
+        },
+        "chart_freshness_evidence": chart_freshness_evidence,
+        "kusto_sections": kusto_sections,
+        **({"edition_type": edition_type} if edition_type is not None else {}),
+        **({"routed_chart_sections": routed_chart_sections} if routed_chart_sections is not None else {}),
+    })
+
+
 def build_run_evidence_snapshot(
     pin: FactSnapshotPin | None, snapshot: ProgramFactSnapshot | None,
     gather: GatherRunManifest | None, manifest: RunManifest, report_snapshot: Snapshot,

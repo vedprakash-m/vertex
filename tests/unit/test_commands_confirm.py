@@ -1218,6 +1218,52 @@ def test_confirm_issue_force_does_not_override_non_forceable_unbound_source_heal
     assert failing_report.results[0].message in result.failures
 
 
+def test_confirm_issue_force_does_not_override_claim_contradiction_gate(monkeypatch, repo_root: Path, tmp_path: Path) -> None:
+    from src.core.quality_gates import narrative as narrative_gates
+
+    reports_root, archive_root, output_root = _prepare_confirmable_weekly_issue(repo_root, tmp_path)
+    programs_root = reports_root.parent / "programs"
+    monkeypatch.setattr(
+        narrative_gates,
+        "build_ado_reconcile_report",
+        lambda **kwargs: SimpleNamespace(
+            discrepancies=(SimpleNamespace(kind="claim_eta", context="claim-1", work_item_id=1001),)
+        ),
+    )
+    monkeypatch.setattr(narrative_gates, "load_open_claims", lambda *args, **kwargs: ())
+    qg11 = narrative_gates.evaluate_claim_contradiction_gate(
+        items=(SimpleNamespace(id=1001),),
+        program_id="acme",
+        program_maturity_level=0,
+        workstreams=(SimpleNamespace(id="velocity"),),
+        programs_root=tmp_path,
+    )
+    real_phase_1b = confirm_module.evaluate_phase_1b_gates
+    monkeypatch.setattr(
+        confirm_module,
+        "evaluate_phase_1b_gates",
+        lambda **kwargs: QualityGateReport(
+            results=tuple(r for r in real_phase_1b(**kwargs).results if r.gate_id != "QG-11") + (qg11,)
+        ),
+    )
+
+    result = confirm_issue(
+        edition_name=EDITION_NAME,
+        issue_number=1,
+        reports_root=reports_root,
+        archive_root=archive_root,
+        programs_root=programs_root,
+        dry_run=True,
+        force=True,
+    )
+
+    assert result.exit_code == 3
+    assert result.archive_paths is None
+    assert result.manifest.qg_results["QG-11"] is False
+    assert not any("Forced past QG-11" in warning for warning in result.warnings)
+    assert qg11.message in result.failures
+
+
 def test_confirm_issue_maps_detailed_edition_source_health_to_newsletter_function(monkeypatch, repo_root: Path, tmp_path: Path) -> None:
     reports_root, archive_root, output_root = _prepare_confirmable_weekly_issue(repo_root, tmp_path)
     programs_root = reports_root.parent / "programs"
@@ -2239,7 +2285,7 @@ def test_confirm_issue_force_does_not_override_qg11_at_l2(repo_root: Path, tmp_p
         force=True,
     )
 
-    assert result.exit_code == 2
+    assert result.exit_code == 3
     assert any("Open claims contradicted by current ADO state without acknowledgment" in failure for failure in result.failures)
 
 def test_confirm_issue_v2_records_edit_patterns(repo_root: Path, tmp_path: Path) -> None:
@@ -2928,6 +2974,529 @@ def test_confirm_issue_reuses_persisted_kusto_sections(repo_root: Path, tmp_path
     assert draft_payload["kusto_sections"]
     active_incidents = next(section for section in draft_payload["kusto_sections"] if section["title"] == "Active Incidents")
     assert active_incidents["rows"][0][-1]["href"] == "https://incident.example.invalid/items/12345"
+
+
+@pytest.mark.parametrize("gate_id", ("QG-21", "QG-22"))
+@pytest.mark.parametrize("dry_run", (True, False))
+@pytest.mark.parametrize("force", (True, False))
+def test_confirm_preserves_recorded_chart_hard_failure(
+    repo_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, gate_id: str, dry_run: bool, force: bool,
+) -> None:
+    from src.core.view_models import KustoSectionData
+
+    reports_root = stage_v2_report_workspace(repo_root, tmp_path)
+    archive_root = tmp_path / "archive"
+    programs_root = reports_root.parent / "programs"
+    disable_kusto_in_report_copy(reports_root)
+    section = KustoSectionData(
+        section_id="synthetic-chart", title="Synthetic chart", query_id="synthetic-chart",
+        render_mode="chart_image", source_label="Synthetic", confidence="high",
+        columns=(), rows=(), metrics=(), image_data_url=None, reference_url=None,
+        caveats=(), message=None, is_degraded=gate_id == "QG-22",
+        chart_png_size_bytes=102_401 if gate_id == "QG-21" else 0,
+        chart_blocks_publish=gate_id == "QG-22", section_placement="exec_summary",
+    )
+    monkeypatch.setattr(
+        "src.core.stages.render_stage.build_kusto_sections",
+        lambda *args, **kwargs: ((section,), (), ()),
+    )
+    as_of = datetime.now(timezone.utc)
+    draft = generate_report_draft(
+        edition_name=EDITION_NAME,
+        reports_root=reports_root,
+        archive_root=archive_root,
+        programs_root=programs_root,
+        as_of=as_of,
+        work_item_loader=lambda bundle, timestamp: (_confirmable_items(timestamp), 0),
+        open_browser=False,
+    )
+    assert draft.manifest.qg_results[gate_id] is False
+    _seed_high_risk_signal_coverage(programs_root, captured_at=as_of)
+    overrides_path = get_overrides_path(EDITION_NAME, reports_root, issue_number=1)
+    overrides_payload = yaml.safe_load(overrides_path.read_text(encoding="utf-8"))
+    for scorecard in overrides_payload["scorecards"].values():
+        for dimension in scorecard.values():
+            dimension["risk"] = "low"
+    _ack_decision_strip(overrides_payload)
+    overrides_path.write_text(yaml.safe_dump(overrides_payload, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    (get_narratives_dir(EDITION_NAME, 1, reports_root) / "exec_summary.md").write_text(
+        "Confirmed executive summary.\n", encoding="utf-8",
+    )
+    _write_authored_workstream_narratives(reports_root, 1, edition_name=EDITION_NAME)
+
+    assert draft.manifest_path is not None
+    original_manifest = draft.manifest_path.read_bytes()
+    draft_path = programs_root / "acme" / "publications" / EDITION_NAME / "issue_001" / "issue_001.draft.json"
+    original_draft = draft_path.read_bytes()
+    control_draft = json.loads(original_draft)
+    control_manifest = json.loads(original_manifest)
+    control_manifest["qg_results"].pop(gate_id)
+    _rebind_chart_test_artifacts(control_draft, control_manifest)
+    draft_path.write_text(json.dumps(control_draft), encoding="utf-8")
+    draft.manifest_path.write_text(json.dumps(control_manifest), encoding="utf-8")
+    control = confirm_issue(
+        edition_name=EDITION_NAME, issue_number=1, reports_root=reports_root,
+        archive_root=archive_root, programs_root=programs_root, force=True, dry_run=True,
+    )
+    assert control.exit_code == 0
+    assert control.archive_paths is None
+    draft.manifest_path.write_bytes(original_manifest)
+    draft_path.write_bytes(original_draft)
+
+    result = confirm_issue(
+        edition_name=EDITION_NAME, issue_number=1, reports_root=reports_root,
+        archive_root=archive_root, programs_root=programs_root, force=force, dry_run=dry_run,
+    )
+
+    assert result.exit_code == 3
+    assert result.archive_paths is None
+    assert result.manifest.qg_results[gate_id] is False
+    assert any(gate_id in failure for failure in result.failures)
+    assert not any(f"Forced past {gate_id}" in warning for warning in result.warnings)
+    assert not archive_root.exists() or not any(archive_root.rglob("*"))
+
+
+@pytest.mark.parametrize("hidden_at", ["never", "draft", "confirm"])
+def test_narrative_draft_and_confirm_respect_removed_executive_chart(
+    repo_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hidden_at: str,
+) -> None:
+    from src.core.view_models import KustoSectionData
+
+    reports_root, archive_root, _ = _prepare_confirmable_weekly_issue(repo_root, tmp_path)
+    programs_root = reports_root.parent / "programs"
+    as_of = datetime(2026, 5, 5, 18, 0, tzinfo=timezone.utc)
+    edition_path = programs_root / "acme" / "editions" / f"{EDITION_NAME}.yaml"
+    edition = yaml.safe_load(edition_path.read_text(encoding="utf-8"))
+    edition["layout_mode"] = "dashboard"
+    edition_path.write_text(yaml.safe_dump(edition), encoding="utf-8")
+    options = dict(
+        edition_name=EDITION_NAME, reports_root=reports_root, archive_root=archive_root,
+        programs_root=programs_root, as_of=as_of, edition_type_override="narrative",
+        work_item_loader=lambda bundle, timestamp: (_confirmable_items(timestamp), 0),
+        open_browser=False,
+    )
+    generate_report_draft(**options)
+    _write_authored_exec_summary(reports_root, 1, "Synthetic executive narrative.\n")
+    _write_authored_workstream_narratives(reports_root, 1)
+    overrides_path = get_overrides_path(EDITION_NAME, reports_root, issue_number=1)
+    overrides = yaml.safe_load(overrides_path.read_text(encoding="utf-8"))
+    if hidden_at == "draft":
+        overrides["removed_sections"] = ["exec_summary"]
+        overrides_path.write_text(yaml.safe_dump(overrides), encoding="utf-8")
+    chart = KustoSectionData(
+        section_id="synthetic-executive", title="Synthetic executive chart", query_id="synthetic-executive",
+        render_mode="chart", source_label="Synthetic source", confidence="high", columns=(), rows=(), metrics=(),
+        image_data_url=None, reference_url="https://example.invalid/chart", caveats=(), message="Synthetic trend",
+        is_degraded=False, captured_at=as_of, chart_png_base64="c3ludGhldGlj", chart_png_size_bytes=9,
+        section_placement="exec_summary",
+    )
+    monkeypatch.setattr("src.core.stages.render_stage.build_kusto_sections", lambda *args, **kwargs: ((chart,), (), ()))
+    draft = generate_report_draft(**options)
+    for body in (draft.html_body, draft.markdown_body):
+        assert ("Synthetic executive narrative" in body) is (hidden_at != "draft")
+        assert ("Synthetic executive chart" in body) is (hidden_at != "draft")
+
+    if hidden_at == "confirm":
+        overrides["removed_sections"] = ["exec_summary"]
+        overrides_path.write_text(yaml.safe_dump(overrides), encoding="utf-8")
+    result = confirm_issue(
+        edition_name=EDITION_NAME, issue_number=1, reports_root=reports_root,
+        archive_root=archive_root, programs_root=programs_root, force=True,
+    )
+    assert result.exit_code == 0
+    assert result.archive_paths is not None
+    for path in (result.archive_paths.html_path, result.archive_paths.md_path):
+        body = path.read_text(encoding="utf-8")
+        assert ("Synthetic executive narrative" in body) is (hidden_at == "never")
+        assert ("Synthetic executive chart" in body) is (hidden_at == "never")
+
+
+@pytest.mark.parametrize("hide_executive", [False, True])
+def test_confirm_preserves_reviewed_charts_with_unmatched_workstream_fallback(
+    repo_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hide_executive: bool,
+) -> None:
+    from html.parser import HTMLParser
+    from src.commands.confirm_stages.draft_loaders import load_confirm_draft_manifest
+    from src.core.view_models import KustoSectionData
+
+    class SectionImages(HTMLParser):
+        def __init__(self, anchor: str) -> None:
+            super().__init__()
+            self.anchor = anchor
+            self.waiting = False
+            self.depth = 0
+            self.images = []
+
+        def handle_starttag(self, tag, attrs):
+            attributes = dict(attrs)
+            if tag == "a" and attributes.get("id") == self.anchor:
+                self.waiting = True
+            elif tag == "table" and (self.waiting or self.depth):
+                self.waiting = False
+                self.depth += 1
+            elif tag == "img" and self.depth:
+                self.images.append(attributes)
+
+        def handle_startendtag(self, tag, attrs):
+            self.handle_starttag(tag, attrs)
+
+        def handle_endtag(self, tag):
+            if tag == "table" and self.depth:
+                self.depth -= 1
+
+    reports_root, archive_root, _ = _prepare_confirmable_weekly_issue(repo_root, tmp_path)
+    programs_root = reports_root.parent / "programs"
+    as_of = datetime(2026, 5, 5, 18, 0, tzinfo=timezone.utc)
+    edition_path = programs_root / "acme" / "editions" / f"{EDITION_NAME}.yaml"
+    edition = yaml.safe_load(edition_path.read_text(encoding="utf-8"))
+    edition["layout_mode"] = "dashboard"
+    edition_path.write_text(yaml.safe_dump(edition), encoding="utf-8")
+    generate_report_draft(
+        edition_name=EDITION_NAME, reports_root=reports_root, archive_root=archive_root,
+        programs_root=programs_root, as_of=as_of,
+        work_item_loader=lambda bundle, timestamp: (_confirmable_items(timestamp), 0),
+        open_browser=False,
+    )
+    _write_authored_workstream_narratives(reports_root, 1)
+    if hide_executive:
+        overrides_path = get_overrides_path(EDITION_NAME, reports_root, issue_number=1)
+        overrides = yaml.safe_load(overrides_path.read_text(encoding="utf-8"))
+        overrides["removed_sections"] = ["exec_summary"]
+        overrides_path.write_text(yaml.safe_dump(overrides), encoding="utf-8")
+    charts = tuple(
+        KustoSectionData(
+            section_id=name, title=name, query_id=name, render_mode="chart",
+            source_label="Synthetic source", confidence="high", columns=(), rows=(), metrics=(),
+            image_data_url=None, reference_url="https://example.invalid/chart", caveats=(),
+            message="Synthetic trend", is_degraded=False, captured_at=as_of,
+            chart_png_base64="c3ludGhldGlj", chart_png_size_bytes=9,
+            section_placement=placement,
+        )
+        for name, placement in (
+            ("Executive chart", "exec_summary"),
+            ("Workstream chart", "workstream:deployment_readiness"),
+            ("Standalone chart", "standalone"),
+            ("Second executive chart", "exec_summary"),
+            ("Missing workstream chart", "workstream:missing"),
+        )
+    )
+    monkeypatch.setattr(
+        "src.core.stages.render_stage.build_kusto_sections",
+        lambda *args, **kwargs: (charts, (), ()),
+    )
+    draft = generate_report_draft(
+        edition_name=EDITION_NAME, reports_root=reports_root, archive_root=archive_root,
+        programs_root=programs_root, as_of=as_of,
+        work_item_loader=lambda bundle, timestamp: (_confirmable_items(timestamp), 0),
+        open_browser=False,
+    )
+    for chart in charts:
+        expected = 0 if hide_executive and chart.title == "Executive chart" else 1
+        assert draft.html_body.count(f"{chart.title} chart: Synthetic trend") == expected
+        assert draft.markdown_body.count(
+            f"{chart.title}: Synthetic trend. [View chart →](https://example.invalid/chart)"
+        ) == expected
+
+    assert draft.manifest_path is not None
+    draft_path = programs_root / "acme" / "publications" / EDITION_NAME / "issue_001" / "issue_001.draft.json"
+    original_draft = draft_path.read_bytes()
+    original_manifest = draft.manifest_path.read_bytes()
+    original_state = json.loads(original_draft)
+    original_metadata = json.loads(original_manifest)
+    assert len(original_state["routed_chart_sections"]) == 2
+    for change in ("image", "missing_routed", "missing_marker", "invalid_marker"):
+        state = json.loads(original_draft)
+        manifest = json.loads(original_manifest)
+        if change == "image":
+            state["routed_chart_sections"][0]["chart_png_base64"] = "Y2hhbmdlZA=="
+        elif change == "missing_routed":
+            state.pop("routed_chart_sections")
+        elif change == "missing_marker":
+            manifest["metadata"].pop("chart_routing_capture")
+        else:
+            manifest["metadata"]["chart_routing_capture"] = "v2"
+        draft.manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        with pytest.raises(typer.BadParameter, match="chart.*binding"):
+            load_confirm_draft_manifest(EDITION_NAME, 1, draft_state=state, programs_root=programs_root)
+    draft.manifest_path.write_bytes(original_manifest)
+    assert original_metadata["metadata"]["chart_routing_capture"] == "v1"
+    tampered_state = json.loads(original_draft)
+    tampered_state["routed_chart_sections"].clear()
+    draft_path.write_text(json.dumps(tampered_state), encoding="utf-8")
+    with pytest.raises(typer.BadParameter, match="chart.*binding"):
+        confirm_issue(
+            edition_name=EDITION_NAME, issue_number=1, reports_root=reports_root,
+            archive_root=archive_root, programs_root=programs_root, force=True,
+        )
+    assert not archive_root.exists() or not any(archive_root.rglob("*"))
+    program_archive = programs_root / "acme" / "archive"
+    assert not program_archive.exists() or not any(program_archive.rglob("*"))
+    draft_path.write_bytes(original_draft)
+
+    result = confirm_issue(
+        edition_name=EDITION_NAME, issue_number=1, reports_root=reports_root,
+        archive_root=archive_root, programs_root=programs_root, force=True,
+    )
+    assert result.exit_code == 0
+    assert result.archive_paths is not None
+    html = result.archive_paths.html_path.read_text(encoding="utf-8")
+    markdown = result.archive_paths.md_path.read_text(encoding="utf-8")
+    for chart in charts:
+        expected = 0 if hide_executive and chart.title == "Executive chart" else 1
+        assert html.count(f"{chart.title} chart: Synthetic trend") == expected
+        assert markdown.count(f"{chart.title}: Synthetic trend. [View chart →](https://example.invalid/chart)") == expected
+    for body, workstream_anchor in (
+        (draft.html_body, "chapter-deployment_readiness"),
+        (html, "Workstream chart"),
+    ):
+        for anchor, title in (
+            ("exec-summary", "Executive chart"),
+            (workstream_anchor, "Workstream chart"),
+            ("Standalone chart", "Standalone chart"),
+            ("Second executive chart", "Second executive chart"),
+            ("Missing workstream chart", "Missing workstream chart"),
+        ):
+            if hide_executive and title == "Executive chart":
+                continue
+            section = SectionImages(anchor)
+            section.feed(body)
+            assert [(image.get("src"), image.get("alt")) for image in section.images] == [
+                ("data:image/png;base64,c3ludGhldGlj", f"{title} chart: Synthetic trend"),
+            ]
+        expected_count = len(charts) - int(hide_executive)
+        assert body.count('href="https://example.invalid/chart"') >= expected_count
+        assert body.count("Source: Synthetic source") == expected_count
+        assert body.count("May 05 2026, 18:00 UTC") >= expected_count
+
+
+@pytest.mark.parametrize("dry_run", (True, False))
+@pytest.mark.parametrize("placement", ("standalone", "exec_summary", "pre_fallback"))
+def test_confirm_blocks_retained_blocking_chart_that_expires_after_draft(
+    repo_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dry_run: bool, placement: str,
+) -> None:
+    from src.core.view_models import KustoSectionData
+
+    reports_root = stage_v2_report_workspace(repo_root, tmp_path)
+    archive_root = tmp_path / "archive"
+    programs_root = reports_root.parent / "programs"
+    disable_kusto_in_report_copy(reports_root)
+    as_of = datetime.now(timezone.utc)
+    section = KustoSectionData(
+        section_id="synthetic-chart", title="Synthetic chart", query_id="synthetic-chart",
+        render_mode="chart_image", source_label="Synthetic", confidence="high",
+        columns=(), rows=(), metrics=(), image_data_url=None, reference_url=None,
+        caveats=(), message=None, is_degraded=True, captured_at=as_of,
+        cache_captured_at=as_of, chart_blocks_publish=True, chart_cache_ttl_hours=26,
+        section_placement="standalone" if placement == "pre_fallback" else placement,
+    )
+    monkeypatch.setattr(
+        "src.core.stages.render_stage.build_kusto_sections",
+        lambda *args, **kwargs: ((section,), (), ()),
+    )
+    if placement == "pre_fallback":
+        monkeypatch.setattr(
+            "src.core.stages.render_stage._apply_kusto_fallbacks",
+            lambda *, ctx, kusto_sections, telemetry_observations, kusto_warnings, ado_vitality_available:
+                ((), telemetry_observations, kusto_warnings),
+        )
+    draft = generate_report_draft(
+        edition_name=EDITION_NAME,
+        reports_root=reports_root,
+        archive_root=archive_root,
+        programs_root=programs_root,
+        as_of=as_of,
+        work_item_loader=lambda bundle, timestamp: (_confirmable_items(timestamp), 0),
+        open_browser=False,
+    )
+    assert draft.manifest.qg_results["QG-22"] is True
+    assert [row["query_id"] for row in draft.manifest.metadata["chart_freshness_evidence"]] == ["synthetic-chart"]
+    _seed_high_risk_signal_coverage(programs_root, captured_at=as_of)
+    overrides_path = get_overrides_path(EDITION_NAME, reports_root, issue_number=1)
+    overrides_payload = yaml.safe_load(overrides_path.read_text(encoding="utf-8"))
+    for scorecard in overrides_payload["scorecards"].values():
+        for dimension in scorecard.values():
+            dimension["risk"] = "low"
+    _ack_decision_strip(overrides_payload)
+    overrides_path.write_text(yaml.safe_dump(overrides_payload, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    (get_narratives_dir(EDITION_NAME, 1, reports_root) / "exec_summary.md").write_text(
+        "Confirmed executive summary.\n", encoding="utf-8",
+    )
+    _write_authored_workstream_narratives(reports_root, 1, edition_name=EDITION_NAME)
+
+    fresh = confirm_issue(
+        edition_name=EDITION_NAME, issue_number=1, reports_root=reports_root,
+        archive_root=archive_root, programs_root=programs_root, force=True, dry_run=True,
+    )
+    assert fresh.exit_code == 0
+    assert "QG-22" not in fresh.manifest.qg_results
+
+    if placement == "exec_summary":
+        draft_path = programs_root / "acme" / "publications" / EDITION_NAME / "issue_001" / "issue_001.draft.json"
+        original_draft = draft_path.read_bytes()
+        changed_edition = json.loads(original_draft)
+        assert draft.manifest.metadata["chart_binding_edition_type"] == changed_edition["edition_type"]
+        changed_edition["edition_type"] = "lookback"
+        draft_path.write_text(json.dumps(changed_edition), encoding="utf-8")
+        with pytest.raises(typer.BadParameter, match="chart.*binding"):
+            confirm_issue(
+                edition_name=EDITION_NAME, issue_number=1, reports_root=reports_root,
+                archive_root=archive_root, programs_root=programs_root, force=True, dry_run=dry_run,
+            )
+        assert not archive_root.exists() or not any(archive_root.rglob("*"))
+        draft_path.write_bytes(original_draft)
+
+    if placement in ("exec_summary", "pre_fallback"):
+        assert draft.manifest_path is not None
+        original_manifest = draft.manifest_path.read_bytes()
+        substituted_manifest = json.loads(original_manifest)
+        substituted_manifest["metadata"]["chart_freshness_evidence"] = []
+        draft.manifest_path.write_text(json.dumps(substituted_manifest), encoding="utf-8")
+        with pytest.raises(typer.BadParameter, match="chart.*binding"):
+            confirm_issue(
+                edition_name=EDITION_NAME, issue_number=1, reports_root=reports_root,
+                archive_root=archive_root, programs_root=programs_root, force=True, dry_run=dry_run,
+            )
+        assert not archive_root.exists() or not any(archive_root.rglob("*"))
+        draft.manifest_path.write_bytes(original_manifest)
+
+        draft_path = programs_root / "acme" / "publications" / EDITION_NAME / "issue_001" / "issue_001.draft.json"
+        original_draft = draft_path.read_bytes()
+        unbound_draft = json.loads(original_draft)
+        unbound_draft.pop("chart_gate_evidence_sha256")
+        unbound_manifest = json.loads(original_manifest)
+        unbound_manifest["metadata"].pop("chart_freshness_evidence")
+        draft_path.write_text(json.dumps(unbound_draft), encoding="utf-8")
+        draft.manifest_path.write_text(json.dumps(unbound_manifest), encoding="utf-8")
+        with pytest.raises(typer.BadParameter, match="chart.*binding"):
+            confirm_issue(
+                edition_name=EDITION_NAME, issue_number=1, reports_root=reports_root,
+                archive_root=archive_root, programs_root=programs_root, force=True, dry_run=dry_run,
+            )
+        assert not archive_root.exists() or not any(archive_root.rglob("*"))
+        draft_path.write_bytes(original_draft)
+        draft.manifest_path.write_bytes(original_manifest)
+
+    draft_path = programs_root / "acme" / "publications" / EDITION_NAME / "issue_001" / "issue_001.draft.json"
+    original_draft = draft_path.read_bytes()
+    invalid_draft = json.loads(original_draft)
+    if placement == "standalone":
+        retained_chart = next(s for s in invalid_draft["kusto_sections"] if s["query_id"] == "synthetic-chart")
+        retained_chart["chart_cache_ttl_hours"] = 0
+        assert draft.manifest_path is not None
+        _rebind_chart_test_artifacts(invalid_draft, json.loads(draft.manifest_path.read_bytes()))
+        draft_path.write_text(json.dumps(invalid_draft), encoding="utf-8")
+        with pytest.raises(typer.BadParameter, match="blocking chart freshness evidence"):
+            confirm_issue(
+                edition_name=EDITION_NAME, issue_number=1, reports_root=reports_root,
+                archive_root=archive_root, programs_root=programs_root, force=True, dry_run=dry_run,
+            )
+        assert not archive_root.exists() or not any(archive_root.rglob("*"))
+        draft_path.write_bytes(original_draft)
+    else:
+        assert not any(s["query_id"] == "synthetic-chart" for s in invalid_draft["kusto_sections"])
+        assert draft.manifest_path is not None
+        original_manifest = draft.manifest_path.read_bytes()
+        invalid_manifest = json.loads(original_manifest)
+        invalid_manifest["metadata"]["chart_freshness_evidence"][0]["chart_cache_ttl_hours"] = 0
+        _rebind_chart_test_artifacts(invalid_draft, invalid_manifest)
+        draft_path.write_text(json.dumps(invalid_draft), encoding="utf-8")
+        draft.manifest_path.write_text(json.dumps(invalid_manifest), encoding="utf-8")
+        with pytest.raises(typer.BadParameter, match="blocking chart freshness evidence"):
+            confirm_issue(
+                edition_name=EDITION_NAME, issue_number=1, reports_root=reports_root,
+                archive_root=archive_root, programs_root=programs_root, force=True, dry_run=dry_run,
+            )
+        assert not archive_root.exists() or not any(archive_root.rglob("*"))
+        draft.manifest_path.write_bytes(original_manifest)
+        draft_path.write_bytes(original_draft)
+
+    if placement == "exec_summary" and not dry_run:
+        original_revalidate = confirm_module._revalidate_evidence
+        checkpoint = Mock()
+        snapshot_write = Mock(side_effect=AssertionError("snapshot write reached after chart expiry"))
+
+        with monkeypatch.context() as fresh_check:
+            fresh_writer = Mock(side_effect=RuntimeError("fresh chart reached snapshot writer"))
+            fresh_check.setattr(
+                "src.commands.confirm_stages.archive_transaction.create_checkpoint_snapshot", checkpoint,
+            )
+            fresh_check.setattr(confirm_module, "write_confirmed", fresh_writer)
+            with pytest.raises(RuntimeError, match="fresh chart reached snapshot writer"):
+                confirm_issue(
+                    edition_name=EDITION_NAME, issue_number=1, reports_root=reports_root,
+                    archive_root=archive_root, programs_root=programs_root, force=True,
+                )
+            checkpoint.assert_called_once()
+            fresh_writer.assert_called_once()
+        checkpoint.reset_mock()
+
+        class ExpiredDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return as_of + timedelta(hours=27)
+
+        with monkeypatch.context() as write_check:
+            def expire_after_evidence_recheck(**kwargs):
+                original_revalidate(**kwargs)
+                write_check.setattr(confirm_module, "datetime", ExpiredDatetime)
+
+            write_check.setattr(confirm_module, "_revalidate_evidence", expire_after_evidence_recheck)
+            write_check.setattr(
+                "src.commands.confirm_stages.archive_transaction.create_checkpoint_snapshot", checkpoint,
+            )
+            write_check.setattr(confirm_module, "write_confirmed", snapshot_write)
+            with pytest.raises(ConfigError, match="QG-22"):
+                confirm_issue(
+                    edition_name=EDITION_NAME, issue_number=1, reports_root=reports_root,
+                    archive_root=archive_root, programs_root=programs_root, force=True,
+                )
+            checkpoint.assert_not_called()
+            snapshot_write.assert_not_called()
+        with monkeypatch.context() as cli_check:
+            def expire_for_cli(**kwargs):
+                original_revalidate(**kwargs)
+                cli_check.setattr(confirm_module, "datetime", ExpiredDatetime)
+
+            cli_check.setattr(confirm_module, "_revalidate_evidence", expire_for_cli)
+            cli_check.setattr(confirm_module, "REPORTS_ROOT", reports_root)
+            cli_check.setattr(confirm_module, "ARCHIVE_ROOT", archive_root)
+            cli_check.setattr(confirm_module, "_CONFIRM_PROGRAMS_ROOT", programs_root)
+            cli_check.setattr(
+                "src.commands.confirm_stages.archive_transaction.create_checkpoint_snapshot", checkpoint,
+            )
+            cli_check.setattr(confirm_module, "write_confirmed", snapshot_write)
+            cli_result = runner.invoke(app, ["confirm", "--edition", EDITION_NAME, "--issue", "1", "--force"])
+            assert cli_result.exit_code == 3
+            assert "QG-22" in cli_result.output
+            checkpoint.assert_not_called()
+            snapshot_write.assert_not_called()
+
+    class LaterDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return as_of + timedelta(hours=27)
+
+    monkeypatch.setattr(confirm_module, "datetime", LaterDatetime)
+    result = confirm_issue(
+        edition_name=EDITION_NAME, issue_number=1, reports_root=reports_root,
+        archive_root=archive_root, programs_root=programs_root, force=True, dry_run=dry_run,
+    )
+
+    assert result.exit_code == 3
+    assert result.archive_paths is None
+    assert result.manifest.qg_results["QG-22"] is False
+    assert not archive_root.exists() or not any(archive_root.rglob("*"))
+
+
+def _rebind_chart_test_artifacts(draft: dict, manifest: dict) -> None:
+    from src.core.manifest_writer import chart_gate_evidence_sha256
+
+    draft["chart_gate_evidence_sha256"] = chart_gate_evidence_sha256(
+        manifest["manifest_id"], manifest["qg_results"],
+        manifest["metadata"]["chart_freshness_evidence"], draft["kusto_sections"],
+        edition_type=manifest["metadata"].get("chart_binding_edition_type"),
+        routed_chart_sections=draft.get("routed_chart_sections"),
+    )
 
 
 def test_confirm_issue_tracks_ai_review_acceptance_from_review_artifact(repo_root: Path, tmp_path: Path) -> None:

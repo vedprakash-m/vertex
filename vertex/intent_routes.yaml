@@ -500,6 +500,11 @@ commands:
         - --from
         - --program
         - --to
+      exceptions:
+        flags: []
+        value_options:
+        - --as-of
+        - --program
       explain:
         flags: []
         value_options:

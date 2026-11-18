@@ -569,3 +569,64 @@ def mark_manually_resolved(db_path: Path, outbox_id: str, *, resolved_by: str, r
     entry = load_entry(db_path, outbox_id)
     assert entry is not None
     return entry
+
+
+_EFFECTS_SQL = """
+CREATE TABLE IF NOT EXISTS outbox_effects (
+    effect_id TEXT PRIMARY KEY,
+    outbox_id TEXT NOT NULL
+)
+"""
+
+
+def load_effect_outbox_id(db_path: Path, effect_id: str) -> str | None:
+    if not db_path.exists():
+        return None
+    with open_program_db(db_path, durability="strict") as connection:
+        connection.execute(_EFFECTS_SQL)
+        row = connection.execute("SELECT outbox_id FROM outbox_effects WHERE effect_id = ?", (effect_id,)).fetchone()
+    return None if row is None else row[0]
+
+
+def bind_effect(db_path: Path, effect_id: str, outbox_id: str) -> str:
+    """First binding wins; returns the outbox row that owns ``effect_id``."""
+    with open_program_db(db_path, durability="strict") as connection:
+        connection.execute(_EFFECTS_SQL)
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("INSERT OR IGNORE INTO outbox_effects (effect_id, outbox_id) VALUES (?, ?)", (effect_id, outbox_id))
+        (bound,) = connection.execute("SELECT outbox_id FROM outbox_effects WHERE effect_id = ?", (effect_id,)).fetchone()
+    return bound
+
+
+def _reconcile_uncertain(db_path: Path, outbox_id: str, *, set_sql: str, params: tuple, receipt_json: str | None) -> OutboxEntry:
+    with open_program_db(db_path, durability="strict") as connection:
+        connection.execute(_SUCCESS_RECEIPTS_SQL)
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute("SELECT status FROM outbox WHERE outbox_id = ?", (outbox_id,)).fetchone()
+        if row is None:
+            raise OutboxError(f"unknown outbox row {outbox_id!r}")
+        if row[0] != "uncertain_remote_state":
+            raise OutboxError(f"outbox row {outbox_id!r} is {row[0]!r}; marker reconciliation needs uncertain_remote_state")
+        connection.execute(f"UPDATE outbox SET {set_sql}, updated_at = ? WHERE outbox_id = ?", (*params, _wire(_now()), outbox_id))
+        if receipt_json is not None:
+            connection.execute("INSERT INTO outbox_success_receipts (outbox_id, receipt_json) VALUES (?, ?)", (outbox_id, receipt_json))
+    entry = load_entry(db_path, outbox_id)
+    assert entry is not None
+    return entry
+
+
+def mark_reconciled_confirmed(db_path: Path, outbox_id: str, *, reconciled_by: str, receipt_json: str) -> OutboxEntry:
+    """uncertain_remote_state -> completed, only after a marker lookup found the remote effect."""
+    return _reconcile_uncertain(
+        db_path, outbox_id, set_sql="status = 'completed', lease_owner = ?, failure_reason = NULL",
+        params=(reconciled_by,), receipt_json=receipt_json,
+    )
+
+
+def mark_reconciled_absent(db_path: Path, outbox_id: str, *, reconciled_by: str, reason: str) -> OutboxEntry:
+    """uncertain_remote_state -> pending, only after a marker lookup verified the remote effect is absent."""
+    return _reconcile_uncertain(
+        db_path, outbox_id,
+        set_sql="status = 'pending', lease_owner = NULL, lease_expires_at = NULL, next_attempt_at = NULL, failure_reason = ?",
+        params=(f"{reason} (by {reconciled_by})",), receipt_json=None,
+    )

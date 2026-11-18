@@ -148,6 +148,9 @@ scripts/check_*.py
 !scripts/check_backlog_citations.py
 !scripts/check_coverage_baseline.py
 !scripts/check_spec_drift.py
+!scripts/check_test_evidence.py
+!scripts/check_spec_bulk_deletion.py
+!scripts/check_publication_content.py
 scripts/create_*.py
 scripts/export_*.py
 scripts/plan_*.py

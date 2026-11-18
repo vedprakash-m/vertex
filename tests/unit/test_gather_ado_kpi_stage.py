@@ -161,14 +161,14 @@ def test_execute_ado_pr_kpi_query_aggregates_pr_age_and_entity_refs() -> None:
                         "title": "Stabilize rollout for WI:12345",
                         "status": "active",
                         "creationDate": "2026-05-02T08:00:00Z",
-                        "repository": {"id": repository_id, "name": "XStoreApp"},
+                        "repository": {"id": repository_id, "name": "ExampleApp"},
                     },
                     {
                         "pullRequestId": 302,
                         "title": "Tune validation gates",
                         "status": "active",
                         "creationDate": "2026-05-08T08:00:00Z",
-                        "repository": {"id": repository_id, "name": "XStoreApp"},
+                        "repository": {"id": repository_id, "name": "ExampleApp"},
                     },
                 ]
             return []
@@ -188,7 +188,7 @@ def test_execute_ado_pr_kpi_query_aggregates_pr_age_and_entity_refs() -> None:
         summarize_pull_requests_fn=lambda **kwargs: {
             "metadata": {
                 "repository_id": kwargs["repository_id"],
-                "repository_name": "XStoreApp",
+                "repository_name": "ExampleApp",
                 "open_pr_count": 2,
             }
         },
@@ -204,7 +204,7 @@ def test_execute_ado_pr_kpi_query_aggregates_pr_age_and_entity_refs() -> None:
     assert len(rows) == 1
     assert rows[0]["P90AgeDays"] == 10.0
     assert rows[0]["OpenPrCount"] == 2
-    assert rows[0]["EntityRefs"] == ["PR:XStoreApp/301", "WI:12345", "PR:XStoreApp/302", "WI:67890"]
+    assert rows[0]["EntityRefs"] == ["PR:ExampleApp/301", "WI:12345", "PR:ExampleApp/302", "WI:67890"]
 
 
 def test_build_kusto_kpi_signals_records_query_state_and_entity_refs() -> None:
@@ -281,7 +281,7 @@ def test_build_kusto_kpi_signals_records_kusto_errors_via_callback() -> None:
         queries=(
             KustoQuery(
                 id="latency-p50",
-                cluster="https://adventure.kusto.windows.net",
+                cluster="https://kusto.example.invalid",
                 database="ExampleDb4",
                 kql="Metrics | take 1",
                 section="Performance",

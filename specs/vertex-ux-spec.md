@@ -769,6 +769,7 @@ The narrative archetype (`archetypes/narrative.j2`) is used by Platform and simi
 - **No `ordered_sections` dispatch** — uses flat loops
 - **No scorecard partial** — workstreams render directly
 - **Exec summary at end** — after workstreams, not before
+- The flat narrative template omits an executive summary explicitly named in `removed_sections`, including any chart attached to that section.
 - Verbosity: narrative editions currently target a 200-word executive summary and 150-word blurbs through the current edition-aware verbosity rules, with per-program overrides available via `editorial_rules.yaml`.
 
 ---
@@ -973,7 +974,9 @@ If `trend_description` (mapped from `KustoSectionData.message`) is absent:
 ```
 
 When `reference_url` is absent, `#` is used as the fallback. Charts are never inlined as images in Teams output.
-The same summary applies to chart members of the existing Fleet Parity group.
+The same summary applies to chart members of the existing Fleet Parity group and
+to charts routed to the executive summary or a visible workstream, within their
+respective sections.
 
 
 ## §11 Freshness Report
@@ -1602,6 +1605,8 @@ The `gather-run.v1` manifest lifecycle (§11.3, Tech Spec) is invisible to progr
 
 Independently of manifest mode, a failed sprint-capacity fetch appears in gather's optional integration failures as `sprints/capacity` with safe retry guidance and exit 2 unless required-scope degradation takes precedence; usable sprint summaries remain available (RELO-W2.4e). The diagnostic omits provider error text and team/iteration identities. A successful empty capacity response is not a failure. Watch currently provides only a generic warning, not a structured capacity-failure result.
 
+For an ordinary program-backed report in `enforce` mode, an ineligible retained fact blocks the report before reseeding or rendering. The diagnostic directs the operator to inspect provenance, gather evidence and the legacy cutoff without exposing fact content; it does not automatically repair the evidence.
+
 An analytics channel failure also marks its `ado/analytics` ingestion record failed with a generic explanation (RELO-W2.4f). New failures caught by gather show a safe message and retry guidance instead of provider details; snapshot retry warnings omit provider text and field names (RELO-W2.4g). Replaying the same diagnostic at the same timestamp does not add another signal, but each gather still reports its failure (RELO-W2.4h). Historical records and direct loader exceptions are unchanged.
 
 **`vertex gather --program <id> --source-export <scope_id>=<count>`** (repeatable): records an operator-verified ADO source-export/UI membership count for one full-scope binding, reconciling that scope's committed `query_results` entry beyond the weak same-endpoint-rerun default. This is the order-2 completeness-oracle proof (§4.3); order-1 (an independent Kusto/OData validation query) remains explicitly deferred and is never fabricated from order-2 evidence.
@@ -1775,6 +1780,12 @@ Horizontal scroll with `-webkit-overflow-scrolling: touch`.
 
 ## §17 Rendering Test Checklist
 
+The automated PR lane executes deterministic golden, privacy, attribution,
+editorial, accessibility-structure, and performance checks for this checklist.
+Automated success does not replace real default/projector dry-run visual review
+or applicable Outlook client qualification; those remain separately authorized
+promotion evidence.
+
 ### 17.0 Chart Pipeline Checklist
 
 | Test | Spec ref |
@@ -1919,6 +1930,7 @@ Pass condition: generated cards stay within body/action limits, preserve risk em
 - A failed lineage read is not "no facts": terminal data trust shows `lineage unavailable (read failed)`, while JSON and HTML retain unknown coverage with the blocked `intelligence.lineage.read_failed` explanation and manual diagnostic guidance. Successful-empty lineage remains `not measured yet` with an informational finding. Known program risk and independently released synthesis remain visible; raw exception messages are not rendered.
 - Failed earned-autonomy state is unavailable trust with the blocked `trust.autonomy_ladder.read_failed` explanation, not L0, zero reviews or "not evaluated." Fresh and retained JSON/terminal/HTML/TUI keep the finding and independent business risk; guidance is manual inspection, not automatic repair or promotion (RELO-W0.15n).
 - Fresh actuation-journal diagnostics distinguish observed exact-status counts from unavailable evidence: the three reliability counts are JSON `null` when the selected journal is absent or cannot be inspected safely. Under the strict no-write policy, WAL-mode journals and any journal with SQLite sidecars are left unread and shown as unavailable. Absence is informational; unsafe or invalid evidence and observed uncertain, dead-letter, terminal-failure or compensation-required states use existing warnings. Findings omit payloads, failure reasons, raw exceptions and private paths. They do not imply provider reconciliation or a complete current exception inbox (RELO-W4.12c).
+- The local `cockpit exceptions` output names the risk register and action journal when not detected at their respective checks, without paths or a completeness claim. A checked path can change before it is read; the diagnostic does not establish accessibility or freshness. Its date applies to current files, not a reconstruction of historical state; both the output and option help say so.
 - Invalid or unrecognized application receipts, or a schema-invalid release decision matched to a consumed run, make OM-4 audit coverage unavailable, with a content-free explanation in the existing cockpit finding rather than a measured subset. A partial ratio must not round to false zero or perfect coverage, and measured explanations identify recorded consumption and latest terminals. Valid no-consumption presentation is unchanged (RELO-W0.15q, RELO-W0.15s).
 - No formal §17 acceptance-mapping ID exists for this surface yet. Golden snapshots (`tests/golden/test_cockpit_html_golden.py`) and automated accessibility checks provide regression coverage, not independent audit certification. Record actual client-validation evidence, audit results, and any approved limitations privately; do not imply that automated coverage satisfies an independent human audit.
 - Retained show/explain (`--as-of`, with `explain --finding <id>`) labels the actual snapshot time and “Current source and action state not evaluated.” Blocked findings precede warnings in stable recorded order; every exception ID and its evidence remain reachable, including findings without a command. The action glance has at most three distinct commands; other findings remain available separately. No exceptions means “No blocked/warn findings in this retained snapshot,” not current clearance. Commands are historical guidance requiring current CLI revalidation; absent confidence, current authority, expiry/escalation, diff and expected effect are explicitly unavailable. Missing history differs from unreadable/inconsistent history, which fails without fallback. System-status borders are neutral, long evidence/commands wrap, and HTML has no action controls. These bounded synthetic checks do not certify a current inbox, independent accessibility audit or operator proficiency (RELO-W4.12b).

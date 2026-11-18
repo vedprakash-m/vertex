@@ -470,10 +470,10 @@ def test_context_compiler_budget_negative_reservation_cannot_admit_overflow(tmp_
 
 @pytest.mark.parametrize(
     ("failure_call", "has_required"),
-    [(1, True), (2, True), (5, True), (6, True), (7, True), (8, True), (9, True), (8, False)],
+    [(1, True), (2, True), (5, True), (6, True), (7, True), (8, True), (4, False), (7, False)],
     ids=[
-        "required-span", "optional-span", "required-prompt", "separator",
-        "first-candidate", "second-candidate", "final", "prefix",
+        "required-span", "optional-span", "required-prompt", "first-candidate",
+        "second-candidate", "third-candidate", "empty-required-prompt", "rejected-candidate",
     ],
 )
 @pytest.mark.parametrize(
@@ -700,6 +700,7 @@ def test_optional_packing_excludes_span_over_rendered_budget(
 def test_optional_packing_estimates_linear_input_volume(tmp_path: Path) -> None:
     class CountingEstimator:
         tokenizer_id = "counting"
+        incremental_estimates = True
 
         def __init__(self) -> None:
             self.lengths: list[int] = []
@@ -727,8 +728,10 @@ def test_optional_packing_estimates_linear_input_volume(tmp_path: Path) -> None:
 def test_optional_rendered_overflow_rejects_before_manifest_persistence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, alert_error: type[Exception] | None,
 ) -> None:
+    # Declares incremental while being non-additive: exercises the QG-32 final-render backstop.
     class BoundaryEstimator:
         tokenizer_id = "boundary-overhead"
+        incremental_estimates = True
 
         def estimate(self, text: str) -> int:
             return len(text) + (5 if "\n\n[EVIDENCE opt " in text else 0)
@@ -780,6 +783,7 @@ def test_budget_alert_failure_is_visible_without_masking_rejection(
 ) -> None:
     class BoundaryEstimator:
         tokenizer_id = "boundary-overhead"
+        incremental_estimates = True
 
         def estimate(self, text: str) -> int:
             return len(text) + (5 if "\n\n[EVIDENCE opt " in text else 0)

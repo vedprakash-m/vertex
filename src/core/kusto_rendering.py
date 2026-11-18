@@ -344,6 +344,17 @@ def _build_degraded_section(query: KustoQuerySettings, *, message: str) -> Kusto
     return _build_table_section(query, (), message=message, degraded=True)
 
 
+def build_offline_kpi_chart_sections(settings: KustoSettings) -> tuple[KustoSectionData, ...]:
+    # Offline runs never query Kusto, so required KPI charts do not gate publish (matches golden-query charts).
+    if not settings.enabled:
+        return ()
+    return tuple(
+        _build_table_section(dataclasses.replace(query, chart_blocks_publish=False), (), message="Unavailable", degraded=True)
+        for query in settings.queries
+        if query.kpi_chart
+    )
+
+
 def _table_rows(rows: tuple[dict[str, Any], ...]) -> tuple[tuple[KustoTableCell, ...], ...]:
     if not rows:
         return ()

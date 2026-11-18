@@ -555,6 +555,40 @@ def test_non_dispatch_release_preserves_other_reservations_and_records_identity(
         ).fetchall() == [(released.reservation_id,)]
 
 
+def test_chain_reservation_draws_attempts_and_releases_only_unused_remainder(tmp_path: Path) -> None:
+    guard = CostGuard(edition=EDITION_NAME, run_id="chain", budget_usd=1.0, programs_root=tmp_path)
+    settled = guard.reserve_call(0.3, chain_total_usd=0.9)
+    with pytest.raises(BudgetExceeded):
+        guard.reserve_call(0.2)
+
+    uncertain = guard.reserve_call(0.3, chain=settled)
+    assert guard.current_state().reserved_usd == pytest.approx(0.9)
+    guard.reserve_call(0.3, chain=settled)
+    with pytest.raises(StateError, match="chain"):
+        guard.reserve_call(0.01, chain=settled)
+    with pytest.raises(StateError, match="chain"):
+        guard.reserve_call(0.2, chain_total_usd=0.1)
+    guard.settle_call(settled, 0.1)
+    state = guard.release_chain(settled)
+
+    assert (state.spent_usd, state.reserved_usd, state.ai_calls) == pytest.approx((0.1, 0.6, 1))
+    with pytest.raises(StateError):
+        guard.reserve_call(0.0, chain=settled)
+    with pytest.raises(StateError):
+        guard.release_chain(settled)
+    with sqlite3.connect(guard.ledger_path) as connection:
+        assert connection.execute(
+            "SELECT status, ROUND(reserved_usd, 9) FROM ai_cost_reservations ORDER BY reservation_id"
+        ).fetchall() == [("settled", 0.3), ("reserved", 0.3), ("reserved", 0.3)]
+        assert connection.execute(
+            "SELECT chain_id, status, ROUND(reserved_usd, 9) FROM ai_cost_chains"
+        ).fetchall() == [(settled.chain_id, "released", 0.0)]
+        assert connection.execute(
+            "SELECT COUNT(*) FROM ai_cost_chain_draws WHERE chain_id = ?", (settled.chain_id,)
+        ).fetchone() == (3,)
+    assert uncertain.chain_id == settled.chain_id
+
+
 def test_non_dispatch_release_rolls_back_if_marker_insert_fails(tmp_path: Path) -> None:
     guard = CostGuard(edition=EDITION_NAME, run_id="release-rollback", budget_usd=1.0, programs_root=tmp_path)
     reservation = guard.reserve_call(0.4)

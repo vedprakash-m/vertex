@@ -1,5 +1,33 @@
 # Changelog
 
+## 2026-11-17
+
+| Feature | Change |
+|---|---|
+| Test and CI lane optimization | Replace implicit `-n auto` with explicit measured workers, separate deterministic, live, operator and performance selections, run offline replay/REV tests by default, and optimize cache, AST, fixture and nested-isolation setup. Add duration-balanced disjoint shards, exact critical-test evidence, full combined line/branch coverage, a no-regression whole-source ratchet, changed-code coverage, a fail-closed aggregate, Windows/macOS qualification, pinned actions, a public frozen lock, and bounded privacy/secret scanning. |
+
+Modified files: `pyproject.toml`, `governance/test-policy.json`, `governance/test-file-timings.json`, `.github/actions/setup-vertex/action.yml`, `.github/workflows/ci.yml`, `.github/workflows/scale.yml`, `scripts/partition_tests.py`, `scripts/derive_test_file_timings.py`, `scripts/check_test_evidence.py`, `scripts/check_spec_bulk_deletion.py`, `scripts/check_publication_content.py`, and the canonical specifications. Tests: `tests/contracts/test_ci_optimization_policy.py`, `tests/unit/test_partition_tests.py`, `tests/unit/test_test_evidence.py`, `tests/unit/test_publication_content_scan.py`, and updated CI contracts.
+
+| Feature | Change |
+|---|---|
+| Cockpit exception inspection, partial | Disclose that risk exceptions use the register rather than primary judgment facts, and that only the current action journal is read so rotation or pruning can omit actions or leave statuses stale. Label an identified date correctly when a stale risk has no review date. Source authority, journal reads, risk staleness and completeness remain unchanged. |
+| WorkIQ timestamp containment, partial | Reject an invalid validated source time before uncached thread extraction rather than substituting the retrieval clock. Window admission and undated-evidence handling remain unchanged. |
+
+Modified files: `src/commands/cockpit.py`, `src/core/exception_queue.py`, `specs/vertex-tech-spec.md`. Tests: `tests/unit/test_exception_queue.py`.
+
+WorkIQ timestamp containment: `src/m365/workiq_retriever.py`, `specs/vertex-tech-spec.md`. Tests: `tests/unit/test_workiq_retriever_identity.py`.
+
+## 2026-11-16
+
+| Feature | Change |
+|---|---|
+| Cockpit exception inspection, partial | Identify risk and action inputs not detected when checked, reject non-`YYYY-MM-DD` dates before queue reads, clarify that date checks use current files rather than historical replay, and skip root AI-mode reset, tier-sink registration, maintenance and catch-up for this read-only subcommand. Input accessibility, freshness, complete exception coverage and pre-dispatch environment loading remain unqualified. |
+| Report preview refusal | Skip root startup effects when `report` or `draft` receives both `--dry-run` and `--send-draft`, while retaining the command's error precedence and normal startup for other invocations. |
+
+Modified files: `cli.py`, `src/commands/cockpit.py`, `specs/vertex-tech-spec.md`, `specs/vertex-ux-spec.md`, `tests/contracts/cli_reference_snapshot.md`. Tests: `tests/unit/test_exception_queue.py`.
+
+Report preview refusal: `cli.py`, `specs/vertex-tech-spec.md`. Tests: `tests/unit/test_commands_report.py`.
+
 ## 2026-11-14
 
 | Feature | Change |

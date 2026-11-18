@@ -159,7 +159,7 @@ def mail_preview_check(
     return DoctorCheck(
         "Mail Preview",
         "ok",
-        "Graph preview-send prerequisites are present; use `vertex draft --edition myprogram_weekly --dry-run --send-draft` for Outlook validation.",
+        "Graph preview-send prerequisites are present; use `vertex draft --edition myprogram_weekly --send-draft` for Outlook validation. This non-dry run may write local run state.",
     )
 
 

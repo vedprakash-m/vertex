@@ -80,6 +80,7 @@ def test_find_program_capability_status_returns_none_for_unknown_id(tmp_path: Pa
     assert find_program_capability_status(statuses, "nonexistent_cap") is None
 
 
+@pytest.mark.operator
 @pytest.mark.skipif(not _LIVE_CAPABILITY_STATUS_EXISTS, reason="Requires local capability_status.yaml")
 def test_live_capability_status_yaml_has_all_required_ids() -> None:
     """Live file must declare all three Phase-1 capability IDs (any status)."""
@@ -93,6 +94,7 @@ def test_live_capability_status_yaml_has_all_required_ids() -> None:
         )
 
 
+@pytest.mark.operator
 @pytest.mark.skipif(not _LIVE_CAPABILITY_STATUS_EXISTS, reason="Requires local capability_status.yaml")
 def test_live_ado_activation_is_complete() -> None:
     """ado_activation must be complete (A8 done)."""
@@ -102,6 +104,7 @@ def test_live_ado_activation_is_complete() -> None:
     assert status.status == "complete", f"ado_activation is {status.status!r} — A8 not yet done"
 
 
+@pytest.mark.operator
 @pytest.mark.skipif(not _LIVE_CAPABILITY_STATUS_EXISTS, reason="Requires local capability_status.yaml")
 def test_live_kusto_activation_is_complete() -> None:
     """kusto_activation must be complete (B15 closed 2026-05-19)."""
@@ -111,6 +114,7 @@ def test_live_kusto_activation_is_complete() -> None:
     assert status.status == "complete", f"kusto_activation is {status.status!r} — B15 not yet closed"
 
 
+@pytest.mark.operator
 @pytest.mark.skipif(not _LIVE_CAPABILITY_STATUS_EXISTS, reason="Requires local capability_status.yaml")
 def test_live_m365_activation_is_complete() -> None:
     """m365_activation must be complete (E5 closed 2026-05-19)."""

@@ -76,9 +76,29 @@ def test_enum_from_string_parses_canonical_values(enum_type: type, value: str | 
     assert enum_type.from_string(value) == expected
 
 
+@pytest.mark.parametrize(
+    ("enum_type", "valid_values", "uppercase_fallback", "fallback"),
+    (
+        (RiskLevel, {"blocked", "high", "medium", "low", "done", "unknown"}, "UNKNOWN", RiskLevel.UNKNOWN),
+        (Confidence, {"high", "medium", "low", "none"}, "NONE", Confidence.NONE),
+    ),
+)
+def test_enum_fallback_configuration_is_not_a_member(
+    enum_type: type, valid_values: set[str], uppercase_fallback: str, fallback: object
+) -> None:
+    assert {member.value for member in enum_type} == valid_values
+    assert enum_type(uppercase_fallback) is fallback
+    with pytest.raises(ValueError):
+        enum_type("NOT_A_MEMBER")
+    assert enum_type.from_string(uppercase_fallback) == fallback
+    assert enum_type.from_string("not-a-member") == fallback
+
+
 def test_review_state_from_string_rejects_unknown_values() -> None:
     with pytest.raises(ValueError):
         ReviewState.from_string("not_a_state")
+    with pytest.raises(ValueError):
+        ReviewState("PENDING")
 
 
 @pytest.mark.parametrize("cls", FROZEN_MODEL_CLASSES + FROZEN_VIEW_MODEL_CLASSES)

@@ -332,14 +332,14 @@ def test_build_approved_telemetry_summary_includes_open_pull_request_pressure() 
         source="ado/pr",
         program_id="acme",
         workstream_id="deployment_readiness",
-        entity_refs=("PR:XStoreApp/301",),
+        entity_refs=("PR:ExampleApp/301",),
         text="Deployment Readiness: pull request summary",
         raw_ref="ado-pr:deployment_readiness:repo-42:2026-05-10",
         confidence=Confidence.HIGH,
         metadata={
             "repositories": [
                 {
-                    "repository_name": "XStoreApp",
+                    "repository_name": "ExampleApp",
                     "open_pr_count": 2,
                     "p90_age_days": 10.0,
                     "oldest_pr_id": 301,
@@ -354,7 +354,7 @@ def test_build_approved_telemetry_summary_includes_open_pull_request_pressure() 
 
     assert summary == (
         "sprint, Sprint 24, 50% complete, 1 open; "
-        "pull requests, XStoreApp, 2 open PRs, P90 age 10.0d, oldest #301 10.0d"
+        "pull requests, ExampleApp, 2 open PRs, P90 age 10.0d, oldest #301 10.0d"
     )
 
 

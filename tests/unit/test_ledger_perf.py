@@ -6,6 +6,7 @@ Dev loop: excluded by the default "not perf" selection.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -19,6 +20,7 @@ from src.core.ledger.event_log import (
     write_events_atomic,
 )
 from src.core.ledger.program_views import project_program_events
+from src.core.ledger import program_views
 from src.core.ledger.source_refs import LTDeckRef
 
 
@@ -52,7 +54,7 @@ def test_replay_budget_is_in_performance_lane() -> None:
 
 @pytest.mark.perf
 @pytest.mark.slow
-def test_replay_perf_50k(tmp_path: Path) -> None:
+def test_replay_perf_50k(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Full-log replay of a 50K-event synthetic program must complete in < 60 s (NFR-3).
 
     Strategy: build all envelopes in memory, write in a single atomic batch
@@ -90,11 +92,26 @@ def test_replay_perf_50k(tmp_path: Path) -> None:
         max_bytes=512 * 1024 * 1024,  # 512 MB cap: no mid-batch rotation
     )
 
+    held_seconds: list[float] = []
+    writer_fence = program_views._projection_writer_fence
+
+    @contextmanager
+    def measured_writer_fence(*args, **kwargs):
+        with writer_fence(*args, **kwargs):
+            held_start = time.monotonic()
+            try:
+                yield
+            finally:
+                held_seconds.append(time.monotonic() - held_start)
+
+    monkeypatch.setattr(program_views, "_projection_writer_fence", measured_writer_fence)
     # Measure full projection replay (NFR-3 budget: < 60 s)
     start = time.monotonic()
     project_program_events(program_id, programs_root=programs_root)
     elapsed = time.monotonic() - start
 
+    assert len(held_seconds) == 1
+    print(f"50K replay: {elapsed:.2f}s; projection fence held: {held_seconds[0]:.2f}s")
     assert elapsed < 60.0, (
         f"50K event replay took {elapsed:.2f}s, exceeds the 60s NFR-3 budget; "
         "check projection algorithm for O(n²) regressions"

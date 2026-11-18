@@ -8,6 +8,8 @@
 
 ## Changelog
 
+- Last updated: 2026-11-17 — Disclose the current-segment-only action journal limitation in cockpit exceptions (§16.5).
+- Last updated: 2026-11-16 — Skip unrelated root startup effects for the read-only cockpit exception queue (§16.5).
 - Last updated: 2026-11-14 — Refuse invalid active reservation amounts during amount-only tracked-match settlement; ownership, reconciliation and scan performance remain unqualified (§12.5).
 - Last updated: 2026-11-14 — Refuse ambiguous or changed amount-only cost-reservation matches before settlement; ownership and reconciliation remain unqualified (§12.5).
 - Last updated: 2026-11-14 — Reuse the Agg canvas across declarative chart layout and saving (§8.3).
@@ -296,7 +298,7 @@ this does not change missing/empty policy, fence later changes, or qualify INV-2
 
 **Selected knowledge scopes (RELO-W2.8z):** Assessment loads claim revisions with the scope tuple it has already selected and retained, using the existing scoped reader and canonical shared root. It does not reselect scopes from program configuration between those two steps. A later configuration edit cannot silently remove already selected claims from that assessment; initially selected-input failures still propagate. This reuses one selection, not a whole-configuration freeze, authorization proof or complete replay contract.
 
-**Persisted fact-authority assessment fence (RELO-W2.9a):** The ordered `ProgramReality.load()` fence also includes only the selected program's `fact_store_sor.yaml`; the existing `save_fact_sor_state()` writer holds the same resource through its write. This prevents a cooperating state update from splitting program-mode and family-mode reads across different persisted generations. The environment override retains its existing precedence and semantics. Empty state lock sidecars may remain after assessment. The fence does not cover environment mutation, other configuration or authority inputs, policy, committed-run generation, outside editors, or non-cooperating writers and does not qualify whole-input capture.
+**Persisted fact-authority assessment fence (RELO-W2.9a):** The ordered `ProgramReality.load()` fence also includes only the selected program's `fact_store_sor.yaml`; the existing `save_fact_sor_state()` writer holds the same resource through its write. The writer stages the complete YAML in the same directory and replaces the selector, so unfenced readers do not observe a partially written selector during a cooperating save; replacement failures propagate without replacing the prior selector. On Windows, selector reads and replacements retry transient permission failures with bounded backoff and surface persistent failures. This prevents a cooperating state update from splitting program-mode and family-mode reads across different persisted generations. The environment override retains its existing precedence and semantics. Empty state lock sidecars may remain after assessment. The fence does not cover environment mutation, other configuration or authority inputs, policy, committed-run generation, outside editors, or non-cooperating writers and does not qualify whole-input capture.
 
 **Program configuration reuse in assessment (RELO-W2.9b):** When committed-gather mode is not explicitly overridden, `ProgramReality.load()` parses the selected `Program` once and reuses that object for both gather activation and knowledge-scope selection. `Program.knowledge_scopes` preserves the existing top-level and nested scope parsing. An explicit gather override continues to bypass strict program parsing and uses the existing scope-only loader. This removes one internally inconsistent repeated read; it adds no file lock, configuration freeze, policy binding or complete capture claim.
 
@@ -318,6 +320,8 @@ The deterministic implementation is materially ahead of the old feature backlog 
 ### 1.4 Data Flow
 
 > **UIL note (2026-06-02):** The Gather Phase ADO path now uses UIL by default. `ADODiscoveryProvider` + `ADOHydrationProvider` replace the removed OData broad-sweep and legacy `_load_freshness_program_items` path; signals are produced by `ADOSignalExtractor` with `source="ado"`. Kusto/Teams/IcM gather paths remain separately env-gated.
+
+**ADO hydration checkpoints (RELO-W2.3, W2.9):** `ado_hydration_checkpoints(work_item_id, subresource ∈ {revisions, comments, relations, attachment_meta}, schema_version, cursor, updated_at)` holds one row per (work_item_id, subresource) and replaces the combined `last_verified_at` watermark for detail-fetch decisions. Rows advance only via `ChannelRegistryStore.mark_verified(checkpoint_advances=…)` in the same SQLite transaction as verification, and never on `--dry-run`. A missing row or older `schema_version` reads as `unknown` and forces full rehydration of that subresource. Relation and attachment cursors are content fingerprints, not paging cursors. `attachment_meta` is metadata only; attachment content is never fetched.
 
 ```
 Gather Phase:
@@ -401,6 +405,11 @@ class AttributionTier(EnumParserMixin, str, Enum):
     TIER2 = "tier2"
     TIER3 = "tier3"
 ```
+
+For compatibility with values exposed by older releases, `RiskLevel("UNKNOWN")`
+and `Confidence("NONE")` resolve to the canonical lowercase-valued members.
+Other invalid constructor values are rejected; `from_string` retains its
+configured fallback behavior.
 
 ### 2.2 ADO Primitives
 
@@ -1698,10 +1707,37 @@ configured goal lines; stacked-bar and combined charts keep the initial
 render. The declarative renderer reuses an Agg canvas for layout and saving
 on each figure. The final PNG is also refused if it exceeds 102,400 bytes.
 
-When charts are enabled, QG-20/21/22 run for explicit chart settings, active
+In ordinary draft validation, when charts are enabled, QG-20/21/22 run for explicit chart settings, active
 chart queries, rendered chart sections, or required chart failures retained
 before fallback. With no chart settings and no active chart work, they are
-omitted. Disabled charts do not run these gates.
+omitted. Disabled charts do not run these gates. Confirmation retains an
+explicitly failed draft QG-21 or QG-22 as a non-forceable failure and refuses
+malformed recorded chart-gate results. Ordinary enabled-chart drafts retain
+compact freshness fields for degraded publish-blocking sections from the
+pre-routing and pre-fallback gate inputs in manifest metadata. When the draft
+is written, a digest in its state binds that evidence, the recorded QG-21/22
+results, the manifest identity, the effective edition type, post-routing
+Kusto sections and routed-away chart sections. The manifest records the routing
+capture version and type so confirmation can refuse a
+changed draft type without disallowing a report's edition-type override.
+Confirmation refuses a mismatch, chart evidence without the digest, or an ordinary draft's
+recorded QG-22 pass without either artifact, and requests draft regeneration.
+When the draft recorded a passing QG-22, confirmation checks those fields and retained
+post-routing sections against their capture timestamp and TTL at confirmation
+start and again under the archive evidence fence before checkpoint and snapshot
+writes. A failure at the fence blocks with CLI exit 3. It refuses invalid present
+blocking flags, degradation flags for blocking sections, and freshness fields
+for degraded blocking sections. This is negative-only containment: the retained
+binding is a consistency check, not authentication, and legacy or lookback
+evidence may be absent. Older chart bindings do not include the effective edition type or routed
+sections. Removing the evidence, its reference and type marker while
+changing the draft type to lookback can still resemble an older lookback draft;
+without a recorded QG-22 pass, removing both evidence and its reference is
+indistinguishable from an older unbound draft.
+Passing or absent results do not establish confirmation-time eligibility;
+QG-20 and QG-21 are not re-evaluated. A chart may expire after the fence check
+and before archive completion. Complete evidence provenance, legacy handling,
+other layout placement and full confirmation-time evaluation remain unresolved.
 
 #### Placement Routing (render_stage.py)
 
@@ -1709,6 +1745,21 @@ omitted. Disabled charts do not run these gates.
 - `"workstream:<ws_id>"` → `WorkstreamData.attached_charts`
 - `"exec_summary"` → `RenderContext.exec_summary_chart` (at most one)
 - `"standalone"` → normal `kusto_sections` list
+
+For ordinary chart-bound dashboard drafts, confirmation restores retained chart
+images and replays executive-summary and matching visible-workstream placements.
+In draft and confirmation, a chart targeting a missing or invisible workstream
+falls back to standalone; this can change its placement and order at confirmation.
+Draft and confirmation can reconstruct different dashboard chapter rosters, so a
+reviewed chapter chart may fall back even when its draft target was visible.
+Confirmation applies the current `removed_sections` render filter, so a routed
+executive chart hidden with its section is not reintroduced after review.
+The narrative HTML template also honors explicit executive-summary removal
+for a chart attached to that section.
+Existing standalone chart fields are also restored for legacy drafts, which
+cannot recover previously discarded routed sections. The confirmation
+chart-cache index still uses post-routing sections and live cache entries; it
+does not establish complete routed-chart provenance.
 
 The HTML chart partials use the registered UTC `format_datetime` filter for
 capture and cache timestamps. Their alt text retains `{title} chart` when
@@ -2161,6 +2212,21 @@ def load_current_action_items(program_id, ...) -> tuple[ActionItem, ...]
 # ... analogues for risk_entries, dependencies, decision_entries, assumptions, milestones, workstreams
 ```
 
+**Risk lifecycle fields (RELO-W4.3, partial):** `RiskEntry` carries eight optional
+string fields (`dedupe_key`, `supersedes`, `superseded_by`, `escalation_state`,
+`contingency_trigger`, `residual_risk`, `outcome`, `effectiveness`), all defaulting
+to `None` and omitted from register YAML and fact payloads when unset, so existing
+registers and content hashes stay byte-identical. `src/core/risk_dedupe.py`
+derives `dedupe_key` from the normalized title, lowercased owner and sorted work
+item IDs, and `detect_risk_duplicates` returns sorted observe-only findings
+(duplicates, supersede chains, cycles, dangling references) without mutating or
+dropping risks. Archive/merge workflow, reporting consumers, and the separate
+`program_context.RiskEntry` remain open.
+
+**ADO actuation outbox (RELO-W5.1, partial):** Only `create_task.v1` is dispatchable through the actuation outbox. `add_comment`, `add_tag` and `set_field` retain their existing direct-write path pending an owner ruling and operation-specific reconciliation; tag removal/replacement also call ADO directly. Uncertain create-task effects are reconciled only by marker lookup, never by blind resend.
+
+**Action-extraction parity (RELO-W4.5, partial):** `src/core/action_extraction_parity.py` provides a pure observe-only checker that normalizes outputs of the meeting and signal action-extraction pipelines and reports `missing_in_a`, `missing_in_b`, `owner_mismatch` and `due_mismatch` findings. Characterization tests pin the current pipeline differences; no pipeline is consolidated yet and the checker is not wired into any report.
+
 **Snapshot gather provenance (RELO-W2.3, partial):** When persisting a fact
 snapshot, pass each fact's `gather_run_id` to newly created, superseding or
 proposed revisions; unstamped facts remain unstamped. An equivalent revision
@@ -2349,7 +2415,7 @@ All 13 data-model quality gates are registered and enforced. Hard-block gates en
 **Operational contract:**
 - JSONL is authoritative; SQLite artifacts (`<id>-index.sqlite3`, `current.sqlite3`) are rebuildable caches/projections.
 - **Projection input binding (RELO-W2.10c):** Schema version 2 / projector version 5 bind cache reuse to deterministic visible-event representations and program identity, both bitemporal filters, and the acknowledged-gap ID set. Capture triage decisions once and use that same tuple for admission and projection. Changed/contracted history, missing watermark/stamps, old schema (including absent columns), changed filters/acknowledgements or unroutable deltas rebuild before reuse. Supported bounded append-only deltas remain incremental; affected event-owned links/shadows are replaced, orphan links recomputed, and field-lock controls are excluded from domain provenance. Watermark and input stamps commit with derived rows; a failed incremental fold rolls back. Full SQLite and memory projections emit equivalent metadata. Four golden metadata rows change only versions and added digests, preserving all entity/evidence data. This does not seal source writers, qualify full-rebuild concurrency, implement shared verdict invalidation or establish scale/resource budgets.
-- **Incremental projection contention:** An incremental fold checks its selected projection metadata, excluding `built_at`, under `BEGIN IMMEDIATE` and raises `ProjectionConflictError` without applying the fold if the base changed. The automatic post-write hook rereads the event log and retries one conflict; on repeated failure it logs the error without undoing the persisted event. Direct callers receive the conflict without replacing supplied or historical inputs. Full rebuilds replace the database file and are not fenced by this transaction; full-rebuild concurrency and operational qualification remain open.
+- **Projection writer contention:** Cooperating full and incremental builders acquire the program-ledger capture fence, then a resolved-target writer lock, before selecting or validating inputs and hold them through commit or replacement. Supplied events for the current target must match the authoritative visible events at the requested cutoffs; explicitly supplied acknowledgements must match the current acknowledged-gap set. Mismatches raise `ProjectionConflictError` without replacing the target. Explicit noncurrent targets retain supplied-input semantics. A historical replay remains historical and can replace the current target; gap decisions are not historically filtered. Full builds use unique same-directory temporary files. Incremental folds also check their selected projection metadata, excluding `built_at`, under `BEGIN IMMEDIATE`. The automatic post-write hook rereads the event log and retries one conflict; on repeated failure it logs the error without undoing the persisted event. Direct callers receive the conflict. The five-second capture-fence timeout can refuse event or triage operations during a long replay; this coordination does not qualify noncooperating or cross-host writers, open-reader/WAL replacement, crash recovery, shared verdict invalidation or operational scale.
 - **Dependency replacement parity (RELO-W2.10a):** Incremental projection removes links owned by historical declaration event IDs for affected dependency IDs inside its existing transaction before re-folding. Endpoint-based deletion is not used: unrelated dependencies sharing endpoints retain their links. Projector version 3 forces the existing full-rebuild fallback for older materializations, including replay with no new events. Authoritative events, schema, external checkpoint stores and the separate ProgramReality projection remain unchanged; this is not complete verdict-cache invalidation.
 - `vertex ledger replay` and `vertex ledger verify` operate over the append-only log, not the projection database.
 - `vertex backup` recursively captures the ledger files under its existing `programs/`, `knowledge/` and `editions/` roots, including event logs, candidate audit, projections, snapshots and evidence-vault artifacts. This fixed root subset is not a complete workspace/store inventory.
@@ -2416,6 +2482,8 @@ it does not extend to other ledger stores or repair historical records.
 **Retained create-reference follow-through:** `ADOUpdateEntry` appends optional defaulted `outbox_id`, serialized as a nullable manifest field and preserved by replay/adoption; missing legacy fields upcast to None, supplied nonstring/blank values raise explicit `ValueError`. The writer constructs its key/payload once for both first-create and recovery, persisting reference/intent/time before enqueue/dispatch. A referenced entry enters recovery even if attempted time is unavailable; missing intent refuses before generating one. Before provider reads, current key must equal the reference and read-only `load_entry` must find an exact actuation-domain/correlation/payload match. Missing row or changed proposal/destination/intent/payload refuses without queue mutation. Legacy reference-free recovery remains supported but outside this binding guarantee; no backfill, new database schema, authenticated reference, downgrade prevention, reconciliation receipt or unknown closeout. A crash before enqueue leaves missing retained evidence requiring explicit reconciliation, never an inferred safe retry.
 
 **Create missing-review repair:** The existing audit helper retains duplicate-fingerprint suppression, but an exact existing create signal ID with no stored review proceeds to the existing `append_review` call without appending/replacing the signal. Any existing review causes return, preserving approved/dismissed/deferred decisions and their actor/time/note. Non-create duplicates and fingerprint duplicates without exact ID remain suppressed. A missing review is recorded at verified recovery time using the existing system audit-review policy; it is not provider execution approval. Store failures propagate before manifest application, permitting another verified rerun without a remote create. Actual JSONL/SQLite first-create signal-write/review-failure tests preserve completed outbox evidence and restore one review after retained-intent/readback gates. No schema, historical sweep, applied-manifest repair, atomic transaction, authenticated review authority or outbox closeout is added.
+
+**Effect identity and first binding (RELO-W5.1, W5.8; W5.3 partial):** Each actuation effect has a deterministic `effect_id_v1`. The `outbox_effects` table binds an effect to its first outbox row; a later row cannot rebind it. Effect states are `intent → dispatched → confirmed`, or `uncertain`. Only `create_task.v1` is dispatchable. An `uncertain` effect is reconciled only by marker lookup (ADO tag `vertex-intent-{effect_id}`), never by blind resend.
 
 - `program_checkpoint_manifest.py` — `ProgramCheckpointManifest` composes event-log position + `program_sequence` + `projection_checkpoint_store` + caller-supplied outbox watermarks/tracked-file hashes/schema versions into one content-addressed (self-hashing) checkpoint; `verify_manifest_against_disk()` detects drift between a captured manifest and current on-disk store state (the restore-drill check).
 - `src/core/quality_gates/gate_registry.py` — central `RESERVED_GATE_IDS` map + a code scanner (`scan_defined_gate_ids()`) so a new gate ID can be checked for collision before it's claimed. QG-29 is the fail-closed AI release-audit gate, live and enforced — see §12.1a.
@@ -2516,6 +2584,8 @@ Freshness reuses the selected program root for configuration, trusted baselines,
 **Discovery outcome degradation (RELO-W3.1a):** The shared UIL runtime retains discovery errors, aggregate partial completeness and incomplete/error scope status in its existing channel outcome, including when later hydration supplies usable items without errors. Both loader callback routes preserve that outcome into the committed manifest. Hydration-error precedence, successful-empty discovery, query sidecars and required-scope/FULL-pointer policy remain unchanged. This corrects contradictory healthy outcome metadata; it does not establish exact source coverage or introduce a publication gate.
 
 **Sprint-capacity failure visibility (RELO-W2.4e):** A caught capacity-query failure retains independently usable sprint signals but adds one safe `sprints/capacity` optional integration error, degrades the `sprints` channel outcome and marks the `ado/sprint` ingestion run failed. The error and warning omit provider text and team/iteration identities; the existing optional-error exit and retry guidance apply. Successful empty and zero-capacity results remain non-degraded, and required ADO scope policy is unchanged. Individual sprint metadata still uses null capacity for both failed and empty responses; watch retains only its warning, not a structured capacity-failure result. This does not establish source completeness or implement the sprint planner.
+
+**Sprint planner (`src/core/sprint_planner.py`):** A deterministic greedy fill of ADO story points, ordered by priority then work item ID, admitting an item only after its dependencies are admitted. Capacity is the median completed points of the last three sprints, or `Unknown` with fewer than three. Output states "Greedy, not optimal" and reports overcommit probability as `Unknown`.
 
 **Sprint snapshot fallback privacy (RELO-W2.4j):** When the filtered snapshot query fails with `QueryError`, the existing item-scoped fallback emits a fixed warning without the program ID or provider exception text. Query selection, item filtering, call counts, signals and propagation of fallback or unexpected exceptions are unchanged. Other provider diagnostics and historical records remain outside this correction.
 
@@ -2703,6 +2773,10 @@ dimensions, FleetReality/cockpit migration or source-freshness change.
 **Context successful replay (RELO-W4.11l):** Retain the existing final `applied` journal after success. A bound proposal with a completed journal returns `skipped_already_applied` before authored, changelog or decision-history writes, with or without an original current-value hash. A completed proposal identity cannot be reused for another update. Absent journals retain existing retry behavior; unreadable/malformed, wrong-identity or unknown-state journals explicitly return `needs_repair`, without replacing journal or authored bytes, including dry-run. This is sequential successful replay suppression, not concurrent apply fencing or exactly-once recovery across intermediate crashes.
 
 **Cooperative context apply serialization (RELO-W4.11n):** After approval admission, non-dry-run apply uses the installed `portalocker` with a bounded 30-second program-scoped `_ncfl_apply/_apply.lock`. Read/recheck the completion journal and perform authored/audit/status writes while holding that lock; queue mutation obtains its separate queue lock in apply-to-queue order. Keep the sidecar after release. Lock failure returns explicit repair before journal/authored mutation. Dry-run creates no apply lock; another program's apply is independent. This coordinates these apply callers only: approval revocation by independent queue writers, arbitrary authored editors, shared cross-program registry contention and intermediate-crash exactly-once behavior remain separate requirements.
+
+**Prior-state binding (RELO-W4.11, 2026-11-15):** `ContextUpdateProposal.prior_state: str | None` records either `absent_verified` or `sha256:<hex>` of the target value at extraction and is included in the approval payload digest. Under the apply lock, apply re-reads the target and refuses when it is unavailable. An inactive shared registry is unavailable, not a verified absent factual value; an absent field in an active registry remains eligible for `absent_verified`. A `sha256` binding applies only when the live raw or trimmed hash matches. `absent_verified` applies only while the target is still absent; otherwise the proposal is skipped as stale. A proposal with neither `prior_state` nor `current_value_hash` returns `needs_rereview`; single and batch CLI return exit 1 for this refusal or `skipped_stale`, with repair exit 3 taking precedence. Batch application remains sequential and other proposals may apply. For shared people/team targets, capture the registry generation before reading the target and supply it to the existing lease-checked writer. A changed generation refuses, including a no-op preview; a refusal after `write_started` retains `needs_repair` for reconciliation. Dry-run checks the generation again without taking a write lease, so its result is advisory. This prevents the demonstrated completed cooperating-writer interleavings, not arbitrary editor races, same-principal lease takeover or cross-store atomicity. Context-gap reply binding remains open.
+
+**Live same-principal contention (RELO-W4.11 partial):** A live registry lease refuses another acquisition for the same mutation domain even when the principal matches; only `renew_registry_lease` with the current handle extends it. In NCFL apply, contention after `write_started` retains `needs_repair`, including the no-op generation-check path. This narrows the preceding same-principal takeover limitation only while the lease is live and writers use the current acquisition code. Expiry or force-release takeover, older writers, and check-to-replacement and cross-store races remain unqualified.
 
 **Context synthesis acceptance (RELO-W4.11m):** The existing proposal model exposes one acceptance-binding error check, reused by authored apply, CLI synthesis admission and direct synthesizer execution before dispatch. Changed/historically unbound accepted payloads are unavailable with re-review guidance; no automatic backfill. Direct execution also requires proposal program/edition/issue to match synthesis inputs, even if the proposal has a valid acceptance in another scope. Preserve valid acceptance, accepted-to-accepted metadata and existing pending filtering. This does not authenticate reviewers or replace the distinct section-proposal confirmation contract.
 
@@ -3018,6 +3092,8 @@ def resolve_edition(edition_id, editions_root=None, programs_root=None) -> Resol
 
 **AI config fields consumed by the live runtime:** `ai.enabled`, deployment/budget settings, `ai.semantic_index`, and `ai.claim_extractor` subfields (`mode`, `calibration_min_confirms`) are now parsed through the governed config surface. Entering production claim-extractor mode is guarded by `vertex config set ai.claim_extractor.mode production` checks rather than direct YAML edits.
 
+**Local semantic index (`src/core/semantic_index.py`):** Retrieval is SQLite FTS5 ranked by BM25 with a deterministic tie order. When FTS5 returns nothing, a token-overlap fallback matches tokens of four or more characters with `rapidfuzz.fuzz.ratio` ≥ 80. There are no embeddings. `rapidfuzz` is pinned at 3.14.6 in the `ai-local` extra; editable install is the only supported install.
+
 **M365 config fields consumed by the live runtime:** `m365.enabled`, `m365.prefer_agency`, optional `m365.workiq_queries`, and optional `m365.icm_incidents_url`. When `m365.icm_incidents_url` is configured, `vertex gather --icm` prefers the direct app-only IcM client (`src/m365/icm_client.py`) and falls back to Agency or Kusto when direct access is unavailable.
 
 #### 10.2.1 Autonomy Ladder (`program.yaml -> maturity_level`)
@@ -3181,7 +3257,9 @@ Resolution: `knowledge/` (shared root) → `programs/<prog>/knowledge/` (fallbac
 
 **HTML context replies (RELO-W4.11e):** Single-part and multipart HTML-only replies reuse the existing `normalize_html_to_text` extraction, retaining paragraph/division/break boundaries so reference lines and answers match equivalent plaintext. Reference matching, packet association, foreign/ambiguous rejection and dry-run nonmutation remain unchanged. Accepted imports are pending/manual-only proposals, not approval, context application, review renewal or gap closure. Existing normalizer limits apply; this is not browser rendering.
 
-**People/Team/Program-Affiliation Registry:** Uses `EntityRegistry`-integrated typed files (`entities.yaml` schema 2.0, `people_directory.yaml`/`teams.yaml` schema 2.0, `memberships.yaml`/`delegations.yaml` schema 1.0), a workspace-global fenced-lease staged-transaction writer, and a field-level append-only change journal. Reads use typed query functions (`src/core/people_query.py`: `find_person`, `find_team`, `team_members`, `search_people`, `list_stale_people`, `list_conflicts`, `find_registry_program_affiliations`), not a single compiled read-model class. `ProgramReality` loads `EntityRegistry` directly for entity resolution. `load_people_directory`/`load_teams`/`load_entities_document`/`read_all_memberships` support scoped/lazy per-program loading. The supported scale contract is **1,000 people / 100 teams / 20 programs**, with a 10-second full-doctor budget enforced by `tests/perf/test_people_registry_scale.py::test_registry_scale_envelope_full_doctor_current_scale`; this is not a statement of deployment population or measured latency. The 10,000-person/2,000-team/100-program target is a future scale profile, not a currently-met commitment; its scale-envelope tests remain `xfail(strict=False)`. `DIR-*` doctor checks cover schema/integrity, freshness, lifecycle, shadow-file hygiene, provider health, audience scope, cache, and manifest integrity. Program-local `people_directory.yaml`/`teams.yaml`/`entities.yaml` records are cleared after migration into the shared root and detected if retained. DIR-08A/08B enforce the workspace-global PII policy: 365-day retention, `sensitive_only`-required/`all`-recommended encryption, and a required reveal-authorization allowlist. DIR-08A checks structure; DIR-08B compares actual with required encryption. Deployment posture and exceptions belong in private governance records. Synthetic example templates at `knowledge/*.example.yaml` illustrate the schema. Persistence remains YAML-authoritative for v1; re-evaluation is evidence-gated, not an immediate SQLite migration.
+**People/Team/Program-Affiliation Registry:** Uses `EntityRegistry`-integrated typed files (`entities.yaml` schema 2.0, `people_directory.yaml`/`teams.yaml` schema 2.0, `memberships.yaml`/`delegations.yaml` schema 1.0), a workspace-global fenced-lease staged-transaction writer, and a field-level append-only change journal. Ordinary release retains an owner-free released row and advances its fencing token; acquisition and force-release continue the retained sequence. Released rows read as no held lease. Stale same-owner handles cannot renew or release a successor, and prepared transactions with a superseded token are refused at the existing pre-replacement check. Previously deleted history cannot be reconstructed, older writers can still delete it, and registry backups exclude the lease database; cutover and recovery cannot assume fencing continuity. Same-principal takeover, check-to-replacement races and cross-store atomicity remain unqualified. Reads use typed query functions (`src/core/people_query.py`: `find_person`, `find_team`, `team_members`, `search_people`, `list_stale_people`, `list_conflicts`, `find_registry_program_affiliations`), not a single compiled read-model class. `ProgramReality` loads `EntityRegistry` directly for entity resolution. `load_people_directory`/`load_teams`/`load_entities_document`/`read_all_memberships` support scoped/lazy per-program loading. The supported scale contract is **1,000 people / 100 teams / 20 programs**, with a 10-second full-doctor budget enforced by `tests/perf/test_people_registry_scale.py::test_registry_scale_envelope_full_doctor_current_scale`; this is not a statement of deployment population or measured latency. The 10,000-person/2,000-team/100-program target is a future scale profile, not a currently-met commitment; its scale-envelope tests remain `xfail(strict=False)`. `DIR-*` doctor checks cover schema/integrity, freshness, lifecycle, shadow-file hygiene, provider health, audience scope, cache, and manifest integrity. Program-local `people_directory.yaml`/`teams.yaml`/`entities.yaml` records are cleared after migration into the shared root and detected if retained. DIR-08A/08B enforce the workspace-global PII policy: 365-day retention, `sensitive_only`-required/`all`-recommended encryption, and a required reveal-authorization allowlist. DIR-08A checks structure; DIR-08B compares actual with required encryption. Deployment posture and exceptions belong in private governance records. Synthetic example templates at `knowledge/*.example.yaml` illustrate the schema. Persistence remains YAML-authoritative for v1; re-evaluation is evidence-gated, not an immediate SQLite migration.
+
+**Registry lease and recovery containment:** Current writers refuse a second live acquisition, even by the same principal, and refuse renewal once the persisted lease expires. Both registry commit paths check the persisted owner, token and expiry before checkpointing, before each factual replacement and before manifest publication. A valid renewal extends the persisted expiry even when the prepared handle contains an earlier expiry. If a check fails after replacement, the PREPARED state remains for recovery. Recovery of existing shared-file PREPARED records limits replacement candidates to their recorded transaction paths, not all manifest hashes; synthetic single-file records retain their original format. These checks are not atomic with replacement; recovery against successor writers, force release, deleted fencing history, older writers, arbitrary editors and cross-store races remains unqualified.
 
 **Demand-driven freshness/enrichment cadence:** `src/core/people_enrichment.py` (Zone A) selects a field only when its person is a stakeholder in a program's current committed state and the field is stale (past `freshness_policy.yaml`'s `people_registry.stale_after_days`, default 90) or was never verified and is empty. `vertex kb people enrich` (Zone C orchestration) asks WorkIQ one targeted question per candidate, capped per run, and records answers as `pending` events in `programs/<id>/_quality/people_enrichment_candidates.jsonl` — never auto-applied. `enrichment-list`/`enrichment-resolve --decision accept|reject` support human review; only `accept --apply` writes through the staged `apply_shared_registry_patch` writer. The trigger is event-driven: `freshness_policy.yaml`'s `people_registry.enrichment_trigger` (`nudge_run_every`/`report_run_every`, default 5/3) ticks a counter on each completed nudge or report run and raises a between-runs alert at the threshold, using the same no-daemon mechanism as `gather`/`confirm`/`doctor`. `report.py` never calls WorkIQ inline (INV-ADF-2). Provider permission and verification failures do not establish successful enrichment.
 
@@ -3223,6 +3301,8 @@ stale_block_days: 30
 ### 10.7 Edition YAML Schema
 
 All editions carry `schema_version: "2.0"`. Required fields: `id`, `program_id`, `type`, `altitude`, `cadence`. Key optional fields: `layout_mode` (default `"dashboard"`), `scorecard_sort` (default `"risk_desc"`), `ado` overrides, `ai` overrides, `distribution`, `brand_name`, `cadence_note`, `forecast_enabled`, `workstream_filter`.
+
+**KPI chart selection (`kpi_charts`, RELO-W3.5):** optional `list[str]` of program KPI ids. Selected KPI charts are appended after golden queries in declared order. A duplicate id, an id colliding with a golden query, an unknown id or a non-string entry raises `ConfigError` at load time. Absent or empty selects no KPI charts.
 
 `chapter_contract.yaml` `include_in` accepts `[detailed, focused, deck, condensed, lookback]`; `nudge`-type editions bypass `chapter_contract.yaml` entirely.
 
@@ -3298,6 +3378,10 @@ queries preserve those two values in their parsed `KustoQuery`. Effective
 inline edition query policies are validated even when golden queries replace
 them, including when Kusto or charts are disabled.
 
+KPI charts selected by edition `kpi_charts` use the KPI's `chart_cache_ttl_hours` (default `26`); a KPI with `required: true` sets `chart_blocks_publish` and therefore joins QG-22. Offline report runs render selected KPI charts as degraded `Unavailable` sections that do not gate publish. KPI renderer fields are not yet carried through, so selected KPI charts render as `chart_image`.
+
+The separate lookback path evaluates offline chart gates when explicit chart settings are enabled; online lookback does not yet build selected KPI sections or evaluate chart gates.
+
 When Kusto and charts are enabled, report configuration rejects an inline
 publish-blocking chart that would otherwise be replaced by selected golden
 queries. The operator must resolve that conflict; query-selection semantics
@@ -3319,6 +3403,7 @@ Edition-level chart settings (`KustoQuerySettings` / `ChartEditionSettings`):
 
 **Entry:** `report_command(edition, issue, dry_run, reseed, no_seed, diff_mode, send_draft, ai_review, no_ai, as_of, edition_type, lookback_range, stdout, format, verbose)`
 
+`--send-draft` is incompatible with `--dry-run`: an explicit preview send requires a non-dry run, which may write local run state. For `report` and `draft`, the parsed conflicting flags skip root workspace preflight, AI-mode reset, telemetry registration, scheduled maintenance and catchup before the command reports the error; normal invocations retain their startup behavior. Module-import environment loading is unchanged.
 `--reseed` is a dry-run-only operator flag that deletes seedable draft narratives and seed-like overrides for the target issue before trusted-baseline seeding runs again.
 `--no-seed` suppresses trusted-baseline narrative seeding for the current run so the draft falls back to scaffold templates or existing authored narratives. A `.no-seed` sentinel file in the target issue narrative directory provides the same behavior without changing the command line.
 
@@ -3415,6 +3500,8 @@ def gather_program(
 **Gather-run manifests (`gather-run.v1`):** an opt-in, program-configured activation layer (`GatherActivationConfig`, `off`/`shadow`/`enforce`, parsed and enforced by `gather_pipeline/lifecycle_policy.py`) wraps `gather_program()` with a versioned run-lifecycle state machine — `staging` → `committed`/`failed`/`quarantined` — implemented in `src/core/gather_run_manifest.py`. Staged artifacts (`ado_items.jsonl`, `query_results.json`, channel outcomes) are written under a run-scoped directory and promoted atomically (`os.replace`, with bounded retry on transient Windows handle-release failures) only once a run commits; `latest.json`/`latest_full.json` pointers are updated atomically last, so no reader ever observes a partially-written run. Each manifest carries a canonical content hash, per-query capture/skew timestamps, discovered/hydrated global unique counts plus per-query raw counts, a resolved completeness-oracle result (`resolve_oracle_result()`; order-2 operator-recorded source-export reconciliation via `vertex gather --source-export <scope_id>=<count>`, order-1 independent Kusto/OData oracle intentionally deferred pending qualification evidence), shrinkage classification, and freshness state (next-expected-full timestamp, current/warn/block thresholds). `report.py`, draft state, and `confirm.py` all resolve and pin the same committed manifest once per run rather than re-fetching membership. A one-time `create_legacy_cutoff_manifest()` / `vertex admin bootstrap-legacy-cutoff --program <id>` bootstraps a synthetic cutoff manifest so `journal.read_signals()` and `program_fact_store.load_program_facts()` can safely bound pre-activation, unstamped record pass-through once a program flips `enforce`; absent a cutoff, today's unconditional pass-through is preserved exactly (full backward compatibility). Both enforcement readers obtain verified committed IDs and the earliest valid cutoff from one committed-directory scan, avoiding a mixed pair of independently sampled values. Retention (`privacy_purge`) removes expired non-current committed/failed/quarantined run directories (90-day default) while always preserving pointer-named and confirm-bound runs; `observability bundle` emits a redacted `gather_runs.json` summary excluding raw delivery-scope membership. A workspace-scoped lease/fencing mechanism serializes concurrent gather attempts, and `gather_schedule_monitor` opens/resolves a `gather_missed_attempt` alert independent of data freshness. Slice-contract schema `1.1` (`src/core/slice_contract_loader.py`, backward-compatible with `1.0`) adds `workstream_id`, per-binding `mode` (`full_scope`/`activity_delta`/`analytics_history`), `workstream_ids[]`/`lane_ids[]` multi-lane attribution, and a closed filter-operator set (`area_path`, `work_item_type`, `title`, `tag`); `report_fetch.py` partitions saved-query bindings by mode so `full_scope` bindings are never date-bounded while `activity_delta` bindings retain the existing recency window, and `analytics_history` bindings never render as current scope. Golden queries (`knowledge/golden_queries.yaml`) carry a closed `classification` (`validation`/`analytics_history`/`evidence`/`hygiene`/`retired`) so no golden query can be mistaken for authoritative delivery scope.
 
 **Committed gather identity (RELO-W2.3/W2.9, partial):** The single enforcement scan accepts a manifest only when its program, directory/run ID, committed status, supported schema and canonical hash agree; invalid candidates emit a fixed warning and are excluded. Excessively nested candidate JSON or hash inputs follow the existing invalid-candidate policies; excessively nested pointers follow the existing scan fallback. Pointer run IDs must be bare identifiers; invalid pointers use the existing scan fallback. Pinned run IDs must also be bare identifiers and block before path lookup when invalid; an absent legacy pin remains allowed. This is lexical validation, not physical containment or symlink protection. The ordinary latest resolver still reports invalid selected evidence, whereas the latest-FULL resolver may recover from an invalid candidate. Valid partial and full runs remain eligible. Cutoff bootstrap revalidates the matching synthetic manifest and fails if a previously verified cutoff cannot be revalidated rather than creating a replacement. When no valid cutoff exists, the existing unstamped-record pass-through remains, including for invalid cutoff evidence. Hash checks do not authenticate origin or verify sidecars; concurrent changes, recovery and gather retry durability remain unqualified.
+
+**Enforced retained report facts:** For an ordinary program-backed report in `enforce` mode, resolution pins the existing full fact snapshot and checks every retained fact against the verified committed-run IDs and legacy cutoff before reseeding, acquisition or rendering. If any fact is ineligible, the report fails with a generic provenance diagnostic; the pin and its membership remain unchanged, and existing report and editorial artifacts are not rewritten. This is containment, not committed-only pin selection, predecessor recovery, atomic cross-store capture or operational qualification. Off/shadow mode, non-report consumers and lookback reports retain their existing paths.
 
 **Committed signal read parity (RELO-W2.3, partial):** `SQLiteSignalStore.read` accepts the same opt-in committed-run filter as the file store, using the same verified scan and legacy cutoff, including on read-only legacy schemas. Manifest-backed gather requests this filter for its recent-signal deduplication window; other callers remain unfiltered unless they request it. This does not establish safe replay.
 
@@ -3637,6 +3724,8 @@ increment beyond that storage boundary is refused. Refusals roll back the
 transaction's counter changes. Unbounded counters are neither read nor updated.
 This validates the stored representation, not its provenance, and does not
 repair historical counters or resolve the scope-key limitation below.
+
+**Bounded exact packing and selection identity (RELO-W1.2, W1.5 partial):** Estimators that declare `incremental_estimates` use the linear packing path. All other estimators use exact whole-prefix greedy packing, bounded at 8 MiB of cumulative estimator input; exceeding the bound raises `ContextPackingUnavailable` with no partial prompt and no dispatch. `CompiledContext` and the persisted manifest store `selection_identity_v1` (`src/core/selection_identity.py`) beside `prompt_hash`; a legacy manifest without it reads as `unverified`. Cache payload/hash authentication remains open.
 
 **Runner call-slot scope limitation:** The current scope key joins program,
 run, feature and policy identifiers with `:`. Admitted identifiers containing
@@ -4053,6 +4142,25 @@ already be constructed, and runner call slots reserved before the callback
 remain consumed. This validates inputs and finite arithmetic, not estimate
 accuracy, provider message framing, model limits or billed cost.
 
+Before the first provider dispatch of a deployment-fallback chain,
+`AIClient.open_cost_chain` validates the feature identifier (when `ai_feature`
+metadata is set) and every deployment's pricing; an unknown feature or a
+pricing `ConfigError` refuses the chain before any ledger write or dispatch.
+The worst case is (`MAX_RETRIES` + 1) attempts multiplied by the sum, over
+deployments, of estimated input tokens times input price plus `max_tokens`
+times output price. The first attempt's `CostGuard.reserve_call(estimate,
+chain_total_usd=worst_case)` holds the whole worst case against the run
+ceiling in the same SQLite transaction as that attempt's reservation
+(`ai_cost_chains`). Later attempts draw from the hold through
+`reserve_call(estimate, chain=...)`, recorded in `ai_cost_chain_draws`, without
+adding reserved money; a draw exceeding the remaining hold raises
+`BudgetStateError`. The feature ceiling is still checked per attempt. Each
+attempt settles its actual cost, uncertain-call reservations are never
+released, and `release_chain` frees only the undrawn remainder when the chain
+ends. Backup prompt sizes are estimated from the primary estimate. A
+standalone `AIClient`, non-`AIClient` providers and separate cost guards keep
+per-attempt admission. No new monetary values are introduced.
+
 Direct `CostGuard` constructor budgets, estimates, reservations and actual
 amounts must be finite, nonnegative numbers, excluding booleans and strings.
 Invalid amounts raise a content-free `StateError` before the affected operation
@@ -4381,6 +4489,8 @@ When explicitly enabled, `workiq_retriever.py` enumerates bounded candidates and
 Rich extraction requires a nonempty string source identifier; semantic preview keys and transient citation identifiers cannot establish canonical identity or enter extraction/freshness admission (RELO-W3.3a). Native fallback identifiers and valid partial results remain supported. The enrichment caller reports rejected identities as a bounded count-only warning without subjects, participants or identifiers. This admission does not authenticate provider identity or establish collection completeness; preview fallback remains available only under its existing provisional contract.
 
 Rich retrieval also returns the examined source-time rejection count for a privacy-safe enrichment warning. When no evidence is produced and candidates were rejected for time or native identity, the existing lane zero-yield state is not advanced; valid partial evidence continues to use the existing yield path. No undated candidate enters extraction and no source-time or completeness authority is inferred.
+
+For an uncached rich-retrieval candidate, the normalized source time is checked again using the discovery parser before thread extraction. An invalid value at that boundary raises a fixed error instead of substituting the retrieval clock; it does not write the freshness cache. Ordinary window admission and timezone-less normalization are unchanged. This defensive check does not admit undated evidence or complete W3.3b.
 
 Rich WorkIQ persistence is a composite safety boundary. `sanitize_workiq_evidence()` scrubs email/phone/SSN fields and quarantines credential patterns or sensitivity-marked content without retaining the offending excerpt. `SourceRef` round-trips `canonical_id` and `extraction_method`. The reader keeps the latest revision per `(lane_id, canonical_source_id)`, applies approval per source, and deterministically aggregates only admitted sources. `VerificationState` distinguishes `unverified`, `model_self_attested`, `human_verified`, and `source_verified`; approval promotes admitted evidence to `human_verified`. Zone A owns models, freshness identity, and aggregation; Zone C owns WorkIQ retrieval; command orchestration owns budgets, privacy, persistence, and review-signal creation.
 
@@ -4882,7 +4992,7 @@ def evaluate_chart_gates(kusto_sections, chart_enabled=True) -> QualityGateRepor
 | **QG-7** | Archive index consistent | Yes | 2 |
 | **QG-9** | No overdue target dates on non-terminal items | Yes | 2 |
 | **QG-10** | High-risk items with ADO state changes since last confirmed issue have authored narrative coverage | Yes | 2 |
-| **QG-11** | No contradictions between current ADO state and prior-issue claim assertions | Yes | 2 |
+| **QG-11** | No contradictions between current ADO state and prior-issue claim assertions | **No** | 3 |
 | **QG-12** | Scorecard dimensions at High risk for ≥3 consecutive confirmed issues have escalation narrative coverage | Yes | 2 |
 | **QG-17** | Workstreams with multiple contradiction packets must acknowledge at least one contradicted work item in their authored narrative | Yes | 2 |
 | **QG-18** | Rendered email HTML must remain Outlook-safe: no `<style>` blocks, no flex/grid inline layout, table styling stays inline, and inline hex colors stay within the canonical palette | Yes | 2 |
@@ -4901,7 +5011,7 @@ def evaluate_chart_gates(kusto_sections, chart_enabled=True) -> QualityGateRepor
 | **QG-24** | Metric injection failure — one or more KPI sections failed to render data (soft warn) | Yes | 2 |
 | **QG-25** | Email signal yield zero across 3+ consecutive gather cycles for active workstreams (circuit breaker) | Yes | 2 |
 
-**`--force` overrides QG-1, QG-2, QG-3, QG-7, QG-9, QG-10, QG-11, QG-12, QG-14, QG-15, QG-16, QG-17, QG-18, QG-19, QG-23, QG-24, QG-25, QG-B1, QG-B2, and QG-B3. QG-4, QG-5, QG-6, QG-8, and QG-13 are never overridable. Bridge gates (QG-B1, QG-B2, QG-B3) evaluate only when a trusted baseline exists.**
+**`--force` overrides QG-1, QG-2, QG-3, QG-7, QG-9, QG-10, QG-12, QG-14, QG-15, QG-16, QG-17, QG-18, QG-19, QG-23, QG-24, QG-25, QG-B1, QG-B2, and QG-B3. QG-4, QG-5, QG-6, QG-8, QG-11, and QG-13 are never overridable. The five-level `Blocked` risk/status renders as NEEDS INPUT and is admitted only through QG-8; only the soft gates listed here accept a reasoned `--force` override (RELO-D8). Bridge gates (QG-B1, QG-B2, QG-B3) evaluate only when a trusted baseline exists.**
 
 This table predates QG-26 (external-dependency state), QG-27 (truth-level/material-dispute), QG-28 (KPI degradation), and QG-WS5B (AI budget) — see §1.3 for their one-line descriptions and `src/core/quality_gates/` for implementation. **QG-29 is the fail-closed AI release-audit gate** (§12.1a) — `src/core/quality_gates/ai_release_audit.py` implements it, live across every structured AI generator; `gate_registry.py` reserved the ID from unrelated work while it was being built.
 
@@ -5037,29 +5147,45 @@ Each summary sub-model is built by its own Zone-A-only reader (`_build_program_s
 
 **Persistence**: `programs/<id>/runtime/cockpit/latest.json` (current snapshot), `runtime/cockpit/history/<timestamp>.json` (rolling history, retained per §9.7-equivalent rotation), `runtime/cockpit/latest.html` (typed local HTML render, no server). Content-addressed via `compute_cockpit_input_hash()`.
 
-**Commands** (`vertex cockpit ...`): `show` (build fresh human/JSON output, or read retained history with `--as-of <timestamp>`; `--format html` requires retained selection), `build` (recompute + persist a fresh snapshot), `explain --finding <finding_id> [--as-of <timestamp>]` (drill into fresh or explicitly retained finding evidence), `tui` (interactive terminal cockpit — review/launch flows for all six human-reviewable AISchemaGateway proposal types plus risk review), `compare <earlier> <later>` (delta between two history snapshots), `measure` (`WorkflowMeasurementReport` — before/after timer-based value measurement), `adoption` / `adoption-skip` (golden-workflow adoption telemetry), `autonomy-evaluate` / `autonomy-promote` / `autonomy-demote` (per-proposal-class autonomy-ladder state transitions, §18.1-equivalent). A separate, pre-existing `vertex fleet` command (`src/commands/fleet.py`) reports a lighter-weight multi-program summary today; a fuller multi-program cockpit fleet view remains not-yet-built, subject to separate fleet qualification.
+**Commands** (`vertex cockpit ...`): `show` (build fresh human/JSON output, or read retained history with `--as-of <timestamp>`; `--format html` requires retained selection), `build` (recompute + persist a fresh snapshot), `explain --finding <finding_id> [--as-of <timestamp>]` (drill into fresh or explicitly retained finding evidence), `tui` (interactive terminal cockpit — review/launch flows for all six human-reviewable AISchemaGateway proposal types plus risk review), `compare <earlier> <later>` (delta between two history snapshots), `measure` (`WorkflowMeasurementReport` — before/after timer-based value measurement), `adoption` / `adoption-skip` (golden-workflow adoption telemetry), `autonomy-evaluate` / `autonomy-promote` / `autonomy-demote` (per-proposal-class autonomy-ladder state transitions, §18.1-equivalent), `exceptions --program <id> [--as-of YYYY-MM-DD]` (read-only ranked exception queue from `src/core/exception_queue.py::build_exception_queue`: unassessed open/escalated risks rank first as Needs Input, then overdue journal actions, then stale risks; ties break oldest-first then subject id; reads the risk register and, when present, the action journal with `repair_corruption=False`, and never writes, sends or configures. Claims, blocked drafts, approval expiries, uncertain intents and runtime incidents are not yet queue sources; accessibility and operator-proficiency qualification remain open). A separate, pre-existing `vertex fleet` command (`src/commands/fleet.py`) reports a lighter-weight multi-program summary today; a fuller multi-program cockpit fleet view remains not-yet-built, subject to separate fleet qualification.
+
+The `exceptions` output identifies its three checked categories and states that other exceptions and input completeness are not evaluated. It states that risk exceptions use the risk register, not primary judgment facts; this differs from the fresh primary-judgment cockpit summary and does not resolve source authority. It names the risk register and action journal when their paths are not detected at the respective checks; these checks can race with reads and do not establish accessibility, freshness or completeness. When a stale risk lacks a review date, its reason labels the identification date and says the review date is unavailable; the existing staleness calculation still ages from identification, so recently identified unreviewed risks need not appear. It also states that only the current action journal is read: rotated or pruned actions and status updates may be omitted, and action statuses may be stale. The date affects age checks on current files; output and option help state that historical state is not reconstructed. An explicit date must use `YYYY-MM-DD`; empty, invalid and other ISO representations are rejected before the queue inputs are read. An empty result means no matching exceptions in available inputs, not overall clearance. Root dispatch preserves the prior in-process AI mode and skips tier-sink registration, scheduled database maintenance and session catch-up for this subcommand, including its help and argument-error paths; other cockpit commands retain their existing startup behavior. The CLI module's pre-dispatch `.env` loader is not suppressed or qualified by this dispatch guard.
 
 ---
 
 ## §17 Testing Strategy
 
-### 17.1 Test Suite (2755 collected tests; latest full execution baseline preserved)
+### 17.1 Test Suite
+
+Suite counts are derived by `scripts/derive_spec_counts.py`; the canonical specs
+do not hard-code them. The required selection is owned by
+`governance/test-policy.json`, not by directory names alone.
 
 | Category | Location | Purpose |
 |----------|---------|---------|
 | Unit tests | `tests/unit/` | Per-module correctness |
 | Contract tests | `tests/contracts/` | Zone boundary, AI safety pipeline usage, provider/integration protocols, architecture fitness guards (no-growth budgets for known god-modules, broad-exception regression ceilings on critical commands), and INV-2 single-write-path enforcement (`test_inv2_write_confirmed_single_write_path`) |
 | Golden file tests | `tests/golden/` | Byte-level output comparison |
-| Integration (opt-in) | `@pytest.mark.integration` | Live ADO (`--run-integration`) |
+| Deterministic integration | `tests/integration/` | Offline cassettes and synthetic REV end-to-end cases |
+| Live integration | `@pytest.mark.integration` | Authorized provider qualification (`--run-integration`) |
+| Performance | `@pytest.mark.perf` | Bounded required budgets and scheduled scale qualification |
+| Operator | `@pytest.mark.operator` | Private-data or operator-only qualification |
 
 ### 17.2 Test Infrastructure
 
-- **Fixtures:** `tests/fixtures/` — sample journal, trajectory, knowledge, edition, program configs, `issue_077.snapshot.json`
-- **Cassettes:** `tests/cassettes/` — recorded ADO API responses
+- **Fixtures:** `tests/data/` — tracked synthetic provider, journal, and evaluation data
 - **Shared helpers:** `tests/support/report_test_setup.py` — stages V2 temp workspace with `editions/`, `programs/`, `knowledge/`, `reports/schemas`
 - **Golden update:** `--update-golden` flag
+- **Shared source index:** `tests/support/source_index.py` parses immutable tracked source once per worker and reuses literal/import inventories for contract checks.
+- **Synthetic report seed:** `tests/conftest.py` builds one worker-local synthetic source per session; individual cases receive fresh writable copies.
+- **Partition manifest:** `governance/test-file-timings.json` is generated from JUnit evidence and consumed by `scripts/partition_tests.py`.
+- **Execution gate:** `scripts/check_test_evidence.py` rejects missing/failed required cases, forbidden private-data skips, incomplete JUnit partitions, stale coverage, or coverage below the approved floor.
 
-**Performance lanes (RELO-W0.7):** The default pytest selection excludes the marked chart, 50K replay, structural-gap, pilot replay, persona-evaluation and 50-item gather timing tests. CI runs them in separate serial `-n 0 -m perf` steps with a ten-minute timeout for replay and three-minute timeouts for the other five; the under-two-second, under-60-second, under-100ms, under-six-second, under-500ms and under-30-second assertions remain unchanged. The gather measurement uses an in-memory fixture, is written under runner temporary storage and is not uploaded. The default functional selection retains the clean 1,000-fact and simultaneous four-rule structural-gap checks, 1,000-event pilot replay counts, and the 15-persona evaluation. These steps do not classify all timing tests or establish the CPU/memory envelope, loaded performance or operational qualification.
+**Performance lanes (RELO-W0.7):** The default pytest selection excludes `perf`. Required CI runs exactly the eight bounded node IDs in `governance/test-policy.json`: chart, 50K replay, two structural-gap checks, two pilot replay checks, persona evaluation, and 50-item gather. The job reuses one runner preparation and runs the measured operations serially with `-n 0`. Registry-scale, broad compatibility and soak evidence run on `scale.yml`, not in every PR. Product thresholds remain binding.
+
+**Functional partitioning:** CI partitions the complete disjoint selection into 12 measured file shards and runs four explicit workers per shard. `governance/test-file-timings.json` is a planning input; union/disjointness is checked by `scripts/partition_tests.py`, while `scripts/check_test_evidence.py` proves execution from JUnit. A long-file imbalance must be reduced by test-file timing, xdist, or test-level work rather than dropping cases.
+
+**Coverage policy:** `pyproject.toml` enables line, branch, relative-path, and parallel-safe measurement. The full functional shards cover `src/` and root `cli.py`. The enforced whole-source floor is a no-regression ratchet measured at the current complete selection; its long-term statement target remains ≥95%. Changed executable production lines must reach ≥95%. Branch coverage is reported and ratcheted separately. The aggregate rejects missing, stale, partial, or incorrectly scoped JSON.
 
 **Public cockpit baselines (RELO-W0.33a):** Fixed authored synthetic cockpit terminal/HTML snapshots use reviewed files in `tests/golden/public_snapshots/`, not ignored operator baselines. Missing baselines fail without creating directories or files; only explicit `--update-golden` creates or replaces output. Regression tests also preserve existing mismatched baselines. These comparisons establish synthetic byte-level parity, not real-program visual or operational qualification.
 
@@ -5089,10 +5215,10 @@ Clock injection (`datetime(2025,11,10,17,0,0,UTC)`), seeded UUIDs, sort-before-e
 ### 17.5 Execution
 
 ```bash
-pytest tests/ -q                    # Full suite (2755 collected tests)
-pytest tests/contracts/ -q          # Contract tests
-pytest tests/golden/ -q             # Golden file tests
-pytest tests/ --run-integration     # Live ADO tests
+pytest tests/ -q -m "not perf and not integration and not operator"
+pytest tests/ -q -n 4 -m "not perf and not integration and not operator"
+pytest tests/ -q -m perf
+pytest tests/ --run-integration     # Authorized live provider qualification
 ```
 
 Latest full-suite execution evidence is recorded in `governance/test-evidence.md` (the canonical evidence log); `output/__green_run.txt` is a stale local artifact and must not be cited — see `scripts/check_spec_drift.py` `p9-dead-green-run`. The current suite shape is computed at CI time by `scripts/derive_spec_counts.py` (WS-9 step 2 deliverable); UIL additions remain a tracked evidence entry.
@@ -5135,7 +5261,7 @@ Current repo-managed base dependency count: 17 packages in `pyproject.toml`'s `[
 ```
 dev       = pip-audit, pytest, pytest-cov, pytest-xdist, pytest-mock, mypy   # Test/lint/supply-chain tooling
 ai        = openai, tiktoken             # Azure OpenAI + tokenizer (Zone B)
-ai-local  = rapidfuzz                    # Tier-1 local fuzzy-match seam
+ai-local  = rapidfuzz==3.14.6            # Tier-1 local fuzzy-match fallback (semantic_index)
 m365      = msgraph-sdk, opentelemetry-api>=1.45.2  # Graph and its patched telemetry dependency (Zone C)
 kusto     = azure-kusto-data              # Azure Data Explorer (Zone A/C)
 render    = matplotlib                    # Chart generation (Zone A)

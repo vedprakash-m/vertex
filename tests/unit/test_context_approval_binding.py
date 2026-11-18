@@ -143,7 +143,10 @@ def test_completed_apply_replay_changes_no_authored_or_audit_bytes(
 ) -> None:
     programs, authored = _workspace(tmp_path, accept=False)
     if not with_current_hash:
-        _edit_queue(programs, lambda record: record.__setitem__("current_value_hash", None))
+        _edit_queue(programs, lambda record: record.update({
+            "current_value_hash": None,
+            "prior_state": "sha256:" + hashlib.sha256(b"baseline").hexdigest(),
+        }))
     update_proposal_status(
         "sample", proposal_id="reviewed", new_status="accepted", actor="reviewer",
         issue_number=1, programs_root=programs,
@@ -385,6 +388,143 @@ def test_batch_refusal_returns_failure_without_authored_writes(tmp_path: Path, d
     assert result.exit_code == 1
     assert "refused_unbound_approval" in result.output
     assert authored.read_bytes() == before
+
+
+def _accept_hashless_proposal(programs: Path) -> None:
+    _edit_queue(programs, lambda record: record.update({"current_value_hash": None, "prior_state": None}))
+    update_proposal_status(
+        "sample", proposal_id="reviewed", new_status="accepted", actor="reviewer",
+        issue_number=1, programs_root=programs,
+    )
+
+
+def _accept_second_proposal(programs: Path) -> None:
+    proposal = replace(
+        _pending(), proposal_id="second", target_key="assume-2",
+        conflict_key="assumptions:assume-2:text", source_value="second value",
+    )
+    stage_extracted_proposals("sample", 1, (proposal,), programs_root=programs)
+    update_proposal_status(
+        "sample", proposal_id="second", new_status="accepted", actor="reviewer",
+        issue_number=1, programs_root=programs,
+    )
+
+
+def _apply_batch(programs: Path, dry_run: bool):
+    from cli import app
+
+    return CliRunner().invoke(app, [
+        "context", "apply-batch", "--edition", "sample_weekly", "--issue", "1",
+        "--programs-root", str(programs), *(["--dry-run"] if dry_run else []),
+    ])
+
+
+@pytest.mark.parametrize("target_state", ["changed", "missing"])
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("batch", [False, True])
+def test_stale_refusal_returns_failure(
+    tmp_path: Path, target_state: str, dry_run: bool, batch: bool,
+) -> None:
+    programs, authored = _workspace(tmp_path)
+    if target_state == "changed":
+        document = yaml.safe_load(authored.read_text(encoding="utf-8"))
+        document["assumptions"][0]["text"] = "changed"
+        authored.write_text(yaml.safe_dump(document), encoding="utf-8")
+    else:
+        authored.unlink()
+    before = authored.read_bytes() if authored.exists() else None
+
+    result = _apply_batch(programs, dry_run) if batch else _apply(programs, *(["--dry-run"] if dry_run else []))
+
+    assert "skipped_stale:" in result.output
+    assert (authored.read_bytes() if authored.exists() else None) == before
+    assert not _journal_path("sample", "reviewed", programs_root=programs).exists()
+    assert result.exit_code == 1, result.output
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_batch_stale_refusal_does_not_undo_other_applies(tmp_path: Path, dry_run: bool) -> None:
+    programs, authored = _workspace(tmp_path)
+    _accept_second_proposal(programs)
+    document = yaml.safe_load(authored.read_text(encoding="utf-8"))
+    document["assumptions"][0]["text"] = "changed"
+    authored.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+    result = _apply_batch(programs, dry_run)
+
+    assert "skipped_stale:" in result.output
+    assert "applied:" in result.output
+    assert _texts(authored) == {
+        "assume-1": "changed", "assume-2": "baseline" if dry_run else "second value",
+    }
+    assert result.exit_code == 1, result.output
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_batch_repair_takes_precedence_over_stale_refusal(tmp_path: Path, dry_run: bool) -> None:
+    programs, authored = _workspace(tmp_path)
+    _accept_second_proposal(programs)
+    document = yaml.safe_load(authored.read_text(encoding="utf-8"))
+    document["assumptions"][0]["text"] = "changed"
+    authored.write_text(yaml.safe_dump(document), encoding="utf-8")
+    journal = _journal_path("sample", "second", programs_root=programs)
+    _write_journal(journal, "second", "needs_repair", note="synthetic repair")
+    before = (authored.read_bytes(), journal.read_bytes())
+
+    result = _apply_batch(programs, dry_run)
+
+    assert "skipped_stale:" in result.output
+    assert "needs_repair:" in result.output
+    assert result.exit_code == 3, result.output
+    assert (authored.read_bytes(), journal.read_bytes()) == before
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("batch", [False, True])
+def test_hashless_refusal_returns_failure(tmp_path: Path, dry_run: bool, batch: bool) -> None:
+    programs, authored = _workspace(tmp_path, accept=False)
+    _accept_hashless_proposal(programs)
+    before = authored.read_bytes()
+
+    result = _apply_batch(programs, dry_run) if batch else _apply(programs, *(["--dry-run"] if dry_run else []))
+
+    assert "needs_rereview:" in result.output
+    assert authored.read_bytes() == before
+    assert not _journal_path("sample", "reviewed", programs_root=programs).exists()
+    assert result.exit_code == 1, result.output
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_batch_hashless_refusal_does_not_undo_other_applies(tmp_path: Path, dry_run: bool) -> None:
+    programs, authored = _workspace(tmp_path, accept=False)
+    _accept_hashless_proposal(programs)
+    _accept_second_proposal(programs)
+
+    result = _apply_batch(programs, dry_run)
+
+    assert "needs_rereview:" in result.output
+    assert "applied:" in result.output
+    assert _texts(authored) == {
+        "assume-1": "baseline", "assume-2": "baseline" if dry_run else "second value",
+    }
+    assert result.exit_code == 1, result.output
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_batch_repair_takes_precedence_over_hashless_refusal(tmp_path: Path, dry_run: bool) -> None:
+    programs, authored = _workspace(tmp_path, accept=False)
+    _accept_hashless_proposal(programs)
+    _accept_second_proposal(programs)
+    journal = _journal_path("sample", "second", programs_root=programs)
+    _write_journal(journal, "second", "needs_repair", note="synthetic repair")
+    before = (authored.read_bytes(), journal.read_bytes())
+
+    result = _apply_batch(programs, dry_run)
+
+    assert "needs_rereview:" in result.output
+    assert "needs_repair:" in result.output
+    assert result.exit_code == 3, result.output
+    assert (authored.read_bytes(), journal.read_bytes()) == before
 
 
 def test_later_reacceptance_binds_the_reviewed_revision(tmp_path: Path) -> None:

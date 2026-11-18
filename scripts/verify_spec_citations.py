@@ -130,13 +130,13 @@ CITATIONS: tuple[Citation, ...] = (
     Citation(
         claim="PS-3: incremental-projection function already exists (Track D is a wiring task)",
         path="src/core/ledger/program_views.py",
-        line=183,
+        line=262,
         must_contain="def project_events_incremental_to_sqlite",
     ),
     Citation(
         claim="PS-3: _MAX_INCREMENTAL_DELTA definition site (cited at both :26 and :213 across revisions)",
         path="src/core/ledger/program_views.py",
-        line=26,
+        line=34,
         must_contain="_MAX_INCREMENTAL_DELTA",
     ),
     Citation(
@@ -166,19 +166,19 @@ CITATIONS: tuple[Citation, ...] = (
     Citation(
         claim="Track B (closed 2026-07-08): render_stage.py's former 7th risk-read call site now reuses ctx.risks, falling back to _load_current_risks only for isolated-stage execution",
         path="src/core/stages/render_stage.py",
-        line=624,
+        line=632,
         must_contain="_load_current_risks",
     ),
     Citation(
         claim="PS-15: resolve_family_sor_mode fallback returns program-level mode for un-pinned families",
         path="src/core/fact_sor_state.py",
-        line=62,
+        line=79,
         must_contain="family_modes.get",
     ),
     Citation(
         claim="PS-16: AUTHORITY_FAMILIES 6-family allow-list excludes risk/action/decision/dependency/workstream",
         path="src/core/fact_sor_state.py",
-        line=18,
+        line=35,
         must_contain="AUTHORITY_FAMILIES",
     ),
     Citation(

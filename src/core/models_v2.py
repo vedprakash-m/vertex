@@ -534,6 +534,16 @@ class RiskEntry:
     dimension_id: str | None = None
     fact_id: str | None = None
     last_validated_at: datetime | None = None
+    # RELO-W4.3 (relo spec §8.4.2): optional lifecycle fields; None is omitted
+    # from persisted records so existing registers stay byte-identical.
+    dedupe_key: str | None = None
+    supersedes: str | None = None
+    superseded_by: str | None = None
+    escalation_state: str | None = None
+    contingency_trigger: str | None = None
+    residual_risk: str | None = None
+    outcome: str | None = None
+    effectiveness: str | None = None
 
 
 class ActionStatus(EnumParserMixin, str, Enum):

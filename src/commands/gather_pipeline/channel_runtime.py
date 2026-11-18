@@ -454,6 +454,7 @@ def run_channel(
             hydration_result.hydrated_ref_ids,
             verified_at=verified_at,
             provider_instance_id=provider_instance_id,
+            checkpoint_advances=getattr(hydration_result.resources, "checkpoint_advances", ()),
         )
         if deferred_verifications is None:
             acknowledge()

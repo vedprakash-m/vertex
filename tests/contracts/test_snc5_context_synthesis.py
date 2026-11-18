@@ -418,6 +418,7 @@ class TestKnowledgeDocApplyPath:
             source_value="evil",
             current_value=None,
             current_value_hash=None,
+            prior_state="absent_verified",
             confidence="low",
             batch_eligible=False,
             extraction_method_rationale="Zone B synthesis",

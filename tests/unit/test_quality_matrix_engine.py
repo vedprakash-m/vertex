@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from jsonschema import Draft202012Validator
+import pytest
 
 from src.core.config_loader import load_report_bundle
 from src.core.kusto_query_loader import load_kpi_queries
@@ -17,6 +18,7 @@ from src.core.remediation_engine import build_remediation_report
 from tests.support.slice_contract_fixtures import build_test_ado_source_contract, build_test_slice_contract
 
 
+@pytest.mark.operator
 def test_build_quality_matrix_marks_exd_performance_healthy(repo_root: Path, tmp_path: Path) -> None:
     reports_root = _copy_reports(repo_root, tmp_path)
     if not (reports_root.parent / "editions" / "acme_weekly.yaml").exists() and not (repo_root / "editions" / "acme_weekly.yaml").exists():
@@ -46,6 +48,7 @@ def test_build_quality_matrix_marks_exd_performance_healthy(repo_root: Path, tmp
     Draft202012Validator(schema).validate(_to_jsonable(matrix))
 
 
+@pytest.mark.operator
 def test_build_quality_matrix_marks_missing_fields_as_under_specified(repo_root: Path, tmp_path: Path) -> None:
     reports_root = _copy_reports(repo_root, tmp_path)
     if not (repo_root / "editions" / "acme_weekly.yaml").exists():
@@ -78,6 +81,7 @@ def test_build_quality_matrix_marks_missing_fields_as_under_specified(repo_root:
     assert "stale_input_block" in performance.failing_conditions or "assignment_empty" in performance.failing_conditions
 
 
+@pytest.mark.operator
 def test_build_quality_matrix_marks_linked_hybrid_telemetry_as_supporting(repo_root: Path, tmp_path: Path) -> None:
     reports_root = _copy_reports(repo_root, tmp_path)
     if not (repo_root / "editions" / "acme_weekly.yaml").exists():
@@ -118,6 +122,7 @@ def test_build_quality_matrix_marks_linked_hybrid_telemetry_as_supporting(repo_r
     assert deployment_velocity.telemetry.validates_slice is True
 
 
+@pytest.mark.operator
 def test_build_quality_matrix_degrades_linked_hybrid_telemetry_when_absent(repo_root: Path, tmp_path: Path) -> None:
     reports_root = _copy_reports(repo_root, tmp_path)
     if not (repo_root / "editions" / "acme_weekly.yaml").exists():
@@ -145,6 +150,7 @@ def test_build_quality_matrix_degrades_linked_hybrid_telemetry_when_absent(repo_
     assert "telemetry_absent" in deployment_velocity.failing_conditions
 
 
+@pytest.mark.operator
 def test_build_remediation_report_uses_slice_template_and_schema(repo_root: Path, tmp_path: Path) -> None:
     reports_root = _copy_reports(repo_root, tmp_path)
     if not (repo_root / "editions" / "acme_weekly.yaml").exists():
@@ -178,6 +184,7 @@ def test_build_remediation_report_uses_slice_template_and_schema(repo_root: Path
     Draft202012Validator(schema).validate(_to_jsonable(remediation))
 
 
+@pytest.mark.operator
 def test_validate_slice_contracts_reports_current_bundle_as_complete(repo_root: Path, tmp_path: Path) -> None:
     reports_root = _copy_reports(repo_root, tmp_path)
     if not (repo_root / "editions" / "acme_weekly.yaml").exists():

@@ -59,7 +59,7 @@ QG_REGISTRY: list[tuple[str, bool, str]] = [
     ("QG-9", True, "QG-9"),    # Overdue target dates
     ("QG-10", True, "QG-10"),  # Material-change narrative
     # Phase 1b gates
-    ("QG-11", True, "QG-11"),  # Claim contradiction (forceable depends on L-level)
+    ("QG-11", False, "QG-11"),  # Claim contradiction (never forceable, RELO-D8)
     ("QG-17", True, "QG-17"),  # Contradiction narrative
     ("QG-12", True, "QG-12"),  # Chronic high-risk escalation
     ("QG-13", False, "QG-13"), # Uncovered high-risk items
@@ -234,8 +234,14 @@ def _gate_call_text(source: str, gate_id_pos: int) -> str:
         elif ch == ")":
             depth -= 1
             if started and depth == 0:
-                return source[call_start : i + 1]
+                return source[call_start : i + 1] if gate_id_pos <= i else ""
     return ""
+
+
+def test_gate_scan_ignores_ids_outside_gate_calls() -> None:
+    source = 'GateEvaluation(gate_id="QG-20", forceable=True)\ngate_ids = ("QG-21",)'
+
+    assert _gate_call_text(source, source.index('"QG-21"')) == ""
 
 
 def test_forceable_classification_matches_code() -> None:

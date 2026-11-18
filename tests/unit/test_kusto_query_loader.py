@@ -341,7 +341,7 @@ kpis:
   - id: acme-deployment-velocity
     metric_id: acme.deployment_velocity
     workstream_ids: [acme]
-    cluster: https://adventure.kusto.windows.net
+    cluster: https://kusto.example.invalid
     database: ExampleDb4
     kql: Metrics | take 1
     section: Deployment Velocity
@@ -363,7 +363,7 @@ kpis:
             golden_queries=(
                 KustoQuery(
                     id="velocity-p50",
-                    cluster="https://adventure.kusto.windows.net",
+                    cluster="https://kusto.example.invalid",
                     database="ExampleDb4",
                     kql="Golden | take 1",
                     section="Velocity",
@@ -373,7 +373,7 @@ kpis:
                 ),
                 KustoQuery(
                     id="other-program",
-                    cluster="https://adventure.kusto.windows.net",
+                    cluster="https://kusto.example.invalid",
                     database="ExampleDb4",
                     kql="Other | take 1",
                     section="Other",
@@ -407,7 +407,7 @@ kpis:
   - id: acme-safety-pass-rate
     metric_id: acme.safety_pass_rate
     workstream_ids: [acme]
-    cluster: https://adventure.kusto.windows.net
+    cluster: https://kusto.example.invalid
     database: ExampleDb4
     kql: Metrics | take 1
     section: Safety
@@ -419,7 +419,7 @@ kpis:
     comparison: ">="
   - id: acme-no-slo
     metric_id: acme.no_slo_metric
-    cluster: https://adventure.kusto.windows.net
+    cluster: https://kusto.example.invalid
     database: ExampleDb4
     kql: Metrics | take 1
     section: Other
@@ -458,7 +458,7 @@ schema_version: "1.0"
 kpis:
   - id: velocity-p50
     workstream_ids: [acme]
-    cluster: https://adventure.kusto.windows.net
+    cluster: https://kusto.example.invalid
     database: ExampleDb4
     kql: Metrics | take 1
     section: Deployment Velocity
@@ -477,7 +477,7 @@ kpis:
             golden_queries=(
                 KustoQuery(
                     id="velocity-p50",
-                    cluster="https://adventure.kusto.windows.net",
+                    cluster="https://kusto.example.invalid",
                     database="ExampleDb4",
                     kql="Golden | take 1",
                     section="Velocity",
@@ -497,7 +497,7 @@ def test_kpi_queries_for_workstream_filters_refresh_only() -> None:
     queries = (
         KustoQuery(
             id="acme-deployment-velocity",
-            cluster="https://adventure.kusto.windows.net",
+            cluster="https://kusto.example.invalid",
             database="ExampleDb4",
             kql="Metrics | take 1",
             section="Deployment Velocity",
@@ -508,7 +508,7 @@ def test_kpi_queries_for_workstream_filters_refresh_only() -> None:
         ),
         KustoQuery(
             id="acme-fleet-health",
-            cluster="https://adventure.kusto.windows.net",
+            cluster="https://kusto.example.invalid",
             database="ExampleDb4",
             kql="FleetHealth | take 1",
             section="Fleet Health",
@@ -519,13 +519,13 @@ def test_kpi_queries_for_workstream_filters_refresh_only() -> None:
         ),
         KustoQuery(
             id="contoso-perf-baseline",
-            cluster="https://adventure.kusto.windows.net",
+            cluster="https://kusto.example.invalid",
             database="ExampleDb4",
             kql="Performance | take 1",
             section="Performance",
             render_as="metric_highlight",
             confidence="medium",
-            workstream_ids=("exd_on_exn",),
+            workstream_ids=("contoso",),
             refresh_on_gather=True,
         ),
     )
@@ -621,7 +621,7 @@ schema_version: "1.0"
 kpis:
   - id: acme-deployment-p50-p90
     workstream_ids: [acme]
-    cluster: https://adventure.kusto.windows.net
+    cluster: https://kusto.example.invalid
     database: ExampleDb4
     kql: Metrics | take 1
     section: Deployment Velocity
@@ -683,9 +683,9 @@ schema_version: "1.0"
 kpis:
   - id: acme-fleet-size
     workstream_ids: [acme]
-    cluster: https://adventure.kusto.windows.net
-    database: adventure
-    kql: TenantCatalogSnapshot_NOVAWithoutEAP() | summarize FleetTenants=dcount(Name)
+    cluster: https://kusto.example.invalid
+    database: ExampleDb4
+    kql: FleetMetrics | summarize FleetTenants=dcount(Name)
     section: Fleet Health
     render_as: metric_highlight
     confidence: medium
@@ -720,6 +720,7 @@ kpis:
     assert queries[0].last_cycle_succeeded is None
 
 
+@pytest.mark.operator
 def test_load_kpi_queries_includes_nova_readiness_catalog_queries() -> None:
     programs_root = Path(__file__).resolve().parents[2] / "programs"
     if not (programs_root / "acme" / "knowledge" / "kpi_queries.yaml").exists():
@@ -735,6 +736,7 @@ def test_load_kpi_queries_includes_nova_readiness_catalog_queries() -> None:
     }.issubset({query.id for query in queries})
 
 
+@pytest.mark.operator
 def test_load_kpi_queries_includes_live_nova_fleet_parity_delta_query() -> None:
     programs_root = Path(__file__).resolve().parents[2] / "programs"
     if not (programs_root / "acme" / "knowledge" / "kpi_queries.yaml").exists():
@@ -749,6 +751,7 @@ def test_load_kpi_queries_includes_live_nova_fleet_parity_delta_query() -> None:
     assert queries["acme-vs-fabric-p50-delta"].render_as == "metric_highlight"
 
 
+@pytest.mark.operator
 def test_load_kpi_queries_includes_live_nova_node_availability_query() -> None:
     programs_root = Path(__file__).resolve().parents[2] / "programs"
     if not (programs_root / "acme" / "knowledge" / "kpi_queries.yaml").exists():
@@ -762,6 +765,7 @@ def test_load_kpi_queries_includes_live_nova_node_availability_query() -> None:
     assert queries["acme-node-availability-7d"].render_as == "metric_highlight"
 
 
+@pytest.mark.operator
 def test_load_kpi_queries_includes_live_nova_docking_forecast_query() -> None:
     programs_root = Path(__file__).resolve().parents[2] / "programs"
     if not (programs_root / "acme" / "knowledge" / "kpi_queries.yaml").exists():
@@ -777,6 +781,7 @@ def test_load_kpi_queries_includes_live_nova_docking_forecast_query() -> None:
     assert queries["acme-docking-forecast-30d"].render_as == "metric_highlight"
 
 
+@pytest.mark.operator
 def test_load_kpi_queries_includes_live_nova_customer_account_query() -> None:
     programs_root = Path(__file__).resolve().parents[2] / "programs"
     if not (programs_root / "acme" / "knowledge" / "kpi_queries.yaml").exists():
@@ -790,6 +795,7 @@ def test_load_kpi_queries_includes_live_nova_customer_account_query() -> None:
     assert queries["acme-customer-account-count"].render_as == "metric_highlight"
 
 
+@pytest.mark.operator
 def test_load_kpi_queries_includes_live_nova_ready_stamp_query() -> None:
     programs_root = Path(__file__).resolve().parents[2] / "programs"
     if not (programs_root / "acme" / "knowledge" / "kpi_queries.yaml").exists():
@@ -803,6 +809,7 @@ def test_load_kpi_queries_includes_live_nova_ready_stamp_query() -> None:
     assert queries["acme-ready-stamp-count"].render_as == "metric_highlight"
 
 
+@pytest.mark.operator
 def test_load_kpi_queries_includes_live_nova_fleet_by_stage_query() -> None:
     programs_root = Path(__file__).resolve().parents[2] / "programs"
     if not (programs_root / "acme" / "knowledge" / "kpi_queries.yaml").exists():
@@ -816,6 +823,7 @@ def test_load_kpi_queries_includes_live_nova_fleet_by_stage_query() -> None:
     assert queries["acme-fleet-by-stage"].result_column is None
 
 
+@pytest.mark.operator
 def test_load_kpi_queries_includes_live_nova_buildout_pipeline_query() -> None:
     programs_root = Path(__file__).resolve().parents[2] / "programs"
     if not (programs_root / "acme" / "knowledge" / "kpi_queries.yaml").exists():
@@ -830,6 +838,7 @@ def test_load_kpi_queries_includes_live_nova_buildout_pipeline_query() -> None:
     assert queries["acme-buildout-pipeline"].result_column is None
 
 
+@pytest.mark.operator
 def test_load_kpi_queries_includes_live_nova_repair_mttr_query() -> None:
     programs_root = Path(__file__).resolve().parents[2] / "programs"
     if not (programs_root / "acme" / "knowledge" / "kpi_queries.yaml").exists():
@@ -845,6 +854,7 @@ def test_load_kpi_queries_includes_live_nova_repair_mttr_query() -> None:
     assert queries["acme-repair-mttr"].render_as == "metric_highlight"
 
 
+@pytest.mark.operator
 def test_load_kpi_queries_includes_live_nova_specific_icm_query_linkage() -> None:
     programs_root = Path(__file__).resolve().parents[2] / "programs"
     if not (programs_root / "acme" / "knowledge" / "kpi_queries.yaml").exists():
@@ -859,6 +869,7 @@ def test_load_kpi_queries_includes_live_nova_specific_icm_query_linkage() -> Non
     assert queries["acme-specific-icm-count"].result_column == "ActiveNovaRegressionIncidents"
 
 
+@pytest.mark.operator
 def test_load_kpi_queries_includes_live_nova_stg_validation_query_linkage() -> None:
     programs_root = Path(__file__).resolve().parents[2] / "programs"
     if not (programs_root / "acme" / "knowledge" / "kpi_queries.yaml").exists():
@@ -874,6 +885,7 @@ def test_load_kpi_queries_includes_live_nova_stg_validation_query_linkage() -> N
     assert queries["acme-stg-validation-open"].result_column == "OpenValidationItems"
 
 
+@pytest.mark.operator
 def test_load_kpi_queries_includes_live_nova_fabric_parity_gap_query_linkage() -> None:
     programs_root = Path(__file__).resolve().parents[2] / "programs"
     if not (programs_root / "acme" / "knowledge" / "kpi_queries.yaml").exists():
@@ -888,6 +900,7 @@ def test_load_kpi_queries_includes_live_nova_fabric_parity_gap_query_linkage() -
     assert queries["acme-fabric-parity-gap-count"].result_column == "OpenFabricParityGaps"
 
 
+@pytest.mark.operator
 def test_load_kpi_queries_includes_live_nova_deployment_p50_metric_linkage() -> None:
     programs_root = Path(__file__).resolve().parents[2] / "programs"
     if not (programs_root / "acme" / "knowledge" / "kpi_queries.yaml").exists():
@@ -901,6 +914,7 @@ def test_load_kpi_queries_includes_live_nova_deployment_p50_metric_linkage() -> 
     assert queries["acme-deployment-p50-p90"].result_column == "P50Mins"
 
 
+@pytest.mark.operator
 def test_load_kpi_queries_includes_live_nova_buildout_slo_metric_linkage() -> None:
     programs_root = Path(__file__).resolve().parents[2] / "programs"
     if not (programs_root / "acme" / "knowledge" / "kpi_queries.yaml").exists():
@@ -914,6 +928,7 @@ def test_load_kpi_queries_includes_live_nova_buildout_slo_metric_linkage() -> No
     assert queries["acme-buildout-slo"].result_column == "BuildoutSloPct"
 
 
+@pytest.mark.operator
 def test_load_kpi_queries_includes_live_nova_fleet_size_metric_linkage() -> None:
     programs_root = Path(__file__).resolve().parents[2] / "programs"
     if not (programs_root / "acme" / "knowledge" / "kpi_queries.yaml").exists():

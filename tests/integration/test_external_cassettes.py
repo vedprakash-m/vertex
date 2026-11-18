@@ -24,7 +24,6 @@ from src.commands.report import generate_report_draft
 FROZEN_NOW = datetime(2026, 5, 5, 18, 0, tzinfo=timezone.utc)
 
 
-@pytest.mark.integration
 def test_ado_cassette_replays_report_generation(repo_root: Path, tmp_path: Path) -> None:
     reports_root = stage_v2_report_workspace(repo_root, tmp_path)
     archive_root = tmp_path / "archive"
@@ -46,7 +45,6 @@ def test_ado_cassette_replays_report_generation(repo_root: Path, tmp_path: Path)
     assert artifacts.manifest.ado_calls == 1
 
 
-@pytest.mark.integration
 def test_kusto_cassette_replays_execute_with_schema(monkeypatch: pytest.MonkeyPatch) -> None:
     rows, schema = load_kusto_cassette_rows_and_schema("kusto_velocity")
 
@@ -92,7 +90,6 @@ def test_kusto_cassette_replays_execute_with_schema(monkeypatch: pytest.MonkeyPa
     assert actual_schema == schema
 
 
-@pytest.mark.integration
 def test_aoai_cassette_replays_structured_completion(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com")
     monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test-key")

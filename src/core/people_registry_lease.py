@@ -1,9 +1,9 @@
 """specs/people.md Phase 1, PPL-W1.2: workspace-global fenced registry lease.
 
-Mirrors `src/core/workspace_lease.py`'s proven fencing-token/TTL/owner
-design (arch-data-fix.md ADF-W1.13's CPK primitive) -- same `BEGIN
-IMMEDIATE`-guarded read-decide-write sequence, same SQLite-backed
-fencing-token increment, same crash-safety story -- deliberately NOT
+Uses `src/core/workspace_lease.py`'s fencing-token/TTL/owner design
+(arch-data-fix.md ADF-W1.13's CPK primitive) with a `BEGIN
+IMMEDIATE`-guarded read-decide-write sequence and SQLite-backed
+fencing-token increment -- deliberately NOT
 reused directly, because its lease key is `(program_id, mutation_domain)`
 and its DB path is program-scoped (`programs/<id>/ledger/...`). The
 people registry is one shared root across every program; specs/people.md
@@ -31,6 +31,8 @@ _DB_FILENAME = "registry_lease.sqlite3"
 _AUDIT_FILENAME = "registry_lease_audit.jsonl"
 _DEFAULT_TTL_SECONDS = 300
 _AUDIT_MAX_BYTES = 10 * 1024 * 1024  # matches proposal_audit.jsonl's rotation cap
+# A released row retains only its fencing sequence; it is not a held lease.
+_RELEASED_AT = "0001-01-01T00:00:00Z"
 
 #: Mirrors workspace_lease.py's DEFAULT_MUTATION_DOMAIN convention -- most
 #: registry commits use this single domain; a future caller may pass a
@@ -105,10 +107,11 @@ def acquire_registry_lease(
     ttl_seconds: int = _DEFAULT_TTL_SECONDS,
     knowledge_root: Path,
 ) -> RegistryLeaseHandle:
-    """Acquire (or renew, if `owner` already holds it) the workspace-global
-    registry lease for `mutation_domain`. Raises
-    `RegistryLeaseHeldByAnotherOwner` if a different, non-expired owner
-    currently holds it."""
+    """Acquire the workspace-global registry lease for `mutation_domain`.
+
+    A live lease blocks every acquisition, including the same owner.
+    Extend a held lease with `renew_registry_lease` and its current handle.
+    """
     path = get_registry_lease_db_path(knowledge_root)
     with open_registry_lease_db(path, durability="strict") as connection:
         _ensure_schema(connection)
@@ -120,9 +123,10 @@ def acquire_registry_lease(
 
         now = _now()
         if row is not None:
-            current_owner, current_token, _acquired_at, expires_at_raw = row
+            current_owner, current_token, acquired_at_raw, expires_at_raw = row
             expires_at = _parse(expires_at_raw)
-            if current_owner != owner and now < expires_at:
+            released = acquired_at_raw == _RELEASED_AT and expires_at_raw == _RELEASED_AT
+            if not released and now < expires_at:
                 raise RegistryLeaseHeldByAnotherOwner(current_owner, expires_at, mutation_domain=mutation_domain)
             next_token = int(current_token) + 1
         else:
@@ -150,15 +154,22 @@ def renew_registry_lease(
         _ensure_schema(connection)
         connection.execute("BEGIN IMMEDIATE")
         row = connection.execute(
-            "SELECT owner, fencing_token FROM registry_lease WHERE mutation_domain = ?", (handle.mutation_domain,)
+            "SELECT owner, fencing_token, acquired_at, expires_at FROM registry_lease WHERE mutation_domain = ?",
+            (handle.mutation_domain,),
         ).fetchone()
         if row is None:
             raise RegistryLeaseFencingTokenStale(handle.fencing_token, 0, mutation_domain=handle.mutation_domain)
-        current_owner, current_token = row
-        if int(current_token) != handle.fencing_token or current_owner != handle.owner:
+        current_owner, current_token, acquired_at_raw, expires_at_raw = row
+        if (
+            int(current_token) != handle.fencing_token
+            or current_owner != handle.owner
+            or (acquired_at_raw == _RELEASED_AT and expires_at_raw == _RELEASED_AT)
+        ):
             raise RegistryLeaseFencingTokenStale(handle.fencing_token, int(current_token), mutation_domain=handle.mutation_domain)
 
         now = _now()
+        if now >= _parse(expires_at_raw):
+            raise ConfigError("Registry lease has expired; acquire a new lease before writing.")
         expires_at = now + timedelta(seconds=ttl_seconds)
         connection.execute(
             "UPDATE registry_lease SET acquired_at = ?, expires_at = ? WHERE mutation_domain = ?",
@@ -176,14 +187,23 @@ def release_registry_lease(handle: RegistryLeaseHandle, *, knowledge_root: Path)
         _ensure_schema(connection)
         connection.execute("BEGIN IMMEDIATE")
         row = connection.execute(
-            "SELECT owner, fencing_token FROM registry_lease WHERE mutation_domain = ?", (handle.mutation_domain,)
+            "SELECT owner, fencing_token, acquired_at, expires_at FROM registry_lease WHERE mutation_domain = ?",
+            (handle.mutation_domain,),
         ).fetchone()
         if row is None:
             return
-        current_owner, current_token = row
-        if int(current_token) != handle.fencing_token or current_owner != handle.owner:
+        current_owner, current_token, acquired_at_raw, expires_at_raw = row
+        if (
+            int(current_token) != handle.fencing_token
+            or current_owner != handle.owner
+            or (acquired_at_raw == _RELEASED_AT and expires_at_raw == _RELEASED_AT)
+        ):
             return
-        connection.execute("DELETE FROM registry_lease WHERE mutation_domain = ?", (handle.mutation_domain,))
+        connection.execute(
+            "UPDATE registry_lease SET owner = '', fencing_token = fencing_token + 1, acquired_at = ?, expires_at = ? "
+            "WHERE mutation_domain = ?",
+            (_RELEASED_AT, _RELEASED_AT, handle.mutation_domain),
+        )
 
 
 def read_registry_lease_state(
@@ -200,6 +220,8 @@ def read_registry_lease_state(
         if row is None:
             return None
         owner, fencing_token, acquired_at_raw, expires_at_raw = row
+        if acquired_at_raw == _RELEASED_AT and expires_at_raw == _RELEASED_AT:
+            return None
         return RegistryLeaseHandle(
             owner=str(owner),
             fencing_token=int(fencing_token),
@@ -250,7 +272,8 @@ def force_release_registry_lease(
         _ensure_schema(connection)
         connection.execute("BEGIN IMMEDIATE")
         row = connection.execute(
-            "SELECT owner, fencing_token FROM registry_lease WHERE mutation_domain = ?", (mutation_domain,)
+            "SELECT owner, fencing_token, acquired_at, expires_at FROM registry_lease WHERE mutation_domain = ?",
+            (mutation_domain,),
         ).fetchone()
         if row is None:
             old_owner, old_token, new_token = None, None, 1
@@ -259,8 +282,11 @@ def force_release_registry_lease(
                 (mutation_domain, f"force_released_by:{authorized_principal}", new_token, _wire(now), _wire(now)),
             )
         else:
-            old_owner, old_token = row
-            new_token = int(old_token) + 1
+            old_owner, current_token, acquired_at_raw, expires_at_raw = row
+            new_token = int(current_token) + 1
+            old_token = current_token
+            if acquired_at_raw == _RELEASED_AT and expires_at_raw == _RELEASED_AT:
+                old_owner, old_token = None, None
             connection.execute(
                 "UPDATE registry_lease SET owner = ?, fencing_token = ?, acquired_at = ?, expires_at = ? WHERE mutation_domain = ?",
                 (f"force_released_by:{authorized_principal}", new_token, _wire(now), _wire(now), mutation_domain),

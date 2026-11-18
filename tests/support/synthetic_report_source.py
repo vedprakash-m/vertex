@@ -21,8 +21,10 @@ FOLLOWUP_QUERY = str(uuid5(NAMESPACE_URL, "https://example.test/fixtures/report/
 
 
 @pytest.fixture
-def synthetic_report_root(tmp_path: Path) -> Path:
-    return build_synthetic_report_source(tmp_path / "synthetic-source")
+def synthetic_report_root(tmp_path: Path, synthetic_report_seed: Path) -> Path:
+    target = tmp_path / "synthetic-source"
+    shutil.copytree(synthetic_report_seed, target)
+    return target
 
 
 def build_synthetic_report_source(root: Path) -> Path:

@@ -18,6 +18,7 @@ from src.core.journal import PROGRAMS_ROOT
 from src.core.jsonl_utils import append_jsonl_line, parse_jsonl_line, read_jsonl_records
 from src.core.models import RiskLevel, WorkItem
 from src.core.models_v2 import RiskCategory, RiskDerivedLevel, RiskEntry, RiskImpact, RiskKind, RiskProbability, RiskStatus
+from src.core.risk_dedupe import parse_risk_lifecycle_fields, risk_lifecycle_record
 
 
 _STALE_REVIEW_DAYS = 30
@@ -344,6 +345,7 @@ def _risk_fact_payload(entry: RiskEntry) -> dict[str, object]:
         "entity_refs": list(entry.entity_refs),
         "source_signal_ids": list(entry.source_signal_ids),
         "kind": entry.kind,
+        **risk_lifecycle_record(entry),
     }
 
 
@@ -654,6 +656,7 @@ def _parse_risk_entry(program_id: str, raw_entry: dict[str, Any]) -> RiskEntry:
         # (existing human-curated rows are strategic by convention). Unknown
         # values fall back to the enum's from_string tolerance.
         kind=_parse_risk_kind(raw_entry.get("kind")),
+        **parse_risk_lifecycle_fields(raw_entry),
     )
 
 
@@ -683,6 +686,7 @@ def _risk_entry_to_record(entry: RiskEntry) -> dict[str, Any]:
         # ADF-W4.2: persist the three-way kind so candidates/hygiene survive a
         # save/load round-trip instead of silently defaulting to "strategic".
         "kind": entry.kind,
+        **risk_lifecycle_record(entry),
     }
 
 

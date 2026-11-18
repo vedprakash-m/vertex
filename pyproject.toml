@@ -71,12 +71,12 @@ ai = [
   "tiktoken>=0.7.0",
 ]
 ai-local = [
-  # Tier-1 "local semantic" seam in src/ai/tiered_router.py (embeddings /
-  # fuzzy match / keyword graph, near-zero OpEx) -- today this tier is
+  # Tier-1 "local semantic" seam in src/ai/tiered_router.py (lexical-only:
+  # FTS5/BM25 plus rapidfuzz fuzzy match, no embeddings) -- today this tier is
   # implemented entirely by rapidfuzz fuzzy matching (src/core/entity_registry.py);
   # no local-inference engine (e.g. an on-device LLM runtime) is wired up yet,
   # so this extra is intentionally small until one is.
-  "rapidfuzz>=3.9,<4",
+  "rapidfuzz==3.14.6",
 ]
 m365 = [
   # Retained as an optional dependency; removing unused integrations requires
@@ -123,7 +123,8 @@ module = ["src.core.config_loader", "src.commands.doctor"]
 disable_error_code = ["import-untyped"]
 
 [tool.pytest.ini_options]
-addopts = "-n auto -m 'not perf'"
+addopts = "-m 'not perf'"
+junit_family = "xunit2"
 # Do not set basetemp here — pytest temp dirs belong in the system %TEMP%, not output/.
 # If a basetemp override is needed (e.g. for CI artifact collection), use .pytest-tmp/
 # (gitignored). Never point basetemp at output/ — that directory is for program artifacts.
@@ -131,5 +132,15 @@ tmp_path_retention_policy = "failed"
 markers = [
     "slow: marks tests as slow (excluded from inner dev loop; run on CI or with -m slow)",
     "perf: bounded performance and scale test lane (excluded by default; run with -m perf)",
+    "operator: requires private operator data or scheduled qualification (excluded from public CI)",
     "eval_ci: ADF-W0.15 CI regression evaluation lane (synthetic fixtures + Issue-079 regression corpus; deterministic, no LLM calls)",
 ]
+
+[tool.coverage.run]
+branch = true
+relative_files = true
+parallel = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

@@ -156,6 +156,7 @@ class KustoQuerySettings:
     fallback_kql: str | None = None  # FR-SG-31: secondary KQL if primary returns zero rows or query error
     result_limits: KustoResultLimits | None = None
     expected_cardinality: str = "zero_ok"
+    kpi_chart: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1546,6 +1547,7 @@ def _parse_report_config(raw_config: dict[str, Any]) -> ReportConfig:
                     chart_cache_ttl_hours=parse_chart_cache_ttl(query.get("chart_cache_ttl_hours", 26)),
                     result_limits=parse_kusto_result_limits(query.get("result_limits")),
                     expected_cardinality=str(query.get("expected_cardinality", "zero_ok")),
+                    kpi_chart=bool(query.get("kpi_chart", False)),
                 )
                 for query in kusto.get("queries", [])
             ),

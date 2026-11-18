@@ -232,7 +232,7 @@ class ContextUpdateProposal:
     dismissed_at: datetime | None = None
     dismissed_by: str | None = None
     source_sha256: str | None = None
-
+    prior_state: str | None = None    # RELO-W4.11: "absent_verified" | "sha256:<hex>" of target at extraction
     # ------------------------------------------------------------------
     # Serialization
     # ------------------------------------------------------------------
@@ -318,6 +318,8 @@ class ContextUpdateProposal:
         }
         if self.source_sha256 is not None:
             payload["source_sha256"] = self.source_sha256
+        if self.prior_state is not None:
+            payload["prior_state"] = self.prior_state
         return payload
 
     @staticmethod
@@ -344,6 +346,7 @@ class ContextUpdateProposal:
             source_value=str(d["source_value"]),
             current_value=d.get("current_value"),
             current_value_hash=d.get("current_value_hash"),
+            prior_state=d.get("prior_state"),
             confidence=str(d.get("confidence", "medium")),
             batch_eligible=bool(d.get("batch_eligible", False)),
             extraction_method_rationale=str(d.get("extraction_method_rationale", "")),

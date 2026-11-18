@@ -62,6 +62,7 @@ from src.core.models_v2 import (
 )
 from src.core.yaml_utils import load_yaml_mapping
 from src.core.reality_store import get_program_reality_db_path
+from src.core.risk_dedupe import parse_risk_lifecycle_fields
 from src.core.risk_register_engine import load_risk_register
 from src.core.trusted_baseline_store import TrustedBaselineHistoryEntry, load_trusted_baseline_for_program
 from src.core.workstream_association_store import WorkstreamAssociationRecord, read_workstream_association_records
@@ -516,6 +517,16 @@ def build_fact_id(program_id: str, natural_key: str) -> str:
     return f"pf_{digest}"
 
 
+def _fact_visible_under_committed_gather(
+    fact: ProgramFactRevision,
+    committed_run_ids: frozenset[str],
+    legacy_cutoff_at: datetime | None,
+) -> bool:
+    if fact.gather_run_id is not None:
+        return fact.gather_run_id in committed_run_ids
+    return legacy_cutoff_at is None or fact.recorded_at <= legacy_cutoff_at
+
+
 def load_program_facts(
     program_id: str,
     *,
@@ -554,9 +565,7 @@ def load_program_facts(
         # None and every unstamped fact stays visible (unchanged prior
         # behavior) — this is the bootstrap/cutover migration itself.
         def _visible(fact: ProgramFactRevision) -> bool:
-            if fact.gather_run_id is not None:
-                return fact.gather_run_id in committed_run_ids
-            return legacy_cutoff_at is None or fact.recorded_at <= legacy_cutoff_at
+            return _fact_visible_under_committed_gather(fact, committed_run_ids, legacy_cutoff_at)
 
         # C.145/C.161 containment: a non-committed run that superseded a
         # committed revision would otherwise make the fact silently vanish.
@@ -3053,6 +3062,7 @@ def _risk_entry_from_fact(fact: ProgramFactRevision) -> RiskEntry:
         dimension_id=_deserialize_optional_string(payload.get("dimension_id")),
         fact_id=fact.fact_id,
         last_validated_at=fact.recorded_at,
+        **parse_risk_lifecycle_fields(payload),
     )
 
 

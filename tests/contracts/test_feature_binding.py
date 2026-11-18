@@ -20,6 +20,7 @@ Zone A only. No AI. No M365 calls.
 
 from __future__ import annotations
 
+from functools import lru_cache
 import re
 import subprocess
 from pathlib import Path
@@ -66,6 +67,7 @@ class Violation(NamedTuple):
     matched: str
 
 
+@lru_cache(maxsize=None)
 def _load_program_strings(programs_root: Path) -> frozenset[str]:
     """
     Load all non-structure string values from program YAML files.
@@ -202,10 +204,11 @@ def _is_excluded_script(path: Path) -> bool:
     return any(path.name.startswith(prefix) for prefix in _EXCLUDED_SCRIPT_PREFIXES)
 
 
-def _all_violations(
-    dirs: list[Path],
+@lru_cache(maxsize=None)
+def _cached_violations(
+    dirs: tuple[Path, ...],
     program_strings: frozenset[str],
-) -> list[Violation]:
+) -> tuple[Violation, ...]:
     """Scan all tracked .py files in the given directories, skipping utility scripts.
 
     Only files tracked by git are scanned — gitignored scripts (which may contain
@@ -234,7 +237,14 @@ def _all_violations(
             if _is_excluded_script(path):
                 continue
             all_violations.extend(_scan_file(path, program_strings))
-    return all_violations
+    return tuple(all_violations)
+
+
+def _all_violations(
+    dirs: list[Path],
+    program_strings: frozenset[str],
+) -> list[Violation]:
+    return list(_cached_violations(tuple(dirs), program_strings))
 
 
 @pytest.mark.skipif(not _PROGRAMS_EXIST, reason="Requires programs/ data to exempt source-of-truth values")

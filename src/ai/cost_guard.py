@@ -43,6 +43,7 @@ class CostReservation:
     estimated_cost_usd: float
     state: CostRunState
     _ledger_path: Path | None = field(default=None, repr=False)
+    chain_id: int | None = None
 
 
 def _enforce_run_budget(state: CostRunState, estimated_cost_usd: float, budget_usd: float) -> None:
@@ -51,6 +52,19 @@ def _enforce_run_budget(state: CostRunState, estimated_cost_usd: float, budget_u
             f"Spent/reserved ${state.spent_usd + state.reserved_usd:.3f} of ${budget_usd:.2f}; "
             f"next AI spend ${estimated_cost_usd:.3f} would exceed the run ceiling."
         )
+
+
+def _ensure_chain_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS ai_cost_chains (chain_id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "edition TEXT NOT NULL, run_id TEXT NOT NULL, reserved_usd REAL NOT NULL, status TEXT NOT NULL, "
+        "created_at TEXT NOT NULL, released_at TEXT)"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS ai_cost_chain_draws ("
+        "reservation_id INTEGER PRIMARY KEY REFERENCES ai_cost_reservations(reservation_id), "
+        "chain_id INTEGER NOT NULL REFERENCES ai_cost_chains(chain_id))"
+    )
 
 
 class CostGuard:
@@ -115,17 +129,36 @@ class CostGuard:
         """
         return self.reserve_call(estimated_cost_usd).state
 
-    def reserve_call(self, estimated_cost_usd: float) -> CostReservation:
+    def reserve_call(
+        self,
+        estimated_cost_usd: float,
+        *,
+        chain_total_usd: float | None = None,
+        chain: CostReservation | None = None,
+    ) -> CostReservation:
         """Atomically reserve one remote call before it can be dispatched.
 
         SQLite serializes the budget decision and reservation insert under an
         immediate transaction.  A second concurrent caller therefore sees the
         first reservation before it can dispatch; a fallback attempt gets a
         separate reservation and cannot borrow the failed attempt's budget.
+
+        ``chain_total_usd`` makes this first attempt also hold a retry/fallback
+        chain's worst case: the run ceiling admits the whole total, the attempt
+        row takes its estimate and ``ai_cost_chains`` keeps the remainder.
+        ``chain=`` (a reservation returned that way) draws a later attempt from
+        that remainder, and :meth:`release_chain` frees only what is undrawn.
         """
         estimated_cost_usd = _validate_live_amount(estimated_cost_usd, field_name="estimated_cost_usd")
+        if chain_total_usd is not None:
+            chain_total_usd = _validate_live_amount(chain_total_usd, field_name="chain_total_usd")
+            if estimated_cost_usd > chain_total_usd + 1e-12:
+                raise StateError("Attempt estimate exceeds its cost chain reservation")
+        chain_id = chain.chain_id if chain is not None else None
         fallback_state = self.current_state()
         ledger_path = self.ledger_path.resolve()
+        if chain is not None and (chain_id is None or chain._ledger_path != ledger_path):
+            raise StateError("Cost chain reservation is unknown or belongs to a different ledger")
         try:
             with open_program_db(ledger_path, durability="strict") as connection:
                 _ensure_sqlite_schema(connection)
@@ -136,16 +169,50 @@ class CostGuard:
                     (self._edition, self._run_id),
                 ).fetchone()
                 current = _state_from_sqlite_row(row) if row is not None else fallback_state
-                _enforce_run_budget(current, estimated_cost_usd, self.effective_budget_usd(current))
+                held_usd = estimated_cost_usd if chain_total_usd is None else chain_total_usd
+                if chain is not None:
+                    _ensure_chain_schema(connection)
+                    chain_row = connection.execute(
+                        "SELECT reserved_usd, status FROM ai_cost_chains WHERE chain_id = ? AND edition = ? AND run_id = ?",
+                        (chain_id, self._edition, self._run_id),
+                    ).fetchone()
+                    if row is None or chain_row is None or chain_row["status"] != "reserved":
+                        raise StateError("Cost chain reservation is unknown or already released")
+                    remaining = _coerce_state_float(chain_row["reserved_usd"], field_name="reserved_usd")
+                    if estimated_cost_usd > remaining + 1e-12:
+                        raise StateError("Attempt estimate exceeds the cost chain reservation's remainder")
+                    # The run already holds this amount inside the chain row.
+                    held_usd = 0.0
+                else:
+                    _enforce_run_budget(current, held_usd, self.effective_budget_usd(current))
                 _projection_payload_for_write(self.state_path, edition=self._edition)
-                updated = _replace_state(current, reserved_usd=current.reserved_usd + estimated_cost_usd)
+                updated = _replace_state(current, reserved_usd=current.reserved_usd + held_usd)
                 _upsert_sqlite_state(connection, updated)
+                created_at = updated.updated_at.isoformat()
+                if chain is not None:
+                    connection.execute(
+                        "UPDATE ai_cost_chains SET reserved_usd = ? WHERE chain_id = ?",
+                        (max(0.0, remaining - estimated_cost_usd), chain_id),
+                    )
+                elif chain_total_usd is not None:
+                    _ensure_chain_schema(connection)
+                    chain_id = connection.execute(
+                        "INSERT INTO ai_cost_chains (edition, run_id, reserved_usd, status, created_at) "
+                        "VALUES (?, ?, ?, 'reserved', ?)",
+                        (self._edition, self._run_id, max(0.0, chain_total_usd - estimated_cost_usd), created_at),
+                    ).lastrowid
                 cursor = connection.execute(
-                    "INSERT INTO ai_cost_reservations (edition, run_id, reserved_usd, status, created_at) VALUES (?, ?, ?, 'reserved', ?)",
-                    (self._edition, self._run_id, estimated_cost_usd, updated.updated_at.isoformat()),
+                    "INSERT INTO ai_cost_reservations (edition, run_id, reserved_usd, status, created_at) "
+                    "VALUES (?, ?, ?, 'reserved', ?)",
+                    (self._edition, self._run_id, estimated_cost_usd, created_at),
                 )
                 reservation_id = cursor.lastrowid
                 assert reservation_id is not None
+                if chain_id is not None:
+                    connection.execute(
+                        "INSERT INTO ai_cost_chain_draws (reservation_id, chain_id) VALUES (?, ?)",
+                        (reservation_id, chain_id),
+                    )
         except sqlite3.DatabaseError as error:
             raise StateError(f"Unable to reserve cost guard SQLite ledger at {self.ledger_path}") from error
         reservation = CostReservation(
@@ -153,6 +220,7 @@ class CostGuard:
             estimated_cost_usd=estimated_cost_usd,
             state=updated,
             _ledger_path=ledger_path,
+            chain_id=chain_id,
         )
         try:
             self._persist_projection(updated)
@@ -162,6 +230,8 @@ class CostGuard:
                     reservation, actual_cost_usd=0.0, ai_calls=0,
                     undispatched=True, refresh_projection=False,
                 )
+                if chain_total_usd is not None:
+                    self.release_chain(reservation, refresh_projection=False)
             except (StateError, OSError, UnicodeError) as error:
                 raise StateError(
                     f"Unable to release undispatched cost reservation ({type(error).__name__}); "
@@ -169,6 +239,58 @@ class CostGuard:
                 ) from None
             raise
         return reservation
+
+    def release_chain(self, chain: CostReservation, *, refresh_projection: bool = True) -> CostRunState:
+        """Release a chain's undrawn remainder; drawn attempts keep their own settle/retain outcome."""
+        ledger_path = self.ledger_path.resolve()
+        if chain.chain_id is None or chain._ledger_path != ledger_path:
+            raise StateError("Cost chain reservation is unknown or belongs to a different ledger")
+        try:
+            with open_program_db(ledger_path, durability="strict") as connection:
+                _ensure_sqlite_schema(connection)
+                _ensure_chain_schema(connection)
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT reserved_usd, status FROM ai_cost_chains WHERE chain_id = ? AND edition = ? AND run_id = ?",
+                    (chain.chain_id, self._edition, self._run_id),
+                ).fetchone()
+                if row is None or row["status"] != "reserved":
+                    raise StateError("Cost chain reservation is unknown or already released")
+                remaining = _coerce_state_float(row["reserved_usd"], field_name="reserved_usd")
+                state_row = connection.execute(
+                    "SELECT edition, run_id, budget_usd, reserved_usd, spent_usd, ai_calls, started_at, updated_at "
+                    "FROM ai_cost_runs WHERE edition = ? AND run_id = ?",
+                    (self._edition, self._run_id),
+                ).fetchone()
+                if state_row is None:
+                    raise StateError("Cost chain reservation has no run state")
+                current = _state_from_sqlite_row(state_row)
+                if remaining > current.reserved_usd + 1e-12:
+                    raise StateError("Cost chain reservation exceeds the run's reserved balance")
+                reserved_usd = current.reserved_usd - remaining
+                outstanding = math.fsum(
+                    _coerce_state_float(open_row["reserved_usd"], field_name="reserved_usd")
+                    for open_row in connection.execute(
+                        "SELECT reserved_usd FROM ai_cost_reservations WHERE edition = ? AND run_id = ? AND status = 'reserved' "
+                        "UNION ALL SELECT reserved_usd FROM ai_cost_chains "
+                        "WHERE edition = ? AND run_id = ? AND status = 'reserved' AND chain_id != ?",
+                        (self._edition, self._run_id, self._edition, self._run_id, chain.chain_id),
+                    )
+                )
+                # Snap draw/settle float drift back to the exact sum of the rows still held.
+                if abs(reserved_usd - outstanding) < 1e-9:
+                    reserved_usd = outstanding
+                updated = _replace_state(current, reserved_usd=reserved_usd if reserved_usd > 1e-12 else 0.0)
+                _upsert_sqlite_state(connection, updated)
+                connection.execute(
+                    "UPDATE ai_cost_chains SET status = 'released', released_at = ? WHERE chain_id = ?",
+                    (updated.updated_at.isoformat(), chain.chain_id),
+                )
+        except sqlite3.DatabaseError as error:
+            raise StateError(f"Unable to release cost chain in SQLite ledger at {self.ledger_path}") from error
+        if refresh_projection:
+            self._persist_projection(updated)
+        return updated
 
     def settle_reservation(self, reserved_cost_usd: float, actual_cost_usd: float, *, ai_calls: int = 1) -> CostRunState:
         """Convert a known reservation into actual spend after a response."""

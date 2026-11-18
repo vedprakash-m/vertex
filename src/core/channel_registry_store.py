@@ -12,6 +12,14 @@ if TYPE_CHECKING:
     from src.core.integration_types import RegistryFeedbackEvent
 
 from src.core._db import SQLiteUnitOfWork, open_program_db
+from src.core.ado_hydration_checkpoints import (
+    CheckpointAdvance,
+    HydrationCheckpoint,
+    HydrationSubresource,
+    advance_checkpoint,
+    ensure_checkpoint_table,
+    read_checkpoints,
+)
 from src.core.integration_types import (
     ChannelRegistration,
     DiscoveredRef,
@@ -453,6 +461,7 @@ class ChannelRegistryStore:
         verified_at: datetime,
         *,
         provider_instance_id: str | None = None,
+        checkpoint_advances: tuple[CheckpointAdvance, ...] = (),
     ) -> None:
         if not ref_id_kind_pairs:
             return
@@ -480,6 +489,15 @@ class ChannelRegistryStore:
                 """,
                 [tuple(base_values[2:] + [ref_id, ref_kind]) for ref_id, ref_kind in ref_id_kind_pairs],
             )
+            # RELO-W2.9: checkpoints commit or roll back with this verification.
+            for advance in checkpoint_advances:
+                advance_checkpoint(conn, advance, at=verified_at)
+
+    def read_hydration_checkpoints(
+        self, work_item_ids: tuple[int, ...]
+    ) -> dict[tuple[int, HydrationSubresource], HydrationCheckpoint]:
+        with self._connect() as conn:
+            return read_checkpoints(conn, work_item_ids)
 
     def mark_hydration_failed(
         self,
@@ -1022,6 +1040,7 @@ class ChannelRegistryStore:
         version_error: str | None = None
         with self._connect(init=True) as conn:
             conn.executescript(_SCHEMA_SQL)
+            ensure_checkpoint_table(conn)
             _ensure_registrations_additive_columns(conn)
             version = conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
             if version is not None:
