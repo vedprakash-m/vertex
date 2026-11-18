@@ -30,7 +30,7 @@ def test_policy_declares_exact_lane_contracts() -> None:
     policy = _policy()
     assert policy["functional_selection"] == "not perf and not integration and not operator"
     assert policy["functional_shards"] == 12
-    assert policy["workers_per_shard"] == 4
+    assert policy["workers_per_shard"] == 6
     assert len(policy["performance_nodes"]) == 8
     assert len(set(policy["performance_nodes"])) == 8
     assert policy["coverage"]["statement_target"] == 95.0

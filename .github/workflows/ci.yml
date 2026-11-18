@@ -113,7 +113,7 @@ jobs:
             --count 12 \
             --index "$SHARD" \
             --weights governance/test-file-timings.json \
-            -- -q -n 4 --dist load \
+            -- -q -n 6 --dist load \
             -m "not perf and not integration and not operator" \
             --strict-markers \
             --cov=src --cov=cli --cov-branch \

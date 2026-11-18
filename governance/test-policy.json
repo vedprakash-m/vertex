@@ -2,7 +2,7 @@
   "schema_version": 1,
   "functional_selection": "not perf and not integration and not operator",
   "functional_shards": 12,
-  "workers_per_shard": 4,
+  "workers_per_shard": 6,
   "performance_reports": 2,
   "windows_reports": 1,
   "coverage": {
