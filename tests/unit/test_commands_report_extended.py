@@ -143,7 +143,7 @@ def test_generate_report_draft_renders_eta_forecast_annotation_in_v2_lt_deck_ope
         open_browser=False,
     )
 
-    assert "low confidence â€” 2 prior slips, 78% miss probability | forecast p50 May 12, p80 May 15, p95 May 18" in artifacts.markdown_body
+    assert "low confidence — 2 prior slips, 78% miss probability | forecast p50 May 12, p80 May 15, p95 May 18" in artifacts.markdown_body
 
 
 def test_generate_report_draft_computes_readiness_from_v2_signal_context(repo_root: Path, tmp_path: Path) -> None:
@@ -1227,7 +1227,7 @@ def test_report_cli_stdout_json(monkeypatch, repo_root: Path, tmp_path: Path) ->
     text_body = next(part.get_payload(decode=True).decode() for part in eml.walk() if part.get_content_subtype() == "plain")
     blocking_notice = text_body.splitlines()[0]
     assert blocking_notice == (
-        "BLOCKED DRAFT â€” publication is prohibited until quality gates pass: "
+        "BLOCKED DRAFT — publication is prohibited until quality gates pass: "
         f"{', '.join(failed_gate_ids)}."
     )
 
@@ -2267,22 +2267,22 @@ def test_generate_report_draft_renders_v2_lt_deck_markdown(repo_root: Path, tmp_
     assert "Constraint: Do not widen partner pilot scope before Network signoff." in artifacts.markdown_body
     assert "## Milestones" in artifacts.markdown_body
     assert "\n---\n\n## Milestones" in artifacts.markdown_body
-    assert "M3 - Code Complete â€” at risk" in artifacts.markdown_body
+    assert "M3 - Code Complete — at risk" in artifacts.markdown_body
     assert "tracking 2026-05-28 (10 days late vs target)" in artifacts.markdown_body
     assert "target history 2026-05-12 -> 2026-05-18" in artifacts.markdown_body
-    assert "M4 - Pilot Rollout Validation â€” completed" in artifacts.markdown_body
+    assert "M4 - Pilot Rollout Validation — completed" in artifacts.markdown_body
     assert "completed 2026-05-18 (1 day late vs target)" in artifacts.markdown_body
     assert "completion history 2026-05-16 -> 2026-05-18" in artifacts.markdown_body
     assert "## Top Risks" in artifacts.markdown_body
     assert "## Dependency Proposals" in artifacts.markdown_body
-    assert "dep-proposal-1: deployment_readiness:1001 -> platform_readiness:1002 â€” comment_language | 2 signal(s) | medium confidence | accept via vertex dependencies accept --program acme --id dep-proposal-1" in artifacts.markdown_body
+    assert "dep-proposal-1: deployment_readiness:1001 -> platform_readiness:1002 — comment_language | 2 signal(s) | medium confidence | accept via vertex dependencies accept --program acme --id dep-proposal-1" in artifacts.markdown_body
     assert "dep-proposal-accepted" not in artifacts.markdown_body
     assert "## Open Issues" in artifacts.markdown_body
     assert "\n---\n\n## Open Issues" in artifacts.markdown_body
     assert "Issue #001 ask: Need LT decision on Network timeline (owner lt)" in artifacts.markdown_body
     assert "linked claim-1, risk-1" in artifacts.markdown_body
     assert "## Key Decisions" in artifacts.markdown_body
-    assert "Network timeline approval â€” Await LT approval before locking external target." in artifacts.markdown_body
+    assert "Network timeline approval — Await LT approval before locking external target." in artifacts.markdown_body
     assert "PROPOSED | stale | owner lt | date 2026-04-20" in artifacts.markdown_body
     assert "## Key Assumptions" in artifacts.markdown_body
     assert "Partner schema contract stays stable through Q4." in artifacts.markdown_body
@@ -3161,7 +3161,7 @@ def test_lookback_draft_discloses_unconfirmed_assumption_during_render_fallback(
     assert section is not None
     assert "Synthetic assumption" in section.group()
     assert "live assumption metadata rendering failed" in section.group()
-    assert ("âš  includes unconfirmed sources" in section.group()) is is_raw
+    assert ("⚠ includes unconfirmed sources" in section.group()) is is_raw
 
 
 def test_generate_report_draft_lookback_surfaces_action_quality_gate(repo_root: Path, tmp_path: Path) -> None:
@@ -5289,7 +5289,7 @@ def test_report_fetch_bound_wiql_skips_date_bound_when_changeddate_already_in_wh
 def test_report_fetch_bound_wiql_injects_date_when_changeddate_only_in_select() -> None:
     # Regression: ADO saved queries commonly include [System.ChangedDate] as a SELECT column.
     # The old code scanned the full pre-ORDER-BY string, so finding it in SELECT caused the
-    # date bound to be skipped â€” leaving WHERE unbounded â†’ full-history scan â†’ 408.
+    # date bound to be skipped — leaving WHERE unbounded → full-history scan → 408.
     from src.commands import report_fetch
     wiql = (
         "select [System.Id], [System.Title], [System.ChangedDate] from WorkItems "

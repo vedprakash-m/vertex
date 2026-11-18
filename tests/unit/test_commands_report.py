@@ -1038,7 +1038,7 @@ def test_teams_template_renders_kusto_confidence() -> None:
         is_dry_run=False,
     )
 
-    assert "Query velocity-p50 Â· kusto Â· Confidence MEDIUM" in markdown
+    assert "Query velocity-p50 · kusto · Confidence MEDIUM" in markdown
     assert "- **Deploy P50 (mins)**: 4.2" in markdown
 
 
@@ -1092,8 +1092,8 @@ def test_html_kusto_group_template_renders_confidence() -> None:
         kusto_group=kusto_group,
     )
 
-    assert "Query fleet-health Â· kusto Â· Confidence HIGH" in rendered
-    assert "Query fleet-capacity Â· kusto Â· Confidence MEDIUM" in rendered
+    assert "Query fleet-health · kusto · Confidence HIGH" in rendered
+    assert "Query fleet-capacity · kusto · Confidence MEDIUM" in rendered
 
 
 def test_teams_template_renders_workstream_kpi_confidence() -> None:
@@ -3984,7 +3984,7 @@ def test_generate_report_draft_seeds_continuity_exec_summary_scaffold(repo_root:
 
     scaffold = (artifacts.narratives_dir / "exec_summary.md").read_text(encoding="utf-8")
 
-    assert "<!-- vertex:scaffold Issue 1 â€” Executive Summary -->" in scaffold
+    assert "<!-- vertex:scaffold Issue 1 — Executive Summary -->" in scaffold
     assert scaffold.startswith("<!-- SCAFFOLD -->\n") and scaffold.count("<!-- vertex:scaffold Heading: Executive Summary -->") == 1
     assert all(f"{{{name}}}" in scaffold for name in ("PROGRAM_OBJECTIVE", "CURRENT_STATE_SIGNAL", "WHAT_CHANGED_SIGNAL_1", "WHAT_CHANGED_SIGNAL_2", "WHAT_CHANGED_SIGNAL_3", "DECISION_OR_ASK"))
     assert not any(line.startswith(("# ", "## ", "- ")) for line in scaffold.splitlines())
@@ -3994,7 +3994,7 @@ def test_build_exec_summary_template_continuity_contains_scaffold_markers() -> N
     scaffold = report_module._build_exec_summary_template(1, layout_mode="continuity")
 
     assert "<!-- SCAFFOLD -->" in scaffold
-    assert "<!-- vertex:scaffold Issue 1 â€” Executive Summary -->" in scaffold
+    assert "<!-- vertex:scaffold Issue 1 — Executive Summary -->" in scaffold
     assert "<!-- {PROGRAM_OBJECTIVE} -->" in scaffold
     assert "<!-- {WHAT_CHANGED_SIGNAL_1} -->" in scaffold
     assert "Continuity mode: replace these scaffold markers" in scaffold
@@ -6288,8 +6288,8 @@ def test_generate_report_draft_renders_eta_forecast_annotation(repo_root: Path, 
         open_browser=False,
     )
 
-    assert "(low confidence â€” 2 prior slips, 78% miss probability | forecast p50 May 12, p80 May 15, p95 May 18)" in artifacts.html_body
-    assert "(low confidence â€” 2 prior slips, 78% miss probability | forecast p50 May 12, p80 May 15, p95 May 18)" in artifacts.markdown_body
+    assert "(low confidence — 2 prior slips, 78% miss probability | forecast p50 May 12, p80 May 15, p95 May 18)" in artifacts.html_body
+    assert "(low confidence — 2 prior slips, 78% miss probability | forecast p50 May 12, p80 May 15, p95 May 18)" in artifacts.markdown_body
 
 
 def _sample_items(as_of: datetime) -> tuple[WorkItem, ...]:
