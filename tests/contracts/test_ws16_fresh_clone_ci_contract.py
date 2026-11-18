@@ -4,7 +4,7 @@ This contract enforces the spec §WS-16 acceptance criteria on a developer
 machine, without requiring a full GitHub Actions runner. It asserts three
 properties:
 
-  1. **ci.yml structure** — the CI workflow MUST contain a `performance-and-install-smoke`
+  1. **ci.yml structure** — the CI workflow MUST contain a `fresh-clone-smoke`
      job that, in order, calls `pip install`, exercises `vertex --help`,
      materializes an isolated test program, runs `vertex doctor`, and
      executes the file→sqlite→file migration round-trip. (This is the
@@ -137,8 +137,8 @@ def test_ci_yml_declares_fresh_clone_smoke_job() -> None:
     coverage) fails the contract."""
     assert CI_YML.exists(), f"missing {CI_YML.relative_to(REPO_ROOT)}"
     text = CI_YML.read_text(encoding="utf-8")
-    assert re.search(r"^\s{2}performance-and-install-smoke\s*:", text, re.MULTILINE), (
-        "ci.yml does not declare a `performance-and-install-smoke:` job. The WS-16 "
+    assert re.search(r"^\s{2}fresh-clone-smoke\s*:", text, re.MULTILINE), (
+        "ci.yml does not declare a `fresh-clone-smoke:` job. The WS-16 "
         "fresh-clone-to-first-command contract requires a dedicated job "
         "that runs on a clean checkout (no cached programs/) and exercises "
         "`vertex --help`, `vertex doctor`, and the migration round-trip."
@@ -151,7 +151,7 @@ def test_ci_fresh_clone_job_pip_installs_first() -> None:
     Putting anything else first would let the job pass with a pre-warmed
     environment, defeating the ratchet."""
     text = CI_YML.read_text(encoding="utf-8")
-    job_block = _extract_job_block(text, "performance-and-install-smoke")
+    job_block = _extract_job_block(text, "fresh-clone-smoke")
     # Iterate over steps in order; the first step that mentions `pip install`
     # MUST come before any step that runs a `vertex` CLI call. (Job-level
     # comments and prose descriptions are ignored — we only look at
@@ -203,7 +203,7 @@ def test_ci_fresh_clone_job_runs_migrate_round_trip() -> None:
     the rollback migration (`--to file`). This is the spec §WS-16 acceptance
     "schema-major migration round-trips with rollback"."""
     text = CI_YML.read_text(encoding="utf-8")
-    job_block = _extract_job_block(text, "performance-and-install-smoke")
+    job_block = _extract_job_block(text, "fresh-clone-smoke")
     assert "--to sqlite" in job_block, (
         "fresh-clone-smoke job does not call `vertex migrate --to sqlite`. "
         "WS-16 acceptance requires the forward schema-major migration."
@@ -225,7 +225,7 @@ def test_ci_fresh_clone_job_does_not_touch_real_programs_dir() -> None:
     state — CI must not depend on them or accidentally create new
     `programs/freshclone/` entries in the working tree."""
     text = CI_YML.read_text(encoding="utf-8")
-    job_block = _extract_job_block(text, "performance-and-install-smoke")
+    job_block = _extract_job_block(text, "fresh-clone-smoke")
     # Must use a tmpdir
     assert "mktemp -d" in job_block or "TMPDIR=" in job_block or "tmp" in job_block, (
         "fresh-clone-smoke job does not use a tmpdir for the isolated program"

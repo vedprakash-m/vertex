@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
+import hashlib
 import json
+import os
 import sqlite3
 import shutil
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -62,6 +65,10 @@ from tests.support.synthetic_report_source import synthetic_report_root as repo_
 
 runner = CliRunner()
 EDITION_NAME = "acme_weekly"
+_CONFIRMABLE_WORKSPACE_TEMPLATES: dict[str, Path] = {}
+_CONFIRMABLE_WORKSPACE_HOLDERS: list[tempfile.TemporaryDirectory[str]] = []
+_DEFAULT_STAGE_V2_REPORT_WORKSPACE = stage_v2_report_workspace
+_DEFAULT_GENERATE_REPORT_DRAFT = generate_report_draft
 
 
 @pytest.fixture(autouse=True)
@@ -558,22 +565,21 @@ def _seed_high_risk_signal_coverage(
     )
 
 
-def _prepare_confirmable_weekly_issue(
+def _build_confirmable_weekly_issue(
     repo_root: Path,
-    tmp_path: Path,
+    workspace_root: Path,
     *,
     webhook_url: str | None = None,
     artifact_base_url: str | None = None,
 ) -> tuple[Path, Path, Path]:
-    reports_root = stage_v2_report_workspace(repo_root, tmp_path)
-    archive_root = tmp_path / "archive"
+    reports_root = stage_v2_report_workspace(repo_root, workspace_root)
+    archive_root = workspace_root / "archive"
     programs_root = reports_root.parent / "programs"
     disable_kusto_in_report_copy(reports_root)
     if webhook_url is not None:
         _set_v2_program_teams_webhook_url(programs_root, webhook_url=webhook_url)
     if artifact_base_url is not None:
         _set_v2_program_artifact_base_url(programs_root, artifact_base_url=artifact_base_url)
-
     as_of = __import__("datetime", fromlist=["datetime", "timezone"]).datetime(
         2026,
         5,
@@ -605,7 +611,75 @@ def _prepare_confirmable_weekly_issue(
     exec_summary_path.parent.mkdir(parents=True, exist_ok=True)
     exec_summary_path.write_text("Confirmed executive summary.\n", encoding="utf-8")
     _write_authored_workstream_narratives(reports_root, 1)
-    return reports_root, archive_root, (tmp_path / "programs" / "acme" / "publications")
+    return reports_root, archive_root, (workspace_root / "programs" / "acme" / "publications")
+
+
+def _prepare_confirmable_weekly_issue(
+    repo_root: Path,
+    tmp_path: Path,
+    *,
+    webhook_url: str | None = None,
+    artifact_base_url: str | None = None,
+) -> tuple[Path, Path, Path]:
+    cache_allowed = (
+        stage_v2_report_workspace is _DEFAULT_STAGE_V2_REPORT_WORKSPACE
+        and generate_report_draft is _DEFAULT_GENERATE_REPORT_DRAFT
+        and _confirmable_items.__name__ == "_confirmable_items"
+    )
+    if not cache_allowed:
+        return _build_confirmable_weekly_issue(
+            repo_root,
+            tmp_path,
+            webhook_url=webhook_url,
+            artifact_base_url=artifact_base_url,
+        )
+
+    fingerprint = hashlib.sha256()
+    config_files = [
+        *sorted((repo_root / "programs").rglob("*.yaml")),
+        *sorted((repo_root / "knowledge").rglob("*.yaml")),
+        *sorted((repo_root / "knowledge").rglob("*.json")),
+    ]
+    for path in config_files:
+        fingerprint.update(path.relative_to(repo_root).as_posix().encode("utf-8"))
+        fingerprint.update(path.read_bytes())
+    fingerprint.update(repr((webhook_url, artifact_base_url)).encode("utf-8"))
+    template_key = fingerprint.hexdigest()
+    template = _CONFIRMABLE_WORKSPACE_TEMPLATES.get(template_key)
+    if template is None:
+        holder = tempfile.TemporaryDirectory(prefix="vertex-confirmable-")
+        template = Path(holder.name)
+        original_db_path = os.environ.get("VERTEX_DB_PATH")
+        os.environ["VERTEX_DB_PATH"] = str(template / "vertex-db")
+        try:
+            _build_confirmable_weekly_issue(
+                repo_root,
+                template,
+                webhook_url=webhook_url,
+                artifact_base_url=artifact_base_url,
+            )
+        finally:
+            if original_db_path is None:
+                os.environ.pop("VERTEX_DB_PATH", None)
+            else:
+                os.environ["VERTEX_DB_PATH"] = original_db_path
+        _CONFIRMABLE_WORKSPACE_HOLDERS.append(holder)
+        _CONFIRMABLE_WORKSPACE_TEMPLATES[template_key] = template
+
+    shutil.copytree(
+        template, tmp_path, dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns("vertex-db"),
+    )
+    reports_root = tmp_path / "reports"
+    archive_root = tmp_path / "archive"
+    programs_root = reports_root.parent / "programs"
+    template_db = template / "vertex-db"
+    if template_db.exists():
+        target_db = Path(os.environ["VERTEX_DB_PATH"])
+        if target_db.exists():
+            shutil.rmtree(target_db)
+        shutil.copytree(template_db, target_db)
+    return reports_root, archive_root, programs_root / "acme" / "publications"
 
 
 def _set_program_storage_backend(programs_root: Path, *, storage_backend: str) -> None:

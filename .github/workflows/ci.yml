@@ -84,6 +84,39 @@ jobs:
         run: python -m pip check
 
 
+      - name: Run seven bounded performance nodes
+        run: |
+          python -m pytest -q -n 0 -m perf \
+            tests/unit/test_declarative_chart_builder.py::test_render_under_2_seconds \
+            tests/unit/test_ledger_perf.py::test_replay_perf_50k \
+            tests/contracts/test_structural_gap_rules.py::TestStructuralGapPerf::test_gap_evaluation_under_100ms_for_1000_facts \
+            tests/contracts/test_structural_gap_rules.py::TestStructuralGapPerf::test_gap_evaluation_with_all_rules_firing \
+            tests/contracts/test_s11c_load_soak.py::TestReplayThroughput::test_replay_throughput_meets_slo \
+            tests/contracts/test_s11c_load_soak.py::TestReplayThroughput::test_incremental_replay_is_at_least_as_fast_as_full_rebuild \
+            tests/unit/test_persona_checker.py::test_full_registry_evaluation_under_500ms \
+            --junitxml="$RUNNER_TEMP/performance-core.xml"
+      - name: Run gather performance baseline
+        working-directory: ${{ runner.temp }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python -m pytest -q -n 0 -m perf \
+            "$GITHUB_WORKSPACE/tests/perf/test_perf_baseline.py::test_perf_baseline_50_item_fixture" \
+            --junitxml="$RUNNER_TEMP/performance-gather.xml"
+      - name: Audit the resolved environment
+        run: python scripts/run_pip_audit.py --strict
+      - name: Upload performance evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: performance
+          path: |
+            ${{ runner.temp }}/performance-core.xml
+            ${{ runner.temp }}/performance-gather.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+
   functional:
     runs-on: ubuntu-latest
     timeout-minutes: 12
@@ -126,35 +159,16 @@ jobs:
           include-hidden-files: true
           retention-days: 14
 
-  performance-and-install-smoke:
+  fresh-clone-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - uses: ./.github/actions/setup-vertex
-      - name: Run seven bounded performance nodes
-        run: |
-          python -m pytest -q -n 0 -m perf \
-            tests/unit/test_declarative_chart_builder.py::test_render_under_2_seconds \
-            tests/unit/test_ledger_perf.py::test_replay_perf_50k \
-            tests/contracts/test_structural_gap_rules.py::TestStructuralGapPerf::test_gap_evaluation_under_100ms_for_1000_facts \
-            tests/contracts/test_structural_gap_rules.py::TestStructuralGapPerf::test_gap_evaluation_with_all_rules_firing \
-            tests/contracts/test_s11c_load_soak.py::TestReplayThroughput::test_replay_throughput_meets_slo \
-            tests/contracts/test_s11c_load_soak.py::TestReplayThroughput::test_incremental_replay_is_at_least_as_fast_as_full_rebuild \
-            tests/unit/test_persona_checker.py::test_full_registry_evaluation_under_500ms \
-            --junitxml="$RUNNER_TEMP/performance-core.xml"
-      - name: Run gather performance baseline
-        working-directory: ${{ runner.temp }}
-        env:
-          PYTHONPATH: ${{ github.workspace }}
-        run: |
-          python -m pytest -q -n 0 -m perf \
-            "$GITHUB_WORKSPACE/tests/perf/test_perf_baseline.py::test_perf_baseline_50_item_fixture" \
-            --junitxml="$RUNNER_TEMP/performance-gather.xml"
-      - name: Audit the resolved environment
-        run: python scripts/run_pip_audit.py --strict
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11"
       - name: Create isolated fresh-install environment
         run: |
           FRESH_VENV="$RUNNER_TEMP/vertex-fresh-install"
@@ -265,16 +279,6 @@ jobs:
         if: always()
         run: rm -rf "${TMP_PROGRAMS:-/tmp/vertex-fresh-clone-noop}"
 
-      - name: Upload performance evidence
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: performance
-          path: |
-            ${{ runner.temp }}/performance-core.xml
-            ${{ runner.temp }}/performance-gather.xml
-          if-no-files-found: warn
-          retention-days: 14
 
   windows-smoke:
     runs-on: windows-latest
@@ -312,7 +316,7 @@ jobs:
     needs:
       - guard
       - functional
-      - performance-and-install-smoke
+      - fresh-clone-smoke
       - windows-smoke
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262

@@ -45,13 +45,14 @@ def test_workflow_has_fail_closed_parallel_lanes_and_aggregate() -> None:
 
     jobs = workflow["jobs"]
     assert jobs["functional"]["strategy"]["matrix"]["shard"] == list(range(17))
-    assert jobs["performance-and-install-smoke"]["timeout-minutes"] <= 12
+    assert jobs["guard"]["timeout-minutes"] <= 5
+    assert jobs["fresh-clone-smoke"]["timeout-minutes"] <= 12
     assert jobs["windows-smoke"]["runs-on"] == "windows-latest"
     assert jobs["vertex-required"]["if"] == "always()"
     assert set(jobs["vertex-required"]["needs"]) == {
         "guard",
         "functional",
-        "performance-and-install-smoke",
+        "fresh-clone-smoke",
         "windows-smoke",
     }
 

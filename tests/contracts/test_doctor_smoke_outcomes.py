@@ -19,7 +19,7 @@ EDITION = "example_tpm_weekly"
 
 def _workflow_python(step_name: str) -> str:
     workflow = yaml.safe_load(CI_YML.read_text(encoding="utf-8"))
-    step, = [s for s in workflow["jobs"]["performance-and-install-smoke"]["steps"] if s.get("name") == step_name]
+    step, = [s for s in workflow["jobs"]["fresh-clone-smoke"]["steps"] if s.get("name") == step_name]
     match = re.search(r"python(?: [^\n]*?)? <<'PY'\n(.*?)\nPY", step["run"], re.DOTALL)
     assert match is not None, "The smoke check must execute testable inline Python."
     return match.group(1)
@@ -146,5 +146,5 @@ def test_workflow_normalizes_only_isolated_fixture_identity(monkeypatch, tmp_pat
     assert resolved.program_dir == program_dir
     assert resolved.edition_path == edition_path
     workflow = yaml.safe_load(CI_YML.read_text(encoding="utf-8"))
-    step, = [s for s in workflow["jobs"]["performance-and-install-smoke"]["steps"] if s.get("name") == "vertex doctor against the fresh-clone program"]
+    step, = [s for s in workflow["jobs"]["fresh-clone-smoke"]["steps"] if s.get("name") == "vertex doctor against the fresh-clone program"]
     assert step["env"]["VERTEX_PROGRAMS_ROOT"] == "${{ env.TMP_PROGRAMS }}"
