@@ -1,0 +1,5 @@
+{"date":"2026-05-01","state":"Active","assigned_to":"owner@example.com","target_date":"2026-06-01","risk_level":"medium","area_path":"One\\Example\\Delivery","tags":["Example"]}
+{"date":"2026-05-08","state":"Active","assigned_to":"owner@example.com","target_date":"2026-06-08","risk_level":"medium","area_path":"One\\Example\\Delivery","tags":["Example"]}
+{"date":"2026-05-15","state":"Active","assigned_to":"owner@example.com","target_date":"2026-06-15","risk_level":"medium","area_path":"One\\Example\\Delivery","tags":["Example"]}
+{"date":"2026-05-22","state":"At Risk","assigned_to":"owner@example.com","target_date":"2026-06-22","risk_level":"high","area_path":"One\\Example\\Delivery","tags":["Example"]}
+{"date":"2026-05-29","state":"At Risk","assigned_to":"owner@example.com","target_date":"2026-06-22","risk_level":"high","area_path":"One\\Example\\Delivery","tags":["Example"]}

@@ -10,10 +10,7 @@ from src.core.trajectory_analyzer import analyze_trajectories
 
 
 def test_analyze_trajectories_detects_high_severity_eta_drift() -> None:
-    fixture_path = Path(__file__).resolve().parents[1] / "fixtures" / "sample_trajectory.jsonl"
-    if not fixture_path.exists():
-        import pytest
-        pytest.skip("Requires local fixture data")
+    fixture_path = Path(__file__).resolve().parents[1] / "data" / "trajectory" / "sample_trajectory.jsonl"
     points = _load_points(fixture_path)
 
     patterns = analyze_trajectories({36830830: points}, as_of=date(2026, 5, 31))
