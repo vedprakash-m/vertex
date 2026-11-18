@@ -40,5 +40,6 @@ def test_scan_allows_synthetic_test_controls() -> None:
             'connection = "DefaultEndpointsProtocol=https;AccountName=x;AccountKey=abcdEFGH1234567890+/="',
             'sample = "contact owner@example.net or call (206) 555-0101"',
             'canary = "123-45-6789"',
+            '@pytest.mark.perf',
         ],
     ) == []
