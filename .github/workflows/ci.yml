@@ -109,14 +109,15 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/vertex-ci"
-          mapfile -t test_files < <(
-            python scripts/partition_tests.py \
-              --count 12 \
-              --index "$SHARD" \
-              --weights governance/test-file-timings.json \
-              --verify
-          )
-          python -m pytest "${test_files[@]}" -q -n 4 --dist load \
+          python scripts/partition_tests.py \
+            --count 12 \
+            --index "$SHARD" \
+            --weights governance/test-file-timings.json \
+            --verify > "$RUNNER_TEMP/vertex-ci/files-${SHARD}.txt"
+          test -s "$RUNNER_TEMP/vertex-ci/files-${SHARD}.txt"
+          echo "Shard ${SHARD} has $(wc -l < "$RUNNER_TEMP/vertex-ci/files-${SHARD}.txt") test files"
+          xargs -d '\n' -a "$RUNNER_TEMP/vertex-ci/files-${SHARD}.txt" \
+            python -m pytest -q -n 4 --dist load \
             -m "not perf and not integration and not operator" \
             --strict-markers \
             --cov=src --cov=cli --cov-branch \
@@ -321,7 +322,7 @@ jobs:
       - name: Run selected Windows-specific tests
         shell: pwsh
         run: |
-          python -m pytest -q -n 0 `
+          & .\.venv\Scripts\python.exe -m pytest -q -n 0 `
             tests/unit/test_cli_help_encoding.py::test_cli_help_with_legacy_windows_output_encoding `
             tests/unit/test_fact_sor_state.py::test_fact_sor_reader_retries_transient_replacement_contention `
             tests/unit/test_fact_sor_state.py::test_fact_sor_reader_surfaces_persistent_permission_failure `
