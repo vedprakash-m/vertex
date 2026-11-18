@@ -123,7 +123,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -137,7 +137,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/vertex-ci"
           python scripts/run_test_partition.py \
-            --count 17 \
+            --count 10 \
             --index "$SHARD" \
             --weights governance/test-file-timings.json \
             -- -q -n 4 --dist worksteal \
@@ -371,13 +371,6 @@ jobs:
               "${{ runner.temp }}/vertex-evidence/functional-7.xml" \
               "${{ runner.temp }}/vertex-evidence/functional-8.xml" \
               "${{ runner.temp }}/vertex-evidence/functional-9.xml" \
-              "${{ runner.temp }}/vertex-evidence/functional-10.xml" \
-              "${{ runner.temp }}/vertex-evidence/functional-11.xml" \
-              "${{ runner.temp }}/vertex-evidence/functional-12.xml" \
-              "${{ runner.temp }}/vertex-evidence/functional-13.xml" \
-              "${{ runner.temp }}/vertex-evidence/functional-14.xml" \
-              "${{ runner.temp }}/vertex-evidence/functional-15.xml" \
-              "${{ runner.temp }}/vertex-evidence/functional-16.xml" \
               "${{ runner.temp }}/vertex-evidence/performance-core.xml" \
               "${{ runner.temp }}/vertex-evidence/performance-gather.xml" \
               "${{ runner.temp }}/vertex-evidence/windows-smoke.xml" \
@@ -391,11 +384,4 @@ jobs:
               "${{ runner.temp }}/vertex-evidence/coverage-6.json" \
               "${{ runner.temp }}/vertex-evidence/coverage-7.json" \
               "${{ runner.temp }}/vertex-evidence/coverage-8.json" \
-              "${{ runner.temp }}/vertex-evidence/coverage-9.json" \
-              "${{ runner.temp }}/vertex-evidence/coverage-10.json" \
-              "${{ runner.temp }}/vertex-evidence/coverage-11.json" \
-              "${{ runner.temp }}/vertex-evidence/coverage-12.json" \
-              "${{ runner.temp }}/vertex-evidence/coverage-13.json" \
-              "${{ runner.temp }}/vertex-evidence/coverage-14.json" \
-              "${{ runner.temp }}/vertex-evidence/coverage-15.json" \
-              "${{ runner.temp }}/vertex-evidence/coverage-16.json"
+              "${{ runner.temp }}/vertex-evidence/coverage-9.json"
