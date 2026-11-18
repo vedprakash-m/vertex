@@ -19,6 +19,7 @@ git-ignored ephemeral runs and **must not be cited** in TRACKED specs
 | Date | Runner | Command | Result | Tag |
 |------|--------|---------|--------|-----|
 | 2026-06-09 | local (session observation) | `pytest tests/contracts/ -q` | 437 passed, 6 skipped (full contract suite, WS-1..WS-25 complete) | post-WS-25 |
+| 2026-11-18 | GitHub Actions run `44260791657` at `f1f335006034077e212fbba1a9312a732a8ebe59` | 12 disjoint functional shards, 6 workers each; 8 bounded perf nodes; 19 Windows checks; full `src/` + `cli.py` statement/branch coverage | 27,903 passed, 39 skipped, 31 subtests passed; aggregate 27,969 cases; 127,150/144,640 statements (87.91%) and 37,953/50,550 branches (75.08%); required result 5m47s | test-ci-optimization |
 | _next_ | | `pytest tests/ -q` | _run full suite and append_ | _append rows above this line_ |
 
 ## Why this file
