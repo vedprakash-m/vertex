@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "functional_selection": "not perf and not integration and not operator",
-  "functional_shards": 17,
+  "functional_shards": 10,
   "workers_per_shard": 4,
   "performance_reports": 2,
   "windows_reports": 1,
@@ -14,7 +14,8 @@
     "statement_floor": 87.90,
     "branch_floor": 75.08,
     "changed_code_statement_floor": 95.0,
-    "policy": "whole-source no-regression ratchet plus changed-code threshold"
+    "policy": "whole-source hash-bound baseline plus changed-code threshold",
+    "baseline": "governance/coverage-baseline.json"
   },
   "performance_nodes": [
     "tests/unit/test_declarative_chart_builder.py::test_render_under_2_seconds",

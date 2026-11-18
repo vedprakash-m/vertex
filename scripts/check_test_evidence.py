@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, field
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -210,11 +211,67 @@ def merge_coverage_json(paths: Iterable[Path]) -> CoverageResult:
     return CoverageResult(files)
 
 
+def load_coverage_baseline(
+    path: Path,
+    root: Path,
+    *,
+    expected_files: set[str],
+) -> CoverageResult:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("schema_version") != 1:
+        raise ValueError("coverage baseline schema_version must be 1")
+    source_files = payload.get("files")
+    source_hashes = payload.get("sources")
+    if not isinstance(source_files, dict):
+        raise ValueError("coverage baseline missing files object")
+    if not isinstance(source_hashes, dict):
+        raise ValueError("coverage baseline missing sources object")
+    observed_sources = set()
+    for name, expected_hash in source_hashes.items():
+        normalized = str(name).replace("\\", "/")
+        observed_sources.add(normalized)
+        source_path = root / normalized
+        if not source_path.is_file():
+            raise ValueError(f"coverage baseline source is missing: {normalized}")
+        actual_hash = hashlib.sha256(source_path.read_bytes()).hexdigest()
+        if expected_hash != actual_hash:
+            raise ValueError(f"coverage baseline invalid: source bytes changed for {normalized}")
+    if observed_sources != expected_files:
+        missing = sorted(expected_files - observed_sources)
+        unexpected = sorted(observed_sources - expected_files)
+        raise ValueError(
+            "coverage baseline source inventory mismatch: "
+            f"missing={missing}, unexpected={unexpected}"
+        )
+    files: dict[str, FileCoverage] = {}
+    for name, detail in source_files.items():
+        normalized = str(name).replace("\\", "/")
+        if not isinstance(detail, dict):
+            raise ValueError(f"coverage baseline detail must be an object: {normalized}")
+        if normalized not in observed_sources:
+            raise ValueError(
+                f"coverage baseline has coverage for an unknown source: {normalized}"
+            )
+        statements = set(detail.get("executed_lines") or ()) | set(
+            detail.get("missing_lines") or ()
+        )
+        covered_statements = set(detail.get("executed_lines") or ())
+        branches = _branch_pairs(detail.get("executed_branches")) | _branch_pairs(
+            detail.get("missing_branches")
+        )
+        covered_branches = _branch_pairs(detail.get("executed_branches"))
+        files[normalized] = FileCoverage(
+            statements, covered_statements, branches, covered_branches
+        )
+    return CoverageResult(files)
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate CI test and coverage evidence.")
     parser.add_argument("--policy", type=Path, required=True)
     parser.add_argument("--junit", type=Path, nargs="+", required=True)
-    parser.add_argument("--coverage", type=Path, nargs="+", required=True)
+    parser.add_argument("--coverage", type=Path, nargs="*")
+    parser.add_argument("--coverage-baseline", type=Path)
     parser.add_argument("--base")
     return parser.parse_args()
 
@@ -251,7 +308,24 @@ def main() -> int:
     if forbidden_skips:
         raise SystemExit("Forbidden deterministic skips: " + "; ".join(forbidden_skips))
 
-    coverage = merge_coverage_json(args.coverage)
+    if args.coverage_baseline:
+        expected_files = {
+            path.as_posix()
+            for path in Path("src").rglob("*.py")
+            if path.is_file()
+        }
+        cli_path = Path("cli.py")
+        if cli_path.is_file():
+            expected_files.add(cli_path.as_posix())
+        coverage = load_coverage_baseline(
+            args.coverage_baseline,
+            Path.cwd(),
+            expected_files=expected_files,
+        )
+    elif args.coverage:
+        coverage = merge_coverage_json(args.coverage)
+    else:
+        raise SystemExit("Coverage evidence or a hash-bound coverage baseline is required.")
     statement_floor = float(policy["coverage"]["statement_floor"])
     branch_floor = float(policy["coverage"]["branch_floor"])
     if coverage.statement_percent + 1e-9 < statement_floor:

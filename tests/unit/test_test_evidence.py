@@ -83,6 +83,44 @@ def test_coverage_merge_unions_lines_and_branch_arcs(tmp_path: Path) -> None:
     assert result.statement_percent == 75.0
 
 
+def test_coverage_baseline_requires_exact_source_bytes(tmp_path: Path, monkeypatch) -> None:
+    module = _load_module()
+    source = tmp_path / "src" / "example.py"
+    source.parent.mkdir()
+    source.write_text("value = 1\n", encoding="utf-8")
+    baseline = tmp_path / "coverage.json"
+    baseline.write_text(json.dumps({
+        "schema_version": 1,
+        "sources": {
+            "src/example.py": __import__("hashlib").sha256(
+                source.read_bytes()
+            ).hexdigest(),
+        },
+        "files": {
+            "src/example.py": {
+                "executed_lines": [1],
+                "missing_lines": [],
+                "executed_branches": [],
+                "missing_branches": [],
+            },
+        },
+    }), encoding="utf-8")
+    result = module.load_coverage_baseline(
+        baseline, tmp_path, expected_files={"src/example.py"},
+    )
+    assert result.statement_percent == 100.0
+
+    source.write_text("value = 2\n", encoding="utf-8")
+    try:
+        module.load_coverage_baseline(
+            baseline, tmp_path, expected_files={"src/example.py"},
+        )
+    except ValueError as error:
+        assert "source bytes changed" in str(error)
+    else:
+        raise AssertionError("A stale coverage baseline must fail closed")
+
+
 def test_private_data_skip_reasons_are_rejected(tmp_path: Path) -> None:
     module = _load_module()
     junit = tmp_path / "one.xml"
