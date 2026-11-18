@@ -139,6 +139,7 @@ def test_workflow_honors_measured_sharding_and_evidence_policy() -> None:
     assert f"--count {policy['functional_shards']}" in command
     assert "--weights governance/test-file-timings.json" in command
     assert f"-n {policy['workers_per_shard']}" in command
+    assert "--dist worksteal" in command
     assert "--cov=src --cov=cli --cov-branch" in command
     assert "--strict-markers" in command
 

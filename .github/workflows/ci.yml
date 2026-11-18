@@ -107,7 +107,7 @@ jobs:
             --count 17 \
             --index "$SHARD" \
             --weights governance/test-file-timings.json \
-            -- -q -n 6 --dist load \
+            -- -q -n 6 --dist worksteal \
             -m "not perf and not integration and not operator" \
             --strict-markers \
             --cov=src --cov=cli --cov-branch \
@@ -169,9 +169,7 @@ jobs:
         run: |
           set -euo pipefail
           for extra in ai ai-local m365 kusto render dev; do
-            python -m pip install --only-binary=:all: \
-              --dry-run --ignore-installed -e ".[$extra]"
-            python -m pip install --only-binary=:all: --no-deps -e ".[$extra]"
+            python -m pip install --only-binary=:all: -e ".[$extra]"
           done
       - name: Install dependencies (no cache)
         run: |
