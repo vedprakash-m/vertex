@@ -169,7 +169,9 @@ jobs:
         run: |
           set -euo pipefail
           for extra in ai ai-local m365 kusto render dev; do
-            python -m pip install --only-binary=:all: -e ".[$extra]"
+            python -m pip install --only-binary=:all: \
+              --dry-run --ignore-installed -e ".[$extra]"
+            python -m pip install --only-binary=:all: --no-deps -e ".[$extra]"
           done
       - name: Install dependencies (no cache)
         run: |
