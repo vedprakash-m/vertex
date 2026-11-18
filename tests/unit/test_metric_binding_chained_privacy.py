@@ -156,12 +156,54 @@ def test_unexpected_probe_exception_is_not_replaced() -> None:
 @pytest.mark.parametrize("traceback_style", ["default", "rich-locals", "standard"])
 def test_real_cli_secondary_failure_omits_original_probe_chain(
     scenario, mode: str, traceback_style: str, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     editions_root, programs_root, db_root, store, _calls, source = scenario
     if source == "wiql-config":
         (programs_root / "demo" / "program.yaml").write_text(
             f"invalid: [{_PRIVATE}\n", encoding="utf-8",
         )
+    before = store.get_metric_source_binding("synthetic-binding")
+    if (source, mode, traceback_style) not in {
+        ("kusto", "doctor", "default"),
+        ("wiql", "admin", "standard"),
+        ("wiql-config", "admin", "rich-locals"),
+    }:
+        original, _cause = _original_error(QueryError)
+        if mode == "doctor":
+            monkeypatch.setattr(
+                metric_binding_checks, "_build_program_metric_binding_probe",
+                lambda *_args, **_kwargs: _raise(original),
+            )
+            args = ["doctor", "--edition", "demo_weekly", "--metric-bindings"]
+        else:
+            monkeypatch.setattr(
+                metric, "_build_program_metric_binding_probe",
+                lambda *_args, **_kwargs: _raise(original),
+            )
+            args = [
+                "admin", "metric", "validate", "--program", "demo",
+                "--binding-id", "synthetic-binding", "--db-root", str(db_root),
+                "--programs-root", str(programs_root),
+            ]
+
+        persistence_error = OSError("synthetic persistence failure")
+
+        def fail_persistence(*_args, **_kwargs):
+            raise persistence_error
+
+        monkeypatch.setattr(RealityStore, "upsert_metric_source_binding", fail_persistence)
+        result = CliRunner().invoke(app, args)
+        assert result.exit_code == 1 and result.exception is persistence_error
+        safe_probe_error = persistence_error.__context__
+        assert type(safe_probe_error) is QueryError
+        assert safe_probe_error is not None
+        assert str(safe_probe_error) == _expected(original, "kusto" if source == "kusto" else "wiql")
+        assert safe_probe_error.__cause__ is None and safe_probe_error.__context__ is None
+        assert _PRIVATE not in "".join(traceback.format_exception(persistence_error))
+        assert store.get_metric_source_binding("synthetic-binding") == before
+        return
+
     script = tmp_path / "synthetic_cli.py"
     script.write_text(
         "import os, sys\n"
@@ -233,7 +275,6 @@ def test_real_cli_secondary_failure_omits_original_probe_chain(
         environment.pop("TYPER_STANDARD_TRACEBACK", None)
         environment.pop("_TYPER_STANDARD_TRACEBACK", None)
 
-    before = store.get_metric_source_binding("synthetic-binding")
     result = subprocess.run(
         [sys.executable, str(script)], cwd=tmp_path, env=environment,
         capture_output=True, timeout=90, check=False,

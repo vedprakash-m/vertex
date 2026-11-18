@@ -68,7 +68,7 @@ def test_pip_audit_step_in_ci_workflow() -> None:
     )
 
     workflow = __import__("yaml").safe_load(text)
-    audit_steps = workflow["jobs"]["audit"]["steps"]
+    audit_steps = workflow["jobs"]["performance"]["steps"]
     assert any(step.get("uses") == "./.github/actions/setup-vertex" for step in audit_steps)
     audit_index = next(
         index

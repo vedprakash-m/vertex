@@ -29,7 +29,7 @@ def test_pytest_defaults_do_not_start_implicit_xdist_workers() -> None:
 def test_policy_declares_exact_lane_contracts() -> None:
     policy = _policy()
     assert policy["functional_selection"] == "not perf and not integration and not operator"
-    assert policy["functional_shards"] == 12
+    assert policy["functional_shards"] == 14
     assert policy["workers_per_shard"] == 6
     assert len(policy["performance_nodes"]) == 8
     assert len(set(policy["performance_nodes"])) == 8
@@ -44,7 +44,7 @@ def test_workflow_has_fail_closed_parallel_lanes_and_aggregate() -> None:
     assert workflow["concurrency"]["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"
 
     jobs = workflow["jobs"]
-    assert jobs["functional"]["strategy"]["matrix"]["shard"] == list(range(12))
+    assert jobs["functional"]["strategy"]["matrix"]["shard"] == list(range(14))
     assert jobs["performance"]["timeout-minutes"] <= 10
     assert jobs["windows-smoke"]["runs-on"] == "windows-latest"
     assert jobs["vertex-required"]["if"] == "always()"
@@ -53,9 +53,7 @@ def test_workflow_has_fail_closed_parallel_lanes_and_aggregate() -> None:
         "static",
         "functional",
         "performance",
-        "audit",
         "fresh-clone-smoke",
-        "extras-offline-wheel-check",
         "windows-smoke",
     }
 

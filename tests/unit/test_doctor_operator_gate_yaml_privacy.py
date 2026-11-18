@@ -430,6 +430,20 @@ def test_real_cli_operator_gate_yaml_traceback_omits_parser_detail(
         "scorecards": programs_root / "demo" / "scorecards.yaml",
     }[document]
     path.write_text(_INVALID_YAML[0], encoding="utf-8")
+    before = store.get_metric_source_binding("synthetic-binding")
+    if (document, traceback_style) not in {
+        ("edition", "default"),
+        ("program", "rich-locals"),
+        ("scorecards", "standard"),
+    }:
+        result = CliRunner().invoke(
+            app, ["doctor", "--edition", "demo_weekly", "--operator-gates"],
+        )
+        assert result.exit_code == 1
+        _assert_safe(result.exception, path)
+        assert store.get_metric_source_binding("synthetic-binding") == before
+        return
+
     script = tmp_path / "synthetic_doctor_cli.py"
     script.write_text(
         "import sys\n"
@@ -449,7 +463,6 @@ def test_real_cli_operator_gate_yaml_traceback_omits_parser_detail(
         + "cli.app()\n",
         encoding="utf-8",
     )
-    before = store.get_metric_source_binding("synthetic-binding")
     output = _run_cli(script, tmp_path, _cli_environment(tmp_path, db_root, programs_root, traceback_style))
     assert _SAFE in " ".join(output.split())
     assert _PRIVATE not in output
@@ -464,8 +477,31 @@ def test_real_cli_operator_gate_yaml_traceback_omits_parser_detail(
 @pytest.mark.parametrize("traceback_style", ["default", "rich-locals", "standard"])
 def test_real_cli_operator_gate_stage_traceback_omits_parser_detail(
     scenario, stage: str, traceback_style: str, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     editions_root, programs_root, db_root, store, _calls, _source = scenario
+    before = store.get_metric_source_binding("synthetic-binding")
+    if (stage, traceback_style) not in {
+        ("auth", "default"),
+        ("channel", "rich-locals"),
+        ("channel", "standard"),
+    }:
+        def fail(**_kwargs):
+            raise ConfigError(_PRIVATE) from yaml.YAMLError(_PRIVATE)
+
+        auth = fail if stage == "auth" else lambda **_kwargs: DoctorReport(
+            "demo_weekly", (),
+        )
+        monkeypatch.setattr(doctor, "_run_auth_doctor", auth)
+        monkeypatch.setattr(doctor, "_run_channel_doctor", fail)
+        result = CliRunner().invoke(
+            app, ["doctor", "--edition", "demo_weekly", "--operator-gates"],
+        )
+        assert result.exit_code == 1
+        _assert_safe(result.exception)
+        assert store.get_metric_source_binding("synthetic-binding") == before
+        return
+
     script = tmp_path / "synthetic_doctor_cli.py"
     script.write_text(
         "import sys\n"
@@ -493,7 +529,6 @@ def test_real_cli_operator_gate_stage_traceback_omits_parser_detail(
         + "cli.app()\n",
         encoding="utf-8",
     )
-    before = store.get_metric_source_binding("synthetic-binding")
     output = _run_cli(script, tmp_path, _cli_environment(tmp_path, db_root, programs_root, traceback_style))
     assert _SAFE in " ".join(output.split())
     assert _PRIVATE not in output

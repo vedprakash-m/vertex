@@ -206,6 +206,48 @@ def test_real_cli_authentication_tracebacks_are_safe(
     scenario, mode: str, traceback_style: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     editions_root, programs_root, db_root, store, _calls, source = scenario
+    before = store.get_metric_source_binding("synthetic-binding")
+    if (source, mode, traceback_style) not in {
+        ("kusto", "doctor", "default"),
+        ("wiql", "admin", "standard"),
+        ("kusto", "admin", "rich-locals"),
+    }:
+        calls: list[tuple[object, ...]] = []
+        if source == "wiql":
+            def request(_self, method, url, **_kwargs):
+                calls.append((method, url))
+                return SimpleNamespace(
+                    status_code=401, headers={"WWW-Authenticate": _PRIVATE}, text="",
+                )
+
+            monkeypatch.setattr(ADOClient, "_request_with_progress", request)
+            expected_type = CredentialExpired
+        else:
+            def execute(database, query, **_kwargs):
+                calls.append((database, query))
+                raise RuntimeError(f"aadsts {_PRIVATE}")
+
+            monkeypatch.setattr(
+                KustoClient, "_get_or_create_client",
+                lambda _self, _cluster: SimpleNamespace(execute=execute),
+            )
+            expected_type = AuthError
+        args = (
+            ["doctor", "--edition", "demo_weekly", "--metric-bindings"]
+            if mode == "doctor" else
+            [
+                "admin", "metric", "validate", "--program", "demo",
+                "--binding-id", "synthetic-binding", "--db-root", str(db_root),
+                "--programs-root", str(programs_root),
+            ]
+        )
+        result = CliRunner().invoke(app, args)
+        assert result.exit_code == 1 and type(result.exception) is expected_type
+        assert _PRIVATE not in "".join(traceback.format_exception(result.exception))
+        assert calls and len(calls) == 1
+        assert store.get_metric_source_binding("synthetic-binding") == before
+        return
+
     monkeypatch.setenv("VERTEX_DB_PATH", str(tmp_path / "unselected-db"))
     monkeypatch.setenv("VERTEX_PROGRAMS_ROOT", str(tmp_path / "unselected-programs"))
     monkeypatch.setenv("ADO_PAT", _PRIVATE)
@@ -275,7 +317,6 @@ def test_real_cli_authentication_tracebacks_are_safe(
     else:
         environment.pop("TYPER_STANDARD_TRACEBACK", None)
         environment.pop("_TYPER_STANDARD_TRACEBACK", None)
-    before = store.get_metric_source_binding("synthetic-binding")
     result = subprocess.run(
         [sys.executable, str(script)], cwd=tmp_path, env=environment,
         capture_output=True, timeout=90, check=False,

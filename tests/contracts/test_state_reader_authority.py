@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import ast
+from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 import pytest
 
 from src.core.state_reader_registry import STATE_READER_REGISTRY
-from tests.support.source_index import parse_python_source_index
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -66,7 +67,24 @@ _RISK_UPDATES_ALLOWLIST = {
 
 
 def _source_index():
-    return parse_python_source_index(SRC_ROOT, REPO_ROOT)
+    return _source_text_index()
+
+
+@dataclass(frozen=True, slots=True)
+class _SourceText:
+    relative: str
+    text: str
+
+
+@lru_cache(maxsize=1)
+def _source_text_index() -> tuple[_SourceText, ...]:
+    return tuple(
+        _SourceText(
+            relative=path.relative_to(REPO_ROOT).as_posix(),
+            text=path.read_text(encoding="utf-8"),
+        )
+        for path in sorted(SRC_ROOT.rglob("*.py"))
+    )
 
 
 def test_gather_state_reads_flow_through_owner_module() -> None:
@@ -194,7 +212,15 @@ def _references_gather_state_filename(source) -> bool:
 
 
 def _references_filename(source, filename: str) -> bool:
-    return filename in source.string_constants
+    if filename not in source.text:
+        return False
+    tree = ast.parse(source.text, filename=source.relative)
+    return any(
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and node.value == filename
+        for node in ast.walk(tree)
+    )
 
 
 # States covered by dedicated per-state tests above, or with variable path patterns.
