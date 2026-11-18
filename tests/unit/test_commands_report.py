@@ -1038,7 +1038,7 @@ def test_teams_template_renders_kusto_confidence() -> None:
         is_dry_run=False,
     )
 
-    assert "Query velocity-p50 · kusto · Confidence MEDIUM" in markdown
+    assert "Query velocity-p50 Â· kusto Â· Confidence MEDIUM" in markdown
     assert "- **Deploy P50 (mins)**: 4.2" in markdown
 
 
@@ -1092,8 +1092,8 @@ def test_html_kusto_group_template_renders_confidence() -> None:
         kusto_group=kusto_group,
     )
 
-    assert "Query fleet-health · kusto · Confidence HIGH" in rendered
-    assert "Query fleet-capacity · kusto · Confidence MEDIUM" in rendered
+    assert "Query fleet-health Â· kusto Â· Confidence HIGH" in rendered
+    assert "Query fleet-capacity Â· kusto Â· Confidence MEDIUM" in rendered
 
 
 def test_teams_template_renders_workstream_kpi_confidence() -> None:
@@ -3984,7 +3984,7 @@ def test_generate_report_draft_seeds_continuity_exec_summary_scaffold(repo_root:
 
     scaffold = (artifacts.narratives_dir / "exec_summary.md").read_text(encoding="utf-8")
 
-    assert "<!-- vertex:scaffold Issue 1 — Executive Summary -->" in scaffold
+    assert "<!-- vertex:scaffold Issue 1 â€” Executive Summary -->" in scaffold
     assert scaffold.startswith("<!-- SCAFFOLD -->\n") and scaffold.count("<!-- vertex:scaffold Heading: Executive Summary -->") == 1
     assert all(f"{{{name}}}" in scaffold for name in ("PROGRAM_OBJECTIVE", "CURRENT_STATE_SIGNAL", "WHAT_CHANGED_SIGNAL_1", "WHAT_CHANGED_SIGNAL_2", "WHAT_CHANGED_SIGNAL_3", "DECISION_OR_ASK"))
     assert not any(line.startswith(("# ", "## ", "- ")) for line in scaffold.splitlines())
@@ -3994,7 +3994,7 @@ def test_build_exec_summary_template_continuity_contains_scaffold_markers() -> N
     scaffold = report_module._build_exec_summary_template(1, layout_mode="continuity")
 
     assert "<!-- SCAFFOLD -->" in scaffold
-    assert "<!-- vertex:scaffold Issue 1 — Executive Summary -->" in scaffold
+    assert "<!-- vertex:scaffold Issue 1 â€” Executive Summary -->" in scaffold
     assert "<!-- {PROGRAM_OBJECTIVE} -->" in scaffold
     assert "<!-- {WHAT_CHANGED_SIGNAL_1} -->" in scaffold
     assert "Continuity mode: replace these scaffold markers" in scaffold
@@ -6288,8 +6288,8 @@ def test_generate_report_draft_renders_eta_forecast_annotation(repo_root: Path, 
         open_browser=False,
     )
 
-    assert "(low confidence — 2 prior slips, 78% miss probability | forecast p50 May 12, p80 May 15, p95 May 18)" in artifacts.html_body
-    assert "(low confidence — 2 prior slips, 78% miss probability | forecast p50 May 12, p80 May 15, p95 May 18)" in artifacts.markdown_body
+    assert "(low confidence â€” 2 prior slips, 78% miss probability | forecast p50 May 12, p80 May 15, p95 May 18)" in artifacts.html_body
+    assert "(low confidence â€” 2 prior slips, 78% miss probability | forecast p50 May 12, p80 May 15, p95 May 18)" in artifacts.markdown_body
 
 
 def _sample_items(as_of: datetime) -> tuple[WorkItem, ...]:
@@ -6753,3 +6753,411 @@ def _write_confirmed_program_scorecard(
         ),
         encoding="utf-8",
     )
+
+
+@pytest.fixture
+def report_startup_calls(monkeypatch) -> list[str]:
+    import cli
+
+    calls: list[str] = []
+    for name in (
+        "_set_invocation_ai_mode",
+        "_preflight_report_workspace",
+        "_maybe_register_tier_decision_sink",
+        "_maybe_run_scheduled_db_maintenance",
+        "_maybe_run_session_catchup",
+    ):
+        monkeypatch.setattr(
+            cli, name, lambda *_args, _name=name, **_kwargs: calls.append(_name),
+        )
+    return calls
+
+
+def _write_lt_deck_dependency_proposals(programs_root: Path) -> None:
+    proposals_path = programs_root / "acme" / "_feedback" / "dependency_proposals.yaml"
+    proposals_path.parent.mkdir(parents=True, exist_ok=True)
+    proposals_path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": "1.0",
+                "updated_at": "2026-05-05T18:00:00+00:00",
+                "proposals": [
+                    {
+                        "id": "dep-proposal-1",
+                        "program_id": "acme",
+                        "from_workstream_id": "deployment_readiness",
+                        "to_workstream_id": "platform_readiness",
+                        "from_item_id": 1001,
+                        "to_item_id": 1002,
+                        "from_item_title": "Covered item",
+                        "to_item_title": "Blocked item",
+                        "suggested_dependency_type": "shares_resource",
+                        "rationale": "Repeated blocked-by phrasing indicates a missing dependency.",
+                        "evidence_refs": ["sig-1", "sig-2"],
+                        "detection_method": "comment_language",
+                        "occurrence_count": 2,
+                        "first_seen_at": "2026-05-03T18:00:00+00:00",
+                        "last_seen_at": "2026-05-05T18:00:00+00:00",
+                        "confidence": "medium",
+                        "status": "proposed",
+                    },
+                    {
+                        "id": "dep-proposal-accepted",
+                        "program_id": "acme",
+                        "from_workstream_id": "deployment_readiness",
+                        "to_workstream_id": "platform_readiness",
+                        "from_item_id": 1003,
+                        "to_item_id": 1004,
+                        "from_item_title": "Already promoted item",
+                        "to_item_title": "Already linked item",
+                        "suggested_dependency_type": "blocks",
+                        "rationale": "Already accepted.",
+                        "evidence_refs": ["sig-3"],
+                        "detection_method": "co_mention",
+                        "occurrence_count": 3,
+                        "first_seen_at": "2026-05-01T18:00:00+00:00",
+                        "last_seen_at": "2026-05-02T18:00:00+00:00",
+                        "confidence": "medium",
+                        "status": "accepted",
+                    },
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _secondary_program_sample_items(as_of: datetime) -> tuple[WorkItem, ...]:
+    rows = (
+        (910001, "Feature", "Example queue processing check", "Active", "Vertex Maintainer", "owner@example.test", "", 14, RiskLevel.MEDIUM, ["Runtime"], 4, {"State": ("Proposed", "Active")}),
+        (910002, "Feature", "Example storage preparation check", "Active", "Example Reviewer", "reviewer@example.test", "", 16, RiskLevel.LOW, ["Buildout"], 3, {"TargetDate": ("2026-05-12", "2026-05-16")}),
+        (910003, "Risk", "Example worker upgrade check", "At Risk", "Vertex Maintainer", "owner@example.test", "", 18, RiskLevel.HIGH, ["Worker Service"], 6, {"RiskLevel": ("Medium", "High")}),
+        (910004, "Scenario", "Example request validation check", "Active", "Example Reviewer", "reviewer@example.test", "\\Scenarios", 19, RiskLevel.MEDIUM, ["Perf"], 5, {"AreaPath": (None, "ExampleProject\\Fabrikam\\Scenarios")}),
+        (910005, "Risk", "Example rollout approval check", "At Risk", "Vertex Maintainer", "owner@example.test", "", 21, RiskLevel.HIGH, ["ExampleApproval", "ExampleOnboarding"], 2, {"State": ("Active", "At Risk")}),
+    )
+    return tuple(
+        WorkItem(
+            id=item_id, type=kind, title=title, state=state,
+            assigned_to=owner, assigned_to_email=email,
+            area_path="ExampleProject\\Fabrikam" + suffix,
+            iteration_path="ExampleProject\\Iteration 2",
+            target_date=date(2026, 5, day), risk_level=risk, tags=tags, custom_fields={},
+            revisions=[
+                Revision(
+                    work_item_id=item_id, rev_number=rev, changed_by=owner,
+                    changed_by_email=email, changed_date=as_of, fields_changed=changes,
+                )
+            ],
+            comments=[], fetched_at=as_of,
+        )
+        for item_id, kind, title, state, owner, email, suffix, day, risk, tags, rev, changes in rows
+    )
+
+
+def _set_v2_key_dependencies(programs_root: Path, *, dependencies: tuple[dict[str, str], ...]) -> None:
+    program_path = programs_root / "acme" / "program.yaml"
+    program_document = yaml.safe_load(program_path.read_text(encoding="utf-8"))
+    assert isinstance(program_document, dict)
+    program_document["key_dependencies"] = list(dependencies)
+    program_path.write_text(yaml.safe_dump(program_document, sort_keys=False), encoding="utf-8")
+
+    dependencies_path = programs_root / "acme" / "dependencies.yaml"
+    dependencies_document = {
+        "schema_version": "1.0",
+        "dependencies": [
+            {
+                "id": f"test-dependency-{index}",
+                "from_workstream_id": dependency["from_item"],
+                "to_workstream_id": dependency["to_item"],
+                "dependency_type": "blocks",
+                "risk_if_broken": dependency["impact"],
+                "status": "active",
+                **({"resolution_path": dependency["resolution_path"]} if dependency.get("resolution_path") else {}),
+            }
+            for index, dependency in enumerate(dependencies, start=1)
+        ],
+    }
+    dependencies_path.write_text(yaml.safe_dump(dependencies_document, sort_keys=False), encoding="utf-8")
+
+
+def _write_v2_summary_seed(programs_root: Path, *, workstream_id: str, text: str) -> None:
+    save_summary(
+        "acme",
+        RollingSummary(
+            workstream_id=workstream_id,
+            generated_at=datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc),
+            prompt_version="summary_generator.v1",
+            source_mode="incremental",
+            signal_count=2,
+            text=text,
+        ),
+        programs_root=programs_root,
+    )
+
+
+def _v2_readiness_items(as_of: datetime) -> tuple[WorkItem, ...]:
+    return (
+        WorkItem(
+            id=1001,
+            type="Feature",
+            title="Covered item",
+            state="Active",
+            assigned_to="Vertex Maintainer",
+            assigned_to_email="maintainer@example.test",
+            area_path="ExampleProject\\Acme\\Deployment",
+            iteration_path="ExampleProject\\Iteration 2",
+            target_date=date(2026, 6, 1),
+            risk_level=RiskLevel.MEDIUM,
+            tags=["Safety"],
+            custom_fields={"changed_date": "2026-05-01T00:00:00+00:00"},
+            revisions=[],
+            comments=[],
+            fetched_at=as_of,
+        ),
+        WorkItem(
+            id=1002,
+            type="Feature",
+            title="Uncovered item",
+            state="Active",
+            assigned_to="Vertex Maintainer",
+            assigned_to_email="maintainer@example.test",
+            area_path="ExampleProject\\Acme\\Deployment",
+            iteration_path="ExampleProject\\Iteration 2",
+            target_date=date(2026, 6, 10),
+            risk_level=RiskLevel.MEDIUM,
+            tags=["Safety"],
+            custom_fields={"changed_date": "2026-05-01T00:00:00+00:00"},
+            revisions=[],
+            comments=[],
+            fetched_at=as_of,
+        ),
+    )
+
+
+def _sample_kusto_query_results(query) -> list[dict[str, object]]:
+    if query.id == "velocity-p50":
+        return [{"Snapshot": "Current", "P50Hours": 2.0, "P90Hours": 4.0}]
+    if query.id == "fleet-health":
+        return [
+            {"Date": "2026-05-01", "HealthyPct": 80.0, "Nodes": 10},
+            {"Date": "2026-05-02", "HealthyPct": 90.0, "Nodes": 10},
+            {"Date": "2026-05-03", "HealthyPct": 100.0, "Nodes": 10},
+        ]
+    if query.id == "icm-active":
+        return [
+            {
+                "IncidentId": "ICM-12345",
+                "Severity": "3",
+                "Title": "Example service alert",
+                "Status": "Active",
+                "IncidentUrl": "https://incidents.example.test/incidents/12345",
+            }
+        ]
+    if query.id == "icm-mttr":
+        raise AuthError("credential unavailable")
+    if query.id == "readiness_observability_coverage":
+        return [{"coverage_pct": 80.0, "CoveredTenantCount": 8, "ExpectedTenantCount": 10}]
+    if query.id == "readiness_capacity_headroom":
+        return [{"headroom_pct": 90.0, "WithinTarget": 9, "TotalDeployments": 10}]
+    if query.id == "readiness_dora_fail_rate":
+        return [{"fail_rate_pct": 10.0, "FailCount": 1, "ObservedChecks": 10}]
+    if query.id == "artifact-service-coverage":
+        return [{"IsGoodStorageTotal": 90.0, "IsGoodStorageGen7": 80.0, "IsGoodStorageGen8": 90.0, "IsGoodStorageGen9": 100.0}]
+    if query.id == "wingtip-fleet-rollout-pct":
+        return [{"RolloutPct": 80.0}]
+    raise AssertionError(f"Unexpected Kusto query id: {query.id}")
+
+
+def _snapshot_with_item(as_of: datetime, *, risk_level: RiskLevel) -> Snapshot:
+    item = _sample_items(as_of)[0]
+    return Snapshot(
+        issue_number=1,
+        generated_at=as_of,
+        ado_data_as_of=as_of,
+        edition_type=EditionType.DETAILED,
+        items=(
+            SnapshotItem(
+                id=item.id,
+                type=item.type,
+                title=item.title,
+                state=item.state,
+                assigned_to=item.assigned_to,
+                area_path=item.area_path,
+                target_date=item.target_date,
+                risk_level=risk_level,
+                tags=list(item.tags),
+            ),
+        ),
+        scorecards=(
+            ConfirmedDimension(
+                scorecard_name="Example Release Readiness",
+                name="Deployment Velocity",
+                risk=risk_level,
+                prior_risk=None,
+                item_count=1,
+                ado_query_url="https://dev.azure.com/query",
+            ),
+        ),
+    )
+
+
+def _issue_077_snapshot_items(repo_root: Path, as_of: datetime) -> tuple[WorkItem, ...]:
+    item = replace(_sample_items(as_of)[0], risk_level=RiskLevel.MEDIUM, revisions=[])
+    networking = replace(_sample_items(as_of)[1], state="Active", target_date=date(2026, 5, 30), risk_level=RiskLevel.MEDIUM, revisions=[])
+    return (item, networking) + tuple(replace(item, id=990000 + index, title=f"Synthetic continuation item {index}") for index in range(10))
+
+
+def _sample_items_with_diff(as_of: datetime) -> tuple[WorkItem, ...]:
+    baseline_items = _sample_items(as_of)
+    return (
+        replace(baseline_items[0], target_date=date(2026, 5, 14)),
+        baseline_items[1],
+        baseline_items[2],
+        WorkItem(
+            id=900004,
+            type="Bug",
+            title="New cache warmup safeguard",
+            state="Active",
+            assigned_to="Vertex Maintainer",
+            assigned_to_email="maintainer@example.test",
+            area_path="ExampleProject\\Acme\\Deployment",
+            iteration_path="ExampleProject\\Iteration 2",
+            target_date=date(2026, 5, 16),
+            risk_level=RiskLevel.MEDIUM,
+            tags=["Hotfix"],
+            custom_fields={},
+            revisions=[
+                Revision(
+                    work_item_id=900004,
+                    rev_number=1,
+                    changed_by="Vertex Maintainer",
+                    changed_by_email="maintainer@example.test",
+                    changed_date=as_of,
+                    fields_changed={"State": (None, "Active")},
+                )
+            ],
+            comments=[],
+            fetched_at=as_of,
+        ),
+    )
+
+
+def _set_override_risks_for_section(
+    *,
+    reports_root: Path,
+    snapshot: Snapshot,
+    section_id: str,
+    risk: RiskLevel,
+    edition_name: str = EDITION_NAME,
+) -> None:
+    target_dimension = next(
+        (
+            dimension
+            for dimension in snapshot.scorecards
+            if build_anchor(f"{dimension.scorecard_name}-{dimension.name}") == section_id
+        ),
+        None,
+    )
+    if target_dimension is None:
+        bundle = load_report_bundle(edition_name, reports_root=reports_root, programs_root=reports_root.parent / "programs")
+        if bundle.chapter_contract is None:
+            raise AssertionError(f"No chapter contract available for section {section_id!r}")
+        chapter = next(chapter for chapter in bundle.chapter_contract.chapters if chapter.id == section_id)
+        bound_dimension = next(
+            bundle.chapter_contract.resolve_dimension(dimension_id)
+            for dimension_id in chapter.dimensions
+            if bundle.chapter_contract.resolve_dimension(dimension_id) is not None
+        )
+        target_dimension = next(
+            dimension
+            for dimension in snapshot.scorecards
+            if dimension.scorecard_name == bound_dimension[0] and dimension.name == bound_dimension[1]
+        )
+    overrides_path = get_overrides_path(edition_name, reports_root, issue_number=snapshot.issue_number)
+    overrides_payload = yaml.safe_load(overrides_path.read_text(encoding="utf-8"))
+    for scorecard in overrides_payload["scorecards"].values():
+        for dimension in scorecard.values():
+            dimension["risk"] = "low"
+    overrides_payload["scorecards"][target_dimension.scorecard_name][target_dimension.name]["risk"] = risk.value
+    overrides_path.write_text(yaml.safe_dump(overrides_payload, sort_keys=False, allow_unicode=True), encoding="utf-8")
+
+
+def test_generate_report_draft_builds_lookback_from_confirmed_archive(repo_root: Path, tmp_path: Path) -> None:
+    reports_root, archive_root = _seed_v2_report_layout(repo_root, tmp_path)
+
+    issue_1_as_of = datetime(2026, 4, 14, 18, 0, tzinfo=timezone.utc)
+    issue_2_as_of = datetime(2026, 4, 21, 18, 0, tzinfo=timezone.utc)
+    issue_3_as_of = datetime(2026, 4, 28, 18, 0, tzinfo=timezone.utc)
+    lookback_as_of = datetime(2026, 5, 5, 18, 0, tzinfo=timezone.utc)
+
+    write_confirmed_issue(
+        edition=EDITION_NAME,
+        issue_number=1,
+        snapshot=_lookback_snapshot(
+            issue_number=1,
+            as_of=issue_1_as_of,
+            items=(
+                _snapshot_item_from_work_item(_sample_items(issue_1_as_of)[0], risk_level=RiskLevel.LOW),
+                _snapshot_item_from_work_item(_sample_items(issue_1_as_of)[1], risk_level=RiskLevel.HIGH),
+            ),
+            scorecard_risks={"Deployment Velocity": RiskLevel.LOW, "Deployment Safety": RiskLevel.HIGH},
+        ),
+        html_body="<html><body>Issue 001</body></html>",
+        markdown_body="# Issue 001",
+        manifest=_manifest(issue_number=1, as_of=issue_1_as_of, edition=EDITION_NAME),
+        archive_root=archive_root,
+    )
+    write_confirmed_issue(
+        edition=EDITION_NAME,
+        issue_number=2,
+        snapshot=_lookback_snapshot(
+            issue_number=2,
+            as_of=issue_2_as_of,
+            items=(
+                _snapshot_item_from_work_item(_sample_items(issue_2_as_of)[0], risk_level=RiskLevel.MEDIUM),
+                _snapshot_item_from_work_item(_sample_items(issue_2_as_of)[1], risk_level=RiskLevel.HIGH),
+            ),
+            scorecard_risks={"Deployment Velocity": RiskLevel.MEDIUM, "Deployment Safety": RiskLevel.HIGH},
+        ),
+        html_body="<html><body>Issue 002</body></html>",
+        markdown_body="# Issue 002",
+        manifest=_manifest(issue_number=2, as_of=issue_2_as_of, edition=EDITION_NAME),
+        archive_root=archive_root,
+    )
+    write_confirmed_issue(
+        edition=EDITION_NAME,
+        issue_number=3,
+        snapshot=_lookback_snapshot(
+            issue_number=3,
+            as_of=issue_3_as_of,
+            items=(
+                _snapshot_item_from_work_item(_sample_items(issue_3_as_of)[0], risk_level=RiskLevel.HIGH),
+            ),
+            scorecard_risks={"Deployment Velocity": RiskLevel.HIGH, "Deployment Safety": RiskLevel.DONE},
+        ),
+        html_body="<html><body>Issue 003</body></html>",
+        markdown_body="# Issue 003",
+        manifest=_manifest(issue_number=3, as_of=issue_3_as_of, edition=EDITION_NAME),
+        archive_root=archive_root,
+    )
+
+    for draft_builder in (generate_report_draft, generate_report_draft_v2):
+        artifacts = draft_builder(
+            edition_name=EDITION_NAME,
+            reports_root=reports_root,
+            archive_root=archive_root,
+            programs_root=(tmp_path / "programs"),
+            as_of=lookback_as_of,
+            edition_type_override="lookback",
+            lookback_range=3,
+            open_browser=False,
+        )
+
+        assert artifacts.issue_number == 4
+        assert artifacts.report.edition == EditionType.LOOKBACK
+        assert any(delta.kind == DeltaKind.CLOSED for delta in artifacts.report.deltas.closed_items)
+        assert any(delta.old_risk == RiskLevel.LOW and delta.new_risk == RiskLevel.HIGH for delta in artifacts.report.scorecard_deltas)
+        assert "persistent risk" in artifacts.report.exec_summary_text.lower()
+        assert "retrospective" in artifacts.html_body.lower()
+        assert "Network capacity check" in artifacts.html_body

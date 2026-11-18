@@ -1321,13 +1321,13 @@
       "seconds": 32.557
     },
     "unit/test_commands_report.py": {
-      "seconds": 358.399
+      "seconds": 363.235
     },
     "unit/test_commands_report_ai.py": {
       "seconds": 0.34
     },
     "unit/test_commands_report_extended.py": {
-      "seconds": 358.26
+      "seconds": 353.424
     },
     "unit/test_commands_report_scorecards.py": {
       "seconds": 0.415
