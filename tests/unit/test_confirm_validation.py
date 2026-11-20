@@ -56,6 +56,21 @@ def test_read_confirming_author_returns_str_or_none(monkeypatch) -> None:
     assert result is None or isinstance(result, str)
 
 
+def test_read_confirming_author_uses_posix_user_when_git_identity_unavailable(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("VERTEX_AUTHOR", raising=False)
+    monkeypatch.delenv("USERNAME", raising=False)
+    monkeypatch.delenv("LOGNAME", raising=False)
+    monkeypatch.setenv("USER", "ci-operator")
+    monkeypatch.setattr(
+        "src.commands.confirm_stages.validation.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout=""),
+    )
+
+    assert read_confirming_author() == "ci-operator"
+
+
 def test_ack_word_count_handles_none_and_split_words() -> None:
     assert ack_word_count(None) == 0
     assert ack_word_count("one two three") == 3

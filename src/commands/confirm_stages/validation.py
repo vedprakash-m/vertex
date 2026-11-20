@@ -44,9 +44,10 @@ def read_confirming_author() -> str | None:
         candidate = completed.stdout.strip()
         if candidate:
             return candidate
-    username = os.environ.get("USERNAME")
-    if username and username.strip():
-        return username.strip()
+    for variable in ("USERNAME", "USER", "LOGNAME"):
+        username = os.environ.get(variable)
+        if username and username.strip():
+            return username.strip()
     return None
 
 

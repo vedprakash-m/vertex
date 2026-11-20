@@ -685,7 +685,10 @@ def _stage_candidates(
         return [], 0
     route = hydrated.route_metadata.get("route")
     if hydrated.identity.source_type is EntityType.DRIVE_ITEM:
-        occurred_at = _parse_mail_source_time(hydrated.route_metadata.get("received_at"))
+        occurred_at = _parse_mail_source_time(
+            hydrated.route_metadata.get("received_at")
+            or hydrated.route_metadata.get("last_modified")
+        )
         if occurred_at is None:
             return [], 1
     elif hydrated.identity.source_type is EntityType.MESSAGE:
