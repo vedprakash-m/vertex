@@ -89,10 +89,14 @@ def _answer_with_reality(question: str, *, program: str, miss_log: Path) -> str:
         )
 
 
-def route_request(request: str, *, edition: str = "") -> str:
+def route_request(request: str, *, edition: str = "", use_structured_runner: bool = False) -> str:
     _require_ask_scope(edition, "")
     try:
-        invocation = _build_router().route(request, default_edition=edition)
+        invocation = _build_router().route(
+            request,
+            default_edition=edition,
+            use_structured_runner=use_structured_runner,
+        )
     except IntentRouterError as error:
         raise typer.BadParameter(f"Intent routing failed: {error}") from error
 

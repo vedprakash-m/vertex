@@ -5,7 +5,9 @@ from pathlib import Path
 from typing import Any, cast
 
 from src.ai._pipeline import AIPipelineError, process_generated_text
+from src.ai._runner_bridge import run_structured_feature_via_runner
 from src.ai.provider import LLMProvider
+from src.ai.structured_feature_runner import RunnerContext
 from src.ai.tiered_router import TierResult, route_through_tiers
 from src.ai.prompt_registry import PromptRegistryError, load_prompt
 from src.core.ai_result_cache import AIResultCacheKey, canonical_input_hash, get_ai_result, put_ai_result
@@ -117,6 +119,84 @@ def advise_on_decision_brief(
             prompt_template=prompt_template,
             program_id=program_id,
             programs_root=programs_root,
+        )
+        if advice is not None:
+            enriched_items.append(
+                replace(
+                    item,
+                    verdict=advice.verdict,
+                    verdict_reasoning=advice.reasoning,
+                    suggested_text=advice.suggested_text,
+                )
+            )
+        else:
+            enriched_items.append(item)
+    return replace(brief, items=tuple(enriched_items), ai_enriched=True)
+
+
+def advise_on_decision_brief_via_runner(
+    *,
+    context: RunnerContext,
+    client: LLMProvider,
+    brief: DecisionBrief,
+    program_id: str,
+    programs_root: Path = PROGRAMS_ROOT,
+) -> DecisionBrief:
+    """RVX-D09 runner path for ``decision_brief_advisor`` via StructuredFeatureRunner."""
+    prompt_template = _load_prompt_template()
+    policy = load_ai_feature_policy(_FEATURE)
+    supplemental_context = _program_synthesis_context_lines(program_id, programs_root)
+    enriched_items: list[DecisionItem] = []
+    for item in brief.items:
+        user_prompt = _build_user_prompt(item, supplemental_context=supplemental_context)
+        request_payload: dict[str, Any] = {
+            "program_id": program_id,
+            "section_id": item.section_id,
+            "current_text": item.current_text,
+            "evidence_delta_lines": list(item.evidence_delta_lines),
+            "top_signal_texts": [signal.text for signal in item.top_signals],
+            "kpi_summary": item.kpi_summary or "",
+            "vitality_summary": item.vitality_summary,
+            "stale_claims": list(item.stale_claims),
+            "proposed_text": item.proposed_text or "",
+            "supplemental_context": list(supplemental_context),
+        }
+
+        def call_provider(compiled: Any) -> Any:
+            return client.structured(
+                compiled.prompt_text,
+                "",
+                parser=lambda payload: payload,
+                max_tokens=policy.max_tokens,
+                prompt_version=PROMPT_VERSION,
+            )
+
+        advice = run_structured_feature_via_runner(
+            feature=_FEATURE,
+            task_class="classification",
+            context=context,
+            program_id=program_id,
+            prompt_version=PROMPT_VERSION,
+            policy_version=POLICY_VERSION,
+            schema_version=_OUTPUT_SCHEMA_VERSION,
+            programs_root=programs_root,
+            system_prompt=prompt_template,
+            user_prompt=user_prompt,
+            output_schema_text=_CONTEXT_OUTPUT_SCHEMA_TEXT,
+            request_payload=request_payload,
+            deployment_fingerprint=_resolve_model_deployment(client),
+            validator_version=POLICY_VERSION,
+            invoke_provider=call_provider,
+            parse_and_validate=_parse_advice,
+            serialize_result=lambda _raw, val: {
+                "verdict": val.verdict,
+                "reasoning": val.reasoning,
+                "suggested_text": val.suggested_text,
+            },
+            error_factory=ValueError,
+            raise_on_rejection=False,
+            empty_value=None,
+            provider_error_map=lambda _err: None,
         )
         if advice is not None:
             enriched_items.append(

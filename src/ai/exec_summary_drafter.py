@@ -358,6 +358,7 @@ def draft_exec_summary_via_runner(
     released_draft: ExecSummaryDraft | None = None
     origin_read_pending = False
     verified_release_hash: str | None = None
+    provider_called = False
     semantic_stage_recorded = False
     replayed_draft: ExecSummaryDraft | None = None
     replay_refusal_reason: str | None = None
@@ -438,7 +439,8 @@ def draft_exec_summary_via_runner(
         return ContextBuildResult(compiled=compiled)
 
     def call_provider(_req: _PreparedExecSummaryInputs, compiled: CompiledContext) -> dict[str, Any]:
-        nonlocal nonretryable_error, provider_error, schema_error
+        nonlocal nonretryable_error, provider_error, schema_error, provider_called
+        provider_called = True
         try:
             raw = client.structured(
                 compiled.prompt_text,
@@ -467,7 +469,7 @@ def draft_exec_summary_via_runner(
 
     def semantic_validator(_req: _PreparedExecSummaryInputs, raw: dict[str, Any]) -> ValidationResult:
         nonlocal semantic_stage_recorded, replayed_draft, replay_refusal_reason, semantic_error, empty_draft_returned
-        cache_hit = verified_release_hash is not None
+        cache_hit = (not provider_called) and (verified_release_hash is not None)
         revalidating_payload = semantic_stage_recorded
         if cache_hit:
             _lifecycle(AIRunState.RESPONDED)

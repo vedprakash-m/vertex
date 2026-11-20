@@ -6,8 +6,10 @@ from pathlib import Path
 from typing import Any, cast
 
 from src.ai._pipeline import AIPipelineError, process_generated_text
+from src.ai._runner_bridge import run_structured_feature_via_runner
 from src.ai.client import AIClientError
 from src.ai.provider import LLMProvider
+from src.ai.structured_feature_runner import RunnerContext
 from src.ai.tiered_router import TierResult, route_through_tiers
 from src.core.anticipation_detector import detect_anticipated_questions
 from src.core.ai_result_cache import AIResultCacheKey, canonical_input_hash, get_ai_result, put_ai_result
@@ -97,6 +99,119 @@ def anticipate_questions(
                 program_id=program_id,
                 programs_root=programs_root,
             )
+            if rendered is not None:
+                question_text, response_text = rendered
+        anticipated.append(
+            AnticipatedQuestion(
+                reader=finding.reader,
+                question=question_text,
+                evidence=finding.evidence,
+                suggested_response=response_text,
+                confidence=finding.confidence,
+            )
+        )
+    return tuple(anticipated)
+
+
+def anticipate_questions_via_runner(
+    *,
+    context: RunnerContext,
+    readers: tuple[LeadershipReader, ...],
+    signals: tuple[Signal, ...],
+    drift_patterns: tuple[DriftPattern, ...],
+    summaries: dict[str, str],
+    workstreams: tuple[WorkstreamData, ...],
+    dependencies: tuple[Dependency | LegacyDependency, ...] = (),
+    client: LLMProvider | None = None,
+    max_questions: int = 5,
+    program_id: str | None = None,
+    programs_root: Path = PROGRAMS_ROOT,
+) -> tuple[AnticipatedQuestion, ...]:
+    """RVX-D09 runner path for ``anticipation_engine`` via StructuredFeatureRunner."""
+    valid_reader_names = {reader.name for reader in readers}
+    findings = detect_anticipated_questions(
+        readers=readers,
+        workstreams=workstreams,
+        drift_patterns=drift_patterns,
+        approved_signals=signals,
+        summaries=summaries,
+        dependencies=dependencies,  # type: ignore[arg-type]
+        max_questions=max_questions,
+    )
+    if not findings:
+        return ()
+
+    policy = load_ai_feature_policy(_FEATURE)
+    prompt_template = _load_prompt_template() if client is not None else None
+    anticipated: list[AnticipatedQuestion] = []
+    for finding in findings[:max_questions]:
+        if finding.reader not in valid_reader_names:
+            raise ValueError(f"Anticipation finding reader is not in provided readers: {finding.reader}")
+        question_text = finding.question_seed
+        response_text = finding.suggested_response_seed
+        if client is not None and prompt_template is not None:
+            active_client = client
+            user_prompt = prompt_template.format(
+                reader=finding.reader,
+                question_seed=finding.question_seed,
+                response_seed=finding.suggested_response_seed,
+                evidence="; ".join(finding.evidence),
+            )
+            request_payload: dict[str, Any] = {
+                "reader": finding.reader,
+                "question_seed": finding.question_seed,
+                "response_seed": finding.suggested_response_seed,
+                "evidence": list(finding.evidence),
+            }
+
+            def _validate_pair(raw: dict[str, Any]) -> tuple[str, str] | None:
+                q_text, r_text = _parse_ai_rendered_question(raw)
+                sem_findings = _validate_semantics(q_text, r_text)
+                if sem_findings:
+                    raise ValueError("; ".join(sem_findings))
+                return _validated_rendered_pair((q_text, r_text))
+
+            def call_provider(compiled: Any) -> Any:
+                return active_client.structured(
+                    compiled.prompt_text,
+                    "",
+                    parser=lambda payload: payload,
+                    max_tokens=policy.max_tokens,
+                    prompt_version=PROMPT_VERSION,
+                )
+
+            try:
+                rendered = run_structured_feature_via_runner(
+                    feature=_FEATURE,
+                    task_class="synthesis",
+                    context=context,
+                    program_id=program_id,
+                    prompt_version=PROMPT_VERSION,
+                    policy_version=POLICY_VERSION,
+                    schema_version=_OUTPUT_SCHEMA_VERSION,
+                    programs_root=programs_root,
+                    system_prompt="You generate concise leadership anticipation questions as strict JSON.",
+                    user_prompt=user_prompt,
+                    output_schema_text='Respond with JSON: {"question": str, "suggested_response": str}.',
+                    request_payload=request_payload,
+                    deployment_fingerprint=_resolve_model_deployment(active_client),
+                    validator_version=POLICY_VERSION,
+                    invoke_provider=call_provider,
+                    parse_and_validate=_validate_pair,
+                    serialize_result=lambda _raw, pair: {
+                        "question": pair[0],
+                        "suggested_response": pair[1],
+                    },
+                    error_factory=ValueError,
+                    raise_on_rejection=False,
+                    empty_value=None,
+                    provider_error_map=lambda _err: None,
+                )
+            except Exception as error:
+                if "program must match" in str(error) or "policy version" in str(error) or "release audit" in str(error):
+                    raise
+                logger.warning("AI anticipation runner failed; using deterministic fallback: %s", error)
+                rendered = None
             if rendered is not None:
                 question_text, response_text = rendered
         anticipated.append(

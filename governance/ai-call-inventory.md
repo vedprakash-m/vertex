@@ -6,12 +6,12 @@ This source-only reconciliation supersedes the historical counts and consumer
 claims below. It does not authorize a provider call or establish runtime
 authorization, qualification or production migration.
 
-The baseline contains **39 syntactic provider-bound expressions** under `src/`:
+The baseline contains **46 syntactic provider-bound expressions** under `src/`:
 **31 legacy feature invocations** (29 in `src/ai`, two in `src/commands`),
-**five opt-in-production runner invocations**, **two fallback forwarding
+**twelve opt-in-production runner invocations**, **two fallback forwarding
 expressions** and **one SDK transport expression**. The 31 legacy invocations
 use **27 feature policy identities**; repeated invocations are not separate
-features. Of the 39 expressions, 36 are `.structured`, two are `.chat` and one
+features. Of the 46 expressions, 43 are `.structured`, two are `.chat` and one
 is the SDK `.chat.completions.create`. Infrastructure is excluded from the
 feature migration denominator. No legacy invocation has been retired by this
 work.
@@ -83,6 +83,7 @@ named scope. Nested functions and methods retain their lexical qualification.
 | src/ai/activation_judge.py | assess_activation | client.structured | 1 | activation_judge | legacy |
 | src/ai/anticipation_engine.py | _generate_with_ai | client.structured | 1 | anticipation_engine | legacy |
 | src/ai/anticipation_engine.py | _generate_with_ai | client.structured | 2 | anticipation_engine | legacy |
+| src/ai/anticipation_engine.py | anticipate_questions_via_runner.call_provider | active_client.structured | 1 | anticipation_engine | opt-in-production |
 | src/ai/backfill_extractor.py | BackfillExtractor.extract_newsletter | client.structured | 1 | backfill_extractor | legacy |
 | src/ai/blurb_generator.py | generate_workstream_blurb | client.structured | 1 | blurb_generator | legacy |
 | src/ai/blurb_generator.py | generate_workstream_blurb_via_runner.call_provider | client.structured | 1 | blurb_generator | opt-in-production |
@@ -91,6 +92,7 @@ named scope. Nested functions and methods retain their lexical qualification.
 | src/ai/context_synthesizer.py | ContextSynthesizer.synthesize | self._client.structured | 1 | context_synthesizer | legacy |
 | src/ai/decision_brief_advisor.py | _advise_on_item | client.structured | 1 | decision_brief_advisor | legacy |
 | src/ai/decision_brief_advisor.py | _advise_on_item_via_context_gateway | client.structured | 1 | decision_brief_advisor | legacy |
+| src/ai/decision_brief_advisor.py | advise_on_decision_brief_via_runner.call_provider | client.structured | 1 | decision_brief_advisor | opt-in-production |
 | src/ai/dependency_blast_radius_generator.py | generate_dependency_blast_radius_proposal | client.structured | 1 | dependency_blast_radius_generator | legacy |
 | src/ai/dependency_blast_radius_generator.py | generate_dependency_blast_radius_proposal_via_runner.call_provider | client.structured | 1 | dependency_blast_radius_generator | opt-in-production |
 | src/ai/deployment_fallback.py | FallbackAIClient.chat | client.chat | 1 | shared-forwarding | infrastructure |
@@ -100,20 +102,25 @@ named scope. Nested functions and methods retain their lexical qualification.
 | src/ai/exec_summary_drafter.py | draft_exec_summary_via_runner.call_provider | client.structured | 1 | exec_summary_drafter | opt-in-production |
 | src/ai/governance_decision_brief_generator.py | generate_governance_decision_brief | client.structured | 1 | governance_decision_brief_generator | legacy |
 | src/ai/intent_router.py | _run_ai_route | client.structured | 1 | intent_router | legacy |
+| src/ai/intent_router.py | _run_ai_route_via_runner.call_provider | client.structured | 1 | intent_router | opt-in-production |
 | src/ai/learning_distiller.py | LearningDistiller.distill | client.structured | 1 | learning_distiller | legacy |
 | src/ai/m365_topic_router.py | _run_ai_route | client.structured | 1 | m365_topic_router | legacy |
+| src/ai/m365_topic_router.py | _run_ai_route_via_runner.call_provider | client.structured | 1 | m365_topic_router | opt-in-production |
 | src/ai/meeting_action_extractor.py | extract_llm_meeting_actions | client.structured | 1 | meeting_action_extractor | legacy |
 | src/ai/onboard_assistant.py | OnboardAssistant.suggest_scorecards | client.structured | 1 | onboard_assistant | legacy |
 | src/ai/onboard_assistant.py | OnboardAssistant.analyze_style_sample | client.structured | 1 | onboard_assistant | legacy |
 | src/ai/program_synthesizer.py | generate_program_synthesis | client.structured | 1 | program_synthesizer | legacy |
 | src/ai/program_synthesizer.py | generate_program_synthesis_via_context_gateway | client.structured | 1 | program_synthesizer | legacy |
+| src/ai/program_synthesizer.py | generate_program_synthesis_via_runner.call_provider | client.structured | 1 | program_synthesizer | opt-in-production |
 | src/ai/request_router.py | AIRequestRouter.route | self._client.chat.completions.create | 1 | shared-transport | infrastructure |
 | src/ai/rev/extractor.py | LLMRevExtractor._call_llm_and_merge | self._client.structured | 1 | rev_extractor | legacy |
 | src/ai/rev/judge.py | judge_extractions | client.structured | 1 | rev_judge | legacy |
 | src/ai/risk_proposal_generator.py | generate_risk_proposal | client.structured | 1 | risk_proposal_generator | legacy |
 | src/ai/setup_assistant.py | SetupAssistant._ai_suggest_workstreams | client.structured | 1 | setup_assistant | legacy |
 | src/ai/summary_generator.py | SummaryGenerator.generate | client.structured | 1 | summary_generator | legacy |
+| src/ai/summary_generator.py | SummaryGenerator.generate_via_runner.call_provider | client.structured | 1 | summary_generator | opt-in-production |
 | src/ai/synthesizer.py | WorkstreamSynthesizer.generate | client.structured | 1 | synthesizer | legacy |
+| src/ai/synthesizer.py | WorkstreamSynthesizer.generate_via_runner.call_provider | client.structured | 1 | synthesizer | opt-in-production |
 | src/ai/top_three_candidate_generator.py | generate_top_three_candidates | client.structured | 1 | top_three_candidate_generator | legacy |
 | src/commands/kb.py | _plan_kb_update_with_ai | client.chat | 1 | default | legacy |
 | src/commands/report_lookback.py | _run_ai_route | client.structured | 1 | lookback_retrospective | legacy |
@@ -132,6 +139,14 @@ it does not replace the provider syntax inventory above.
 | src/commands/report_ai.py | _synthesize_v2_ai_content | generate_workstream_blurb_via_runner | use_structured_runner | blurb_generator | opt-in-production |
 | src/commands/confirm_stages/claim_resolution.py | resolve_confirm_claim_extraction | extract_claims_via_runner | use_structured_runner | claim_extractor | opt-in-production |
 | src/commands/report_lookback.py | _build_lookback_ai_retrospective_rows | _run_ai_route_via_runner | use_structured_runner | lookback_retrospective | opt-in-production |
+| src/commands/prep.py | generate_prep_brief | anticipate_questions_via_runner | use_structured_runner | anticipation_engine | opt-in-production |
+| src/commands/review_full.py | _build_reviewer_render_context | anticipate_questions_via_runner | use_structured_runner | anticipation_engine | opt-in-production |
+| src/commands/decision_brief.py | _enrich_with_ai | advise_on_decision_brief_via_runner | use_structured_runner | decision_brief_advisor | opt-in-production |
+| src/commands/program_synthesizer_pilot.py | run_context_gateway_comparison | generate_program_synthesis_via_runner | use_structured_runner | program_synthesizer | opt-in-production |
+| src/commands/ask.py | route_request | IntentRouter.route(..., use_structured_runner=True) | use_structured_runner | intent_router | opt-in-production |
+| src/ai/m365_topic_router.py | M365TopicRouter.route_artifact | _run_ai_route_via_runner | use_structured_runner | m365_topic_router | opt-in-production |
+| src/commands/summarize.py | _summarize_workstream | generate_via_runner | use_structured_runner | summary_generator | opt-in-production |
+| src/commands/synthesize.py | synthesize_workstream | generate_via_runner | use_structured_runner | synthesizer | opt-in-production |
 
 ## Static limitations and unreachable anchors
 

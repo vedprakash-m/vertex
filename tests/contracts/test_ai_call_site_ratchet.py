@@ -246,6 +246,13 @@ def test_exec_summary_report_command_has_opt_in_runner_adoption() -> None:
         ("src/ai/blurb_generator.py", "generate_workstream_blurb_via_runner.call_provider"),
         ("src/ai/claim_extractor.py", "ClaimExtractor.extract_claims_via_runner.call_provider"),
         ("src/commands/report_lookback.py", "_run_ai_route_via_runner.call_provider"),
+        ("src/ai/anticipation_engine.py", "anticipate_questions_via_runner.call_provider"),
+        ("src/ai/decision_brief_advisor.py", "advise_on_decision_brief_via_runner.call_provider"),
+        ("src/ai/program_synthesizer.py", "generate_program_synthesis_via_runner.call_provider"),
+        ("src/ai/intent_router.py", "_run_ai_route_via_runner.call_provider"),
+        ("src/ai/m365_topic_router.py", "_run_ai_route_via_runner.call_provider"),
+        ("src/ai/summary_generator.py", "SummaryGenerator.generate_via_runner.call_provider"),
+        ("src/ai/synthesizer.py", "WorkstreamSynthesizer.generate_via_runner.call_provider"),
     ):
         adopted = [row for row in rows if row[0] == path_str and row[1] == fn_name]
         assert len(adopted) == 1, f"Missing inventory row for {path_str}:{fn_name}"

@@ -164,6 +164,7 @@ def run_structured_feature_via_runner(
     released_value: ResultT | None = None
     origin_read_pending = False
     verified_release_hash: str | None = None
+    provider_called = False
     semantic_stage_recorded = False
     replayed_value: ResultT | None = None
     replay_refusal_reason: str | None = None
@@ -252,7 +253,8 @@ def run_structured_feature_via_runner(
         return ContextBuildResult(compiled=compiled)
 
     def call_provider(_req: dict[str, Any], compiled: CompiledContext) -> dict[str, Any]:
-        nonlocal nonretryable_error, provider_error, schema_error
+        nonlocal nonretryable_error, provider_error, schema_error, provider_called
+        provider_called = True
         try:
             raw = invoke_provider(compiled)
         except NON_RETRYABLE_AI_ERRORS as error:
@@ -276,7 +278,7 @@ def run_structured_feature_via_runner(
     def semantic_validator(_req: dict[str, Any], raw: dict[str, Any]) -> ValidationResult:
         nonlocal semantic_stage_recorded, replayed_value, replay_refusal_reason
         nonlocal semantic_error, empty_result_returned
-        cache_hit = verified_release_hash is not None
+        cache_hit = (not provider_called) and (verified_release_hash is not None)
         revalidating_payload = semantic_stage_recorded
         if cache_hit:
             _lifecycle(AIRunState.RESPONDED)
