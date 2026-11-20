@@ -40,6 +40,9 @@ class HealthSummary:
     risk_register_stale_evidence: bool = False
     risk_register_includes_unconfirmed_sources: bool = False
     risk_render_warning: str | None = None
+    verdict_risk: RiskLevel | None = None
+    verdict_reason_codes: tuple[str, ...] = ()
+    verdict_contradiction_count: int = 0
 
     @property
     def needs_input_count(self) -> int:
@@ -53,11 +56,11 @@ class HealthSummary:
 
     @property
     def health_state(self) -> str:
-        if self.high_count >= 3:
+        if self.high_count >= 3 or self.overall_risk == RiskLevel.BLOCKED:
             return "CRITICAL"
-        if self.high_count:
+        if self.high_count or self.overall_risk == RiskLevel.HIGH:
             return "AT RISK"
-        if self.medium_count:
+        if self.medium_count or self.overall_risk == RiskLevel.MEDIUM:
             return "ON TRACK"
         if self.total_count > 0 and self.low_count + self.done_count == self.total_count:
             return "HEALTHY"

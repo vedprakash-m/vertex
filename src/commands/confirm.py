@@ -1285,7 +1285,7 @@ def _build_confirm_artifacts(
         read_time_minutes=read_time_minutes,
         edition_type=report.edition,
         new_high_count=new_high_count,
-        healthy_streak=healthy_streak,
+        healthy_streak=healthy_streak, items=items, program_id=program_id, programs_root=programs_root,
     )
     forwarding_context = _resolve_forwarding_context(overrides_document, top_items, auto_suggestions)
     exec_summary_citations = build_inline_citations(items, evidence_by_item, ado_base_url=_ado_item_base_url(bundle))

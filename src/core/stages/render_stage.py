@@ -330,6 +330,7 @@ class RenderStage:
             overrides_document=ctx.overrides_document,
             top_items=ctx.top_items,
             forecast=forecast,
+            eta_forecasts=tuple((ctx.eta_forecasts or {}).values()),
             items=ctx.items,
             milestones=(ctx.milestones or ()),
             milestone_assessments=(ctx.milestone_assessments or ()),

@@ -1010,6 +1010,9 @@
       <p class="eyebrow">Vertex Review</p>
       <h1>{{ title }}</h1>
       <p class="subtitle">{{ subtitle }}</p>
+      {% if published_verdict_line is defined and published_verdict_line %}
+      <p class="review-note">Program Verdict: {{ published_verdict_line }}</p>
+      {% endif %}
       <p class="review-note">This is a pre-publication review. Please reply with corrections.</p>
     </header>
 

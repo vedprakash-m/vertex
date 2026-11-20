@@ -11,15 +11,14 @@ from typing import TYPE_CHECKING, Literal
 from src.core.exceptions import ConfigError
 from src.core.forecast_engine import ETAForecast
 from src.core.manifest_writer import hash_jsonable, validate_run_evidence_snapshot
-from src.core.models import Confidence, RiskLevel, RunEvidenceSnapshot, Snapshot
+from src.core.models import Confidence, DimensionRisk, RiskLevel, RunEvidenceSnapshot, Snapshot, WorkItem
 from src.core.models_v2 import Milestone, MilestoneAssessment, MilestoneStatus, RiskEntry, RiskImpact, RiskProbability, RiskStatus
-from src.core.program_reality import FactAssessment
+from src.core.program_reality import FactAssessment, RealityConflict
 from src.core.risk_register_engine import HIGH_RISK_SCORE_THRESHOLD, compute_risk_score
 from src.core.work_item_states import TERMINAL_WORK_ITEM_STATES
 from src.core.workspace_paths import is_bare_identifier
 
 if TYPE_CHECKING:
-    from src.core.program_reality import RealityConflict
     from src.core.view_models import HealthSummary
 
 
@@ -122,10 +121,89 @@ class ReportVerdictComparison:
     risk_values_equal: bool
 
 
+def _extract_observation_candidate(
+    program_id: str,
+    path: Path,
+) -> tuple[datetime, Path, dict] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        raise ConfigError("Program verdict manifest is invalid or unreadable.") from None
+    if not isinstance(payload, dict):
+        raise ConfigError("Program verdict manifest is invalid.")
+    metadata = payload.get("metadata")
+    observation = metadata.get("program_verdict_observation") if isinstance(metadata, dict) else None
+    if observation is None:
+        return None
+    if not isinstance(observation, dict) or observation.get("mode") != "observe":
+        raise ConfigError("Program verdict manifest observation is invalid.")
+    verdict = observation.get("verdict")
+    if not isinstance(verdict, dict) or verdict.get("program_id") != program_id:
+        raise ConfigError("Program verdict manifest observation identity is invalid.")
+    raw_clock = payload.get("started_at")
+    if not isinstance(raw_clock, str):
+        raise ConfigError("Program verdict manifest clock is unavailable.")
+    try:
+        clock = datetime.fromisoformat(raw_clock.replace("Z", "+00:00"))
+    except ValueError:
+        raise ConfigError("Program verdict manifest clock is invalid.") from None
+    if clock.tzinfo is None or clock.utcoffset() is None:
+        raise ConfigError("Program verdict manifest clock must be timezone-aware.")
+    return clock.astimezone(timezone.utc), path, verdict
+
+
+def _discover_confirmed_issue_keys(
+    program_id: str,
+    *,
+    programs_root: Path,
+    archive_root: Path | None,
+) -> tuple[set[tuple[str, int]], list[tuple[datetime, Path, dict]]]:
+    confirmed_keys: set[tuple[str, int]] = set()
+    archive_candidates: list[tuple[datetime, Path, dict]] = []
+    candidate_roots = []
+    for base in (archive_root, programs_root.parent / "archive", programs_root / program_id / "archive"):
+        if base is not None and base not in candidate_roots and base.is_dir():
+            candidate_roots.append(base)
+    seen_manifests: set[Path] = set()
+    for base in candidate_roots:
+        resolved_base = base.resolve()
+        for index_path in sorted(base.glob("*/index.json")):
+            edition = index_path.parent.name
+            try:
+                index_payload = json.loads(index_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                continue
+            raw_issues = index_payload.get("issues") if isinstance(index_payload, dict) else None
+            if not isinstance(raw_issues, list):
+                continue
+            for entry in raw_issues:
+                if not isinstance(entry, dict) or entry.get("kind") != "confirmed":
+                    continue
+                issue_num = entry.get("issue_number")
+                if type(issue_num) is not int:
+                    continue
+                confirmed_keys.add((edition, issue_num))
+                manifest_path = (index_path.parent / "manifests" / f"issue_{issue_num:03d}.manifest.json").resolve()
+                if manifest_path.is_file() and manifest_path not in seen_manifests:
+                    try:
+                        manifest_path.relative_to(resolved_base)
+                    except ValueError:
+                        continue
+                    seen_manifests.add(manifest_path)
+                    candidate = _extract_observation_candidate(program_id, manifest_path)
+                    if candidate is not None:
+                        archive_candidates.append(candidate)
+    return confirmed_keys, archive_candidates
+
+
 def load_latest_program_verdict(
-    program_id: str, *, programs_root: Path
+    program_id: str,
+    *,
+    programs_root: Path,
+    archive_root: Path | None = None,
+    confirmed_only: bool = False,
 ) -> PublishedProgramVerdict | None:
-    """Load the newest retained snapshot-bound verdict without older fallback."""
+    """Load the newest retained snapshot-bound verdict without draft shadowing."""
     if not is_bare_identifier(program_id):
         raise ConfigError("Program verdict program identity is invalid.")
     selected_root = programs_root.resolve()
@@ -133,44 +211,39 @@ def load_latest_program_verdict(
         program_root = (selected_root / program_id).resolve().relative_to(selected_root)
     except ValueError:
         raise ConfigError("Program verdict program root is invalid.") from None
+    confirmed_keys, archive_candidates = _discover_confirmed_issue_keys(
+        program_id, programs_root=selected_root, archive_root=archive_root,
+    )
     publications = selected_root / program_root / "publications"
-    if not publications.exists():
+    pub_confirmed: list[tuple[datetime, Path, dict]] = []
+    pub_all: list[tuple[datetime, Path, dict]] = []
+    if publications.exists():
+        publication_root = publications.resolve()
+        for path in publications.rglob("*.manifest.json"):
+            try:
+                rel = path.resolve().relative_to(publication_root)
+            except (OSError, ValueError):
+                raise ConfigError("Program verdict manifest path is invalid.") from None
+            candidate = _extract_observation_candidate(program_id, path)
+            if candidate is None:
+                continue
+            pub_all.append(candidate)
+            if len(rel.parts) >= 2 and rel.parts[1].startswith("issue_"):
+                suffix = rel.parts[1].removeprefix("issue_")
+                if suffix.isdigit() and (rel.parts[0], int(suffix)) in confirmed_keys:
+                    pub_confirmed.append(candidate)
+
+    if confirmed_only or confirmed_keys:
+        pool = archive_candidates or pub_confirmed
+        if archive_candidates and pub_confirmed:
+            pool = archive_candidates + pub_confirmed
+        if not pool:
+            return None
+        _, path, verdict = max(pool, key=lambda row: (row[0], str(row[1])))
+        return _published_verdict_from_payload(program_id, path, verdict)
+    if not pub_all:
         return None
-    candidates: list[tuple[datetime, Path, dict]] = []
-    publication_root = publications.resolve()
-    for path in publications.rglob("*.manifest.json"):
-        try:
-            path.resolve().relative_to(publication_root)
-        except (OSError, ValueError):
-            raise ConfigError("Program verdict manifest path is invalid.") from None
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            raise ConfigError("Program verdict manifest is invalid or unreadable.") from None
-        if not isinstance(payload, dict):
-            raise ConfigError("Program verdict manifest is invalid.")
-        metadata = payload.get("metadata")
-        observation = metadata.get("program_verdict_observation") if isinstance(metadata, dict) else None
-        if observation is None:
-            continue
-        if not isinstance(observation, dict) or observation.get("mode") != "observe":
-            raise ConfigError("Program verdict manifest observation is invalid.")
-        verdict = observation.get("verdict")
-        if not isinstance(verdict, dict) or verdict.get("program_id") != program_id:
-            raise ConfigError("Program verdict manifest observation identity is invalid.")
-        raw_clock = payload.get("started_at")
-        if not isinstance(raw_clock, str):
-            raise ConfigError("Program verdict manifest clock is unavailable.")
-        try:
-            clock = datetime.fromisoformat(raw_clock.replace("Z", "+00:00"))
-        except ValueError:
-            raise ConfigError("Program verdict manifest clock is invalid.") from None
-        if clock.tzinfo is None or clock.utcoffset() is None:
-            raise ConfigError("Program verdict manifest clock must be timezone-aware.")
-        candidates.append((clock.astimezone(timezone.utc), path, verdict))
-    if not candidates:
-        return None
-    _, path, verdict = max(candidates, key=lambda row: (row[0], str(row[1])))
+    _, path, verdict = max(pub_all, key=lambda row: (row[0], str(row[1])))
     return _published_verdict_from_payload(program_id, path, verdict)
 
 
@@ -541,23 +614,294 @@ def evaluate_program_verdict(inputs: ProgramVerdictInputs) -> ProgramVerdict:
         schedule_risk = max((schedule_risk, milestone_floor), key=_RANK.__getitem__)
     if any(row.milestone_id not in milestone_ids for row in inputs.milestone_assessments or ()):
         gaps.append(VerdictReason("milestone_assessment_unbound"))
+    verdict_health = max((*health_levels, schedule_risk), key=_RANK.__getitem__)
+    contradictions = _detect_verdict_contradictions(
+        scorecards=snapshot.scorecards,
+        verdict_health=verdict_health,
+        reasons=reasons,
+    )
     source_refs = tuple(sorted({
         *(f"WI:{item_id}" for item_id in item_ids),
         *(f"FACT_REVISION:{binding.fact_revision_id}" for binding in capture.binding_declarations),
         *(f"RISK:{risk_id}" for risk_id in risk_ids),
         *(f"MILESTONE:{milestone_id}" for milestone_id in milestone_ids),
     }))
-    return ProgramVerdict(
+    result = ProgramVerdict(
         schema_version="program-verdict.v1", engine_version="observe.v3",
         policy_version="observe-conservative.v3", program_id=capture.program_id,
         snapshot_id=capture.sha256, as_of=as_of, valid_until=None,
-        health=max((*health_levels, schedule_risk), key=_RANK.__getitem__),
+        health=verdict_health,
         schedule_risk=schedule_risk, confidence=Confidence.NONE, completion_phase="unknown",
         reasons=tuple(sorted(reasons, key=lambda row: (row.code, row.entity_refs))),
-        contradictions=(), evidence_gaps=tuple(sorted(gaps, key=lambda row: (row.code, row.entity_refs))),
+        contradictions=contradictions,
+        evidence_gaps=tuple(sorted(gaps, key=lambda row: (row.code, row.entity_refs))),
         leadership_asks=tuple(sorted(asks, key=lambda row: row.entity_refs)), source_refs=source_refs, override_refs=(),
         affected_entity_refs=tuple(sorted({
             *source_refs, *(f"SCORECARD:{name}/{dimension}" for name, dimension in dimensions),
         })),
         horizon_refs=(),
     )
+    verify_program_verdict_oracle(inputs, result)
+    return result
+
+
+def _detect_verdict_contradictions(
+    *,
+    scorecards: tuple[object, ...],
+    verdict_health: RiskLevel,
+    reasons: list[VerdictReason] | tuple[VerdictReason, ...],
+) -> tuple[RealityConflict, ...]:
+    adverse_refs = tuple(
+        sorted(
+            {
+                ref
+                for reason in reasons
+                if reason.code != "dimension_risk_floor"
+                for ref in reason.entity_refs
+            }
+        )
+    )
+    if not adverse_refs or _RANK[verdict_health] <= _RANK[RiskLevel.UNKNOWN]:
+        return ()
+    conflicts: list[RealityConflict] = []
+    for row in scorecards:
+        row_risk = getattr(row, "risk", RiskLevel.UNKNOWN)
+        if row_risk not in {RiskLevel.LOW, RiskLevel.DONE}:
+            continue
+        if _RANK[row_risk] >= _RANK[verdict_health]:
+            continue
+        scorecard_name = getattr(row, "scorecard_name", "Scorecard")
+        dim_name = getattr(row, "name", "unknown")
+        dim_ref = f"SCORECARD:{scorecard_name}/{dim_name}"
+        conflicts.append(
+            RealityConflict(
+                conflict_id=f"verdict-contradiction:{scorecard_name}/{dim_name}",
+                entity_refs=(dim_ref, *adverse_refs),
+                family="verdict.contradiction",
+                open=True,
+                description=(
+                    f"Optimistic scorecard dimension {scorecard_name}/{dim_name} ({row_risk.value}) "
+                    f"conflicts with conservative program verdict floor ({verdict_health.value})."
+                ),
+                winning_source="program_verdict.conservative_floor",
+                losing_source=dim_ref,
+                winning_value=verdict_health.value,
+                losing_value=row_risk.value,
+                resolution="conservative_max_floor",
+            )
+        )
+    return tuple(sorted(conflicts, key=lambda item: item.conflict_id))
+
+
+def verify_program_verdict_oracle(inputs: ProgramVerdictInputs, verdict: ProgramVerdict) -> None:
+    """Correctness oracle: verify conservative floors, contradictions, and identity invariants."""
+    expected_as_of = inputs.snapshot.ado_data_as_of.astimezone(timezone.utc)
+    if (
+        verdict.program_id != inputs.capture.program_id
+        or verdict.snapshot_id != inputs.capture.sha256
+        or verdict.as_of != expected_as_of
+    ):
+        raise ConfigError("Program verdict correctness oracle violation: verdict identity or clock mismatch.")
+
+    expected_floor = RiskLevel.UNKNOWN
+    for row in inputs.snapshot.scorecards:
+        if _RANK[row.risk] > _RANK[expected_floor]:
+            expected_floor = row.risk
+    for item in inputs.snapshot.items:
+        if _RANK[item.risk_level] > _RANK[expected_floor]:
+            expected_floor = item.risk_level
+        if (
+            item.state.strip().lower() not in TERMINAL_WORK_ITEM_STATES
+            and item.target_date is not None
+            and item.target_date < expected_as_of.date()
+            and _RANK[RiskLevel.MEDIUM] > _RANK[verdict.schedule_risk]
+        ):
+            raise ConfigError("Program verdict correctness oracle violation: overdue item missed schedule floor.")
+    for risk in inputs.risks or ():
+        if (
+            risk.kind == "strategic"
+            and risk.status in {RiskStatus.OPEN, RiskStatus.ESCALATED}
+            and risk.probability != RiskProbability.UNASSESSED
+            and risk.impact != RiskImpact.UNASSESSED
+            and compute_risk_score(risk) >= HIGH_RISK_SCORE_THRESHOLD
+            and _RANK[RiskLevel.HIGH] > _RANK[verdict.health]
+        ):
+            raise ConfigError("Program verdict correctness oracle violation: high strategic risk lowered.")
+
+    for ms in inputs.milestones or ():
+        matching = [a for a in (inputs.milestone_assessments or ()) if a.milestone_id == ms.id]
+        ma = matching[0] if len(matching) == 1 else None
+        ms_status = ma.computed_health if ma is not None else None
+        if ms_status == MilestoneStatus.MISSED and _RANK[RiskLevel.HIGH] > _RANK[verdict.schedule_risk]:
+            raise ConfigError("Program verdict correctness oracle violation: missed milestone lowered schedule risk.")
+        if ms_status == MilestoneStatus.AT_RISK and _RANK[RiskLevel.MEDIUM] > _RANK[verdict.schedule_risk]:
+            raise ConfigError("Program verdict correctness oracle violation: at-risk milestone lowered schedule risk.")
+
+    if _RANK[verdict.health] < _RANK[expected_floor] or _RANK[verdict.health] < _RANK[verdict.schedule_risk]:
+        raise ConfigError("Program verdict correctness oracle violation: health below conservative risk floor.")
+
+    adverse_refs = [r for r in verdict.reasons if r.code != "dimension_risk_floor"]
+    optimistic_dims = [
+        f"verdict-contradiction:{row.scorecard_name}/{row.name}"
+        for row in inputs.snapshot.scorecards
+        if row.risk in {RiskLevel.LOW, RiskLevel.DONE} and _RANK[row.risk] < _RANK[verdict.health]
+    ]
+    if adverse_refs and optimistic_dims:
+        recorded_ids = {c.conflict_id for c in verdict.contradictions}
+        missing = sorted(set(optimistic_dims) - recorded_ids)
+        if missing:
+            raise ConfigError(
+                f"Program verdict correctness oracle violation: silent contradictions {missing}."
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class AuthoritativeRiskAssessment:
+    overall_risk: RiskLevel
+    schedule_risk: RiskLevel
+    contradictions: tuple[RealityConflict, ...]
+    reason_codes: tuple[str, ...]
+
+
+def resolve_authoritative_program_risk(
+    *,
+    scorecards: tuple[DimensionRisk | object, ...] = (),
+    items: tuple[WorkItem | object, ...] = (),
+    forecasts: tuple[ETAForecast, ...] = (),
+    risks: tuple[RiskEntry, ...] = (),
+    milestones: tuple[Milestone, ...] = (),
+    milestone_assessments: tuple[MilestoneAssessment, ...] = (),
+    as_of: datetime | None = None,
+) -> AuthoritativeRiskAssessment:
+    """Compute conservative RiskLevel floor identically to evaluate_program_verdict for render paths."""
+    reasons: list[VerdictReason] = []
+    levels = [RiskLevel.UNKNOWN]
+    schedule_risk = RiskLevel.UNKNOWN
+
+    for row in scorecards:
+        row_risk = getattr(row, "risk", RiskLevel.UNKNOWN)
+        levels.append(row_risk)
+        if _RANK[row_risk] > _RANK[RiskLevel.UNKNOWN]:
+            reasons.append(VerdictReason("dimension_risk_floor", (f"SCORECARD:{getattr(row, 'scorecard_name', 'Scorecard')}/{getattr(row, 'name', '')}",)))
+
+    item_map = {}
+    as_of_date = as_of.date() if as_of is not None else None
+    for item in items:
+        item_id = getattr(item, "id", None)
+        item_risk = getattr(item, "risk_level", RiskLevel.UNKNOWN)
+        item_state = str(getattr(item, "state", "")).strip().lower()
+        target_date = getattr(item, "target_date", None)
+        if item_id is not None:
+            item_map[item_id] = item
+        levels.append(item_risk)
+        if _RANK[item_risk] > _RANK[RiskLevel.UNKNOWN]:
+            reasons.append(VerdictReason("item_risk_floor", (f"WI:{item_id}",)))
+        if as_of_date is not None and item_state not in TERMINAL_WORK_ITEM_STATES and target_date is not None and target_date < as_of_date:
+            schedule_risk = max((schedule_risk, RiskLevel.MEDIUM), key=_RANK.__getitem__)
+            reasons.append(VerdictReason("target_overdue", (f"WI:{item_id}",)))
+
+    for fc in forecasts:
+        item = item_map.get(fc.work_item_id)
+        if item is not None and str(getattr(item, "state", "")).strip().lower() in TERMINAL_WORK_ITEM_STATES:
+            continue
+        if fc.ado_target_date is not None:
+            if fc.slip_probability >= 0.8:
+                schedule_risk = max((schedule_risk, RiskLevel.HIGH), key=_RANK.__getitem__)
+                reasons.append(VerdictReason("miss_probability_high", (f"WI:{fc.work_item_id}",)))
+            elif fc.slip_probability >= 0.5:
+                schedule_risk = max((schedule_risk, RiskLevel.MEDIUM), key=_RANK.__getitem__)
+                reasons.append(VerdictReason("miss_probability_medium", (f"WI:{fc.work_item_id}",)))
+        if as_of_date is not None and fc.p50_date is not None and fc.p50_date < as_of_date:
+            schedule_risk = max((schedule_risk, RiskLevel.MEDIUM), key=_RANK.__getitem__)
+            reasons.append(VerdictReason("forecast_p50_past", (f"WI:{fc.work_item_id}",)))
+
+    for risk in risks:
+        if risk.kind != "strategic" or risk.status not in {RiskStatus.OPEN, RiskStatus.ESCALATED}:
+            continue
+        if risk.probability == RiskProbability.UNASSESSED or risk.impact == RiskImpact.UNASSESSED:
+            continue
+        if compute_risk_score(risk) >= HIGH_RISK_SCORE_THRESHOLD:
+            levels.append(RiskLevel.HIGH)
+            reasons.append(VerdictReason("risk_register_high_floor", (f"RISK:{risk.id}",)))
+
+    for ms in milestones:
+        matching = [a for a in milestone_assessments if a.milestone_id == ms.id]
+        ma = matching[0] if len(matching) == 1 else None
+        status = ma.computed_health if ma is not None else None
+        if status == MilestoneStatus.MISSED:
+            schedule_risk = max((schedule_risk, RiskLevel.HIGH), key=_RANK.__getitem__)
+            reasons.append(VerdictReason("milestone_missed", (f"MILESTONE:{ms.id}",)))
+        elif status == MilestoneStatus.AT_RISK:
+            schedule_risk = max((schedule_risk, RiskLevel.MEDIUM), key=_RANK.__getitem__)
+            reasons.append(VerdictReason("milestone_at_risk", (f"MILESTONE:{ms.id}",)))
+        if (
+            as_of_date is not None
+            and ms.target_date < as_of_date
+            and status not in {MilestoneStatus.COMPLETED, MilestoneStatus.DEFERRED}
+            and not (status is None and ms.status == MilestoneStatus.DEFERRED)
+        ):
+            schedule_risk = max((schedule_risk, RiskLevel.MEDIUM), key=_RANK.__getitem__)
+            reasons.append(VerdictReason("milestone_target_overdue", (f"MILESTONE:{ms.id}",)))
+
+    overall_sc = RiskLevel.UNKNOWN
+    for row in scorecards:
+        row_risk = getattr(row, "risk", RiskLevel.UNKNOWN)
+        if _RANK[row_risk] > _RANK[overall_sc]:
+            overall_sc = row_risk
+    if scorecards and all(getattr(row, "risk", RiskLevel.UNKNOWN) in {RiskLevel.LOW, RiskLevel.DONE} for row in scorecards):
+        overall_sc = max((getattr(row, "risk", RiskLevel.UNKNOWN) for row in scorecards), key=_RANK.__getitem__)
+    elif any(getattr(row, "risk", RiskLevel.UNKNOWN) == RiskLevel.UNKNOWN for row in scorecards) and _RANK[overall_sc] < _RANK[RiskLevel.UNKNOWN]:
+        overall_sc = RiskLevel.UNKNOWN
+    adverse_max = max((*levels, schedule_risk), key=_RANK.__getitem__)
+    overall = adverse_max if _RANK[adverse_max] >= _RANK[RiskLevel.MEDIUM] else overall_sc
+    conflicts = _detect_verdict_contradictions(scorecards=scorecards, verdict_health=overall, reasons=reasons)
+    return AuthoritativeRiskAssessment(
+        overall_risk=overall,
+        schedule_risk=schedule_risk,
+        contradictions=conflicts,
+        reason_codes=tuple(sorted({r.code for r in reasons})),
+    )
+
+
+def render_published_verdict_line(verdict: PublishedProgramVerdict) -> str:
+    """Format a deterministic, ban-list-safe one-line summary of a PublishedProgramVerdict."""
+    return (
+        f"Program Verdict ({verdict.program_id}, snapshot {verdict.snapshot_id}, as_of {verdict.as_of.isoformat()}): "
+        f"health={verdict.health.value.upper()} | schedule_risk={verdict.schedule_risk.value.upper()} | "
+        f"reasons={len(verdict.reason_codes)} | gaps={len(verdict.evidence_gap_codes)}"
+    )
+
+
+def assert_cross_surface_verdict_parity(
+    *,
+    published: PublishedProgramVerdict,
+    report_risk: RiskLevel,
+    cockpit_overall_risk: str,
+    brief_verdict: PublishedProgramVerdict | None,
+    escalate_verdict: PublishedProgramVerdict | None,
+    review_verdict: PublishedProgramVerdict | None,
+) -> None:
+    """Cross-surface oracle: assert report, cockpit, brief, escalate, and review agree on PublishedProgramVerdict."""
+    expected_cockpit = {
+        "blocked": "red",
+        "high": "red",
+        "medium": "yellow",
+        "low": "green",
+        "done": "green",
+        "unknown": "unknown",
+    }[published.health.value]
+    if report_risk != published.health:
+        raise ConfigError(
+            f"Cross-surface verdict conflict: report_risk={report_risk.value} != published={published.health.value}."
+        )
+    if cockpit_overall_risk != expected_cockpit:
+        raise ConfigError(
+            f"Cross-surface verdict conflict: cockpit={cockpit_overall_risk} != expected={expected_cockpit}."
+        )
+    for surface, candidate in (
+        ("brief", brief_verdict),
+        ("escalate", escalate_verdict),
+        ("review", review_verdict),
+    ):
+        if candidate is None or candidate.snapshot_id != published.snapshot_id or candidate.health != published.health:
+            raise ConfigError(f"Cross-surface verdict conflict on {surface}: expected {published.snapshot_id}/{published.health.value}.")

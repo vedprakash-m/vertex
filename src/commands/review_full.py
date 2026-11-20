@@ -4,7 +4,7 @@ import csv
 import json
 import logging
 import webbrowser
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 import inspect
 from io import StringIO
@@ -44,6 +44,7 @@ from src.core.evidence_engine import build_evidence
 from src.core.exceptions import AuthError, ConfigError, QueryError
 from src.core.forecast_engine import ETAForecast, build_forecast_assessment
 from src.core.freshness_engine import build_freshness_report
+from src.core.program_verdict import PublishedProgramVerdict, load_latest_program_verdict, render_published_verdict_line
 from src.core.issue_projection import IssueProjection, build_issue_projection, issue_projection_confidence_label, issue_projection_source_label
 from src.core.jinja_filters import build_anchor, delta_label, risk_label
 from src.core.knowledge_store import load_program_knowledge, select_engms_pages
@@ -113,6 +114,7 @@ class ReviewFullContextData:
     reviewer_context: ReviewerRenderContext
     items: tuple[WorkItem, ...]
     program_id: str | None
+    published_verdict: PublishedProgramVerdict | None = None
 
 
 SectionReviewCardSender = Callable[[str, dict[str, Any]], None]
@@ -589,12 +591,27 @@ def prepare_review_full_context(
         signal_source_confidence_order=reviewer_signal_source_confidence_order,
         persona_coverage=persona_coverage,
     )
+    published_verdict = (
+        load_latest_program_verdict(
+            resolved_v2.program.id,
+            programs_root=programs_root,
+            archive_root=resolved_archive_root,
+        )
+        if resolved_v2 is not None
+        else None
+    )
+    if published_verdict is not None:
+        reviewer_context = replace(
+            reviewer_context,
+            published_verdict_line=render_published_verdict_line(published_verdict),
+        )
     return ReviewFullContextData(
         issue_number=resolved_issue_number,
         bundle=bundle,
         reviewer_context=reviewer_context,
         items=items,
         program_id=(resolved_v2.program.id if resolved_v2 is not None else None),
+        published_verdict=published_verdict,
     )
 
 
