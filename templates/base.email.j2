@@ -6,9 +6,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   {% if not executive_style | default(false) %}<meta name="color-scheme" content="light dark">{% else %}<meta name="color-scheme" content="light"><meta name="supported-color-schemes" content="light">{% endif %}
   <title>{{ title }}</title>
-  {% if type_scale_v2 | default(false) %}{% include "partials/typography_v2.j2" %}{% endif %}
+  {% if type_scale_v2 | default(false) %}{% include "partials/typography_v2.j2" %}{% endif %}{%- if projector_profile | default(false) %}{% include "partials/projector_1080p.j2" %}{%- endif %}
 </head>
-{% set _exec = executive_style | default(false) %}
+{% set _exec = executive_style | default(false) %}{%- set _proj = projector_profile | default(false) %}
 <body style="margin:0; padding:0; background-color:{% if _exec %}#FFFFFF{% else %}#F9FAFB{% endif %}; font-family:Segoe UI, -apple-system, Roboto, Helvetica, Arial, sans-serif; color:#111827;">
   <div style="display:none; max-height:0; overflow:hidden; opacity:0; mso-hide:all; color:transparent;">
     {{ preheader | default('Newsletter preview') }}
@@ -16,7 +16,7 @@
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; background-color:{% if _exec %}#FFFFFF{% else %}#F9FAFB{% endif %}; margin:0; padding:0;">
     <tr>
       <td align="center" style="padding:24px 12px;">
-        <table role="presentation" width="680" cellpadding="0" cellspacing="0" border="0"{% if _exec %} bgcolor="#ffffff"{% endif %} style="width:680px; max-width:680px; border-collapse:collapse; background-color:#FFFFFF;{% if not _exec %} border:1px solid #E5E7EB;{% endif %}">
+        <table role="presentation" width="{% if _proj %}100%{% else %}680{% endif %}" cellpadding="0" cellspacing="0" border="0"{% if _exec %} bgcolor="#ffffff"{% endif %} style="width:{% if _proj %}100%; max-width:1200px{% else %}680px; max-width:680px{% endif %}; border-collapse:collapse; background-color:#FFFFFF;{% if not _exec %} border:1px solid #E5E7EB;{% endif %}">
           <tr>
             {# specs/bklg.md BL-H2 action (2), 2026-07-26: role="main" on this
                cell (not the nested layout table -- it already needs its own
@@ -25,7 +25,7 @@
                effect in any browser/email client, same risk class as the
                existing role="presentation" convention. #}
             <td align="center" role="main" style="padding:0;">
-              <table role="presentation" width="640" cellpadding="0" cellspacing="0" border="0" style="width:640px; max-width:640px; border-collapse:collapse;">
+              <table role="presentation" width="{% if _proj %}100%{% else %}640{% endif %}" cellpadding="0" cellspacing="0" border="0" style="width:{% if _proj %}100%; max-width:1120px{% else %}640px; max-width:640px{% endif %}; border-collapse:collapse;">
                 <tr>
                   <td style="padding:24px 0 16px 0; border-bottom:1px solid #E5E7EB;">
                     {% block header %}
@@ -40,7 +40,7 @@
                   </td>
                 </tr>
                 <tr>
-                  <td style="padding:24px 0; font-size:14px; line-height:1.6; color:#374151;">
+                  <td style="padding:24px 0; font-size:{% if _proj %}16px; line-height:1.65; color:#111827{% else %}14px; line-height:1.6; color:#374151{% endif %};">
                     {% block content %}
                     {{ content_html | default('') | safe }}
                     {% endblock %}
