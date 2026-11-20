@@ -699,7 +699,9 @@ def _derive_risk_sparkline(
         return sparkline, "rising vs prior issue"
     if direction == "fall":
         return sparkline, "falling vs prior issue"
-    if direction in {"steady", "high"}:
+    if direction == "high":
+        return sparkline, "high vs prior issue"
+    if direction == "steady":
         return sparkline, "unchanged vs prior issue"
     return None, None
 

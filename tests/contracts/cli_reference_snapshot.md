@@ -2040,6 +2040,7 @@ Inspect and validate the L1 reality database.
 | --program TEXT | text | Yes |  | Program id, e.g. myprogram. |
 | --dry-run | boolean | No | False | Preview compaction without writing any database changes. |
 | --format TEXT | text | No | text | Output format: text or json. |
+| --programs-root PATH | path | No |  | Override workspace programs root. |
 
 #### `vertex admin db relocate`
 

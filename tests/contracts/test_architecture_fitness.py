@@ -26,11 +26,23 @@ from src.core.models import ConfirmedDimension, EditionType, RunManifest, RiskLe
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+_R0_CALLERLESS_MODULE_ALLOWLIST: dict[str, dict[str, str]] = {
+    "src/core/communication_budget.py": {
+        "decision": "OD-9",
+        "owner": "vertex-r1-maintainer",
+        "expiry": "R1-Wave-2",
+        "reason": "Retained standalone budget evaluator pending R1-Wave-2 prompt pipeline integration.",
+    },
+}
+
+
 def test_relo_w4_callerless_helpers_are_retired() -> None:
     retired = (
         REPO_ROOT / "src" / "core" / "sprint_planner.py",
         REPO_ROOT / "src" / "core" / "object_lifecycle.py",
         REPO_ROOT / "src" / "core" / "long_horizon_relevance.py",
+        REPO_ROOT / "src" / "core" / "actuation_reconciler.py",
+        REPO_ROOT / "src" / "core" / "action_extraction_parity.py",
     )
     assert [path.relative_to(REPO_ROOT).as_posix() for path in retired if path.exists()] == []
 
@@ -38,6 +50,8 @@ def test_relo_w4_callerless_helpers_are_retired() -> None:
         "src.core.sprint_planner",
         "src.core.object_lifecycle",
         "src.core.long_horizon_relevance",
+        "src.core.actuation_reconciler",
+        "src.core.action_extraction_parity",
     }
     imports: set[str] = set()
     for path in (REPO_ROOT / "src").rglob("*.py"):
@@ -48,6 +62,9 @@ def test_relo_w4_callerless_helpers_are_retired() -> None:
             elif isinstance(node, ast.ImportFrom) and node.module:
                 imports.add(node.module)
     assert imports & forbidden_modules == set()
+    for rel_path, meta in _R0_CALLERLESS_MODULE_ALLOWLIST.items():
+        assert (REPO_ROOT / rel_path).exists(), f"Remove stale allowlist entry {rel_path}"
+        assert meta["owner"] and meta["expiry"] == "R1-Wave-2"
 
 
 # These ceilings freeze the current high-risk hotspots so they cannot silently grow

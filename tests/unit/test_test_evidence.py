@@ -121,6 +121,71 @@ def test_coverage_baseline_requires_exact_source_bytes(tmp_path: Path, monkeypat
         raise AssertionError("A stale coverage baseline must fail closed")
 
 
+def test_coverage_baseline_fails_closed_when_measurement_entry_is_missing(tmp_path: Path) -> None:
+    module = _load_module()
+    source = tmp_path / "src" / "example.py"
+    source.parent.mkdir()
+    source.write_text("value = 1\n", encoding="utf-8")
+    digest = __import__("hashlib").sha256(source.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+    baseline = tmp_path / "coverage.json"
+    baseline.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "sources": {"src/example.py": digest},
+                "files": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    try:
+        module.load_coverage_baseline(baseline, tmp_path, expected_files={"src/example.py"})
+    except ValueError as error:
+        assert "missing measurement entries" in str(error)
+    else:
+        raise AssertionError("Coverage baseline omitting measurement entries must fail closed")
+
+
+def test_main_rejects_live_coverage_missing_src_entry(tmp_path: Path, monkeypatch) -> None:
+    module = _load_module()
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "src" / "b.py").write_text("y = 2\n", encoding="utf-8")
+    (tmp_path / "cli.py").write_text("z = 3\n", encoding="utf-8")
+    assert module._expected_coverage_files(tmp_path) == {"cli.py", "src/a.py", "src/b.py"}
+
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "functional_shards": 1,
+                "performance_reports": 0,
+                "windows_reports": 0,
+                "critical_obligations": [],
+                "performance_nodes": [],
+                "windows_nodes": [],
+                "control_nodes": [],
+                "forbidden_skip_patterns": [],
+                "coverage": {"sources": ["src", "cli.py"], "statement_floor": 0.0, "branch_floor": 0.0, "changed_code_statement_floor": 95.0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    junit = tmp_path / "one.xml"
+    _write_junit(junit, [("tests.unit.test_x", "test_ok", "passed")])
+    cov_path = tmp_path / "cov.json"
+    _coverage(cov_path, (1,), ())
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["check_test_evidence.py", "--policy", str(policy_path), "--junit", str(junit), "--coverage", str(cov_path)])
+    try:
+        module.main()
+    except SystemExit as exc:
+        assert "missing measurement entries" in str(exc)
+    else:
+        raise AssertionError("main() must fail closed when live --coverage omits src/ or cli.py files")
+
+
 def test_private_data_skip_reasons_are_rejected(tmp_path: Path) -> None:
     module = _load_module()
     junit = tmp_path / "one.xml"

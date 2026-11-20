@@ -262,3 +262,172 @@ def test_invalid_manifest_fails_closed(
     assert exit_code == 2
     assert payload["candidate_count"] == 0
     assert payload["findings"][0]["code"] == "MANIFEST_INVALID"
+
+
+def _git(repo: Path, *args: str, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        input=input_text,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
+def _configure_git_repo(repo: Path) -> None:
+    _init_repo(repo)
+    _git(repo, "config", "user.email", "tester@example.com")
+    _git(repo, "config", "user.name", "Vertex Tester")
+
+
+def test_staged_reads_exact_index_blob_across_working_tree_divergence(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _load_module()
+    _configure_git_repo(tmp_path)
+    target = tmp_path / "notes.txt"
+    secret = "ghp_" + "abcdefghijklmnopqrstuvwxyz123456"
+
+    # Direction A: secret staged in index, working tree scrubbed -> MUST block
+    target.write_text(f"token = '{secret}'\n", encoding="utf-8")
+    _git(tmp_path, "add", "notes.txt")
+    target.write_text("clean working tree\n", encoding="utf-8")
+    blocked_code, blocked = _run(module, capsys, tmp_path, "--staged")
+    assert blocked_code == 1
+    assert blocked["findings"][0]["code"] == "SECRET_PATTERN"
+    assert blocked["findings"][0]["path"] == "notes.txt"
+
+    # Direction B: clean blob staged in index, working tree dirty with secret -> MUST pass
+    target.write_text("clean staged blob\n", encoding="utf-8")
+    _git(tmp_path, "add", "notes.txt")
+    target.write_text(f"token = '{secret}'\n", encoding="utf-8")
+    clean_code, clean = _run(module, capsys, tmp_path, "--staged")
+    assert clean_code == 0
+    assert clean["findings"] == []
+    assert clean["candidate_count"] == 1
+
+
+def test_staged_skips_deletions_handles_skip_paths_and_binary_allowlist(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _load_module()
+    _configure_git_repo(tmp_path)
+
+    # Initial tracked file to test deletion skip
+    doomed = tmp_path / "obsolete.txt"
+    doomed.write_text("bye\n", encoding="utf-8")
+    _git(tmp_path, "add", "obsolete.txt")
+    _git(tmp_path, "commit", "-m", "initial")
+    _git(tmp_path, "rm", "--quiet", "obsolete.txt")
+
+    # SKIP_PATHS file staged cleanly without false UNSCANNED_ALLOWLISTED_PATH block
+    skip_file = tmp_path / "tests" / "unit" / "test_publication_content_scan.py"
+    skip_file.parent.mkdir(parents=True)
+    skip_file.write_text("PATTERN = '" + "Arm" + "ada'\n", encoding="utf-8")
+    _git(tmp_path, "add", "tests/unit/test_publication_content_scan.py")
+
+    skip_code, skip_payload = _run(module, capsys, tmp_path, "--staged")
+    assert skip_code == 0, skip_payload
+    assert skip_payload["findings"] == []
+
+    # Unallowlisted binary blocks
+    png = tmp_path / "assets" / "logo.png"
+    png.parent.mkdir(parents=True)
+    png_bytes = b"\x89PNG\r\n\x1a\n"
+    png.write_bytes(png_bytes)
+    _git(tmp_path, "add", "assets/logo.png")
+    bin_code, bin_payload = _run(module, capsys, tmp_path, "--staged")
+    assert bin_code == 1
+    assert any(f["code"] == "UNSCANNED_BINARY" and f["path"] == "assets/logo.png" for f in bin_payload["findings"])
+
+    # Manifest-allowlisted binary with matching sha256 passes
+    allowlist = tmp_path / "allowlist.json"
+    allowlist.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "artifacts": [
+                    {
+                        "path": "assets/logo.png",
+                        "sha256": hashlib.sha256(png_bytes).hexdigest(),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    allowed_code, allowed_payload = _run(
+        module, capsys, tmp_path, "--staged", "--binary-allowlist", "allowlist.json"
+    )
+    assert allowed_code == 0, allowed_payload
+
+    # Modified binary whose sha256 disagrees with allowlist fails closed
+    png.write_bytes(b"\x89PNG\r\n\x1a\nMUTATED")
+    _git(tmp_path, "add", "assets/logo.png")
+    mismatch_code, mismatch_payload = _run(
+        module, capsys, tmp_path, "--staged", "--binary-allowlist", "allowlist.json"
+    )
+    assert mismatch_code == 1
+    assert any(
+        f["code"] == "OUTGOING_BLOB_HASH_MISMATCH" and f["path"] == "assets/logo.png"
+        for f in mismatch_payload["findings"]
+    )
+
+
+def test_push_refs_scans_outgoing_commits_and_hooks_wire_disclosure_checks(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import io
+
+    module = _load_module()
+    _configure_git_repo(tmp_path)
+    doc = tmp_path / "doc.txt"
+    doc.write_text("clean v1\n", encoding="utf-8")
+    _git(tmp_path, "add", "doc.txt")
+    _git(tmp_path, "commit", "-m", "v1")
+    base_oid = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+
+    secret = "ghp_" + "abcdefghijklmnopqrstuvwxyz123456"
+    doc.write_text(f"leaked = '{secret}'\n", encoding="utf-8")
+    _git(tmp_path, "add", "doc.txt")
+    _git(tmp_path, "commit", "-m", "v2 leak")
+    head_oid = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(f"refs/heads/main {head_oid} refs/heads/main {base_oid}\n"),
+    )
+    push_code, push_payload = _run(module, capsys, tmp_path, "--push-refs")
+    assert push_code == 1
+    assert push_payload["findings"][0]["code"] == "SECRET_PATTERN"
+    assert push_payload["findings"][0]["path"] == "doc.txt"
+
+    pre_commit = (REPO_ROOT / ".githooks" / "pre-commit").read_text(encoding="utf-8")
+    pre_push = (REPO_ROOT / ".githooks" / "pre-push").read_text(encoding="utf-8")
+    assert "scripts/rev_precommit_quality.py" in pre_commit
+    assert "scripts/verify_disclosure_candidate.py --staged" in pre_commit
+    assert "scripts/verify_disclosure_candidate.py --push-refs" in pre_push
+
+    # Deleted branch (0*40 local oid) and new branch (0*40 remote oid) handling
+    clean_doc = tmp_path / "clean_branch.txt"
+    clean_doc.write_text("safe branch commit\n", encoding="utf-8")
+    _git(tmp_path, "add", "clean_branch.txt")
+    _git(tmp_path, "commit", "-m", "v3 clean")
+    v3_oid = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(
+            f"(delete) {'0' * 40} refs/heads/old {head_oid}\n"
+            f"refs/heads/new {v3_oid} refs/heads/new {'0' * 40}\n"
+        ),
+    )
+    new_branch_code, new_branch_payload = _run(module, capsys, tmp_path, "--push-refs")
+    assert new_branch_code == 1  # detects prior leaked v2 commit in branch ancestry
+    assert new_branch_payload["candidate_count"] >= 1

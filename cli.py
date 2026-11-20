@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import uuid
 from copy import copy
@@ -10,8 +11,9 @@ from inspect import getattr_static
 from pathlib import Path
 
 try:
-    from dotenv import load_dotenv
-    load_dotenv(Path(__file__).parent / ".env", override=False)
+    if os.environ.get("VERTEX_NO_DOTENV") != "1":
+        from dotenv import load_dotenv
+        load_dotenv(Path(__file__).parent / ".env", override=False)
 except ImportError:
     pass
 
@@ -68,7 +70,7 @@ from src.commands.connectors import app as connectors_app
 from src.commands.deck_companion import deck_companion_command
 from src.commands.diff import _preflight_diff_workspace, diff_command
 from src.commands.context_diff import context_diff as _context_diff_cmd
-from src.commands.db import app as db_app, maybe_run_scheduled_compaction
+from src.commands.db import app as db_app, maybe_run_scheduled_compaction, use_compaction_programs_root
 from src.commands.doctor import doctor_command
 from src.commands.edit import _preflight_edit_workspace, edit_command
 from src.commands.editor import app as editor_app
@@ -362,6 +364,7 @@ class VertexRootGroup(TyperGroup):
                 except click.UsageError:
                     pass  # The actual invocation reports the parse error.
                 else:
+                    ctx.meta["vertex_startup_dry_run"] = options.get("dry_run") is True
                     ctx.meta["report_conflicting_send"] = (
                         options.get("dry_run") is True
                         and options.get("send_draft") is True
@@ -458,6 +461,12 @@ class VertexRootGroup(TyperGroup):
                             probe.get_parameter_source(name) is click.core.ParameterSource.COMMANDLINE
                             for name in ("approve_draft", "mark_sent")
                         )
+            if "vertex_startup_dry_run" not in ctx.meta and resolved[1] is not None and any(
+                arg == "--dry-run" or arg.startswith("--dry-run=") for arg in resolved[2]
+            ):
+                ctx.meta["vertex_startup_dry_run"] = _probe_dry_run_flag(
+                    ctx, resolved[0], resolved[1], resolved[2]
+                )
             return resolved
         except click.ClickException:
             ask_group = self.commands.get("ask")
@@ -545,7 +554,10 @@ def main(
         ):
             return
         _maybe_register_tier_decision_sink(ctx)
-        if ctx.invoked_subcommand == "enrich" and ctx.meta.get("enrich_dry_run") is True:
+        if (
+            ctx.meta.get("vertex_startup_dry_run") is True
+            or (ctx.invoked_subcommand == "enrich" and ctx.meta.get("enrich_dry_run") is True)
+        ):
             return
         _maybe_run_scheduled_db_maintenance(ctx)
         _maybe_run_session_catchup(ctx, no_catchup=no_catchup)
@@ -625,6 +637,37 @@ def _maybe_register_tier_decision_sink(ctx: typer.Context) -> None:
         logging.getLogger(__name__).warning("tier decision sink registration failed", exc_info=True)
 
 
+def _probe_dry_run_flag(
+    ctx: click.Context,
+    command_name: str,
+    command: click.Command,
+    cmd_args: list[str],
+) -> bool:
+    """Safely check whether --dry-run was passed as an option flag (not an option value)."""
+    probe_args = ["--dry-run" if arg.startswith("--dry-run=") else arg for arg in cmd_args]
+    try:
+        probe = command.make_context(
+            command_name,
+            probe_args,
+            parent=ctx,
+            resilient_parsing=True,
+            help_option_names=[],
+            ignore_unknown_options=True,
+            allow_extra_args=True,
+        )
+    except click.ClickException:
+        return False
+    with probe:
+        return probe.params.get("dry_run") is True
+
+
+def _effective_startup_programs_root() -> Path:
+    configured = os.environ.get("VERTEX_PROGRAMS_ROOT")
+    if configured and configured.strip():
+        return Path(configured).expanduser()
+    return PROGRAMS_ROOT
+
+
 def _maybe_run_scheduled_db_maintenance(ctx: typer.Context) -> None:
     """Best-effort scheduled reality-store compaction for this invocation.
 
@@ -641,7 +684,8 @@ def _maybe_run_scheduled_db_maintenance(ctx: typer.Context) -> None:
     if program_id is None:
         return
     try:
-        maybe_run_scheduled_compaction(program_id)
+        with use_compaction_programs_root(_effective_startup_programs_root()):
+            maybe_run_scheduled_compaction(program_id)
     except Exception:  # pragma: no cover - maintenance must never break the CLI
         logging.getLogger(__name__).warning("scheduled db maintenance failed", exc_info=True)
 

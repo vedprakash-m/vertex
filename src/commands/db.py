@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
-from contextlib import closing
+from collections.abc import Iterator, Mapping
+from contextlib import closing, contextmanager
+import contextvars
 from datetime import datetime, timedelta, timezone
 import json
 import logging
@@ -16,11 +17,62 @@ from typing import Any, cast
 from uuid import uuid4
 
 import typer
+import yaml
 
 from src.core.edition_resolver import PROGRAMS_ROOT
+from src.core.exceptions import ConfigError
 from src.core.metric_models import MetricDefinition, MetricQualityState
 from src.core.metric_registry import load_metric_definition_map
 from src.core.reality_store import get_program_reality_db_path
+
+
+_COMPACTION_PROGRAMS_ROOT_VAR: contextvars.ContextVar[Path | None] = contextvars.ContextVar(
+    "vertex_compaction_programs_root",
+    default=None,
+)
+_CHECKOUT_PROGRAMS_ROOT = (Path(__file__).resolve().parents[2] / "programs").resolve()
+
+
+@contextmanager
+def use_compaction_programs_root(programs_root: Path | None) -> Iterator[None]:
+    """Bind workspace programs root for scheduled DB compaction within the current context."""
+    token = _COMPACTION_PROGRAMS_ROOT_VAR.set(programs_root)
+    try:
+        yield
+    finally:
+        _COMPACTION_PROGRAMS_ROOT_VAR.reset(token)
+
+
+def _resolve_effective_programs_root(programs_root: Path | None = None) -> tuple[Path, bool]:
+    if programs_root is not None:
+        return programs_root.expanduser().resolve(), True
+    ctx_root = _COMPACTION_PROGRAMS_ROOT_VAR.get()
+    if ctx_root is not None:
+        resolved = ctx_root.expanduser().resolve()
+        return resolved, resolved != _CHECKOUT_PROGRAMS_ROOT
+    env_root = os.environ.get("VERTEX_PROGRAMS_ROOT")
+    if env_root and env_root.strip():
+        return Path(env_root).expanduser().resolve(), True
+    return PROGRAMS_ROOT, False
+
+
+def _resolve_compaction_metrics_root(*, programs_root: Path | None = None) -> Path:
+    effective_programs_root, is_external = _resolve_effective_programs_root(programs_root)
+    metrics_root = effective_programs_root.parent / "knowledge" / "metrics"
+    if is_external and not metrics_root.is_dir():
+        raise ConfigError(f"Compaction metrics registry directory does not exist: {metrics_root}")
+    return metrics_root
+
+
+def _load_compaction_metric_definitions(
+    metrics_root: Path,
+    *,
+    as_of: datetime,
+) -> dict[str, MetricDefinition]:
+    try:
+        return load_metric_definition_map(metrics_root=metrics_root, as_of=as_of)
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"Malformed compaction metric registry YAML in {metrics_root}: {exc}") from exc
 
 
 app = typer.Typer(help="Inspect and validate the L1 reality database.")
@@ -359,9 +411,15 @@ def compact_command(
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview compaction without writing any database changes."),
     format: str = typer.Option("text", "--format", help="Output format: text or json."),
     db_root: Path | None = typer.Option(None, "--db-root", hidden=True),
+    programs_root: Path | None = typer.Option(None, "--programs-root", help="Override workspace programs root."),
 ) -> None:
     normalized_format = _normalize_format(format)
-    db_path = get_program_reality_db_path(program, db_root=db_root)
+    effective_programs_root, _ = _resolve_effective_programs_root(programs_root)
+    db_path = get_program_reality_db_path(
+        program,
+        db_root=db_root,
+        programs_root=effective_programs_root,
+    )
     if not db_path.exists():
         _emit_compact(
             {
@@ -374,7 +432,26 @@ def compact_command(
         )
         raise typer.Exit(code=2)
 
-    payload = _compact_database(program, db_path, dry_run=dry_run)
+    try:
+        with use_compaction_programs_root(effective_programs_root):
+            payload = _compact_database(program, db_path, dry_run=dry_run)
+    except ConfigError as exc:
+        error_code = (
+            "metrics_registry_missing"
+            if "does not exist:" in str(exc)
+            else "metrics_registry_invalid"
+        )
+        _emit_compact(
+            {
+                "program_id": program,
+                "db_path": str(db_path),
+                "is_valid": False,
+                "error": error_code,
+                "detail": str(exc),
+            },
+            format=normalized_format,
+        )
+        raise typer.Exit(code=2)
     _emit_compact(payload, format=normalized_format)
     raise typer.Exit(code=0)
 
@@ -583,10 +660,16 @@ def _migrate_database(program: str, db_path: Path, *, dry_run: bool) -> dict[str
     }
 
 
-def _compact_database(program: str, db_path: Path, *, dry_run: bool) -> dict[str, object]:
+def _compact_database(
+    program: str,
+    db_path: Path,
+    *,
+    dry_run: bool,
+) -> dict[str, object]:
     compacted_at = datetime.now(timezone.utc)
     evaluation_cutoff = compacted_at - timedelta(days=_COMPACT_EVALUATION_RETENTION_DAYS)
-    metric_definitions = load_metric_definition_map(as_of=compacted_at)
+    metrics_root = _resolve_compaction_metrics_root()
+    metric_definitions = _load_compaction_metric_definitions(metrics_root, as_of=compacted_at)
 
     with sqlite3.connect(db_path) as connection:
         connection.row_factory = sqlite3.Row
@@ -647,10 +730,16 @@ def maybe_run_scheduled_compaction(
     program: str,
     *,
     db_root: Path | None = None,
+    programs_root: Path | None = None,
     now: datetime | None = None,
 ) -> dict[str, object] | None:
     reference_time = now or datetime.now(timezone.utc)
-    db_path = get_program_reality_db_path(program, db_root=db_root)
+    effective_programs_root, _ = _resolve_effective_programs_root(programs_root)
+    db_path = get_program_reality_db_path(
+        program,
+        db_root=db_root,
+        programs_root=effective_programs_root,
+    )
     if not db_path.exists():
         return None
     sentinel_path = db_path.parent / ".compact_last_run"
@@ -666,6 +755,9 @@ def maybe_run_scheduled_compaction(
             "Scheduled db compaction not applicable: reality schema is not initialized."
         )
         return None
+    if programs_root is not None:
+        with use_compaction_programs_root(programs_root):
+            return _compact_database(program, db_path, dry_run=False)
     return _compact_database(program, db_path, dry_run=False)
 
 

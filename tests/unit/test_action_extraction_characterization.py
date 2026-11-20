@@ -14,7 +14,7 @@ from pathlib import Path
 
 from src.ai.action_extractor import ActionExtractor
 from src.ai.meeting_action_extractor import run_meeting_action_extraction_pipeline
-from src.core.action_extraction_parity import (
+from tests.support.action_extraction_parity import (
     check_action_parity,
     normalize_action_items,
     normalize_meeting_actions,

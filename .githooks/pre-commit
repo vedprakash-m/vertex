@@ -33,3 +33,4 @@ if ! command -v "$PY" >/dev/null 2>&1; then
 fi
 
 "$PY" scripts/rev_precommit_quality.py --changed-files "$tmp"
+"$PY" scripts/verify_disclosure_candidate.py --staged

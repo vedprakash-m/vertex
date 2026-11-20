@@ -485,3 +485,95 @@ def test_catchup_cli_acknowledges_resolved_staleness_into_confirmation_log(monke
     assert "Acknowledged 1 resolved staleness challenge(s)." in result.stdout
     assert [entry["event_type"] for entry in entries] == ["catchup_summary", "catchup_acknowledged"]
     assert entries[1]["challenge_ids"] == ["challenge-001"]
+
+
+def test_vertex_no_dotenv_skips_repo_dotenv_in_fresh_subprocess() -> None:
+    import os
+    import subprocess
+    import sys
+
+    code = (
+        "import dotenv; calls = []; "
+        "dotenv.load_dotenv = lambda *a, **kw: calls.append((a, kw)); "
+        "import cli; "
+        "print(f'DOTENV_CALLS={len(calls)}')"
+    )
+    repo_root = Path(__file__).resolve().parents[2]
+    env_no = os.environ.copy()
+    env_no["VERTEX_NO_DOTENV"] = "1"
+    res_no = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=str(repo_root),
+        env=env_no,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "DOTENV_CALLS=0" in res_no.stdout
+
+    env_yes = os.environ.copy()
+    env_yes.pop("VERTEX_NO_DOTENV", None)
+    res_yes = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=str(repo_root),
+        env=env_yes,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "DOTENV_CALLS=1" in res_yes.stdout
+
+
+def test_dry_run_skips_scheduled_db_maintenance_and_catchup(monkeypatch) -> None:
+    from functools import wraps
+    import cli
+
+    maintenance_calls: list[str] = []
+    catchup_calls: list[bool] = []
+
+    monkeypatch.setattr(
+        "cli._maybe_run_scheduled_db_maintenance",
+        lambda ctx: maintenance_calls.append(str(ctx.invoked_subcommand)),
+    )
+    monkeypatch.setattr(
+        "cli._maybe_run_session_catchup",
+        lambda ctx, no_catchup: catchup_calls.append(no_catchup),
+    )
+    for info in cli.app.registered_commands:
+        if info.name in {"report", "draft", "confirm"} and info.callback is not None:
+            orig = info.callback
+
+            @wraps(orig)
+            def _noop(*args, **kwargs):
+                return None
+
+            monkeypatch.setattr(info, "callback", _noop)
+
+    for args in (
+        ["report", "--edition", "acme-exec", "--dry-run"],
+        ["confirm", "--edition", "acme-exec", "--dry-run"],
+        ["draft", "--edition", "acme-exec", "--dry-run"],
+    ):
+        maintenance_calls.clear()
+        catchup_calls.clear()
+        result = runner.invoke(cli.app, args)
+        assert result.exit_code == 0, (args, result.output)
+        assert maintenance_calls == [], args
+        assert catchup_calls == [], args
+
+    maintenance_calls.clear()
+    catchup_calls.clear()
+    value_result = runner.invoke(cli.app, ["report", "--edition", "--dry-run"])
+    assert value_result.exit_code == 0, value_result.output
+    assert maintenance_calls == ["report"]
+    assert catchup_calls == [False]
+
+    monkeypatch.setenv("VERTEX_PROGRAMS_ROOT", "~/custom-programs")
+    assert cli._effective_startup_programs_root().name == "custom-programs"
+    monkeypatch.delenv("VERTEX_PROGRAMS_ROOT", raising=False)
+    assert cli._effective_startup_programs_root() == cli.PROGRAMS_ROOT
+
+    import click
+    bad_cmd = type("BadCmd", (), {"make_context": lambda *a, **kw: (_ for _ in ()).throw(click.ClickException("bad"))})()
+    ctx_root = click.Context(click.Command("root"))
+    assert cli._probe_dry_run_flag(ctx_root, "report", bad_cmd, ["--dry-run"]) is False  # type: ignore[arg-type]

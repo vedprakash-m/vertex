@@ -2300,7 +2300,7 @@ def test_generate_report_draft_renders_v2_lt_deck_markdown(repo_root: Path, tmp_
 @pytest.mark.parametrize(
     ("prior_confirmed_at", "expected_trend"),
     [
-        (datetime(2040, 4, 28, 18, 0, tzinfo=timezone.utc), "unchanged vs prior issue"),
+        (datetime(2040, 4, 28, 18, 0, tzinfo=timezone.utc), "high vs prior issue"),
         (datetime(2040, 5, 5, 18, 0, tzinfo=timezone.utc), None),
     ],
 )

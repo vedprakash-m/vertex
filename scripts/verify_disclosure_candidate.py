@@ -69,6 +69,7 @@ class Candidate:
     path: Path
     relative_path: str
     expected_sha256: str | None = None
+    git_object: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +92,9 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--candidate", action="append", dest="candidates")
     selection.add_argument("--manifest")
+    selection.add_argument("--staged", action="store_true")
+    selection.add_argument("--push-refs", action="store_true")
+    parser.add_argument("--binary-allowlist")
     return parser.parse_args(argv)
 
 
@@ -150,10 +154,91 @@ def _load_manifest(
     return manifest.relative_path, tuple(candidates), lines
 
 
+def _load_staged_candidates(root: Path) -> tuple[Candidate, ...]:
+    result = subprocess.run(
+        ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z"],
+        cwd=root,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise _SelectionError("INPUT_UNAVAILABLE")
+    raw_paths = result.stdout.decode("utf-8", errors="strict").split("\0")
+    candidates: list[Candidate] = []
+    for rel in raw_paths:
+        if not rel:
+            continue
+        candidate = _resolve(rel, root)
+        candidates.append(Candidate(candidate.path, candidate.relative_path, git_object=f":{candidate.relative_path}"))
+    return tuple(candidates)
+
+
+def _load_push_ref_candidates(root: Path) -> tuple[Candidate, ...]:
+    zero_oid = "0" * 40
+    commits: list[str] = []
+    for raw_line in sys.stdin.read().splitlines():
+        parts = raw_line.strip().split()
+        if len(parts) != 4:
+            continue
+        _local_ref, local_oid, _remote_ref, remote_oid = parts
+        if local_oid == zero_oid:
+            continue
+        cmd = (
+            ["git", "rev-list", local_oid, "--not", "--remotes"]
+            if remote_oid == zero_oid
+            else ["git", "rev-list", f"{remote_oid}..{local_oid}"]
+        )
+        rev = subprocess.run(cmd, cwd=root, capture_output=True, text=True, check=False)
+        if rev.returncode != 0:
+            raise _SelectionError("INPUT_UNAVAILABLE")
+        commits.extend(line.strip() for line in rev.stdout.splitlines() if line.strip())
+
+    seen_objects: set[tuple[str, str]] = set()
+    candidates: list[Candidate] = []
+    for oid in commits:
+        diff = subprocess.run(
+            ["git", "diff-tree", "--root", "--no-commit-id", "--name-only", "--diff-filter=ACMR", "-r", "-z", oid],
+            cwd=root,
+            capture_output=True,
+            check=False,
+        )
+        if diff.returncode != 0:
+            raise _SelectionError("INPUT_UNAVAILABLE")
+        for rel in diff.stdout.decode("utf-8", errors="strict").split("\0"):
+            if not rel:
+                continue
+            resolved = _resolve(rel, root)
+            key = (oid, resolved.relative_path)
+            if key in seen_objects:
+                continue
+            seen_objects.add(key)
+            candidates.append(
+                Candidate(
+                    resolved.path,
+                    resolved.relative_path,
+                    git_object=f"{oid}:{resolved.relative_path}",
+                )
+            )
+    return tuple(candidates)
+
+
+def _load_binary_allowlist(raw_path: str | None, root: Path) -> dict[str, str]:
+    default_path = root / "governance" / "disclosure-binary-allowlist.json"
+    selected = raw_path or ("governance/disclosure-binary-allowlist.json" if default_path.is_file() else None)
+    if selected is None:
+        return {}
+    _, allow_candidates, _ = _load_manifest(selected, root)
+    return {c.relative_path: c.expected_sha256 for c in allow_candidates if c.expected_sha256 is not None}
+
+
 def _load_selection(
     args: argparse.Namespace,
     root: Path,
 ) -> tuple[str | None, tuple[Candidate, ...], list[str]]:
+    if args.staged:
+        return None, _load_staged_candidates(root), []
+    if args.push_refs:
+        return None, _load_push_ref_candidates(root), []
     if args.manifest is not None:
         return _load_manifest(args.manifest, root)
     if not args.candidates:
@@ -177,9 +262,9 @@ def _is_ignored(relative_path: str, root: Path) -> bool | None:
     return False if result.returncode == 1 else None
 
 
-def _scan(relative_path: str, lines: list[str]) -> list[Finding]:
+def _scan(relative_path: str, lines: list[str], *, allow_skip_paths: bool = False) -> list[Finding]:
     if relative_path in SKIP_PATHS:
-        return [_finding("UNSCANNED_ALLOWLISTED_PATH", relative_path)]
+        return [] if allow_skip_paths else [_finding("UNSCANNED_ALLOWLISTED_PATH", relative_path)]
     findings: list[Finding] = []
     for result in scan_lines(relative_path, lines):
         prefix, separator, detail = result.rpartition(": ")
@@ -191,28 +276,47 @@ def _scan(relative_path: str, lines: list[str]) -> list[Finding]:
     return findings
 
 
-def _inspect(candidate: Candidate, root: Path) -> list[Finding]:
+def _read_candidate_bytes(candidate: Candidate, root: Path) -> bytes | None:
+    if candidate.git_object is not None:
+        result = subprocess.run(
+            ["git", "show", candidate.git_object],
+            cwd=root,
+            capture_output=True,
+            check=False,
+        )
+        return result.stdout if result.returncode == 0 else None
     if not candidate.path.is_file():
+        return None
+    try:
+        return candidate.path.read_bytes()
+    except OSError:
+        return None
+
+
+def _inspect(
+    candidate: Candidate,
+    root: Path,
+    *,
+    allow_skip_paths: bool = False,
+    binary_allowlist: dict[str, str] | None = None,
+) -> list[Finding]:
+    content = _read_candidate_bytes(candidate, root)
+    if content is None:
         return [_finding("INPUT_UNAVAILABLE", candidate.relative_path)]
     ignored = _is_ignored(candidate.relative_path, root)
     if ignored is None:
         return [_finding("IGNORE_STATUS_UNAVAILABLE", candidate.relative_path)]
-    findings = _scan(candidate.relative_path, [candidate.relative_path])
+    findings = _scan(candidate.relative_path, [candidate.relative_path], allow_skip_paths=allow_skip_paths)
     if ignored:
         findings.append(_finding("IGNORED_INPUT", candidate.relative_path))
-    try:
-        content = candidate.path.read_bytes()
-    except OSError:
-        findings.append(_finding("INPUT_UNAVAILABLE", candidate.relative_path))
-        return findings
-    if (
-        candidate.expected_sha256 is not None
-        and hashlib.sha256(content).hexdigest() != candidate.expected_sha256
-    ):
-        findings.append(
-            _finding("OUTGOING_BLOB_HASH_MISMATCH", candidate.relative_path)
-        )
-    if candidate.path.suffix.lower() in BINARY_SUFFIXES:
+    digest = hashlib.sha256(content).hexdigest()
+    if candidate.expected_sha256 is not None and digest != candidate.expected_sha256:
+        findings.append(_finding("OUTGOING_BLOB_HASH_MISMATCH", candidate.relative_path))
+    if Path(candidate.relative_path).suffix.lower() in BINARY_SUFFIXES:
+        if binary_allowlist and candidate.relative_path in binary_allowlist:
+            if digest != binary_allowlist[candidate.relative_path]:
+                findings.append(_finding("OUTGOING_BLOB_HASH_MISMATCH", candidate.relative_path))
+            return findings
         findings.append(_finding("UNSCANNED_BINARY", candidate.relative_path))
         return findings
     try:
@@ -220,7 +324,7 @@ def _inspect(candidate: Candidate, root: Path) -> list[Finding]:
     except UnicodeError:
         findings.append(_finding("UNSCANNED_TEXT", candidate.relative_path))
         return findings
-    return findings + _scan(candidate.relative_path, lines)
+    return findings + _scan(candidate.relative_path, lines, allow_skip_paths=allow_skip_paths)
 
 
 def _render(
@@ -256,7 +360,14 @@ def _render(
 def main(argv: Sequence[str] | None = None, *, repo_root: Path = REPO_ROOT) -> int:
     root = repo_root.resolve()
     try:
-        manifest, candidates, manifest_lines = _load_selection(_parse_args(argv), root)
+        args = _parse_args(argv)
+        manifest, candidates, manifest_lines = _load_selection(args, root)
+        allow_git_mode = bool(args.staged or args.push_refs)
+        binary_allowlist = (
+            _load_binary_allowlist(args.binary_allowlist, root)
+            if allow_git_mode
+            else None
+        )
     except (_ArgumentError, _SelectionError) as error:
         finding = (
             _finding(error.code, error.path)
@@ -276,7 +387,14 @@ def main(argv: Sequence[str] | None = None, *, repo_root: Path = REPO_ROOT) -> i
             if ignored:
                 findings.append(_finding("IGNORED_INPUT", manifest))
     for candidate in candidates:
-        findings.extend(_inspect(candidate, root))
+        findings.extend(
+            _inspect(
+                candidate,
+                root,
+                allow_skip_paths=allow_git_mode,
+                binary_allowlist=binary_allowlist,
+            )
+        )
     exit_code = (
         2
         if any(finding.code in _UNAVAILABLE for finding in findings)
