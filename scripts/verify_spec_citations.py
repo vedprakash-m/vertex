@@ -154,13 +154,13 @@ CITATIONS: tuple[Citation, ...] = (
     Citation(
         claim="PS-6: digest.j2 deprecation shim with 2026-12-31 sunset",
         path="src/core/html_renderer.py",
-        line=227,
+        line=237,
         must_contain="digest.j2",
     ),
     Citation(
         claim="PS-10 / Track J: AI narrative context now derives a reality assessment summary from loaded ProgramReality, carried to blurb and executive-summary prompt context",
         path="src/commands/report_ai.py",
-        line=755,
+        line=767,
         must_contain="reality_assessments = build_reality_assessment_summary(program_reality)",
     ),
     Citation(
