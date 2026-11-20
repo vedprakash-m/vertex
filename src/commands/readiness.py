@@ -19,6 +19,12 @@ from src.core.people_entity_schema import CanonicalEntity, load_entities_documen
 from src.core.people_namespace_bridge import resolve_ref_to_canonical_entity_id
 from src.core.people_registry_governance import require_adopted_registry
 from src.core.program_fact_store import load_program_facts, project_dependencies, project_risk_entries
+from src.core.study_evaluator import (
+    MatchedWeeklyCycle,
+    StratumSample,
+    StudyEvaluationResult,
+    evaluate_matched_cycles,
+)
 from src.core.readiness_engine import (
     ReadinessConfig,
     ReadinessDimensionConfig,
@@ -364,3 +370,12 @@ def _render_table(
         evidence = ", ".join(dimension.evidence_refs[:3]) if dimension.evidence_refs else "none"
         lines.append(f"- {dimension.gate_id}: {dimension.summary} | evidence: {evidence}")
     return "\n".join(lines)
+
+
+def evaluate_launch_study_readiness(
+    cycles: tuple[MatchedWeeklyCycle, ...],
+    *,
+    strata: tuple[StratumSample, ...],
+) -> StudyEvaluationResult:
+    """Evaluate W6.1/W6.2 matched-cycle study and Decision M agreement readiness."""
+    return evaluate_matched_cycles(cycles, strata=strata)

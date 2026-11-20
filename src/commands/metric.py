@@ -36,6 +36,10 @@ app = typer.Typer(help="Metric binding operator commands.")
 _live_metric_binding_probe = build_live_metric_binding_probe
 
 
+_CHECKOUT_PROGRAMS_ROOT = (Path(__file__).resolve().parents[2] / "programs").resolve()
+_CHECKOUT_METRICS_ROOT = METRICS_ROOT
+
+
 def _resolve_runtime_db_root(
     db_root: Path | None,
     *,
@@ -46,6 +50,36 @@ def _resolve_runtime_db_root(
     if os.environ.get("VERTEX_DB_PATH"):
         return None
     return programs_root.parent / "vertex-db"
+
+
+def _resolve_workspace_metrics_root(
+    *,
+    metrics_root: Path | None = None,
+    programs_root: Path = PROGRAMS_ROOT,
+) -> Path:
+    """R0-FR-02 R1 parity: resolve workspace knowledge/metrics without falling back to checkout defaults."""
+    if metrics_root is not None:
+        return metrics_root
+    if METRICS_ROOT != _CHECKOUT_METRICS_ROOT:
+        return METRICS_ROOT
+    resolved_programs = programs_root.expanduser().resolve()
+    is_external_arg = resolved_programs != _CHECKOUT_PROGRAMS_ROOT and programs_root != PROGRAMS_ROOT
+    env_root = os.environ.get("VERTEX_PROGRAMS_ROOT")
+    if is_external_arg:
+        candidate = resolved_programs.parent / "knowledge" / "metrics"
+        if not candidate.is_dir():
+            raise typer.BadParameter(
+                f"Workspace metrics registry directory does not exist: {candidate}"
+            )
+        return candidate
+    if env_root and env_root.strip():
+        candidate = Path(env_root).expanduser().resolve().parent / "knowledge" / "metrics"
+        if not candidate.is_dir():
+            raise typer.BadParameter(
+                f"Workspace metrics registry directory does not exist: {candidate}"
+            )
+        return candidate
+    return METRICS_ROOT
 
 
 @app.command("bind")
@@ -100,7 +134,7 @@ def provision_metric_rollout_command(
     description: str = typer.Option("", "--description", help="Optional human-readable description."),
     db_root: Path | None = typer.Option(None, "--db-root", help="Override the SQLite root for tests or local runs."),
     programs_root: Path = typer.Option(PROGRAMS_ROOT, hidden=True),
-    metrics_root: Path = typer.Option(METRICS_ROOT, hidden=True),
+    metrics_root: Path | None = typer.Option(None, hidden=True),
 ) -> None:
     program_id = _require_text(program, "--program")
     store = RealityStore(program_id, db_root=_resolve_runtime_db_root(db_root, programs_root=programs_root))
@@ -118,8 +152,12 @@ def provision_metric_rollout_command(
         for query in queries
         if (metric_id := _optional_text(query.metric_id)) is not None
     )
-    metric_definitions = load_metric_definition_map(
+    resolved_metrics_root = _resolve_workspace_metrics_root(
         metrics_root=metrics_root,
+        programs_root=programs_root,
+    )
+    metric_definitions = load_metric_definition_map(
+        metrics_root=resolved_metrics_root,
         metric_ids=metric_ids or None,
         as_of=datetime.now(timezone.utc),
     )
@@ -292,7 +330,7 @@ def metric_rollout_status_command(
     format: str = typer.Option("text", "--format", help="Output format: text or json."),
     db_root: Path | None = typer.Option(None, "--db-root", help="Override the SQLite root for tests or local runs."),
     programs_root: Path = typer.Option(PROGRAMS_ROOT, hidden=True),
-    metrics_root: Path = typer.Option(METRICS_ROOT, hidden=True),
+    metrics_root: Path | None = typer.Option(None, hidden=True),
 ) -> None:
     program_id = _require_text(program, "--program")
     output_format = _normalize_format(format)
@@ -305,8 +343,12 @@ def metric_rollout_status_command(
         else tuple(load_kpi_queries(program_id, programs_root=programs_root))
     )
     metric_ids = tuple(metric_id for query in queries if (metric_id := _optional_text(query.metric_id)) is not None)
-    metric_definitions = load_metric_definition_map(
+    resolved_metrics_root = _resolve_workspace_metrics_root(
         metrics_root=metrics_root,
+        programs_root=programs_root,
+    )
+    metric_definitions = load_metric_definition_map(
+        metrics_root=resolved_metrics_root,
         metric_ids=metric_ids or None,
         as_of=datetime.now(timezone.utc),
     )
@@ -386,12 +428,14 @@ def _query_rollout_eligibility(
 def list_metric_definitions_command(
     product: str | None = typer.Option(None, "--product", help="Filter to a product id or metric-id prefix."),
     format: str = typer.Option("text", "--format", help="Output format: text or json."),
+    programs_root: Path = typer.Option(PROGRAMS_ROOT, hidden=True),
 ) -> None:
     output_format = _normalize_format(format)
+    resolved_metrics_root = _resolve_workspace_metrics_root(programs_root=programs_root)
     definitions = tuple(
         definition
         for definition in sorted(
-            load_metric_definition_map(metrics_root=METRICS_ROOT, as_of=datetime.now(timezone.utc)).values(),
+            load_metric_definition_map(metrics_root=resolved_metrics_root, as_of=datetime.now(timezone.utc)).values(),
             key=lambda item: item.id,
         )
         if _matches_product(definition, product)
@@ -455,7 +499,8 @@ def validate_metric_bindings_command(
     store.initialize()
 
     now = datetime.now(timezone.utc)
-    metric_definitions = load_metric_definition_map(metrics_root=METRICS_ROOT, as_of=now)
+    resolved_metrics_root = _resolve_workspace_metrics_root(programs_root=programs_root)
+    metric_definitions = load_metric_definition_map(metrics_root=resolved_metrics_root, as_of=now)
     probe = _privacy_safe_metric_binding_probe(
         _build_program_metric_binding_probe(program.strip(), programs_root=programs_root)
     )
