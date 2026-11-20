@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from typing import cast
 
 from src.ai._pipeline import AIPipelineError, process_generated_text
+from src.ai._runner_bridge import run_structured_feature_via_runner
 from src.ai.client import NON_RETRYABLE_AI_ERRORS
 from src.ai.provider import LLMProvider
+from src.ai.structured_feature_runner import RunnerContext
 from src.ai.tiered_router import TierResult, route_through_tiers
 from src.core.ai_result_cache import AIResultCacheKey, canonical_input_hash, get_ai_result, put_ai_result
 from src.core.ai_schema_gateway import SchemaGatewayError, validate_bounded_payload
@@ -59,6 +62,113 @@ class WorkstreamBlurb:
     cited_source_refs: tuple[SourceRef, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedBlurbInputs:
+    eligible_items: tuple[WorkItem, ...]
+    system_prompt: str
+    user_prompt: str
+    request_payload: dict[str, object]
+
+
+def _prepare_blurb_inputs(
+    *,
+    workstream_name: str,
+    items: tuple[WorkItem, ...] | list[WorkItem],
+    evidence_by_item: dict[int, EvidencePacket],
+    deltas: tuple[ItemDelta, ...] | list[ItemDelta],
+    editorial_rules: EditorialRules,
+    program_id: str,
+    edition_type: EditionType | None,
+    program_context: NarrativeProgramContext | None,
+    supplemental_context: tuple[str, ...],
+    workstream_evidence_bundle: WorkstreamEvidenceBundle | None,
+) -> _PreparedBlurbInputs | None:
+    missing_item_ids = tuple(item.id for item in items if evidence_by_item.get(item.id) is None)
+    if missing_item_ids:
+        raise BlurbGenerationError(
+            "Workstream blurb items missing evidence context: "
+            + ", ".join(str(item_id) for item_id in dict.fromkeys(missing_item_ids))
+        )
+    eligible_items = tuple(
+        item
+        for item in items
+        if evidence_by_item.get(item.id) is not None and evidence_by_item[item.id].confidence != Confidence.NONE
+    )
+    if not eligible_items:
+        return None
+    eligible_ids = {item.id for item in eligible_items}
+    relevant_deltas = tuple(delta for delta in deltas if delta.work_item_id in eligible_ids)
+    if not relevant_deltas:
+        return None
+    prompt_template = _load_prompt_template()
+    system_prompt = prompt_template.format(workstream_name=workstream_name)
+    max_words = editorial_rules.verbosity.workstream_blurb_max_words_for(edition_type)
+    user_prompt = _build_user_prompt(
+        workstream_name=workstream_name,
+        eligible_items=eligible_items,
+        evidence_by_item=evidence_by_item,
+        deltas=relevant_deltas,
+        editorial_rules=editorial_rules,
+        program_context=program_context,
+        supplemental_context=supplemental_context,
+        max_words=max_words,
+        workstream_evidence_bundle=workstream_evidence_bundle,
+    )
+    request_payload: dict[str, object] = {
+        "program_id": program_id,
+        "workstream_name": workstream_name,
+        "eligible_item_ids": [item.id for item in eligible_items],
+        "supplemental_context": list(supplemental_context),
+        "max_words": max_words,
+    }
+    return _PreparedBlurbInputs(
+        eligible_items=eligible_items,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        request_payload=request_payload,
+    )
+
+
+def _validate_and_build_blurb(
+    raw: object,
+    *,
+    eligible_items: tuple[WorkItem, ...],
+    evidence_by_item: dict[int, EvidencePacket],
+    workstream_name: str,
+    editorial_rules: EditorialRules,
+    edition_type: EditionType | None,
+    program_context: NarrativeProgramContext | None,
+    workstream_evidence_bundle: WorkstreamEvidenceBundle | None,
+) -> WorkstreamBlurb | None:
+    raw_text = _parse_generated_blurb_text(cast(dict[str, object], raw))
+    if not raw_text:
+        return None
+    try:
+        grounded = process_generated_text(raw_text, allowed_items=eligible_items)
+    except AIPipelineError as error:
+        raise BlurbGenerationError(str(error)) from error
+    if not grounded.text:
+        return None
+    _validate_delta_lead(
+        grounded.text,
+        program_context=program_context,
+        editorial_rules=editorial_rules,
+    )
+    _validate_editorial_rules(
+        grounded.text,
+        workstream_name,
+        editorial_rules,
+        edition_type=edition_type,
+    )
+    return WorkstreamBlurb(
+        text=grounded.text,
+        prompt_version=PROMPT_VERSION,
+        cited_work_item_ids=grounded.cited_work_item_ids,
+        ai_confidence=_derive_ai_confidence(evidence_by_item, grounded.cited_work_item_ids),
+        cited_source_refs=_bundle_source_refs(workstream_evidence_bundle),
+    )
+
+
 def generate_workstream_blurb(
     *,
     client: LLMProvider,
@@ -85,40 +195,20 @@ def generate_workstream_blurb(
     deployment-fallback loop already depends on ``BlurbGenerationError``
     propagating -- same reasoning as ``exec_summary_drafter.py``'s
     migration."""
-    missing_item_ids = tuple(item.id for item in items if evidence_by_item.get(item.id) is None)
-    if missing_item_ids:
-        raise BlurbGenerationError(
-            "Workstream blurb items missing evidence context: "
-            + ", ".join(str(item_id) for item_id in dict.fromkeys(missing_item_ids))
-        )
-
-    eligible_items = tuple(
-        item
-        for item in items
-        if evidence_by_item.get(item.id) is not None and evidence_by_item[item.id].confidence != Confidence.NONE
-    )
-    if not eligible_items:
-        return None
-
-    eligible_ids = {item.id for item in eligible_items}
-    relevant_deltas = tuple(delta for delta in deltas if delta.work_item_id in eligible_ids)
-    if not relevant_deltas:
-        return None
-
-    prompt_template = _load_prompt_template()
-    system_prompt = prompt_template.format(workstream_name=workstream_name)
-    max_words = editorial_rules.verbosity.workstream_blurb_max_words_for(edition_type)
-    user_prompt = _build_user_prompt(
+    prepared = _prepare_blurb_inputs(
         workstream_name=workstream_name,
-        eligible_items=eligible_items,
+        items=items,
         evidence_by_item=evidence_by_item,
-        deltas=relevant_deltas,
+        deltas=deltas,
         editorial_rules=editorial_rules,
+        program_id=program_id,
+        edition_type=edition_type,
         program_context=program_context,
         supplemental_context=supplemental_context,
-        max_words=max_words,
         workstream_evidence_bundle=workstream_evidence_bundle,
     )
+    if prepared is None:
+        return None
 
     ai_run_id = new_ai_run_id()
 
@@ -145,15 +235,8 @@ def generate_workstream_blurb(
 
     _lifecycle(AIRunState.PLANNED)
 
-    request_payload = {
-        "program_id": program_id,
-        "workstream_name": workstream_name,
-        "eligible_item_ids": [item.id for item in eligible_items],
-        "supplemental_context": list(supplemental_context),
-        "max_words": max_words,
-    }
     try:
-        validate_bounded_payload(request_payload)
+        validate_bounded_payload(prepared.request_payload)
     except SchemaGatewayError as error:
         reason = f"AISchemaGateway rejected the outbound request: {error}"
         _discard(ReleaseTerminal.DISCARDED, reason)
@@ -165,12 +248,12 @@ def generate_workstream_blurb(
     cache_key = AIResultCacheKey(
         program_id=program_id,
         feature=_FEATURE,
-        canonical_input_hash=canonical_input_hash(user_prompt),
+        canonical_input_hash=canonical_input_hash(prepared.user_prompt),
         prompt_version=PROMPT_VERSION,
         policy_version=POLICY_VERSION,
         model_deployment=_resolve_model_deployment(client),
         context_manifest_hash=canonical_input_hash(
-            "|".join(str(item.id) for item in eligible_items)
+            "|".join(str(item.id) for item in prepared.eligible_items)
         ),
         output_schema_version=_OUTPUT_SCHEMA_VERSION,
     )
@@ -179,8 +262,8 @@ def generate_workstream_blurb(
             _FEATURE,
             deterministic_fn=lambda: None,
             frontier_fn=lambda: client.structured(
-                system_prompt,
-                user_prompt,
+                prepared.system_prompt,
+                prepared.user_prompt,
                 parser=lambda payload: payload,
                 max_tokens=policy.max_tokens,
                 prompt_version=PROMPT_VERSION,
@@ -205,54 +288,102 @@ def generate_workstream_blurb(
     _lifecycle(AIRunState.SCHEMA_VALIDATED)
 
     try:
-        raw_text = _parse_generated_blurb_text(cast(dict[str, object], raw))
+        blurb = _validate_and_build_blurb(
+            raw,
+            eligible_items=prepared.eligible_items,
+            evidence_by_item=evidence_by_item,
+            workstream_name=workstream_name,
+            editorial_rules=editorial_rules,
+            edition_type=edition_type,
+            program_context=program_context,
+            workstream_evidence_bundle=workstream_evidence_bundle,
+        )
     except BlurbGenerationError as error:
         _lifecycle(AIRunState.SEMANTICALLY_VALIDATED)
         _discard(ReleaseTerminal.REJECTED, str(error))
         raise
-    if not raw_text:
-        _lifecycle(AIRunState.SEMANTICALLY_VALIDATED)
-        _discard(ReleaseTerminal.REJECTED, "generated workstream blurb text was empty.")
-        return None
-
-    try:
-        grounded = process_generated_text(raw_text, allowed_items=eligible_items)
-    except AIPipelineError as error:
-        _lifecycle(AIRunState.SEMANTICALLY_VALIDATED)
-        _discard(ReleaseTerminal.REJECTED, str(error))
-        raise BlurbGenerationError(str(error)) from error
-
-    if not grounded.text:
+    if blurb is None:
         _lifecycle(AIRunState.SEMANTICALLY_VALIDATED)
         _discard(ReleaseTerminal.REJECTED, "processed text pipeline produced empty output.")
         return None
 
-    try:
-        _validate_delta_lead(
-            grounded.text,
-            program_context=program_context,
-            editorial_rules=editorial_rules,
-        )
-        _validate_editorial_rules(
-            grounded.text,
-            workstream_name,
-            editorial_rules,
-            edition_type=edition_type,
-        )
-    except BlurbGenerationError as error:
-        _lifecycle(AIRunState.SEMANTICALLY_VALIDATED)
-        _discard(ReleaseTerminal.REJECTED, str(error))
-        raise
-
     _lifecycle(AIRunState.SEMANTICALLY_VALIDATED)
     _discard(ReleaseTerminal.RELEASED, "passed AISchemaGateway bounds and editorial-rules validation")
+    return blurb
 
-    return WorkstreamBlurb(
-        text=grounded.text,
+
+def generate_workstream_blurb_via_runner(
+    *,
+    context: RunnerContext,
+    client: LLMProvider,
+    workstream_name: str,
+    items: tuple[WorkItem, ...] | list[WorkItem],
+    evidence_by_item: dict[int, EvidencePacket],
+    deltas: tuple[ItemDelta, ...] | list[ItemDelta],
+    editorial_rules: EditorialRules,
+    program_id: str,
+    edition_type: EditionType | None = None,
+    program_context: NarrativeProgramContext | None = None,
+    supplemental_context: tuple[str, ...] = (),
+    workstream_evidence_bundle: WorkstreamEvidenceBundle | None = None,
+    programs_root: Path = PROGRAMS_ROOT,
+) -> WorkstreamBlurb | None:
+    """RVX-D09 runner path for ``blurb_generator`` via StructuredFeatureRunner."""
+    prepared = _prepare_blurb_inputs(
+        workstream_name=workstream_name,
+        items=items,
+        evidence_by_item=evidence_by_item,
+        deltas=deltas,
+        editorial_rules=editorial_rules,
+        program_id=program_id,
+        edition_type=edition_type,
+        program_context=program_context,
+        supplemental_context=supplemental_context,
+        workstream_evidence_bundle=workstream_evidence_bundle,
+    )
+    if prepared is None:
+        return None
+    policy = load_ai_feature_policy(_FEATURE)
+
+    def call_provider(compiled) -> object:
+        return client.structured(
+            compiled.prompt_text,
+            "",
+            parser=lambda payload: payload,
+            max_tokens=policy.max_tokens,
+            prompt_version=PROMPT_VERSION,
+        )
+
+    return run_structured_feature_via_runner(
+        feature=_FEATURE,
+        task_class="synthesis",
+        context=context,
+        program_id=program_id,
         prompt_version=PROMPT_VERSION,
-        cited_work_item_ids=grounded.cited_work_item_ids,
-        ai_confidence=_derive_ai_confidence(evidence_by_item, grounded.cited_work_item_ids),
-        cited_source_refs=_bundle_source_refs(workstream_evidence_bundle),
+        policy_version=POLICY_VERSION,
+        schema_version=_OUTPUT_SCHEMA_VERSION,
+        programs_root=programs_root,
+        system_prompt=prepared.system_prompt,
+        user_prompt=prepared.user_prompt,
+        output_schema_text='Respond with JSON: {"text": str}. Cite every factual claim with [#WI].',
+        request_payload=prepared.request_payload,
+        deployment_fingerprint=_resolve_model_deployment(client),
+        validator_version="blurb_generator.v1",
+        invoke_provider=call_provider,
+        parse_and_validate=lambda raw: _validate_and_build_blurb(
+            raw,
+            eligible_items=prepared.eligible_items,
+            evidence_by_item=evidence_by_item,
+            workstream_name=workstream_name,
+            editorial_rules=editorial_rules,
+            edition_type=edition_type,
+            program_context=program_context,
+            workstream_evidence_bundle=workstream_evidence_bundle,
+        ),
+        serialize_result=lambda raw, _blurb: {"text": _parse_generated_blurb_text(raw)},
+        error_factory=BlurbGenerationError,
+        raise_on_rejection=True,
+        raise_on_empty_result=True,
     )
 
 

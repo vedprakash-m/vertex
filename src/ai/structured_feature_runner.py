@@ -419,7 +419,20 @@ class CacheIdentity:
 
 
 _FAIL_CLOSED_INTEGRITY_FEATURES = frozenset(
-    {"dependency_blast_radius_generator", "exec_summary_drafter"}
+    {
+        "dependency_blast_radius_generator",
+        "exec_summary_drafter",
+        "blurb_generator",
+        "lookback_retrospective",
+        "claim_extractor",
+        "anticipation_engine",
+        "decision_brief_advisor",
+        "program_synthesizer",
+        "intent_router",
+        "m365_topic_router",
+        "summary_generator",
+        "synthesizer",
+    }
 )
 
 _RELEASED_CACHE_SCHEMA_SQL = """

@@ -106,7 +106,7 @@ CITATIONS: tuple[Citation, ...] = (
     Citation(
         claim="Track C (closed 2026-07-08): report_lookback's assumption lifecycle now routes through sor_gated_family_load(family=\"judgment\", ...)",
         path="src/commands/report_lookback.py",
-        line=916,
+        line=1001,
         must_contain='family="judgment"',
     ),
     Citation(
@@ -160,7 +160,7 @@ CITATIONS: tuple[Citation, ...] = (
     Citation(
         claim="PS-10 / Track J: AI narrative context now derives a reality assessment summary from loaded ProgramReality, carried to blurb and executive-summary prompt context",
         path="src/commands/report_ai.py",
-        line=767,
+        line=772,
         must_contain="reality_assessments = build_reality_assessment_summary(program_reality)",
     ),
     Citation(

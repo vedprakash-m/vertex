@@ -6,12 +6,12 @@ This source-only reconciliation supersedes the historical counts and consumer
 claims below. It does not authorize a provider call or establish runtime
 authorization, qualification or production migration.
 
-The baseline contains **36 syntactic provider-bound expressions** under `src/`:
+The baseline contains **39 syntactic provider-bound expressions** under `src/`:
 **31 legacy feature invocations** (29 in `src/ai`, two in `src/commands`),
-**two opt-in-production runner invocations**, **two fallback forwarding
+**five opt-in-production runner invocations**, **two fallback forwarding
 expressions** and **one SDK transport expression**. The 31 legacy invocations
 use **27 feature policy identities**; repeated invocations are not separate
-features. Of the 36 expressions, 33 are `.structured`, two are `.chat` and one
+features. Of the 39 expressions, 36 are `.structured`, two are `.chat` and one
 is the SDK `.chat.completions.create`. Infrastructure is excluded from the
 feature migration denominator. No legacy invocation has been retired by this
 work.
@@ -85,7 +85,9 @@ named scope. Nested functions and methods retain their lexical qualification.
 | src/ai/anticipation_engine.py | _generate_with_ai | client.structured | 2 | anticipation_engine | legacy |
 | src/ai/backfill_extractor.py | BackfillExtractor.extract_newsletter | client.structured | 1 | backfill_extractor | legacy |
 | src/ai/blurb_generator.py | generate_workstream_blurb | client.structured | 1 | blurb_generator | legacy |
+| src/ai/blurb_generator.py | generate_workstream_blurb_via_runner.call_provider | client.structured | 1 | blurb_generator | opt-in-production |
 | src/ai/claim_extractor.py | ClaimExtractor.extract_claims._frontier_tier | self._client.structured | 1 | claim_extractor | legacy |
+| src/ai/claim_extractor.py | ClaimExtractor.extract_claims_via_runner.call_provider | self._client.structured | 1 | claim_extractor | opt-in-production |
 | src/ai/context_synthesizer.py | ContextSynthesizer.synthesize | self._client.structured | 1 | context_synthesizer | legacy |
 | src/ai/decision_brief_advisor.py | _advise_on_item | client.structured | 1 | decision_brief_advisor | legacy |
 | src/ai/decision_brief_advisor.py | _advise_on_item_via_context_gateway | client.structured | 1 | decision_brief_advisor | legacy |
@@ -115,6 +117,7 @@ named scope. Nested functions and methods retain their lexical qualification.
 | src/ai/top_three_candidate_generator.py | generate_top_three_candidates | client.structured | 1 | top_three_candidate_generator | legacy |
 | src/commands/kb.py | _plan_kb_update_with_ai | client.chat | 1 | default | legacy |
 | src/commands/report_lookback.py | _run_ai_route | client.structured | 1 | lookback_retrospective | legacy |
+| src/commands/report_lookback.py | _run_ai_route_via_runner.call_provider | client.structured | 1 | lookback_retrospective | opt-in-production |
 
 ## Structured-runner consumer baseline
 
@@ -126,6 +129,9 @@ it does not replace the provider syntax inventory above.
 |---|---|---|---|---|---|
 | src/commands/ai_proposals.py | _generate_dependency_blast_radius | generate_dependency_blast_radius_proposal_via_runner | use_structured_runner | dependency_blast_radius_generator | opt-in-production |
 | src/commands/report_ai.py | _synthesize_v2_ai_content | draft_exec_summary_via_runner | use_structured_runner | exec_summary_drafter | opt-in-production |
+| src/commands/report_ai.py | _synthesize_v2_ai_content | generate_workstream_blurb_via_runner | use_structured_runner | blurb_generator | opt-in-production |
+| src/commands/confirm_stages/claim_resolution.py | resolve_confirm_claim_extraction | extract_claims_via_runner | use_structured_runner | claim_extractor | opt-in-production |
+| src/commands/report_lookback.py | _build_lookback_ai_retrospective_rows | _run_ai_route_via_runner | use_structured_runner | lookback_retrospective | opt-in-production |
 
 ## Static limitations and unreachable anchors
 

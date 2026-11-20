@@ -16,11 +16,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from src.ai._runner_bridge import build_pinned_runner_context
 from src.ai.claim_extractor import (
     ClaimExtractor,
     ClaimExtractorBudgetError,
     ClaimExtractorError,
     ClaimExtractorSafetyError,
+    POLICY_VERSION as CLAIM_EXTRACTOR_POLICY_VERSION,
 )
 from src.core.claim_extraction_calibration_store import ClaimExtractionCalibrationRecord
 from src.core.claim_evidence_map import (
@@ -54,6 +56,7 @@ def resolve_confirm_claim_extraction(
     workstream_area_paths: dict[str, tuple[str, ...]] | None = None,
     legacy_regex_extractor: bool,
     programs_root: Path = PROGRAMS_ROOT,
+    use_structured_runner: bool = False,
 ) -> tuple[ClaimExtractionResult | None, str, tuple[str, ...]]:
     if legacy_regex_extractor:
         return None, "regex", ()
@@ -61,17 +64,39 @@ def resolve_confirm_claim_extraction(
     if mode is None:
         return None, "regex", ()
     try:
-        extraction_result = ClaimExtractor.from_program(resolved.program).extract_claims(
-            program_id=resolved.program.id,
-            edition_id=edition_name,
-            issue_number=issue_number,
-            claim_date=confirmed_at.date(),
-            narratives=narratives,
-            items=items,
-            valid_workstream_ids=valid_workstream_ids,
-            workstream_area_paths=workstream_area_paths,
-            programs_root=programs_root,
-        )
+        extractor = ClaimExtractor.from_program(resolved.program)
+        if use_structured_runner:
+            runner_context = build_pinned_runner_context(
+                resolved.program.id,
+                programs_root=programs_root,
+                caller="vertex-confirm-claim-extraction",
+                feature="claim_extractor",
+                policy_version=CLAIM_EXTRACTOR_POLICY_VERSION,
+            )
+            extraction_result = extractor.extract_claims_via_runner(
+                context=runner_context,
+                program_id=resolved.program.id,
+                edition_id=edition_name,
+                issue_number=issue_number,
+                claim_date=confirmed_at.date(),
+                narratives=narratives,
+                items=items,
+                valid_workstream_ids=valid_workstream_ids,
+                workstream_area_paths=workstream_area_paths,
+                programs_root=programs_root,
+            )
+        else:
+            extraction_result = extractor.extract_claims(
+                program_id=resolved.program.id,
+                edition_id=edition_name,
+                issue_number=issue_number,
+                claim_date=confirmed_at.date(),
+                narratives=narratives,
+                items=items,
+                valid_workstream_ids=valid_workstream_ids,
+                workstream_area_paths=workstream_area_paths,
+                programs_root=programs_root,
+            )
     except ClaimExtractorBudgetError as error:
         raise RuntimeError(str(error)) from error
     except ClaimExtractorSafetyError as error:

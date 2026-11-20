@@ -238,13 +238,15 @@ def test_exec_summary_report_command_has_opt_in_runner_adoption() -> None:
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
     assert "draft_exec_summary_via_runner" in called
+    assert "generate_workstream_blurb_via_runner" in called
 
     rows = _inventory_rows(_INVENTORY_PATH.read_text(encoding="utf-8"))
-    adopted = [
-        row
-        for row in rows
-        if row[0] == "src/ai/exec_summary_drafter.py"
-        and row[1] == "draft_exec_summary_via_runner.call_provider"
-    ]
-    assert len(adopted) == 1
-    assert adopted[0][5] == "opt-in-production"
+    for path_str, fn_name in (
+        ("src/ai/exec_summary_drafter.py", "draft_exec_summary_via_runner.call_provider"),
+        ("src/ai/blurb_generator.py", "generate_workstream_blurb_via_runner.call_provider"),
+        ("src/ai/claim_extractor.py", "ClaimExtractor.extract_claims_via_runner.call_provider"),
+        ("src/commands/report_lookback.py", "_run_ai_route_via_runner.call_provider"),
+    ):
+        adopted = [row for row in rows if row[0] == path_str and row[1] == fn_name]
+        assert len(adopted) == 1, f"Missing inventory row for {path_str}:{fn_name}"
+        assert adopted[0][5] == "opt-in-production"
