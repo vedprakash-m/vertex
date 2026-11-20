@@ -10,6 +10,8 @@ from src.core.signal_sentence_utils import candidate_sentences
 
 
 ACTION_HINTS = ("action:", "follow up with", "follow-up with", "will deliver by", "need to", "todo:", "next step:")
+_MEETING_SOURCE_MARKERS = ("teams", "transcript", "meeting")
+_CANONICAL_MEETING_SOURCE_MARKERS = ("transcript", "meeting")
 
 _ISO_DATE_PATTERN = re.compile(r"\b(20\d{2})-(\d{2})-(\d{2})\b")
 _MONTH_DATE_PATTERN = re.compile(
@@ -96,6 +98,23 @@ def extract_actions_from_signals(
                 )
             )
     return tuple(actions)
+
+
+def is_meeting_action_source(signal: Signal) -> bool:
+    normalized = signal.source.strip().lower()
+    return any(marker in normalized for marker in _MEETING_SOURCE_MARKERS)
+
+
+def is_canonical_meeting_action_source(signal: Signal) -> bool:
+    normalized = signal.source.strip().lower()
+    return any(marker in normalized for marker in _CANONICAL_MEETING_SOURCE_MARKERS)
+
+
+def normalize_action_identity(text: str, owner_alias: str | None) -> tuple[str, str]:
+    return (
+        (owner_alias or "").strip().lower(),
+        " ".join(text.split()).strip().lower(),
+    )
 
 
 _ACTION_SIGNAL_PRIORITIES = {

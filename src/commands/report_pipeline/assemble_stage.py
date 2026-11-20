@@ -72,7 +72,6 @@ from src.commands.report_ai import _AIGeneratedSection, _AISynthesisResult, _Dra
 from src.commands.report_ai import _GuardedReviewEvidence
 from src.commands.report_ai import _ReportSignalContext
 from src.commands.report_ai import _build_draft_readiness
-from src.commands.report_ai import _edit_pattern_context_lines
 from src.commands.report_ai import _build_newsletter_narrative_covered_item_ids as _build_newsletter_narrative_covered_item_ids_impl
 from src.commands.report_ai import _build_newsletter_scoped_items as _build_newsletter_scoped_items_impl
 from src.commands.report_ai import _item_trajectory_points
@@ -245,6 +244,7 @@ from src.core.jinja_filters import build_anchor, configure_ado_web_url, configur
 from src.core.kusto_client import build_live_kusto_query_executor
 from src.core.kusto_query_loader import load_kpi_queries
 from src.core.kusto_rendering import KustoQueryExecutor, build_kusto_sections, build_offline_kpi_chart_sections, chart_pipeline_enabled
+from src.core.kusto_templates import KustoTemplateContext
 from src.core.manifest_writer import build_run_manifest, write_run_manifest
 from src.core.narrative_store import build_workstream_narrative_history
 from src.core.notification_state_store import load_latest_notification_state
@@ -361,6 +361,7 @@ class DraftState:
     override_snapshot: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
     program_fact_snapshot: ProgramFactSnapshotDraftState | None = None
     run_evidence_snapshot_sha256: str | None = None
+    program_verdict_observation_sha256: str | None = None
     chart_gate_evidence_sha256: str | None = None
     routed_chart_sections: tuple[KustoSectionData, ...] | None = None
     top_3_now: tuple[str, ...] = ()
@@ -1409,6 +1410,8 @@ def _generate_lookback_draft(
     gather_run_id: str | None = None,
     gather_run_hash: str | None = None,
     programs_root: Path | None = None,
+    kusto_query_executor: KustoQueryExecutor | None = None,
+    risk_entries: tuple[RiskEntry, ...] | list[RiskEntry] | None = None,
 ) -> DraftArtifacts:
     if programs_root is not None:
         _resolve_artifact_edition(edition_name, reports_root, programs_root)
@@ -1643,7 +1646,28 @@ def _generate_lookback_draft(
                 # Retrospective AI synthesis is a best-effort enhancement for lookback editions.
                 # Fail closed to the deterministic retrospective rows rather than blocking report generation.
                 pass
-    kusto_sections = build_offline_kpi_chart_sections(bundle.config.kusto) if offline else ()
+    if offline:
+        kusto_sections = build_offline_kpi_chart_sections(bundle.config.kusto)
+        kusto_warnings: tuple[str, ...] = ()
+    else:
+        lookback_context = KustoTemplateContext(
+            program_id=resolved_edition.program.id if resolved_edition is not None else "",
+            area_paths=bundle.config.ado.area_paths,
+            date_from=baseline_snapshot.ado_data_as_of,
+            date_to=latest_snapshot.ado_data_as_of,
+            require_exact_window=True,
+        )
+        kusto_sections, _, kusto_warnings = build_kusto_sections(
+            bundle.config.kusto,
+            kusto_query_executor or build_live_kusto_query_executor(),
+            observed_at=data_as_of,
+            template_context=lookback_context,
+            programs_root=programs_root,
+            program_id=resolved_edition.program.id if resolved_edition is not None else None,
+            charts_enabled=(
+                bundle.config.charts is None or bundle.config.charts.enabled
+            ),
+        )
     render_context = RenderContext(
         title=title,
         subtitle=subtitle,
@@ -1808,6 +1832,7 @@ def _generate_lookback_draft(
         program_maturity_level=(resolved_edition.program.maturity_level if resolved_edition is not None else 0),
         workstreams=(resolved_edition.workstreams if resolved_edition is not None else ()),
         scorecards=(resolved_edition.scorecards if resolved_edition is not None else ()),
+        risk_entries=tuple(risk_entries) if risk_entries is not None else None,
         archive_root=archive_root,
         programs_root=programs_root,
         reports_root=reports_root,
@@ -1824,7 +1849,7 @@ def _generate_lookback_draft(
         archive_inconsistencies=find_archive_index_inconsistencies(edition_name, archive_root=archive_root),
     )
     qg_reports = [qg_phase_1a, qg_phase_1b, qg_phase_1c]
-    if offline and bundle.config.charts is not None:
+    if kusto_sections and bundle.config.charts is not None:
         qg_reports.append(
             evaluate_chart_gates(
                 kusto_sections,

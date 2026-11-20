@@ -16,7 +16,7 @@ from src.core.evidence_models import (
     extract_pr_ids,
     parse_workiq_latest_date,
 )
-from src.core.models import RiskLevel
+from src.core.models import Enrichment, RiskLevel
 from src.commands.doctor_checks.evidence_checks import check_eta_slippage, check_false_done_lanes
 
 
@@ -249,4 +249,38 @@ def test_false_done_skips_high_risk_lanes():
     entry = {"id": "acme.performance", "workiq_latest": "2026-06-17: Performance HIGH"}
     issues = check_false_done_lanes([entry], enrichments_by_lane={}, as_of=date(2026, 6, 17))
     # HIGH risk lanes are not checked (only Done/Low)
+    assert issues == []
+
+
+def test_false_done_ignores_evidence_without_qualified_source_time():
+    lane_id = "acme.repairs_safety"
+    evidence = WorkstreamEvidence(
+        lane_id=lane_id,
+        synthesized_at=datetime(2026, 6, 17, tzinfo=timezone.utc),
+        risk_level=RiskLevel.DONE,
+        etas=(),
+        blocking_items=(),
+        owners=(),
+        source_refs=(),
+        raw_excerpts=(),
+        confidence=0.8,
+        narrative_summary="Done",
+    )
+    undated = Enrichment(
+        source="mail",
+        source_id="mail-undated",
+        author="operator@example.com",
+        timestamp=None,
+        excerpt="Undated blocker evidence",
+        permalink=None,
+        body_text="blocked blocking issue remains open",
+    )
+
+    issues = check_false_done_lanes(
+        [{"id": lane_id}],
+        enrichments_by_lane={lane_id: (undated,)},
+        as_of=date(2026, 6, 17),
+        evidence_override={lane_id: evidence},
+    )
+
     assert issues == []

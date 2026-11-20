@@ -54,6 +54,10 @@ DEFAULT_MAX_AGE_DAYS = 90.0
 #: MEASURED with fewer observations than this is not statistically comparable.
 DEFAULT_MIN_MATCHED_PAIRS = 8
 
+#: RELO-W6.2: a time-savings certification's 95% lower confidence bound must
+#: be strictly above this floor.
+DEFAULT_MIN_CONFIDENCE_INTERVAL_LOW = 0.80
+
 
 @dataclass(frozen=True, slots=True)
 class ValueBaselineFreshnessFinding:
@@ -115,8 +119,13 @@ def detect_value_baseline_freshness(
     # (Section 8.1.8). It is incomparable when it claims to be a real
     # certification but has fewer matched pairs than the minimum.
     cert = value_summary.time_savings_certification
-    if cert is not None and _certification_is_incomparable(cert, min_matched_pairs):
-        incomparable.append(f"time_savings_certification:{cert.workflow}")
+    certification_reasons: tuple[str, ...] = ()
+    if cert is not None:
+        certification_reasons = _certification_incomparability_reasons(
+            cert, min_matched_pairs
+        )
+        if certification_reasons:
+            incomparable.append(f"time_savings_certification:{cert.workflow}")
 
     affected = tuple(expired) + tuple(incomparable)
     if not affected:
@@ -137,9 +146,10 @@ def detect_value_baseline_freshness(
         )
     if incomparable:
         parts.append(
-            f"{len(incomparable)} measured comparison(s) incomparable (fewer than {min_matched_pairs} matched pairs): "
+            f"{len(incomparable)} measured comparison(s) incomparable: "
             f"{', '.join(incomparable)}"
         )
+        parts.extend(certification_reasons)
     reason = "expired" if expired and not incomparable else ("incomparable" if incomparable and not expired else "expired_and_incomparable")
     return ValueBaselineFreshnessFinding(
         is_degraded=True,
@@ -183,15 +193,35 @@ def _evaluate_metric(
     return None
 
 
-def _certification_is_incomparable(cert: TimeSavingsCertification, min_matched_pairs: int) -> bool:
+def _certification_incomparability_reasons(
+    cert: TimeSavingsCertification, min_matched_pairs: int
+) -> tuple[str, ...]:
     """Section 8.1.8: a savings certification needs >= min_matched_pairs.
 
     The certification type carries ``manual_sample_count`` and
     ``vertex_sample_count``; the matched-pair floor is the minimum of the two
-    (a matched pair requires one of each).
+    (a matched pair requires one of each). RELO-W6.2 additionally requires the
+    95% confidence lower bound to be present and strictly above 0.80.
+
+    These checks disclose inadequate inputs; they do not verify pair identity
+    or certify a study.
     """
     matched = min(cert.manual_sample_count, cert.vertex_sample_count)
-    return matched < min_matched_pairs
+    reasons: list[str] = []
+    if matched < min_matched_pairs:
+        reasons.append(
+            f"matched sample count {matched} is fewer than {min_matched_pairs} required pairs"
+        )
+    confidence_low = cert.confidence_interval_low
+    if confidence_low is None:
+        reasons.append("95% confidence lower bound is missing")
+    elif not confidence_low > DEFAULT_MIN_CONFIDENCE_INTERVAL_LOW:
+        reasons.append(
+            "95% confidence lower bound "
+            f"{confidence_low:.2f} must be strictly above "
+            f"{DEFAULT_MIN_CONFIDENCE_INTERVAL_LOW:.2f}"
+        )
+    return tuple(reasons)
 
 
 def build_value_baseline_alert_message(finding: ValueBaselineFreshnessFinding) -> tuple[str, str]:
@@ -215,6 +245,7 @@ def build_value_baseline_alert_message(finding: ValueBaselineFreshnessFinding) -
 
 __all__ = [
     "DEFAULT_MAX_AGE_DAYS",
+    "DEFAULT_MIN_CONFIDENCE_INTERVAL_LOW",
     "DEFAULT_MIN_MATCHED_PAIRS",
     "ValueBaselineFreshnessFinding",
     "build_value_baseline_alert_message",

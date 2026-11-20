@@ -43,3 +43,29 @@ def test_scan_allows_synthetic_test_controls() -> None:
             '@pytest.mark.perf',
         ],
     ) == []
+
+
+def test_allowed_control_does_not_mask_secret_on_same_line() -> None:
+    module = _load_module()
+    findings = module.scan_lines(
+        "tests/unit/example.py",
+        [
+            'control = "synthetic@microsoft.com"; '
+            'token = "ghp_abcdefghijklmnopqrstuvwxyz123456"'
+        ],
+    )
+    assert any("secret" in finding for finding in findings)
+
+
+def test_allowed_match_does_not_mask_later_secret_match() -> None:
+    module = _load_module()
+    findings = module.scan_lines(
+        "tests/unit/example.py",
+        [
+            "controls = "
+            "'DefaultEndpointsProtocol=https;AccountName=x;"
+            "AccountKey=abcdEFGH1234567890+/='; "
+            "real = 'AccountKey=abcdefghijklmnopqrstuvwxyz123456'"
+        ],
+    )
+    assert any("secret" in finding for finding in findings)

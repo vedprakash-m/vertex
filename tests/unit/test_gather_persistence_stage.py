@@ -124,6 +124,59 @@ def test_run_persistence_stage_dry_run_skips_disk_writes(monkeypatch, tmp_path: 
     assert result.auto_reviews_written == 0
 
 
+def test_run_persistence_stage_routes_only_non_meeting_signals_to_action_extractors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    current_time = datetime(2026, 6, 5, 12, 0, tzinfo=timezone.utc)
+    meeting = replace(
+        _demo_signal(current_time=current_time),
+        id="meeting-1",
+        source="m365/meeting_transcript",
+        text="Action: Confirm checkpoint | owner=priya | wi=WI:101",
+        raw_ref="meeting:1",
+    )
+    email = replace(
+        _demo_signal(current_time=current_time),
+        id="email-1",
+        source="workiq/email",
+        text="Need to send the status summary.",
+        raw_ref="email:1",
+    )
+    program = replace(_demo_program(), ai=AIConfig(enabled=True, budget_usd_per_run=0.25))
+    store = SimpleNamespace(
+        append=Mock(),
+        append_review=Mock(),
+        read=Mock(return_value=()),
+        read_reviews=Mock(return_value={}),
+    )
+    basic_extractor = Mock(return_value=())
+    ai_extractor = Mock(return_value=())
+    monkeypatch.setattr(persistence_stage, "extract_actions_from_signals", basic_extractor)
+    monkeypatch.setattr(
+        persistence_stage,
+        "load_program_facts",
+        lambda *_args, **_kwargs: SimpleNamespace(facts=()),
+    )
+
+    run_persistence_stage(
+        PersistenceStageInput(
+            program=program,
+            program_id="demo",
+            workstreams=(),
+            candidate_signals=(meeting, email),
+            existing_signals=(),
+            signal_store=store,
+            current_time=current_time,
+            programs_root=tmp_path,
+            ai_action_extractor=ai_extractor,
+        )
+    )
+
+    basic_extractor.assert_not_called()
+    ai_extractor.assert_called_once_with(program, (email,))
+
+
 def test_run_persistence_stage_canonicalizes_manifest_backed_signal_ids(monkeypatch, tmp_path: Path) -> None:
     current_time = datetime(2026, 6, 5, 12, 0, tzinfo=timezone.utc)
     signal = _demo_signal(current_time=current_time)

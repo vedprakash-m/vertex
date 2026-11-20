@@ -1,44 +1,48 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import html
 import json
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 from src.core.ado_client import ADOClient
-from src.core.ado_hydration_checkpoints import CheckpointAdvance, HydrationCheckpoint, HydrationSubresource
 from src.core.ado_enrichment import (
     ADO_RISK_ASSESSMENT_COMMENT_FIELD,
     ADO_RISK_ASSESSMENT_FIELD,
     infer_ado_risk_level,
     normalize_risk_assessment,
 )
+from src.core.ado_hydration_checkpoints import (
+    CheckpointAdvance,
+    HydrationCheckpoint,
+    HydrationSubresource,
+    plan_checkpoint_reseeds,
+)
 from src.core.ado_relations import parse_relations_payload, traverse_relations
 from src.core.ado_schema_drift import assert_row_shape
 from src.core.config_loader import PROGRAMS_ROOT
-from src.core.exceptions import AuthError, CredentialExpired, QueryError
+from src.core.exceptions import AuthError, ConfigError, CredentialExpired, QueryError
 from src.core.failure_taxonomy import FailureCategory, safe_failure_suffix
 from src.core.integration_types import (
     ADOHydrationOutput,
     ChannelConfig,
     ChannelRegistration,
+    DiscoveryCompleteness,
     HydrationMode,
     HydrationResult,
     IntegrationError,
     PaginationOutcome,
     ProviderCapability,
-    DiscoveryCompleteness,
     WorkItemRelation,
 )
 from src.core.models import Comment, Revision, WorkItem
 from src.core.models_v2 import Program, Workstream
-
 
 ADO_BATCH_FIELDS = (
     "System.Id",
@@ -64,6 +68,8 @@ class ADOHydrationConfig:
     # fixed worker pool avoids serially spending the channel budget while
     # keeping ADO request pressure bounded and predictable.
     detail_max_workers: int = 4
+    anti_entropy_after_seconds: int = 7 * 24 * 60 * 60
+    anti_entropy_max_expired_items: int = 50
 
 
 class ADOHydrationProvider:
@@ -73,7 +79,8 @@ class ADOHydrationProvider:
         *,
         detail_client_factory: Callable[[], ADOClient] | None = None,
         checkpoint_reader: Callable[
-            [tuple[int, ...]], dict[tuple[int, HydrationSubresource], HydrationCheckpoint]
+            [str, tuple[int, ...]],
+            dict[tuple[int, HydrationSubresource], HydrationCheckpoint],
         ] | None = None,
     ):
         self._client = client
@@ -89,7 +96,7 @@ class ADOHydrationProvider:
         *,
         programs_root: Path = PROGRAMS_ROOT,
     ) -> tuple["ADOHydrationProvider", ADOHydrationConfig]:
-        del workstreams, channel_config
+        del workstreams
         if program.ado is None:
             raise ValueError(f"Program '{program.id}' has no ADO config")
         client = ADOClient(
@@ -104,13 +111,16 @@ class ADOHydrationProvider:
             return client.fork_read_client()
 
         def _read_checkpoints(
+            provider_instance_id: str,
             work_item_ids: tuple[int, ...],
         ) -> dict[tuple[int, HydrationSubresource], HydrationCheckpoint]:
             from src.core.channel_registry_store import ChannelRegistryStore
             from src.core.program_paths import get_channel_registry_path
 
             store = ChannelRegistryStore(get_channel_registry_path(program.id, programs_root=programs_root), program.id)
-            return store.read_hydration_checkpoints(work_item_ids)
+            return store.read_hydration_checkpoints(
+                provider_instance_id, work_item_ids
+            )
 
         return (
             cls(client, detail_client_factory=_make_detail_client, checkpoint_reader=_read_checkpoints),
@@ -150,6 +160,13 @@ class ADOHydrationProvider:
         del program_id, run_ctx
         work_item_regs = tuple(reg for reg in registrations if reg.ref_kind == "work_item")
         repo_regs = tuple(reg for reg in registrations if reg.ref_kind == "repository")
+        provider_ids = {
+            registration.provider_instance_id
+            for registration in (*work_item_regs, *repo_regs)
+        }
+        if len(provider_ids) > 1:
+            raise ConfigError("ADO hydration requires one provider instance per invocation.")
+        provider_instance_id = next(iter(provider_ids), "default")
         _int_ids: list[int] = []
         for reg in work_item_regs:
             _wid = _parse_int(reg.ref_id)
@@ -189,6 +206,15 @@ class ADOHydrationProvider:
                 )
 
         items: list[WorkItem] = []
+        rows_by_id: dict[int, dict[str, Any]] = {}
+        detail_rows_by_id: dict[
+            int,
+            tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None],
+        ] = {}
+        checkpoints: dict[
+            tuple[int, HydrationSubresource], HydrationCheckpoint
+        ] = {}
+        reseeds: tuple[tuple[int, str], ...] = ()
         if work_item_ids:
             # activation.md §6.14.13 — inspect contract drift (non-fatal) so a
             # renamed/removed ADO field alerts the maintainer even when the
@@ -198,27 +224,99 @@ class ADOHydrationProvider:
             if rows:
                 inspect_contract_drift(rows, contract_fields=ADO_BATCH_FIELDS)
             rows_by_id = {_row_work_item_id(row): row for row in rows}
-            fetched_at = datetime.now(timezone.utc)
             registrations_by_id = {int(reg.ref_id): reg for reg in work_item_regs if reg.ref_id.isdigit()}
-            # RELO-W2.3: an `unknown` history checkpoint (legacy item or older
-            # checkpoint version) forces full revision/comment rehydration.
-            forced_detail_ids: frozenset[int] = frozenset()
+            fetched_at = datetime.now(timezone.utc)
+            required_details: dict[
+                int, frozenset[HydrationSubresource]
+            ] = {}
             if mode is HydrationMode.FULL and self._checkpoint_reader is not None:
-                checkpoints = self._checkpoint_reader(work_item_ids)
-                forced_detail_ids = frozenset(
-                    work_item_id
-                    for work_item_id in work_item_ids
-                    for sub in (HydrationSubresource.REVISIONS, HydrationSubresource.COMMENTS)
-                    if (checkpoint := checkpoints.get((work_item_id, sub))) is None or checkpoint.state != "current"
+                checkpoints = self._checkpoint_reader(
+                    provider_instance_id, work_item_ids
                 )
+                reseeds = plan_checkpoint_reseeds(
+                    checkpoints,
+                    at=fetched_at,
+                    max_age_seconds=config.anti_entropy_after_seconds,
+                    max_expired_items=config.anti_entropy_max_expired_items,
+                )
+                reseed_by_id = dict(reseeds)
+                for work_item_id in work_item_ids:
+                    required: set[HydrationSubresource] = set()
+                    if _requires_item_detail(
+                        row=rows_by_id.get(work_item_id, {}),
+                        registration=registrations_by_id.get(work_item_id),
+                        since=since,
+                        mode=mode,
+                    ):
+                        required.update(
+                            (
+                                HydrationSubresource.REVISIONS,
+                                HydrationSubresource.COMMENTS,
+                            )
+                        )
+                    registration = registrations_by_id.get(work_item_id)
+                    if (
+                        registration is not None
+                        and registration.consecutive_hydration_failures > 0
+                        and not required
+                    ):
+                        required.update(
+                            sub
+                            for sub in (
+                                HydrationSubresource.REVISIONS,
+                                HydrationSubresource.COMMENTS,
+                            )
+                            if checkpoints.get((work_item_id, sub)) is None
+                            or checkpoints[(work_item_id, sub)].state
+                            != "current"
+                        )
+                        if not required:
+                            required.update(
+                                (
+                                    HydrationSubresource.REVISIONS,
+                                    HydrationSubresource.COMMENTS,
+                                )
+                            )
+                    for sub in (
+                        HydrationSubresource.REVISIONS,
+                        HydrationSubresource.COMMENTS,
+                    ):
+                        checkpoint = checkpoints.get((work_item_id, sub))
+                        if (
+                            checkpoint is None
+                            or checkpoint.state != "current"
+                            or reseed_by_id.get(work_item_id)
+                            == "anti_entropy_expired"
+                        ):
+                            required.add(sub)
+                    if required:
+                        required_details[work_item_id] = frozenset(required)
+            else:
+                for work_item_id in work_item_ids:
+                    registration = registrations_by_id.get(work_item_id)
+                    if (
+                        _requires_item_detail(
+                            row=rows_by_id.get(work_item_id, {}),
+                            registration=registration,
+                            since=since,
+                            mode=mode,
+                        )
+                        or (
+                            registration is not None
+                            and registration.consecutive_hydration_failures > 0
+                        )
+                    ):
+                        required_details[work_item_id] = frozenset(
+                            (
+                                HydrationSubresource.REVISIONS,
+                                HydrationSubresource.COMMENTS,
+                            )
+                        )
             detail_rows_by_id, detail_errors, detail_failed_ids, detail_api_calls = self._hydrate_item_details(
                 work_item_ids=work_item_ids,
                 rows_by_id=rows_by_id,
-                registrations_by_id=registrations_by_id,
-                since=since,
-                mode=mode,
                 config=config,
-                forced_detail_ids=forced_detail_ids,
+                required_details=required_details,
             )
             api_calls += detail_api_calls
             errors.extend(detail_errors)
@@ -230,8 +328,15 @@ class ADOHydrationProvider:
                     failed_ref_ids.append((str(work_item_id), "work_item"))
                     continue
                 registration = registrations_by_id.get(work_item_id)
-                revision_rows, comment_rows = detail_rows_by_id.get(work_item_id, ([], []))
-                item = _work_item_from_batch_row(row, revision_rows=revision_rows, comment_rows=comment_rows, fetched_at=fetched_at)
+                revision_rows, comment_rows = detail_rows_by_id.get(
+                    work_item_id, (None, None)
+                )
+                item = _work_item_from_batch_row(
+                    row,
+                    revision_rows=revision_rows or [],
+                    comment_rows=comment_rows or [],
+                    fetched_at=fetched_at,
+                )
                 if registration is not None:
                     item.custom_fields["workstream_ids"] = tuple(registration.workstream_ids)
                 items.append(item)
@@ -278,16 +383,42 @@ class ADOHydrationProvider:
         # already hydrated -- it surfaces as a non-fatal error and empty relations.
         relations: tuple[WorkItemRelation, ...] = ()
         relation_truncation = None
-        hydrated_work_item_ids = {int(ref_id) for ref_id, kind in hydrated_ref_ids if kind == "work_item"}
+        evidence_work_item_ids = set(rows_by_id) if work_item_ids else set()
         advances: list[CheckpointAdvance] = []
-        if work_item_ids:
-            for work_item_id, (revision_rows, comment_rows) in detail_rows_by_id.items():
-                if work_item_id in hydrated_work_item_ids:
-                    advances.append(
-                        CheckpointAdvance(work_item_id, HydrationSubresource.REVISIONS, _revision_cursor(revision_rows))
+        if work_item_ids and self._checkpoint_reader is not None:
+            for work_item_id, row in rows_by_id.items():
+                advances.append(
+                    _checkpoint_advance(
+                        work_item_id,
+                        HydrationSubresource.ITEM,
+                        _fingerprint([row]),
+                        row,
+                        provider_instance_id,
+                        checkpoints,
                     )
+                )
+            for work_item_id, (revision_rows, comment_rows) in detail_rows_by_id.items():
+                if revision_rows is not None:
                     advances.append(
-                        CheckpointAdvance(work_item_id, HydrationSubresource.COMMENTS, str(len(comment_rows)))
+                        _checkpoint_advance(
+                            work_item_id,
+                            HydrationSubresource.REVISIONS,
+                            _revision_cursor(revision_rows),
+                            revision_rows,
+                            provider_instance_id,
+                            checkpoints,
+                        )
+                    )
+                if comment_rows is not None:
+                    advances.append(
+                        _checkpoint_advance(
+                            work_item_id,
+                            HydrationSubresource.COMMENTS,
+                            str(len(comment_rows)),
+                            comment_rows,
+                            provider_instance_id,
+                            checkpoints,
+                        )
                     )
         if mode is HydrationMode.FULL and work_item_ids:
             relation_loader = getattr(self._client, "get_work_item_relations", None)
@@ -304,7 +435,15 @@ class ADOHydrationProvider:
                     relations = traversal.edges
                     relation_truncation = traversal.truncation
                     errors.extend(traversal.errors)
-                    advances.extend(_relation_checkpoint_advances(raw_relations, hydrated_work_item_ids))
+                    if self._checkpoint_reader is not None:
+                        advances.extend(
+                            _relation_checkpoint_advances(
+                                raw_relations,
+                                evidence_work_item_ids,
+                                provider_instance_id,
+                                checkpoints,
+                            )
+                        )
                 except QueryError as error:
                     description = "Failed to hydrate work item relations"
                     errors.append(
@@ -320,6 +459,13 @@ class ADOHydrationProvider:
             relations=relations,
             relation_truncation=relation_truncation,
             checkpoint_advances=tuple(advances),
+            checkpoint_evidence_ref_ids=tuple(
+                (str(work_item_id), "work_item")
+                for work_item_id in sorted(
+                    {advance.work_item_id for advance in advances}
+                )
+            ),
+            checkpoint_reseed_reasons=reseeds,
         )
         return HydrationResult(
             channel="ado",
@@ -335,12 +481,14 @@ class ADOHydrationProvider:
         *,
         work_item_ids: tuple[int, ...],
         rows_by_id: dict[int, dict[str, Any]],
-        registrations_by_id: dict[int, ChannelRegistration],
-        since: datetime,
-        mode: HydrationMode,
         config: ADOHydrationConfig,
-        forced_detail_ids: frozenset[int] = frozenset(),
-    ) -> tuple[dict[int, tuple[list[dict[str, Any]], list[dict[str, Any]]]], list[IntegrationError], list[str], int]:
+        required_details: dict[int, frozenset[HydrationSubresource]],
+    ) -> tuple[
+        dict[int, tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None]],
+        list[IntegrationError],
+        list[str],
+        int,
+    ]:
         """Fetch required revision/comment detail with deterministic results.
 
         Calls for one work item remain ordered (revisions before comments),
@@ -351,13 +499,8 @@ class ADOHydrationProvider:
         detail_ids = tuple(
             work_item_id
             for work_item_id in work_item_ids
-            if (row := rows_by_id.get(work_item_id)) is not None
-            and (work_item_id in forced_detail_ids or _requires_item_detail(
-                row=row,
-                registration=registrations_by_id.get(work_item_id),
-                since=since,
-                mode=mode,
-            ))
+            if rows_by_id.get(work_item_id) is not None
+            and required_details.get(work_item_id)
         )
         if not detail_ids:
             return {}, [], [], 0
@@ -367,7 +510,17 @@ class ADOHydrationProvider:
         # factory so no HTTP session is shared across threads.
         worker_count = min(max(config.detail_max_workers, 1), len(detail_ids))
         if self._detail_client_factory is None or worker_count == 1:
-            results = [self._fetch_item_detail(work_item_id, self._client) for work_item_id in detail_ids]
+            results = [
+                self._fetch_item_detail(
+                    work_item_id,
+                    self._client,
+                    HydrationSubresource.REVISIONS
+                    in required_details[work_item_id],
+                    HydrationSubresource.COMMENTS
+                    in required_details[work_item_id],
+                )
+                for work_item_id in detail_ids
+            ]
         else:
             local = threading.local()
             detail_client_factory = self._detail_client_factory
@@ -377,13 +530,23 @@ class ADOHydrationProvider:
                 if client is None:
                     client = detail_client_factory()
                     local.client = client
-                return self._fetch_item_detail(work_item_id, client)
+                return self._fetch_item_detail(
+                    work_item_id,
+                    client,
+                    HydrationSubresource.REVISIONS
+                    in required_details[work_item_id],
+                    HydrationSubresource.COMMENTS
+                    in required_details[work_item_id],
+                )
 
             with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="vertex-ado-detail") as executor:
                 futures = {work_item_id: executor.submit(_fetch_with_isolated_client, work_item_id) for work_item_id in detail_ids}
                 results = [futures[work_item_id].result() for work_item_id in detail_ids]
 
-        detail_rows_by_id: dict[int, tuple[list[dict[str, Any]], list[dict[str, Any]]]] = {}
+        detail_rows_by_id: dict[
+            int,
+            tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None],
+        ] = {}
         errors: list[IntegrationError] = []
         failed_ids: list[str] = []
         api_calls = 0
@@ -396,7 +559,12 @@ class ADOHydrationProvider:
         return detail_rows_by_id, errors, failed_ids, api_calls
 
     @staticmethod
-    def _fetch_item_detail(work_item_id: int, client: ADOClient) -> "_ItemDetailFetch":
+    def _fetch_item_detail(
+        work_item_id: int,
+        client: ADOClient,
+        fetch_revisions: bool,
+        fetch_comments: bool,
+    ) -> "_ItemDetailFetch":
         api_calls = 0
         errors: list[IntegrationError] = []
 
@@ -404,7 +572,7 @@ class ADOHydrationProvider:
             name: str,
             loader: Callable[..., list[dict[str, Any]]] | None,
             timestamp: Callable[[dict[str, Any]], datetime | None],
-        ) -> list[dict[str, Any]]:
+        ) -> list[dict[str, Any]] | None:
             nonlocal api_calls
             description = f"Failed to hydrate work item {work_item_id}"
             outcomes: list[PaginationOutcome] = []
@@ -457,12 +625,24 @@ class ADOHydrationProvider:
                     failure_category=failure_category,
                 )
             )
-            return []
+            return None
 
-        revision_rows = _fetch_history("revisions", client.list_work_item_revisions, _revision_timestamp)
+        revision_rows = (
+            _fetch_history(
+                "revisions", client.list_work_item_revisions, _revision_timestamp
+            )
+            if fetch_revisions
+            else None
+        )
         comment_loader = getattr(client, "list_work_item_comments", None)
-        comment_rows = _fetch_history(
-            "comments", comment_loader if callable(comment_loader) else None, _comment_timestamp
+        comment_rows = (
+            _fetch_history(
+                "comments",
+                comment_loader if callable(comment_loader) else None,
+                _comment_timestamp,
+            )
+            if fetch_comments
+            else None
         )
         return _ItemDetailFetch(work_item_id, revision_rows, comment_rows, api_calls, tuple(errors))
 
@@ -470,8 +650,8 @@ class ADOHydrationProvider:
 @dataclass(frozen=True, slots=True)
 class _ItemDetailFetch:
     work_item_id: int
-    revision_rows: list[dict[str, Any]]
-    comment_rows: list[dict[str, Any]]
+    revision_rows: list[dict[str, Any]] | None
+    comment_rows: list[dict[str, Any]] | None
     api_calls: int
     errors: tuple[IntegrationError, ...] = ()
 
@@ -485,8 +665,6 @@ def _requires_item_detail(
 ) -> bool:
     if mode is not HydrationMode.FULL:
         return False
-    if registration is not None and registration.consecutive_hydration_failures > 0:
-        return True
     # ADF-W2.2: an item already verified more recently than the rolling
     # window only needs fresh detail when it changed after its own watermark.
     effective_since = since
@@ -513,7 +691,36 @@ def _fingerprint(values: list[object]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _relation_checkpoint_advances(raw_relations: object, work_item_ids: set[int]) -> list[CheckpointAdvance]:
+def _checkpoint_advance(
+    work_item_id: int,
+    subresource: HydrationSubresource,
+    cursor: str,
+    evidence: object,
+    provider_instance_id: str,
+    checkpoints: dict[tuple[int, HydrationSubresource], HydrationCheckpoint],
+) -> CheckpointAdvance:
+    checkpoint = checkpoints.get((work_item_id, subresource))
+    current = checkpoint is not None and checkpoint.state == "current"
+    expected_cursor = checkpoint.cursor if checkpoint is not None and current else None
+    return CheckpointAdvance(
+        work_item_id,
+        subresource,
+        cursor,
+        provider_instance_id=provider_instance_id,
+        expected_state="current" if current else "unknown",
+        expected_cursor=expected_cursor,
+        evidence_json=json.dumps(
+            evidence, sort_keys=True, default=str, separators=(",", ":")
+        ),
+    )
+
+
+def _relation_checkpoint_advances(
+    raw_relations: object,
+    work_item_ids: set[int],
+    provider_instance_id: str,
+    checkpoints: dict[tuple[int, HydrationSubresource], HydrationCheckpoint],
+) -> list[CheckpointAdvance]:
     """Fingerprint link and attachment metadata; attachment content is never fetched."""
     advances: list[CheckpointAdvance] = []
     for raw in raw_relations if isinstance(raw_relations, list) else ():
@@ -533,9 +740,25 @@ def _relation_checkpoint_advances(raw_relations: object, work_item_ids: set[int]
                 for details in [attrs if isinstance(attrs, dict) else {}]
             ),
         )
-        advances.append(CheckpointAdvance(work_item_id, HydrationSubresource.RELATIONS, _fingerprint(list(links))))
         advances.append(
-            CheckpointAdvance(work_item_id, HydrationSubresource.ATTACHMENT_META, _fingerprint(list(attachments)))
+            _checkpoint_advance(
+                work_item_id,
+                HydrationSubresource.RELATIONS,
+                _fingerprint(list(links)),
+                list(links),
+                provider_instance_id,
+                checkpoints,
+            )
+        )
+        advances.append(
+            _checkpoint_advance(
+                work_item_id,
+                HydrationSubresource.ATTACHMENT_META,
+                _fingerprint(list(attachments)),
+                list(attachments),
+                provider_instance_id,
+                checkpoints,
+            )
         )
     return advances
 

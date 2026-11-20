@@ -6,7 +6,9 @@ from typing import Any, TypedDict
 
 from src.core.pipeline import StageContext
 from src.core.fact_sor_state import resolve_family_sor_mode
+from src.core.models_v2 import RiskEntry
 from src.core.program_fact_store import build_legacy_program_fact_snapshot, load_program_facts, project_risk_entries
+from src.core.risk_dedupe import detect_risk_duplicates
 from src.core.risk_register_engine import assess_risk_staleness
 from src.core.stages.sor_gated_load import (
     record_report_family_selector, report_reality_scope, report_reality_scope_matches,
@@ -90,6 +92,16 @@ class RiskStage:
             reality=ctx.report_reality if reuse_reality else None,
             sor_mode=sor_mode,
         )
+        typed_risks = tuple(risk for risk in risks if isinstance(risk, RiskEntry))
+        lifecycle_warnings = (
+            tuple(
+                f"[risk lifecycle] {finding.kind}: {', '.join(finding.risk_ids)}"
+                for finding in detect_risk_duplicates(typed_risks)
+            )
+            if len(typed_risks) == len(risks)
+            else ()
+        )
+        warnings = (*warnings, *lifecycle_warnings)
 
         stale_risk_ids = tuple(
             risk.id

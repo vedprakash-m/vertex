@@ -3,7 +3,15 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 
 from src.core.evidence_engine import build_evidence
-from src.core.models import AttributionTier, Comment, Confidence, Revision, RiskLevel, WorkItem
+from src.core.models import (
+    AttributionTier,
+    Comment,
+    Confidence,
+    Enrichment,
+    Revision,
+    RiskLevel,
+    WorkItem,
+)
 
 
 def test_build_evidence_uses_windowed_revisions_and_comments() -> None:
@@ -116,4 +124,39 @@ def test_build_evidence_uses_changed_date_fallback_when_revision_history_is_unav
     assert evidence.confidence == Confidence.LOW
     assert evidence.tier == AttributionTier.TIER3
     assert evidence.summary_for_reviewer == "ADO item changed on 2026-05-02T11:00:00+00:00."
+
+
+def test_build_evidence_renders_unknown_enrichment_source_time() -> None:
+    item = WorkItem(
+        id=104,
+        type="Feature",
+        title="Deployment readiness",
+        state="Active",
+        assigned_to="Vertex Maintainer",
+        assigned_to_email="operator@example.com",
+        area_path="One\\Adventure\\Acme",
+        iteration_path="One\\FY26\\Q4",
+        target_date=date(2026, 6, 30),
+        risk_level=RiskLevel.MEDIUM,
+        tags=["acme"],
+        custom_fields={},
+    )
+    unknown = Enrichment(
+        source="mail",
+        source_id="mail-unknown-time",
+        author="operator@example.com",
+        timestamp=None,
+        excerpt="Subject: Undated evidence",
+        permalink=None,
+    )
+
+    evidence = build_evidence(
+        item=item,
+        window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        window_end=datetime(2026, 5, 3, tzinfo=timezone.utc),
+        enrichments_by_item={item.id: (unknown,)},
+    )
+
+    assert evidence.confidence == Confidence.LOW
+    assert "on unknown source time" in evidence.summary_for_reviewer
 

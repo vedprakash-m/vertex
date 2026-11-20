@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from typing import Callable
 
-from src.core.integration_types import ExtractionResult, KustoHydrationOutput, KustoResultSet
+from src.core.integration_types import (
+    ExtractionResult,
+    KustoHydrationOutput,
+    KustoResultSet,
+)
 from src.core.kusto_ref_utils import extract_kusto_entity_refs
+from src.core.metric_binding_validator import coerce_metric_value
 from src.core.models import Confidence
 from src.core.models_v2 import Signal
 from src.core.signal_ref_utils import merge_entity_refs
@@ -20,6 +27,29 @@ from src.core.signal_ref_utils import merge_entity_refs
 #: and slice contracts.
 WaiverLookup = Callable[[str], "object | None"]
 
+_MAX_KUSTO_FACT_ROWS = 3
+_TIME_COLUMN_NAMES = {
+    "timestamp",
+    "date",
+    "eventtimestamp",
+    "createdate",
+    "resolveddate",
+    "snapshot",
+    "maxts",
+    "maxdatatimestamp",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class _UnboundKustoInterpretation:
+    kind: str
+    qualification: str
+    columns: tuple[str, ...] = ()
+    facts: tuple[str, ...] = ()
+    omitted_rows: int = 0
+    data_as_of: datetime | None = None
+    refusal: str | None = None
+
 
 def kusto_source_event_time(rows: Iterable[Mapping[str, object]]) -> datetime | None:
     candidates: list[datetime] = []
@@ -29,17 +59,9 @@ def kusto_source_event_time(rows: Iterable[Mapping[str, object]]) -> datetime | 
                 continue
             if value in (None, ""):
                 continue
-            if isinstance(value, datetime):
-                parsed = value.astimezone(timezone.utc) if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
-            else:
-                try:
-                    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-                except ValueError:
-                    if not isinstance(value, date):
-                        continue
-                    parsed = datetime.combine(value, time.min, tzinfo=timezone.utc)
-                parsed = parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
-            candidates.append(parsed)
+            parsed = _parse_kusto_time_value(value)
+            if parsed is not None:
+                candidates.append(parsed)
     return max(candidates) if candidates else None
 
 
@@ -109,8 +131,17 @@ def _empty_result_text(result_set: KustoResultSet) -> str | None:
 
 
 def format_kusto_result_text(result_set: KustoResultSet, *, waiver: object | None = None) -> str:
+    if result_set.is_partial:
+        return _format_unbound_refusal(result_set, "partial result")
+    if result_set.row_count is not None and result_set.row_count != len(result_set.rows):
+        return _format_unbound_refusal(result_set, "row count mismatch")
+
     if result_set.metric_id is None:
-        return f"Kusto query {result_set.query_id}: {len(result_set.rows)} row(s) observed."
+        interpretation = _interpret_unbound_kusto_result(
+            result_set.rows,
+            declared_measure=result_set.result_column,
+        )
+        return _format_unbound_kusto_result(result_set.query_id, len(result_set.rows), interpretation)
 
     if result_set.observed_value is None:
         # metric_id/result_column configured but the column wasn't found (or
@@ -132,6 +163,195 @@ def format_kusto_result_text(result_set: KustoResultSet, *, waiver: object | Non
     verdict = "BREACH" if result_set.is_breach else "OK"
     text = f"{result_set.metric_id} = {value_text} against SLO {result_set.comparison}{target_text}: {verdict}."
     return _with_waiver_suffix(text, waiver)
+
+
+def _format_unbound_refusal(result_set: KustoResultSet, refusal: str) -> str:
+    return (
+        f"Kusto query {result_set.query_id} [kind=table, interpretation=ambiguous]: "
+        f"admitted_rows={len(result_set.rows)}; refusal={refusal}."
+    )
+
+
+def _interpret_unbound_kusto_result(
+    rows: tuple[dict[str, str | int | float | bool | None], ...],
+    *,
+    declared_measure: str | None = None,
+) -> _UnboundKustoInterpretation:
+    columns = _stable_kusto_columns(rows)
+    if columns is None:
+        return _UnboundKustoInterpretation(
+            kind="table", qualification="ambiguous", refusal="schema drift",
+        )
+
+    serialized_rows = tuple(_serialize_kusto_row(row, columns) for row in rows)
+    if any(row is None for row in serialized_rows):
+        return _UnboundKustoInterpretation(
+            kind="table",
+            qualification="ambiguous",
+            columns=columns,
+            refusal="unsupported row value",
+        )
+    exact_rows = tuple(row for row in serialized_rows if row is not None)
+
+    time_columns = tuple(column for column in columns if _normalize_kusto_column(column) in _TIME_COLUMN_NAMES)
+    numeric_columns = tuple(
+        column
+        for column in columns
+        if all(coerce_metric_value(row.get(column)) is not None for row in rows)
+    )
+    if len(time_columns) > 1:
+        return _ambiguous_table(columns, exact_rows, "multiple time columns")
+    if len(time_columns) == 1:
+        if declared_measure is not None:
+            if declared_measure not in numeric_columns:
+                return _ambiguous_table(columns, exact_rows, "declared numeric measure unavailable")
+            numeric_column = declared_measure
+        else:
+            if len(numeric_columns) > 1:
+                return _ambiguous_table(columns, exact_rows, "multiple numeric measures")
+            if not numeric_columns:
+                return _ambiguous_table(columns, exact_rows, "missing numeric measure")
+            numeric_column = numeric_columns[0]
+        point_columns = tuple(
+            column for column in columns if column in {time_columns[0], numeric_column}
+        )
+        if any(
+            column not in point_columns and column not in numeric_columns
+            for column in columns
+        ):
+            return _ambiguous_table(columns, exact_rows, "multiple series dimensions")
+        ordered_point_rows = tuple(_serialize_kusto_row(row, point_columns) for row in rows)
+        exact_point_rows = tuple(row for row in ordered_point_rows if row is not None)
+        if len(exact_point_rows) != len(rows):
+            return _ambiguous_table(columns, exact_rows, "unsupported point value")
+        parsed_points: list[tuple[datetime, str]] = []
+        for row, exact_row in zip(rows, exact_point_rows):
+            parsed = _parse_kusto_time_value(row.get(time_columns[0]))
+            if parsed is None:
+                return _ambiguous_table(columns, exact_rows, "invalid time point")
+            parsed_points.append((parsed, exact_row))
+        if len({point[0] for point in parsed_points}) != len(parsed_points):
+            return _ambiguous_table(columns, exact_rows, "duplicate time points")
+        ordered_rows = tuple(row for _, row in sorted(parsed_points, key=lambda point: point[0]))
+        return _UnboundKustoInterpretation(
+            kind="timeseries",
+            qualification="unqualified",
+            columns=columns,
+            facts=ordered_rows[:_MAX_KUSTO_FACT_ROWS],
+            omitted_rows=max(0, len(ordered_rows) - _MAX_KUSTO_FACT_ROWS),
+            data_as_of=max(point[0] for point in parsed_points),
+        )
+
+    return _UnboundKustoInterpretation(
+        kind="table",
+        qualification="unqualified",
+        columns=columns,
+        facts=exact_rows[:_MAX_KUSTO_FACT_ROWS],
+        omitted_rows=max(0, len(exact_rows) - _MAX_KUSTO_FACT_ROWS),
+    )
+
+
+def _ambiguous_table(
+    columns: tuple[str, ...],
+    exact_rows: tuple[str, ...],
+    refusal: str,
+) -> _UnboundKustoInterpretation:
+    return _UnboundKustoInterpretation(
+        kind="table",
+        qualification="ambiguous",
+        columns=columns,
+        facts=exact_rows[:_MAX_KUSTO_FACT_ROWS],
+        omitted_rows=max(0, len(exact_rows) - _MAX_KUSTO_FACT_ROWS),
+        refusal=refusal,
+    )
+
+
+def _stable_kusto_columns(
+    rows: tuple[dict[str, str | int | float | bool | None], ...],
+) -> tuple[str, ...] | None:
+    if not rows:
+        return ()
+    columns = tuple(rows[0])
+    if not columns or any(not isinstance(column, str) or not column.strip() for column in columns):
+        return None
+    if any(tuple(row) != columns for row in rows[1:]):
+        return None
+    return columns
+
+
+def _serialize_kusto_row(
+    row: dict[str, str | int | float | bool | None],
+    columns: tuple[str, ...],
+) -> str | None:
+    pairs: list[str] = []
+    for column in columns:
+        value = row.get(column)
+        serialized = _serialize_kusto_scalar(value)
+        if serialized is None and value is not None:
+            return None
+        pairs.append(f"{json.dumps(column, ensure_ascii=True)}:{serialized if serialized is not None else 'null'}")
+    return "{" + ",".join(pairs) + "}"
+
+
+def _serialize_kusto_scalar(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return json.dumps(value, ensure_ascii=True, separators=(",", ":"), allow_nan=False)
+    if isinstance(value, datetime):
+        normalized = (
+            value.astimezone(timezone.utc)
+            if value.tzinfo is not None
+            else value.replace(tzinfo=timezone.utc)
+        )
+        return json.dumps(normalized.isoformat(), ensure_ascii=True)
+    if isinstance(value, date):
+        return json.dumps(value.isoformat(), ensure_ascii=True)
+    return None
+
+
+def _format_unbound_kusto_result(
+    query_id: str,
+    admitted_rows: int,
+    interpretation: _UnboundKustoInterpretation,
+) -> str:
+    prefix = (
+        f"Kusto query {query_id} "
+        f"[kind={interpretation.kind}, interpretation={interpretation.qualification}]: "
+    )
+    parts = [f"admitted_rows={admitted_rows}"]
+    if interpretation.columns:
+        parts.append(f"columns=[{','.join(interpretation.columns)}]")
+    if interpretation.facts:
+        label = "points" if interpretation.kind == "timeseries" else "facts"
+        parts.append(f"{label}=[{','.join(interpretation.facts)}]")
+    if interpretation.omitted_rows:
+        parts.append(f"omitted_rows={interpretation.omitted_rows}")
+    if interpretation.data_as_of is not None:
+        parts.append(f"data_as_of={interpretation.data_as_of.isoformat()}")
+    if interpretation.refusal is not None:
+        parts.append(f"refusal={interpretation.refusal}")
+    else:
+        parts.append("no qualified trend or SLO verdict")
+    return prefix + "; ".join(parts) + "."
+
+
+def _normalize_kusto_column(column: str) -> str:
+    return column.strip().lower().replace("_", "")
+
+
+def _parse_kusto_time_value(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc) if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        if not isinstance(value, date):
+            return None
+        parsed = datetime.combine(value, time.min, tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
 def _format_value(value: float | None, unit: str | None) -> str:
@@ -184,6 +404,16 @@ def _build_signals(
             "slo_target": result_set.slo_target,
             "comparison": result_set.comparison,
             "is_breach": result_set.is_breach,
+            "result_kind": (
+                result_set.schema.kind.value
+                if result_set.schema is not None
+                else "unknown"
+            ),
+            "result_columns": (
+                tuple(column.name for column in result_set.schema.columns)
+                if result_set.schema is not None
+                else ()
+            ),
             # ADF-W2.3 (Section 8.5.3): waiver annotation for downstream
             # consumers (report rendering, cockpit). False (not None)
             # when no waiver was looked up, so a reader can distinguish

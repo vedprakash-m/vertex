@@ -58,7 +58,9 @@ def _inventory_rows(text: str) -> list[tuple[str, str, str, int, str, str]]:
         assert len(fields) == 6 and all(fields), f"Invalid inventory row: {line}"
         path, function, callee, ordinal, feature, disposition = fields
         assert ordinal.isdecimal() and int(ordinal) > 0, f"Invalid ordinal: {line}"
-        assert disposition in {"legacy", "test-only-pilot", "infrastructure"}, f"Invalid disposition: {line}"
+        assert disposition in {
+            "legacy", "runner-adopted", "opt-in-production", "infrastructure",
+        }, f"Invalid disposition: {line}"
         rows.append((path, function, callee, int(ordinal), feature, disposition))
     identities = [row[:4] for row in rows]
     assert len(set(identities)) == len(identities), "Duplicate invocation identity in inventory."
@@ -193,3 +195,30 @@ def test_function_baseline_does_not_claim_dynamic_resolution() -> None:
     assert _provider_calls(source, "src/example.py") == [
         ("src/example.py", "generate", "unrelated.chat", 1),
     ]
+
+
+def test_dependency_blast_radius_command_is_bound_to_runner_adoption() -> None:
+    command_path = _REPO_ROOT / "src" / "commands" / "ai_proposals.py"
+    tree = ast.parse(command_path.read_text(encoding="utf-8"))
+    caller = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_generate_dependency_blast_radius"
+    )
+    called = {
+        node.func.id
+        for node in ast.walk(caller)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "generate_dependency_blast_radius_proposal_via_runner" in called
+    assert "generate_dependency_blast_radius_proposal" not in called
+
+    rows = _inventory_rows(_INVENTORY_PATH.read_text(encoding="utf-8"))
+    adopted = [
+        row
+        for row in rows
+        if row[0] == "src/ai/dependency_blast_radius_generator.py"
+        and row[1] == "generate_dependency_blast_radius_proposal_via_runner.call_provider"
+    ]
+    assert len(adopted) == 1
+    assert adopted[0][5] == "opt-in-production"

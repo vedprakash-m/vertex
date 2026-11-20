@@ -1,16 +1,118 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import pytest
 
 from src.commands.chart_gather import _scrub_pii_rows
 from src.core.config_loader import KustoQuerySettings, KustoSettings
-from src.core.exceptions import AuthError, QueryError
+from src.core.exceptions import AuthError, ConfigError, QueryError
 from src.core.kusto_rendering import build_kusto_sections
 from src.core.kusto_templates import KustoTemplateContext
+
+
+def test_lookback_exact_window_renders_selected_snapshot_bounds() -> None:
+    query = KustoQuerySettings(
+        id="velocity",
+        cluster="synthetic",
+        database="synthetic",
+        kql="T | where timestamp between (datetime({date_from}) .. datetime({date_to}))",
+        section="Velocity",
+        render_as="table",
+        confidence="high",
+        kusto_section_validates_slice=False,
+        caveats=(),
+        reference_url="https://example.invalid/velocity",
+    )
+    executed: list[KustoQuerySettings] = []
+
+    def execute(current):
+        executed.append(current)
+        return [{"value": 1}]
+
+    sections, observations, warnings = build_kusto_sections(
+        KustoSettings(enabled=True, queries=(query,)),
+        execute,
+        template_context=KustoTemplateContext(
+            program_id="acme",
+            date_from=datetime(2026, 8, 1, tzinfo=timezone.utc),
+            date_to=datetime(2026, 10, 31, tzinfo=timezone.utc),
+            require_exact_window=True,
+        ),
+    )
+
+    assert len(executed) == 1
+    assert "2026-08-01T00:00:00Z" in executed[0].kql
+    assert "2026-10-31T00:00:00Z" in executed[0].kql
+    assert sections[0].is_degraded is False
+    assert not warnings
+    assert observations[0].execution_state == "success"
+
+
+def test_lookback_query_without_exact_window_contract_degrades_without_execution() -> None:
+    query = KustoQuerySettings(
+        id="legacy-window",
+        cluster="synthetic",
+        database="synthetic",
+        kql="T | where timestamp > ago({date_range})",
+        section="Velocity",
+        render_as="table",
+        confidence="high",
+        kusto_section_validates_slice=False,
+        caveats=(),
+        reference_url="https://example.invalid/velocity",
+    )
+    executed: list[object] = []
+
+    sections, observations, warnings = build_kusto_sections(
+        KustoSettings(enabled=True, queries=(query,)),
+        lambda current: executed.append(current) or [{"value": 1}],
+        template_context=KustoTemplateContext(
+            program_id="acme",
+            date_from=date(2026, 8, 1),
+            date_to=date(2026, 10, 31),
+            date_window_days=90,
+            require_exact_window=True,
+        ),
+    )
+
+    assert executed == []
+    assert sections[0].is_degraded is True
+    assert "exact retrospective window" in sections[0].message
+    assert observations[0].execution_state == "degraded"
+    assert warnings
+
+
+def test_lookback_exact_window_does_not_hide_unrelated_template_config_errors() -> None:
+    query = KustoQuerySettings(
+        id="missing-area",
+        cluster="synthetic",
+        database="synthetic",
+        kql=(
+            "T | where AreaPath == \"{area_path}\" and timestamp between "
+            "(datetime({date_from}) .. datetime({date_to}))"
+        ),
+        section="Velocity",
+        render_as="table",
+        confidence="high",
+        kusto_section_validates_slice=False,
+        caveats=(),
+        reference_url="https://example.invalid/velocity",
+    )
+
+    with pytest.raises(ConfigError, match="area_path"):
+        build_kusto_sections(
+            KustoSettings(enabled=True, queries=(query,)),
+            lambda _current: pytest.fail("Invalid template config must not execute"),
+            template_context=KustoTemplateContext(
+                program_id="acme",
+                date_from=date(2026, 8, 1),
+                date_to=date(2026, 10, 31),
+                require_exact_window=True,
+            ),
+        )
 
 
 @pytest.mark.parametrize("failure_type", [AuthError, QueryError])

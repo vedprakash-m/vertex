@@ -116,6 +116,20 @@ def enrich_command(
     m365_config = getattr(resolved.program, "m365", None)
     retrieval_config = getattr(m365_config, "retrieval", None)
     per_thread_enabled = bool(retrieval_config and retrieval_config.per_thread_extraction)
+    workiq_run_budget = None
+    if per_thread_enabled and retrieval_config is not None:
+        from src.core.models_v2 import WorkIQRetrievalConfig
+        from src.m365.workiq_retriever import WorkIQRunBudget
+
+        defaults = WorkIQRetrievalConfig()
+        workiq_run_budget = WorkIQRunBudget(
+            max_calls=getattr(
+                retrieval_config, "max_calls_per_cycle", defaults.max_calls_per_cycle,
+            ),
+            max_wall_clock_seconds=getattr(
+                retrieval_config, "max_wall_clock_seconds", defaults.max_wall_clock_seconds,
+            ),
+        )
     if batch and not lane and not per_thread_enabled:
         budget_refusals: list[str] = []
         cluster_cache = _build_cluster_response_cache(
@@ -164,6 +178,7 @@ def enrich_command(
                 edition=edition,
                 programs_root=programs_root,
                 dry_run=dry_run,
+                run_budget=workiq_run_budget,
             )
             admitted_count = 0
             rejected_count = 0
@@ -453,6 +468,7 @@ def _extract_per_thread_evidence(
     edition: str,
     programs_root: Path,
     dry_run: bool = False,
+    run_budget: Any | None = None,
 ) -> tuple[tuple["WorkstreamEvidence", ...], bool]:
     """Return source-keyed evidence and whether discovery was incomplete."""
 
@@ -484,7 +500,13 @@ def _extract_per_thread_evidence(
         cache_path=cache_path,
         one_hop=retrieval_config.per_thread_one_hop,
         write_cache=not dry_run,
+        budget=run_budget,
     )
+    if getattr(retrieval, "budget_exhausted", False):
+        typer.echo(
+            " [WorkIQ: per-run call or wall-clock budget exhausted; remaining threads not attempted]",
+            err=True,
+        )
     if retrieval.rejected_identity_count:
         typer.echo(
             f" [WorkIQ: rejected {retrieval.rejected_identity_count} record(s) without stable source identity]",
@@ -531,6 +553,7 @@ def _extract_per_thread_evidence(
     return tuple(evidences), bool(
         retrieval.rejected_identity_count or retrieval.rejected_source_time_count
         or retrieval.rejected_invalid_record_count or not retrieval.response_usable
+        or getattr(retrieval, "budget_exhausted", False)
     )
 
 

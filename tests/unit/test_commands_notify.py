@@ -78,7 +78,8 @@ def test_notify_cli_surfaces_unavailable_transport(monkeypatch, repo_root: Path,
     result = runner.invoke(app, ["notify", "--edition", EDITION_NAME, "--issue", "1", "--channel", "email"], input="y\n")
 
     assert result.exit_code == 2
-    assert "Missing GRAPH_TENANT_ID" in result.stdout
+    assert "Email delivery is blocked" in result.stdout
+    assert "durable-outbox" in result.stdout
     assert not (tmp_path / "programs" / "acme" / "publications" / EDITION_NAME / "notifications").exists()
 
 

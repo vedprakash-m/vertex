@@ -108,6 +108,7 @@ class TierDecisionRecord:
     cost_usd: float | None
     execution_mode: str
     recorded_at: str
+    execution_class: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -132,6 +133,7 @@ class TierDecisionRecord:
             "cost_usd": self.cost_usd,
             "execution_mode": self.execution_mode,
             "recorded_at": self.recorded_at,
+            "execution_class": self.execution_class,
         }
         payload["record_checksum"] = compute_record_checksum(payload)
         return payload
@@ -240,8 +242,8 @@ def make_tier_decision_sink(config: TierDecisionSinkConfig):
             frontier_called=decision.frontier_called,
             cache_hit=decision.outcome.value == "cache_hit",
             policy_version=config.policy_version,
-            model_version=None,
-            deployment_id=None,
+            model_version=getattr(decision, "model_version", None),
+            deployment_id=getattr(decision, "deployment_id", None),
             context_hash=None,
             latency_ms=None,
             input_tokens=None,
@@ -249,6 +251,7 @@ def make_tier_decision_sink(config: TierDecisionSinkConfig):
             cost_usd=None,
             execution_mode=config.execution_mode,
             recorded_at=decision.recorded_at,
+            execution_class=getattr(decision, "execution_class", None),
         )
         append_measurement(store_path, record)
 

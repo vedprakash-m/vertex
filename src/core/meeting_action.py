@@ -23,6 +23,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Literal
 
+from src.core.action_extractor_basic import normalize_action_identity
 from src.core.models import WorkItem
 from src.core.proposal_audit import record_proposal_event
 from src.core.work_item_states import TERMINAL_WORK_ITEM_STATES
@@ -35,7 +36,7 @@ ExtractionMethod = Literal["deterministic", "llm"]
 MeetingActionStatus = Literal["staged", "approved", "rejected"]
 
 _MARKER = "Action:"
-_ALLOWED_MARKER_KEYS = frozenset({"owner", "due", "wi", "blocks"})
+_ALLOWED_MARKER_KEYS = frozenset({"owner", "due", "wi", "refs", "blocks"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +80,8 @@ def extract_deterministic_meeting_actions(
     transcript_text: str,
 ) -> tuple[MeetingAction, ...]:
     """Parses ``Action: <commitment> | owner=<alias> | due=<YYYY-MM-DD> |
-    wi=<id> | blocks=<ref,ref,...>`` lines -- the same marker-line shape
+    wi=<id> | blocks=<ref,ref,...>`` lines. ``refs=<id>`` remains accepted as
+    a legacy single-work-item alias for ``wi``. This matches the marker-line shape
     ``claim_extractor.py``'s ``Claim:``/``Decision ask:`` markers use. The
     literal source line is the action's ``source_span`` (a deterministic
     marker line IS its own grounding -- no separate citation needed).
@@ -104,7 +106,7 @@ def extract_deterministic_meeting_actions(
             continue
         assert raw_due_date is None or isinstance(raw_due_date, date)
         due_date = raw_due_date
-        raw_linked_work_item_id = _parse_wi(payload.get("wi"))
+        raw_linked_work_item_id = _parse_wi(payload.get("wi") or payload.get("refs"))
         if raw_linked_work_item_id is _INVALID_WI:
             continue
         assert raw_linked_work_item_id is None or isinstance(raw_linked_work_item_id, int)
@@ -218,9 +220,7 @@ def merge_meeting_actions(
 
 
 def _dedup_key(action: MeetingAction) -> tuple[str, str]:
-    normalized_commitment = " ".join(action.commitment.split()).strip().lower()
-    normalized_owner = (action.owner_alias or "").strip().lower()
-    return (normalized_owner, normalized_commitment)
+    return normalize_action_identity(action.commitment, action.owner_alias)
 
 
 # ---------------------------------------------------------------------------

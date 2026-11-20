@@ -447,14 +447,24 @@ def run_channel(
         )
         _record_outcome(degraded=True, reason=_runtime_error_message(channel, "hydration", error))
         return None, delta
-    if not run_ctx.dry_run and hydration_result.hydrated_ref_ids:
+    checkpoint_advances = getattr(
+        hydration_result.resources, "checkpoint_advances", ()
+    )
+    if not run_ctx.dry_run and (
+        hydration_result.hydrated_ref_ids or checkpoint_advances
+    ):
         acknowledge = partial(
             store.mark_verified,
             channel,
             hydration_result.hydrated_ref_ids,
             verified_at=verified_at,
             provider_instance_id=provider_instance_id,
-            checkpoint_advances=getattr(hydration_result.resources, "checkpoint_advances", ()),
+            checkpoint_advances=checkpoint_advances,
+            checkpoint_evidence_ref_ids=getattr(
+                hydration_result.resources,
+                "checkpoint_evidence_ref_ids",
+                hydration_result.hydrated_ref_ids,
+            ),
         )
         if deferred_verifications is None:
             acknowledge()

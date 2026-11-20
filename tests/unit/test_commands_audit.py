@@ -14,6 +14,7 @@ from src.commands.audit import build_audit_timeline
 from src.core.ado_proposal import ADOUpdateEntry, ADOUpdateProposal, write_proposal_manifest
 from src.core.analytics_store import AutonomyAuditRecord, append_autonomy_audit_record, get_program_autonomy_audit_archive_path, get_program_autonomy_audit_path
 from src.core.feedback.signal_approval_learner import load_promoted_signal_approval_rules
+from src.core.governed_feedback_lifecycle import FeedbackValue, ProposalKind
 from src.core.integration_types import PaginationOutcome
 from src.core.journal import append_review_decision, append_signal, append_usage_marker
 from src.core.models import Confidence
@@ -1125,6 +1126,21 @@ def test_audit_pause_cli_disables_batch_rule_and_records_audit(monkeypatch, tmp_
             },
         ),
     )
+    monkeypatch.setattr(
+        "src.core.feedback.signal_approval_learner.load_active_feedback_proposals",
+        lambda *args, **kwargs: (
+            SimpleNamespace(
+                subject="signal_approval:approval:vitality_nudge",
+                kind=ProposalKind.THRESHOLD,
+                proposed_value=FeedbackValue.enum("batch_approval"),
+            ),
+            SimpleNamespace(
+                subject="signal_approval:approval:comment",
+                kind=ProposalKind.THRESHOLD,
+                proposed_value=FeedbackValue.enum("proposal_staging"),
+            ),
+        ),
+    )
 
     result = runner.invoke(app, ["audit", "pause", "--program", "acme", "--action-type", "vitality_nudge", "--updated-by", "owner"])
 
@@ -1238,10 +1254,11 @@ def test_audit_rollback_cli_rolls_back_proposal_backed_action_and_records_govern
 
     result = runner.invoke(app, ["audit", "rollback", "--action", "action-apply", "--updated-by", "owner"])
 
-    assert result.exit_code == 0
-    assert "Rolled back action action-apply for acme: 2 rolled back, 0 skipped, 0 conflict, 0 failed." in result.stdout
-    assert fake_client.rows_by_id[1002]["fields"]["Custom.RiskLevel"] == "high"
-    assert fake_client.comments_by_id[1001][-1]["text"].startswith("Vertex rollback action-apply")
+    assert result.exit_code == 2
+    assert "Rolled back action action-apply for acme: 0 rolled back, 0 skipped, 0 conflict, 2 failed." in result.stdout
+    assert fake_client.rows_by_id[1002]["fields"]["Custom.RiskLevel"] == "medium"
+    assert len(fake_client.comments_by_id[1001]) == 1
+    assert "outbox boundary" in result.stdout
 
     payloads = [
         json.loads(line)
@@ -1254,7 +1271,8 @@ def test_audit_rollback_cli_rolls_back_proposal_backed_action_and_records_govern
     assert rollback_payload["policy_rule"] == "approval:vitality_nudge"
     assert rollback_payload["prior_acceptance_rate"] == 1.0
     assert rollback_payload["evidence_refs"][:2] == ["original_action:action-apply", "ado_proposal:prop-demo"]
-    assert "Rolled back 2 ADO update(s) from action action-apply" in rollback_payload["blast_radius"]
+    assert "Rolled back 0 ADO update(s) from action action-apply" in rollback_payload["blast_radius"]
+    assert "2 failed" in rollback_payload["blast_radius"]
 
 
 def test_audit_rollback_cli_dry_run_previews_without_external_write(monkeypatch, tmp_path: Path) -> None:
@@ -1391,10 +1409,10 @@ def test_audit_rollback_cli_batch_rolls_back_same_day_actions_and_records_each_g
 
     result = runner.invoke(app, ["audit", "rollback", "--program", "acme", "--batch", "2026-05-02", "--updated-by", "owner"])
 
-    assert result.exit_code == 0
-    assert "Rolled back batch 2026-05-02 for acme: 2 action(s), 2 rolled back, 0 skipped, 0 conflict, 0 failed." in result.stdout
-    assert fake_client.rows_by_id[2001]["fields"]["Custom.RiskLevel"] == "high"
-    assert fake_client.rows_by_id[2002]["fields"]["Custom.RiskLevel"] == "medium"
+    assert result.exit_code == 2
+    assert "Rolled back batch 2026-05-02 for acme: 2 action(s), 0 rolled back, 0 skipped, 0 conflict, 2 failed." in result.stdout
+    assert fake_client.rows_by_id[2001]["fields"]["Custom.RiskLevel"] == "medium"
+    assert fake_client.rows_by_id[2002]["fields"]["Custom.RiskLevel"] == "low"
     assert fake_client.rows_by_id[2003]["fields"]["Custom.RiskLevel"] == "high"
 
     payloads = [

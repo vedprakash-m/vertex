@@ -384,6 +384,7 @@ def execute_archive_transaction(
                     resolved_v2.program.id,
                     edition_id=edition_name,
                     issue_number=issue_number,
+                    approved_by=confirmed_by,
                     programs_root=programs_root,
                 )
             except OSError:

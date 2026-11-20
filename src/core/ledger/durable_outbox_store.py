@@ -22,6 +22,8 @@ lease and get an error if it's stale — see ``verify_lease_current``).
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -53,7 +55,10 @@ CREATE INDEX IF NOT EXISTS ix_outbox_correlation ON outbox (correlation_id);
 """
 
 _TRUE_TERMINALS = frozenset(
-    {"uncertain_remote_state", "failed_terminal", "compensation_required", "dead_letter", "manually_resolved", "completed"}
+    {
+        "uncertain_remote_state", "failed_terminal", "compensation_required", "dead_letter",
+        "manually_resolved", "completed", "cancelled",
+    }
 )
 _RELEASABLE_STATUSES = ("pending", "failed_retryable")
 _SUCCESS_RECEIPTS_SQL = """
@@ -62,6 +67,27 @@ CREATE TABLE IF NOT EXISTS outbox_success_receipts (
     receipt_json TEXT NOT NULL
 )
 """
+_RECONCILIATION_RECEIPTS_SQL = """
+CREATE TABLE IF NOT EXISTS outbox_reconciliation_receipts (
+    outbox_id TEXT PRIMARY KEY,
+    receipt_json TEXT NOT NULL
+)
+"""
+_STATE_RECEIPTS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS outbox_state_receipts (
+    receipt_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    outbox_id TEXT NOT NULL,
+    terminal_status TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    receipt_json TEXT NOT NULL
+)
+"""
+_STATE_RECEIPTS_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS ix_outbox_state_receipts_outbox
+    ON outbox_state_receipts (outbox_id, receipt_id)
+"""
+_STATE_RECEIPTS_SQL = _STATE_RECEIPTS_TABLE_SQL + ";\n" + _STATE_RECEIPTS_INDEX_SQL + ";"
+_RECEIPTED_STATUSES = _TRUE_TERMINALS | {"completed", "succeeded"}
 _TRANSITION_PREDECESSORS = {
     "dispatched": frozenset({"leased"}),
     "succeeded": frozenset({"dispatched"}),
@@ -167,22 +193,81 @@ def enqueue(
     domain: str,
     correlation_id: str,
     payload_json: str,
+    effect_id: str | None = None,
 ) -> OutboxEntry:
     now = _now()
     with open_program_db(db_path, durability="strict") as connection:
         connection.executescript(_SCHEMA_SQL)
+        if effect_id is None:
+            connection.execute(
+                """
+                INSERT INTO outbox (
+                    outbox_id, domain, correlation_id, payload_json, status,
+                    lease_fencing_token, attempt_count, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'pending', 0, 0, ?, ?)
+                """,
+                (outbox_id, domain, correlation_id, payload_json, _wire(now), _wire(now)),
+            )
+            entry = connection.execute(
+                "SELECT outbox_id, domain, correlation_id, payload_json, status, lease_owner, "
+                "lease_fencing_token, lease_expires_at, attempt_count, next_attempt_at, "
+                "remote_request_hash, remote_response_hash, failure_reason, created_at, updated_at "
+                "FROM outbox WHERE outbox_id = ?",
+                (outbox_id,),
+            ).fetchone()
+            assert entry is not None
+            return _entry_from_row(tuple(entry))
+
+        connection.execute(_EFFECTS_SQL)
+        connection.execute("BEGIN IMMEDIATE")
+        bound = connection.execute(
+            "SELECT outbox_id FROM outbox_effects WHERE effect_id = ?",
+            (effect_id,),
+        ).fetchone()
+        selected_id = str(bound[0]) if bound is not None else outbox_id
+        selected = connection.execute(
+            "SELECT outbox_id, domain, correlation_id, payload_json, status, lease_owner, "
+            "lease_fencing_token, lease_expires_at, attempt_count, next_attempt_at, "
+            "remote_request_hash, remote_response_hash, failure_reason, created_at, updated_at "
+            "FROM outbox WHERE outbox_id = ?",
+            (selected_id,),
+        ).fetchone()
+        if bound is not None:
+            if selected is None:
+                raise OutboxError("Effect id is bound to a missing outbox row")
+            return _entry_from_row(tuple(selected))
+        if selected is None:
+            connection.execute(
+                """
+                INSERT INTO outbox (
+                    outbox_id, domain, correlation_id, payload_json, status,
+                    lease_fencing_token, attempt_count, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'pending', 0, 0, ?, ?)
+                """,
+                (outbox_id, domain, correlation_id, payload_json, _wire(now), _wire(now)),
+            )
+            selected_id = outbox_id
+        else:
+            existing = _entry_from_row(tuple(selected))
+            if (
+                existing.domain != domain
+                or existing.correlation_id != correlation_id
+                or existing.payload_json != payload_json
+            ):
+                raise OutboxError("Existing outbox key has different domain, correlation or payload")
         connection.execute(
-            """
-            INSERT INTO outbox (
-                outbox_id, domain, correlation_id, payload_json, status,
-                lease_fencing_token, attempt_count, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, 'pending', 0, 0, ?, ?)
-            """,
-            (outbox_id, domain, correlation_id, payload_json, _wire(now), _wire(now)),
+            "INSERT INTO outbox_effects (effect_id, outbox_id) VALUES (?, ?)",
+            (effect_id, selected_id),
         )
-    entry = load_entry(db_path, outbox_id)
-    assert entry is not None
-    return entry
+        selected = connection.execute(
+            "SELECT outbox_id, domain, correlation_id, payload_json, status, lease_owner, "
+            "lease_fencing_token, lease_expires_at, attempt_count, next_attempt_at, "
+            "remote_request_hash, remote_response_hash, failure_reason, created_at, updated_at "
+            "FROM outbox WHERE outbox_id = ?",
+            (selected_id,),
+        ).fetchone()
+        assert selected is not None
+        return _entry_from_row(tuple(selected))
 
 
 def load_entry(db_path: Path, outbox_id: str) -> OutboxEntry | None:
@@ -271,12 +356,113 @@ def load_success_receipt(db_path: Path, outbox_id: str) -> str | None:
     return None if row is None else str(row[0])
 
 
+def load_latest_receipt(db_path: Path, outbox_id: str) -> str | None:
+    if not db_path.exists():
+        return None
+    with open_program_db(db_path, read_only=True) as connection:
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'outbox_state_receipts'"
+        ).fetchone()
+        if table is None:
+            return None
+        row = connection.execute(
+            "SELECT receipt_json FROM outbox_state_receipts "
+            "WHERE outbox_id = ? ORDER BY receipt_id DESC LIMIT 1",
+            (outbox_id,),
+        ).fetchone()
+    return None if row is None else str(row[0])
+
+
+def record_outbox_receipt(
+    db_path: Path,
+    outbox_id: str,
+    receipt: dict[str, object],
+    *,
+    expected_status: str | None = None,
+) -> str:
+    receipt_json = json.dumps(receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    status = str(receipt.get("terminal_status") or "")
+    recorded_at = str(receipt.get("recorded_at") or _wire(_now()))
+    with open_program_db(db_path, durability="strict") as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute("SELECT status FROM outbox WHERE outbox_id = ?", (outbox_id,)).fetchone()
+        if row is None:
+            raise OutboxError(f"unknown outbox row {outbox_id!r}")
+        if expected_status is not None and row[0] != expected_status:
+            raise OutboxError(
+                f"outbox row {outbox_id!r} is {row[0]!r}; "
+                f"receipt expects {expected_status!r}"
+            )
+        _append_state_receipt(connection, outbox_id, status, recorded_at, receipt_json)
+    return receipt_json
+
+
+def _append_state_receipt(
+    connection,
+    outbox_id: str,
+    terminal_status: str,
+    recorded_at: str,
+    receipt_json: str,
+) -> None:
+    connection.execute(_STATE_RECEIPTS_TABLE_SQL)
+    connection.execute(_STATE_RECEIPTS_INDEX_SQL)
+    connection.execute(
+        """
+        INSERT INTO outbox_state_receipts (
+            outbox_id, terminal_status, recorded_at, receipt_json
+        ) VALUES (?, ?, ?, ?)
+        """,
+        (outbox_id, terminal_status, recorded_at, receipt_json),
+    )
+
+
+def _state_receipt(
+    *,
+    outbox_id: str,
+    domain: str,
+    correlation_id: str,
+    payload_json: str,
+    terminal_status: str,
+    owner: str,
+    fencing_token: int,
+    attempt_count: int,
+    reason: object,
+    recorded_at: str,
+) -> str:
+    operation: str | None = None
+    try:
+        payload = json.loads(payload_json)
+        if isinstance(payload, dict) and isinstance(payload.get("operation"), str):
+            operation = payload["operation"]
+    except (TypeError, ValueError):
+        pass
+    return json.dumps(
+        {
+            "schema_version": "1",
+            "outbox_id": outbox_id,
+            "domain": domain,
+            "correlation_id": correlation_id,
+            "operation": operation,
+            "payload_sha256": hashlib.sha256(payload_json.encode("utf-8")).hexdigest(),
+            "terminal_status": terminal_status,
+            "owner": owner,
+            "fencing_token": fencing_token,
+            "attempt_count": attempt_count,
+            "reason": reason if isinstance(reason, str) else None,
+            "recorded_at": recorded_at,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 def lease_next(
     db_path: Path,
     domain: str,
     *,
     owner: str,
     ttl_seconds: int = 300,
+    eligible_operation: str | None = None,
 ) -> OutboxEntry | None:
     """Atomically lease the oldest eligible row for ``domain``: a ``pending``
     row, a due ``failed_retryable`` row, or any row whose previous lease has
@@ -294,8 +480,14 @@ def lease_next(
                    next_attempt_at, created_at
             FROM outbox
             WHERE domain = ? AND status IN ('pending', 'failed_retryable', 'leased')
+              AND (
+                  ? IS NULL
+                  OR json_valid(payload_json) = 0
+                  OR json_type(payload_json, '$.operation') IS NULL
+                  OR json_extract(payload_json, '$.operation') = ?
+              )
             """,
-            (domain,),
+            (domain, eligible_operation, eligible_operation),
         ):
             created_at = _scheduling_timestamp(candidate["created_at"])
             deadline = candidate["lease_expires_at"] if candidate["status"] == "leased" else candidate["next_attempt_at"]
@@ -381,6 +573,26 @@ def classify_expired_dispatched(
         if row is None:
             raise LeaseNoLongerCurrent(observed.outbox_id)
         result = _entry_from_row(tuple(row))
+        recorded_at = str(_wire(now))
+        receipt_json = _state_receipt(
+            outbox_id=result.outbox_id,
+            domain=result.domain,
+            correlation_id=result.correlation_id,
+            payload_json=result.payload_json,
+            terminal_status=result.status,
+            owner=workspace_lease.owner,
+            fencing_token=result.lease_fencing_token,
+            attempt_count=result.attempt_count,
+            reason=result.failure_reason,
+            recorded_at=recorded_at,
+        )
+        _append_state_receipt(
+            transaction.connection,
+            result.outbox_id,
+            result.status,
+            recorded_at,
+            receipt_json,
+        )
     return result
 
 
@@ -393,6 +605,7 @@ def _transition(
     new_status: str,
     extra_columns: dict[str, object] | None = None,
     success_receipt_json: str | None = None,
+    reconciliation_receipt_json: str | None = None,
 ) -> OutboxEntry:
     now = _now()
     columns = dict(extra_columns or {})
@@ -404,11 +617,21 @@ def _transition(
     with open_program_db(db_path, durability="strict") as connection:
         connection.execute("BEGIN IMMEDIATE")
         row = connection.execute(
-            "SELECT lease_owner, lease_fencing_token, status, domain FROM outbox WHERE outbox_id = ?", (outbox_id,)
+            "SELECT lease_owner, lease_fencing_token, status, domain, correlation_id, "
+            "payload_json, attempt_count FROM outbox WHERE outbox_id = ?",
+            (outbox_id,),
         ).fetchone()
         if row is None:
             raise OutboxError(f"unknown outbox row {outbox_id!r}")
-        current_owner, current_token, current_status, domain = row
+        (
+            current_owner,
+            current_token,
+            current_status,
+            domain,
+            correlation_id,
+            payload_json,
+            attempt_count,
+        ) = row
         if current_owner != owner or int(current_token) != fencing_token:
             raise LeaseNoLongerCurrent(outbox_id)
         if current_status in _TRUE_TERMINALS:
@@ -425,7 +648,37 @@ def _transition(
                 "INSERT INTO outbox_success_receipts (outbox_id, receipt_json) VALUES (?, ?)",
                 (outbox_id, success_receipt_json),
             )
+        if reconciliation_receipt_json is not None:
+            connection.execute(_RECONCILIATION_RECEIPTS_SQL)
+            connection.execute(
+                "INSERT INTO outbox_reconciliation_receipts (outbox_id, receipt_json) VALUES (?, ?) "
+                "ON CONFLICT(outbox_id) DO UPDATE SET receipt_json = excluded.receipt_json",
+                (outbox_id, reconciliation_receipt_json),
+            )
+        elif new_status == "uncertain_remote_state":
+            connection.execute(_RECONCILIATION_RECEIPTS_SQL)
+            connection.execute(
+                "DELETE FROM outbox_reconciliation_receipts WHERE outbox_id = ?",
+                (outbox_id,),
+            )
         connection.execute(f"UPDATE outbox SET {set_clause} WHERE outbox_id = ?", (*values, outbox_id))
+        if new_status in _RECEIPTED_STATUSES:
+            recorded_at = str(columns["updated_at"])
+            receipt_json = _state_receipt(
+                outbox_id=outbox_id,
+                domain=domain,
+                correlation_id=correlation_id,
+                payload_json=payload_json,
+                terminal_status=new_status,
+                owner=owner,
+                fencing_token=fencing_token,
+                attempt_count=int(attempt_count),
+                reason=columns.get("failure_reason"),
+                recorded_at=recorded_at,
+            )
+            _append_state_receipt(
+                connection, outbox_id, new_status, recorded_at, receipt_json,
+            )
     entry = load_entry(db_path, outbox_id)
     assert entry is not None
     return entry
@@ -533,8 +786,40 @@ def mark_failed_terminal(db_path: Path, outbox_id: str, *, owner: str, fencing_t
     return _transition(db_path, outbox_id, owner=owner, fencing_token=fencing_token, new_status="failed_terminal", extra_columns={"failure_reason": reason})
 
 
-def mark_uncertain_remote_state(db_path: Path, outbox_id: str, *, owner: str, fencing_token: int, reason: str) -> OutboxEntry:
-    return _transition(db_path, outbox_id, owner=owner, fencing_token=fencing_token, new_status="uncertain_remote_state", extra_columns={"failure_reason": reason})
+def mark_uncertain_remote_state(
+    db_path: Path,
+    outbox_id: str,
+    *,
+    owner: str,
+    fencing_token: int,
+    reason: str,
+    reconciliation_receipt_json: str | None = None,
+) -> OutboxEntry:
+    return _transition(
+        db_path,
+        outbox_id,
+        owner=owner,
+        fencing_token=fencing_token,
+        new_status="uncertain_remote_state",
+        extra_columns={"failure_reason": reason},
+        reconciliation_receipt_json=reconciliation_receipt_json,
+    )
+
+
+def load_reconciliation_receipt(db_path: Path, outbox_id: str) -> str | None:
+    if not db_path.exists():
+        return None
+    with open_program_db(db_path, durability="strict") as connection:
+        exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'outbox_reconciliation_receipts'"
+        ).fetchone()
+        if exists is None:
+            return None
+        row = connection.execute(
+            "SELECT receipt_json FROM outbox_reconciliation_receipts WHERE outbox_id = ?",
+            (outbox_id,),
+        ).fetchone()
+    return None if row is None else str(row[0])
 
 
 def mark_compensation_required(db_path: Path, outbox_id: str, *, owner: str, fencing_token: int, reason: str) -> OutboxEntry:
@@ -552,10 +837,21 @@ def mark_manually_resolved(db_path: Path, outbox_id: str, *, resolved_by: str, r
     now = _now()
     with open_program_db(db_path, durability="strict") as connection:
         connection.execute("BEGIN IMMEDIATE")
-        row = connection.execute("SELECT status FROM outbox WHERE outbox_id = ?", (outbox_id,)).fetchone()
+        row = connection.execute(
+            "SELECT status, domain, correlation_id, payload_json, lease_fencing_token, "
+            "attempt_count FROM outbox WHERE outbox_id = ?",
+            (outbox_id,),
+        ).fetchone()
         if row is None:
             raise OutboxError(f"unknown outbox row {outbox_id!r}")
-        (current_status,) = row
+        (
+            current_status,
+            domain,
+            correlation_id,
+            payload_json,
+            fencing_token,
+            attempt_count,
+        ) = row
         if current_status not in _TRUE_TERMINALS or current_status == "manually_resolved":
             raise OutboxError(
                 f"outbox row {outbox_id!r} is in status {current_status!r}; "
@@ -565,6 +861,26 @@ def mark_manually_resolved(db_path: Path, outbox_id: str, *, resolved_by: str, r
             "UPDATE outbox SET status = 'manually_resolved', lease_owner = ?, "
             "failure_reason = ?, updated_at = ? WHERE outbox_id = ?",
             (resolved_by, reason, _wire(now), outbox_id),
+        )
+        recorded_at = str(_wire(now))
+        receipt_json = _state_receipt(
+            outbox_id=outbox_id,
+            domain=domain,
+            correlation_id=correlation_id,
+            payload_json=payload_json,
+            terminal_status="manually_resolved",
+            owner=resolved_by,
+            fencing_token=int(fencing_token),
+            attempt_count=int(attempt_count),
+            reason=reason,
+            recorded_at=recorded_at,
+        )
+        _append_state_receipt(
+            connection,
+            outbox_id,
+            "manually_resolved",
+            recorded_at,
+            receipt_json,
         )
     entry = load_entry(db_path, outbox_id)
     assert entry is not None
@@ -582,8 +898,12 @@ CREATE TABLE IF NOT EXISTS outbox_effects (
 def load_effect_outbox_id(db_path: Path, effect_id: str) -> str | None:
     if not db_path.exists():
         return None
-    with open_program_db(db_path, durability="strict") as connection:
-        connection.execute(_EFFECTS_SQL)
+    with open_program_db(db_path, read_only=True) as connection:
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'outbox_effects'"
+        ).fetchone()
+        if table is None:
+            return None
         row = connection.execute("SELECT outbox_id FROM outbox_effects WHERE effect_id = ?", (effect_id,)).fetchone()
     return None if row is None else row[0]
 
@@ -598,7 +918,80 @@ def bind_effect(db_path: Path, effect_id: str, outbox_id: str) -> str:
     return bound
 
 
-def _reconcile_uncertain(db_path: Path, outbox_id: str, *, set_sql: str, params: tuple, receipt_json: str | None) -> OutboxEntry:
+def enqueue_with_effect(
+    db_path: Path,
+    outbox_id: str,
+    *,
+    domain: str,
+    correlation_id: str,
+    payload_json: str,
+    effect_id: str,
+) -> tuple[OutboxEntry, bool]:
+    """Atomically enqueue or recover the first outbox row bound to ``effect_id``."""
+    now = _now()
+    columns = (
+        "outbox_id, domain, correlation_id, payload_json, status, lease_owner, "
+        "lease_fencing_token, lease_expires_at, attempt_count, next_attempt_at, "
+        "remote_request_hash, remote_response_hash, failure_reason, created_at, updated_at"
+    )
+    with open_program_db(db_path, durability="strict") as connection:
+        connection.executescript(_SCHEMA_SQL)
+        connection.executescript(_EFFECTS_SQL)
+        connection.execute("BEGIN IMMEDIATE")
+        bound_row = connection.execute(
+            "SELECT outbox_id FROM outbox_effects WHERE effect_id = ?", (effect_id,),
+        ).fetchone()
+        if bound_row is not None:
+            row = connection.execute(
+                f"SELECT {columns} FROM outbox WHERE outbox_id = ?", (bound_row[0],),
+            ).fetchone()
+            if row is None:
+                raise OutboxError("Effect id is bound to a missing outbox row")
+            return _entry_from_row(row), False
+
+        row = connection.execute(
+            f"SELECT {columns} FROM outbox WHERE outbox_id = ?", (outbox_id,),
+        ).fetchone()
+        if row is None:
+            connection.execute(
+                """
+                INSERT INTO outbox (
+                    outbox_id, domain, correlation_id, payload_json, status,
+                    lease_fencing_token, attempt_count, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'pending', 0, 0, ?, ?)
+                """,
+                (outbox_id, domain, correlation_id, payload_json, _wire(now), _wire(now)),
+            )
+            created = True
+        else:
+            existing = _entry_from_row(row)
+            if (
+                existing.domain != domain
+                or existing.correlation_id != correlation_id
+                or existing.payload_json != payload_json
+            ):
+                raise OutboxError("Existing outbox key has different domain, correlation or payload")
+            created = False
+        connection.execute(
+            "INSERT INTO outbox_effects (effect_id, outbox_id) VALUES (?, ?)",
+            (effect_id, outbox_id),
+        )
+        row = connection.execute(
+            f"SELECT {columns} FROM outbox WHERE outbox_id = ?", (outbox_id,),
+        ).fetchone()
+        assert row is not None
+    return _entry_from_row(row), created
+
+
+def _reconcile_uncertain(
+    db_path: Path,
+    outbox_id: str,
+    *,
+    set_sql: str,
+    params: tuple,
+    receipt_json: str | None,
+    state_receipt: dict[str, object] | None = None,
+) -> OutboxEntry:
     with open_program_db(db_path, durability="strict") as connection:
         connection.execute(_SUCCESS_RECEIPTS_SQL)
         connection.execute("BEGIN IMMEDIATE")
@@ -610,6 +1003,23 @@ def _reconcile_uncertain(db_path: Path, outbox_id: str, *, set_sql: str, params:
         connection.execute(f"UPDATE outbox SET {set_sql}, updated_at = ? WHERE outbox_id = ?", (*params, _wire(_now()), outbox_id))
         if receipt_json is not None:
             connection.execute("INSERT INTO outbox_success_receipts (outbox_id, receipt_json) VALUES (?, ?)", (outbox_id, receipt_json))
+        else:
+            connection.execute(_RECONCILIATION_RECEIPTS_SQL)
+            connection.execute(
+                "DELETE FROM outbox_reconciliation_receipts WHERE outbox_id = ?",
+                (outbox_id,),
+            )
+        if state_receipt is not None:
+            state_receipt_json = json.dumps(
+                state_receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+            )
+            _append_state_receipt(
+                connection,
+                outbox_id,
+                str(state_receipt.get("terminal_status") or ""),
+                str(state_receipt.get("recorded_at") or _wire(_now())),
+                state_receipt_json,
+            )
     entry = load_entry(db_path, outbox_id)
     assert entry is not None
     return entry
@@ -620,13 +1030,34 @@ def mark_reconciled_confirmed(db_path: Path, outbox_id: str, *, reconciled_by: s
     return _reconcile_uncertain(
         db_path, outbox_id, set_sql="status = 'completed', lease_owner = ?, failure_reason = NULL",
         params=(reconciled_by,), receipt_json=receipt_json,
+        state_receipt={
+            **json.loads(receipt_json),
+            "terminal_status": "completed",
+            "reconciled_by": reconciled_by,
+        },
     )
 
 
-def mark_reconciled_absent(db_path: Path, outbox_id: str, *, reconciled_by: str, reason: str) -> OutboxEntry:
+def mark_reconciled_absent(
+    db_path: Path,
+    outbox_id: str,
+    *,
+    reconciled_by: str,
+    reason: str,
+    state_receipt: dict[str, object] | None = None,
+) -> OutboxEntry:
     """uncertain_remote_state -> pending, only after a marker lookup verified the remote effect is absent."""
     return _reconcile_uncertain(
         db_path, outbox_id,
         set_sql="status = 'pending', lease_owner = NULL, lease_expires_at = NULL, next_attempt_at = NULL, failure_reason = ?",
         params=(f"{reason} (by {reconciled_by})",), receipt_json=None,
+        state_receipt=state_receipt or {
+            "schema_version": "1",
+            "outbox_id": outbox_id,
+            "terminal_status": "pending",
+            "reconciled_by": reconciled_by,
+            "disposition": "absent",
+            "reason": reason,
+            "recorded_at": _wire(_now()),
+        },
     )

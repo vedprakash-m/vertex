@@ -24,6 +24,7 @@ from src.core.exceptions import ConfigError
 from src.commands.confirm_stages import claim_resolution
 from src.commands.confirm_stages.claim_resolution import (
     claim_extractor_mode,
+    evaluate_claim_evidence_gate,
     evaluate_claim_extraction_calibration_gate,
     prepare_confirm_claim_extraction_for_v2,
     record_confirmed_claims_for_v2,
@@ -172,6 +173,66 @@ def test_evaluate_calibration_gate_regex_heavy_divergence_fails() -> None:
     assert "Regex extraction found more" in gate.message
 
 
+@pytest.mark.parametrize(
+    ("entity_refs", "expected_message"),
+    [
+        ((), "1 unsupported claim(s), 0 dangling/unapproved evidence reference(s)"),
+        (("WI:999",), "1 unsupported claim(s), 1 dangling/unapproved evidence reference(s)"),
+        (("WI:1001", "WI:999"), "0 unsupported claim(s), 1 dangling/unapproved evidence reference(s)"),
+        (("DEP:database",), "1 unsupported claim(s), 1 dangling/unapproved evidence reference(s)"),
+    ],
+)
+def test_evaluate_claim_evidence_gate_blocks_missing_or_unapproved_refs(
+    entity_refs: tuple[str, ...],
+    expected_message: str,
+) -> None:
+    extraction_result = ClaimExtractionResult(
+        claims=(
+            SimpleNamespace(
+                id="claim-1",
+                text="Ship the change.",
+                entity_refs=entity_refs,
+            ),
+        ),
+        decision_asks=(),
+    )
+
+    report = evaluate_claim_evidence_gate(
+        extraction_result,
+        items=(SimpleNamespace(id=1001),),
+    )
+
+    assert len(report.results) == 1
+    gate = report.results[0]
+    assert gate.gate_id == "RELO-QG-05"
+    assert gate.passed is False
+    assert gate.exit_code == 3
+    assert gate.forceable is False
+    assert expected_message in gate.message
+
+
+def test_evaluate_claim_evidence_gate_accepts_attributable_claims() -> None:
+    extraction_result = ClaimExtractionResult(
+        claims=(
+            SimpleNamespace(
+                id="claim-1",
+                text="Ship the change.",
+                entity_refs=("WI:1001",),
+            ),
+        ),
+        decision_asks=(),
+    )
+
+    report = evaluate_claim_evidence_gate(
+        extraction_result,
+        items=(SimpleNamespace(id=1001),),
+    )
+
+    assert report.qg_results == {"RELO-QG-05": True}
+    assert report.results[0].exit_code == 3
+    assert report.results[0].forceable is False
+
+
 def test_prepare_claim_extraction_unresolved_edition_returns_empty(tmp_path: Path) -> None:
     reports_root = tmp_path / "repo" / "reports"
     reports_root.mkdir(parents=True)
@@ -220,7 +281,7 @@ def test_prepare_claim_extraction_builds_calibration_record(monkeypatch, tmp_pat
     assert built["ai_extracted"] is extraction_sentinel and built["program_id"] == "acme"
 
 
-def test_prepare_claim_extraction_regex_mode_skips_calibration_record(monkeypatch, tmp_path: Path) -> None:
+def test_prepare_claim_extraction_regex_mode_prepares_result_without_calibration(monkeypatch, tmp_path: Path) -> None:
     reports_root = tmp_path / "repo" / "reports"
     reports_root.mkdir(parents=True)
     resolved = SimpleNamespace(program=SimpleNamespace(id="acme"), workstreams=())
@@ -242,7 +303,8 @@ def test_prepare_claim_extraction_regex_mode_skips_calibration_record(monkeypatc
         reports_root=reports_root,
         items=(),
     )
-    assert result is None and mode == "regex" and record is None
+    assert result == ClaimExtractionResult(claims=(), decision_asks=(), warnings=())
+    assert mode == "regex" and record is None
 
 
 def test_prepare_claim_extraction_uses_explicit_programs_root(monkeypatch, tmp_path: Path) -> None:
@@ -279,7 +341,12 @@ def test_prepare_claim_extraction_uses_explicit_programs_root(monkeypatch, tmp_p
         programs_root=selected_root,
     )
 
-    assert result == (None, "regex", (), None)
+    assert result == (
+        ClaimExtractionResult(claims=(), decision_asks=(), warnings=()),
+        "regex",
+        (),
+        None,
+    )
     assert resolution_calls == [("acme_weekly", selected_root.parent / "editions", selected_root)]
     assert narrative_calls[0][1]["programs_root"] == selected_root
     assert extraction_calls[0]["programs_root"] == selected_root
@@ -376,6 +443,43 @@ def test_record_confirmed_claims_for_v2_skips_resolution_when_result_is_precompu
         "persisted warning",
         "Claim tracker recorded 1 claim(s) and 0 decision ask(s).",
     )
+
+
+def test_record_confirmed_claims_for_v2_does_not_reextract_without_precomputed_gate_decision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reports_root = tmp_path / "repo" / "reports"
+    reports_root.mkdir(parents=True)
+    resolved = SimpleNamespace(program=SimpleNamespace(id="acme"), workstreams=())
+    monkeypatch.setattr(
+        claim_resolution,
+        "resolve_edition",
+        lambda *args, **kwargs: resolved,
+    )
+    monkeypatch.setattr(claim_resolution, "load_narratives", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        claim_resolution,
+        "resolve_confirm_claim_extraction",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("must not re-extract")),
+    )
+    monkeypatch.setattr(
+        claim_resolution,
+        "record_confirmed_claims",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("must not persist")),
+    )
+
+    warnings = record_confirmed_claims_for_v2(
+        edition_name="acme_weekly",
+        issue_number=2,
+        confirmed_at=datetime(2026, 6, 5, 12, 0, 0),
+        reports_root=reports_root,
+        items=(),
+        extraction_result=None,
+        resolve_extraction_if_missing=False,
+    )
+
+    assert warnings == ()
 
 
 def test_record_confirmed_claims_for_v2_uses_explicit_programs_root(

@@ -22,6 +22,7 @@ from src.core.chart_policy import parse_chart_cache_ttl
 from src.core.exceptions import ConfigError
 from src.core.html_renderer import RenderContext
 from src.core.models import Comment, Revision, RiskLevel, WorkItem
+from src.core.quality_gates import QualityGateReport, evaluate_chart_gates
 from src.core.view_models import KustoMetric, KustoSectionData, KustoTableCell
 
 
@@ -71,10 +72,42 @@ def restore_chart_placements(context: RenderContext, draft_state: dict[str, Any]
     from src.core.stages.render_stage import _route_chart_placements
 
     routed = deserialize_kusto_sections(tuple(draft_state.get("routed_chart_sections") or ()))
-    remaining, executive, workstreams = _route_chart_placements(routed, context.workstreams)
+    hidden_sections = frozenset(
+        str(section).replace("-", "_") for section in context.hidden_render_sections
+    )
+    remaining, executive, workstreams = _route_chart_placements(
+        routed,
+        context.workstreams,
+        exec_summary_visible=(
+            bool((context.report.exec_summary_text or "").strip())
+            and "exec_summary" not in hidden_sections
+        ),
+        hidden_sections=hidden_sections,
+    )
     return replace(
         context, kusto_sections=context.kusto_sections + remaining,
         exec_summary_chart=executive, workstreams=workstreams,
+    )
+
+
+def restored_chart_gate_report(context: RenderContext, current_time: datetime) -> QualityGateReport:
+    sections = (
+        context.kusto_sections
+        + ((context.exec_summary_chart,) if context.exec_summary_chart is not None else ())
+        + tuple(chart for workstream in context.workstreams for chart in workstream.attached_charts)
+    )
+    placement_failures = tuple(
+        section
+        for section in sections
+        if isinstance((message := getattr(section, "message", None)), str)
+        and message.startswith((
+            "Chart placement target ",
+            "Multiple charts target ",
+            "Unknown chart placement target ",
+        ))
+    )
+    return QualityGateReport(
+        results=evaluate_chart_gates(placement_failures, current_time=current_time).failing_results
     )
 
 

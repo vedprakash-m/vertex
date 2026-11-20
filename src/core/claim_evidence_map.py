@@ -1,7 +1,7 @@
-"""Claim-to-evidence map and QG-05 truth-consistency check (Zone A, observe-only).
+"""Claim-to-evidence map and QG-05 truth-consistency check (Zone A).
 
 Pure and deterministic: no I/O, no clock, no AI/M365 imports. Findings never
-raise; ``would_block`` reports what an enforcing gate would do (OD-12/OD-13).
+raise; ``blocked`` applies the selected observe-only or release-block mode.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ class FindingKind(str, Enum):
 
 class TruthConsistencyMode(str, Enum):
     OBSERVE_ONLY = "observe_only"
+    RELEASE_BLOCK = "release_block"
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,7 +51,7 @@ class TruthConsistencyResult:
 
     @property
     def blocked(self) -> bool:
-        return False
+        return self.mode is TruthConsistencyMode.RELEASE_BLOCK and self.would_block
 
 
 def build_claim_evidence_map(
@@ -82,5 +83,5 @@ def evaluate_truth_consistency(
     mode: TruthConsistencyMode = TruthConsistencyMode.OBSERVE_ONLY,
 ) -> TruthConsistencyResult:
     report = build_claim_evidence_map(claims, known_evidence_refs)
-    would_block = any(f.kind is FindingKind.UNSUPPORTED_CLAIM for f in report.findings)
+    would_block = bool(report.findings)
     return TruthConsistencyResult(mode, would_block, report.findings, report)

@@ -67,6 +67,8 @@ def _git(*args: str) -> subprocess.CompletedProcess[str]:
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
 
@@ -112,17 +114,22 @@ def scan_lines(path: str, lines: Iterable[str]) -> list[str]:
         return []
     findings: list[str] = []
     for line_number, line in enumerate(lines, start=1):
-        if any(value in line for value in ALLOWED_VALUES):
-            continue
-        if PRIVATE_NAME_PATTERN.search(line):
+        if any(
+            not _is_allowed_match(match)
+            for match in PRIVATE_NAME_PATTERN.finditer(line)
+        ):
             findings.append(f"{path}:{line_number}: private program name")
         for pattern in SECRET_PATTERNS:
-            if pattern.search(line):
+            if any(not _is_allowed_match(match) for match in pattern.finditer(line)):
                 findings.append(f"{path}:{line_number}: potential secret")
         for pattern in PII_PATTERNS:
-            if pattern.search(line):
+            if any(not _is_allowed_match(match) for match in pattern.finditer(line)):
                 findings.append(f"{path}:{line_number}: potential private/PII value")
     return findings
+
+
+def _is_allowed_match(match: re.Match[str]) -> bool:
+    return any(match.group(0) in allowed_value for allowed_value in ALLOWED_VALUES)
 
 
 def main() -> int:

@@ -574,7 +574,7 @@ def test_source_rejection_cannot_run_complete_only_family_gates(
 
 
 @pytest.mark.parametrize("source_type", [EntityType.MESSAGE, EntityType.EVENT, EntityType.DRIVE_ITEM])
-def test_direct_staging_applies_mail_time_check_only_to_mail(
+def test_direct_staging_qualifies_message_and_drive_item_source_time(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_type: EntityType,
 ) -> None:
     from src.ai.rev.extractor import ExtractedClaim
@@ -597,6 +597,11 @@ def test_direct_staging_applies_mail_time_check_only_to_mail(
             "subject": "Synthetic deployment",
             "sender": "owner@example.com",
             "received_at": "private-synthetic-invalid-time",
+            **({
+                "site_id": "site-1",
+                "page_url": "https://example.invalid/page/1",
+                "last_modified": "2026-06-24T12:00:00+00:00",
+            } if source_type is EntityType.DRIVE_ITEM else {}),
         },
     )
     claim = ExtractedClaim(
@@ -627,7 +632,7 @@ def test_direct_staging_applies_mail_time_check_only_to_mail(
         evidence_refs=(evidence_ref,), set_at=NOW, programs_root=tmp_path,
     )
 
-    if source_type is EntityType.MESSAGE:
+    if source_type in (EntityType.MESSAGE, EntityType.DRIVE_ITEM):
         assert staged == []
         assert failures == 1
         assert fallback_values == []
@@ -635,7 +640,11 @@ def test_direct_staging_applies_mail_time_check_only_to_mail(
     else:
         assert len(staged) == 1
         assert failures == 0
-        assert fallback_values == ["private-synthetic-invalid-time"]
+        assert fallback_values == (
+            []
+            if source_type is EntityType.DRIVE_ITEM
+            else ["private-synthetic-invalid-time"]
+        )
 
 
 class TestLocalImportFileFinalization:
@@ -1553,6 +1562,41 @@ class TestHighVolumeBatchedDrain:
         # The other 2 files were never claimed — still sitting untouched in inbox/.
         assert len(list(eml_inbox.glob("*.eml"))) == 2
         assert not any(deps.enumerator.claimed_dir().glob("*.eml"))
+
+    def test_fresh_restarts_continue_claimed_batch_within_each_limit(self, tmp_path: Path) -> None:
+        eml_inbox = tmp_path / "rev_inbox"
+        eml_inbox.mkdir()
+        self._write_n_emls(eml_inbox, 3)
+        seed = _build_deps(eml_inbox).enumerator
+        seeded = seed.enumerate(
+            RetrievalIntent(entity_type=EntityType.MESSAGE, limit=3),
+            correlation_id="seed-crash",
+        )
+        assert isinstance(seeded, Success)
+        assert len(seeded.value) == 3
+
+        reports = []
+        for cycle in range(3):
+            reports.append(run_rev_cycle(
+                program_id="prog-local",
+                intent=RetrievalIntent(entity_type=EntityType.MESSAGE, limit=1),
+                deps=_build_deps(eml_inbox),
+                profile=RevRetrievalProfile(profile=REV_PROFILE_SEARCH_HYDRATE),
+                mailbox_tenant_id="t",
+                mailbox_principal="operator@example.com",
+                mailbox_container="inbox",
+                correlation_id=f"restart-{cycle}",
+                programs_root=tmp_path,
+                budget_limits=BudgetLimits(),
+                set_at=NOW,
+            ))
+
+        assert [report.processed_successfully for report in reports] == [1, 1, 1]
+        assert sorted(
+            path.name for path in (eml_inbox / "processed").glob("*.eml")
+        ) == [f"msg{i:03d}.eml" for i in range(3)]
+        assert not any((eml_inbox / "claimed").glob("*.eml"))
+        assert not any((eml_inbox / "quarantine").glob("*.eml"))
 
     def test_multi_cycle_drain_processes_every_file_exactly_once(self, tmp_path: Path) -> None:
         eml_inbox = tmp_path / "rev_inbox"

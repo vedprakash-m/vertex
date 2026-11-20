@@ -38,10 +38,19 @@ def test_forced_confirm_rejects_foreign_fact_pin_scope(
         capture["fact_snapshot_id"] = pin.snapshot_id
         capture.pop("sha256")
         capture["sha256"] = hash_jsonable(capture)
+        observation = manifest["metadata"]["program_verdict_observation"]
+        comparison = manifest["metadata"]["program_verdict_comparison"]
+        observation["inputs"]["capture"] = capture
+        observation["verdict"]["snapshot_id"] = capture["sha256"]
+        observation["inputs_sha256"] = hash_jsonable(observation["inputs"])
+        observation["verdict_sha256"] = hash_jsonable(observation["verdict"])
+        comparison["capture_sha256"] = capture["sha256"]
+        comparison["observation_inputs_sha256"] = observation["inputs_sha256"]
         path.write_text(json.dumps(manifest), encoding="utf-8")
         return {
             **draft,
             "run_evidence_snapshot_sha256": capture["sha256"],
+            "program_verdict_observation_sha256": hash_jsonable(observation),
             "program_fact_snapshot": {
                 **draft["program_fact_snapshot"],
                 "snapshot_id": pin.snapshot_id,

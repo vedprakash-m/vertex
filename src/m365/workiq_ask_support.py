@@ -26,6 +26,7 @@ class DiscoveryRequest:
     window_start: date
     window_end: date
     limit: int = 8
+    senders: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +36,7 @@ class StructuredDiscoveryResult:
     response_usable: bool
     rejected_identity_count: int = 0
     rejected_invalid_record_count: int = 0
+    rejected_outside_window_count: int = 0
 
 
 def build_structured_discovery_question(request: DiscoveryRequest) -> str:
@@ -48,11 +50,21 @@ def build_structured_discovery_question(request: DiscoveryRequest) -> str:
     terms = tuple(_clean_prompt_value(term, field_name="terms") for term in request.terms if term.strip())
     if not terms:
         raise ValueError("WorkIQ discovery terms must not be empty")
+    senders = tuple(
+        _clean_prompt_value(sender, field_name="senders")
+        for sender in request.senders
+        if sender.strip()
+    )
     lane_terms = "; ".join(terms)
+    sender_scope = (
+        f" Only include emails from these senders: '{'; '.join(senders)}'."
+        if senders
+        else ""
+    )
     return (
         "Use my Microsoft 365 mailbox to answer. "
         f"Which of my emails received between {request.window_start.isoformat()} and {request.window_end.isoformat()} "
-        f"are about, or closely related to, '{lane_terms}' for workstream '{lane_name}'? "
+        f"are about, or closely related to, '{lane_terms}' for workstream '{lane_name}'?{sender_scope} "
         "Return JSON only, no markdown, using this schema: "
         '{"emails":[{"id":"","conversationId":"","threadId":"","subject":"","from":"",'
         '"receivedDateTime":"","webUrl":"","bodyPreview":""}]}. '
@@ -68,6 +80,7 @@ def validate_structured_discovery_payload(
     window_end: date,
     limit: int,
     allowed_web_hosts: frozenset[str] = _DEFAULT_MAIL_WEB_HOSTS,
+    senders: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Fail closed per record and return only bounded, safe FQ-01 emails.
 
@@ -88,7 +101,7 @@ def validate_structured_discovery_payload(
 
     return validate_structured_discovery_payload_with_diagnostics(
         payload, window_start=window_start, window_end=window_end,
-        limit=limit, allowed_web_hosts=allowed_web_hosts,
+        limit=limit, allowed_web_hosts=allowed_web_hosts, senders=senders,
     ).payload
 
 
@@ -99,6 +112,7 @@ def validate_structured_discovery_payload_with_diagnostics(
     window_end: date,
     limit: int,
     allowed_web_hosts: frozenset[str] = _DEFAULT_MAIL_WEB_HOSTS,
+    senders: tuple[str, ...] = (),
 ) -> StructuredDiscoveryResult:
     """Return bounded records and count-only validation diagnostics."""
 
@@ -115,8 +129,13 @@ def validate_structured_discovery_payload_with_diagnostics(
     rejected_source_time_count = 0
     rejected_identity_count = 0
     rejected_invalid_record_count = 0
+    rejected_outside_window_count = 0
+    sender_scope = tuple(sender.strip().casefold() for sender in senders if sender.strip())
     for raw in raw_records:
         if not isinstance(raw, dict) or _contains_terminal_escape(raw):
+            rejected_invalid_record_count += 1
+            continue
+        if sender_scope and not _record_matches_sender_scope(raw, sender_scope):
             rejected_invalid_record_count += 1
             continue
         received_at = _parse_iso_datetime(raw.get("receivedDateTime"))
@@ -124,6 +143,7 @@ def validate_structured_discovery_payload_with_diagnostics(
             rejected_source_time_count += 1
             continue
         if not start_at <= received_at <= end_at:
+            rejected_outside_window_count += 1
             continue
         previous_identity = _normalize_discovery_identity(
             raw.get("conversationId") or raw.get("threadId") or raw.get("id"),
@@ -182,7 +202,12 @@ def validate_structured_discovery_payload_with_diagnostics(
         if len(valid) >= limit:
             break
     return StructuredDiscoveryResult(
-        {"emails": valid}, rejected_source_time_count, True, rejected_identity_count, rejected_invalid_record_count,
+        {"emails": valid},
+        rejected_source_time_count,
+        True,
+        rejected_identity_count,
+        rejected_invalid_record_count,
+        rejected_outside_window_count,
     )
 
 
@@ -231,11 +256,41 @@ def _parse_iso_datetime(value: Any) -> datetime | None:
         return None
     try:
         parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            return None
         return parsed.astimezone(timezone.utc)
     except (ValueError, OverflowError):
         return None
+
+
+def _record_matches_sender_scope(record: dict[str, Any], senders: tuple[str, ...]) -> bool:
+    sender = record.get("from") or record.get("sender")
+    address = ""
+    aliases: list[str] = []
+    if isinstance(sender, str):
+        address = sender.strip().casefold()
+    elif isinstance(sender, dict):
+        envelope = sender.get("emailAddress", sender)
+        if isinstance(envelope, dict):
+            raw_address = envelope.get("address")
+            raw_name = envelope.get("name")
+            address = raw_address.strip().casefold() if isinstance(raw_address, str) else ""
+            if isinstance(raw_name, str) and raw_name.strip():
+                aliases.append(raw_name.strip().casefold())
+    if address:
+        aliases.append(address)
+    return any(
+        (
+            requested == address
+            if "@" in requested
+            else any(
+                requested == candidate
+                or ("@" in candidate and requested == candidate.split("@", 1)[0])
+                for candidate in aliases
+            )
+        )
+        for requested in senders
+    )
 
 
 def _semantic_email_identity(record: dict[str, Any], *, received_at: datetime) -> str | None:

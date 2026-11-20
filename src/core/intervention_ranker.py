@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
-from src.core.jsonl_utils import parse_jsonl_line
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -309,28 +307,5 @@ def _build_source_hash(*parts: str) -> str:
 
 
 def _load_edit_magnitude_by_section(program_id: str, programs_root: Path) -> dict[str, float]:
-    path = programs_root / program_id / "journal" / "edit_patterns.jsonl"
-    if not path.exists():
-        return {}
-
-    totals: dict[str, float] = {}
-    counts: dict[str, int] = {}
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        try:
-            record = parse_jsonl_line(line)
-        except json.JSONDecodeError:
-            continue
-        section_id = record.get("section_id")
-        magnitude = record.get("author_override_magnitude")
-        if not isinstance(section_id, str) or not isinstance(magnitude, (int, float)):
-            continue
-        totals[section_id] = totals.get(section_id, 0.0) + float(magnitude)
-        counts[section_id] = counts.get(section_id, 0) + 1
-    return {
-        section_id: round(totals[section_id] / counts[section_id], 2)
-        for section_id in totals
-        if counts[section_id] > 0
-    }
+    del program_id, programs_root
+    return {}

@@ -258,7 +258,16 @@ from src.core.m365_signal_corpus import build_m365_corpus_texts_by_workstream, b
 from src.core.m365_identifiers import normalize_meeting_id, normalize_thread_id
 from src.core.m365_registry_store import M365RegistryArtifact, _artifact_meets_auto_promotion_confidence_gate, build_auto_meeting_artifact_id, build_auto_thread_artifact_id, describe_current_m365_registry_promotion_blockers, ensure_m365_registry_bootstrap, is_current_m365_registry_promotion_candidate, load_m365_registry, read_m365_routing_feedback_events, refresh_m365_registry_metrics, tracked_registry_thread_ids, upsert_m365_registry_artifacts
 from src.core.metric_models import MetricObservation
-from src.core.integration_types import ChannelRegistration, DiscoveredRef, HydrationMode, RegistrationBinding, RegistrationStatus, RunContext
+from src.core.integration_types import (
+    ChannelRegistration,
+    DiscoveredRef,
+    HydrationMode,
+    KustoResultSet,
+    RegistrationBinding,
+    RegistrationStatus,
+    RunContext,
+)
+from src.core.kusto_signal_extractor import format_kusto_result_text
 from src.core.models import Comment, Confidence, Revision, RiskLevel, SnapshotItem, WorkItem
 from src.core.program_fact_store import (
     load_current_action_items,
@@ -3141,9 +3150,26 @@ def _build_kusto_kpi_signal(
     event_timestamp = timestamp.isoformat()
     raw_ref = f"kusto_kpi:{query.id}:{event_timestamp}"
     first_row = rows[0]
-    result_value = _kusto_kpi_value(query, first_row)
+    unbound_kusto_result = query.engine == "kusto" and query.metric_id is None
+    result_value = (
+        None
+        if unbound_kusto_result and (len(rows) != 1 or query.result_column is None)
+        else _kusto_kpi_value(query, first_row)
+    )
     label = query.label or query.section or query.id
     value_label = result_value if result_value is not None else "rows available"
+    if unbound_kusto_result:
+        text = format_kusto_result_text(
+            KustoResultSet(
+                query_id=query.id,
+                rows=tuple(rows),
+                observed_at=timestamp,
+                result_column=query.result_column,
+                row_count=len(rows),
+            )
+        )
+    else:
+        text = f"KPI {label}: {value_label}"
     # BL-F2 (D-19): see kusto_query_helpers.build_kusto_signal for this fix's rationale.
     workstream_id = query.workstream_ids[0] if query.workstream_ids else None
     signal_entity_refs = merge_entity_refs(
@@ -3158,7 +3184,7 @@ def _build_kusto_kpi_signal(
         workstream_id=workstream_id,
         workstream_ids=query.workstream_ids,
         entity_refs=signal_entity_refs,
-        text=_truncate_signal_text(f"KPI {label}: {value_label}"),
+        text=_truncate_signal_text(text),
         raw_ref=raw_ref,
         confidence=_confidence_from_string(query.confidence),
         metadata={
@@ -3172,7 +3198,11 @@ def _build_kusto_kpi_signal(
             "label": query.label,
             "result_column": query.result_column,
             "result_value": result_value, "unit": query.unit,
-            "result_json": json.dumps(first_row, default=str, sort_keys=True),
+            "result_json": (
+                json.dumps(first_row, default=str, sort_keys=True)
+                if not unbound_kusto_result or len(rows) == 1
+                else None
+            ),
         },
     )
 

@@ -5,14 +5,90 @@ from pathlib import Path
 
 import pytest
 
+from src.core.exceptions import ConfigError
 from src.core.knowledge_candidate_store import KnowledgeCandidate, KnowledgeCandidateDecisionRecord, ProposedKnowledgeClaim, append_candidate, append_triage_decision
-from src.core.knowledge_claim_store import KnowledgeClaimRevision, append_claim_revision, claim_ids_referencing_vault_hash, find_claim_redaction_by_id, find_claim_revision_by_id, load_all_claim_revisions, load_scoped_claim_revisions, redact_claim_revision, resolve_knowledge_context, summarize_knowledge_status
+from src.core.knowledge_claim_store import KnowledgeClaimRevision, LatestClaimFreshnessSummary, append_claim_revision, claim_ids_referencing_vault_hash, find_claim_redaction_by_id, find_claim_revision_by_id, get_claims_dir_for_scope, load_all_claim_revisions, load_scoped_claim_revisions, redact_claim_revision, resolve_knowledge_context, summarize_knowledge_status
 from src.core.ledger.event_log import ConfidenceTier
 from src.core.ledger.source_refs import EmailRef, KnowledgeDocumentRef, LTDeckRef, OperatorAssertionRef
 
 
 def _deck_ref() -> LTDeckRef:
     return LTDeckRef(file_path="deck.pptx", deck_date=datetime(2025, 3, 20, tzinfo=timezone.utc).date())
+
+
+@pytest.mark.parametrize(
+    ("scope", "relative"),
+    [
+        ("org", ("org", "claims")),
+        ("operator", ("operator", "claims")),
+        ("program:acme", ("programs", "acme", "claims")),
+        ("domain:storage", ("domains", "storage", "claims")),
+        ("portfolio:platform", ("portfolio", "platform", "claims")),
+    ],
+)
+def test_get_claims_dir_for_scope_preserves_owner_authority_roots(
+    tmp_path: Path, scope: str, relative: tuple[str, ...]
+) -> None:
+    knowledge_root = tmp_path / "knowledge"
+
+    path = get_claims_dir_for_scope(scope, knowledge_root=knowledge_root)
+
+    assert path == knowledge_root.joinpath(*relative)
+    assert path.is_dir()
+
+
+@pytest.mark.parametrize("scope", ["plain", "unsupported:example"])
+def test_get_claims_dir_for_scope_rejects_unowned_scope(
+    tmp_path: Path, scope: str
+) -> None:
+    with pytest.raises(ConfigError, match="Unsupported knowledge scope"):
+        get_claims_dir_for_scope(scope, knowledge_root=tmp_path / "knowledge")
+
+
+def test_latest_claim_freshness_exposes_expired_and_expiring_counts() -> None:
+    revision = KnowledgeClaimRevision(
+        claim_id="01CLAIM",
+        scope="program:acme",
+        subject="milestone:m1",
+        predicate="first_deployment",
+        value="2026-H1",
+        valid_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        valid_until=datetime(2026, 2, 1, tzinfo=timezone.utc),
+        recorded_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        confidence=ConfidenceTier.OPERATOR_CONFIRMED,
+        source_ref=OperatorAssertionRef(
+            asserted_by="operator",
+            asserted_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        ),
+        supersedes=None,
+        natural_key="program:acme/milestone:m1/first_deployment",
+    )
+
+    summary = LatestClaimFreshnessSummary(
+        expired=(revision,),
+        expiring_soon=(revision,),
+        warning_window_days=30,
+    )
+
+    assert summary.expired_count == 1
+    assert summary.expiring_soon_count == 1
+
+
+def test_load_claim_revisions_rejects_non_mapping_rows_after_blank_lines(
+    tmp_path: Path,
+) -> None:
+    knowledge_root = tmp_path / "knowledge"
+    claims_path = (
+        knowledge_root / "programs" / "acme" / "claims" / "claims-2026-01.jsonl"
+    )
+    claims_path.parent.mkdir(parents=True)
+    claims_path.write_text("\n[]\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="claim row must be an object"):
+        load_scoped_claim_revisions(
+            ("program:acme",),
+            knowledge_root=knowledge_root,
+        )
 
 
 def test_resolve_knowledge_context_prefers_confidence_before_scope() -> None:

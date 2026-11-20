@@ -94,6 +94,9 @@ tests/golden/snapshots/
 programs/*
 !programs/_templates/
 !programs/_templates/**
+# Ratified operator budget authority is local-only. The tracked registry remains
+# a public candidate template and must not be treated as deployment approval.
+governance/nfr-budgets.private.yaml
 # Program-level publications workspace (operator data, not committed).
 # Explicit scoped entry for PR diff clarity; logically covered by programs/[^_]*/ below.
 /programs/*/publications/
@@ -251,5 +254,6 @@ governance/roles/*.yaml
 # Private execution authority and measured baselines are not public templates.
 governance/relo-authority-matrix.yaml
 governance/relo-work-packages.yaml
+governance/relo-problem-statements.yaml
 governance/decisions/0020-*.md
 governance/baselines/relo_trusted_workflow_baseline_*.json

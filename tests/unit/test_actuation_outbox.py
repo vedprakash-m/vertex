@@ -7,6 +7,8 @@ module's smaller building blocks in isolation.
 
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -21,6 +23,38 @@ from src.core.actuation_outbox import (
 )
 from src.core.ledger.durable_outbox_store import load_entry
 from src.core.workspace_lease import ACTUATION_DISPATCH_DOMAIN
+from tests.support.actuation_reconciliation import (
+    synthetic_authorized_effect_document,
+    synthetic_completed_reconciliation,
+)
+
+
+def _qualified_payload(intent_id: str = "intent", program_id: str = "fixture") -> str:
+    return json.dumps({
+        "operation": "create_task.v1",
+        "operation_intent_id": intent_id,
+        "proposal_id": "proposal",
+        "org": "org",
+        "project": "project",
+        "authorized_effect": synthetic_authorized_effect_document(
+            program_id=program_id,
+            intent_id=intent_id,
+        ),
+    })
+
+
+def _success(entry, remote_id: int = 42) -> DispatchResult:
+    authorized = json.loads(entry.payload_json)["authorized_effect"]
+    return DispatchResult(
+        succeeded=True,
+        remote_id=remote_id,
+        remote_rev=2,
+        reconciliation=synthetic_completed_reconciliation(
+            authorized,
+            remote_id=remote_id,
+            remote_rev=2,
+        ),
+    )
 
 
 def test_dispatch_does_not_reclaim_future_backlog_lease(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -33,7 +67,7 @@ def test_dispatch_does_not_reclaim_future_backlog_lease(tmp_path: Path, monkeypa
     for key in ("older", "requested"):
         enqueue_create_task_intent(
             program_id="fixture", idempotency_key=key, operation_intent_id=key,
-            proposal_id=key, payload_json="{}", programs_root=root,
+            proposal_id=key, payload_json=_qualified_payload(key), programs_root=root,
         )
     db = outbox_db_path("fixture", programs_root=root)
     with open_program_db_with_retry(db) as connection:
@@ -51,7 +85,7 @@ def test_dispatch_does_not_reclaim_future_backlog_lease(tmp_path: Path, monkeypa
 
     def callback(entry):
         dispatched.append(entry.outbox_id)
-        return DispatchResult(succeeded=True, remote_id=42)
+        return _success(entry)
 
     outcome = dispatch_leased_create_task(
         program_id="fixture", idempotency_key="requested", owner="new",
@@ -71,7 +105,7 @@ def test_existing_key_rejects_changed_identity(tmp_path: Path, changed: str) -> 
     root = tmp_path / "programs"
     first = enqueue_create_task_intent(
         program_id="fixture", idempotency_key="key", operation_intent_id="intent",
-        proposal_id="proposal", payload_json="{}", programs_root=root,
+        proposal_id="proposal", payload_json=_qualified_payload(), programs_root=root,
     )
     db = outbox_db_path("fixture", programs_root=root)
     if changed != "payload_json":
@@ -103,7 +137,7 @@ def test_dispatch_refuses_state_changed_after_leasing_before_callback(tmp_path, 
     root = tmp_path / "programs"
     enqueue_create_task_intent(
         program_id="fixture", idempotency_key="key", operation_intent_id="intent",
-        proposal_id="proposal", payload_json="{}", programs_root=root,
+        proposal_id="proposal", payload_json=_qualified_payload(), programs_root=root,
     )
     db = outbox_db_path("fixture", programs_root=root)
     actual_lease_next = service.lease_next
@@ -201,7 +235,7 @@ def test_dispatch_refuses_changed_or_expired_pre_dispatch_fence(tmp_path, monkey
 
     def dispatch(entry):
         calls.append(entry.outbox_id)
-        return DispatchResult(succeeded=True, remote_id=42)
+        return _success(entry, 42)
 
     monkeypatch.setattr(service, "lease_next", alter_after_lease)
     with pytest.raises(store.OutboxError, match="lease"):
@@ -239,7 +273,7 @@ def test_dispatch_refuses_unreadable_changed_row_without_releasing_lease(
     root = tmp_path / "programs"
     enqueue_create_task_intent(
         program_id="fixture", idempotency_key="key", operation_intent_id="intent",
-        proposal_id="proposal", payload_json="{}", programs_root=root,
+        proposal_id="proposal", payload_json=_qualified_payload(), programs_root=root,
     )
     db = outbox_db_path("fixture", programs_root=root)
     actual_lease_next = service.lease_next
@@ -280,7 +314,7 @@ def test_fencing_failure_does_not_release_same_owner_successor(tmp_path, monkeyp
     root = tmp_path / "programs"
     enqueue_create_task_intent(
         program_id="fixture", idempotency_key="key", operation_intent_id="intent",
-        proposal_id="proposal", payload_json="{}", programs_root=root,
+        proposal_id="proposal", payload_json=_qualified_payload(), programs_root=root,
     )
     db = outbox_db_path("fixture", programs_root=root)
     actual_lease_next = service.lease_next
@@ -323,7 +357,7 @@ def test_dispatch_does_not_release_changed_same_owner_lease_after_callback(tmp_p
     root = tmp_path / "programs"
     enqueue_create_task_intent(
         program_id="fixture", idempotency_key="key", operation_intent_id="intent",
-        proposal_id="proposal", payload_json="{}", programs_root=root,
+        proposal_id="proposal", payload_json=_qualified_payload(), programs_root=root,
     )
     successor = []
 
@@ -340,7 +374,7 @@ def test_dispatch_does_not_release_changed_same_owner_lease_after_callback(tmp_p
             monkeypatch.setattr(workspace, "_now", lambda: current.acquired_at)
             successor.append(workspace.renew_lease(current, ttl_seconds=301, programs_root=root))
         assert successor[0].fencing_token == current.fencing_token
-        return DispatchResult(succeeded=True, remote_id=42)
+        return _success(entry, 42)
 
     outcome = dispatch_leased_create_task(
         program_id="fixture", idempotency_key="key", owner="worker", dispatch_fn=dispatch, programs_root=root,
@@ -364,7 +398,7 @@ def test_dispatch_samples_expiry_after_transaction_locks(tmp_path, monkeypatch, 
     root = tmp_path / "programs"
     enqueue_create_task_intent(
         program_id="fixture", idempotency_key="key", operation_intent_id="intent",
-        proposal_id="proposal", payload_json="{}", programs_root=root,
+        proposal_id="proposal", payload_json=_qualified_payload(), programs_root=root,
     )
     db = outbox_db_path("fixture", programs_root=root)
     base = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -396,7 +430,7 @@ def test_dispatch_samples_expiry_after_transaction_locks(tmp_path, monkeypatch, 
 
     def dispatch(entry):
         calls.append(entry.outbox_id)
-        return DispatchResult(succeeded=True, remote_id=42)
+        return _success(entry, 42)
 
     monkeypatch.setattr(service, "lease_next", expire_after_lease)
     with pytest.raises(store.OutboxError, match="lease"):
@@ -424,7 +458,7 @@ def test_fence_locks_both_stores_until_dispatch_transition_commits(tmp_path, mon
     root = tmp_path / "programs"
     enqueue_create_task_intent(
         program_id="fixture", idempotency_key="key", operation_intent_id="intent",
-        proposal_id="proposal", payload_json="{}", programs_root=root,
+        proposal_id="proposal", payload_json=_qualified_payload(), programs_root=root,
     )
     db = outbox_db_path("fixture", programs_root=root)
     actual_lease_next = service.lease_next
@@ -468,7 +502,7 @@ def test_fence_locks_both_stores_until_dispatch_transition_commits(tmp_path, mon
             assert entry.status == "dispatched"
             for future in futures:
                 future.result(timeout=10)
-            return DispatchResult(succeeded=True, remote_id=42)
+            return _success(entry, 42)
 
         monkeypatch.setattr(service, "lease_next", start_competitors_after_lease)
         outcome = service.dispatch_leased_create_task(
@@ -496,7 +530,7 @@ def test_nonclassifiable_dispatch_does_not_acquire_or_drain(
     root = tmp_path / "programs"
     enqueue_create_task_intent(
         program_id="fixture", idempotency_key="key", operation_intent_id="intent",
-        proposal_id="proposal", payload_json="{}", programs_root=root,
+        proposal_id="proposal", payload_json=_qualified_payload(), programs_root=root,
     )
     db = outbox_db_path("fixture", programs_root=root)
     leased = store.lease_next(db, ACTUATION_DISPATCH_DOMAIN, owner="old", ttl_seconds=300 if status == "active" else 0)
@@ -554,10 +588,10 @@ def test_invalid_requested_intent_cannot_dispatch_pending_backlog(tmp_path: Path
         root = tmp_path / "programs"
         db = outbox_db_path("fixture", programs_root=root)
         backlog = store.enqueue(
-            db, "backlog", domain=ACTUATION_DISPATCH_DOMAIN, correlation_id="backlog", payload_json="{}",
+            db, "backlog", domain=ACTUATION_DISPATCH_DOMAIN, correlation_id="backlog", payload_json=_qualified_payload(),
         )
         if status != "missing":
-            store.enqueue(db, "requested", domain=ACTUATION_DISPATCH_DOMAIN, correlation_id="requested", payload_json="{}")
+            store.enqueue(db, "requested", domain=ACTUATION_DISPATCH_DOMAIN, correlation_id="requested", payload_json=_qualified_payload())
             with open_program_db_with_retry(db, durability="strict") as connection:
                 connection.execute("UPDATE outbox SET status = ? WHERE outbox_id = 'requested'", (status,))
         requested = store.load_entry(db, "requested")
@@ -565,7 +599,7 @@ def test_invalid_requested_intent_cannot_dispatch_pending_backlog(tmp_path: Path
 
         def dispatch(entry) -> DispatchResult:
             calls.append(entry.outbox_id)
-            return DispatchResult(succeeded=True, remote_id=42)
+            return _success(entry, 42)
 
         with pytest.raises(store.OutboxError):
             dispatch_leased_create_task(
@@ -588,7 +622,7 @@ def test_dispatch_refuses_missing_or_foreign_requested_row(tmp_path: Path, ident
     if identity != "missing":
         enqueue_create_task_intent(
             program_id="fixture", idempotency_key="key", operation_intent_id="intent",
-            proposal_id="proposal", payload_json="{}", programs_root=root,
+            proposal_id="proposal", payload_json=_qualified_payload(), programs_root=root,
         )
         with open_program_db_with_retry(outbox_db_path("fixture", programs_root=root), durability="strict") as connection:
             connection.execute(f"UPDATE outbox SET {identity} = 'other'")
@@ -610,7 +644,7 @@ def test_classification_refuses_current_other_workspace_owner(tmp_path: Path) ->
     root = tmp_path / "programs"
     enqueue_create_task_intent(
         program_id="fixture", idempotency_key="key", operation_intent_id="intent",
-        proposal_id="proposal", payload_json="{}", programs_root=root,
+        proposal_id="proposal", payload_json=_qualified_payload(), programs_root=root,
     )
     db = outbox_db_path("fixture", programs_root=root)
     old = store.lease_next(db, ACTUATION_DISPATCH_DOMAIN, owner="old", ttl_seconds=0)
@@ -638,13 +672,13 @@ def test_expired_dispatched_returns_uncertainty_before_backlog_drain(tmp_path: P
     root = tmp_path / "programs"
     original = enqueue_create_task_intent(
         program_id="fixture", idempotency_key="key", operation_intent_id="intent",
-        proposal_id="proposal", payload_json="{}", programs_root=root,
+        proposal_id="proposal", payload_json=_qualified_payload(), programs_root=root,
     )
     db = outbox_db_path("fixture", programs_root=root)
     old = store.lease_next(db, ACTUATION_DISPATCH_DOMAIN, owner="old", ttl_seconds=0)
     assert old is not None
     store.mark_dispatched(db, "key", owner="old", fencing_token=old.lease_fencing_token)
-    store.enqueue(db, "backlog", domain=ACTUATION_DISPATCH_DOMAIN, correlation_id="backlog", payload_json="{}")
+    store.enqueue(db, "backlog", domain=ACTUATION_DISPATCH_DOMAIN, correlation_id="backlog", payload_json=_qualified_payload())
 
     def forbidden(entry):
         pytest.fail("Classification must return before backlog drain or dispatch")
@@ -669,11 +703,11 @@ def test_stale_classifier_preserves_same_owner_successor_and_backlog(tmp_path, m
 
     root = tmp_path / "programs"
     db = outbox_db_path("fixture", programs_root=root)
-    store.enqueue(db, "key", domain=ACTUATION_DISPATCH_DOMAIN, correlation_id="key", payload_json="{}")
+    store.enqueue(db, "key", domain=ACTUATION_DISPATCH_DOMAIN, correlation_id="key", payload_json=_qualified_payload())
     old = store.lease_next(db, ACTUATION_DISPATCH_DOMAIN, owner="old", ttl_seconds=0)
     assert old is not None
     observed = store.mark_dispatched(db, "key", owner="old", fencing_token=old.lease_fencing_token)
-    backlog = store.enqueue(db, "backlog", domain=ACTUATION_DISPATCH_DOMAIN, correlation_id="backlog", payload_json="{}")
+    backlog = store.enqueue(db, "backlog", domain=ACTUATION_DISPATCH_DOMAIN, correlation_id="backlog", payload_json=_qualified_payload())
     classify = service.classify_expired_dispatched
     successor = []
 
@@ -750,11 +784,13 @@ def test_duplicate_enqueue_of_non_create_operation_is_idempotent(tmp_path: Path)
 
 
 @pytest.mark.parametrize("operation", ["add_comment.v1", "add_tag.v1", "set_field.v1"])
-def test_non_create_operations_are_not_dispatchable(operation: str) -> None:
+def test_registered_non_create_operations_are_manual_only(operation: str) -> None:
     from src.core.actuation_outbox import OutboxError, require_dispatchable_operation
 
     with pytest.raises(OutboxError, match="draft/manual only"):
         require_dispatchable_operation(operation)
+    with pytest.raises(OutboxError, match="draft/manual only"):
+        require_dispatchable_operation(f"unqualified_{operation}")
 
 
 def test_idempotency_key_excludes_approval_event_id() -> None:
@@ -782,11 +818,11 @@ def test_enqueue_create_task_intent_is_idempotent_on_key(tmp_path: Path) -> None
     key = create_task_idempotency_key(program_id="samplealpha", org="contoso", project="One", operation_intent_id="abc123")
     first = enqueue_create_task_intent(
         program_id="samplealpha", idempotency_key=key, operation_intent_id="abc123", proposal_id="prop-1",
-        payload_json="{}", programs_root=programs_root,
+        payload_json=_qualified_payload("abc123", "samplealpha"), programs_root=programs_root,
     )
     second = enqueue_create_task_intent(
         program_id="samplealpha", idempotency_key=key, operation_intent_id="abc123", proposal_id="prop-1",
-        payload_json="{}", programs_root=programs_root,
+        payload_json=_qualified_payload("abc123", "samplealpha"), programs_root=programs_root,
     )
     assert first.outbox_id == second.outbox_id == key
     assert first.status == "pending"
@@ -812,11 +848,11 @@ def test_dispatch_leased_create_task_happy_path_returns_completed_with_remote_id
     key = create_task_idempotency_key(program_id="samplealpha", org="contoso", project="One", operation_intent_id="abc123")
     enqueue_create_task_intent(
         program_id="samplealpha", idempotency_key=key, operation_intent_id="abc123", proposal_id="prop-1",
-        payload_json="{}", programs_root=programs_root,
+        payload_json=_qualified_payload("old", "samplealpha"), programs_root=programs_root,
     )
 
     def dispatch_fn(entry) -> DispatchResult:
-        return DispatchResult(succeeded=True, remote_id=42, remote_response_hash="deadbeef")
+        return replace(_success(entry, 42), remote_response_hash="deadbeef")
 
     outcome = dispatch_leased_create_task(
         program_id="samplealpha", idempotency_key=key, owner="worker-a", dispatch_fn=dispatch_fn, programs_root=programs_root,
@@ -828,12 +864,54 @@ def test_dispatch_leased_create_task_happy_path_returns_completed_with_remote_id
     assert outcome.entry.remote_response_hash == "deadbeef"
 
 
+@pytest.mark.parametrize("field", ["target_identity", "remote_effect_id"])
+def test_dispatch_refuses_forged_target_or_remote_receipt(
+    tmp_path: Path, field: str,
+) -> None:
+    programs_root = tmp_path / "programs"
+    key = create_task_idempotency_key(
+        program_id="samplealpha",
+        org="contoso",
+        project="One",
+        operation_intent_id="abc123",
+    )
+    enqueue_create_task_intent(
+        program_id="samplealpha",
+        idempotency_key=key,
+        operation_intent_id="abc123",
+        proposal_id="prop-1",
+        payload_json=_qualified_payload("abc123", "samplealpha"),
+        programs_root=programs_root,
+    )
+
+    def dispatch(entry) -> DispatchResult:
+        result = _success(entry, 42)
+        receipt = result.reconciliation.receipts[0]
+        return replace(
+            result,
+            reconciliation=replace(
+                result.reconciliation,
+                receipts=(replace(receipt, **{field: "wrong"}),),
+            ),
+        )
+
+    outcome = dispatch_leased_create_task(
+        program_id="samplealpha",
+        idempotency_key=key,
+        owner="worker",
+        dispatch_fn=dispatch,
+        programs_root=programs_root,
+    )
+    assert outcome.status == "uncertain_remote_state"
+    assert outcome.remote_id is None
+
+
 def test_dispatch_leased_create_task_definite_failure_returns_failed_terminal(tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     key = create_task_idempotency_key(program_id="samplealpha", org="contoso", project="One", operation_intent_id="abc123")
     enqueue_create_task_intent(
         program_id="samplealpha", idempotency_key=key, operation_intent_id="abc123", proposal_id="prop-1",
-        payload_json="{}", programs_root=programs_root,
+        payload_json=_qualified_payload("new", "samplealpha"), programs_root=programs_root,
     )
 
     def dispatch_fn(entry) -> DispatchResult:
@@ -852,19 +930,19 @@ def test_drain_processes_older_backlog_before_own_row(tmp_path: Path) -> None:
     old_key = create_task_idempotency_key(program_id="samplealpha", org="contoso", project="One", operation_intent_id="old")
     enqueue_create_task_intent(
         program_id="samplealpha", idempotency_key=old_key, operation_intent_id="old", proposal_id="prop-0",
-        payload_json="{}", programs_root=programs_root,
+        payload_json=_qualified_payload("old", "samplealpha"), programs_root=programs_root,
     )
     new_key = create_task_idempotency_key(program_id="samplealpha", org="contoso", project="One", operation_intent_id="new")
     enqueue_create_task_intent(
         program_id="samplealpha", idempotency_key=new_key, operation_intent_id="new", proposal_id="prop-1",
-        payload_json="{}", programs_root=programs_root,
+        payload_json=_qualified_payload("new", "samplealpha"), programs_root=programs_root,
     )
 
     order: list[str] = []
 
     def dispatch_fn(entry) -> DispatchResult:
         order.append(entry.outbox_id)
-        return DispatchResult(succeeded=True, remote_id=len(order))
+        return _success(entry, len(order))
 
     outcome = dispatch_leased_create_task(
         program_id="samplealpha", idempotency_key=new_key, owner="worker-a", dispatch_fn=dispatch_fn, programs_root=programs_root,

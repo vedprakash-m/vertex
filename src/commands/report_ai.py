@@ -14,7 +14,7 @@ from src.ai.blurb_generator import BlurbGenerationError
 from src.ai.ai_mode import AIMode, get_ai_mode
 from src.ai.client import AIClientError, NON_RETRYABLE_AI_ERRORS
 from src.ai.deployment_fallback import LEGACY_DEPLOYMENT_ALIAS_NOTICE, resolve_ai_deployments_for_feature
-from src.ai.edit_learner import load_recent_edit_patterns, summarize_recent_calibration, summarize_recent_confidence_bands, summarize_recent_models, summarize_recent_prompt_version_confidence_bands, summarize_recent_prompt_version_models, summarize_recent_prompt_versions
+from src.ai.edit_learner import summarize_recent_confidence_bands, summarize_recent_models, summarize_recent_prompt_version_confidence_bands, summarize_recent_prompt_version_models, summarize_recent_prompt_versions
 from src.ai.exec_summary_drafter import ExecSummaryDraftError
 from src.ai.llm_trace import AITraceContext
 from src.ai.provider import LLMProvider
@@ -1011,13 +1011,6 @@ def _section_ai_context_lines(
     lines.extend(_leadership_reader_context_lines(program_context))
     lines.extend(reality_lines[1:])
     lines.extend(
-        _edit_pattern_context_lines(
-            ai_context.program_id,
-            workstream_ids=workstream_ids,
-            programs_root=ai_context.programs_root,
-        )
-    )
-    lines.extend(
         _feedback_context_lines(
             ai_context.approved_signals,
             item_ids=item_ids,
@@ -1379,56 +1372,6 @@ def _exec_ai_context_lines(
     # Track J (PR-11b): reality-substrate confidence so the exec summary does not
     # contradict the structured tables' trust badges. Surfaced early (high-signal).
     lines.extend(_reality_context_lines(ai_context.reality_assessments))
-    exec_summary = next(
-        (
-            summary
-            for summary in summarize_recent_calibration(ai_context.program_id, programs_root=ai_context.programs_root)
-            if summary.task_type == "exec_summary"
-        ),
-        None,
-    )
-    if exec_summary is not None:
-        lines.append(
-            "Recent calibration [exec_summary]: "
-            f"score={exec_summary.calibration_score:.2f}; "
-            f"avg_override={exec_summary.average_override_magnitude:.2f}; "
-            f"samples={exec_summary.sample_count}."
-        )
-    lines.extend(
-        _confidence_band_context_lines(
-            ai_context.program_id,
-            task_type="exec_summary",
-            programs_root=ai_context.programs_root,
-        )
-    )
-    lines.extend(
-        _prompt_version_confidence_context_lines(
-            ai_context.program_id,
-            task_type="exec_summary",
-            programs_root=ai_context.programs_root,
-        )
-    )
-    lines.extend(
-        _prompt_version_context_lines(
-            ai_context.program_id,
-            task_type="exec_summary",
-            programs_root=ai_context.programs_root,
-        )
-    )
-    lines.extend(
-        _prompt_version_model_context_lines(
-            ai_context.program_id,
-            task_type="exec_summary",
-            programs_root=ai_context.programs_root,
-        )
-    )
-    lines.extend(
-        _model_context_lines(
-            ai_context.program_id,
-            task_type="exec_summary",
-            programs_root=ai_context.programs_root,
-        )
-    )
     lines.extend(_leadership_reader_context_lines(program_context))
     lines.extend(_lt_deck_context_lines(ai_context.program_id, programs_root=ai_context.programs_root))  # SP3-6
     lines.extend(
@@ -1779,66 +1722,7 @@ def _edit_pattern_context_lines(
     programs_root: Path,
     output_root: Path | None = None,
 ) -> tuple[str, ...]:
-    lines: list[str] = []
-    workstream_summary = next(
-        (
-            summary
-            for summary in summarize_recent_calibration(program_id, programs_root=programs_root)
-            if summary.task_type == "workstream_blurb"
-        ),
-        None,
-    )
-    if workstream_summary is not None:
-        lines.append(
-            "Recent calibration [workstream_blurb]: "
-            f"score={workstream_summary.calibration_score:.2f}; "
-            f"avg_override={workstream_summary.average_override_magnitude:.2f}; "
-            f"samples={workstream_summary.sample_count}."
-        )
-    lines.extend(
-        _confidence_band_context_lines(
-            program_id,
-            task_type="workstream_blurb",
-            programs_root=programs_root,
-        )
-    )
-    lines.extend(
-        _prompt_version_confidence_context_lines(
-            program_id,
-            task_type="workstream_blurb",
-            programs_root=programs_root,
-        )
-    )
-    lines.extend(
-        _prompt_version_context_lines(
-            program_id,
-            task_type="workstream_blurb",
-            programs_root=programs_root,
-        )
-    )
-    lines.extend(
-        _prompt_version_model_context_lines(
-            program_id,
-            task_type="workstream_blurb",
-            programs_root=programs_root,
-        )
-    )
-    lines.extend(
-        _model_context_lines(
-            program_id,
-            task_type="workstream_blurb",
-            programs_root=programs_root,
-        )
-    )
-    for workstream_id in workstream_ids:
-        for pattern in load_recent_edit_patterns(
-            program_id,
-            section_id=workstream_id,
-            limit=2,
-            programs_root=programs_root,
-        ):
-            lines.append(f"Recent confirmed edit pattern [{workstream_id}]: {pattern.summary}")
-    return tuple(lines)
+    return ()
 
 
 def _signal_context_lines(

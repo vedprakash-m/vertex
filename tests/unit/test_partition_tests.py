@@ -93,6 +93,10 @@ def test_real_checkout_inventory_prefers_git_tracked_files(
     module = _load_module()
     tests = tmp_path / "tests"
     tests.mkdir()
+    for relative in ("unit/test_one.py", "contracts/test_two.py"):
+        path = tests / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
     monkeypatch.setattr(module, "DEFAULT_TESTS_ROOT", tests)
     monkeypatch.setattr(
         module.subprocess,
@@ -105,6 +109,29 @@ def test_real_checkout_inventory_prefers_git_tracked_files(
     assert module.discover_test_files(tests) == [
         "contracts/test_two.py",
         "unit/test_one.py",
+    ]
+
+
+def test_real_checkout_inventory_ignores_deleted_tracked_files(
+    tmp_path: Path, monkeypatch
+) -> None:
+    module = _load_module()
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    existing = tests / "test_existing.py"
+    existing.write_text("def test_existing():\n    pass\n", encoding="utf-8")
+    monkeypatch.setattr(module, "DEFAULT_TESTS_ROOT", tests)
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=b"tests/test_existing.py\0tests/test_deleted.py\0",
+        ),
+    )
+
+    assert module.discover_test_files(tests, functional_only=True) == [
+        "test_existing.py"
     ]
 
 

@@ -60,9 +60,7 @@ def test_refresh_author_salience_writes_cached_yaml_and_audit(tmp_path: Path) ->
     assert path is not None
     assert path.exists()
     assert loaded == model
-    assert [workstream.workstream_id for workstream in model.workstreams] == ["deployment", "repair"]
-    assert model.workstreams[0].attention_weight > model.workstreams[1].attention_weight
-    assert model.workstreams[0].attention_weight >= 0.2
+    assert model.workstreams == ()
 
     audit_path = programs_root / "acme" / "_feedback" / "_audit.jsonl"
     audit_entries = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -95,7 +93,7 @@ def test_refresh_author_salience_dry_run_skips_cached_write(tmp_path: Path) -> N
     )
 
     assert path is None
-    assert model.workstreams[0].workstream_id == "deployment"
+    assert model.workstreams == ()
     assert not (programs_root / "acme" / "_feedback" / "author_salience.yaml").exists()
 
 
@@ -140,7 +138,23 @@ def test_refresh_author_salience_honors_program_config_defaults(tmp_path: Path) 
 
     assert model.min_weight == 0.4
     assert model.ema_alpha == 0.3
-    assert model.workstreams[0].attention_weight >= 0.4
+    assert model.workstreams == ()
+
+
+def test_load_author_salience_ignores_legacy_ungoverned_schema(tmp_path: Path) -> None:
+    path = tmp_path / "programs" / "acme" / "_feedback" / "author_salience.yaml"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        'schema_version: "1.0"\n'
+        'updated_at: "2026-05-20T11:00:00+00:00"\n'
+        'author_alias: "owner"\n'
+        'ema_alpha: 0.1\n'
+        'min_weight: 0.2\n'
+        'workstreams: {}\n',
+        encoding="utf-8",
+    )
+
+    assert load_author_salience("acme", programs_root=tmp_path / "programs") is None
 
 
 def test_refresh_author_salience_consumes_salience_events_and_confirmation_weight(tmp_path: Path) -> None:
@@ -211,6 +225,6 @@ def test_refresh_author_salience_consumes_salience_events_and_confirmation_weigh
 
     assert len(model.workstreams) == 1
     assert model.workstreams[0].workstream_id == "deployment"
-    assert model.workstreams[0].sample_count == 3
-    assert model.workstreams[0].average_override_magnitude > 0.0
-    assert model.workstreams[0].attention_weight == 0.3906
+    assert model.workstreams[0].sample_count == 2
+    assert model.workstreams[0].average_override_magnitude == 0.0
+    assert model.workstreams[0].attention_weight == 0.36

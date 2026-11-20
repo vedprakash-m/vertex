@@ -25,6 +25,31 @@ from src.core.models import ConfirmedDimension, EditionType, RunManifest, RiskLe
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+
+def test_relo_w4_callerless_helpers_are_retired() -> None:
+    retired = (
+        REPO_ROOT / "src" / "core" / "sprint_planner.py",
+        REPO_ROOT / "src" / "core" / "object_lifecycle.py",
+        REPO_ROOT / "src" / "core" / "long_horizon_relevance.py",
+    )
+    assert [path.relative_to(REPO_ROOT).as_posix() for path in retired if path.exists()] == []
+
+    forbidden_modules = {
+        "src.core.sprint_planner",
+        "src.core.object_lifecycle",
+        "src.core.long_horizon_relevance",
+    }
+    imports: set[str] = set()
+    for path in (REPO_ROOT / "src").rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imports.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imports.add(node.module)
+    assert imports & forbidden_modules == set()
+
+
 # These ceilings freeze the current high-risk hotspots so they cannot silently grow
 # while the larger decomposition work remains intentionally deferred.
 LINE_BUDGETS = {
@@ -41,7 +66,7 @@ LINE_BUDGETS = {
     # WS-3 / v1.14 (2026-06-10): +21 for _emit_credential_expired_banner helper
     # + CredentialExpired import + 3 banner call sites (WorkIQ/Kusto/IcM).
     # +1 (2026-11-05): forward declared result limits to the shared Kusto client.
-    "src/commands/gather.py": 5442,  # +2 (2026-07-25): BL-F2 D-19 real fan-out fix -- _build_kusto_kpi_signal now populates Signal.workstream_ids from the full configured query.workstream_ids set, not just a single scalar picked only when exactly one existed; +3 (2026-07-25): BL-F2 M365 re-routing now explicitly replaces Signal.workstream_ids too, not just workstream_id -- +11 (2026-07-15): ADF-W1.4 remainder -- overall WorkIQ phase (all query plans combined) bounded by program.m365.retrieval.max_wall_clock_seconds, threaded into _build_workiq_signals
+    "src/commands/gather.py": 5469,  # +27 (2026-11-19, RELO-W3 typed Kusto result contract): retain deterministic unbound result text and metadata. +2 (2026-07-25): BL-F2 D-19 real fan-out fix -- _build_kusto_kpi_signal now populates Signal.workstream_ids from the full configured query.workstream_ids set, not just a single scalar picked only when exactly one existed; +3 (2026-07-25): BL-F2 M365 re-routing now explicitly replaces Signal.workstream_ids too, not just workstream_id -- +11 (2026-07-15): ADF-W1.4 remainder -- overall WorkIQ phase (all query plans combined) bounded by program.m365.retrieval.max_wall_clock_seconds, threaded into _build_workiq_signals
     # +36 (2026-07-21, synthetic gather lifecycle contract D-19/AG-2.12): completeness-oracle
     # reconciliation -- resolve_oracle_result import/application at the
     # QueryResultEntry construction site, source_export_counts param on

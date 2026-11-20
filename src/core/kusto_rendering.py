@@ -13,8 +13,13 @@ from typing import Any, Callable, Mapping
 from src.core.chart_cache_store import chart_cache_write_failure_reason
 from src.core.config_loader import KustoQuerySettings, KustoSettings
 from src.core.exceptions import AuthError, QueryError
-from src.core.kusto_result_limits import admit_kusto_rows
-from src.core.kusto_templates import KustoTemplateContext, render_kusto_query
+from src.core.integration_types import KustoResultKind, KustoResultSet
+from src.core.kusto_result_contract import admit_kusto_execution
+from src.core.kusto_templates import (
+    ExactWindowQueryError,
+    KustoTemplateContext,
+    render_kusto_query,
+)
 from src.core.metric_binding_validator import kusto_scalar_cardinality_error
 from src.core.view_models import KustoMetric, KustoSectionData, KustoTableCell
 
@@ -34,7 +39,10 @@ _DEFAULT_CHART_CACHE_TTL_HOURS = 26
 ChartCacheLoader = Callable[[str, str], Any]  # (program_id, query_id) -> ChartCacheEntry | None
 
 
-KustoQueryExecutor = Callable[[KustoQuerySettings], list[dict[str, Any]]]
+KustoQueryExecutor = Callable[
+    [KustoQuerySettings],
+    list[dict[str, Any]] | tuple[dict[str, Any], ...] | KustoResultSet,
+]
 ChartBuilder = Callable[[KustoQuerySettings, tuple[dict[str, Any], ...]], str | None]
 ChartRowsScrubber = Callable[[list[dict[str, Any]]], list[dict[str, Any]]]
 
@@ -82,7 +90,34 @@ def build_kusto_sections(
     charts_active = chart_pipeline_enabled(charts_enabled)
 
     for configured_query in settings.queries:
-        query = render_kusto_query(configured_query, context=template_context) if template_context is not None else configured_query
+        try:
+            query = (
+                render_kusto_query(configured_query, context=template_context)
+                if template_context is not None
+                else configured_query
+            )
+        except ExactWindowQueryError:
+            degraded = _build_degraded_section(
+                configured_query,
+                message=(
+                    "Kusto data is unavailable because this query cannot bind the exact "
+                    "retrospective window."
+                ),
+            )
+            if degraded is not None:
+                sections.append(degraded)
+            observations.append(
+                _make_observation(
+                    configured_query,
+                    observed_time,
+                    "degraded",
+                    "Exact retrospective window contract is unavailable.",
+                )
+            )
+            warnings.append(
+                f"Kusto query {configured_query.id} cannot bind the exact retrospective window."
+            )
+            continue
 
         # Chart pipeline: determine if this is a registry-path chart
         is_registry_chart = (
@@ -92,7 +127,13 @@ def build_kusto_sections(
         )
 
         try:
-            rows = tuple(admit_kusto_rows(query_executor(query), query.result_limits))
+            admitted_rows, result_schema = admit_kusto_execution(
+                query_executor(query),
+                query_id=query.id,
+                expected_cardinality=query.expected_cardinality,
+                result_limits=query.result_limits,
+            )
+            rows = tuple(admitted_rows)
             cardinality_error = kusto_scalar_cardinality_error(query.id, query.expected_cardinality, len(rows))
             if cardinality_error is not None:
                 raise QueryError(cardinality_error)
@@ -100,7 +141,13 @@ def build_kusto_sections(
             if not rows and fallback_kql:
                 fallback_q = dataclasses.replace(query, kql=fallback_kql, id=f"{query.id}__fallback")
                 try:
-                    fallback_rows = tuple(admit_kusto_rows(query_executor(fallback_q), fallback_q.result_limits))
+                    fallback_admitted, fallback_schema = admit_kusto_execution(
+                        query_executor(fallback_q),
+                        query_id=fallback_q.id,
+                        expected_cardinality=fallback_q.expected_cardinality,
+                        result_limits=fallback_q.result_limits,
+                    )
+                    fallback_rows = tuple(fallback_admitted)
                 except (AuthError, QueryError):
                     raise
                 except Exception:
@@ -108,6 +155,7 @@ def build_kusto_sections(
                 if fallback_rows:
                     rows = fallback_rows
                     query = fallback_q
+                    result_schema = fallback_schema
         except (AuthError, QueryError) as exc:
             is_auth = isinstance(exc, AuthError)
             degraded = _build_degraded_section(
@@ -150,11 +198,23 @@ def build_kusto_sections(
                 continue
             # Zero rows from live query is a valid data state — spec §5.5.
             # Cache is NOT consulted. Render "No data available" placeholder.
-            _handle_zero_rows(query, observed_time, sections, observations)
+            _handle_zero_rows(
+                query,
+                observed_time,
+                sections,
+                observations,
+                result_kind=result_schema.kind.value,
+            )
             continue
 
         if query.render_as == "metric_highlight":
-            sections.append(_build_metric_section(query, rows))
+            sections.append(
+                _build_metric_section(
+                    query,
+                    rows,
+                    result_kind=result_schema.kind.value,
+                )
+            )
             observations.append(
                 TelemetryObservation(
                     query_id=query.id,
@@ -246,6 +306,7 @@ def build_kusto_sections(
                             message=None,
                             is_degraded=False,
                             chart_png_size_bytes=png_size,
+                            result_kind=result_schema.kind.value,
                         )
                     )
                     observations.append(_make_observation(query, observed_time, "success", None))
@@ -259,7 +320,15 @@ def build_kusto_sections(
                 observations.append(_make_observation(query, observed_time, "success", None))
                 continue
 
-        sections.append(_build_table_section(query, rows, message=None, degraded=False))
+        sections.append(
+            _build_table_section(
+                query,
+                rows,
+                message=None,
+                degraded=False,
+                result_kind=result_schema.kind.value,
+            )
+        )
         observations.append(
             TelemetryObservation(
                 query_id=query.id,
@@ -277,7 +346,12 @@ def build_kusto_sections(
     return tuple(sections), tuple(observations), tuple(warnings)
 
 
-def _build_metric_section(query: KustoQuerySettings, rows: tuple[dict[str, Any], ...]) -> KustoSectionData:
+def _build_metric_section(
+    query: KustoQuerySettings,
+    rows: tuple[dict[str, Any], ...],
+    *,
+    result_kind: str = KustoResultKind.SCALAR.value,
+) -> KustoSectionData:
     metrics: list[KustoMetric] = []
     if len(rows) == 1:
         for key, value in rows[0].items():
@@ -308,6 +382,7 @@ def _build_metric_section(query: KustoQuerySettings, rows: tuple[dict[str, Any],
         caveats=query.caveats,
         message=None,
         is_degraded=False,
+        result_kind=result_kind,
     )
 
 
@@ -317,6 +392,7 @@ def _build_table_section(
     *,
     message: str | None,
     degraded: bool,
+    result_kind: str = KustoResultKind.TABLE.value,
 ) -> KustoSectionData:
     return KustoSectionData(
         section_id=_section_id(query.id),
@@ -335,6 +411,7 @@ def _build_table_section(
         is_degraded=degraded,
         chart_blocks_publish=degraded and query.render_as == "chart_image" and query.chart_blocks_publish,
         chart_cache_ttl_hours=query.chart_cache_ttl_hours,
+        result_kind=result_kind,
     )
 
 
@@ -459,7 +536,14 @@ def _make_observation(query, observed_time, state, message) -> TelemetryObservat
     )
 
 
-def _handle_zero_rows(query, observed_time, sections, observations) -> None:
+def _handle_zero_rows(
+    query,
+    observed_time,
+    sections,
+    observations,
+    *,
+    result_kind: str = KustoResultKind.TABLE.value,
+) -> None:
     """Handle zero-row case for both registry and legacy paths."""
     # Valid zero-row state — render a PNG placeholder card (spec §5.5)
     png_bytes = _build_zero_row_placeholder()
@@ -492,6 +576,7 @@ def _handle_zero_rows(query, observed_time, sections, observations) -> None:
             chart_blocks_publish=chart_blocks_publish,
             chart_cache_ttl_hours=cache_ttl_hours,
             section_placement=section_placement,
+            result_kind=result_kind,
         )
     )
     observations.append(

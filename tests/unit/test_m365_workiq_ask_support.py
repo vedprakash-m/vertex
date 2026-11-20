@@ -14,6 +14,7 @@ from src.m365.workiq_ask_support import (
     extract_source_url_contexts,
     extract_source_urls_from_text,
     validate_structured_discovery_payload,
+    validate_structured_discovery_payload_with_diagnostics,
     DiscoveryRequest,
 )
 
@@ -202,6 +203,21 @@ def test_build_structured_discovery_question_is_deterministic_and_windowed() -> 
     assert 'return {"emails":[]}' in first
 
 
+def test_build_structured_discovery_question_applies_sender_scope() -> None:
+    request = DiscoveryRequest(
+        lane_name="Acme Ramp",
+        terms=("launch readiness",),
+        senders=("owner@example.com",),
+        window_start=date(2026, 6, 6),
+        window_end=date(2026, 6, 20),
+    )
+
+    question = build_structured_discovery_question(request)
+
+    assert "owner@example.com" in question
+    assert "sender" in question.lower()
+
+
 def test_build_structured_discovery_question_rejects_control_sequences() -> None:
     with pytest.raises(ValueError, match="unsafe"):
         build_structured_discovery_question(
@@ -235,7 +251,7 @@ def test_validate_structured_discovery_payload_filters_and_bounds_records() -> N
     assert result["emails"][0]["receivedDateTime"] == "2026-06-10T08:00:00Z"
 
 
-def test_validate_structured_discovery_payload_synthesizes_identity_for_naive_iso_timestamp() -> None:
+def test_validate_structured_discovery_payload_rejects_naive_iso_timestamp() -> None:
     result = validate_structured_discovery_payload(
         {
             "emails": [
@@ -253,10 +269,7 @@ def test_validate_structured_discovery_payload_synthesizes_identity_for_naive_is
         limit=8,
     )
 
-    assert len(result["emails"]) == 1
-    assert result["emails"][0]["id"].startswith("semantic:")
-    assert result["emails"][0]["receivedDateTime"] == "2026-06-10T08:00:00Z"
-    assert "conversationId" not in result["emails"][0]
+    assert result == {"emails": []}
 
 
 def test_validate_structured_discovery_payload_deduplicates_semantic_identity() -> None:
@@ -264,7 +277,7 @@ def test_validate_structured_discovery_payload_deduplicates_semantic_identity() 
         "id": "turn1search1",
         "subject": "Ramp update",
         "from": "owner@example.com",
-        "receivedDateTime": "2026-06-10T08:00:00",
+        "receivedDateTime": "2026-06-10T08:00:00Z",
     }
     duplicate = {**record, "id": "turn1search9"}
 
@@ -293,7 +306,7 @@ def test_extract_json_value_from_text_recovers_cli_wrapped_json() -> None:
         ([{"id": "outside", "receivedDateTime": "2026-05-01T08:00:00Z"}], 0, []),
         ([{"id": "missing"}], 1, []),
         ([{"id": "malformed", "receivedDateTime": "yesterday"}], 1, []),
-        ([{"id": "naive", "receivedDateTime": "2026-06-10T08:00:00"}], 0, ["naive"]),
+        ([{"id": "naive", "receivedDateTime": "2026-06-10T08:00:00"}], 1, []),
     ],
 )
 def test_structured_discovery_reports_examined_source_time_rejections(
@@ -306,6 +319,7 @@ def test_structured_discovery_reports_examined_source_time_rejections(
     result = workiq_ask_support.validate_structured_discovery_payload_with_diagnostics(payload, **kwargs)
 
     assert result.rejected_source_time_count == rejected
+    assert result.rejected_outside_window_count == int(bool(records and records[0].get("id") == "outside"))
     assert [record["id"] for record in result.payload["emails"]] == accepted
     assert result.payload == validate_structured_discovery_payload(payload, **kwargs)
 
@@ -325,9 +339,77 @@ def test_structured_discovery_counts_only_the_examined_prefix() -> None:
     result = workiq_ask_support.validate_structured_discovery_payload_with_diagnostics(payload, **kwargs)
 
     assert result.rejected_source_time_count == 2
+    assert result.rejected_outside_window_count == 1
     assert [record["id"] for record in result.payload["emails"]] == ["accepted"]
     assert result.payload["emails"][0]["receivedDateTime"] == "2026-06-10T08:00:00Z"
     assert result.payload == validate_structured_discovery_payload(payload, **kwargs)
+
+
+def test_structured_discovery_rejects_unqualified_source_timestamp() -> None:
+    result = validate_structured_discovery_payload_with_diagnostics(
+        {
+            "emails": [{
+                "id": "mail-1",
+                "receivedDateTime": "2026-06-10T08:00:00",
+                "subject": "Unqualified",
+            }],
+        },
+        window_start=date(2026, 6, 6),
+        window_end=date(2026, 6, 20),
+        limit=8,
+    )
+
+    assert result.payload == {"emails": []}
+    assert result.rejected_source_time_count == 1
+
+
+def test_structured_discovery_rejects_records_outside_sender_scope() -> None:
+    result = validate_structured_discovery_payload_with_diagnostics(
+        {
+            "emails": [
+                {
+                    "id": "mail-1",
+                    "from": {"emailAddress": {"address": "other@example.com"}},
+                    "receivedDateTime": "2026-06-10T08:00:00Z",
+                },
+                {
+                    "id": "mail-2",
+                    "from": {"emailAddress": {"address": "owner@example.com"}},
+                    "receivedDateTime": "2026-06-10T09:00:00Z",
+                },
+                {
+                    "id": "mail-3",
+                    "from": {"emailAddress": {"address": "imposter-owner@example.com"}},
+                    "receivedDateTime": "2026-06-10T10:00:00Z",
+                },
+                {
+                    "id": "mail-4",
+                    "from": {
+                        "emailAddress": {
+                            "address": "other@example.com",
+                            "name": "owner@example.com",
+                        },
+                    },
+                    "receivedDateTime": "2026-06-10T11:00:00Z",
+                },
+                {
+                    "id": "mail-5",
+                    "from": {
+                        "emailAddress": {"address": "other@example.com"},
+                        "replyTo": {"address": "owner@example.com"},
+                    },
+                    "receivedDateTime": "2026-06-10T12:00:00Z",
+                },
+            ],
+        },
+        window_start=date(2026, 6, 6),
+        window_end=date(2026, 6, 20),
+        limit=8,
+        senders=("owner@example.com",),
+    )
+
+    assert [record["id"] for record in result.payload["emails"]] == ["mail-2"]
+    assert result.rejected_invalid_record_count == 4
 
 
 @pytest.mark.parametrize(

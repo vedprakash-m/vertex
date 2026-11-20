@@ -14,6 +14,7 @@ from src.core.analytics_store import get_program_analytics_store_path
 from src.core.edition_resolver import PROGRAMS_ROOT
 from src.core.feedback._advisory_yaml import load_advisory_yaml, write_advisory_yaml
 from src.core.feedback.trust_profile_store import compute_autonomy_trust_level, humanize_trust_key
+from src.core.governed_feedback_lifecycle import ProposalKind, load_active_feedback_proposals
 
 
 SCHEMA_VERSION = "1.0"
@@ -251,11 +252,23 @@ def load_promoted_signal_approval_rules(
     if not isinstance(raw_rules, list):
         return ()
 
+    active_by_subject = {
+        proposal.subject: proposal
+        for proposal in load_active_feedback_proposals(program_id, programs_root=programs_root)
+        if proposal.kind is ProposalKind.THRESHOLD
+    }
     promoted_rules: list[PromotedSignalApprovalRule] = []
     for raw_rule in raw_rules:
         if not isinstance(raw_rule, dict):
             continue
         proposal = _proposal_from_mapping(raw_rule)
+        governed = active_by_subject.get(f"signal_approval:{proposal.rule_id}")
+        if (
+            governed is None
+            or governed.proposed_value.value_type != "enum"
+            or governed.proposed_value.value != proposal.recommended_mode
+        ):
+            continue
         raw_promoted_at = raw_rule.get("promoted_at")
         raw_promoted_by = raw_rule.get("promoted_by")
         if not isinstance(raw_promoted_at, str) or not raw_promoted_at.strip():
@@ -305,6 +318,21 @@ def promote_signal_approval_rule(
 
     proposal = _proposal_from_mapping(proposal_mapping)
     timestamp = _ensure_utc(as_of or _utc_now())
+    active = load_active_feedback_proposals(
+        program_id,
+        subject=f"signal_approval:{rule_id}",
+        as_of=timestamp,
+        programs_root=programs_root,
+    )
+    if len(active) != 1:
+        raise ValueError("Signal approval promotion requires one active governed threshold proposal.")
+    governed = active[0]
+    if (
+        governed.kind is not ProposalKind.THRESHOLD
+        or governed.proposed_value.value_type != "enum"
+        or governed.proposed_value.value != proposal.recommended_mode
+    ):
+        raise ValueError("Signal approval proposal does not match the governed threshold version.")
     promoted_rule = PromotedSignalApprovalRule(
         proposal=proposal,
         promoted_at=timestamp,

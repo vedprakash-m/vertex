@@ -156,7 +156,12 @@ def test_empty_value_summary_emits_no_alert(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _cert(*, manual: int, vertex: int) -> TimeSavingsCertification:
+def _cert(
+    *,
+    manual: int,
+    vertex: int,
+    confidence_interval_low: float | None = 0.81,
+) -> TimeSavingsCertification:
     return TimeSavingsCertification(
         schema_version="1",
         program_id="samplealpha",
@@ -167,7 +172,7 @@ def _cert(*, manual: int, vertex: int) -> TimeSavingsCertification:
         manual_median_active_seconds=600.0,
         vertex_median_active_seconds=120.0,
         savings_ratio=0.80,
-        confidence_interval_low=0.75,
+        confidence_interval_low=confidence_interval_low,
     )
 
 
@@ -197,6 +202,26 @@ def test_well_evidenced_certification_emits_no_alert(tmp_path: Path) -> None:
 
     _emit_value_baseline_freshness_alert_best_effort("samplealpha", snapshot, programs_root=programs_root)
     assert read_alerts("samplealpha", programs_root=programs_root) == ()
+
+
+def test_certification_without_confidence_bound_emits_alert(tmp_path: Path) -> None:
+    programs_root = _programs_root(tmp_path)
+    snapshot = _snapshot(
+        value_summary=ValueCockpitSummary(
+            metrics=(),
+            time_savings_certification=_cert(
+                manual=10, vertex=10, confidence_interval_low=None
+            ),
+        )
+    )
+
+    _emit_value_baseline_freshness_alert_best_effort(
+        "samplealpha", snapshot, programs_root=programs_root
+    )
+
+    alerts = read_alerts("samplealpha", programs_root=programs_root)
+    assert len(alerts) == 1
+    assert "95% confidence lower bound" in alerts[0].message
 
 
 # ---------------------------------------------------------------------------

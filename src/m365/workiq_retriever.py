@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from math import ceil
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -23,6 +24,8 @@ from src.m365.workiq_ask_support import (
     validate_structured_discovery_payload_with_diagnostics,
 )
 
+_CALL_NOT_ATTEMPTED = object()
+
 
 @dataclass(frozen=True, slots=True)
 class WorkIQRetrievalResult:
@@ -34,6 +37,38 @@ class WorkIQRetrievalResult:
     rejected_source_time_count: int = 0
     response_usable: bool = True
     rejected_invalid_record_count: int = 0
+    budget_exhausted: bool = False
+
+
+@dataclass(slots=True)
+class WorkIQRunBudget:
+    """One mutable call and wall-clock ceiling shared across WorkIQ threads."""
+
+    max_calls: int
+    max_wall_clock_seconds: int
+    calls_made: int = 0
+    started_at: float = field(default=0.0, init=False)
+
+    def __post_init__(self) -> None:
+        if self.max_calls < 1 or self.max_wall_clock_seconds < 1:
+            raise ValueError("Invalid WorkIQ per-run retrieval budget")
+        self.started_at = monotonic()
+
+    def remaining_seconds(self) -> float:
+        return self.max_wall_clock_seconds - (monotonic() - self.started_at)
+
+    def reserve_call(self) -> float | None:
+        if self.calls_made >= self.max_calls:
+            return None
+        remaining = (
+            float(self.max_wall_clock_seconds)
+            if self.calls_made == 0
+            else self.remaining_seconds()
+        )
+        if remaining <= 0:
+            return None
+        self.calls_made += 1
+        return remaining
 
 
 def retrieve_workiq_threads(
@@ -46,14 +81,38 @@ def retrieve_workiq_threads(
     cache_path: Path | None = None,
     one_hop: bool = False,
     write_cache: bool = True,
+    budget: WorkIQRunBudget | None = None,
 ) -> WorkIQRetrievalResult:
     """Enumerate then extract one bounded, source-keyed record per thread."""
 
     if not 1 <= top_k <= 10 or max_calls < 1 or max_wall_clock_seconds < 1:
         raise ValueError("Invalid WorkIQ per-thread retrieval budget")
-    started = monotonic()
-    calls = 1
-    payload = bridge.ask_workiq(build_structured_discovery_question(request), use_cache=False)
+    run_budget = budget or WorkIQRunBudget(max_calls, max_wall_clock_seconds)
+    calls = 0
+
+    def _ask(question: str) -> Any:
+        nonlocal calls
+        remaining = run_budget.reserve_call()
+        if remaining is None:
+            return _CALL_NOT_ATTEMPTED
+        calls += 1
+        timeout_seconds = max(1, int(ceil(remaining)))
+        try:
+            return bridge.ask_workiq(
+                question, use_cache=False, timeout_seconds=timeout_seconds,
+            )
+        except TypeError:
+            return bridge.ask_workiq(question, use_cache=False)
+
+    payload = _ask(build_structured_discovery_question(request))
+    if payload is _CALL_NOT_ATTEMPTED:
+        return WorkIQRetrievalResult(
+            enrichments=(),
+            enumeration_count=0,
+            calls_made=calls,
+            skipped_unchanged=0,
+            budget_exhausted=True,
+        )
     validated = validate_structured_discovery_payload_with_diagnostics(
         payload,
         window_start=request.window_start,
@@ -65,8 +124,10 @@ def retrieve_workiq_threads(
     enrichments: list[Enrichment] = []
     skipped = 0
     rejected = validated.rejected_identity_count
+    budget_exhausted = False
     for record in records[:top_k]:
-        if calls >= max_calls or monotonic() - started >= max_wall_clock_seconds:
+        if run_budget.calls_made >= run_budget.max_calls or run_budget.remaining_seconds() <= 0:
+            budget_exhausted = True
             break
         source_id = _canonical_source_id(record)
         if source_id is None:
@@ -87,8 +148,10 @@ def retrieve_workiq_threads(
         if timestamp is None:
             raise ValueError("Invalid validated WorkIQ source time")
         question = _thread_extraction_question(record, request=request, one_hop=one_hop)
-        raw = bridge.ask_workiq(question, use_cache=False)
-        calls += 1
+        raw = _ask(question)
+        if raw is _CALL_NOT_ATTEMPTED:
+            budget_exhausted = True
+            break
         body = _response_text(raw)
         if not body:
             continue
@@ -115,7 +178,9 @@ def retrieve_workiq_threads(
         write_workiq_freshness_cache(cache_path, cache)
     return WorkIQRetrievalResult(
         tuple(enrichments), len(records), calls, skipped, rejected, validated.rejected_source_time_count,
-        response_usable=validated.response_usable, rejected_invalid_record_count=validated.rejected_invalid_record_count,
+        response_usable=validated.response_usable,
+        rejected_invalid_record_count=validated.rejected_invalid_record_count,
+        budget_exhausted=budget_exhausted,
     )
 
 

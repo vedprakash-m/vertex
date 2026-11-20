@@ -34,7 +34,7 @@ from src.core.jsonl_utils import append_jsonl_line, parse_jsonl_line
 # --------------------------------------------------------------------------- #
 # Schema version bump when the set of required keys changes
 # --------------------------------------------------------------------------- #
-_SCHEMA_VERSION = "1.0"
+_SCHEMA_VERSION = "1.1"
 _SIDECAR_RELATIVE = "_state/ai_telemetry.jsonl"
 
 
@@ -89,6 +89,14 @@ class AiTelemetryRecord:
     tokens_out: int | None = None
     cost_usd: float | None = None
     error_detail: str | None = None
+    run_id: str | None = None
+    resolved_deployment: str | None = None
+    attempt_index: int | None = None
+    outcome: str | None = None
+    estimated_cost_usd: float | None = None
+    cost_reservation_id: int | None = None
+    caller: str | None = None
+    prompt_version: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -103,6 +111,14 @@ class AiTelemetryRecord:
             "tokens_out": self.tokens_out,
             "cost_usd": self.cost_usd,
             "error_detail": self.error_detail,
+            "run_id": self.run_id,
+            "resolved_deployment": self.resolved_deployment,
+            "attempt_index": self.attempt_index,
+            "outcome": self.outcome,
+            "estimated_cost_usd": self.estimated_cost_usd,
+            "cost_reservation_id": self.cost_reservation_id,
+            "caller": self.caller,
+            "prompt_version": self.prompt_version,
         }
 
 
@@ -214,7 +230,49 @@ def _record_from_payload(payload: dict[str, Any]) -> AiTelemetryRecord:
         tokens_out=int(tokens_out_raw) if tokens_out_raw is not None else None,
         cost_usd=float(cost_raw) if cost_raw is not None else None,
         error_detail=payload.get("error_detail"),
+        run_id=(
+            payload.get("run_id")
+            if isinstance(payload.get("run_id"), str)
+            else None
+        ),
+        resolved_deployment=(
+            payload.get("resolved_deployment")
+            if isinstance(payload.get("resolved_deployment"), str)
+            else None
+        ),
+        attempt_index=_optional_int(payload.get("attempt_index")),
+        outcome=(
+            payload.get("outcome")
+            if isinstance(payload.get("outcome"), str)
+            else None
+        ),
+        estimated_cost_usd=(
+            float(payload["estimated_cost_usd"])
+            if payload.get("estimated_cost_usd") is not None
+            else None
+        ),
+        cost_reservation_id=_optional_int(payload.get("cost_reservation_id")),
+        caller=(
+            payload.get("caller")
+            if isinstance(payload.get("caller"), str)
+            else None
+        ),
+        prompt_version=(
+            payload.get("prompt_version")
+            if isinstance(payload.get("prompt_version"), str)
+            else None
+        ),
     )
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError(
+            "Telemetry integer fields must be integers or integer strings."
+        )
+    return int(value)
 
 
 # --------------------------------------------------------------------------- #

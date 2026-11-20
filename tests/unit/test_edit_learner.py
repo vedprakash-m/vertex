@@ -75,11 +75,7 @@ def test_build_and_load_recent_edit_patterns(tmp_path: Path) -> None:
     assert prompt_confidence_summaries[0].prompt_version == "workstream_blurb.v1"
     assert prompt_confidence_summaries[0].ai_confidence == Confidence.HIGH.value
     assert prompt_confidence_summaries[0].sample_count == 1
-    assert context_lines[0].startswith("Recent calibration [workstream_blurb]: score=")
-    assert context_lines[1].startswith("Recent confidence calibration [workstream_blurb/high]: score=")
-    assert context_lines[2].startswith("Recent prompt confidence [workstream_blurb.v1/high]: score=")
-    assert context_lines[3].startswith("Recent prompt performance [workstream_blurb.v1]: score=")
-    assert context_lines[4:] == (f"Recent confirmed edit pattern [deployment]: {recent[0].summary}",)
+    assert context_lines == ()
 
 
 def test_summarize_recent_prompt_versions_groups_patterns_by_task_and_prompt_version(tmp_path: Path) -> None:

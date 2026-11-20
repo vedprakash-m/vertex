@@ -35,6 +35,26 @@ from tests.unit.test_gather_run_manifest import _make_manifest, _write_nested_ma
 pytestmark = pytest.mark.usefixtures(_isolate_fact_store_db.__name__)
 
 
+def _rebind_program_verdict(
+    report_manifest: dict[str, object], draft: dict[str, object], capture: dict[str, object],
+) -> None:
+    metadata = report_manifest["metadata"]
+    assert isinstance(metadata, dict)
+    observation = metadata["program_verdict_observation"]
+    comparison = metadata["program_verdict_comparison"]
+    assert isinstance(observation, dict) and isinstance(comparison, dict)
+    inputs = observation["inputs"]
+    verdict = observation["verdict"]
+    assert isinstance(inputs, dict) and isinstance(verdict, dict)
+    inputs["capture"] = capture
+    verdict["snapshot_id"] = capture["sha256"]
+    observation["inputs_sha256"] = hash_jsonable(inputs)
+    observation["verdict_sha256"] = hash_jsonable(verdict)
+    comparison["capture_sha256"] = capture["sha256"]
+    comparison["observation_inputs_sha256"] = observation["inputs_sha256"]
+    draft["program_verdict_observation_sha256"] = hash_jsonable(observation)
+
+
 @pytest.mark.parametrize("dry_run", [False, True])
 def test_confirm_path_shaped_gather_pin_blocks_before_archive(
     repo_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dry_run: bool,
@@ -61,6 +81,7 @@ def test_confirm_path_shaped_gather_pin_blocks_before_archive(
     capture.pop("sha256")
     capture["sha256"] = hash_jsonable(capture)
     draft["run_evidence_snapshot_sha256"] = capture["sha256"]
+    _rebind_program_verdict(report_manifest, draft, capture)
     report_manifest_path.write_text(json.dumps(report_manifest), encoding="utf-8")
     draft_path.write_text(json.dumps(draft), encoding="utf-8")
     archive_before = {path: path.read_bytes() for path in archive_root.rglob("*") if path.is_file()}
@@ -143,6 +164,7 @@ def test_confirm_gather_pin_identity_gates_archive(
     capture.pop("sha256")
     capture["sha256"] = hash_jsonable(capture)
     draft["run_evidence_snapshot_sha256"] = capture["sha256"]
+    _rebind_program_verdict(report_manifest, draft, capture)
     report_manifest_path.write_text(json.dumps(report_manifest), encoding="utf-8")
     draft_path.write_text(json.dumps(draft), encoding="utf-8")
     archive_before = {path: path.read_bytes() for path in archive_root.rglob("*") if path.is_file()}
@@ -211,6 +233,7 @@ def test_forced_confirm_rechecks_gather_pin_after_archive_lock(
     capture.pop("sha256")
     capture["sha256"] = hash_jsonable(capture)
     draft["run_evidence_snapshot_sha256"] = capture["sha256"]
+    _rebind_program_verdict(report_manifest, draft, capture)
     report_manifest_path.write_text(json.dumps(report_manifest), encoding="utf-8")
     draft_path.write_text(json.dumps(draft), encoding="utf-8")
     archive_before = {path: path.read_bytes() for path in archive_root.rglob("*") if path.is_file()}
@@ -299,6 +322,7 @@ def test_confirm_does_not_mark_valid_pin_stale_for_newer_failed_full_run(
     capture.pop("sha256")
     capture["sha256"] = hash_jsonable(capture)
     draft["run_evidence_snapshot_sha256"] = capture["sha256"]
+    _rebind_program_verdict(report_manifest, draft, capture)
     report_manifest_path.write_text(json.dumps(report_manifest), encoding="utf-8")
     draft_path.write_text(json.dumps(draft), encoding="utf-8")
     archive_before = {path: path.read_bytes() for path in archive_root.rglob("*") if path.is_file()}

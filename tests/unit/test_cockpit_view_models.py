@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -28,6 +29,202 @@ def test_exception_selector_and_headline_preserve_existing_precedence() -> None:
     assert cockpit_builder._pick_next_action(list(findings)) == "block"
     assert cockpit_builder._pick_next_action([]) is None
     assert select_cockpit_exceptions(()) == ()
+
+
+def test_exception_views_cover_all_spec_classes_without_reordering_sources() -> None:
+    from src.core.cockpit_builder import build_cockpit_exception_views
+    from src.core.cockpit_models import (
+        CockpitExceptionClass,
+        CockpitFinding,
+        CockpitSnapshot,
+        EconomicsCockpitSummary,
+        IntelligenceCockpitSummary,
+        ProgramCockpitSummary,
+        ReliabilityCockpitSummary,
+        SourceCockpitSummary,
+        ValueCockpitSummary,
+        finalize_cockpit_snapshot,
+    )
+
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    cases = (
+        ("program.draft.blocked", "warn"),
+        ("source.gap.required_channel", "blocked"),
+        ("intelligence.binding.ambiguous", "warn"),
+        ("trust.knowledge.correction", "blocked"),
+        ("trust.approval.expired", "warn"),
+        ("reliability.intent.uncertain", "blocked"),
+        ("schedule.runtime.incident", "warn"),
+    )
+    findings = tuple(
+        CockpitFinding(
+            finding_id, area, status, f"failure:{finding_id}", f"consequence:{finding_id}",
+            None, f"vertex inspect {finding_id}", (f"evidence:{finding_id}",), now,
+        )
+        for finding_id, status in cases
+        for area in (finding_id.split(".", 1)[0],)
+    )
+    snapshot = finalize_cockpit_snapshot(CockpitSnapshot(
+        schema_version="1",
+        program_id="fixture",
+        edition_id=None,
+        generated_at=now,
+        as_of=now,
+        program_summary=ProgramCockpitSummary("green", None, 0, (), None),
+        source_summary=SourceCockpitSummary(0, 0, (), (), (), {}),
+        intelligence_summary=IntelligenceCockpitSummary(None, None, (), 0),
+        economics_summary=EconomicsCockpitSummary(None, 0.0, None, 0),
+        value_summary=ValueCockpitSummary((), None),
+        reliability_summary=ReliabilityCockpitSummary(None, None, None, 0, None),
+        findings=findings,
+        input_hash="",
+    ))
+
+    views = build_cockpit_exception_views(snapshot)
+
+    assert [view.finding_id for view in views] == [
+        "source.gap.required_channel",
+        "trust.knowledge.correction",
+        "reliability.intent.uncertain",
+        "program.draft.blocked",
+        "intelligence.binding.ambiguous",
+        "trust.approval.expired",
+        "schedule.runtime.incident",
+    ]
+    assert [view.exception_class for view in views] == [
+        CockpitExceptionClass.SOURCE_GAP,
+        CockpitExceptionClass.KNOWLEDGE_CORRECTION,
+        CockpitExceptionClass.UNCERTAIN_INTENT,
+        CockpitExceptionClass.BLOCKED_DRAFT,
+        CockpitExceptionClass.BINDING_AMBIGUITY,
+        CockpitExceptionClass.APPROVAL_EXPIRY,
+        CockpitExceptionClass.RUNTIME_INCIDENT,
+    ]
+    assert all(view.snapshot_input_hash == snapshot.input_hash for view in views)
+    assert all(view.revalidation_command.startswith("vertex cockpit explain --program fixture") for view in views)
+    assert all(view.confidence is None for view in views)
+    assert all(view.diff_preview is None for view in views)
+    assert all(view.authority_required is None for view in views)
+    assert all(view.expiry_or_escalation is None for view in views)
+
+
+def test_exception_view_revalidation_refuses_untrusted_command_tokens() -> None:
+    from src.core.cockpit_builder import build_cockpit_exception_views
+    from src.core.cockpit_models import (
+        CockpitExceptionClass,
+        CockpitFinding,
+    )
+
+    finding = CockpitFinding(
+        "source.gap.unsafe;rm", "source", "blocked", "failure", "consequence",
+        None, None, (), datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    snapshot = replace(_exception_snapshot(findings=(finding,)), input_hash="a" * 64)
+    snapshot = finalize_cockpit_snapshot(snapshot)
+
+    view = build_cockpit_exception_views(snapshot)[0]
+
+    assert view.exception_class is CockpitExceptionClass.SOURCE_GAP
+    assert view.revalidation_command is None
+    assert view.safe_options == (
+        "A safe revalidation command is not available because the selected identifiers are not "
+        "valid copyable CLI tokens.",
+    )
+
+
+@pytest.mark.parametrize(
+    ("program_id", "edition_id"),
+    [("fixture;echo injected", None), ("fixture", "fixture_weekly;echo injected")],
+)
+def test_exception_view_revalidation_refuses_untrusted_scope_tokens(
+    program_id: str, edition_id: str | None,
+) -> None:
+    from src.core.cockpit_builder import build_cockpit_exception_views
+    from src.core.cockpit_models import CockpitFinding
+
+    finding = CockpitFinding(
+        "source.gap.required", "source", "blocked", "failure", "consequence",
+        None, None, (), datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    snapshot = replace(
+        _exception_snapshot(findings=(finding,)),
+        program_id=program_id,
+        edition_id=edition_id,
+    )
+
+    view = build_cockpit_exception_views(snapshot)[0]
+
+    assert view.revalidation_command is None
+
+
+def test_exception_view_revalidation_preserves_edition_scope() -> None:
+    from src.core.cockpit_builder import build_cockpit_exception_views
+    from src.core.cockpit_models import CockpitFinding
+
+    finding = CockpitFinding(
+        "source.gap.required", "source", "blocked", "failure", "consequence",
+        None, None, (), datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    snapshot = replace(
+        _exception_snapshot(findings=(finding,)),
+        edition_id="fixture_weekly",
+    )
+
+    view = build_cockpit_exception_views(snapshot)[0]
+
+    assert view.revalidation_command == (
+        "vertex cockpit explain --program fixture --edition fixture_weekly "
+        "--finding source.gap.required"
+    )
+
+
+def test_retained_exception_view_refuses_unverifiable_snapshot_hash() -> None:
+    from src.core.cockpit_builder import build_cockpit_exception_views
+    from src.core.cockpit_models import CockpitFinding
+
+    finding = CockpitFinding(
+        "source.gap.required", "source", "blocked", "failure", "consequence",
+        None, None, (), datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    snapshot = replace(_exception_snapshot(findings=(finding,)), input_hash="not-a-sha256")
+
+    view = build_cockpit_exception_views(snapshot, retained=True)[0]
+
+    assert view.revalidation_command is None
+    assert "not available" in view.safe_options[0]
+
+
+def test_exception_json_view_labels_every_missing_required_field() -> None:
+    from src.core.cockpit_builder import build_cockpit_exception_views
+    from src.core.cockpit_models import cockpit_exception_view_to_json_dict
+
+    snapshot = _exception_snapshot(
+        findings=(
+            CockpitFinding(
+                "source.gap.required", "source", "blocked", "failure", "consequence",
+                None, None, (), datetime(2026, 1, 1, tzinfo=timezone.utc),
+            ),
+        ),
+    )
+
+    payload = cockpit_exception_view_to_json_dict(build_cockpit_exception_views(snapshot)[0])
+
+    assert payload["exception_class"] == "source_gap"
+    assert payload["what_failed"] == "failure"
+    assert payload["consequence"] == "consequence"
+    assert payload["snapshot_input_hash"] == snapshot.input_hash
+    assert payload["confidence"] == "not available"
+    assert payload["expected_effect"] == (
+        "Rechecks the current finding before any operator action. "
+        "The cockpit view itself performs no mutation or dispatch."
+    )
+    assert payload["diff_preview"] == "not available"
+    assert payload["next_command"] == "not available"
+    assert payload["authority_required"] == "not available"
+    assert payload["expiry_or_escalation"] == "not available"
+
+    empty_options = replace(build_cockpit_exception_views(snapshot)[0], safe_options=())
+    assert cockpit_exception_view_to_json_dict(empty_options)["safe_options"] == ["not available"]
 from src.core.cockpit_builder import build_cockpit_snapshot
 from src.core.cockpit_models import (
     CockpitFinding,
@@ -52,6 +249,95 @@ from src.core.program_reality import ProgramReality
 from src.core.risk_register_engine import _risk_fact_payload, get_risk_register_path, save_risk_register
 
 _NOW = datetime(2026, 7, 12, 3, 4, 5, tzinfo=timezone.utc)
+
+
+def _exception_snapshot(*, findings: tuple[CockpitFinding, ...]) -> CockpitSnapshot:
+    return finalize_cockpit_snapshot(CockpitSnapshot(
+        schema_version="1",
+        program_id="fixture",
+        edition_id=None,
+        generated_at=_NOW,
+        as_of=_NOW,
+        program_summary=ProgramCockpitSummary("green", None, 0, (), None),
+        source_summary=SourceCockpitSummary(0, 0, (), (), (), {}),
+        intelligence_summary=IntelligenceCockpitSummary(None, None, (), 0),
+        economics_summary=EconomicsCockpitSummary(None, 0.0, None, 0),
+        value_summary=ValueCockpitSummary((), None),
+        reliability_summary=ReliabilityCockpitSummary(None, None, None, 0, None),
+        findings=findings,
+        input_hash="",
+    ))
+
+
+def test_program_summary_prefers_latest_snapshot_bound_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publication = tmp_path / "acme" / "publications" / "weekly" / "issue_012"
+    publication.mkdir(parents=True)
+    manifest = {
+        "started_at": "2026-07-12T03:04:05+00:00",
+        "metadata": {
+            "program_verdict_observation": {
+                "mode": "observe",
+                "verdict": {
+                    "schema_version": "program-verdict.v1",
+                    "program_id": "acme",
+                    "snapshot_id": "capture-12",
+                    "as_of": "2026-07-12T03:00:00+00:00",
+                    "health": "high",
+                    "schedule_risk": "medium",
+                    "confidence": "none",
+                    "completion_phase": "unknown",
+                    "reasons": [{"code": "risk_register_high_floor"}],
+                    "evidence_gaps": [{"code": "risk_register_coverage_unqualified"}],
+                    "leadership_asks": [{"text": "Assign an owner."}],
+                    "source_refs": ["WI:1"],
+                },
+            }
+        },
+    }
+    (publication / "issue_012.manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        cockpit_builder,
+        "resolve_family_sor_mode",
+        lambda *args, **kwargs: "legacy",
+    )
+    monkeypatch.setattr(cockpit_builder, "load_risk_register", lambda *args, **kwargs: ())
+    risk_loader = Mock(return_value=())
+    monkeypatch.setattr(cockpit_builder, "load_risk_register", risk_loader)
+
+    summary, findings = cockpit_builder._build_program_summary(
+        "acme", programs_root=tmp_path, observed_at=_NOW
+    )
+
+    assert summary.overall_risk == "red"
+    assert summary.blocker_count is None
+    assert summary.next_action == "Review the latest snapshot-bound program verdict."
+    finding = next(f for f in findings if f.finding_id == "program.verdict.snapshot_bound")
+    assert finding.status == "warn"
+    assert "observe mode" in finding.detail
+    risk_loader.assert_not_called()
+
+
+def test_program_summary_invalid_latest_verdict_does_not_fall_back_to_live_risk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publication = tmp_path / "acme" / "publications" / "weekly" / "issue_013"
+    publication.mkdir(parents=True)
+    (publication / "issue_013.manifest.json").write_text("{broken", encoding="utf-8")
+    risk_loader = Mock(return_value=())
+    monkeypatch.setattr(cockpit_builder, "load_risk_register", risk_loader)
+
+    summary, findings = cockpit_builder._build_program_summary(
+        "acme", programs_root=tmp_path, observed_at=_NOW
+    )
+
+    assert summary.overall_risk == "unknown"
+    assert summary.blocker_count is None
+    assert [finding.finding_id for finding in findings] == ["program.verdict.read_failed"]
+    risk_loader.assert_not_called()
 
 
 @pytest.mark.parametrize("error", [
@@ -474,6 +760,24 @@ def test_successful_risk_summary_preserves_existing_behavior(
     assert snapshot.program_summary.overall_risk == expected_risk
     assert snapshot.program_summary.blocker_count == expected_count
     assert not any(f.finding_id.endswith("_failed") for f in snapshot.findings)
+
+
+def test_ambiguous_active_risk_lifecycle_is_unknown_not_aggregated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    risks = (
+        replace(_risk_entry("duplicate-a"), dedupe_key="explicit-duplicate"),
+        replace(_risk_entry("duplicate-b"), dedupe_key="explicit-duplicate"),
+    )
+    monkeypatch.setattr(cockpit_builder, "load_risk_register", lambda *args, **kwargs: risks)
+
+    snapshot = build_cockpit_snapshot("fixture_prog", programs_root=tmp_path / "programs", now=_NOW)
+
+    assert snapshot.program_summary.overall_risk == "unknown"
+    assert snapshot.program_summary.blocker_count is None
+    finding = next(f for f in snapshot.findings if f.finding_id == "program.risk.lifecycle_ambiguous")
+    assert finding.status == "blocked"
+    assert set(finding.evidence_refs) == {"duplicate-a", "duplicate-b"}
 
 
 def _seed_primary_risk_divergence(

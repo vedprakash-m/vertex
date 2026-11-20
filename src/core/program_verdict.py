@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import json
 import math
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from src.core.exceptions import ConfigError
@@ -13,6 +16,7 @@ from src.core.models_v2 import Milestone, MilestoneAssessment, MilestoneStatus, 
 from src.core.program_reality import FactAssessment
 from src.core.risk_register_engine import HIGH_RISK_SCORE_THRESHOLD, compute_risk_score
 from src.core.work_item_states import TERMINAL_WORK_ITEM_STATES
+from src.core.workspace_paths import is_bare_identifier
 
 if TYPE_CHECKING:
     from src.core.program_reality import RealityConflict
@@ -68,6 +72,22 @@ class ProgramVerdict:
 
 
 @dataclass(frozen=True, slots=True)
+class PublishedProgramVerdict:
+    program_id: str
+    snapshot_id: str
+    as_of: datetime
+    health: RiskLevel
+    schedule_risk: RiskLevel
+    confidence: Confidence
+    completion_phase: str
+    reason_codes: tuple[str, ...]
+    evidence_gap_codes: tuple[str, ...]
+    leadership_ask_count: int
+    source_refs: tuple[str, ...]
+    manifest_path: Path
+
+
+@dataclass(frozen=True, slots=True)
 class ProgramVerdictInputs:
     capture: RunEvidenceSnapshot
     snapshot: Snapshot
@@ -87,6 +107,7 @@ class ProgramVerdictObservation:
     inputs: ProgramVerdictInputs
     inputs_sha256: str
     verdict: ProgramVerdict
+    verdict_sha256: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +120,121 @@ class ReportVerdictComparison:
     report_health_state: str
     verdict_risk: RiskLevel
     risk_values_equal: bool
+
+
+def load_latest_program_verdict(
+    program_id: str, *, programs_root: Path
+) -> PublishedProgramVerdict | None:
+    """Load the newest retained snapshot-bound verdict without older fallback."""
+    if not is_bare_identifier(program_id):
+        raise ConfigError("Program verdict program identity is invalid.")
+    selected_root = programs_root.resolve()
+    try:
+        program_root = (selected_root / program_id).resolve().relative_to(selected_root)
+    except ValueError:
+        raise ConfigError("Program verdict program root is invalid.") from None
+    publications = selected_root / program_root / "publications"
+    if not publications.exists():
+        return None
+    candidates: list[tuple[datetime, Path, dict]] = []
+    publication_root = publications.resolve()
+    for path in publications.rglob("*.manifest.json"):
+        try:
+            path.resolve().relative_to(publication_root)
+        except (OSError, ValueError):
+            raise ConfigError("Program verdict manifest path is invalid.") from None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            raise ConfigError("Program verdict manifest is invalid or unreadable.") from None
+        if not isinstance(payload, dict):
+            raise ConfigError("Program verdict manifest is invalid.")
+        metadata = payload.get("metadata")
+        observation = metadata.get("program_verdict_observation") if isinstance(metadata, dict) else None
+        if observation is None:
+            continue
+        if not isinstance(observation, dict) or observation.get("mode") != "observe":
+            raise ConfigError("Program verdict manifest observation is invalid.")
+        verdict = observation.get("verdict")
+        if not isinstance(verdict, dict) or verdict.get("program_id") != program_id:
+            raise ConfigError("Program verdict manifest observation identity is invalid.")
+        raw_clock = payload.get("started_at")
+        if not isinstance(raw_clock, str):
+            raise ConfigError("Program verdict manifest clock is unavailable.")
+        try:
+            clock = datetime.fromisoformat(raw_clock.replace("Z", "+00:00"))
+        except ValueError:
+            raise ConfigError("Program verdict manifest clock is invalid.") from None
+        if clock.tzinfo is None or clock.utcoffset() is None:
+            raise ConfigError("Program verdict manifest clock must be timezone-aware.")
+        candidates.append((clock.astimezone(timezone.utc), path, verdict))
+    if not candidates:
+        return None
+    _, path, verdict = max(candidates, key=lambda row: (row[0], str(row[1])))
+    return _published_verdict_from_payload(program_id, path, verdict)
+
+
+def _published_verdict_from_payload(
+    program_id: str, path: Path, verdict: dict
+) -> PublishedProgramVerdict:
+    try:
+        if verdict.get("schema_version") != "program-verdict.v1":
+            raise ValueError("schema")
+        raw_snapshot_id = verdict["snapshot_id"]
+        raw_as_of = verdict["as_of"]
+        raw_completion_phase = verdict.get("completion_phase", "unknown")
+        raw_confidence = verdict.get("confidence", "none")
+        if (
+            not isinstance(raw_snapshot_id, str) or not raw_snapshot_id.strip()
+            or not isinstance(raw_as_of, str)
+            or not isinstance(raw_completion_phase, str) or not raw_completion_phase.strip()
+            or not isinstance(raw_confidence, str)
+        ):
+            raise ValueError("shape")
+        as_of = datetime.fromisoformat(raw_as_of.replace("Z", "+00:00"))
+        if as_of.tzinfo is None or as_of.utcoffset() is None:
+            raise ValueError("clock")
+        reason_codes = _manifest_reason_codes(verdict.get("reasons"))
+        evidence_gap_codes = _manifest_reason_codes(verdict.get("evidence_gaps"))
+        asks = verdict.get("leadership_asks")
+        refs = verdict.get("source_refs")
+        if (
+            not isinstance(asks, list)
+            or any(not isinstance(row, dict) for row in asks)
+            or not isinstance(refs, list)
+            or any(not isinstance(ref, str) or not ref.strip() for ref in refs)
+        ):
+            raise ValueError("shape")
+        return PublishedProgramVerdict(
+            program_id=program_id,
+            snapshot_id=raw_snapshot_id,
+            as_of=as_of.astimezone(timezone.utc),
+            health=RiskLevel(verdict["health"]),
+            schedule_risk=RiskLevel(verdict["schedule_risk"]),
+            confidence=Confidence(raw_confidence),
+            completion_phase=raw_completion_phase,
+            reason_codes=reason_codes,
+            evidence_gap_codes=evidence_gap_codes,
+            leadership_ask_count=len(asks),
+            source_refs=tuple(refs),
+            manifest_path=path,
+        )
+    except (KeyError, TypeError, ValueError):
+        raise ConfigError("Program verdict manifest payload is invalid.") from None
+
+
+def _manifest_reason_codes(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise ValueError("reason shape")
+    codes: list[str] = []
+    for row in value:
+        if not isinstance(row, dict):
+            raise ValueError("reason row")
+        code = row.get("code")
+        if not isinstance(code, str) or not code.strip():
+            raise ValueError("reason code")
+        codes.append(code)
+    return tuple(sorted(codes))
 
 
 def compare_report_health(
@@ -142,7 +278,75 @@ def observe_program_verdict(
         tuple(sorted(milestone_warnings)),
     )
     verdict = evaluate_program_verdict(inputs)
-    return ProgramVerdictObservation("observe", inputs, hash_jsonable(inputs), verdict)
+    return ProgramVerdictObservation(
+        "observe", inputs, hash_jsonable(inputs), verdict, hash_jsonable(verdict),
+    )
+
+
+def validate_retained_program_verdict(
+    payload: object,
+    *,
+    capture: RunEvidenceSnapshot,
+    report_snapshot_hash: str,
+) -> str:
+    if not isinstance(payload, Mapping):
+        raise ConfigError("The retained program verdict observation is invalid.")
+    mode = payload.get("mode")
+    inputs = payload.get("inputs")
+    verdict = payload.get("verdict")
+    inputs_sha256 = payload.get("inputs_sha256")
+    verdict_sha256 = payload.get("verdict_sha256")
+    if (
+        mode != "observe"
+        or not isinstance(inputs, Mapping)
+        or not isinstance(verdict, Mapping)
+        or not isinstance(inputs_sha256, str)
+        or not isinstance(verdict_sha256, str)
+    ):
+        raise ConfigError("The retained program verdict observation is invalid.")
+    retained_capture = inputs.get("capture")
+    retained_snapshot = inputs.get("snapshot")
+    if (
+        not isinstance(retained_capture, Mapping)
+        or not isinstance(retained_snapshot, Mapping)
+        or hash_jsonable(retained_capture) != hash_jsonable(capture)
+        or hash_jsonable(retained_snapshot) != report_snapshot_hash
+        or report_snapshot_hash != capture.report_snapshot_hash
+    ):
+        raise ConfigError("The retained program verdict observation capture binding is invalid.")
+    if hash_jsonable(inputs) != inputs_sha256 or hash_jsonable(verdict) != verdict_sha256:
+        raise ConfigError("The retained program verdict observation content binding is invalid.")
+    if (
+        verdict.get("schema_version") != "program-verdict.v1"
+        or verdict.get("program_id") != capture.program_id
+        or verdict.get("snapshot_id") != capture.sha256
+    ):
+        raise ConfigError("The retained program verdict observation identity is invalid.")
+    return inputs_sha256
+
+
+def validate_retained_program_verdict_comparison(
+    payload: object,
+    *,
+    capture_sha256: str,
+    observation_inputs_sha256: str,
+) -> None:
+    if not isinstance(payload, Mapping):
+        raise ConfigError("The retained report verdict comparison is invalid.")
+    report_risk = payload.get("report_risk")
+    verdict_risk = payload.get("verdict_risk")
+    risk_values_equal = payload.get("risk_values_equal")
+    if (
+        payload.get("schema_version") != "report-verdict-comparison.v1"
+        or payload.get("mode") != "observe"
+        or payload.get("capture_sha256") != capture_sha256
+        or payload.get("observation_inputs_sha256") != observation_inputs_sha256
+        or not isinstance(report_risk, str)
+        or not isinstance(verdict_risk, str)
+        or not isinstance(risk_values_equal, bool)
+        or risk_values_equal is not (report_risk == verdict_risk)
+    ):
+        raise ConfigError("The retained report verdict comparison binding is invalid.")
 
 
 def evaluate_program_verdict(inputs: ProgramVerdictInputs) -> ProgramVerdict:

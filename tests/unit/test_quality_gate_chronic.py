@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from src.core import quality_gates as quality_gates_module
 from src.core.models import AttributionTier, Confidence, DimensionRisk, EvidencePacket, RiskLevel
@@ -41,15 +42,30 @@ def _resolved_scorecards() -> tuple[Scorecard, ...]:
 
 
 def test_phase_1b_chronic_wrapper_uses_chronic_module(monkeypatch, tmp_path: Path) -> None:
+    captured_risk = SimpleNamespace(status=SimpleNamespace(value="open"))
+    observed: dict[str, object] = {}
+
+    def evaluate(**kwargs):
+        observed.update(kwargs)
+        return quality_gates_module.GateEvaluation(
+            "QG-12",
+            False,
+            "chronic",
+            2,
+            forceable=True,
+        )
+
     monkeypatch.setattr(
         quality_gates_module,
         "_evaluate_chronic_high_dimension_gate_impl",
-        lambda **kwargs: quality_gates_module.GateEvaluation("QG-12", False, "chronic", 2, forceable=True),
+        evaluate,
     )
     monkeypatch.setattr(
         quality_gates_module,
         "_load_current_risks",
-        lambda program_id, *, programs_root: (),
+        lambda program_id, *, programs_root: (_ for _ in ()).throw(
+            AssertionError("Captured risks must not be replaced with a live read.")
+        ),
     )
 
     result = quality_gates_module._evaluate_chronic_high_dimension_gate(
@@ -61,10 +77,12 @@ def test_phase_1b_chronic_wrapper_uses_chronic_module(monkeypatch, tmp_path: Pat
         scorecards=_resolved_scorecards(),
         archive_root=tmp_path / "archive",
         programs_root=tmp_path / "programs",
+        risk_entries=(captured_risk,),
     )
 
     assert result.gate_id == "QG-12"
     assert result.passed is False
+    assert observed["open_risks"] == (captured_risk,)
 
 
 def test_chronic_gate_passes_when_inputs_missing(tmp_path: Path) -> None:

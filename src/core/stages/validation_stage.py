@@ -232,6 +232,7 @@ class ValidationStage:
             program_maturity_level=(ctx.resolved_v2.program.maturity_level if ctx.resolved_v2 is not None else 0),
             workstreams=(ctx.resolved_v2.workstreams if ctx.resolved_v2 is not None else ()),
             scorecards=(ctx.resolved_v2.scorecards if ctx.resolved_v2 is not None else ()),
+            risk_entries=tuple(ctx.risks) if ctx.risks is not None else None,
             archive_root=archive_root,
             programs_root=programs_root,
             reports_root=ctx.reports_root,

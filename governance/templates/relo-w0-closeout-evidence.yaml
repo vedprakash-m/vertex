@@ -1,0 +1,36 @@
+# Public, value-free RELO-W0.12/W0.13/W0.14 evidence packet template.
+#
+# Copy this file to a private location before adding real evidence. The verifier
+# accepts an explicitly selected packet and never treats this template as
+# deployment qualification, staffing authority, budget ratification or owner
+# approval. Run `scripts/verify_relo.py --closeout` to generate the exact current
+# requirement list, including one NFR measurement record per selected budget.
+schema_version: "1"
+
+staffing:
+  status: pending
+  as_of: null
+  evidence_refs: []
+  approval:
+    status: pending
+    approved_by: null
+    approved_at: null
+
+economics:
+  status: pending
+  as_of: null
+  window_start: null
+  window_end: null
+  workload_profile: null
+  evidence_refs: []
+  approval:
+    status: pending
+    approved_by: null
+    approved_at: null
+
+# Add exactly one entry for each budget emitted by --closeout. A numeric
+# ceiling/floor uses observed_value + unit; a qualitative budget uses
+# policy_result. Every supplied entry requires:
+# budget_id, status, as_of, workload_profile, verification_method,
+# evidence_refs, approval, and its direction-specific result field(s).
+nfr_measurements: []

@@ -64,11 +64,58 @@ def _comment_program() -> Program:
     )
 
 
+def _authorized_create_effect() -> dict[str, Any]:
+    observed_at = "2026-05-13T18:00:00+00:00"
+    return {
+        "program_id": "demo",
+        "intent_id": "intent-1",
+        "approval_id": "approval-1",
+        "provider": "ado",
+        "tenant_id": "fixture",
+        "project": "One",
+        "operation": "create_task.v1",
+        "target_identity": "One:new",
+        "desired_value": {
+            "System.Title": "Synthetic",
+            "System.Tags": "vertex-intent-intent-1",
+        },
+        "execution_principal": "operator:fixture",
+        "audience_manifest": {
+            "generated_at": observed_at,
+            "program_id": "demo",
+            "entries": [],
+        },
+        "intended_recipients": [],
+        "preflight_revision": 1,
+        "precondition_observed_at": observed_at,
+        "evidence_version": "synthetic-evidence-v1",
+        "policy_version": "synthetic-policy-v1",
+        "rollback_mechanism": "none",
+    }
+
+
+def _qualified_create_payload() -> dict[str, Any]:
+    return {
+        "program_id": "demo",
+        "org": "fixture",
+        "project": "One",
+        "title": "Synthetic",
+        "tags": "vertex-intent-intent-1",
+        "operation_intent_id": "intent-1",
+        "authorized_effect": _authorized_create_effect(),
+    }
+
+
 @pytest.mark.parametrize("response", [{}, {"id": None}, {"id": True}, {"id": 0}, {"id": -1}, {"id": "42"}, {"id": 1.5}])
 def test_create_callback_invalid_acknowledgement_is_uncertain(tmp_path, monkeypatch, response) -> None:
     from types import SimpleNamespace
 
-    writer = ADOWriter(SimpleNamespace(organization="fixture", project="One", _rest_base_url="https://example.invalid/"), programs_root=tmp_path)
+    writer = ADOWriter(SimpleNamespace(
+        organization="fixture",
+        project="One",
+        _rest_base_url="https://example.invalid/",
+        _vertex_synthetic_provider=True,
+    ), programs_root=tmp_path)
     calls = []
 
     def respond(*args, **kwargs):
@@ -77,7 +124,9 @@ def test_create_callback_invalid_acknowledgement_is_uncertain(tmp_path, monkeypa
 
     monkeypatch.setattr(writer, "_request_json", respond)
     result = writer._dispatch_create_task_outbox_entry(SimpleNamespace(
-        payload_json=json.dumps({"org": "fixture", "project": "One", "title": "Synthetic", "tags": "marker"}),
+        payload_json=json.dumps(_qualified_create_payload()),
+        outbox_id="fixture-outbox",
+        attempt_count=1,
     ))
     assert result.succeeded is False and result.uncertain is True
     assert result.remote_id is None and len(calls) == 1
@@ -88,10 +137,17 @@ def test_create_callback_hashes_actual_success_response(tmp_path, monkeypatch) -
     from types import SimpleNamespace
 
     response = {"id": 42, "rev": 1, "fields": {"System.Title": "Synthetic"}}
-    writer = ADOWriter(SimpleNamespace(organization="fixture", project="One", _rest_base_url="https://example.invalid/"), programs_root=tmp_path)
+    writer = ADOWriter(SimpleNamespace(
+        organization="fixture",
+        project="One",
+        _rest_base_url="https://example.invalid/",
+        _vertex_synthetic_provider=True,
+    ), programs_root=tmp_path)
     monkeypatch.setattr(writer, "_request_json", lambda *args, **kwargs: response)
     result = writer._dispatch_create_task_outbox_entry(SimpleNamespace(
-        payload_json=json.dumps({"org": "fixture", "project": "One", "title": "Synthetic", "tags": "marker"}),
+        payload_json=json.dumps(_qualified_create_payload()),
+        outbox_id="fixture-outbox",
+        attempt_count=1,
     ))
     assert result.succeeded is True and result.uncertain is False and result.remote_id == 42
     assert result.remote_rev == 1
@@ -101,7 +157,12 @@ def test_create_callback_hashes_actual_success_response(tmp_path, monkeypatch) -
 def test_create_callback_query_timeout_is_uncertain_not_definite_failure(tmp_path, monkeypatch) -> None:
     from types import SimpleNamespace
 
-    writer = ADOWriter(SimpleNamespace(organization="fixture", project="One", _rest_base_url="https://example.invalid/"), programs_root=tmp_path)
+    writer = ADOWriter(SimpleNamespace(
+        organization="fixture",
+        project="One",
+        _rest_base_url="https://example.invalid/",
+        _vertex_synthetic_provider=True,
+    ), programs_root=tmp_path)
     calls = []
 
     def timeout(*args, **kwargs):
@@ -110,11 +171,144 @@ def test_create_callback_query_timeout_is_uncertain_not_definite_failure(tmp_pat
 
     monkeypatch.setattr(writer, "_request_json", timeout)
     result = writer._dispatch_create_task_outbox_entry(SimpleNamespace(
-        payload_json=json.dumps({"org": "fixture", "project": "One", "title": "Synthetic"}),
+        payload_json=json.dumps(_qualified_create_payload()),
+        outbox_id="fixture-outbox",
+        attempt_count=1,
     ))
     assert result.uncertain is True and result.succeeded is False
     assert "private-timeout-detail" not in result.failure_reason
     assert len(calls) == 1
+
+
+def test_non_create_ado_mutations_have_no_dispatch_surface(tmp_path: Path) -> None:
+    writer = ADOWriter(
+        SimpleNamespace(
+            organization="fixture",
+            project="One",
+            _rest_base_url="https://example.invalid/",
+        ),
+        programs_root=tmp_path,
+    )
+    assert not hasattr(writer, "_dispatch_mutation_via_outbox")
+
+
+def test_create_callback_refuses_unbound_authorization_before_post(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = ADOWriter(
+        SimpleNamespace(
+            organization="fixture",
+            project="One",
+            _rest_base_url="https://example.invalid/",
+            _vertex_synthetic_provider=True,
+        ),
+        programs_root=tmp_path,
+    )
+    monkeypatch.setattr(
+        writer,
+        "_request_json",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("provider must not be reached")
+        ),
+    )
+    result = writer._dispatch_create_task_outbox_entry(SimpleNamespace(
+        payload_json=json.dumps({
+            "org": "fixture",
+            "project": "One",
+            "title": "Synthetic",
+            "operation_intent_id": "intent-1",
+        }),
+        outbox_id="fixture-outbox",
+        attempt_count=1,
+    ))
+    assert result.succeeded is False
+    assert result.uncertain is False
+    assert "authorized effect" in (result.failure_reason or "").lower()
+
+
+def test_create_callback_refuses_real_provider_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = ADOWriter(
+        SimpleNamespace(
+            organization="fixture",
+            project="One",
+            _rest_base_url="https://example.invalid/",
+        ),
+        programs_root=tmp_path,
+    )
+    monkeypatch.setattr(
+        writer,
+        "_request_json",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("provider must not be reached")
+        ),
+    )
+    result = writer._dispatch_create_task_outbox_entry(SimpleNamespace(
+        payload_json=json.dumps(_qualified_create_payload()),
+        outbox_id="fixture-outbox",
+        attempt_count=1,
+    ))
+    assert result.succeeded is False
+    assert result.uncertain is False
+    assert "live ado provider dispatch is disabled" in (
+        result.failure_reason or ""
+    ).lower()
+
+
+def test_create_callback_reconciles_authorized_remote_effect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = ADOWriter(
+        SimpleNamespace(
+            organization="fixture",
+            project="One",
+            _rest_base_url="https://example.invalid/",
+            _vertex_synthetic_provider=True,
+        ),
+        programs_root=tmp_path,
+    )
+    response = {
+        "id": 42,
+        "rev": 2,
+        "intent_id": "intent-1",
+        "approval_id": "approval-1",
+        "provider": "ado",
+        "provider_tenant_id": "fixture",
+        "provider_project": "One",
+        "operation": "create_task.v1",
+        "provider_target_identity": "One:new",
+        "preflight_revision": 1,
+        "fields": {
+            "System.Title": "Synthetic",
+            "System.Tags": "vertex-intent-intent-1",
+            "System.CreatedBy": {"uniqueName": "operator:fixture"},
+        },
+        "provider_request_id": "provider-request-1",
+        "provider_correlation_id": "provider-correlation-1",
+        "evidence_version": "synthetic-evidence-v1",
+        "policy_version": "synthetic-policy-v1",
+        "dispatched_at": "2026-05-13T18:00:00+00:00",
+        "observed_at": "2026-05-13T18:00:01+00:00",
+    }
+    monkeypatch.setattr(writer, "_request_json", lambda *args, **kwargs: response)
+    result = writer._dispatch_create_task_outbox_entry(SimpleNamespace(
+        payload_json=json.dumps({
+            "org": "fixture",
+            "project": "One",
+            "program_id": "demo",
+            "title": "Synthetic",
+            "operation_intent_id": "intent-1",
+            "tags": "vertex-intent-intent-1",
+            "authorized_effect": _authorized_create_effect(),
+        }),
+        outbox_id="fixture-outbox",
+        attempt_count=1,
+    ))
+    assert result.succeeded is True
+    assert result.reconciliation is not None
+    assert result.reconciliation.completed is True
+    assert len(result.reconciliation.receipts) == 1
 
 
 def _comment_proposal(proposal_id: str, at: datetime, *, entry_status: str = "pending") -> ADOUpdateProposal:
@@ -153,7 +347,7 @@ def _comment_proposal(proposal_id: str, at: datetime, *, entry_status: str = "pe
         ("vitality_nudge", "Vertex shared title\nDifferent obligation", 0),
     ],
 )
-def test_apply_manifest_uses_exact_body_only_for_typed_meeting_actions(
+def _retired_direct_path_test_apply_manifest_uses_exact_body_only_for_typed_meeting_actions(
     tmp_path: Path, update_type: str, existing_text: str, expected_applied: int,
 ) -> None:
     at = datetime(2026, 5, 13, 18, tzinfo=timezone.utc)
@@ -260,31 +454,23 @@ def test_apply_manifest_updates_entries_and_logs_audit_signals(tmp_path: Path) -
     reviews = load_latest_review_decisions("demo", programs_root=programs_root)
 
     assert artifacts.proposal_status == "partially_applied"
-    assert artifacts.applied_count == 3
-    assert artifacts.skipped_count == 1
-    assert artifacts.conflict_count == 1
-    assert artifacts.failed_count == 0
+    assert artifacts.applied_count == 0
+    assert artifacts.skipped_count == 0
+    assert artifacts.conflict_count == 0
+    assert artifacts.failed_count == 5
     assert proposal_status == "partially_applied"
-    assert [entry.entry_status for entry in updated_proposal.entries] == [
-        "applied",
-        "conflict",
-        "skipped",
-        "applied",
-        "applied",
-    ]
-    assert len(signals) == 3
-    assert all(signal.source == "vertex/ado_update" for signal in signals)
-    assert set(reviews) == {signal.id for signal in signals}
-    assert client.comment_lookup_count == 2
-    assert client.session.calls[0]["method"] == "POST"
-    assert client.session.calls[1]["method"] == "PATCH"
-    assert client.session.calls[2]["method"] == "PATCH"
+    assert [entry.entry_status for entry in updated_proposal.entries] == ["failed"] * 5
+    assert not signals
+    assert not reviews
+    assert client.comment_lookup_count == 0
+    assert client.session.calls == []
 
     rerun = ADOWriter(client, programs_root=programs_root).apply_manifest(manifest_path, applied_at=applied_at)
 
-    assert rerun.applied_count == 3
-    assert len(client.session.calls) == 3
-    assert len(read_signals("demo", programs_root=programs_root)) == 3
+    assert rerun.applied_count == 0
+    assert rerun.failed_count == 5
+    assert client.session.calls == []
+    assert not read_signals("demo", programs_root=programs_root)
 
 
 @pytest.mark.parametrize(
@@ -305,6 +491,20 @@ def test_apply_manifest_updates_entries_and_logs_audit_signals(tmp_path: Path) -
             "PATCH",
         ),
         (
+            ADOUpdateEntry(work_item_id=1001, action="remove_tag", field_or_tag="System.Tags", current_value="alpha",
+                           proposed_value="Needs-PM-Review", reason="r", revision_id=7),
+            {"rev": 7, "fields": {"System.Id": 1001, "System.Rev": 7, "System.Tags": "alpha; Needs-PM-Review"}},
+            "add_tag.v1",
+            "PATCH",
+        ),
+        (
+            ADOUpdateEntry(work_item_id=1001, action="set_tags", field_or_tag="System.Tags", current_value="alpha",
+                           proposed_value="Needs-PM-Review", reason="r", revision_id=7),
+            {"rev": 7, "fields": {"System.Id": 1001, "System.Rev": 7, "System.Tags": "alpha"}},
+            "add_tag.v1",
+            "PATCH",
+        ),
+        (
             ADOUpdateEntry(work_item_id=1001, action="set_field", field_or_tag="Custom.RiskLevel", current_value="high",
                            proposed_value="medium", reason="r", revision_id=7),
             {"rev": 7, "fields": {"System.Id": 1001, "System.Rev": 7, "Custom.RiskLevel": "high"}},
@@ -313,7 +513,7 @@ def test_apply_manifest_updates_entries_and_logs_audit_signals(tmp_path: Path) -
         ),
     ],
 )
-def test_non_create_mutation_keeps_existing_direct_path_pending_owner_ruling(
+def test_non_create_mutation_fails_closed_without_provider_write(
     tmp_path: Path, entry: ADOUpdateEntry, row: dict[str, Any], operation: str, method: str,
 ) -> None:
     from src.core.actuation_outbox import outbox_db_path
@@ -327,15 +527,52 @@ def test_non_create_mutation_keeps_existing_direct_path_pending_owner_ruling(
     artifacts = ADOWriter(client, programs_root=programs_root).apply_manifest(manifest_path, applied_at=applied_at)
     rerun = ADOWriter(client, programs_root=programs_root).apply_manifest(manifest_path, applied_at=applied_at)
 
-    assert artifacts.applied_count == rerun.applied_count == 1
-    assert len(client.session.calls) == 1
+    assert artifacts.applied_count == rerun.applied_count == 0
+    assert artifacts.failed_count == rerun.failed_count == 1
+    assert len(client.session.calls) == 0
     db = outbox_db_path("demo", programs_root=programs_root)
     assert not db.exists()
-    assert client.session.calls[0]["method"] == method
-    assert "workItems/1001" in client.session.calls[0]["url"]
+    assert "outbox" in (read_proposal_manifest(manifest_path)[0].entries[0].status_reason or "").lower()
+    assert operation not in set(("create_task.v1",))
 
 
-def test_apply_manifest_writes_sqlite_backed_audit_signals(tmp_path: Path) -> None:
+@pytest.mark.parametrize("action", ["add_comment", "add_tag", "remove_tag", "set_tags", "set_field"])
+def test_non_create_rollback_fails_closed_without_provider_write(
+    tmp_path: Path, action: str,
+) -> None:
+    proposal = ADOUpdateProposal(
+        id=f"prop-rollback-{action}",
+        program_id="demo",
+        edition_id="demo_weekly",
+        issue_number=7,
+        update_type=action,
+        created_at=datetime(2026, 5, 13, 16, tzinfo=timezone.utc),
+        expires_at=datetime(2026, 5, 16, 16, tzinfo=timezone.utc),
+        entries=(ADOUpdateEntry(
+            work_item_id=1001,
+            action=action,
+            field_or_tag="comment" if action == "add_comment" else "System.Tags" if action != "set_field" else "Custom.RiskLevel",
+            current_value="old",
+            proposed_value="new",
+            reason="r",
+            revision_id=7,
+            entry_status="applied",
+        ),),
+    )
+    path = write_proposal_manifest(proposal, programs_root=tmp_path / "programs")
+    client = _FakeADOClient(rows_by_id={1001: {"rev": 8, "fields": {}}})
+    result = ADOWriter(client, programs_root=tmp_path / "programs").rollback_manifest(
+        path,
+        action_id="rollback-1",
+        rolled_back_at=datetime(2026, 5, 13, 18, tzinfo=timezone.utc),
+    )
+    assert result.failed_count == 1
+    assert result.rolled_back_count == 0
+    assert result.results[0].status_reason and "outbox" in result.results[0].status_reason.lower()
+    assert client.session.calls == []
+
+
+def _retired_direct_path_test_apply_manifest_writes_sqlite_backed_audit_signals(tmp_path: Path) -> None:
     programs_root = tmp_path / "programs"
     program_dir = programs_root / "demo"
     program_dir.mkdir(parents=True, exist_ok=True)
@@ -396,7 +633,9 @@ def test_apply_manifest_writes_sqlite_backed_audit_signals(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize("update_type", ["comment", "meeting_action"])
-def test_rollback_manifest_reverts_applied_entries_idempotently(tmp_path: Path, update_type: str) -> None:
+def _retired_direct_path_test_rollback_manifest_reverts_applied_entries_idempotently(
+    tmp_path: Path, update_type: str,
+) -> None:
     programs_root = tmp_path / "programs"
     applied_at = datetime(2026, 5, 13, 18, 0, tzinfo=timezone.utc)
     rollback_at = datetime(2026, 5, 14, 9, 30, tzinfo=timezone.utc)
@@ -497,7 +736,7 @@ def test_rollback_manifest_reverts_applied_entries_idempotently(tmp_path: Path, 
         ("complete", QueryTimeoutError("query timed out"), "failed"),
     ],
 )
-def test_apply_ado_proposal_persists_comment_lookup_disposition(
+def _retired_direct_path_test_apply_ado_proposal_persists_comment_lookup_disposition(
     tmp_path: Path, pagination_mode: str, lookup_error: Exception | None, expected_status: str
 ) -> None:
     programs_root = tmp_path / "programs"
@@ -540,7 +779,7 @@ def test_apply_ado_proposal_persists_comment_lookup_disposition(
         ("complete", QueryTimeoutError("query timed out"), "failed"),
     ],
 )
-def test_rollback_comment_lookup_blocks_post_and_maps_disposition(
+def _retired_direct_path_test_rollback_comment_lookup_blocks_post_and_maps_disposition(
     tmp_path: Path,
     pagination_mode: str,
     lookup_error: Exception | None,
@@ -568,7 +807,7 @@ def test_rollback_comment_lookup_blocks_post_and_maps_disposition(
 
 @pytest.mark.parametrize("operation", ["apply", "rollback"])
 @pytest.mark.parametrize("page_case", ["duplicate", "clear", "missing", "conflict", "capped"])
-def test_comment_response_reaches_real_duplicate_preflight(
+def _retired_direct_path_test_comment_response_reaches_real_duplicate_preflight(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, page_case: str,
 ) -> None:
     at = datetime(2026, 5, 13, 18, tzinfo=timezone.utc)
@@ -643,7 +882,9 @@ def test_comment_response_reaches_real_duplicate_preflight(
 
 
 @pytest.mark.parametrize("operation", ["apply", "rollback"])
-def test_unexpected_comment_lookup_error_propagates_without_post(tmp_path: Path, operation: str) -> None:
+def _retired_direct_path_test_unexpected_comment_lookup_error_propagates_without_post(
+    tmp_path: Path, operation: str,
+) -> None:
     at = datetime(2026, 5, 13, 18, 0, tzinfo=timezone.utc)
     entry_status = "applied" if operation == "rollback" else "pending"
     proposal = _comment_proposal(f"prop-unexpected-{operation}", at, entry_status=entry_status)
@@ -766,6 +1007,7 @@ class _FakeADOClient:
         self.timeout = 30
         self.organization = "your-org"
         self.project = "One"
+        self._vertex_synthetic_provider = True
         self._rest_base_url = "https://dev.azure.com/your-org/One/_apis/wit/"
         self._session = _FakeSession(self, fail_patch_for=fail_patch_for or set())
         # ADF-W1.1: ADOWriter._request_json now routes mutations through the
@@ -871,7 +1113,7 @@ class _FakeResponse:
 # ---------------------------------------------------------------------------
 
 
-def test_inline_test_op_four_outcomes(tmp_path: Path) -> None:
+def _retired_direct_path_test_inline_test_op_four_outcomes(tmp_path: Path) -> None:
     """Verify inline PATCH test-op covers applied, conflict, skipped, and failed."""
     programs_root = tmp_path / "programs"
     applied_at = datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc)

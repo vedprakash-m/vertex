@@ -36,13 +36,13 @@ MODEL_REGISTRY_FILENAME = "model_registry.jsonl"
 # ``policy_block_on_bump: false`` in the registry row.
 DEFAULT_POLICY_BLOCK_ON_BUMP = True
 
-# Recert window: 90 days. After this, a ``recert_at`` becomes "stale"
-# and ``read_model_registry`` flags the row with ``needs_recert=True``.
+# Recert window: 90 days. After this, a ``recert_at`` becomes stale.
+# ``assess_model_pin_lifecycle`` exposes the synthetic/diagnostic result
+# without claiming live operational qualification.
 DEFAULT_RECERT_WINDOW_DAYS = 90
 
 # Deprecation review horizon: 90 days. After the model's
-# ``deprecation_review_at`` passes, the row is flagged ``past_review=True``
-# and the operator should retire the deployment.
+# ``deprecation_review_at`` passes, the owner must recertify or retire it.
 DEFAULT_DEPRECATION_REVIEW_DAYS = 90
 
 
@@ -92,6 +92,17 @@ class ModelBumpResult:
             "recorded_at": _iso(self.recorded_at),
             "blocked": self.blocked,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class ModelPinLifecycle:
+    feature_name: str
+    model_id: str
+    deployment_id: str
+    needs_recert: bool
+    past_review: bool
+    synthetic_harness_eligible: bool
+    owner_action: str
 
 
 class ModelBumpDetectedError(RuntimeError):
@@ -156,6 +167,41 @@ def record_model_deployment_used(
 
 
 # ---------- read-side ----------
+
+
+def assess_model_pin_lifecycle(
+    pin: ModelPin,
+    *,
+    now: datetime,
+    recert_window_days: int = DEFAULT_RECERT_WINDOW_DAYS,
+) -> ModelPinLifecycle:
+    """Assess a frozen pin without performing or authorizing model qualification."""
+    if isinstance(recert_window_days, bool) or not isinstance(recert_window_days, int) or recert_window_days <= 0:
+        raise StateError("Model recertification window must be a positive integer number of days.")
+    _require_utc_datetime(pin.pinned_at, field_name="pinned_at")
+    _require_utc_datetime(pin.deprecation_review_at, field_name="deprecation_review_at")
+    _require_utc_datetime(now, field_name="now")
+
+    recert_at = pin.recert_at
+    needs_recert = recert_at is None or recert_at > now
+    if recert_at is not None:
+        _require_utc_datetime(recert_at, field_name="recert_at")
+        needs_recert = needs_recert or now >= recert_at + timedelta(days=recert_window_days)
+    past_review = now >= pin.deprecation_review_at
+    synthetic_harness_eligible = not needs_recert and not past_review
+    return ModelPinLifecycle(
+        feature_name=pin.feature_name,
+        model_id=pin.model_id,
+        deployment_id=pin.deployment_id,
+        needs_recert=needs_recert,
+        past_review=past_review,
+        synthetic_harness_eligible=synthetic_harness_eligible,
+        owner_action=(
+            "synthetic harness only; owner recertification and live qualification required"
+            if synthetic_harness_eligible
+            else "model-owner recertification and deprecation review required"
+        ),
+    )
 
 
 def read_model_registry(
@@ -283,3 +329,8 @@ def _parse_dt(value: Any) -> datetime | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _require_utc_datetime(value: datetime, *, field_name: str) -> None:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise StateError(f"model_registry {field_name} must be timezone-aware.")

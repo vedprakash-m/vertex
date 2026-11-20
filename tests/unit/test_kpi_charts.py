@@ -250,7 +250,9 @@ def test_report_kpi_chart_behavior(
     archive_roots = (archive, program_dir / "archive")
     archive_before = {path: path.read_bytes() for root in archive_roots for path in root.rglob("*") if path.is_file()}
     work_items = Mock(side_effect=AssertionError("Offline report called ADO"))
-    kusto = Mock(side_effect=AssertionError("Offline report called Kusto"))
+    kusto = Mock(return_value=[]) if not offline else Mock(
+        side_effect=AssertionError("Offline report called Kusto")
+    )
 
     result = generate_report_draft(
         "acme_weekly", issue_number=77, programs_root=programs, reports_root=reports,
@@ -266,35 +268,58 @@ def test_report_kpi_chart_behavior(
     work_items.assert_not_called()
     kusto.assert_not_called()
     assert {path: path.read_bytes() for root in archive_roots for path in root.rglob("*") if path.is_file()} == archive_before
-    if not offline:
-        assert sections == []
-        assert result.kusto_sections == ()
-        assert "Optional KPI" not in result.html_body and "Required KPI" not in result.html_body
-        assert "QG-22" not in result.manifest.qg_results
-        assert draft["chart_gate_evidence_sha256"] is None
-        return
-
-    assert [section["query_id"] for section in sections] == ["kpi-optional", "kpi-required"]
-    assert [section.query_id for section in result.kusto_sections if section.query_id.startswith("kpi-")] == [
-        "kpi-optional", "kpi-required",
-    ]
-    assert all(section["message"] == "Unavailable" and section["is_degraded"] for section in sections)
-    assert all(not section["chart_blocks_publish"] for section in sections)
+    expected_ids = ["kpi-optional", "kpi-required"] if offline else ["kpi-required"]
+    assert [section["query_id"] for section in sections] == expected_ids
+    assert [
+        section.query_id
+        for section in result.kusto_sections
+        if section.query_id.startswith("kpi-")
+    ] == expected_ids
+    if offline:
+        assert all(section["message"] == "Unavailable" and section["is_degraded"] for section in sections)
+        expected_message = "Unavailable"
+    else:
+        assert all(
+            "cannot bind the exact retrospective window" in section["message"]
+            and section["is_degraded"]
+            for section in sections
+        )
+        expected_message = "Kusto data is unavailable because this query cannot bind the exact retrospective window."
+    block_flags = tuple(section["chart_blocks_publish"] for section in sections)
+    assert block_flags == ((False, False) if offline else (True,))
     restored = deserialize_kusto_sections(tuple(sections))
-    assert [(section.title, section.message, section.is_degraded, section.chart_blocks_publish) for section in restored] == [
-        ("Optional KPI", "Unavailable", True, False), ("Required KPI", "Unavailable", True, False),
+    expected_sections = [
+        (title, expected_message, True, block)
+        for title, block in zip(
+            ("Optional KPI", "Required KPI") if offline else ("Required KPI",),
+            block_flags,
+        )
     ]
-    optional_at = result.html_body.index("Optional KPI")
-    required_at = result.html_body.index("Required KPI", optional_at)
-    assert "Unavailable" in result.html_body[optional_at:required_at]
-    assert "Unavailable" in result.html_body[required_at:]
+    assert [
+        (
+            section.title,
+            section.message,
+            section.is_degraded,
+            section.chart_blocks_publish,
+        )
+        for section in restored
+    ] == expected_sections
+    required_at = result.html_body.index("Required KPI")
+    if offline:
+        optional_at = result.html_body.index("Optional KPI")
+        assert optional_at < required_at
+        assert expected_message in result.html_body[optional_at:required_at]
+    else:
+        assert "Optional KPI" not in result.html_body
+    assert expected_message in result.html_body[required_at:]
     assert "Unselected KPI" not in result.html_body
     if not chart_enabled or not global_charts:
         assert all(gate not in result.manifest.qg_results for gate in ("QG-20", "QG-21", "QG-22"))
         assert "chart_freshness_evidence" not in result.manifest.metadata
         assert draft["chart_gate_evidence_sha256"] is None
     else:
-        assert all(result.manifest.qg_results[gate] is True for gate in ("QG-20", "QG-21", "QG-22"))
+        assert all(result.manifest.qg_results[gate] is True for gate in ("QG-20", "QG-21"))
+        assert result.manifest.qg_results["QG-22"] is offline
         if edition_type != "lookback":
             from src.commands.confirm_stages.draft_loaders import load_confirm_draft_manifest
 

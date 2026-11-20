@@ -93,7 +93,11 @@ def test_build_kusto_signals_emits_signal_and_query_state(legacy: bool) -> None:
 
     assert len(signals) == 1
     assert signals[0].source == "kusto"
-    assert "Kusto query-a returned 1 row(s): P50=4.2" in signals[0].text
+    assert (
+        "Kusto query query-a [kind=timeseries, interpretation=unqualified]: "
+        'admitted_rows=1; columns=[P50,Timestamp]; points=[{"P50":4.2,'
+        '"Timestamp":"2026-05-10T07:00:00Z"}]'
+    ) in signals[0].text
     state = query_state_sink["query-a"]
     assert state["last_cycle_succeeded"] is True
     assert state["data_freshness_ok"] is True
@@ -122,6 +126,89 @@ def test_build_kusto_signal_shares_across_all_configured_workstreams() -> None:
     assert len(signals) == 1
     assert signals[0].workstream_id == "acme"
     assert signals[0].workstream_ids == ("acme", "contoso")
+
+
+def test_unbound_kusto_table_uses_semantic_evidence_without_numeric_history() -> None:
+    from src.commands import gather
+
+    query = replace(_kusto_query(), render_as="table", result_column=None)
+    rows = [{"Region": "west", "Count": 3}, {"Region": "east", "Count": 1}]
+    state: dict[str, dict[str, object]] = {}
+
+    signals = kusto_query_helpers.build_kusto_signals(
+        queries=(query,),
+        program_id="acme",
+        as_of=datetime(2026, 11, 19, 12, tzinfo=timezone.utc),
+        executor=lambda _: rows,
+        query_state_sink=state,
+        previous_query_states={"query-a": {"value_last_4": [7.0]}},
+    )
+    kpi_signal = gather._build_kusto_kpi_signal(
+        query=query,
+        rows=rows,
+        program_id="acme",
+        as_of=datetime(2026, 11, 19, 12, tzinfo=timezone.utc),
+    )
+
+    assert len(signals) == 1
+    assert "[kind=table, interpretation=unqualified]" in signals[0].text
+    assert '"Region":"west","Count":3' in signals[0].text
+    assert state["query-a"]["value_last_4"] == [7.0]
+    assert kusto_query_helpers.extract_kusto_query_numeric_value(query, rows) is None
+    assert kpi_signal is not None
+    assert kpi_signal.text == signals[0].text
+    assert kpi_signal.metadata["result_value"] is None
+    assert kpi_signal.metadata["result_json"] is None
+
+
+def test_unbound_kusto_timeseries_emits_points_but_no_numeric_or_slo_claim() -> None:
+    from src.commands import gather
+
+    query = replace(_kusto_query(), render_as="chart", result_column="P50")
+    rows = [
+        {"Timestamp": "2026-11-19T12:00:00Z", "P50": 9.5},
+        {"Timestamp": "2026-11-19T10:00:00Z", "P50": 8.0},
+    ]
+    as_of = datetime(2026, 11, 19, 12, 30, tzinfo=timezone.utc)
+
+    signal = kusto_query_helpers.build_kusto_signal(
+        query=query, rows=rows, program_id="acme", as_of=as_of,
+    )
+    kpi_signal = gather._build_kusto_kpi_signal(
+        query=query, rows=rows, program_id="acme", as_of=as_of,
+    )
+
+    assert signal is not None
+    assert kpi_signal is not None
+    assert "[kind=timeseries, interpretation=unqualified]" in signal.text
+    assert signal.text.index('"2026-11-19T10:00:00Z"') < signal.text.index(
+        '"2026-11-19T12:00:00Z"'
+    )
+    assert "no qualified trend or SLO verdict" in signal.text
+    assert kusto_query_helpers.extract_kusto_query_numeric_value(query, rows) is None
+    assert kpi_signal.metadata["result_value"] is None
+    assert kpi_signal.metadata["result_json"] is None
+
+
+def test_unbound_kusto_ambiguous_measure_refuses_timeseries_interpretation() -> None:
+    query = replace(_kusto_query(), render_as="chart", result_column=None)
+    rows = [
+        {"Timestamp": "2026-11-19T10:00:00Z", "P50": 8.0, "P95": 12.0},
+        {"Timestamp": "2026-11-19T11:00:00Z", "P50": 8.5, "P95": 13.0},
+    ]
+
+    signal = kusto_query_helpers.build_kusto_signal(
+        query=query,
+        rows=rows,
+        program_id="acme",
+        as_of=datetime(2026, 11, 19, 12, tzinfo=timezone.utc),
+    )
+
+    assert signal is not None
+    assert "[kind=table, interpretation=ambiguous]" in signal.text
+    assert "refusal=multiple numeric measures" in signal.text
+    assert "points=" not in signal.text
+    assert kusto_query_helpers.extract_kusto_query_numeric_value(query, rows) is None
 
 
 @pytest.mark.parametrize("value,unit,target,comparison,expected", [

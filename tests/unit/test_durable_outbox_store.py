@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -38,6 +39,16 @@ def test_receipt_lookup_is_read_only_for_missing_and_legacy_database(tmp_path) -
     assert load_entry(db, "key") == original
     with open_program_db_with_retry(db, read_only=True) as connection:
         assert connection.execute("SELECT 1 FROM sqlite_master WHERE name='outbox_success_receipts'").fetchone() is None
+
+
+def test_effect_lookup_does_not_create_missing_binding_table(tmp_path) -> None:
+    from src.core.ledger import durable_outbox_store as store
+
+    db = tmp_path / "outbox.db"
+    enqueue(db, "key", domain="test", correlation_id="intent", payload_json="{}")
+    assert store.load_effect_outbox_id(db, "effect") is None
+    with open_program_db_with_retry(db, read_only=True) as connection:
+        assert connection.execute("SELECT 1 FROM sqlite_master WHERE name='outbox_effects'").fetchone() is None
 
 
 @pytest.mark.parametrize("fault", ["insert", "update", "update_new_table", "duplicate"])
@@ -138,11 +149,42 @@ def test_classification_preserves_data_and_fences_old_worker(tmp_path: Path) -> 
         lease_fencing_token=observed.lease_fencing_token, failure_reason=observed.failure_reason,
         updated_at=observed.updated_at,
     ) == observed
+    receipt = json.loads(store.load_latest_receipt(db, observed.outbox_id) or "{}")
+    assert receipt["terminal_status"] == "uncertain_remote_state"
+    assert receipt["reason"].startswith("Expired dispatched attempt")
     with pytest.raises(LeaseNoLongerCurrent):
         mark_succeeded(db, "key", owner="old", fencing_token=observed.lease_fencing_token)
     assert lease_next(db, observed.domain, owner="third") is None
     resolved = mark_manually_resolved(db, "key", resolved_by="operator", reason="explicit offline reconciliation")
     assert resolved.status == "manually_resolved"
+
+
+def test_expired_classification_receipt_fault_preserves_dispatched_row(
+    tmp_path: Path,
+) -> None:
+    import sqlite3
+
+    from src.core.ledger import durable_outbox_store as store
+
+    root, db, observed, handle = _expired_dispatch_fixture(tmp_path)
+    with open_program_db_with_retry(db) as connection:
+        connection.executescript(store._STATE_RECEIPTS_SQL)
+        connection.execute(
+            "CREATE TRIGGER classification_receipt_fault "
+            "BEFORE INSERT ON outbox_state_receipts "
+            "BEGIN SELECT RAISE(ABORT, 'receipt fault'); END"
+        )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        store.classify_expired_dispatched(
+            db,
+            observed,
+            workspace_lease=handle,
+            programs_root=root,
+        )
+
+    assert load_entry(db, observed.outbox_id) == observed
+    assert store.load_latest_receipt(db, observed.outbox_id) is None
 
 
 @pytest.mark.parametrize("change", [

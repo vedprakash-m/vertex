@@ -15,7 +15,6 @@ from pathlib import Path
 from src.ai.action_extractor import ActionExtractor
 from src.ai.meeting_action_extractor import run_meeting_action_extraction_pipeline
 from src.core.action_extraction_parity import (
-    ParityFinding,
     check_action_parity,
     normalize_action_items,
     normalize_meeting_actions,
@@ -79,7 +78,7 @@ def test_meeting_pipeline_parses_both_marker_lines_including_wi_key() -> None:
     assert actions[0].source_span == "Action: Ship ramp packet | owner=Priya@example.com | due=2026-12-01"
 
 
-def test_meeting_pipeline_skips_refs_key_and_invalid_due_but_counts_index() -> None:
+def test_meeting_pipeline_accepts_refs_compatibility_and_counts_invalid_due_index() -> None:
     text = (
         "Action: Bad due | due=next week\n"
         "Action: Uses refs | refs=WI:1\n"
@@ -88,10 +87,14 @@ def test_meeting_pipeline_skips_refs_key_and_invalid_due_but_counts_index() -> N
 
     actions = extract_deterministic_meeting_actions(program_id="acme", meeting_ref="m2", transcript_text=text)
 
-    # "refs=" is not an allowed key (payload rejected before indexing);
-    # an invalid due consumes an index slot before being skipped.
-    assert [(a.id, a.commitment, a.owner_alias, a.blocks) for a in actions] == [
-        ("deterministic-action-m2-2", "Kept", None, ("WI:7", "WI:8")),
+    # The legacy "refs=" key remains accepted as a compatibility alias for "wi=";
+    # an invalid due still consumes an index slot before being skipped.
+    assert [
+        (a.id, a.commitment, a.owner_alias, a.linked_work_item_id, a.blocks)
+        for a in actions
+    ] == [
+        ("deterministic-action-m2-2", "Uses refs", None, 1, ()),
+        ("deterministic-action-m2-3", "Kept", None, None, ("WI:7", "WI:8")),
     ]
 
 
@@ -122,7 +125,7 @@ def test_meeting_pipeline_end_to_end_skips_llm_when_no_residual(tmp_path: Path) 
 # --- Pipeline B: signal extractor ----------------------------------------------
 
 
-def test_signal_pipeline_marker_with_wi_key_falls_back_to_heuristic_sentence() -> None:
+def test_signal_pipeline_marker_with_wi_key_retains_direct_compatibility() -> None:
     client = _NoCallClient()
 
     actions = ActionExtractor(client=client).extract_actions(program_id="acme", signals=(_signal(),))
@@ -130,19 +133,16 @@ def test_signal_pipeline_marker_with_wi_key_falls_back_to_heuristic_sentence() -
     assert client.calls == 0
     assert [(a.text, a.owner_alias, a.due_date, a.linked_work_item_ids) for a in actions] == [
         ("Ship ramp packet", "priya", date(2026, 12, 1), ()),
-        # "wi=" is not an allowed key here ("refs=" is), so the line is
-        # malformed and re-extracted by the heuristic: full line kept as text,
-        # "owner=alex" ignored in favor of the sender alias.
-        ("Action: Update rollout plan | owner=alex | wi=WI:42", "sam", None, (42,)),
+        ("Update rollout plan", "alex", None, (42,)),
     ]
-    assert {a.source_type for a in actions} == {ActionSourceType.MEETING_TRANSCRIPT}
-    assert {a.status for a in actions} == {ActionStatus.PROPOSED}
-    assert {a.source_signal_id for a in actions} == {"sig-1"}
 
 
-def test_signal_pipeline_accepts_refs_key_marker() -> None:
+def test_signal_pipeline_accepts_non_meeting_refs_marker() -> None:
     client = _NoCallClient()
-    signal = _signal(text="Action: Update rollout plan | owner=alex | refs=WI:42, WI:43")
+    signal = _signal(
+        text="Action: Update rollout plan | owner=alex | refs=WI:42, WI:43",
+        source="workiq/email",
+    )
 
     actions = ActionExtractor(client=client).extract_actions(program_id="acme", signals=(signal,))
 
@@ -152,20 +152,22 @@ def test_signal_pipeline_accepts_refs_key_marker() -> None:
     ]
 
 
-def test_signal_pipeline_ignores_non_meeting_sources() -> None:
+def test_signal_pipeline_deterministically_extracts_non_meeting_sources() -> None:
     client = _NoCallClient()
 
     actions = ActionExtractor(client=client).extract_actions(
         program_id="acme", signals=(_signal(source="workiq/email"),)
     )
 
-    assert actions == ()
+    assert [action.text for action in actions] == [
+        "Ship ramp packet",
+        "Update rollout plan",
+    ]
     assert client.calls == 0
 
 
-def test_basic_heuristic_keeps_full_marker_line_and_reads_at_domain_as_owner() -> None:
+def test_basic_heuristic_direct_compatibility_is_not_a_production_admission() -> None:
     actions = extract_actions_from_signals((_signal(),), "acme")
-
     assert [(a.text, a.owner_alias, a.due_date, a.linked_work_item_ids, a.source_type) for a in actions] == [
         (
             "Action: Ship ramp packet | owner=Priya@example.com | due=2026-12-01",
@@ -187,8 +189,4 @@ def test_same_transcript_parity_findings_pin_current_divergence() -> None:
 
     findings = check_action_parity(normalize_meeting_actions(a), normalize_action_items(b))
 
-    wi_line = "action: update rollout plan | owner=alex | wi=wi:42"
-    assert findings == (
-        ParityFinding(kind="missing_in_a", key=wi_line, a_value=None, b_value=wi_line),
-        ParityFinding(kind="missing_in_b", key="update rollout plan", a_value="update rollout plan", b_value=None),
-    )
+    assert findings == ()

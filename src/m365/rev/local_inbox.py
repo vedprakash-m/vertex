@@ -199,12 +199,16 @@ class LocalInboxClaimer:
         *,
         correlation_id: str,
     ) -> PortResult[tuple[EnumeratedCandidate, ...]]:
-        claimed_at_startup = sorted(self._claimed.glob(self._glob))
+        claimed_at_startup = list(self._claimed.glob(self._glob))
         self.claimed_at_startup_count = len(claimed_at_startup)
 
-        recovery_keyed, _quarantined = self._apply_crash_loop_guard(claimed_at_startup)
-        claimed_ids = {p: self._logical_id_fn(p) for p in recovery_keyed}
-        recovery_keyed = sorted(recovery_keyed, key=lambda p: fifo_key(p, claimed_ids[p]))
+        claimed_ids = {p: self._logical_id_fn(p) for p in claimed_at_startup}
+        recovery_ordered = sorted(
+            claimed_at_startup, key=lambda p: fifo_key(p, claimed_ids[p])
+        )
+        recovery_keyed, _quarantined, recovery_deferred = self._apply_crash_loop_guard(
+            recovery_ordered, candidate_limit=limit
+        )
 
         inbox_files = sorted(self._inbox.glob(self._glob))
         inbox_ids = {p: self._logical_id_fn(p) for p in inbox_files}
@@ -230,7 +234,7 @@ class LocalInboxClaimer:
                 log.warning("%s: failed to claim %s → %s: %s",
                             self._enumerator_name, inbox_path, claimed_path, exc)
 
-        truncated = len(inbox_keyed) > remaining_slots or len(recovery_keyed) > limit
+        truncated = bool(recovery_deferred) or len(inbox_keyed) > remaining_slots
 
         all_claimed = recovery_keyed + newly_claimed
         all_ids = {**claimed_ids}
@@ -311,17 +315,21 @@ class LocalInboxClaimer:
             self._save_crash_loop_counts(counts)
 
     def _apply_crash_loop_guard(
-        self, claimed_at_startup: list[Path],
-    ) -> tuple[list[Path], list[Path]]:
+        self, claimed_at_startup: list[Path], *, candidate_limit: int,
+    ) -> tuple[list[Path], list[Path], list[Path]]:
         if not claimed_at_startup:
             counts = self._load_crash_loop_counts()
             if counts:
                 self._save_crash_loop_counts({})
-            return [], []
+            return [], [], []
         counts = self._load_crash_loop_counts()
         survivors: list[Path] = []
         quarantined: list[Path] = []
+        deferred: list[Path] = []
         for p in claimed_at_startup:
+            if len(survivors) >= candidate_limit:
+                deferred.append(p)
+                continue
             name = p.name
             counts[name] = counts.get(name, 0) + 1
             if counts[name] >= self._max_recoveries:
@@ -333,7 +341,7 @@ class LocalInboxClaimer:
             else:
                 survivors.append(p)
         self._save_crash_loop_counts(counts)
-        return survivors, quarantined
+        return survivors, quarantined, deferred
 
     # ------------------------------------------------------------------
     # Disposition

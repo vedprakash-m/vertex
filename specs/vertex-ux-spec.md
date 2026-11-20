@@ -7,6 +7,9 @@
 
 ## Changelog
 
+- Last updated: 2026-11-19 — Knowledge triage exposes class/review state, explicit review and renewal commands, verified resolution and retained lifecycle history (§12.10a).
+- Last updated: 2026-11-19 — RELO-D19 adds no newsletter or reader-facing chrome. Confirm may report that typed governed feedback was recorded; proposal lifecycle refusal reports the missing governance stage, and active feedback policy is unavailable when its approved version is expired or absent.
+
 - Last updated: 2026-11-12 — Report unavailable scoped startup without exposing identifiers; enrichment previews retain tier telemetry only when scope is admitted (§12.1, §12.6.4).
 - Last updated: 2026-11-11 — Fresh cockpit frontier avoidance is unavailable without qualified evidence; its active-file cache diagnostic carries a warning (§18.5).
 - Last updated: 2026-11-11 — Blind pilot summaries refuse invalid active journals with a fixed stderr error and exit 2 rather than presenting a partial recommendation (§12.1).
@@ -632,6 +635,8 @@ Phase-1 table notice. For KPIs with `render_as: table` and `refresh_on_gather: t
 
 **Degraded state:** `color: #9A3412` message text when cluster is unreachable. Reference URL link as fallback.
 
+**Placement refusal:** A chart whose authored exec-summary/workstream target is hidden, missing or empty is not moved to another section. It renders as a neutral degraded placement diagnostic without an image, with an explicit target message, and the draft remains blocked until the target or selection is corrected. Teams and HTML use the same rule; confirmation re-evaluates current visibility.
+
 **Result-admission refusal:** SDK-reported partial completion, declared projection/row/decoded-byte violations and scalar-required cardinality failures use existing query-error degradation and warnings, with a reference link when available. Do not display refused rows as successful telemetry or a metric verdict. Hydration records failure without a result set. Valid empty declared projections remain distinct from schema refusal; undeclared legacy budgets are not presented as qualified.
 
 Injected report and fallback executors follow the same declared row admission. A query/auth failure in the fallback is degraded with warnings, not silently shown as an empty successful result. Refused chart-gather rows cannot reach sanitization or replace cached output. Failed direct/KPI queries retain prior successful history/time without refreshing freshness from refused rows; independent valid queries remain visible. Empty consumer-only lists and historical cache artifacts are not original-response or current-contract certification.
@@ -667,9 +672,17 @@ The continuity layout (`archetypes/continuity.j2`) is an alternative assembly fo
 5. Scorecard Bands (one per band — colored tile rows)
 6. ADO Vitality Section
 7. Executive Summary (paragraph cards split on `<!-- state -->`)
-8. Jump-to-Section Grid (3-column link blocks)
-9. Chapters (one per chapter — narrative with detail rows)
-10. Provenance Comment (dry-run only — dashed border)
+8. Selected KPI unavailability block (conditional; degraded/offline selected KPI rows only)
+9. Jump-to-Section Grid (3-column link blocks)
+10. Chapters (one per chapter — narrative with detail rows)
+11. Provenance Comment (dry-run only — dashed border)
+
+The KPI unavailability block uses one 100%-width bordered table with a neutral
+`#F3F4F6` header labelled `KPI data unavailable`. Only selected entries with
+`is_degraded` appear. Each two-column row names the KPI and shows
+`Unavailable` plus its source/query identity in 13px secondary text. It is
+not a Kusto section, contains no chart claim, and is omitted when selected
+KPIs are available.
 
 ### 4.2 Scorecard Band (`partials/continuity_scorecard_band.j2`)
 
@@ -793,7 +806,7 @@ The only unique visual element: describes the lookback period. 12px eyebrow "Qua
 
 ### 7.3 Content
 
-The lookback template uses the same section dispatch and partial templates as the detailed archetype. The distinction is in the data — items, scorecards, and metrics cover the retrospective window instead of the current week.
+The lookback template uses the same section dispatch and partial templates as the detailed archetype. The distinction is in the data — items, scorecards, and metrics cover the retrospective window instead of the current week. Selected online KPI queries bind to the earliest and latest selected archive `ado_data_as_of` values. If a query cannot express exact bounds, its selected row/section renders `Unavailable` and participates in chart gates; no relative execution-time window is substituted.
 
 When retrospective incident data exists, render an `Incident Learnings` section after the main section dispatch and before the footer. Each learning card is compact and evidence-first: incident identifier, date, short summary, and the extracted learning/action text. This section is bounded to a small operator-readable set rather than a full incident dump.
 
@@ -1011,6 +1024,8 @@ Per-DRI message with item list, ADO links including "Edit in ADO" deep links.
 - Color in terminal only; stripped when piped
 - Semantic exit codes (§12.3)
 
+Feedback governance is an operator-only CLI/internal lifecycle surface. Confirm reports a hash-only typed-feedback path when a generated/final difference was captured. It never displays the retained prose because none is stored. Policy promotion with no active governed version fails visibly; expiry disables the active feedback-derived rule without silently falling back to an ungoverned legacy rule.
+
 When catchup is enabled and unseen items exist, the CLI may emit a short session-start catchup banner before the requested command output. The banner is advisory, bounded, and summarizes the highest-salience unseen changes rather than replaying full history.
 
 When an ordinary scope preview is rejected or a named scope cannot be resolved, a fixed warning omits identifiers and reports that scoped startup effects were skipped. Commands without a selected scope can skip the effects silently. The requested command may still run or report its own error; edition-lookup exceptions and other startup probes retain their existing behavior.
@@ -1078,6 +1093,8 @@ Default restore reports success only after copied destination bytes match its si
 Bounded backup creation refuses linked/reparse or unsupported roots/members and failed enumeration before copying payload or publishing a manifest. Existing human/JSON/CSV create-error output reports exit 2, not a successful count. Linked workspaces require correction before retry; no target is silently followed or omitted. This does not certify historical backup provenance or complete recovery (RELO-W0.13f).
 
 Backup manifests with repeated decoded property names fail explicitly, even when values agree or the manifest is legacy. Verify uses the existing human/JSON/CSV exit-2 error; restore refuses before destination mutation even with skipped preflight, and reference search reports malformed input rather than silently discarding declarations. Valid uniquely declared manifests remain compatible; the error does not echo arbitrary values or imply authenticated inventory (RELO-W0.13g).
+
+The `verify_relo --closeout` operator report begins with `NOT ASSESSED`, separates generated traceability from evidence-packet completeness, and names only stable requirement/work-item/budget identifiers plus missing field names. It lists one remaining record for current staffing, one for current economics, and one per selected NFR budget; real values and owner identities remain outside public output unless an operator deliberately selects a private packet. Human and JSON forms never display approval success as qualification, and exit 6 remains insufficient-evidence behavior even when all packet fields are mechanically present (RELO-W0.12/W0.13/W0.14).
 
 Status shows risk-fact configuration failures as unavailable with correction-before-retry guidance, consistently in human/JSON/CSV. Successful empty risk facts keep their existing absent summary; unrelated available status facts remain visible and raw exception details are not displayed. This does not change status exit codes or publication gates (RELO-W0.15k).
 
@@ -1363,7 +1380,7 @@ Qualification tooling is operator-only. It may show private subjects and preview
 
 REV adds two operator-facing CLI surfaces:
 
-**`vertex rev run --program <id> --mailbox <upn> [--eml-inbox <dir>] [--ics-inbox <dir>] [--mock-fixture <path>]`** — runs one retrieval cycle and stages verified candidates in the existing `vertex ledger triage` queue. Output: one line per stage (enumerate → hydrate → extract → vault → stage → verify; stop=complete). `--eml-inbox <dir>` processes locally-exported `.eml` files from the given inbox directory (3-dir atomicity: inbox → claimed → processed). `--ics-inbox <dir>` processes exported `.ics` calendar files. `--mock-fixture` exercises the full P1 value chain with a JSON fixture. Neither flag provided exits 2 with the ADR-008 pivot reference (live Graph API permanently blocked by IT). No reader-visible newsletter chrome: staged candidates enter PENDING and follow the standard triage → project → draft pipeline. **EML privacy (W1-4 + W5-3):** the EML hydrator routes all email body text through `normalizer.normalize()` (PII scrub: emails/phones/SSNs/cards replaced with `[…_REDACTED]` tokens) then replaces person display names from From/To/Cc/Bcc headers with stable `PERSON_N` tokens before extraction. Raw names never reach the external model. The `PERSON_N`→original mapping is available in the hydrated content's route metadata for entity binding.
+**`vertex rev run --program <id> --mailbox <upn> [--eml-inbox <dir>] [--ics-inbox <dir>] [--workiq] [--sharepoint-fixture <path>] [--mock-fixture <path>]`** — runs one retrieval cycle and stages verified candidates in the existing `vertex ledger triage` queue. Output: one line per stage (enumerate → hydrate → extract → vault → stage → verify; stop=complete). Local inbox modes retain 3-directory atomicity. `--workiq` requires subject/body terms, defaults to at most four seven-day windows, and reports a bounded `Incomplete` outcome for page/window caps rather than claiming continuation. `--sharepoint-fixture` explicitly selects read-only fixture drive items through the existing enumerator/hydrator ports; it does not claim live Graph consent or registry promotion. `--mock-fixture` exercises the P1 mail value chain. No source selected exits 2 with the ADR-008 pivot reference. No reader-visible newsletter chrome: staged candidates enter PENDING and follow standard triage → project → draft flow. **EML privacy (W1-4 + W5-3):** the EML hydrator routes all email body text through `normalizer.normalize()` and masks person names before extraction.
 
 If the selected enumerator is unsupported, the run reports `stop=unsupported`
 and exits 1. Its structured report does not copy provider-supplied entity or
@@ -1575,6 +1592,25 @@ Run: vertex ledger triage list --program <prog>
 ```
 Redacted event 01JWCM3DQPVZ; original_hash=sha256:abc123...def456.
 ```
+
+### 12.10a Knowledge Candidate Review
+
+`vertex knowledge triage list` identifies each active candidate's knowledge class, review-time bound subject and review state (`not_required`, `unreviewed`, `current`, `expired` or `invalid`). JSON keeps the same fields plus the review expiry and whether resolution is verified. `vertex knowledge status` and `vertex doctor --kb` expose pending counts by class and the unreviewed/expired/invalid and verified-resolution counts; they recheck the retained authorizing program and never infer that an unknown, expired or revoked review is current.
+
+Review-gated extraction uses:
+
+```
+vertex knowledge triage review --program <id> --candidate <id> --actor <label> \
+  --valid-until <ISO> --reason "<evidence checked>"
+vertex knowledge triage renew --program <id> --candidate <id> --actor <label> \
+  --valid-until <ISO> --reason "<renewal basis>"
+vertex knowledge triage approve --program <id> --candidate <id> --actor <label>
+vertex knowledge triage verify-resolution --program <id> --candidate <id> \
+  --actor <label> --reason "<resolution evidence>"
+vertex knowledge triage history --candidate <id> --format text|json
+```
+
+The review/renewal and verification commands bind to the native OS principal, reject missing/revoked `knowledge_review_principals`, and exit 2 before mutation when authorization or the explicit review window is unavailable. Approval and batch quarantine consume the review-time subject binding rather than silently adopting a later entity-registry resolution. Human output names the refused lifecycle state and next safe action without printing a source payload. Resolution history shows retained `reviewed`, `review_renewed`, terminal decision and `resolution_verified` events; candidate/session counts remain terminal-decision metrics. It is evidence, not a new approval store, claim-renewal operation, external-source authentication, context-gap closure or people-registry mutation.
 
 ### 12.11 People Registry CLI (implemented, `.archive/specs/people.md`, Accepted, complete as of 2026-07-21)
 
@@ -1899,6 +1935,7 @@ Pass condition: the brief stays within section budgets, reads cleanly as wrapped
 - Cross-program comparison must remain scannable in one viewport pass, so summary density takes precedence over deep per-program prose.
 - Confirmed-issue rollups retain missing assessment rather than showing a green Low/Done subset. Keep known Blocked/High/Medium visible, but show `unknown` trend and an explicit coverage detail when either selected issue has an Unknown dimension. Blank/missing risk is Unknown. No current dimensions, absent prior assessment or onboarding cannot imply stability. Human/JSON/CSV/Markdown/HTML share this meaning without changing layout; publication age and context diagnostics are independent.
 - The initial program-verdict observer is local manifest metadata only, not a new tile, status badge or leadership clearance. Existing rendered report health and publication gates remain authoritative until explicitly migrated; an observe-mode result with unqualified inputs must not be presented as certified program health.
+- Cockpit active-risk lifecycle ambiguity is displayed as **Unknown** with a blocked finding, never a red/yellow/green aggregate. Explicit duplicate keys and active merge/fork/cycle/dangling references name bounded risk IDs and direct the operator to `vertex risks list --program <id>`; derived-key similarity and normal retained supersession chains do not change existing scoring.
 - Risk-aware observer asks remain local metadata, not rendered leadership requests or journal decisions. They name the actual missing owner/mitigation ETA for the linked high-scored active strategic risk; no invented owner, date, approval or completed mitigation. Missing/ambiguous assessments, stale/disputed/provisional context and load/coverage gaps prevent trust or clearance claims even when a known adverse floor remains visible.
 - Milestone-aware observations remain metadata only. Retained computed Missed/At Risk findings can raise observed schedule severity, never certify global completion. Unknown's heuristic 0.5 is missing evidence, not a measured forecast; coverage/assessment/binding gaps stay explicit. No new rendered status, duration-criticality label or completion clearance.
 - **Context health columns** (added 2026-05-27): each program row includes a context health summary line: `Context L{level} / {errors} errors / {stale} stale`. `level` maps to a semantic label: L4 = ✅ healthy, L3 = ⚠ warnings, L2 = ⚠ gaps, L1 = ❌ errors, L0 = ❌ critical. The context health line stacks below the lifecycle/phase info within the same program row — no additional column or nested table.
@@ -1920,11 +1957,13 @@ Pass condition: generated cards stay within body/action limits, preserve risk em
 
 - Terminal (`vertex cockpit show`) and standalone HTML (`vertex cockpit show --as-of <timezone-aware-ISO> --format html` / `build`) are the two supported renders; the HTML output is one self-contained document (inline `<style>` only, no external JS/CSS, no network requests — safe to open via `file://`). Retained show emits HTML to stdout without writing a file; fresh show supports human/JSON, not HTML.
 - **System-health labels are distinct from program-risk colors**: system/source-health state (`[OK]` / `[Degraded]`) renders as text labels or neutral icons, never the canonical risk-color palette (`RISK_COLORS`) — program risk continues to be the only concept color is reserved for, per §1.2's platform-wide "Color = Risk. Always. Only." rule.
+- **Effective source completeness is truth-labelled:** cockpit and `doctor --rev-health` use one downgrade-only projection. A missing/partial/failed/truncated/degraded manifest renders an unknown completeness finding with stable reasons; inability to compute the projection renders `source.completeness.unavailable`. It never appears as healthy silence, and the legacy base value is retained only as context. Doctor JSON/CLI and cockpit JSON/terminal/HTML expose the same reason set (RELO-W2.4/W2.5, OD-5).
 - Accessibility: skip-link + semantic landmarks (`<header>`/`<main>`/`<section aria-labelledby>`) for keyboard navigation; targets WCAG 2.2 AA (§15.1's reconciled note) rather than the platform-wide 2.1 AA baseline.
 - Every evidence-derived string is escaped; an evidence ref renders as a real clickable link only when it parses as an allowlisted `http`/`https` URL — anything else (`javascript:`, `file:`, a bare id) renders as plain escaped text, never a clickable link.
 - `explain <finding_id>` renders every explainability field a `CockpitFinding` actually carries (why, detail, owner, source-age, evidence, next-command) and honestly labels the fields it doesn't yet have data for (calculation/rule, confidence, what-Vertex-did-not-do) rather than fabricating content.
 - `compare <earlier> <later>` operates only on retained history snapshots — never a live recompute — so a comparison is always reproducible from the same two points in time.
 - Fresh primary-judgment risk summaries use retained primary risk records rather than the authored mirror. Unreadable or inconsistent authority displays unknown risk and a blocked finding, never a mirror-derived green result. Existing non-primary mode remains compatible; this is not historical snapshot or coverage certification.
+- When a retained snapshot-bound `ProgramVerdict` exists, the cockpit program summary displays that verdict's health rather than recomputing a live competing conclusion. The finding identifies it as snapshot state, shows schedule risk and explicit evidence gaps, and carries the snapshot/source references. A missing or invalid newest verdict manifest is blocked/unavailable; it does not silently fall back to a green live-risk calculation. Other report/brief/escalation consumers migrate separately.
 - Value/time-savings figures always render their confidence tier (`measured`/`calibrated`/`proxy`/`unavailable`) alongside the number — a figure is never presented as a bare percentage without its evidence tier visible.
 - Fresh economics projections leave frontier avoidance unavailable until eligible attempts, actual frontier-model calls and complete window coverage are established. With intact nonempty tier records, the accompanying warning identifies the cache-hit ratio as an unqualified active-file diagnostic; missing or empty records get an informational explanation. Retained snapshots are not rewritten.
 - A failed lineage read is not "no facts": terminal data trust shows `lineage unavailable (read failed)`, while JSON and HTML retain unknown coverage with the blocked `intelligence.lineage.read_failed` explanation and manual diagnostic guidance. Successful-empty lineage remains `not measured yet` with an informational finding. Known program risk and independently released synthesis remain visible; raw exception messages are not rendered.

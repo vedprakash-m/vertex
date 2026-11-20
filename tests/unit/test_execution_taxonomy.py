@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -10,10 +11,12 @@ from src.core.execution_taxonomy import (
     RegistryFinding,
     RegistryFindingCode,
     check_model_use,
+    model_pin_to_registry_entry,
     lookup_model,
     parse_execution_class,
     validate_registry,
 )
+from src.core.model_registry import ModelPin
 
 
 def _entry(model_id: str = "gpt-4o", **overrides: object) -> ModelRegistryEntry:
@@ -50,6 +53,54 @@ def test_entry_is_frozen_with_slots() -> None:
     assert not hasattr(entry, "__dict__")
     with pytest.raises(dataclasses.FrozenInstanceError):
         entry.enabled = False  # type: ignore[misc]
+
+
+def test_model_pin_adapter_requires_and_preserves_explicit_registry_policy() -> None:
+    now = datetime(2026, 11, 18, tzinfo=timezone.utc)
+    pin = ModelPin(
+        feature_name="claim_extractor",
+        model_id="gpt-4o-2024-08-06",
+        deployment_id="vertex-claims",
+        pinned_at=now,
+        deprecation_review_at=now + timedelta(days=90),
+        recert_at=None,
+    )
+
+    entry = model_pin_to_registry_entry(
+        pin,
+        provider="azure_openai",
+        purpose="claim_extraction",
+        execution_class="ai_generated",
+        enabled=False,
+    )
+
+    assert entry == ModelRegistryEntry(
+        model_id="gpt-4o-2024-08-06",
+        provider="azure_openai",
+        purpose="claim_extraction",
+        execution_class="ai_generated",
+        enabled=False,
+    )
+
+
+def test_model_pin_adapter_requires_each_registry_policy_field() -> None:
+    now = datetime(2026, 11, 18, tzinfo=timezone.utc)
+    pin = ModelPin(
+        feature_name="claim_extractor",
+        model_id="gpt-4o-2024-08-06",
+        deployment_id="vertex-claims",
+        pinned_at=now,
+        deprecation_review_at=now + timedelta(days=90),
+        recert_at=None,
+    )
+
+    with pytest.raises(TypeError):
+        model_pin_to_registry_entry(  # type: ignore[call-arg]
+            pin,
+            provider="azure_openai",
+            purpose="claim_extraction",
+            execution_class="ai_generated",
+        )
 
 
 def test_valid_registry_has_no_findings() -> None:

@@ -26,6 +26,7 @@ import math
 import os
 from pathlib import Path
 import random
+import sqlite3
 from typing import Any, Callable, cast
 
 import typer
@@ -33,11 +34,15 @@ import typer
 from src.ai.ai_mode import AIMode, get_ai_mode
 from src.ai.deployment_fallback import resolve_ai_deployments_for_feature
 from src.ai.deployment_fallback import FallbackAIClient
-from src.ai.dependency_blast_radius_generator import generate_dependency_blast_radius_proposal
+from src.ai.dependency_blast_radius_generator import (
+    POLICY_VERSION as DEPENDENCY_POLICY_VERSION,
+    generate_dependency_blast_radius_proposal_via_runner,
+)
 from src.ai.governance_decision_brief_generator import generate_governance_decision_brief
 from src.ai.meeting_action_extractor import run_meeting_action_extraction_pipeline
 from src.ai.provider import LLMProvider
 from src.ai.risk_proposal_generator import generate_risk_proposal
+from src.ai.structured_feature_runner import RunnerContext
 from src.core.adoption_telemetry import GoldenWorkflow, record_adoption
 from src.core.ai_review_proposal_store import (
     REVIEW_PROPOSAL_TYPES,
@@ -56,7 +61,7 @@ from src.core.dependency_blast_radius import (
 )
 from src.core.dependency_graph import load_dependencies, save_dependencies
 from src.core.edition_resolver import PROGRAMS_ROOT, load_program
-from src.core.exceptions import StateError
+from src.core.exceptions import ConfigError, StateError
 from src.core.governance_decision_brief import (
     GovernanceDecisionBriefError,
     GovernanceDecisionRequest,
@@ -68,9 +73,12 @@ from src.core.meeting_action import approve_meeting_action, reject_meeting_actio
 from src.core.meeting_action_routing import MeetingActionRoutingError, route_meeting_action_to_ado_proposal
 from src.core.models import RiskLevel, WorkItem
 from src.core.models_v2 import RiskImpact
+from src.core.operator_identity import capture_operator_identity
 from src.core.overrides_store import REPORTS_ROOT, load_overrides, save_overrides
+from src.core.program_fact_store import ProgramFactStore, _resolve_fact_db_root
 from src.core.program_synthesis import ProgramSynthesisRequest, SynthesisInputItem
 from src.core.proposal_audit import record_proposal_event
+from src.core.quality_gates.ai_release_audit import new_ai_run_id
 from src.core.risk_proposal import RiskProposalError, RiskProposalRequest, apply_risk_proposal, approve_risk_proposal, reject_risk_proposal
 from src.core.risk_register_engine import load_risk_register, save_risk_register
 from src.ai.top_three_candidate_generator import generate_top_three_candidates
@@ -468,7 +476,10 @@ def _generate_dependency_blast_radius(
             message=f"[dry-run] Would generate a dependency blast-radius proposal for {dependency_id!r}. No AI call made, nothing staged.",
         )
     try:
-        proposal = generate_dependency_blast_radius_proposal(request, client=client, programs_root=programs_root)
+        context = _dependency_runner_context(program_id, programs_root=programs_root)
+        proposal = generate_dependency_blast_radius_proposal_via_runner(
+            request, context=context, client=client, programs_root=programs_root,
+        )
     except StateError:
         raise GenerateProposalError("Dependency proposal cache or release audit failed; nothing was staged.") from None
     if proposal is None:
@@ -483,6 +494,55 @@ def _generate_dependency_blast_radius(
     return GenerateProposalResult(
         proposal_type="dependency_blast_radius", staged_ids=(proposal.id,),
         message=f"Generated and staged dependency blast-radius proposal {proposal.id!r} for review (`vertex ai-proposals list --program {program_id} --type dependency_blast_radius`).",
+    )
+
+
+def _dependency_runner_context(program_id: str, *, programs_root: Path) -> RunnerContext:
+    try:
+        identity = capture_operator_identity(
+            "vertex-ai-proposals-generate",
+            require_os_principal=True,
+        )
+    except (OSError, ValueError):
+        raise GenerateProposalError(
+            "A native OS principal is required for dependency proposal runner execution."
+        ) from None
+    if identity.principal is None or not identity.principal.strip():
+        raise GenerateProposalError(
+            "A native OS principal is required for dependency proposal runner execution."
+        )
+    store = ProgramFactStore(program_id, db_root=_resolve_fact_db_root(programs_root))
+    try:
+        pin = store.pin_snapshot(metadata={
+            "caller": "vertex-ai-proposals-generate",
+            "feature": "dependency_blast_radius_generator",
+        })
+        drift = store.detect_drift(pin.snapshot_id)
+    except (ConfigError, KeyError, OSError, sqlite3.DatabaseError, StateError, ValueError):
+        raise GenerateProposalError(
+            "The program fact snapshot could not be pinned for dependency proposal execution."
+        ) from None
+    digest = pin.content_sha256
+    if (
+        pin.program_id != program_id
+        or not isinstance(digest, str)
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        raise GenerateProposalError(
+            "The pinned program fact snapshot does not match the selected program."
+        )
+    if drift:
+        raise GenerateProposalError(
+            "The pinned program fact snapshot changed before dependency proposal execution; re-run the command."
+        )
+    return RunnerContext(
+        program_id=program_id,
+        run_id=new_ai_run_id(),
+        policy_version=DEPENDENCY_POLICY_VERSION,
+        snapshot_id=digest,
+        principal=identity.principal,
+        classification="confidential",
     )
 
 

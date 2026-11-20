@@ -419,13 +419,13 @@ def test_actions_review_cli_skips_apply_ado_for_non_fully_approved_meeting_batch
 @pytest.mark.parametrize(
     ("mode", "applied", "skipped", "conflicts"),
     [
-        ("same_target", 2, 0, 0),
-        ("different_targets", 2, 0, 0),
-        ("unrelated_title", 2, 0, 0),
-        ("exact_replay", 1, 1, 0),
-        ("partial_revision", 1, 0, 1),
-        ("truncated", 0, 0, 2),
-        ("missing_history", 0, 0, 2),
+        ("same_target", 0, 0, 0),
+        ("different_targets", 0, 0, 0),
+        ("unrelated_title", 0, 0, 0),
+        ("exact_replay", 0, 0, 0),
+        ("partial_revision", 0, 0, 0),
+        ("truncated", 0, 0, 0),
+        ("missing_history", 0, 0, 0),
         ("cancelled", 0, 0, 0),
         ("unapproved", 0, 0, 0),
     ],
@@ -500,7 +500,7 @@ def test_actions_review_cli_preserves_typed_meeting_payloads(
     result = runner.invoke(app, ["actions", "review", "--program", "demo", "--reviewer", "owner", "--apply-ado"],
                            input=decisions)
     assert result.exit_code == 0, result.exception
-    assert client._mutation_session.request.call_count == applied
+    assert client._mutation_session.request.call_count == 0
     if mode in {"cancelled", "unapproved"}:
         assert results == []
         persisted, status = read_proposal_manifest(manifest_path)
@@ -511,10 +511,11 @@ def test_actions_review_cli_preserves_typed_meeting_payloads(
     assert (results[0].applied_count, results[0].skipped_count, results[0].conflict_count) == (applied, skipped, conflicts)
     persisted, status = read_proposal_manifest(manifest_path)
     assert status == results[0].proposal_status
-    if not conflicts:
-        assert {entry.proposed_value for entry in proposal.entries} <= {
-            comment["text"] for batch in comments.values() for comment in batch
-        }
+    assert all(entry.entry_status == "failed" for entry in persisted.entries)
+    assert all(
+        "direct writes are retired" in (entry.status_reason or "")
+        for entry in persisted.entries
+    )
     assert "Reviewed 2 action(s)" in result.stdout
 
 

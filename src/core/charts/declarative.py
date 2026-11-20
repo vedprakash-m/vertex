@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 # Target decoded PNG size (bytes) — spec §7
 PNG_TARGET_BYTES = 80_000
 PNG_HARD_GATE_BYTES = 102_400
+MAX_VISIBLE_X_TICKS = 20
 
 
 class DeclarativeChartBuilder:
@@ -240,8 +241,7 @@ class DeclarativeChartBuilder:
         for yi, y_vals in enumerate(y_data):
             color = palette[yi % len(palette)]
             axis.plot(x_pos, y_vals, marker="o", linewidth=1.5, label=y_axes[yi], color=color)
-        axis.set_xticks(x_pos)
-        axis.set_xticklabels(x_labels, rotation=45, ha="right", fontsize=7)
+        self._set_x_ticks(axis, x_labels)
         axis.grid(axis="y", color=grid_color, linewidth=0.8, alpha=grid_alpha)
         axis.legend(fontsize=7, loc="best")
         axis.set_facecolor(facecolor)
@@ -253,8 +253,7 @@ class DeclarativeChartBuilder:
             color = palette[yi % len(palette)]
             offset = (yi - len(y_data) / 2 + 0.5) * width
             axis.bar([p + offset for p in x_pos], y_vals, width=width, label=y_axes[yi], color=color, alpha=0.9)
-        axis.set_xticks(x_pos)
-        axis.set_xticklabels(x_labels, rotation=45, ha="right", fontsize=7)
+        self._set_x_ticks(axis, x_labels)
         axis.grid(axis="y", color=grid_color, linewidth=0.8, alpha=grid_alpha)
         axis.legend(fontsize=7, loc="best")
         axis.set_facecolor(facecolor)
@@ -266,8 +265,7 @@ class DeclarativeChartBuilder:
             color = palette[yi % len(palette)]
             axis.bar(x_pos, y_vals, width=0.6, bottom=bottom, label=y_axes[yi], color=color, alpha=0.9)
             bottom = [b + (v or 0) for b, v in zip(bottom, y_vals)]
-        axis.set_xticks(x_pos)
-        axis.set_xticklabels(x_labels, rotation=45, ha="right", fontsize=7)
+        self._set_x_ticks(axis, x_labels)
         axis.grid(axis="y", color=grid_color, linewidth=0.8, alpha=grid_alpha)
         axis.legend(fontsize=7, loc="best")
         axis.set_facecolor(facecolor)
@@ -277,8 +275,7 @@ class DeclarativeChartBuilder:
             x_vals = list(range(len(y_vals)))
             color = palette[yi % len(palette)]
             axis.scatter(x_vals, y_vals, label=y_axes[yi], color=color, s=20)
-        axis.set_xticks(list(range(len(x_labels))))
-        axis.set_xticklabels(x_labels, rotation=45, ha="right", fontsize=7)
+        self._set_x_ticks(axis, x_labels)
         axis.grid(axis="y", color="#E5E7EB", linewidth=0.8, alpha=0.3)
         axis.legend(fontsize=7, loc="best")
         axis.set_facecolor(facecolor)
@@ -295,6 +292,23 @@ class DeclarativeChartBuilder:
             offset = (yi - 0.5) * width
             axis.bar([p + offset for p in x_pos], y_data[yi], width=width, label=y_axes[yi], color=palette[yi % len(palette)], alpha=0.8)
         axis.legend(fontsize=7, loc="best")
+
+    def _set_x_ticks(self, axis, x_labels):
+        count = min(len(x_labels), MAX_VISIBLE_X_TICKS)
+        if count <= 1:
+            positions = list(range(count))
+        else:
+            positions = [
+                round(index * (len(x_labels) - 1) / (count - 1))
+                for index in range(count)
+            ]
+        axis.set_xticks(positions)
+        axis.set_xticklabels(
+            [x_labels[position] for position in positions],
+            rotation=45,
+            ha="right",
+            fontsize=7,
+        )
 
     def _derive_alt_text(self, chart_type: str, x_axis: str, y_axes: list[str]) -> str:
         """Derive accessible alt text from chart data."""

@@ -7,17 +7,31 @@ import re
 import sqlite3
 import time
 import uuid
-from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import portalocker
 
-from src.core.actuation_outbox import DispatchResult, actuation_idempotency_key, create_task_idempotency_key, dispatch_leased_create_task, enqueue_create_task_intent, outbox_db_path
-from src.core.ledger.durable_outbox_store import OutboxError, load_entry
+from src.core.actuation_outbox import (
+    DispatchResult,
+    create_task_idempotency_key,
+    dispatch_leased_create_task,
+    enqueue_create_task_intent,
+    outbox_db_path,
+    reconcile_uncertain_create_task,
+)
+from src.core.actuation_reconciliation import (
+    AuthorizedEffect,
+    EffectReconciliation,
+    ProviderEffectEvidence,
+    audience_manifest_hash,
+    desired_effect_hash,
+    reconcile_effect,
+)
+from src.core.ledger.durable_outbox_store import OutboxError, load_entry, load_success_receipt
 from src.core.ado_client import ADOClient
 from src.core.ado_proposal import ADOUpdateEntry, ADOUpdateProposal, open_locked_proposal_manifest, read_proposal_manifest_from_handle, write_proposal_manifest_to_handle
 from src.core.exceptions import AuthError, ConfigError, CredentialExpired, MutationOutcomeUnknown, QueryError, QueryTimeoutError, StateError
@@ -28,12 +42,10 @@ from src.core.models_v2 import Signal, SignalReviewDecision
 from src.core.signal_dedup import is_duplicate_signal
 from src.core.signal_classification import classify_signal as _classify_signal
 from src.core.store_factory import build_signal_store_for_program_id
-from src.core.workspace_lease import ACTUATION_DISPATCH_DOMAIN, LeaseHeldByAnotherOwner, acquire_lease, release_lease
+from src.core.workspace_lease import ACTUATION_DISPATCH_DOMAIN, LeaseHeldByAnotherOwner
 
 
 log = logging.getLogger(__name__)
-# Non-create ADO writes retain the existing direct path pending an owner ruling.
-_ROUTE_ADO_MUTATIONS_VIA_OUTBOX = False
 _ACTION_ASSOCIATION_WARNING = (
     "ADO entry is applied; local action association may be incomplete. Review the action history."
 )
@@ -75,25 +87,8 @@ class ADOWriter:
         self._client = client
         self._programs_root = programs_root
 
-    @contextmanager
-    def _actuation_lease(self, program_id: str) -> Iterator[None]:
-        """ADF-W1.10 (Appendix A.11): every ADO mutation -- not just
-        create_task, which owns its own lease via the outbox
-        (``dispatch_leased_create_task``) -- serializes against the
-        program's ``actuation_dispatch`` workspace lease domain. A short
-        per-call acquire/release (rather than one lease held across the
-        whole ``apply_manifest``/``rollback_manifest`` call) avoids
-        conflicting with create_task's own self-contained acquire/release
-        pairing, at the cost of not serializing an entire multi-entry apply
-        as one atomic unit -- acceptable, since each individual ADO write is
-        already independently safe (revision test-ops, duplicate checks).
-        """
-        owner = f"ado_writer:{uuid.uuid4().hex[:12]}"
-        lease = acquire_lease(program_id, owner, mutation_domain=ACTUATION_DISPATCH_DOMAIN, programs_root=self._programs_root)
-        try:
-            yield
-        finally:
-            release_lease(lease, programs_root=self._programs_root)
+    def _is_synthetic_provider(self) -> bool:
+        return getattr(self._client, "_vertex_synthetic_provider", False) is True
 
     def apply_manifest(
         self,
@@ -140,7 +135,7 @@ class ADOWriter:
                     interim_status = _derive_proposal_status(interim_proposal.entries, expired=False)
                     write_proposal_manifest_to_handle(manifest_handle, interim_proposal, proposal_status=interim_status)
 
-                live_row = self._load_live_row(entry)
+                live_row = self._load_live_row(entry) if entry.action == "create_task" else None
                 try:
                     updated_entry = self._apply_entry(
                         proposal,
@@ -287,6 +282,8 @@ class ADOWriter:
             )
             outbox_payload_json = json.dumps(
                 {
+                    "program_id": proposal.program_id,
+                    "operation": "create_task.v1",
                     "operation_intent_id": operation_intent_id,
                     "proposal_id": proposal.id,
                     "org": self._client.organization,
@@ -299,6 +296,7 @@ class ADOWriter:
                     "priority": task_data.get("priority"),
                     "target_date": task_data.get("target_date"),
                     "tags": f"vertex-intent-{operation_intent_id}",
+                    "authorized_effect": task_data.get("authorized_effect"),
                 }
             )
 
@@ -306,6 +304,16 @@ class ADOWriter:
             # persisted (attempted_at set). A never-attempted entry has
             # nothing to reconcile against, so skip the extra WIQL round trip.
             if entry.attempted_at is not None or entry.outbox_id is not None:
+                if not self._is_synthetic_provider():
+                    return replace(
+                        entry,
+                        entry_status="failed",
+                        operation_intent_id=operation_intent_id,
+                        status_reason=(
+                            "Live provider reconciliation is disabled; retain the outbox row "
+                            "and use separately authorized provider qualification."
+                        ),
+                    )
                 if entry.outbox_id is not None and entry.outbox_id != idempotency_key:
                     return replace(
                         entry, entry_status="failed",
@@ -327,7 +335,23 @@ class ADOWriter:
                             status_reason="Retained create intent is missing or changed; reconciliation required before recovery.",
                         )
                 try:
-                    existing_id, existing_rev = self._search_existing_create(
+                    authorized_effect = _authorized_create_effect({
+                        **task_data,
+                        "program_id": proposal.program_id,
+                        "org": self._client.organization,
+                        "project": self._client.project,
+                        "operation_intent_id": operation_intent_id,
+                        "tags": f"vertex-intent-{operation_intent_id}",
+                    })
+                except ValueError as error:
+                    return replace(
+                        entry,
+                        entry_status="failed",
+                        operation_intent_id=operation_intent_id,
+                        status_reason=f"Create reconciliation requires qualified authorization: {error}",
+                    )
+                try:
+                    existing_id, existing_rev, remote_fields = self._search_existing_create(
                         operation_intent_id=operation_intent_id,
                         area_path=area_path,
                         title=title,
@@ -343,27 +367,153 @@ class ADOWriter:
                             "intent-marker lookup or readback could not be verified."
                         ),
                     )
-                self._emit_duplicate_prevented(
-                    proposal,
-                    operation_intent_id=operation_intent_id,
-                    existing_remote_id=existing_id,
-                    detection="preflight_search",
+                retained_outbox = (
+                    load_entry(
+                        outbox_db_path(proposal.program_id, programs_root=self._programs_root),
+                        entry.outbox_id,
+                    )
+                    if entry.outbox_id is not None
+                    else None
                 )
-                adopted_entry = replace(
-                    entry,
-                    entry_status="applied",
-                    work_item_id=existing_id,
-                    remote_rev=existing_rev,
-                    operation_intent_id=operation_intent_id,
-                    status_reason="adopted existing work item via search-before-create (ADF-W1.2)",
-                )
-                self._append_audit_signal(
-                    proposal, adopted_entry, applied_at=applied_at,
-                    existing_signals=existing_signals, signal_store=signal_store,
-                    raw_ref=f"ado:{existing_id}", adopted_existing=True,
-                )
-                return adopted_entry
+                if existing_id is None:
+                    if retained_outbox is None or retained_outbox.status not in {
+                        "pending", "uncertain_remote_state",
+                    }:
+                        return replace(
+                            entry,
+                            entry_status="failed",
+                            operation_intent_id=operation_intent_id,
+                            status_reason=(
+                                "Verified-absence reconciliation requires a retained qualified pending or uncertain "
+                                "outbox row before dispatch can continue."
+                            ),
+                        )
+                    if retained_outbox.status == "uncertain_remote_state":
+                        absent = reconcile_uncertain_create_task(
+                            program_id=proposal.program_id,
+                            idempotency_key=idempotency_key,
+                            marker_lookup=lambda _entry: None,
+                            reconciled_by="ado_writer:verified-absent",
+                            programs_root=self._programs_root,
+                        )
+                        if absent.status != "pending":
+                            return replace(
+                                entry,
+                                entry_status="failed",
+                                operation_intent_id=operation_intent_id,
+                                status_reason="Verified absence could not reopen the retained outbox row.",
+                            )
+                else:
+                    if retained_outbox is None:
+                        return replace(
+                            entry,
+                            entry_status="failed",
+                            operation_intent_id=operation_intent_id,
+                            status_reason=(
+                                "Marker adoption requires a retained qualified outbox row and receipt."
+                            ),
+                        )
+                    assert remote_fields is not None
+                    if retained_outbox.status == "uncertain_remote_state":
+                        reconciliation = _reconcile_recovered_create(
+                            authorized_effect=authorized_effect,
+                            outbox_entry=retained_outbox,
+                            remote_id=existing_id,
+                            remote_rev=existing_rev,
+                            remote_fields=remote_fields,
+                        )
+                        if not reconciliation.completed:
+                            return replace(
+                                entry,
+                                entry_status="failed",
+                                operation_intent_id=operation_intent_id,
+                                status_reason=(
+                                    "ADO task reconciliation remains uncertain; provider readback did not "
+                                    "certify recipient, target, value and principal."
+                                ),
+                            )
+                        closeout = reconcile_uncertain_create_task(
+                            program_id=proposal.program_id,
+                            idempotency_key=idempotency_key,
+                            marker_lookup=lambda _entry: existing_id,
+                            reconciled_by="ado_writer:provider-readback",
+                            reconciliation=reconciliation,
+                            programs_root=self._programs_root,
+                        )
+                        if closeout.status != "completed":
+                            return replace(
+                                entry,
+                                entry_status="failed",
+                                operation_intent_id=operation_intent_id,
+                                status_reason="ADO task recovery could not close the retained outbox row",
+                            )
+                    elif retained_outbox.status == "completed":
+                        receipt_json = load_success_receipt(
+                            outbox_db_path(proposal.program_id, programs_root=self._programs_root),
+                            retained_outbox.outbox_id,
+                        )
+                        if not _completed_create_receipt_binds(
+                            receipt_json=receipt_json,
+                            authorized_effect=authorized_effect,
+                            remote_id=existing_id,
+                            remote_rev=existing_rev,
+                        ):
+                            return replace(
+                                entry,
+                                entry_status="failed",
+                                operation_intent_id=operation_intent_id,
+                                status_reason=(
+                                    "Marker adoption requires the retained completed reconciliation "
+                                    "receipt to match the provider readback."
+                                ),
+                            )
+                    else:
+                        return replace(
+                            entry,
+                            entry_status="failed",
+                            operation_intent_id=operation_intent_id,
+                            status_reason=(
+                                f"Marker adoption cannot certify retained outbox status "
+                                f"{retained_outbox.status!r}."
+                            ),
+                        )
+                    self._emit_duplicate_prevented(
+                        proposal,
+                        operation_intent_id=operation_intent_id,
+                        existing_remote_id=existing_id,
+                        detection="preflight_search",
+                    )
+                    adopted_entry = replace(
+                        entry,
+                        entry_status="applied",
+                        work_item_id=existing_id,
+                        remote_rev=existing_rev,
+                        operation_intent_id=operation_intent_id,
+                        status_reason="adopted existing work item via search-before-create (ADF-W1.2)",
+                    )
+                    self._append_audit_signal(
+                        proposal, adopted_entry, applied_at=applied_at,
+                        existing_signals=existing_signals, signal_store=signal_store,
+                        raw_ref=f"ado:{existing_id}", adopted_existing=True,
+                    )
+                    return adopted_entry
 
+            try:
+                _authorized_create_effect({
+                    **task_data,
+                    "program_id": proposal.program_id,
+                    "org": self._client.organization,
+                    "project": self._client.project,
+                    "operation_intent_id": operation_intent_id,
+                    "tags": f"vertex-intent-{operation_intent_id}",
+                })
+            except ValueError as error:
+                return replace(
+                    entry,
+                    entry_status="failed",
+                    operation_intent_id=operation_intent_id,
+                    status_reason=f"Create intent is not qualified for outbox dispatch: {error}",
+                )
             # ADF-W1.2: persist attempted_at + operation_intent_id BEFORE
             # dispatch. If the process dies or the response is lost after
             # this point but the server committed the write, the next apply
@@ -433,125 +583,22 @@ class ADOWriter:
                 status_reason=outcome.entry.failure_reason or "ADO task creation failed",
             )
 
-        if live_row is None:
-            return replace(entry, entry_status="failed", status_reason="work item not found in ADO")
-
-        live_rev = _coerce_int(live_row.get("rev"))
-
-        if _has_revision_conflict(entry, live_row):
+        operation = {
+            "add_comment": "add_comment.v1",
+            "add_tag": "add_tag.v1",
+            "remove_tag": "add_tag.v1",
+            "set_tags": "add_tag.v1",
+            "set_field": "set_field.v1",
+        }.get(entry.action)
+        if operation is not None:
             return replace(
                 entry,
-                entry_status="conflict",
-                status_reason="revision mismatch (preflight)",
-                remote_rev=live_rev,
+                entry_status="failed",
+                status_reason=(
+                    f"{operation} is not qualified for provider dispatch; "
+                    "direct writes are retired and the outbox boundary remains blocked."
+                ),
             )
-
-        if entry.action == "add_comment":
-            try:
-                duplicate = self._has_duplicate_comment(entry, update_type=proposal.update_type)
-            except (AuthError, QueryError) as error:
-                return replace(entry, entry_status="failed", status_reason=f"comment history lookup failed: {error}")
-            if duplicate is None:
-                return replace(
-                    entry,
-                    entry_status="conflict",
-                    status_reason="comment history incomplete; cannot safely check for duplicate",
-                )
-            if duplicate:
-                return replace(entry, entry_status="skipped", status_reason="duplicate comment")
-            if _ROUTE_ADO_MUTATIONS_VIA_OUTBOX:
-                status, reason, response = self._dispatch_mutation_via_outbox(
-                    proposal, entry, operation="add_comment.v1", method="POST",
-                    url=f"{self._client._rest_base_url}workItems/{entry.work_item_id}/comments?api-version=7.1-preview.4",
-                    json_body={"text": entry.proposed_value}, content_type="application/json",
-                )
-                if status != "completed":
-                    return replace(entry, entry_status="failed", status_reason=reason)
-                self._append_audit_signal(
-                    proposal, entry, applied_at=applied_at, existing_signals=existing_signals,
-                    signal_store=signal_store, raw_ref=_comment_raw_ref(response),
-                )
-                return replace(entry, entry_status="applied", remote_rev=live_rev)
-            with self._actuation_lease(proposal.program_id):
-                response = self._request_json(
-                    "POST",
-                    f"{self._client._rest_base_url}workItems/{entry.work_item_id}/comments?api-version=7.1-preview.4",
-                    json_body={"text": entry.proposed_value},
-                )
-            self._append_audit_signal(
-                proposal,
-                entry,
-                applied_at=applied_at,
-                existing_signals=existing_signals,
-                signal_store=signal_store,
-                raw_ref=_comment_raw_ref(response),
-            )
-            return replace(entry, entry_status="applied", remote_rev=live_rev)
-
-        if entry.action in {"add_tag", "remove_tag", "set_tags"}:
-            tag_value = self._apply_tag_update(entry, live_row)
-            if tag_value is None:
-                return replace(entry, entry_status="skipped", status_reason="tag already applied (no-op)")
-            tag_patch: list[dict[str, Any]] = [{"op": "add", "path": "/fields/System.Tags", "value": tag_value}]
-            if entry.revision_id is not None:
-                tag_patch = _prepend_test_op(tag_patch, entry.revision_id)
-            if _ROUTE_ADO_MUTATIONS_VIA_OUTBOX and entry.action == "add_tag":
-                return self._apply_patch_via_outbox(
-                    proposal, entry, operation="add_tag.v1", patch=tag_patch, live_rev=live_rev,
-                    applied_at=applied_at, existing_signals=existing_signals, signal_store=signal_store,
-                )
-            try:
-                with self._actuation_lease(proposal.program_id):
-                    self._request_json(
-                        "PATCH",
-                        f"{self._client._rest_base_url}workItems/{entry.work_item_id}?api-version=7.1",
-                        json_body=tag_patch,
-                        content_type="application/json-patch+json",
-                    )
-            except QueryError:
-                return replace(entry, entry_status="conflict", status_reason="test op rejected (race)", remote_rev=live_rev)
-            self._append_audit_signal(
-                proposal,
-                entry,
-                applied_at=applied_at,
-                existing_signals=existing_signals,
-                signal_store=signal_store,
-            )
-            return replace(entry, entry_status="applied", remote_rev=live_rev)
-
-        if entry.action == "set_field":
-            live_value = _field_value(live_row, entry.field_or_tag)
-            if _normalize_value(entry.current_value) != _normalize_value(live_value):
-                return replace(entry, entry_status="conflict", status_reason="current value mismatch (staleness check)", remote_rev=live_rev)
-            if _normalize_value(entry.proposed_value) == _normalize_value(live_value):
-                return replace(entry, entry_status="skipped", status_reason="proposed value already in effect")
-            field_patch: list[dict[str, Any]] = [{"op": "add", "path": f"/fields/{entry.field_or_tag}", "value": entry.proposed_value}]
-            if entry.revision_id is not None:
-                field_patch = _prepend_test_op(field_patch, entry.revision_id)
-            if _ROUTE_ADO_MUTATIONS_VIA_OUTBOX:
-                return self._apply_patch_via_outbox(
-                    proposal, entry, operation="set_field.v1", patch=field_patch, live_rev=live_rev,
-                    applied_at=applied_at, existing_signals=existing_signals, signal_store=signal_store,
-                )
-            try:
-                with self._actuation_lease(proposal.program_id):
-                    self._request_json(
-                        "PATCH",
-                        f"{self._client._rest_base_url}workItems/{entry.work_item_id}?api-version=7.1",
-                        json_body=field_patch,
-                        content_type="application/json-patch+json",
-                    )
-            except QueryError:
-                return replace(entry, entry_status="conflict", status_reason="test op rejected (race)", remote_rev=live_rev)
-            self._append_audit_signal(
-                proposal,
-                entry,
-                applied_at=applied_at,
-                existing_signals=existing_signals,
-                signal_store=signal_store,
-            )
-            return replace(entry, entry_status="applied", remote_rev=live_rev)
-
         raise QueryError(f"Unsupported ADO proposal action: {entry.action}")
 
     def _rollback_entry(
@@ -579,128 +626,27 @@ class ADOWriter:
             )
 
         if entry.action == "add_comment":
-            rollback_comment = _build_rollback_comment_body(
-                proposal=proposal,
-                entry=entry,
-                action_id=action_id,
-                rolled_back_at=rolled_back_at,
-            )
-            try:
-                duplicate = self._has_duplicate_comment_text(entry.work_item_id, rollback_comment)
-            except (AuthError, QueryError) as error:
-                return ADORollbackEntryResult(
-                    work_item_id=entry.work_item_id,
-                    action=entry.action,
-                    status="failed",
-                    status_reason=f"comment history lookup failed: {error}",
-                )
-            if duplicate is None:
-                return ADORollbackEntryResult(
-                    work_item_id=entry.work_item_id,
-                    action=entry.action,
-                    status="conflict",
-                    status_reason="comment history incomplete; cannot safely check for duplicate",
-                )
-            if duplicate:
-                return ADORollbackEntryResult(
-                    work_item_id=entry.work_item_id,
-                    action=entry.action,
-                    status="skipped",
-                    status_reason="rollback comment already posted",
-                )
-            try:
-                with self._actuation_lease(proposal.program_id):
-                    self._request_json(
-                        "POST",
-                        f"{self._client._rest_base_url}workItems/{entry.work_item_id}/comments?api-version=7.1-preview.4",
-                        json_body={"text": rollback_comment},
-                    )
-            except QueryError as error:
-                return ADORollbackEntryResult(
-                    work_item_id=entry.work_item_id,
-                    action=entry.action,
-                    status="failed",
-                    status_reason=str(error),
-                )
-            return ADORollbackEntryResult(
-                work_item_id=entry.work_item_id,
-                action=entry.action,
-                status="rolled_back",
-            )
-
-        live_row = self._load_live_row(entry)
-        if live_row is None:
             return ADORollbackEntryResult(
                 work_item_id=entry.work_item_id,
                 action=entry.action,
                 status="failed",
-                status_reason="work item not found in ADO",
+                status_reason="add_comment.v1 compensation is not qualified; rollback provider write is blocked by the outbox boundary.",
             )
 
-        live_rev = _coerce_int(live_row.get("rev"))
         if entry.action == "set_field":
-            live_value = _field_value(live_row, entry.field_or_tag)
-            if _normalize_value(live_value) == _normalize_value(entry.current_value):
-                return ADORollbackEntryResult(
-                    work_item_id=entry.work_item_id,
-                    action=entry.action,
-                    status="skipped",
-                    status_reason="field already reverted",
-                )
-            field_patch = _build_field_rollback_patch(entry, live_rev=live_rev)
-            try:
-                with self._actuation_lease(proposal.program_id):
-                    self._request_json(
-                        "PATCH",
-                        f"{self._client._rest_base_url}workItems/{entry.work_item_id}?api-version=7.1",
-                        json_body=field_patch,
-                        content_type="application/json-patch+json",
-                    )
-            except QueryError:
-                return ADORollbackEntryResult(
-                    work_item_id=entry.work_item_id,
-                    action=entry.action,
-                    status="conflict",
-                    status_reason="rollback patch rejected (race)",
-                )
             return ADORollbackEntryResult(
                 work_item_id=entry.work_item_id,
                 action=entry.action,
-                status="rolled_back",
+                status="failed",
+                status_reason="set_field.v1 compensation is not qualified; rollback provider write is blocked by the outbox boundary.",
             )
 
         if entry.action in {"add_tag", "remove_tag", "set_tags"}:
-            live_value = _field_value(live_row, "System.Tags")
-            target_tags = _normalize_value(entry.current_value) or ""
-            if _normalize_value(live_value) == _normalize_value(target_tags):
-                return ADORollbackEntryResult(
-                    work_item_id=entry.work_item_id,
-                    action=entry.action,
-                    status="skipped",
-                    status_reason="tags already reverted",
-                )
-            tag_patch: list[dict[str, Any]] = [{"op": "add", "path": "/fields/System.Tags", "value": target_tags}]
-            if live_rev is not None:
-                tag_patch = _prepend_test_op(tag_patch, live_rev)
-            try:
-                with self._actuation_lease(proposal.program_id):
-                    self._request_json(
-                        "PATCH",
-                        f"{self._client._rest_base_url}workItems/{entry.work_item_id}?api-version=7.1",
-                        json_body=tag_patch,
-                        content_type="application/json-patch+json",
-                    )
-            except QueryError:
-                return ADORollbackEntryResult(
-                    work_item_id=entry.work_item_id,
-                    action=entry.action,
-                    status="conflict",
-                    status_reason="rollback patch rejected (race)",
-                )
             return ADORollbackEntryResult(
                 work_item_id=entry.work_item_id,
                 action=entry.action,
-                status="rolled_back",
+                status="failed",
+                status_reason="add_tag.v1 compensation is not qualified; rollback provider write is blocked by the outbox boundary.",
             )
 
         return ADORollbackEntryResult(
@@ -898,86 +844,6 @@ class ADOWriter:
             )
         return body
 
-    def _apply_patch_via_outbox(
-        self, proposal: ADOUpdateProposal, entry: ADOUpdateEntry, *, operation: str, patch: list[dict[str, Any]],
-        live_rev: int | None, applied_at: datetime, existing_signals: list[Signal], signal_store,
-    ) -> ADOUpdateEntry:
-        status, reason, _ = self._dispatch_mutation_via_outbox(
-            proposal, entry, operation=operation, method="PATCH",
-            url=f"{self._client._rest_base_url}workItems/{entry.work_item_id}?api-version=7.1",
-            json_body=patch, content_type="application/json-patch+json",
-        )
-        if status == "failed_terminal":
-            return replace(entry, entry_status="conflict", status_reason="test op rejected (race)", remote_rev=live_rev)
-        if status != "completed":
-            return replace(entry, entry_status="failed", status_reason=reason)
-        self._append_audit_signal(
-            proposal, entry, applied_at=applied_at, existing_signals=existing_signals, signal_store=signal_store,
-        )
-        return replace(entry, entry_status="applied", remote_rev=live_rev)
-
-    def _dispatch_mutation_via_outbox(
-        self, proposal: ADOUpdateProposal, entry: ADOUpdateEntry, *, operation: str, method: str, url: str,
-        json_body: Any, content_type: str,
-    ) -> tuple[str, str | None, dict[str, Any]]:
-        """Enqueue -> dispatch -> record one ADO mutation; returns (status, reason, response)."""
-        request = {"operation": operation, "work_item_id": entry.work_item_id, "method": method, "url": url, "body": json_body}
-        operation_intent_id = hashlib.sha256(
-            json.dumps({**request, "proposal_id": proposal.id}, sort_keys=True, separators=(",", ":")).encode("utf-8"),
-        ).hexdigest()
-        idempotency_key = actuation_idempotency_key(
-            program_id=proposal.program_id, org=self._client.organization, project=self._client.project,
-            operation=operation, target_identity=str(entry.work_item_id), operation_intent_id=operation_intent_id,
-        )
-        payload_json = json.dumps({
-            **request, "content_type": content_type, "operation_intent_id": operation_intent_id,
-            "proposal_id": proposal.id, "org": self._client.organization, "project": self._client.project,
-        })
-        enqueue_create_task_intent(
-            program_id=proposal.program_id, idempotency_key=idempotency_key, operation_intent_id=operation_intent_id,
-            proposal_id=proposal.id, payload_json=payload_json, programs_root=self._programs_root,
-            operation=operation, target_identity=str(entry.work_item_id),
-        )
-        retained = load_entry(outbox_db_path(proposal.program_id, programs_root=self._programs_root), idempotency_key)
-        if retained is not None and retained.status == "completed":
-            return "completed", None, {}
-        self._last_mutation_response: dict[str, Any] = {}
-        try:
-            outcome = dispatch_leased_create_task(
-                program_id=proposal.program_id, idempotency_key=idempotency_key,
-                owner=f"ado_writer:{uuid.uuid4().hex[:12]}",
-                dispatch_fn=self._dispatch_create_task_outbox_entry, programs_root=self._programs_root,
-            )
-        except LeaseHeldByAnotherOwner as error:
-            return "failed", f"actuation dispatch lease busy, retry later: {error}", {}
-        except OutboxError as error:
-            return "failed", f"actuation dispatch not possible: {error}", {}
-        if outcome.status == "uncertain_remote_state":
-            return outcome.status, (
-                f"ADO {operation} outcome uncertain (outbox key {idempotency_key}); operator must reconcile before retrying"
-            ), {}
-        return outcome.status, outcome.entry.failure_reason, self._last_mutation_response
-
-    def _dispatch_ado_mutation(self, fields: dict[str, Any]) -> DispatchResult:
-        try:
-            response = self._request_json(
-                fields["method"], fields["url"], json_body=fields["body"], content_type=fields["content_type"],
-            )
-        except (MutationOutcomeUnknown, QueryTimeoutError):
-            return DispatchResult(
-                succeeded=False, uncertain=True,
-                failure_reason=f"ADO {fields['operation']} response is inconclusive; reconciliation required, no automatic retry",
-            )
-        except QueryError as error:
-            return DispatchResult(succeeded=False, failure_reason=f"ADO {fields['operation']} failed: {error}")
-        self._last_mutation_response = response
-        return DispatchResult(
-            succeeded=True, remote_id=fields["work_item_id"],
-            remote_response_hash=hashlib.sha256(
-                json.dumps(response, sort_keys=True, separators=(",", ":")).encode("utf-8"),
-            ).hexdigest(),
-        )
-
     def _dispatch_create_task_outbox_entry(self, outbox_entry: Any) -> DispatchResult:
         """ADF-W1.3: the ``dispatch_fn`` handed to ``dispatch_leased_create_task``.
 
@@ -986,6 +852,14 @@ class ADOWriter:
         a stale lease (the original worker crashed mid-dispatch) can still
         complete this exact intent correctly.
         """
+        if not self._is_synthetic_provider():
+            return DispatchResult(
+                succeeded=False,
+                failure_reason=(
+                    "Live ADO provider dispatch is disabled; qualified outbox migration "
+                    "does not authorize a real provider write."
+                ),
+            )
         try:
             fields = json.loads(outbox_entry.payload_json)
         except Exception as error:
@@ -997,7 +871,17 @@ class ADOWriter:
         ):
             return DispatchResult(succeeded=False, failure_reason="outbox payload has missing or mismatched ADO destination")
         if fields.get("operation", "create_task.v1") != "create_task.v1":
-            return self._dispatch_ado_mutation(fields)
+            return DispatchResult(
+                succeeded=False,
+                failure_reason="outbox payload operation is not qualified for provider dispatch",
+            )
+        try:
+            authorized_effect = _authorized_create_effect(fields)
+        except ValueError as error:
+            return DispatchResult(
+                succeeded=False,
+                failure_reason=f"create dispatch lacks a qualified authorized effect: {error}",
+            )
         patch = _build_create_task_patch(fields)
         try:
             response = self._request_json(
@@ -1025,11 +909,20 @@ class ADOWriter:
                 succeeded=False, uncertain=True, remote_id=new_id,
                 failure_reason="Create response contains an invalid revision; manual reconciliation required",
             )
+        reconciliation = _reconcile_create_response(
+            authorized_effect=authorized_effect,
+            outbox_entry=outbox_entry,
+            response=response,
+            provider_response_hash=hashlib.sha256(
+                json.dumps(response, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+            ).hexdigest(),
+        )
         return DispatchResult(
             succeeded=True, remote_id=new_id, remote_rev=remote_rev,
             remote_response_hash=hashlib.sha256(
                 json.dumps(response, sort_keys=True, separators=(",", ":")).encode("utf-8"),
             ).hexdigest(),
+            reconciliation=reconciliation,
         )
 
     def _search_existing_create(
@@ -1039,7 +932,7 @@ class ADOWriter:
         area_path: str | None,
         title: str,
         task_data: dict[str, Any],
-    ) -> tuple[int, int | None]:
+    ) -> tuple[int | None, int | None, dict[str, Any] | None]:
         """Require complete unique marker lookup and matching requested-field readback."""
         tag = f"vertex-intent-{operation_intent_id}"
         tag_wiql = f"SELECT [System.Id] FROM WorkItems WHERE [System.Tags] CONTAINS '{_escape_wiql_literal(tag)}'"
@@ -1057,8 +950,10 @@ class ADOWriter:
             or outcomes[0].is_truncated is not False
         ):
             raise QueryError("create marker lookup completeness is unproven")
+        if not tag_hits:
+            return None, None, None
         if len(tag_hits) != 1:
-            raise QueryError("create marker lookup did not return exactly one candidate")
+            raise QueryError("create marker lookup returned multiple candidates")
         candidate_id = tag_hits[0]
         if type(candidate_id) is not int or candidate_id <= 0:
             raise QueryError("create marker lookup returned an invalid candidate ID")
@@ -1068,7 +963,7 @@ class ADOWriter:
             if item["path"] not in {"/fields/System.Title", "/fields/System.Tags"}
         }
         rows = self._client.query_work_items_batch(
-            tag_hits, fields=("System.Title", "System.Tags", *desired_fields),
+            tag_hits, fields=("System.Title", "System.Tags", "System.CreatedBy", *desired_fields),
         )
         if len(rows) != 1 or not isinstance(rows[0], dict):
             raise QueryError("create marker readback did not return the unique candidate")
@@ -1104,7 +999,7 @@ class ADOWriter:
         remote_rev = rows[0].get("rev")
         if remote_rev is not None and (type(remote_rev) is not int or remote_rev <= 0):
             raise QueryError("create marker readback returned an invalid revision")
-        return remote_id, remote_rev
+        return remote_id, remote_rev, fields
 
     def _emit_duplicate_prevented(
         self,
@@ -1160,6 +1055,205 @@ class ADOWriter:
 
 def _new_operation_intent_id() -> str:
     return uuid.uuid4().hex
+
+
+def _authorized_create_effect(fields: dict[str, Any]) -> AuthorizedEffect:
+    raw = fields.get("authorized_effect")
+    if not isinstance(raw, dict):
+        raise ValueError("authorized effect binding is missing")
+    authorized = AuthorizedEffect.from_dict(raw)
+    if authorized.program_id != fields.get("program_id"):
+        raise ValueError("authorized effect program does not match the retained intent")
+    if authorized.intent_id != fields.get("operation_intent_id"):
+        raise ValueError("authorized effect intent ID does not match the retained intent")
+    if authorized.provider != "ado":
+        raise ValueError("authorized effect provider is not ADO")
+    if authorized.tenant_id != fields.get("org"):
+        raise ValueError("authorized effect tenant does not match the ADO destination")
+    if authorized.project != fields.get("project"):
+        raise ValueError("authorized effect project does not match the ADO destination")
+    if authorized.operation != "create_task.v1":
+        raise ValueError("authorized effect operation is not create_task.v1")
+    if authorized.target_identity != f"{fields.get('project')}:new":
+        raise ValueError("authorized effect target does not match the create destination")
+    desired_value = {
+        item["path"].removeprefix("/fields/"): item["value"]
+        for item in _build_create_task_patch(fields)
+    }
+    if desired_effect_hash(authorized.desired_value) != desired_effect_hash(desired_value):
+        raise ValueError("authorized effect desired value does not match the retained create payload")
+    preflight = reconcile_effect(authorized, ())
+    if preflight.status == "failed_terminal":
+        raise ValueError("; ".join(preflight.mismatches))
+    return authorized
+
+
+def _completed_create_receipt_binds(
+    *,
+    receipt_json: str | None,
+    authorized_effect: AuthorizedEffect,
+    remote_id: int,
+    remote_rev: int | None,
+) -> bool:
+    if receipt_json is None:
+        return False
+    try:
+        receipt = json.loads(receipt_json)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(receipt, dict):
+        return False
+    reconciliation = receipt.get("reconciliation")
+    if (
+        not isinstance(reconciliation, dict)
+        or reconciliation.get("status") != "completed"
+        or reconciliation.get("completed") is not True
+        or reconciliation.get("mismatches") != []
+    ):
+        return False
+    receipts = reconciliation.get("receipts")
+    expected_recipients: list[str | None] = list(authorized_effect.intended_recipients) or [None]
+    if not isinstance(receipts, list) or len(receipts) != len(expected_recipients):
+        return False
+    if (
+        receipt.get("remote_id") != remote_id
+        or receipt.get("remote_rev") != remote_rev
+        or receipt.get("operation") != authorized_effect.operation
+        or receipt.get("operation_intent_id") != authorized_effect.intent_id
+    ):
+        return False
+    manifest_hash = audience_manifest_hash(authorized_effect.audience_manifest)
+    effect_hash = desired_effect_hash(authorized_effect.desired_value)
+    for child, expected_recipient in zip(receipts, expected_recipients):
+        if not isinstance(child, dict):
+            return False
+        if (
+            child.get("recipient") != expected_recipient
+            or child.get("terminal_status") != "completed"
+            or child.get("intent_id") != authorized_effect.intent_id
+            or child.get("approval_id") != authorized_effect.approval_id
+            or child.get("provider") != authorized_effect.provider
+            or child.get("tenant_id") != authorized_effect.tenant_id
+            or child.get("project") != authorized_effect.project
+            or child.get("operation") != authorized_effect.operation
+            or child.get("target_identity") != authorized_effect.target_identity
+            or child.get("remote_effect_id") != str(remote_id)
+            or child.get("resulting_revision") != remote_rev
+            or child.get("desired_effect_hash") != effect_hash
+            or child.get("execution_principal") != authorized_effect.execution_principal
+            or child.get("audience_manifest_hash") != manifest_hash
+            or child.get("authorized_audience_recipients")
+            != list(authorized_effect.audience_manifest.included_person_entity_ids)
+        ):
+            return False
+    return True
+
+
+def _reconcile_create_response(
+    *,
+    authorized_effect: AuthorizedEffect,
+    outbox_entry: Any,
+    response: dict[str, Any],
+    provider_response_hash: str,
+) -> EffectReconciliation:
+    response_fields = response.get("fields")
+    if not isinstance(response_fields, dict):
+        response_fields = {}
+    created_by = response_fields.get("System.CreatedBy")
+    if isinstance(created_by, dict):
+        created_by = created_by.get("uniqueName")
+    principal = created_by if isinstance(created_by, str) else ""
+    observed_value = {
+        field_name: response_fields[field_name]
+        for field_name in authorized_effect.desired_value
+        if field_name in response_fields
+    }
+    dispatched_at = _provider_timestamp(response.get("dispatched_at"))
+    observed_at = _provider_timestamp(response.get("observed_at"))
+    resulting_revision = response.get("rev")
+    preflight_revision = response.get("preflight_revision")
+    attempt_count = getattr(outbox_entry, "attempt_count", 0)
+    evidence = ProviderEffectEvidence(
+        intent_id=_response_text(response, "intent_id"),
+        approval_id=_response_text(response, "approval_id"),
+        provider=_response_text(response, "provider"),
+        tenant_id=_response_text(response, "provider_tenant_id"),
+        project=_response_text(response, "provider_project"),
+        operation=_response_text(response, "operation"),
+        recipient=None,
+        target_identity=_response_text(response, "provider_target_identity"),
+        remote_effect_id=str(response.get("id") or ""),
+        resulting_revision=resulting_revision if type(resulting_revision) is int else 0,
+        preflight_revision=preflight_revision if type(preflight_revision) is int else 0,
+        observed_value=observed_value,
+        execution_principal=principal,
+        provider_request_id=_response_text(response, "provider_request_id"),
+        provider_correlation_id=_response_text(response, "provider_correlation_id"),
+        response_hash=provider_response_hash,
+        attempt_count=attempt_count if type(attempt_count) is int else 0,
+        dispatched_at=dispatched_at,
+        observed_at=observed_at,
+        evidence_version=_response_text(response, "evidence_version"),
+        policy_version=_response_text(response, "policy_version"),
+    )
+    return reconcile_effect(authorized_effect, (evidence,))
+
+
+def _reconcile_recovered_create(
+    *,
+    authorized_effect: AuthorizedEffect,
+    outbox_entry: Any,
+    remote_id: int,
+    remote_rev: int | None,
+    remote_fields: dict[str, Any],
+) -> EffectReconciliation:
+    # The caller's W5.4 readback has already compared each requested field;
+    # this normalized snapshot is the certified provider value handed to W5.9.
+    observed_value = dict(authorized_effect.desired_value)
+    created_by = remote_fields.get("System.CreatedBy")
+    if isinstance(created_by, dict):
+        created_by = created_by.get("uniqueName")
+    evidence = ProviderEffectEvidence(
+        intent_id=authorized_effect.intent_id,
+        approval_id=authorized_effect.approval_id,
+        provider=authorized_effect.provider,
+        tenant_id=authorized_effect.tenant_id,
+        project=authorized_effect.project,
+        operation=authorized_effect.operation,
+        recipient=None,
+        target_identity=authorized_effect.target_identity,
+        remote_effect_id=str(remote_id),
+        resulting_revision=remote_rev if type(remote_rev) is int else 0,
+        preflight_revision=authorized_effect.preflight_revision,
+        observed_value=observed_value,
+        execution_principal=created_by if isinstance(created_by, str) else "",
+        provider_request_id=f"recovery:{outbox_entry.outbox_id}",
+        provider_correlation_id=authorized_effect.intent_id,
+        response_hash=hashlib.sha256(
+            json.dumps(remote_fields, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+        ).hexdigest(),
+        attempt_count=outbox_entry.attempt_count,
+        dispatched_at=outbox_entry.created_at,
+        observed_at=outbox_entry.updated_at,
+        evidence_version=authorized_effect.evidence_version,
+        policy_version=authorized_effect.policy_version,
+    )
+    return reconcile_effect(authorized_effect, (evidence,))
+
+
+def _provider_timestamp(value: object) -> datetime:
+    if not isinstance(value, str):
+        return datetime.fromtimestamp(0, tz=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.fromtimestamp(0, tz=timezone.utc)
+    return parsed
+
+
+def _response_text(response: dict[str, Any], key: str) -> str:
+    value = response.get(key)
+    return value if isinstance(value, str) else ""
 
 
 def _build_create_task_patch(fields: dict[str, Any]) -> list[dict[str, Any]]:

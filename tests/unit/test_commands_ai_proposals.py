@@ -13,6 +13,7 @@ from dataclasses import replace
 from datetime import date, datetime, timezone
 import json
 from pathlib import Path
+import sqlite3
 from typing import Any, Callable
 
 import pytest
@@ -28,10 +29,13 @@ from cli import app
 from src.core.adoption_telemetry import GoldenWorkflow, read_adoption_events
 from src.core.ai_review_proposal_store import load_proposal, load_proposals, stage_proposal
 from src.core.ledger.event_log import get_event_logs_dir, read_events
+from src.core.operator_identity import OperatorIdentity
+from src.core.program_fact_store import ProgramFactStore, _resolve_fact_db_root
 from src.core.proposal_audit import read_proposal_audit
 from src.core.proposal_autonomy_ladder import advance_proposal_class_autonomy, promote_proposal_class_explicit
 from src.core.dependency_blast_radius import DependencyBlastRadiusProposal
 from src.core.dependency_graph import save_dependencies
+from src.core.exceptions import StateError
 from src.core.governance_decision_brief import GovernanceDecisionBriefProposal, GovernanceDecisionOption
 from src.core.meeting_action import MeetingAction
 from src.core.models_v2 import (
@@ -283,6 +287,258 @@ def test_generate_dependency_cli_partitions_real_fallback_client_by_deployment(
     )
 
 
+def test_generate_dependency_cli_binds_pinned_snapshot_and_native_principal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    programs_root, client = _setup_pairing_cli(
+        monkeypatch, tmp_path, "dependency_blast_radius", "selected-ref", check_admission=False,
+    )
+    identity = OperatorIdentity(
+        actor="vertex-ai-proposals-generate",
+        principal="synthetic-native-principal",
+        machine="synthetic-host",
+        session="synthetic-operator-session",
+    )
+    capture_identity: list[tuple[str, bool]] = []
+    captured: dict[str, Any] = {}
+
+    def capture_operator_identity(actor: str, *, require_os_principal: bool = False) -> OperatorIdentity:
+        capture_identity.append((actor, require_os_principal))
+        return identity
+
+    def generate_via_runner(request, *, context, client, programs_root):
+        captured.update(request=request, context=context, client=client, programs_root=programs_root)
+        return _blast_radius(id="blast-runner-bound", dependency_id=request.dependency_id)
+
+    monkeypatch.setattr(ai_proposals, "capture_operator_identity", capture_operator_identity, raising=False)
+    monkeypatch.setattr(ai_proposals, "new_ai_run_id", lambda: "synthetic-context-run", raising=False)
+    monkeypatch.setattr(
+        ai_proposals,
+        "generate_dependency_blast_radius_proposal",
+        lambda *args, **kwargs: pytest.fail("Legacy dependency dispatch remained on the production path"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        ai_proposals,
+        "generate_dependency_blast_radius_proposal_via_runner",
+        generate_via_runner,
+        raising=False,
+    )
+
+    result = runner.invoke(
+        app,
+        _pairing_cli_args("dependency_blast_radius", ("selected-ref",), ("selected text",)),
+    )
+
+    assert result.exit_code == 0, result.output
+    assert capture_identity == [("vertex-ai-proposals-generate", True)]
+    assert captured["client"] is client
+    assert captured["programs_root"] == programs_root
+    context = captured["context"]
+    assert context.program_id == "acme"
+    assert context.run_id == "synthetic-context-run"
+    assert context.policy_version == blast_radius_generator.POLICY_VERSION
+    assert context.principal == identity.principal
+    assert context.classification == "confidential"
+    store = ProgramFactStore("acme", db_root=_resolve_fact_db_root(programs_root))
+    assert context.snapshot_id
+    with sqlite3.connect(store.db_path) as connection:
+        rows = connection.execute(
+            "SELECT content_sha256, metadata_json FROM program_fact_snapshot_pins"
+        ).fetchall()
+    assert len(rows) == 1
+    assert context.snapshot_id == rows[0][0]
+    assert json.loads(rows[0][1]) == {
+        "caller": "vertex-ai-proposals-generate",
+        "feature": "dependency_blast_radius_generator",
+    }
+
+
+@pytest.mark.parametrize("identity_failure", ("missing", "capture-error"))
+def test_generate_dependency_cli_refuses_without_native_principal_before_snapshot_or_provider(
+    identity_failure: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    programs_root, client = _setup_pairing_cli(
+        monkeypatch, tmp_path, "dependency_blast_radius", "selected-ref", check_admission=False,
+    )
+    def capture_identity(*args, **kwargs):
+        if identity_failure == "capture-error":
+            raise OSError("synthetic-private-native-identity-error")
+        return OperatorIdentity(
+            actor="vertex-ai-proposals-generate",
+            principal=None,
+            machine="synthetic-host",
+            session="synthetic-operator-session",
+        )
+
+    monkeypatch.setattr(
+        ai_proposals, "capture_operator_identity", capture_identity, raising=False,
+    )
+    monkeypatch.setattr(
+        ai_proposals,
+        "generate_dependency_blast_radius_proposal",
+        lambda *args, **kwargs: pytest.fail("Refusal reached legacy provider dispatch"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        ai_proposals,
+        "generate_dependency_blast_radius_proposal_via_runner",
+        lambda *args, **kwargs: pytest.fail("Refusal reached runner provider dispatch"),
+        raising=False,
+    )
+
+    result = runner.invoke(
+        app,
+        _pairing_cli_args("dependency_blast_radius", ("selected-ref",), ("selected text",)),
+    )
+
+    assert result.exit_code != 0
+    assert "native OS principal" in result.output
+    assert client.calls == 0
+    assert not ProgramFactStore(
+        "acme", db_root=_resolve_fact_db_root(programs_root),
+    ).db_path.exists()
+
+
+@pytest.mark.parametrize("failure", ("foreign", "changed", "pin-error"))
+def test_generate_dependency_cli_refuses_invalid_pinned_snapshot_before_provider(
+    failure: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _programs_root, client = _setup_pairing_cli(
+        monkeypatch, tmp_path, "dependency_blast_radius", "selected-ref", check_admission=False,
+    )
+    monkeypatch.setattr(
+        ai_proposals,
+        "capture_operator_identity",
+        lambda *args, **kwargs: OperatorIdentity(
+            actor="vertex-ai-proposals-generate",
+            principal="synthetic-native-principal",
+            machine="synthetic-host",
+            session="synthetic-operator-session",
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(ai_proposals, "new_ai_run_id", lambda: "synthetic-context-run", raising=False)
+    original_pin = ProgramFactStore.pin_snapshot
+    if failure == "pin-error":
+        def fail_pin(self, **kwargs):
+            raise StateError("synthetic-private-pin-error")
+
+        monkeypatch.setattr(
+            ProgramFactStore,
+            "pin_snapshot",
+            fail_pin,
+        )
+    elif failure == "foreign":
+        def foreign_pin(self, **kwargs):
+            pin = original_pin(self, **kwargs)
+            return replace(pin, program_id="foreign-program")
+
+        monkeypatch.setattr(ProgramFactStore, "pin_snapshot", foreign_pin)
+    else:
+        monkeypatch.setattr(
+            ProgramFactStore,
+            "detect_drift",
+            lambda self, snapshot_id: ("synthetic-change",),
+        )
+    monkeypatch.setattr(
+        ai_proposals,
+        "generate_dependency_blast_radius_proposal",
+        lambda *args, **kwargs: pytest.fail("Snapshot refusal reached legacy provider dispatch"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        ai_proposals,
+        "generate_dependency_blast_radius_proposal_via_runner",
+        lambda *args, **kwargs: pytest.fail("Snapshot refusal reached runner provider dispatch"),
+        raising=False,
+    )
+
+    result = runner.invoke(
+        app,
+        _pairing_cli_args("dependency_blast_radius", ("selected-ref",), ("selected text",)),
+    )
+
+    assert result.exit_code != 0
+    assert "snapshot" in result.output.lower()
+    assert client.calls == 0
+
+
+def test_generate_dependency_cli_changed_compiled_input_does_not_reuse_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    programs_root, client = _setup_pairing_cli(
+        monkeypatch, tmp_path, "dependency_blast_radius", "selected-ref", check_admission=False,
+    )
+    identity = OperatorIdentity(
+        actor="vertex-ai-proposals-generate",
+        principal="synthetic-native-principal",
+        machine="synthetic-host",
+        session="synthetic-operator-session",
+    )
+    monkeypatch.setattr(
+        ai_proposals,
+        "capture_operator_identity",
+        lambda *args, **kwargs: identity,
+        raising=False,
+    )
+    args = _pairing_cli_args("dependency_blast_radius", ("selected-ref",), ("selected text",))
+
+    first = runner.invoke(app, args)
+    changed_args = list(args)
+    changed_args[changed_args.index("--from-summary") + 1] = "Synthetic changed upstream"
+    second = runner.invoke(app, changed_args)
+
+    assert first.exit_code == 0, first.output
+    assert second.exit_code == 0, second.output
+    assert client.calls == 2
+    assert len(load_proposals("acme", proposal_type="dependency_blast_radius", programs_root=programs_root)) == 2
+
+
+def test_generate_dependency_cli_changed_principal_does_not_reuse_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    programs_root, client = _setup_pairing_cli(
+        monkeypatch, tmp_path, "dependency_blast_radius", "selected-ref", check_admission=False,
+    )
+    identities = iter((
+        OperatorIdentity(
+            actor="vertex-ai-proposals-generate",
+            principal="synthetic-native-principal-a",
+            machine="synthetic-host",
+            session="synthetic-operator-session-a",
+        ),
+        OperatorIdentity(
+            actor="vertex-ai-proposals-generate",
+            principal="synthetic-native-principal-b",
+            machine="synthetic-host",
+            session="synthetic-operator-session-b",
+        ),
+    ))
+    monkeypatch.setattr(
+        ai_proposals,
+        "capture_operator_identity",
+        lambda *args, **kwargs: next(identities),
+        raising=False,
+    )
+    args = _pairing_cli_args("dependency_blast_radius", ("selected-ref",), ("selected text",))
+
+    first = runner.invoke(app, args)
+    second = runner.invoke(app, args)
+
+    assert first.exit_code == 0, first.output
+    assert second.exit_code == 0, second.output
+    assert client.calls == 2
+    assert len(load_proposals("acme", proposal_type="dependency_blast_radius", programs_root=programs_root)) == 2
+
+
 @pytest.mark.parametrize("proposal_type", ("governance_decision_brief", "dependency_blast_radius"))
 def test_generate_cli_keeps_both_empty_evidence_supported(
     proposal_type: str,
@@ -362,7 +618,9 @@ def test_dependency_release_cache_cli_retries_rejected_output_and_stages_only_re
     assert rejected.exit_code == 0, rejected.output
     assert "discarded or rejected" in rejected.output
     assert load_proposals("acme", proposal_type=proposal_type, programs_root=programs_root) == ()
-    assert list((programs_root / "acme" / "rev_cache" / "ai_result").glob("*.json")) == []
+    cache_path = blast_radius_generator._released_cache_path(programs_root, "acme")
+    with sqlite3.connect(cache_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM released_result_cache").fetchone()[0] == 0
 
     client.response = _pairing_cli_response(proposal_type, "selected-ref")
     client.response["next_proving_event"] = "Contact synthetic@example.invalid due to the review."
@@ -376,7 +634,8 @@ def test_dependency_release_cache_cli_retries_rejected_output_and_stages_only_re
     staged = load_proposals("acme", proposal_type=proposal_type, programs_root=programs_root)
     assert len(staged) == 2
     assert all("[PII-FILTERED-EMAIL]" in item.next_proving_event for item in staged)
-    cached = next((programs_root / "acme" / "rev_cache" / "ai_result").glob("*.json")).read_text(encoding="utf-8")
+    with sqlite3.connect(cache_path) as connection:
+        cached = connection.execute("SELECT payload FROM released_result_cache").fetchone()[0]
     assert "synthetic@example.invalid" not in cached
     assert "synthetic-secret-extra" not in cached
 
@@ -389,11 +648,13 @@ def test_dependency_release_cache_cli_write_failure_never_stages_proposal(
         monkeypatch, tmp_path, proposal_type, "selected-ref", check_admission=False,
     )
     monkeypatch.setattr(blast_radius_generator, "new_ai_run_id", lambda: "synthetic-cli-cache-failure")
+    original_put = blast_radius_generator.ReleasedResultCache.put
 
-    def fail_cache_write(*args: object, **kwargs: object) -> None:
+    def fail_cache_write(self, *args: object, **kwargs: object) -> None:
+        original_put(self, *args, **kwargs)
         raise OSError("synthetic-secret-cache-detail")
 
-    monkeypatch.setattr(blast_radius_generator, "put_ai_result", fail_cache_write)
+    monkeypatch.setattr(blast_radius_generator.ReleasedResultCache, "put", fail_cache_write)
     result = runner.invoke(app, _pairing_cli_args(proposal_type, ("selected-ref",), ("selected text",)))
 
     assert result.exit_code != 0
@@ -423,10 +684,15 @@ def test_dependency_release_cache_cli_refuses_corrupt_state(
     staged = load_proposals("acme", proposal_type=proposal_type, programs_root=programs_root)
     assert len(staged) == 1
 
-    cache_path = next((programs_root / "acme" / "rev_cache" / "ai_result").glob("*.json"))
+    cache_path = blast_radius_generator._released_cache_path(programs_root, "acme")
     ledger_path = next(get_event_logs_dir("acme", programs_root=programs_root).glob("*.events.jsonl"))
     if damage in {"cache", "both"}:
-        cache_path.write_text('{"synthetic-private-cache":', encoding="utf-8")
+        with sqlite3.connect(cache_path) as connection:
+            connection.execute(
+                "UPDATE released_result_cache SET payload = ?, released_content_hash = ?",
+                ('{"synthetic-private-cache":', "0" * 64),
+            )
+            connection.commit()
     if damage in {"ledger", "both"}:
         ledger_path.write_bytes(ledger_path.read_bytes() + b'{"synthetic-private-ledger":')
     cache_before = cache_path.read_bytes()
@@ -434,12 +700,20 @@ def test_dependency_release_cache_cli_refuses_corrupt_state(
 
     refused = runner.invoke(app, args)
 
-    assert refused.exit_code != 0
-    assert "cache or release audit failed" in refused.output.lower()
+    if damage == "cache":
+        assert refused.exit_code == 0
+        assert "discarded or rejected" in refused.output.lower()
+    else:
+        assert refused.exit_code != 0
+        assert "cache or release audit failed" in refused.output.lower()
     assert "synthetic-private" not in refused.output
     assert client.calls == 1
     assert load_proposals("acme", proposal_type=proposal_type, programs_root=programs_root) == staged
-    assert cache_path.read_bytes() == cache_before
+    if damage == "cache":
+        with sqlite3.connect(cache_path) as connection:
+            assert connection.execute("SELECT COUNT(*) FROM released_result_cache").fetchone()[0] == 0
+    else:
+        assert cache_path.read_bytes() == cache_before
     if damage in {"ledger", "both"}:
         assert ledger_path.read_bytes() == ledger_before
 
@@ -987,8 +1261,8 @@ def test_generate_dependency_blast_radius_stages_proposal(monkeypatch, tmp_path:
         "src.commands.ai_proposals.resolve_ai_deployments_for_feature", lambda **kwargs: ("fake-deployment",)
     )
     monkeypatch.setattr(
-        "src.commands.ai_proposals.generate_dependency_blast_radius_proposal",
-        lambda request, *, client, programs_root: _blast_radius(
+        "src.commands.ai_proposals.generate_dependency_blast_radius_proposal_via_runner",
+        lambda request, *, context, client, programs_root: _blast_radius(
             id="blast-generated", dependency_id=request.dependency_id
         ),
     )

@@ -12,14 +12,18 @@ from __future__ import annotations
 
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from src.core.integration_types import ChannelRegistration, RegistrationStatus
-from src.core.kusto_hydration import KustoHydrationConfig, KustoHydrationProvider
+from src.core.kusto_hydration import (
+    KustoCancellationToken,
+    KustoHydrationConfig,
+    KustoHydrationProvider,
+)
 from src.core.models_v2 import KustoQuery
 
-_NOW = datetime(2026, 7, 12, tzinfo=timezone.utc)
+_NOW = datetime(2026, 7, 12, tzinfo=UTC)
 
 
 def _query(query_id: str) -> KustoQuery:
@@ -134,6 +138,42 @@ def test_parallel_execution_isolates_a_timed_out_query_from_the_others(tmp_path:
     finally:
         release.set()
     assert finished.wait(timeout=5)
+
+
+def test_parallel_timeout_cancels_cooperative_query(tmp_path: Path) -> None:
+    queries = tuple(_query(query_id) for query_id in ("query-a", "query-hangs"))
+    registrations = tuple(_registration(query_id) for query_id in ("query-a", "query-hangs"))
+    started = threading.Event()
+    cancelled = threading.Event()
+
+    def execute(query: KustoQuery, token: KustoCancellationToken) -> list[dict[str, object]]:
+        if query.id == "query-hangs":
+            started.set()
+            token.wait(timeout=5)
+            if token.cancelled:
+                cancelled.set()
+                raise TimeoutError("cooperative cancellation")
+            return [{"unexpected": True}]
+        return [{"ok": True}]
+
+    provider = KustoHydrationProvider(
+        executor=lambda query: [],
+        cancellable_executor=execute,
+        query_loader=lambda *_, **__: queries,
+    )
+    config = KustoHydrationConfig(
+        programs_root=tmp_path,
+        max_concurrency=2,
+        per_query_timeout_seconds=1,
+    )
+
+    result = provider.hydrate(registrations, _NOW, "demo", config)
+
+    assert started.is_set()
+    assert cancelled.wait(timeout=5)
+    assert [row.query_id for row in result.resources.result_sets] == ["query-a"]
+    assert result.errors[0].ref_id == "query-hangs"
+    assert "cancelled" in result.errors[0].message.lower()
 
 
 def test_max_concurrency_bounds_simultaneous_executor_threads(tmp_path: Path) -> None:

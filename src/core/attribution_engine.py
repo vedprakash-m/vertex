@@ -87,7 +87,11 @@ def _build_citations(
 def _latest_evidence_timestamp(evidence: EvidencePacket) -> datetime:
     timestamps = [revision.changed_date for revision in evidence.revisions]
     timestamps.extend(comment.created_date for comment in evidence.comments)
-    timestamps.extend(enrichment.timestamp for enrichment in evidence.enrichments)
+    timestamps.extend(
+        enrichment.timestamp
+        for enrichment in evidence.enrichments
+        if enrichment.timestamp is not None
+    )
     if not timestamps:
         return datetime.min.replace(tzinfo=timezone.utc)
     return max(timestamps)

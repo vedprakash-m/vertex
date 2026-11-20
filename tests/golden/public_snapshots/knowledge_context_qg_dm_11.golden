@@ -9,6 +9,7 @@
             {
               "claim_id": "01ORGGEN8",
               "confidence": "source_authoritative",
+              "knowledge_class": "milestone_horizons",
               "overridden_claim_ids": [],
               "predicate": "status",
               "recorded_at": "2024-01-15T00:00:00+00:00",
@@ -29,6 +30,7 @@
             {
               "claim_id": "01DOMAINGEN9",
               "confidence": "source_authoritative",
+              "knowledge_class": "milestone_horizons",
               "overridden_claim_ids": [],
               "predicate": "status",
               "recorded_at": "2025-02-01T00:00:00+00:00",
@@ -64,6 +66,7 @@
             {
               "claim_id": "01PROGRAMBLOCKER",
               "confidence": "operator_confirmed",
+              "knowledge_class": "recurring_risk_dependency_patterns",
               "overridden_claim_ids": [
                 "01DOMAINBLOCKER"
               ],
@@ -80,6 +83,7 @@
             {
               "claim_id": "01DOMAINGEN9OP",
               "confidence": "operator_confirmed",
+              "knowledge_class": "milestone_horizons",
               "overridden_claim_ids": [],
               "predicate": "status",
               "recorded_at": "2026-01-10T00:00:00+00:00",
@@ -115,6 +119,7 @@
             {
               "claim_id": "01DOMAINBLOCKER",
               "confidence": "operator_confirmed",
+              "knowledge_class": "recurring_risk_dependency_patterns",
               "overridden_claim_ids": [],
               "predicate": "launch_blocker",
               "recorded_at": "2025-09-20T00:00:00+00:00",
@@ -129,6 +134,7 @@
             {
               "claim_id": "01PROGRAMGEN9",
               "confidence": "ai_extracted",
+              "knowledge_class": "milestone_horizons",
               "overridden_claim_ids": [],
               "predicate": "status",
               "recorded_at": "2025-12-15T00:00:00+00:00",

@@ -175,7 +175,11 @@ def test_output_stage_fact_pin_uses_selected_program_root(
         report_module._OutputStage().execute(ctx)
     reader = report_module._runtime_db_root_for_reports
     assert reader.call_args.kwargs.get("programs_root") == (root if program_backed else None)
-    assert not list(tmp_path.iterdir())
+    if program_backed:
+        assert list(tmp_path.iterdir()) == [root]
+        assert any(path.name.endswith(".capture.lock") for path in root.rglob("*"))
+    else:
+        assert not list(tmp_path.iterdir())
 
 
 @pytest.mark.parametrize("program_backed", [False, True])
@@ -2114,13 +2118,6 @@ def test_report_draft_reuses_successful_empty_risks_at_selected_time(
             work_item_loader=lambda _bundle, timestamp: (_sample_items(timestamp), 0), open_browser=False,
         )
 
-    if comparison == "invalid":
-        with pytest.raises(ConfigError, match="Unsupported risk register schema_version"):
-            run_draft()
-        assert len(health_results) == 1
-        assert health_results[0].risk_register_summary is None
-        health_loader.assert_not_called()
-        return
     artifacts = run_draft()
 
     stage_loader.assert_called_once_with(
@@ -2135,7 +2132,7 @@ def test_report_draft_reuses_successful_empty_risks_at_selected_time(
     assert artifacts.manifest.metadata["family_read_paths"]["risk"] == "reality"
     if comparison == "nonempty":
         assert any("cross-check" in warning for warning in observed.inputs.risk_warnings)
-    elif comparison == "unavailable":
+    elif comparison in {"unavailable", "invalid"}:
         assert any("cross-check unavailable" in warning for warning in observed.inputs.risk_warnings)
     else:
         assert observed.inputs.risk_warnings == ()
@@ -2200,15 +2197,6 @@ def test_report_draft_reuses_successful_empty_legacy_risks(
             work_item_loader=lambda _bundle, timestamp: (_sample_items(timestamp), 0), open_browser=False,
         )
 
-    if change_after_selection == "invalidate":
-        with pytest.raises(ConfigError, match="Unsupported risk register schema_version"):
-            run_draft()
-        assert selections == [()]
-        assert len(health_results) == 1
-        assert health_results[0].risk_register_summary is None
-        health_loader.assert_not_called()
-        gate_loader.assert_called_once_with("acme", programs_root=programs_root)
-        return
     artifacts = run_draft()
 
     assert selections == [()]
@@ -2220,7 +2208,7 @@ def test_report_draft_reuses_successful_empty_legacy_risks(
     assert observed.inputs.risk_warnings == ()
     assert artifacts.manifest.metadata["family_read_paths"]["risk"] == "legacy"
     health_loader.assert_not_called()
-    gate_loader.assert_called_once_with("acme", programs_root=programs_root)
+    gate_loader.assert_not_called()
 
 
 @pytest.mark.parametrize("outcome", ["typed_loader_error", "typed_accessor_error", "empty_rollback", "legacy_error"])

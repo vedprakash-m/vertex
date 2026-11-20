@@ -175,8 +175,9 @@ def test_record_learning_distillation_writes_outputs(monkeypatch, tmp_path: Path
 
 
 @pytest.mark.parametrize("selected", [False, True])
-def test_record_edit_patterns_for_v2_appends_patterns(monkeypatch, tmp_path: Path, selected: bool) -> None:
-    captured: dict[str, object] = {}
+def test_record_governed_feedback_for_v2_appends_typed_hashes(
+    monkeypatch, tmp_path: Path, selected: bool
+) -> None:
     reports_root = tmp_path / "reports"
     reports_root.mkdir()
     selected_root = tmp_path / "selected" / "programs"
@@ -186,47 +187,52 @@ def test_record_edit_patterns_for_v2_appends_patterns(monkeypatch, tmp_path: Pat
         selected_edition.write_text("program_id: acme\n", encoding="utf-8")
     expected_root = selected_root if selected else reports_root.parent / "programs"
 
-    def resolve_edition(*args, **kwargs):
-        captured["resolved_programs_root"] = kwargs["programs_root"]
-        return SimpleNamespace(program=SimpleNamespace(id=PROGRAM_ID))
+    captured = {}
 
-    monkeypatch.setattr(artifacts_module, "resolve_edition", resolve_edition)
     monkeypatch.setattr(
         artifacts_module,
-        "build_edit_patterns",
-        lambda **kwargs: ("pattern-1",),
+        "resolve_edition",
+        lambda *args, **kwargs: (
+            captured.update(resolved_programs_root=kwargs["programs_root"])
+            or SimpleNamespace(program=SimpleNamespace(id=PROGRAM_ID))
+        ),
     )
     monkeypatch.setattr(
         artifacts_module,
-        "append_edit_patterns",
-        lambda program_id, patterns, *, programs_root: captured.update(
-            program_id=program_id,
-            patterns=patterns,
-            programs_root=programs_root,
+        "record_feedback_observation",
+        lambda observation, *, programs_root: (
+            captured.update(observation=observation, programs_root=programs_root)
+            or programs_root / PROGRAM_ID / "_feedback" / "feedback_observations.jsonl"
         ),
     )
 
     report: Any = SimpleNamespace(exec_summary_text="confirmed", workstream_blurbs={})
 
-    warning = artifacts_module.record_edit_patterns_for_v2(
+    path, warning = artifacts_module.record_governed_feedback_for_v2(
         edition_name=EDITION,
         issue_number=1,
         draft_state={"exec_summary_text": "draft", "workstream_blurbs": {}, "ai_prompt_versions": {}, "ai_confidences": {}},
         report=cast(ReportData, report),
         confirmed_at=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc),
+        confirmed_by="synthetic-operator",
         reports_root=reports_root,
         **({"programs_root": selected_root} if selected else {}),
     )
 
+    assert path is not None
     assert warning is None
-    assert captured["program_id"] == PROGRAM_ID
-    assert captured["patterns"] == ("pattern-1",)
     assert captured["resolved_programs_root"] == expected_root
     assert captured["programs_root"] == expected_root
+    observation = captured["observation"]
+    assert observation.program_id == PROGRAM_ID
+    assert observation.before_value.value_type == "sha256"
+    assert observation.before_value.length == 5
+    assert observation.after_value.value_type == "sha256"
+    assert observation.approved_by == "synthetic-operator"
 
 
 @pytest.mark.parametrize("root_case", ["missing", "relative", "legacy_decoy"])
-def test_record_edit_patterns_rejects_invalid_explicit_root_before_reads_or_writes(
+def test_record_governed_feedback_rejects_invalid_explicit_root_before_reads_or_writes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     root_case: str,
@@ -253,22 +259,18 @@ def test_record_edit_patterns_rejects_invalid_explicit_root_before_reads_or_writ
     )
     monkeypatch.setattr(
         artifacts_module,
-        "build_edit_patterns",
-        lambda **kwargs: artifact_calls.append(("build", kwargs)) or ("pattern-1",),
-    )
-    monkeypatch.setattr(
-        artifacts_module,
-        "append_edit_patterns",
-        lambda *args, **kwargs: artifact_calls.append(("append", args, kwargs)),
+        "record_feedback_observation",
+        lambda *args, **kwargs: artifact_calls.append((args, kwargs)),
     )
 
     with pytest.raises(ConfigError):
-        artifacts_module.record_edit_patterns_for_v2(
+        artifacts_module.record_governed_feedback_for_v2(
             edition_name=EDITION,
             issue_number=1,
             draft_state={},
             report=cast(ReportData, SimpleNamespace(exec_summary_text="confirmed", workstream_blurbs={})),
             confirmed_at=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc),
+            confirmed_by="synthetic-operator",
             reports_root=reports_root,
             programs_root=selected_root,
         )

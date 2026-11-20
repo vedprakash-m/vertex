@@ -10,7 +10,7 @@ import portalocker
 
 from src.ai.action_extractor import ActionExtractor, ActionExtractorError
 from src.commands.gather_pipeline.models import PersistenceStageInput, PersistenceStageResult
-from src.core.action_extractor_basic import extract_actions_from_signals
+from src.core.action_extractor_basic import extract_actions_from_signals, is_canonical_meeting_action_source
 from src.core.action_tracker import append_action
 from src.core.decision_extractor_basic import extract_decisions_from_signals
 from src.core.decision_register import upsert_decisions
@@ -93,10 +93,18 @@ def run_persistence_stage(stage_input: PersistenceStageInput) -> PersistenceStag
         for entry in build_incident_entries(new_signals, recorded_at=stage_input.current_time):
             append_incident_entry(entry, programs_root=stage_input.programs_root)
 
-    extracted_actions = list(extract_actions_from_signals(new_signals, program_id=stage_input.program_id))
+    non_meeting_signals = tuple(
+        signal for signal in new_signals if not is_canonical_meeting_action_source(signal)
+    )
     if not stage_input.dry_run and stage_input.program.ai is not None and stage_input.program.ai.enabled:
-        extracted_actions.extend(
-            (stage_input.ai_action_extractor or extract_actions_with_ai)(stage_input.program, new_signals)
+        extracted_actions = list(
+            (stage_input.ai_action_extractor or extract_actions_with_ai)(
+                stage_input.program, non_meeting_signals,
+            )
+        )
+    else:
+        extracted_actions = list(
+            extract_actions_from_signals(non_meeting_signals, program_id=stage_input.program_id)
         )
 
     if not stage_input.dry_run:

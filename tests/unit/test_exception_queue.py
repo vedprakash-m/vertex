@@ -19,7 +19,12 @@ import src.ai.ai_mode as ai_mode
 import src.commands.cockpit as cockpit_module
 import src.commands.db as db_module
 from src.commands.cockpit import app
-from src.core.exception_queue import ExceptionItem, build_exception_queue
+from src.core.exception_queue import (
+    DispatchException,
+    ExceptionItem,
+    build_exception_queue,
+    load_dispatch_exceptions,
+)
 from src.core.jsonl_utils import append_jsonl_line
 from src.core.fact_sor_state import save_fact_sor_state
 from src.core.models_v2 import (
@@ -84,6 +89,211 @@ def test_queue_ranks_needs_input_then_overdue_actions_then_stale_risks() -> None
         reason="Action due 2026-11-01 is overdue.", evidence="actions.jsonl#a-overdue",
     )
     assert queue[2].evidence == "risk_register.yaml#r-stale"
+
+
+def test_partial_dispatch_reconciliation_is_a_first_class_exception() -> None:
+    dispatch = DispatchException(
+        outbox_id="fixture-outbox",
+        status="partial",
+        age_days=2,
+        reason="2 of 3 recipient effects are terminal; one remains uncertain.",
+        evidence="actuation/outbox.db#fixture-outbox",
+    )
+    queue = build_exception_queue((), (), AS_OF, dispatch_exceptions=(dispatch,))
+    assert queue == (
+        ExceptionItem(
+            kind="partial_dispatch",
+            subject_id="fixture-outbox",
+            severity_rank=0,
+            age_days=2,
+            reason=dispatch.reason,
+            evidence=dispatch.evidence,
+        ),
+    )
+
+
+def test_cli_exceptions_reads_partial_outbox_reconciliation_without_writing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    from src.core.actuation_outbox import (
+        DispatchResult,
+        create_task_idempotency_key,
+        dispatch_leased_create_task,
+        enqueue_create_task_intent,
+    )
+    from src.core.actuation_reconciliation import EffectReconciliation
+    from tests.support.actuation_reconciliation import synthetic_authorized_effect_document
+
+    root = tmp_path / "programs"
+    key = create_task_idempotency_key(
+        program_id="synthetic",
+        org="tenant",
+        project="project",
+        operation_intent_id="intent-1",
+    )
+    enqueue_create_task_intent(
+        program_id="synthetic",
+        idempotency_key=key,
+        operation_intent_id="intent-1",
+        proposal_id="proposal-1",
+        payload_json=json.dumps({
+            "operation": "create_task.v1",
+            "operation_intent_id": "intent-1",
+            "org": "org",
+            "project": "project",
+            "authorized_effect": synthetic_authorized_effect_document(
+                program_id="synthetic",
+                intent_id="intent-1",
+            ),
+        }),
+        programs_root=root,
+    )
+    dispatch_leased_create_task(
+        program_id="synthetic",
+        idempotency_key=key,
+        owner="synthetic-worker",
+        dispatch_fn=lambda _entry: DispatchResult(
+            succeeded=True,
+            remote_id=42,
+            remote_rev=2,
+            reconciliation=EffectReconciliation(
+                status="partial",
+                receipts=(),
+                mismatches=("recipient bob: provider evidence missing",),
+            ),
+        ),
+        programs_root=root,
+    )
+    monkeypatch.setattr(cockpit_module, "PROGRAMS_ROOT", root)
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    result = runner.invoke(
+        app,
+        ["exceptions", "--program", "synthetic", "--as-of", AS_OF.isoformat()],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "[partial_dispatch]" in result.output
+    assert key in result.output
+    assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+
+
+def test_cli_exceptions_includes_uncertain_dispatch_without_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    from src.core.actuation_outbox import (
+        create_task_idempotency_key,
+        dispatch_leased_create_task,
+        enqueue_create_task_intent,
+    )
+    from tests.support.actuation_reconciliation import synthetic_authorized_effect_document
+
+    root = tmp_path / "programs"
+    key = create_task_idempotency_key(
+        program_id="synthetic",
+        org="org",
+        project="project",
+        operation_intent_id="intent-timeout",
+    )
+    enqueue_create_task_intent(
+        program_id="synthetic",
+        idempotency_key=key,
+        operation_intent_id="intent-timeout",
+        proposal_id="proposal-1",
+        payload_json=json.dumps({
+            "operation": "create_task.v1",
+            "operation_intent_id": "intent-timeout",
+            "org": "org",
+            "project": "project",
+            "authorized_effect": synthetic_authorized_effect_document(
+                program_id="synthetic",
+                intent_id="intent-timeout",
+            ),
+        }),
+        programs_root=root,
+    )
+    dispatch_leased_create_task(
+        program_id="synthetic",
+        idempotency_key=key,
+        owner="synthetic-worker",
+        dispatch_fn=lambda _entry: (_ for _ in ()).throw(TimeoutError("lost response")),
+        programs_root=root,
+    )
+    monkeypatch.setattr(cockpit_module, "PROGRAMS_ROOT", root)
+
+    result = runner.invoke(
+        app,
+        ["exceptions", "--program", "synthetic", "--as-of", AS_OF.isoformat()],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "[uncertain_dispatch]" in result.output
+    assert "0 of 1 required recipient effects are terminal" in result.output
+
+
+@pytest.mark.parametrize(
+    "receipt_json",
+    [
+        "[]",
+        '{"status": "partial", "receipts": {}}',
+    ],
+)
+def test_dispatch_exception_refuses_malformed_retained_receipt(
+    tmp_path: Path, receipt_json: str,
+) -> None:
+    from src.core._db import open_program_db_with_retry
+    from src.core.actuation_outbox import outbox_db_path
+    from src.core.ledger import durable_outbox_store as store
+
+    root = tmp_path / "programs"
+    db_path = outbox_db_path("synthetic", programs_root=root)
+    entry = store.enqueue(
+        db_path,
+        "outbox-malformed",
+        domain="actuation_dispatch",
+        correlation_id="correlation-1",
+        payload_json="{}",
+    )
+    with open_program_db_with_retry(db_path, durability="strict") as connection:
+        connection.execute(
+            "UPDATE outbox SET status = 'uncertain_remote_state' WHERE outbox_id = ?",
+            (entry.outbox_id,),
+        )
+        connection.execute(store._RECONCILIATION_RECEIPTS_SQL)
+        connection.execute(
+            "INSERT INTO outbox_reconciliation_receipts (outbox_id, receipt_json) VALUES (?, ?)",
+            (entry.outbox_id, receipt_json),
+        )
+    with pytest.raises(ValueError, match="receipt"):
+        load_dispatch_exceptions("synthetic", programs_root=root, as_of=AS_OF)
+
+
+def test_dispatch_exception_refuses_naive_retained_timestamp(tmp_path: Path) -> None:
+    from src.core._db import open_program_db_with_retry
+    from src.core.actuation_outbox import outbox_db_path
+    from src.core.ledger import durable_outbox_store as store
+
+    root = tmp_path / "programs"
+    db_path = outbox_db_path("synthetic", programs_root=root)
+    entry = store.enqueue(
+        db_path,
+        "outbox-naive",
+        domain="actuation_dispatch",
+        correlation_id="correlation-1",
+        payload_json="{}",
+    )
+    with open_program_db_with_retry(db_path, durability="strict") as connection:
+        connection.execute(
+            "UPDATE outbox SET status = 'uncertain_remote_state', updated_at = '2026-11-15T00:00:00' "
+            "WHERE outbox_id = ?",
+            (entry.outbox_id,),
+        )
+    with pytest.raises(ValueError, match="timezone-aware"):
+        load_dispatch_exceptions("synthetic", programs_root=root, as_of=AS_OF)
 
 
 @pytest.mark.parametrize(
@@ -209,7 +419,7 @@ def test_cli_exceptions_lists_ranked_queue_without_writing(tmp_path: Path, monke
     assert lines[1].startswith("  1. [overdue_action] a1")
     assert lines[2].startswith("  2. [stale_risk] r1")
     assert lines[3] == (
-        "  Scope: unassessed risks, overdue actions, and stale risks only; "
+        "  Scope: unresolved dispatch reconciliation, unassessed risks, overdue actions, and stale risks only; "
         "other exceptions and input completeness are not evaluated."
     )
     assert lines[4] == "  Risk exceptions use the risk register; primary judgment facts are not evaluated."
@@ -231,7 +441,7 @@ def test_cli_exceptions_empty_program_reports_none(tmp_path: Path, monkeypatch: 
         "Exception queue (acme, as of 2026-11-15): 0",
         "  No matching exceptions in available inputs.",
         "  Inputs not detected when checked: risk register, action journal.",
-        "  Scope: unassessed risks, overdue actions, and stale risks only; "
+        "  Scope: unresolved dispatch reconciliation, unassessed risks, overdue actions, and stale risks only; "
         "other exceptions and input completeness are not evaluated.",
         "  Risk exceptions use the risk register; primary judgment facts are not evaluated.",
         "  Only the current action journal is read; rotated or pruned actions and status updates may be omitted. "

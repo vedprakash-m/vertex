@@ -4,3 +4,6 @@ reviewers:
       - exec_summary
       - scorecard
 required: false
+# Native OS principals explicitly authorized to review and verify knowledge candidates.
+# Keep empty until the program owner approves the reviewed principals.
+knowledge_review_principals: []

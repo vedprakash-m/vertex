@@ -2,23 +2,41 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 
 import pytest
 
 from src.core.rev.entity_types import EntityType
 from src.core.rev.ports import CandidateEnumerator, ContentHydrator, EnumeratedCandidate
+from src.core.rev.privacy import LocalCheckResult
 from src.core.rev.query_planner import RetrievalIntent
 from src.core.rev.result import Forbidden, Incomplete, Success, Unsupported
 from src.m365.rev.hydrator import RUNG_METADATA_ONLY
-from src.m365.rev.workiq_enumerator import WorkIQContext, WorkIQEnumerator, WorkIQHydrator
+from src.m365.rev.workiq_enumerator import (
+    WorkIQContext,
+    WorkIQEnumerator,
+    WorkIQHydrator,
+    WorkIQPage,
+)
 
 CTX = WorkIQContext(tenant_id="tenant-1", principal_mailbox="pm@contoso.com")
 
 
-def _intent(limit: int = 25, entity_type: EntityType = EntityType.MESSAGE) -> RetrievalIntent:
-    return RetrievalIntent(entity_type=entity_type, subject_terms=("Atlas",), limit=limit)
+def _intent(
+    limit: int = 25,
+    entity_type: EntityType = EntityType.MESSAGE,
+    *,
+    from_date: date | None = None,
+    to_date: date | None = None,
+) -> RetrievalIntent:
+    return RetrievalIntent(
+        entity_type=entity_type,
+        subject_terms=("Atlas",),
+        limit=limit,
+        from_date=from_date,
+        to_date=to_date,
+    )
 
 
 def _enumerator(records: list[dict[str, Any]], calls: list[RetrievalIntent] | None = None) -> WorkIQEnumerator:
@@ -127,12 +145,151 @@ def test_enumerate_naive_timestamp_is_not_trusted() -> None:
     assert candidate.partial_metadata["received_at"] is None
 
 
+def test_enumerate_invalid_timestamp_is_reported_incomplete() -> None:
+    result = _enumerator(
+        [{"id": "m1", "receivedDateTime": "not-a-timestamp"}],
+    ).enumerate(_intent(), correlation_id="x")
+
+    assert isinstance(result, Incomplete)
+    assert result.reason == "unqualified_source_time:1"
+    (candidate,) = result.value
+    assert candidate.received_at is None
+    assert candidate.partial_metadata["received_at"] is None
+
+
+@pytest.mark.parametrize(
+    ("sender", "expected"),
+    [
+        ({"emailAddress": {"address": "lead@contoso.com"}}, "lead@contoso.com"),
+        ({"emailAddress": {"name": "Program Lead"}}, "Program Lead"),
+        ({"emailAddress": "opaque"}, ""),
+        ({"name": "Envelope Sender"}, "Envelope Sender"),
+    ],
+)
+def test_enumerate_preserves_supported_sender_shapes(
+    sender: object,
+    expected: str,
+) -> None:
+    result = _enumerator([{"id": "m1", "from": sender}]).enumerate(
+        _intent(),
+        correlation_id="x",
+    )
+
+    assert result.value[0].partial_metadata["sender"] == expected
+
+
+def test_enumerate_reports_non_mapping_provider_records_as_incomplete() -> None:
+    enumerator = WorkIQEnumerator(
+        lambda _intent: [None],  # type: ignore[list-item]
+        CTX,
+    )
+
+    result = enumerator.enumerate(_intent(), correlation_id="x")
+
+    assert isinstance(result, Incomplete)
+    assert result.reason == "unidentified_records:1"
+    assert result.value == ()
+
+
 def test_enumerate_applies_intent_limit_as_page_cut() -> None:
     records = [{"id": f"m{i}", "receivedDateTime": f"2026-11-0{i}T00:00:00Z"} for i in range(1, 4)]
     result = _enumerator(records).enumerate(_intent(limit=2), correlation_id="x")
     assert isinstance(result, Incomplete)
     assert result.reason == "page_cut"
     assert _ids(result) == ["m3", "m2"]
+
+
+def test_enumerate_requeries_bounded_weekly_windows() -> None:
+    calls: list[RetrievalIntent] = []
+
+    def query(intent: RetrievalIntent) -> list[dict[str, Any]]:
+        calls.append(intent)
+        assert intent.from_date is not None and intent.to_date is not None
+        return [{
+            "id": intent.to_date.isoformat(),
+            "receivedDateTime": f"{intent.to_date.isoformat()}T12:00:00+00:00",
+        }]
+
+    enumerator = WorkIQEnumerator(query, CTX, window_days=7, max_windows=4)
+    intent = RetrievalIntent(
+        entity_type=EntityType.MESSAGE,
+        subject_terms=("Atlas",),
+        from_date=date(2026, 10, 15),
+        to_date=date(2026, 11, 11),
+        limit=25,
+    )
+
+    result = enumerator.enumerate(intent, correlation_id="windowed")
+
+    assert isinstance(result, Success)
+    assert len(result.value) == 4
+    assert len(calls) == 4
+    assert [(window.from_date, window.to_date) for window in calls] == [
+        (date(2026, 11, 5), date(2026, 11, 11)),
+        (date(2026, 10, 29), date(2026, 11, 4)),
+        (date(2026, 10, 22), date(2026, 10, 28)),
+        (date(2026, 10, 15), date(2026, 10, 21)),
+    ]
+
+
+def test_enumerate_discloses_window_budget_stop() -> None:
+    calls: list[RetrievalIntent] = []
+
+    def query(intent: RetrievalIntent) -> list[dict[str, Any]]:
+        calls.append(intent)
+        return [{"id": f"m-{intent.to_date}", "receivedDateTime": f"{intent.to_date}T12:00:00Z"}]
+
+    enumerator = WorkIQEnumerator(query, CTX, window_days=7, max_windows=2)
+    intent = RetrievalIntent(
+        entity_type=EntityType.MESSAGE,
+        from_date=date(2026, 10, 1),
+        to_date=date(2026, 10, 31),
+        limit=25,
+    )
+
+    result = enumerator.enumerate(intent, correlation_id="windowed")
+
+    assert isinstance(result, Incomplete)
+    assert result.reason == "budget_stop:max_windows"
+    assert len(calls) == 2
+    assert len(result.value) == 2
+
+
+@pytest.mark.parametrize("window_days,max_windows", [(0, 1), (1, 0), (True, 1), (1, False)])
+def test_enumerate_rejects_invalid_window_bounds(window_days: int, max_windows: int) -> None:
+    with pytest.raises(ValueError, match="positive integers"):
+        WorkIQEnumerator(lambda _: [], CTX, window_days=window_days, max_windows=max_windows)
+
+
+def test_enumerate_rejects_reversed_window_without_querying() -> None:
+    calls: list[RetrievalIntent] = []
+    intent = RetrievalIntent(
+        entity_type=EntityType.MESSAGE,
+        from_date=date(2026, 11, 2),
+        to_date=date(2026, 11, 1),
+    )
+
+    result = WorkIQEnumerator(lambda value: calls.append(value) or [], CTX).enumerate(
+        intent, correlation_id="x"
+    )
+
+    assert isinstance(result, Incomplete)
+    assert result.reason == "invalid_window"
+    assert result.value == ()
+    assert calls == []
+
+
+def test_enumerate_keeps_unknown_source_time_without_fabrication() -> None:
+    result = _enumerator([{"id": "m1", "receivedDateTime": "0001-01-01T00:00:00+14:00"}]).enumerate(
+        _intent(), correlation_id="x"
+    )
+
+    assert isinstance(result, Incomplete)
+    assert result.reason == "unqualified_source_time:1"
+    (candidate,) = result.value
+    assert candidate.received_at is None
+    assert candidate.partial_metadata["received_at"] is None
+    assert candidate.partial_metadata["source_time_qualified"] is False
 
 
 def test_enumerate_rejects_mismatched_entity_type_without_querying() -> None:
@@ -174,6 +331,11 @@ def test_hydrate_builds_canonical_content_from_preview() -> None:
     assert hydrated.chunks
     assert hydrated.normalized_source_hash.startswith("sha256:")
     assert hydrated.route_metadata["conversation_id"] == "AAQk-c1"
+    assert hydrated.route_metadata["route"] == "workiq"
+    assert hydrated.route_metadata["subject"] == "Atlas status"
+    assert hydrated.route_metadata["sender"] == ""
+    assert hydrated.route_metadata["source_time_qualified"] is False
+    assert hydrated.route_metadata["source_time_state"] == "missing"
     assert hydrated.correlation_id == "cid"
 
 
@@ -197,6 +359,39 @@ def test_hydrate_quarantines_credentials() -> None:
     result = WorkIQHydrator().hydrate(candidate, correlation_id="cid")
     assert isinstance(result, Forbidden)
     assert result.scope == "content"
+
+
+def test_hydrate_refuses_sensitivity_denial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.m365.rev.workiq_enumerator.run_local_checks",
+        lambda *_args, **_kwargs: LocalCheckResult(
+            passed=False,
+            sensitivity_denied=True,
+            reason="sensitivity_denied:restricted",
+        ),
+    )
+
+    result = WorkIQHydrator().hydrate(
+        _candidate(subject="status"),
+        correlation_id="cid",
+    )
+
+    assert isinstance(result, Forbidden)
+    assert result.scope == "sensitivity"
+    assert result.reason == "sensitivity_denied:restricted"
+
+
+def test_hydrate_refuses_content_over_configured_size_limit() -> None:
+    result = WorkIQHydrator(max_body_bytes=4).hydrate(
+        _candidate(subject="Atlas", preview="later"),
+        correlation_id="cid",
+    )
+
+    assert isinstance(result, Unsupported)
+    assert result.entity_type == EntityType.MESSAGE.value
+    assert result.reason.startswith("size_exceeded:")
 
 
 @pytest.mark.parametrize("source_type", [EntityType.MESSAGE, EntityType.CHAT_MESSAGE, EntityType.EVENT])

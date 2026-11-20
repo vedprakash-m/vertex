@@ -12,7 +12,7 @@ from src.ai.deployment_fallback import FallbackStructuredClient, LEGACY_DEPLOYME
 from src.ai.llm_trace import AITraceContext
 from src.ai.provider import DisabledStructuredProvider, LLMProvider
 from src.ai.tiered_router import TierResult, route_through_tiers
-from src.core.action_extractor_basic import extract_actions_from_signals
+from src.core.action_extractor_basic import extract_actions_from_signals, is_meeting_action_source
 from src.core.action_tracker import build_action_id
 from src.core.models_v2 import ActionItem, ActionSourceType, ActionStatus, Program, Signal
 from src.core.policy_loader import load_ai_feature_policy
@@ -163,8 +163,19 @@ def _extract_deterministic_actions(
     extraction_signals = tuple(remaining_signals) if malformed and actions else signals
     heuristic_actions = extract_actions_from_signals(extraction_signals, program_id)
     if heuristic_actions:
+        signals_by_id = {signal.id: signal for signal in extraction_signals}
         return (
-            tuple(_normalize_heuristic_action_item(action) for action in heuristic_actions),
+            tuple(
+                _normalize_heuristic_action_item(
+                    action,
+                    signal=(
+                        signals_by_id.get(action.source_signal_id)
+                        if action.source_signal_id is not None
+                        else None
+                    ),
+                )
+                for action in heuristic_actions
+            ),
             0.95,
             preserved_actions,
             extraction_signals,
@@ -172,7 +183,11 @@ def _extract_deterministic_actions(
     return None, 0.0, preserved_actions, extraction_signals
 
 
-def _normalize_heuristic_action_item(action: ActionItem) -> ActionItem:
+def _normalize_heuristic_action_item(
+    action: ActionItem,
+    *,
+    signal: Signal | None,
+) -> ActionItem:
     return ActionItem(
         id=action.id,
         program_id=action.program_id,
@@ -181,7 +196,7 @@ def _normalize_heuristic_action_item(action: ActionItem) -> ActionItem:
         due_date=action.due_date,
         status=action.status,
         source_signal_id=action.source_signal_id,
-        source_type=ActionSourceType.MEETING_TRANSCRIPT,
+        source_type=_action_source_type(signal),
         linked_work_item_ids=action.linked_work_item_ids,
         linked_claim_id=action.linked_claim_id,
         linked_risk_id=action.linked_risk_id,
@@ -209,7 +224,7 @@ def _parse_deterministic_action_line(*, line: str, signal: Signal) -> ExtractedA
             return None
         key, value = segment.split("=", 1)
         normalized_key = key.strip().lower()
-        if normalized_key not in {"owner", "due", "refs"}:
+        if normalized_key not in {"owner", "due", "refs", "wi"}:
             return None
         payload[normalized_key] = value.strip()
     try:
@@ -217,7 +232,10 @@ def _parse_deterministic_action_line(*, line: str, signal: Signal) -> ExtractedA
             text=_parse_action_text(payload["text"]),
             owner_alias=_parse_optional_owner_alias(payload.get("owner")) or _owner_alias_from_signal(signal) or "unknown",
             due_date=_parse_optional_date(payload.get("due")),
-            linked_work_item_ids=_parse_ref_ids(payload.get("refs")) or _work_item_ids_from_signal(signal),
+            linked_work_item_ids=(
+                _parse_ref_ids(payload.get("refs") or payload.get("wi"))
+                or _work_item_ids_from_signal(signal)
+            ),
         )
     except ActionExtractorError:
         return None
@@ -245,8 +263,8 @@ def _parse_ref_ids(value: object) -> tuple[int, ...]:
 
 
 def _supports_ai_extraction(signal: Signal) -> bool:
-    normalized_source = signal.source.strip().lower()
-    return "teams" in normalized_source or "transcript" in normalized_source or "meeting" in normalized_source
+    del signal
+    return True
 
 
 def _load_prompt() -> str:
@@ -333,7 +351,7 @@ def _to_action_item(*, candidate: ExtractedActionCandidate, program_id: str, sig
         due_date=candidate.due_date,
         status=ActionStatus.PROPOSED,
         source_signal_id=signal.id,
-        source_type=ActionSourceType.MEETING_TRANSCRIPT,
+        source_type=_action_source_type(signal),
         linked_work_item_ids=candidate.linked_work_item_ids,
         linked_claim_id=None,
         linked_risk_id=None,
@@ -342,6 +360,12 @@ def _to_action_item(*, candidate: ExtractedActionCandidate, program_id: str, sig
         resolved_at=None,
         resolution_note=None,
     )
+
+
+def _action_source_type(signal: Signal | None) -> ActionSourceType:
+    if signal is not None and is_meeting_action_source(signal):
+        return ActionSourceType.MEETING_TRANSCRIPT
+    return ActionSourceType.SIGNAL
 
 
 def _owner_alias_from_signal(signal: Signal) -> str | None:

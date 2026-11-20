@@ -172,6 +172,9 @@ def test_valid_inputs_report_observable_counts_without_terminal_state(tmp_path) 
     assert ledger["by_phase"] == {"RELO-0": {"completed": 1, "in_progress": 1}, "RELO-6": {"planned": 1, "some_future_status": 1}}
     assert ledger["by_class"] == {"AGENT_READY": 2, "NEEDS_JUDGMENT": 2}
     assert ledger["code_complete"] == 1
+    assert ledger["parent_by_status"] == {"completed": 1, "in_progress": 1, "planned": 1}
+    assert ledger["parent_total"] == 3
+    assert ledger["parent_code_complete"] == 1
     assert ledger["is_certification"] is False
     assert ledger["relo6"] == [
         {"id": "RELO-W6.12", "class": "NEEDS_JUDGMENT", "status": "planned"},
@@ -183,6 +186,32 @@ def test_valid_inputs_report_observable_counts_without_terminal_state(tmp_path) 
     assert any(item["spec"] == "§20 RELO-D16" for item in report["missing_inputs"])
     assert any("§13.6a" in item["spec"] for item in report["missing_inputs"])
     assert report["limitations"]
+
+
+def test_terminal_projection_separates_code_ready_w0_slices_from_owner_gates(tmp_path) -> None:
+    ledger = """schema_version: '1'
+work_items:
+  - {id: RELO-W0.12, phase: RELO-0, class: NEEDS_JUDGMENT, status: planned, current_parent: true}
+  - {id: RELO-W0.12a, phase: RELO-0, class: AGENT_READY, status: completed, current_slice: true, startability: completed_local, depends_on: [RELO-W0.12c]}
+  - {id: RELO-W0.12c, phase: RELO-0, class: AGENT_READY, status: completed}
+  - {id: RELO-W0.13, phase: RELO-0, class: NEEDS_DECISION, status: partial, current_parent: true, blocking_decisions: [RELO-D6d, RELO-D6e, RELO-D13]}
+  - {id: RELO-W0.13a, phase: RELO-0, class: AGENT_READY, status: planned, current_slice: true, startability: code_now, depends_on: [RELO-W0.12c]}
+  - {id: RELO-W0.14, phase: RELO-0, class: NEEDS_JUDGMENT, status: planned, current_parent: true}
+  - {id: RELO-W0.14a, phase: RELO-0, class: AGENT_READY, status: planned, current_slice: true, startability: code_now, depends_on: [RELO-W0.12c]}
+  - {id: RELO-W0.14c, phase: RELO-0, class: NEEDS_JUDGMENT, status: planned, current_slice: true, startability: blocked_judgment, depends_on: [RELO-W0.13, RELO-W0.14a]}
+"""
+    root, spec = _root(tmp_path, **{"governance/relo-work-packages.yaml": ledger})
+
+    report = assess_terminal_state(root, spec_path=spec)
+
+    readiness = report["work_ledger"]["w0_readiness"]
+    assert readiness["open_parents"] == ["RELO-W0.12", "RELO-W0.13", "RELO-W0.14"]
+    assert readiness["code_now"] == ["RELO-W0.13a", "RELO-W0.14a"]
+    assert readiness["completed_local"] == ["RELO-W0.12a"]
+    assert readiness["blocked_judgment"] == ["RELO-W0.14c"]
+    assert readiness["by_parent"]["RELO-W0.13"]["blocking_decisions"] == [
+        "RELO-D6d", "RELO-D6e", "RELO-D13",
+    ]
 
 
 def test_all_cards_completed_and_proposed_header_never_yield_a_terminal_state(tmp_path) -> None:
@@ -241,3 +270,49 @@ def test_terminal_cli_uses_explicit_budget_registry(tmp_path, capsys) -> None:
 
     assert main(["--repo-root", str(root), "--spec", str(spec), "--budgets", str(registry), "--terminal-state", "--json"]) == 6
     assert json.loads(capsys.readouterr().out)["budgets"] == {"ratified": 1, "unratified": ["candidate-one"]}
+
+def test_w6_projection_exposes_decision_and_dependency_gates(tmp_path) -> None:
+    ledger = """schema_version: "1"
+work_items:
+  - id: RELO-W6.1
+    phase: RELO-6
+    class: NEEDS_DECISION
+    status: blocked
+    blocking_decisions: [RELO-D16]
+    depends_on: [RELO-W6.2]
+  - id: RELO-W6.2
+    phase: RELO-6
+    class: NEEDS_JUDGMENT
+    status: planned
+    depends_on: []
+  - id: RELO-W6.3
+    phase: RELO-6
+    class: AGENT_READY
+    status: partial
+    depends_on: []
+"""
+    root, spec = _root(
+        tmp_path,
+        **{"governance/relo-work-packages.yaml": ledger},
+    )
+
+    projection = assess_terminal_state(
+        root,
+        spec_path=spec,
+    )["w6_readiness"]
+
+    assert projection["assessment"] == "not_qualified"
+    assert projection["summary"] == {
+        "decision_blocked": 1,
+        "bounded_slice_required": 1,
+        "agent_ready": 1,
+    }
+    assert projection["agent_startable"] == ["RELO-W6.3"]
+    assert projection["items"][0]["unresolved_decisions"] == ["RELO-D16"]
+    assert projection["items"][0]["unresolved_dependencies"] == [
+        {
+            "id": "RELO-W6.2",
+            "class": "NEEDS_JUDGMENT",
+            "status": "planned",
+        }
+    ]

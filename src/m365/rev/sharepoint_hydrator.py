@@ -250,8 +250,12 @@ class SharePointHydrator:
             "name": item.name,
             "web_url": item.web_url,
             "site_id": item.site_id,
+            "page_id": candidate.partial_metadata.get("page_id"),
+            "page_url": candidate.partial_metadata.get("url"),
             "parent_path": item.parent_path,
             "mime_type": item.mime_type,
+            "etag": item.etag,
+            "last_modified": item.last_modified,
             "rung": RUNG_FILE_CONTENT,
             # §5.4: SharePoint has no §13.5 route type today — noted here for consumers.
             "sharepoint_no_registry_route": True,

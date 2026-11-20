@@ -16,23 +16,23 @@ from src.core.ado_hydration_checkpoints import (
     CheckpointAdvance,
     HydrationCheckpoint,
     HydrationSubresource,
-    advance_checkpoint,
+    commit_checkpoint_advances,
     ensure_checkpoint_table,
     read_checkpoints,
+    resolve_checkpoint_provider_instance,
 )
 from src.core.integration_types import (
     ChannelRegistration,
     DiscoveredRef,
     DiscoveryCompleteness,
     DiscoveryResult,
-    RegistryDelta,
     RegistrationBinding,
     RegistrationStatus,
+    RegistryDelta,
     ScopeState,
     ScopeStatus,
     ScopeStatusKind,
 )
-
 
 SCHEMA_VERSION = "2"
 _AUTO_UPGRADABLE_SCHEMA_VERSIONS = frozenset({"1", "2"})
@@ -462,8 +462,10 @@ class ChannelRegistryStore:
         *,
         provider_instance_id: str | None = None,
         checkpoint_advances: tuple[CheckpointAdvance, ...] = (),
+        checkpoint_evidence_ref_ids: tuple[tuple[str, str], ...] = (),
     ) -> None:
-        if not ref_id_kind_pairs:
+        provider_instance_id = resolve_checkpoint_provider_instance(channel, provider_instance_id, checkpoint_advances, checkpoint_evidence_ref_ids or ref_id_kind_pairs)
+        if not ref_id_kind_pairs and not checkpoint_advances:
             return
         provider_clause = ""
         base_values: list[object] = [_format_datetime(verified_at), _format_datetime(verified_at), channel, self.program_id]
@@ -489,15 +491,11 @@ class ChannelRegistryStore:
                 """,
                 [tuple(base_values[2:] + [ref_id, ref_kind]) for ref_id, ref_kind in ref_id_kind_pairs],
             )
-            # RELO-W2.9: checkpoints commit or roll back with this verification.
-            for advance in checkpoint_advances:
-                advance_checkpoint(conn, advance, at=verified_at)
+            commit_checkpoint_advances(conn, self.program_id, provider_instance_id, checkpoint_advances, at=verified_at)
 
-    def read_hydration_checkpoints(
-        self, work_item_ids: tuple[int, ...]
-    ) -> dict[tuple[int, HydrationSubresource], HydrationCheckpoint]:
+    def read_hydration_checkpoints(self, provider_instance_id: str, work_item_ids: tuple[int, ...]) -> dict[tuple[int, HydrationSubresource], HydrationCheckpoint]:
         with self._connect() as conn:
-            return read_checkpoints(conn, work_item_ids)
+            return read_checkpoints(conn, provider_instance_id, work_item_ids, at=datetime.now(timezone.utc))
 
     def mark_hydration_failed(
         self,
@@ -628,7 +626,9 @@ class ChannelRegistryStore:
         *,
         provider_instance_id: str | None = None,
     ) -> tuple["RegistryFeedbackEvent", ...]:
-        from src.core.integration_types import RegistryFeedbackEvent  # local import avoids circular
+        from src.core.integration_types import (
+            RegistryFeedbackEvent,  # local import avoids circular
+        )
         params: list[object] = [channel, self.program_id, ref_id, ref_kind]
         provider_clause = ""
         if provider_instance_id is not None:

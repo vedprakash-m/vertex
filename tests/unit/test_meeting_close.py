@@ -179,7 +179,7 @@ def test_meeting_close_real_marker_reacquisition_preserves_identity(tmp_path: Pa
     assert first_payload["queued_action_count"] == 1
     assert second_payload["skipped_action_count"] == 1
     assert second_payload["mappings"][0]["action"] == first_payload["mappings"][0]["action"]
-    assert any(mapping["action"]["text"] == "Need to publish checklist." for mapping in second_payload["mappings"])
+    assert all(mapping["action"]["text"] != peer for mapping in second_payload["mappings"])
 
 
 def test_meeting_close_renders_packet_and_writes_local_artifacts(tmp_path: Path, monkeypatch) -> None:
@@ -431,7 +431,7 @@ def test_meeting_close_disabled_mode_uses_deterministic_extractor_without_ai_art
                 title="LT Sync",
                 captured_at="2026-05-21T12:00:00+00:00",
                 web_url="https://contoso/meetings/lt-sync-disabled",
-                content="Action: follow up with priya by 2026-05-14 on WI:101 to confirm the ramp packet.",
+                content="Action: Confirm the ramp packet | owner=priya | due=2026-05-14 | wi=WI:101",
             )
         ),
     )
@@ -455,6 +455,48 @@ def test_meeting_close_disabled_mode_uses_deterministic_extractor_without_ai_art
     assert artifacts.packet_path is not None and artifacts.packet_path.exists()
     assert artifacts.proposal_path is not None and artifacts.proposal_path.exists()
     assert not (repo_root / "programs" / "acme" / "publications" / "acme" / "ai").exists()
+
+
+def test_meeting_close_refuses_terminal_linked_work_item(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo_root = _seed_repo(tmp_path)
+    closed_client = _StubADOClient()
+    original_query = closed_client.query_work_items_batch
+
+    def query_closed(work_item_ids: list[int], fields: tuple[str, ...]) -> list[dict[str, object]]:
+        rows = original_query(work_item_ids, fields)
+        assert isinstance(rows[0]["fields"], dict)
+        rows[0]["fields"]["System.State"] = "Closed"
+        return rows
+
+    monkeypatch.setattr(closed_client, "query_work_items_batch", query_closed)
+    monkeypatch.setattr(
+        meeting_close_command,
+        "_build_transcript_reader",
+        lambda: _StubTranscriptReader(
+            TranscriptRecord(
+                meeting_id="lt-sync-closed",
+                title="LT Sync",
+                captured_at="2026-05-21T12:00:00+00:00",
+                web_url="https://contoso/meetings/lt-sync-closed",
+                content="Action: Confirm the ramp packet | owner=priya | wi=WI:101",
+            )
+        ),
+    )
+    monkeypatch.setattr(meeting_close_command, "_build_ado_client", lambda _program: closed_client)
+
+    with pytest.raises(ValueError, match="terminal"):
+        meeting_close_command.generate_meeting_close_artifacts(
+            program_id="acme",
+            meeting_id="lt-sync-closed",
+            title_override=None,
+            emit_html=False,
+            emit_teams=False,
+            dry_run=False,
+            programs_root=repo_root / "programs",
+        )
 
 
 def test_meeting_close_dismiss_review_filters_action_from_outputs_and_queue(tmp_path: Path, monkeypatch) -> None:

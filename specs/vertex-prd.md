@@ -7,6 +7,9 @@
 
 ## Changelog
 
+- Last updated: 2026-11-19 — Knowledge candidates cover the eight required maintained-context classes and retain explicit OS-principal review/renewal plus verified resolution history; live policy population and qualification remain gated (§7.4, §10.2).
+- Last updated: 2026-11-19 — Ratified RELO-D19 (ADR-0020 decision 17): only typed, approved, evidence-linked feedback remains reusable. Confirm now records hash-only governed telemetry, while offline proposals require privacy, contamination, development, frozen-holdout, human-approval and shadow gates before promotion; rollback restores a governed prior version. Raw edit-pattern learning and confirm-time distillation are no longer runtime prompt inputs.
+
 - Last updated: 2026-11-08 — WorkIQ FQ-01 now keeps semantic-only discovery records as in-memory previews; only native-identity-backed WorkIQ signals enter persistence, evidence, actions, provenance, AI feedback context, or source-family corroboration.
 
 - Last updated: 2026-07-08 — Incorporated `specs/fix-data-flow.md` (v1.0→v1.13, archived to `.archive/specs/fix-data-flow.md`) into the canonical PRD/tech-spec. All 13 tracks (A–M) closed: the newsletter's risk and dependency read paths now route through `ProgramReality` (Track B), with the platform's first-ever trust-badge rendering markup (`templates/partials/truth_badge.j2`) live for risk, milestone, and assumption facts; `fact_bridge_enabled` now defaults to `true` with a visible doctor warning when it doesn't (Track A, ADR-0011); the incremental event-projection fold is now wired as an automatic post-write hook under WAL-mode concurrency (Track D, ADR-0010); all 7 render-pipeline `ProgramReality.load()` call sites are consolidated or documented (Track E); the AI-generated executive summary and workstream blurbs now draw on a token-budgeted reality-substrate summary (`src/commands/reality_context.py`) instead of the narrative-only `bundle.program_context`, so structured trust badges and AI prose can no longer silently contradict each other (Track J, PR-11b — closed ahead of this spec's own "next priority after Track C" schedule); a substrate health monitor (gather-freshness, bridge backlog, SoR-vs-actual-read-path consistency via a per-issue render manifest, fact-store location/schema-version consistency) is live in `vertex doctor --storage` (Track K). Per-family investigation found action/decision/commitment have no current main-newsletter read path and workstream's newsletter content is narrative-driven, not fact-per-row — reported honestly rather than force-migrated (§1.1 updated). Two operator-paced follow-ups moved to `specs/bklg.md`: deployment-specific stray-database cleanup (BL-B1) and Track D Step 2's conditional production-observation gate (BL-B2). Full suite: 6922 passed, 901 skipped, 0 failed; Deployment activation results remain private and are not certified by these implementation checks.
@@ -259,7 +262,7 @@ BL-L1: complete (2026-07-22)
 | **RealityConflict** | A detected disagreement between two or more sources about the same fact. Carries `conflict_id`, `entity_id`, `authority_family`, `sources`, `materiality` (material or minor), `resolution` (open/resolved). Material conflicts block rendering (QG-27 forceable). `conflicts(open_only=True)` on `ProgramReality`. |
 | **AttentionItem** | A structured triage item from `attention()`. Kinds (closed enum): `DISPUTED_FACT`, `STALE_HIGH_SEVERITY`, `UNANSWERED_DECISION`, `PENDING_ACTUATION`, `CORROBORATED_RISK_AWAITING_REVIEW`, `COMMITMENT_SLIPPED`, `STRUCTURAL_GAP`, `DECISION_OUTCOME_DRIFT`, `OVERRIDE_RECERTIFICATION_DUE`. Carries `priority`, `description`, `action_hint`, `provisional_inputs` flag. `vertex triage --full` is the daily front door for all attention items. |
 | **RealityDelta** | What changed between two `ProgramReality` snapshots. Returned by `diff()`. Fields: `added`, `changed`, `retired`, `dispute_opened`, `dispute_resolved`, `non_replayable_families`. Drives "what changed?" prep without manual source checking. |
-| **ActuationProposal** | A governed propose→approve→execute→verify record. Three origins: fact-derived (G-11), claim-derived (WI-7.1b), gap-fix (§6.11.3). Every proposal has a TTL, requires explicit human approval (INV-12), and produces a `fact.executed` event or a reverse-proposal on failure. `pending_actuations()` on `ProgramReality`. `vertex actuate review` is the operator surface. Execute admission, including dry-run, requires the currently loaded policy and one enabled matching rule, matching adapter/operation, explicit approval, no gap, and a nonfuture proposal time within the current TTL. Direct dispatch repeats admission before client resolution and retains its default-deny kill switch. Invalid stored approval/time/TTL and nonboolean policy enablement require correction before review, not inferred approval or renewed time. These bounded checks do not establish payload-bound approval, atomic revocation, rate reservation or effectively-once execution. |
+| **ActuationProposal** | A governed propose→approve→execute→verify record. Three origins: fact-derived (G-11), claim-derived (WI-7.1b), gap-fix (§6.11.3). Every proposal has a TTL, requires explicit human approval (INV-12), and produces a `fact.executed` event or a reverse-proposal on failure. `pending_actuations()` on `ProgramReality`. `vertex actuate review` is the operator surface. Execute admission, including dry-run, requires the currently loaded policy and one enabled matching rule, matching adapter/operation, explicit approval, no gap, and a nonfuture proposal time within the current TTL. Direct dispatch repeats admission before client resolution and retains its default-deny kill switch. Invalid stored approval/time/TTL and nonboolean policy enablement require correction before review, not inferred approval or renewed time. The separate qualified outbox path now binds a real operator identity/current snapshot to the exact normalized payload/effect, atomically reserves revision/effect/rate capacity, and cancels un-dispatched children on revocation or expiry. It remains synthetic/default-off; legacy approval surfaces are not authenticated by that path and effectively-once provider delivery is not certified. |
 | **FactSorState** | Per-program, per-family source-of-record mode: `legacy` (reads from artifact stores; fact-store shadow only), `shadow` (dual-read, parity-checked), `primary` (fact-store is authoritative). Accessed via `load_fact_sor_state(program_id)`. Family flip from shadow → primary requires ≥5 clean gather-triage cycles (`fact-store-flip --family`). |
 | **NCFL Apply** | Governed context-update write workflow for accepted `ContextUpdateProposal`s. V1 may write only the ADR-0006-approved Plane 1 targets: `assumptions`, `decisions`, `milestones`, `risk_register`, and `workstreams`. Apply requires a fresh hash, optimistic concurrency, canonical `save_*` path, changelog entry, ledger/outbox recording, and repairable journal state. |
 | **EntityRegistry** | Program + org-scope canonical entity registry (`src/core/entity_registry.py`). Three-tier resolution: exact match → casefold match → fuzzy match (rapidfuzz WRatio, per-scope thresholds). Aliases learned via `entity_alias_emitter.py`. Enables cross-source entity linking for corroboration and conflict detection. |
@@ -276,7 +279,7 @@ BL-L1: complete (2026-07-22)
 | **OperationTrace** | A purely internal, Vertex-generated `correlation_id` linking every artifact one logical pipeline run produces (source acquisition, fact write, context manifest, AI release decision, rendered output, actuation intent/receipt) into one queryable trace. Never touches an external system; observability only, never a write blocker. See §12.2a of `vertex-tech-spec.md`. |
 | **Solicitation** | A targeted, human-approved question Vertex proposes to a stakeholder when required evidence is stale or missing (e.g. no recent update on a claim nearing its due date). Never auto-sent — routed through the same nudge/Teams/email review-and-approval pipeline as any other outbound draft. A reply feeds back into re-evaluating the originating context gap. |
 
-**Outbox lifecycle admission:** A stored actuation cannot skip from pending/leased to completion, redispatch recorded success, or downgrade a dispatched effect to automatically retryable. The shared store checks transition order transactionally after owner/token admission; rejected transitions preserve retained evidence. Existing local registry delivery may still complete a leased event directly. This is state-machine integrity, not proof of receipt completeness, recipient/target correctness or effectively-once delivery across all providers.
+**Outbox lifecycle admission:** A stored actuation cannot skip from pending/leased to completion, redispatch recorded success, or downgrade a dispatched effect to automatically retryable. The shared store checks transition order transactionally after owner/token admission; rejected transitions preserve retained evidence. Qualified W5 admission additionally rejects changed approval revision/payload, stale evidence, disabled scope/rule, exhausted rate/blast capacity, target/revision/state drift, an existing marker/effect or a conflicting active intent. Revocation atomically cancels pending/leased children and exposes dispatched children for reconciliation. Existing local registry delivery may still complete a leased event directly. This is deterministic admission/state integrity, not proof of receipt completeness, recipient/target correctness or effectively-once delivery across all providers.
 
 **Create acknowledgement durability:** Newly completed create-task dispatch retains an append-once provider acknowledgement receipt atomically with its succeeded transition in the existing outbox database. It records remote ID, exact payload hash and available identity/destination/response evidence independently of the secondary ledger. A post-request response without a positive integer/nonboolean work-item ID is uncertain, not completed or automatically retryable. Legacy rows are not backfilled. This bounded acknowledgement does not certify full terminal receipts, resulting revision, approval/principal/audience or desired-effect correctness.
 
@@ -577,7 +580,7 @@ vertex/
 │   │   │   ├── 2026-W19.jsonl      # Weekly partition (immutable after week)
 │   │   │   ├── reviews.jsonl       # Review decisions sidecar
 │   │   │   ├── claims.jsonl        # Claim/commitment ledger
-│   │   │   ├── edit_patterns.jsonl # Author edit learning audit
+│   │   │   ├── edit_patterns.jsonl # Legacy forensic input; not written by confirm
 │   │   │   ├── kb_edits.jsonl      # KB edit audit trail
 │   │   │   └── signal_threads.jsonl # Signal correlation links
 │   │   ├── trajectories/           # Per-item ADO field history (JSONL)
@@ -808,7 +811,7 @@ The program event ledger and knowledge plane sit above the Program Fact Store an
 | Type | Purpose |
 |------|---------|
 | `KnowledgeClaim` | A predicate-driven assertion with `claim_id`, `scope`, `predicate` (from closed registry), `subject`, `value`, `valid_from`/`valid_until`, `confidence`, and `source_ref` |
-| `ClaimCandidate` | A knowledge claim awaiting triage; follows the same a/e/r/s lifecycle as `CandidateEvent` |
+| `ClaimCandidate` | A knowledge claim awaiting triage. The closed class registry covers glossary, entity aliases, stakeholder roles, workstream ownership, program charter, milestone horizons, recurring risk/dependency patterns and document locations. Extracted candidates require an OS-principal-authorized review, optional explicit renewal and terminal resolution verification; people aliases remain in the separate people registry |
 
 ---
 
@@ -1031,7 +1034,7 @@ The `PROVIDER_REGISTRY` in `channel_wiring.py` maps channel names to their provi
 - **Atomic, classified extraction (FR-SG-08/09/10).** Collaboration content (WorkIQ/Teams/transcript/email) decomposes into individual signals, each carrying non-empty work-item `refs` and a resolved workstream; every stored signal carries a `SignalClass`. Classification weights synthesis, routes decisions, and de-prioritizes status-only noise.
 - **Program Fact Store (FR-SG-54..73).** A program-scoped, bitemporal, append-only system-of-record (`program_fact_store.py`) holds typed facts (Claim, Decision, Action, Risk, MetricObservation, ExternalDependency, ProgramEvent, Milestone, ReviewFinding). A write precedence hierarchy — `Active PM Judgment > Confirmed Governance Decision > Verified System Signal > Raw Telemetry` — means a lower-precedence write contradicting a higher-precedence accepted fact is queued as a **Proposed Revision**, never a silent overwrite. `report` pins a `ProgramFactSnapshot` to the draft; `confirm` raises a **State Drift Warning** (QG-SG-20) if live facts have materially diverged. Issue N+1 *inherits* the last accepted fact instead of carrying forward a `❓ Needs input` override (current-truth inheritance). The full storage + API contract is reconciled in [vertex-tech-spec.md](vertex-tech-spec.md) §9.16. *Migration status: the unified read API and shadow-write foundation are landed, with shadow isolation, lineage reverse lookup, per-family SoR mode resolution, divergence detection, and accepted flip-gate policy implemented. The irreversible flip to system-of-record still requires clean-cycle evidence and rollback posture before any family is treated as primary in production.*
 - **Synthesis & judgment (FR-SG-19..25).** Per-workstream evidence packets, strategic risk derivation, ETA credibility scoring with slip-history rendering, auto section-scope suppression, and cross-workstream executive summaries extract value from data already present.
-- **Closed loops (FR-SG-37..44).** Nudge outcome tracking, evidence-governed risk auto-upsert, per-function ConversionFidelity, QG-failure root-cause learning, signal-approval auto-enforcement, and earned-autonomy maturity advancement — all audited and PM-reversible — turn one-off detections into learning loops.
+- **Closed loops (FR-SG-37..44).** Nudge outcome tracking, evidence-governed risk auto-upsert, per-function ConversionFidelity, QG-failure root-cause learning, signal-approval auto-enforcement, and earned-autonomy maturity advancement remain individually governed. Under RELO-D19, only typed correction outcomes with explicit provenance and approval may produce offline proposals; promotion requires versioned evaluation, human approval, shadow evidence, expiry, a kill switch, and rollback.
 
 **Operator-gated dependencies:** live M365 identifier population, Kusto auth/RBAC, IcM enablement, cross-team ADO PAT scope, and the Teams bot / Outlook add-in registration are configuration/access tasks owned by the operator, not the platform.
 
@@ -1101,7 +1104,7 @@ The `PROVIDER_REGISTRY` in `channel_wiring.py` maps channel names to their provi
 - Quality gates must pass (or be force-overridden for forceable gates; hard blocks cannot be forced)
 - `❓ Needs Input` is a hard publish-block (QG-8, exit code 3)
 - After confirm: claims and decision-asks extracted from narratives (AI-first when enabled, regex fallback available, max 20 per confirm)
-- Edit patterns captured (draft vs. confirmed narrative diff → `edit_patterns.jsonl`)
+- Hash-only generated-to-final feedback captured in `programs/<prog>/_feedback/feedback_observations.jsonl`; raw draft/final prose is not copied into a learning log
 - Signal usage markers appended to `reviews.jsonl`
 - Vitality archive entry written to `vitality.json`
 - Next-issue review and narratives are prepared after confirmation. A missing
@@ -1200,6 +1203,12 @@ capture/trust/validation/policy and other unevaluated inputs remain explicit
 gaps: no Low/Done clearance, confidence NONE and unknown completion.
 This does not replace rendered health, change publication gates, generate
 authoritative asks or authorize actions; all-consumer migration is pending.
+New ordinary drafts additionally retain the observation envelope's canonical
+content hash in draft state. Confirmation verifies that reference, the
+capture/snapshot/input bindings and the content hashes before consuming the
+observation, then carries the verified observation/comparison into confirmed
+manifest metadata. Mismatch refuses confirmation for regeneration; legacy
+drafts without the observation reference remain on their existing path.
 
 The observer now retains the already-selected risk register, assessments,
 stale-review IDs and load diagnostics without rereading sources. Active
@@ -1211,6 +1220,11 @@ mitigated, accepted and closed records do not establish this strategic floor.
 Missing, ambiguous or different-revision assessments cannot supply an ask's
 evidence; stale/disputed/provisional context and incomplete coverage remain
 explicit gaps and cannot erase known adverse observations.
+Report risk selection also retains sorted duplicate, merge, fork, cycle and
+dangling lifecycle findings as warnings. They do not drop, merge or mutate
+risks, and cockpit withholds its active-risk aggregate as Unknown when an
+explicit duplicate key affects multiple active risks or a conflicting active
+lifecycle is present. Derived-key similarity remains warning-only.
 
 Selected milestone records, computed assessments and load diagnostics also
 participate in the observation. Computed Missed floors schedule/health at
@@ -1334,6 +1348,8 @@ An applied create retains its remote outcome when a subsequent local action-asso
 ### 9.12 Claim Tracking (`vertex claims`)
 
 **Extraction:** During `vertex confirm`, claims and decision-asks are extracted from narratives through an AI-first path when AI is enabled, with governed regex fallback retained for calibration, resilience, and explicit reproducibility runs. Max 20 claims per confirm. Deduplication against existing open claims (same entity_refs + similar due_date within ±7 days).
+
+**Claim evidence release rule:** Before confirmation, only `WI:<id>` references from the captured confirm snapshot are approved claim evidence. Missing evidence, unsupported claims and dangling or other unapproved reference families hard-block release through `RELO-QG-05`; the gate cannot be forced, does not rewrite claims, and decision asks remain outside this claim-only rule (RELO-W4.8).
 
 **Lifecycle:** Claims start as `open`. Status updates (`met`, `contradicted`, `stale`) are appended to `claims.jsonl` as sidecar entries. Claims are never auto-closed — author resolves via `vertex claims resolve`.
 
@@ -1619,7 +1635,7 @@ The generated operator reference lives at [tests/contracts/cli_reference_snapsho
 | `discover candidates` | Run discovery pipelines (AI extractors + M365 connectors) and stage output as ledger candidates; `--source prose_extract` targets EML/HTML/PDF newsletters and PPTX LT decks using 4-wave prose extraction (W1=phase/scope/workstream, W2=same, W3=commitment/assumption/dependency/incident, W4=KPI/knowledge) | `--program`, `--source`, `--since`, `--dry-run`, `--connector`, `--source-dir <dir>`, `--wave 1|2|3|4` |
 | `knowledge ingest` | Ingest knowledge documents into the content-addressed vault and extract claim candidates | `--program`, `--path`, `--dry-run` |
 | `knowledge extract` | AI-assisted extraction of KnowledgeClaims from a vault document | `--program`, `--vault-hash`, `--dry-run` |
-| `knowledge triage list/approve/edit/reject/skip` | Govern extracted knowledge claims through the a/e/r/s lifecycle | `--program`, `--status`, `--actor` |
+| `knowledge triage list/review/renew/approve/edit/reject/skip/verify-resolution/history` | Govern extracted knowledge claims through review, a/e/r/s decision, verified resolution and retained history; review-gated candidates require explicit program authority and review expiry | `--program`, `--candidate`, `--actor`, `--valid-until`, `--reason`, `--format` |
 | `knowledge context` | Show the resolved knowledge context for a program at a given time | `--program`, `--as-of`, `--scope`, `--format` |
 | `rollback` | Restore program stores from a checkpoint snapshot taken before a fact-layer promotion; `--drill` runs a side-effect-free sandbox simulation and records an `s7a_rollback_drill` proof entry | `--edition`, `--to`, `--drill`, `--archetype`, `--notes`, `--dry-run` |
 
@@ -1666,7 +1682,7 @@ All AI-generated text passes through a mandatory 4-stage pipeline (`process_gene
 | Module | Purpose |
 |--------|---------|
 | `draft_reviewer.py` | Pre-publish advisory: data gaps, cross-issue flags, structural issues |
-| `edit_learner.py` | Captures before/after edit patterns for continuous learning |
+| `governed_feedback_lifecycle.py` | Stores approved typed feedback and versioned offline proposal/evaluation/approval/rollback state; legacy edit-pattern readers are forensic compatibility only |
 | `learning_distiller.py` | Distills repeated corrections into editorial rule proposals |
 
 ### 11.5 Routing & Onboarding
@@ -2145,6 +2161,7 @@ pytest tests/ --run-integration             # Authorized live qualification only
 - **Run manifest:** Per-issue audit record with content hashes, duration, AI costs, QG results
 - **LLM trace:** Every AI call logged to JSONL (tokens, latency, cost, model)
 - **Cost guard:** Per-edition AI spend tracking with budget ceiling
+- **Operational evidence honesty:** RELO closeout tooling may verify traceability and packet shape, but current staffing/economics evidence, NFR measurements, accountable-owner approval, qualification and terminal certification remain separate operator-supplied evidence; public templates do not satisfy those gates
 
 ### 16.4 Security
 

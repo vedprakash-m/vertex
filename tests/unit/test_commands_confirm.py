@@ -28,7 +28,6 @@ from src.core.gather_state_store import GatherState
 from src.core.models import ArchiveEntry, ArchiveIndex, WorkItem
 from src.commands.confirm import confirm_issue
 from src.commands.report import _DraftAIContext, _write_output_json, generate_report_draft
-from src.ai.edit_learner import read_edit_patterns
 import src.core.archive_store as archive_store
 from src.core.config_loader import load_report_bundle
 from src.core.decision_register import save_decisions
@@ -38,7 +37,7 @@ from src.core.file_stores import FileTrajectoryStore
 from src.core.models_v2 import TrajectoryPoint
 from src.core.pipeline import capture_milestone_trajectory_snapshot
 from src.core.quality_gates import fact_drift as fact_drift_module
-from src.ai.learning_distiller import EditorialRuleProposal, LearningDistillation
+from src.core.governed_feedback_lifecycle import load_feedback_observations
 from src.core.narrative_store import get_narratives_dir, load_narratives
 from src.core.overrides_store import get_overrides_path, load_overrides
 from src.core.program_fact_store import FactPrecedence, ProgramFactInput, ProgramFactStore
@@ -1264,6 +1263,35 @@ def test_confirm_issue_force_does_not_override_claim_contradiction_gate(monkeypa
     assert qg11.message in result.failures
 
 
+def test_confirm_issue_blocks_unattributable_claim_evidence_before_archive(
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    reports_root, archive_root, _ = _prepare_confirmable_weekly_issue(repo_root, tmp_path)
+    programs_root = reports_root.parent / "programs"
+    narrative = programs_root / "acme" / "narratives" / "issue_001" / "exec_summary.md"
+    narrative.write_text(
+        "WI:999999 Deployment readiness expected by June 15.\n",
+        encoding="utf-8",
+    )
+
+    result = confirm_issue(
+        edition_name=EDITION_NAME,
+        issue_number=1,
+        reports_root=reports_root,
+        archive_root=archive_root,
+        programs_root=programs_root,
+        legacy_regex_extractor=True,
+        force=True,
+    )
+
+    assert result.exit_code == 3
+    assert result.archive_paths is None
+    assert result.manifest.qg_results["RELO-QG-05"] is False
+    assert any("RELO-QG-05" in failure for failure in result.failures)
+    assert not (programs_root / "acme" / "journal" / "claims.jsonl").exists()
+
+
 def test_confirm_issue_maps_detailed_edition_source_health_to_newsletter_function(monkeypatch, repo_root: Path, tmp_path: Path) -> None:
     reports_root, archive_root, output_root = _prepare_confirmable_weekly_issue(repo_root, tmp_path)
     programs_root = reports_root.parent / "programs"
@@ -1710,7 +1738,7 @@ def test_confirm_issue_v2_records_claims_and_decision_asks(repo_root: Path, tmp_
     claims = load_claim_entries("acme", programs_root)
     asks = load_decision_asks("acme", programs_root)
 
-    assert result.exit_code == 0
+    assert result.exit_code == 0, result.failures
     assert result.archive_paths is not None
     assert result.archive_paths.vitality_path is not None and result.archive_paths.vitality_path.exists()
     vitality_payload = json.loads(result.archive_paths.vitality_path.read_text(encoding="utf-8"))
@@ -2288,7 +2316,7 @@ def test_confirm_issue_force_does_not_override_qg11_at_l2(repo_root: Path, tmp_p
     assert result.exit_code == 3
     assert any("Open claims contradicted by current ADO state without acknowledgment" in failure for failure in result.failures)
 
-def test_confirm_issue_v2_records_edit_patterns(repo_root: Path, tmp_path: Path) -> None:
+def test_confirm_issue_v2_records_governed_feedback(repo_root: Path, tmp_path: Path) -> None:
     reports_root, archive_root = _seed_v2_report_layout(repo_root, tmp_path)
     programs_root = reports_root.parent / "programs"
 
@@ -2332,15 +2360,17 @@ def test_confirm_issue_v2_records_edit_patterns(repo_root: Path, tmp_path: Path)
         force=True,
     )
 
-    patterns = read_edit_patterns("acme", programs_root=programs_root)
+    observations = load_feedback_observations("acme", programs_root=programs_root)
 
     assert result.exit_code == 0
-    assert len(patterns) == 1
-    assert patterns[0].section_id == "exec_summary"
-    assert "Author edits" in patterns[0].summary
+    assert len(observations) == 1
+    assert observations[0].target_id.endswith(":exec_summary")
+    assert observations[0].before_value.value_type == "sha256"
+    assert observations[0].approved_by
+    assert not (programs_root / "acme" / "journal" / "edit_patterns.jsonl").exists()
 
 
-def test_confirm_issue_v2_records_ai_prompt_version_in_edit_patterns(monkeypatch, repo_root: Path, tmp_path: Path) -> None:
+def test_confirm_issue_v2_does_not_copy_ai_prompt_trace_into_feedback(monkeypatch, repo_root: Path, tmp_path: Path) -> None:
     reports_root, archive_root = _seed_v2_report_layout(repo_root, tmp_path)
     programs_root = reports_root.parent / "programs"
     program_path = programs_root / "acme" / "program.yaml"
@@ -2422,16 +2452,13 @@ def test_confirm_issue_v2_records_ai_prompt_version_in_edit_patterns(monkeypatch
         force=True,
     )
 
-    patterns = read_edit_patterns("acme", programs_root=programs_root)
+    observations = load_feedback_observations("acme", programs_root=programs_root)
 
     assert result.exit_code == 0
-    assert len(patterns) == 1
-    assert patterns[0].task_type == "exec_summary"
-    assert patterns[0].prompt_version == "exec_summary_drafter.v1"
-    assert patterns[0].ai_confidence == Confidence.HIGH
-    assert patterns[0].trace_run_id == draft_state["ai_trace_run_id"]
-    assert patterns[0].author_override_magnitude is not None
-    assert patterns[0].author_override_magnitude > 0
+    assert len(observations) == 1
+    payload = json.dumps(observations[0], default=str)
+    assert "exec_summary_drafter.v1" not in payload
+    assert draft_state["ai_trace_run_id"] not in payload
 
 
 def test_confirm_issue_requires_forecast_ack(repo_root: Path, tmp_path: Path) -> None:
@@ -3094,7 +3121,10 @@ def test_narrative_draft_and_confirm_respect_removed_executive_chart(
     draft = generate_report_draft(**options)
     for body in (draft.html_body, draft.markdown_body):
         assert ("Synthetic executive narrative" in body) is (hidden_at != "draft")
-        assert ("Synthetic executive chart" in body) is (hidden_at != "draft")
+        assert "Synthetic executive chart" in body
+        assert ("Synthetic trend" in body) is (hidden_at != "draft")
+        assert ("was not bypassed" in body) is (hidden_at == "draft")
+    assert draft.manifest.qg_results["QG-22"] is (hidden_at != "draft")
 
     if hidden_at == "confirm":
         overrides["removed_sections"] = ["exec_summary"]
@@ -3103,17 +3133,23 @@ def test_narrative_draft_and_confirm_respect_removed_executive_chart(
         edition_name=EDITION_NAME, issue_number=1, reports_root=reports_root,
         archive_root=archive_root, programs_root=programs_root, force=True,
     )
-    assert result.exit_code == 0
-    assert result.archive_paths is not None
-    for path in (result.archive_paths.html_path, result.archive_paths.md_path):
-        body = path.read_text(encoding="utf-8")
-        assert ("Synthetic executive narrative" in body) is (hidden_at == "never")
-        assert ("Synthetic executive chart" in body) is (hidden_at == "never")
+    if hidden_at == "never":
+        assert result.exit_code == 0
+        assert result.archive_paths is not None
+        for path in (result.archive_paths.html_path, result.archive_paths.md_path):
+            body = path.read_text(encoding="utf-8")
+            assert "Synthetic executive narrative" in body
+            assert "Synthetic executive chart" in body
+            assert "Synthetic trend" in body
+    else:
+        assert result.exit_code == 3
+        assert result.archive_paths is None
+        assert result.manifest.qg_results["QG-22"] is False
+        assert any("QG-22" in failure for failure in result.failures)
 
 
-@pytest.mark.parametrize("hide_executive", [False, True])
-def test_confirm_preserves_reviewed_charts_with_unmatched_workstream_fallback(
-    repo_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hide_executive: bool,
+def test_confirm_preserves_reviewed_charts_at_visible_targets(
+    repo_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from html.parser import HTMLParser
     from src.commands.confirm_stages.draft_loaders import load_confirm_draft_manifest
@@ -3158,11 +3194,6 @@ def test_confirm_preserves_reviewed_charts_with_unmatched_workstream_fallback(
         open_browser=False,
     )
     _write_authored_workstream_narratives(reports_root, 1)
-    if hide_executive:
-        overrides_path = get_overrides_path(EDITION_NAME, reports_root, issue_number=1)
-        overrides = yaml.safe_load(overrides_path.read_text(encoding="utf-8"))
-        overrides["removed_sections"] = ["exec_summary"]
-        overrides_path.write_text(yaml.safe_dump(overrides), encoding="utf-8")
     charts = tuple(
         KustoSectionData(
             section_id=name, title=name, query_id=name, render_mode="chart",
@@ -3174,10 +3205,7 @@ def test_confirm_preserves_reviewed_charts_with_unmatched_workstream_fallback(
         )
         for name, placement in (
             ("Executive chart", "exec_summary"),
-            ("Workstream chart", "workstream:deployment_readiness"),
             ("Standalone chart", "standalone"),
-            ("Second executive chart", "exec_summary"),
-            ("Missing workstream chart", "workstream:missing"),
         )
     )
     monkeypatch.setattr(
@@ -3191,11 +3219,10 @@ def test_confirm_preserves_reviewed_charts_with_unmatched_workstream_fallback(
         open_browser=False,
     )
     for chart in charts:
-        expected = 0 if hide_executive and chart.title == "Executive chart" else 1
-        assert draft.html_body.count(f"{chart.title} chart: Synthetic trend") == expected
+        assert draft.html_body.count(f"{chart.title} chart: Synthetic trend") == 1
         assert draft.markdown_body.count(
             f"{chart.title}: Synthetic trend. [View chart →](https://example.invalid/chart)"
-        ) == expected
+        ) == 1
 
     assert draft.manifest_path is not None
     draft_path = programs_root / "acme" / "publications" / EDITION_NAME / "issue_001" / "issue_001.draft.json"
@@ -3203,7 +3230,7 @@ def test_confirm_preserves_reviewed_charts_with_unmatched_workstream_fallback(
     original_manifest = draft.manifest_path.read_bytes()
     original_state = json.loads(original_draft)
     original_metadata = json.loads(original_manifest)
-    assert len(original_state["routed_chart_sections"]) == 2
+    assert len(original_state["routed_chart_sections"]) == 1
     for change in ("image", "missing_routed", "missing_marker", "invalid_marker"):
         state = json.loads(original_draft)
         manifest = json.loads(original_manifest)
@@ -3237,33 +3264,24 @@ def test_confirm_preserves_reviewed_charts_with_unmatched_workstream_fallback(
         edition_name=EDITION_NAME, issue_number=1, reports_root=reports_root,
         archive_root=archive_root, programs_root=programs_root, force=True,
     )
-    assert result.exit_code == 0
+    assert result.exit_code == 0, result.failures
     assert result.archive_paths is not None
     html = result.archive_paths.html_path.read_text(encoding="utf-8")
     markdown = result.archive_paths.md_path.read_text(encoding="utf-8")
     for chart in charts:
-        expected = 0 if hide_executive and chart.title == "Executive chart" else 1
-        assert html.count(f"{chart.title} chart: Synthetic trend") == expected
-        assert markdown.count(f"{chart.title}: Synthetic trend. [View chart →](https://example.invalid/chart)") == expected
-    for body, workstream_anchor in (
-        (draft.html_body, "chapter-deployment_readiness"),
-        (html, "Workstream chart"),
-    ):
+        assert html.count(f"{chart.title} chart: Synthetic trend") == 1
+        assert markdown.count(f"{chart.title}: Synthetic trend. [View chart →](https://example.invalid/chart)") == 1
+    for body in (draft.html_body, html):
         for anchor, title in (
             ("exec-summary", "Executive chart"),
-            (workstream_anchor, "Workstream chart"),
             ("Standalone chart", "Standalone chart"),
-            ("Second executive chart", "Second executive chart"),
-            ("Missing workstream chart", "Missing workstream chart"),
         ):
-            if hide_executive and title == "Executive chart":
-                continue
             section = SectionImages(anchor)
             section.feed(body)
             assert [(image.get("src"), image.get("alt")) for image in section.images] == [
                 ("data:image/png;base64,c3ludGhldGlj", f"{title} chart: Synthetic trend"),
             ]
-        expected_count = len(charts) - int(hide_executive)
+        expected_count = len(charts)
         assert body.count('href="https://example.invalid/chart"') >= expected_count
         assert body.count("Source: Synthetic source") == expected_count
         assert body.count("May 05 2026, 18:00 UTC") >= expected_count
@@ -3570,7 +3588,9 @@ def test_confirm_issue_tracks_ai_review_acceptance_from_review_artifact(repo_roo
     outcomes = {entry["suggestion"]["section_id"]: entry["outcome"] for entry in tracking_payload["suggestions"]}
     assert outcomes["exec_summary"] == "accepted"
 
-def test_confirm_issue_records_learning_distillation_when_review_tracking_exists(monkeypatch, repo_root: Path, tmp_path: Path) -> None:
+def test_confirm_issue_does_not_run_learning_distillation_when_review_tracking_exists(
+    monkeypatch, repo_root: Path, tmp_path: Path
+) -> None:
     reports_root = stage_v2_report_workspace(repo_root, tmp_path)
     archive_root = tmp_path / "archive"
     programs_root = reports_root.parent / "programs"
@@ -3622,32 +3642,10 @@ def test_confirm_issue_records_learning_distillation_when_review_tracking_exists
     )
     _write_output_json(programs_root / "acme" / "publications" / EDITION_NAME / "issue_001" / "issue_001.review.json", review_artifact)
 
-    captured_trace_contexts: list[object] = []
-
-    class _FakeLearningDistiller:
-        def distill(self, *, editorial_rules, tracking_reports):
-            del editorial_rules
-            assert tuple(report.issue_number for report in tracking_reports) == (1,)
-            return LearningDistillation(
-                tracked_issue_numbers=(1,),
-                proposals=(
-                    EditorialRuleProposal(
-                        target="banned_openings",
-                        action="append",
-                        value="Current status is as follows",
-                        rationale="Accepted edits repeatedly replaced a generic opener with a direct answer.",
-                        supporting_issue_numbers=(1,),
-                        supporting_examples=("Issue 001 accepted: exec summary was rewritten to answer directly.",),
-                    ),
-                ),
-                prompt_version="learning_distiller.v1",
-            )
-
-    def _fake_build_learning_distiller(*, trace_context=None):
-        captured_trace_contexts.append(trace_context)
-        return _FakeLearningDistiller()
-
-    monkeypatch.setattr("src.commands.confirm_stages.learning_distiller.build_learning_distiller", _fake_build_learning_distiller)
+    monkeypatch.setattr(
+        "src.commands.confirm_stages.learning_distiller.build_learning_distiller",
+        lambda **kwargs: pytest.fail("confirm must not invoke online learning distillation"),
+    )
 
     exec_summary_path = get_narratives_dir(EDITION_NAME, 1, reports_root) / "exec_summary.md"
     exec_summary_path.write_text("Confirmed executive summary with direct leadership answer.\n", encoding="utf-8")
@@ -3663,19 +3661,9 @@ def test_confirm_issue_records_learning_distillation_when_review_tracking_exists
     )
 
     assert result.exit_code == 0
-    assert len(captured_trace_contexts) == 1
-    trace_context = captured_trace_contexts[0]
-    assert trace_context is not None
-    assert trace_context.edition == EDITION_NAME
-    assert trace_context.caller == "src.commands.confirm._record_learning_distillation"
-    assert trace_context.metadata["task_type"] == "learning_distillation"
-    assert trace_context.metadata["issue_number"] == 1
-    assert result.learning_md_path is not None and result.learning_md_path.exists()
-    assert result.learning_json_path is not None and result.learning_json_path.exists()
-    assert result.learning_summary == "AI learning distillation: 1 proposed rule update(s) from 1 tracked issue(s)."
-    learning_payload = json.loads(result.learning_json_path.read_text(encoding="utf-8"))
-    assert learning_payload["proposals"][0]["target"] == "banned_openings"
-    assert learning_payload["tracked_issue_numbers"] == [1]
+    assert result.learning_md_path is None
+    assert result.learning_json_path is None
+    assert result.learning_summary.startswith("Governed feedback:")
 
 
 def test_confirm_cli_rejects_already_confirmed_issue(monkeypatch, repo_root: Path, tmp_path: Path) -> None:

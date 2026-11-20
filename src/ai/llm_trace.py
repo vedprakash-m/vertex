@@ -78,6 +78,10 @@ def llm_trace(
     latency_ms: float | None = None,
     cost_usd: float | None = None,
     error: str | None = None,
+    resolved_deployment: str | None = None,
+    attempt_index: int | None = None,
+    outcome: str | None = None,
+    estimated_cost_usd: float | None = None,
     cost_reservation_id: int | None = None,
     metadata: dict[str, Any] | None = None,
     trace_file: Path | None = None,
@@ -108,6 +112,14 @@ def llm_trace(
         record["cost_usd"] = round(cost_usd, 6)
     if error is not None:
         record["error"] = error
+    if resolved_deployment is not None:
+        record["resolved_deployment"] = resolved_deployment
+    if attempt_index is not None:
+        record["attempt_index"] = attempt_index
+    if outcome is not None:
+        record["outcome"] = outcome
+    if estimated_cost_usd is not None:
+        record["estimated_cost_usd"] = round(estimated_cost_usd, 6)
     if cost_reservation_id is not None:
         record["cost_reservation_id"] = cost_reservation_id
     if metadata:

@@ -11,7 +11,11 @@ import pytest
 
 from src.core.workiq_freshness import mark_workiq_freshness_success
 from src.m365.workiq_ask_support import DiscoveryRequest, validate_structured_discovery_payload
-from src.m365.workiq_retriever import _canonical_source_id, retrieve_workiq_threads
+from src.m365.workiq_retriever import (
+    WorkIQRunBudget,
+    _canonical_source_id,
+    retrieve_workiq_threads,
+)
 
 
 REQUEST = DiscoveryRequest("Synthetic lane", ("synthetic",), date(2026, 6, 1), date(2026, 6, 21), 8)
@@ -132,6 +136,37 @@ def test_retrieval_budgets_remain_bounded(budget: str, monkeypatch: pytest.Monke
     result = _retrieve(bridge, **kwargs)
     assert result.calls_made == (2 if budget == "top_k" else 1)
     assert len(result.enrichments) == (1 if budget == "top_k" else 0)
+
+
+def test_run_budget_is_shared_across_thread_restarts() -> None:
+    bridge = Bridge([
+        _record(id="native-1", conversationId="thread-1"),
+        _record(id="native-2", conversationId="thread-2"),
+    ])
+    budget = WorkIQRunBudget(max_calls=3, max_wall_clock_seconds=30)
+
+    first = _retrieve(bridge, budget=budget, top_k=1)
+    second = _retrieve(bridge, budget=budget, top_k=1)
+
+    assert first.calls_made == 2
+    assert len(first.enrichments) == 1
+    assert second.calls_made == 1
+    assert second.enrichments == ()
+    assert second.budget_exhausted is True
+    assert len(bridge.questions) == 3
+
+
+def test_run_budget_rejects_invalid_and_elapsed_reservations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValueError, match="per-run retrieval budget"):
+        WorkIQRunBudget(max_calls=0, max_wall_clock_seconds=30)
+
+    clock = iter((0.0, 2.0))
+    monkeypatch.setattr("src.m365.workiq_retriever.monotonic", lambda: next(clock))
+    budget = WorkIQRunBudget(max_calls=2, max_wall_clock_seconds=1)
+    assert budget.reserve_call() == 1.0
+    assert budget.reserve_call() is None
 
 
 @pytest.mark.parametrize("body", [{}, ""])
@@ -256,6 +291,58 @@ def test_enrich_cli_retains_identity_warning_and_valid_partial_results(
     assert "turn1search2" not in result.output
     assert "Synthetic private subject" not in result.output
     assert "fixture@example.net" not in result.output
+
+
+def test_enrich_cli_shares_call_budget_across_lanes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import typer
+    from typer.testing import CliRunner
+    import src.commands.enrich as command
+
+    retrieval_config = SimpleNamespace(
+        per_thread_extraction=True,
+        per_thread_top_k=1,
+        max_calls_per_cycle=2,
+        max_wall_clock_seconds=30,
+        per_thread_one_hop=False,
+    )
+    resolved = SimpleNamespace(
+        paths=SimpleNamespace(program_id="synthetic"),
+        program=SimpleNamespace(m365=SimpleNamespace(retrieval=retrieval_config)),
+    )
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> datetime:
+            return datetime(2026, 6, 21, tzinfo=timezone.utc)
+
+    bridge = Bridge([_record(id="native-message", conversationId="native-thread")])
+    monkeypatch.setattr(bridge, "probe", lambda: SimpleNamespace(available=True, has_workiq=True), raising=False)
+    monkeypatch.setattr("src.m365.agency_bridge.AgencyBridge", lambda **_: bridge)
+    monkeypatch.setattr(command, "resolve_edition", lambda *_, **__: resolved)
+    monkeypatch.setattr(command, "load_program_context", lambda *_, **__: None)
+    monkeypatch.setattr(command, "_load_registry_lanes", lambda *_: [
+        {"id": "lane-a", "name": "Synthetic lane A"},
+        {"id": "lane-b", "name": "Synthetic lane B"},
+    ])
+    monkeypatch.setattr(command, "_build_workiq_breaker", lambda **_: None)
+    monkeypatch.setattr(command, "_build_workiq_cost_guard", lambda **_: None)
+    monkeypatch.setattr(command, "_is_workiq_lane_suspended", lambda **_: False)
+    monkeypatch.setattr(command, "_record_workiq_lane_result", lambda **_: None)
+    monkeypatch.setattr(command, "_workiq_thread_freshness_path", lambda **_: tmp_path / "freshness.json")
+    monkeypatch.setattr(command, "datetime", Clock)
+    app = typer.Typer()
+    app.command()(command.enrich_command)
+
+    result = CliRunner().invoke(
+        app, ["--edition", "synthetic", "--dry-run", "--format", "json"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(bridge.questions) == 2
+    assert "per-run call or wall-clock budget exhausted" in result.stderr
+    assert [row["lane_id"] for row in json.loads(result.stdout)] == ["lane-a"]
 
 
 @pytest.mark.parametrize("dry_run", [False, True], ids=["normal", "preview"])
@@ -468,12 +555,13 @@ def test_rich_retrieval_refuses_invalid_validated_time_before_extraction(
         assert not cache.exists()
 
 
-def test_rich_retrieval_retains_normalized_naive_source_time() -> None:
+def test_rich_retrieval_rejects_unqualified_source_time() -> None:
     bridge = Bridge([_record(id="valid", receivedDateTime="2026-06-20T10:00:00")])
 
     result = _retrieve(bridge)
 
-    assert result.enrichments[0].timestamp == datetime(2026, 6, 20, 10, tzinfo=timezone.utc)
+    assert not result.enrichments
+    assert result.rejected_source_time_count == 1
 
 
 @pytest.mark.parametrize("max_calls, expected_rejected", [(1, 1), (10, 2)])

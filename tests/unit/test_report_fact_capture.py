@@ -2,6 +2,8 @@ from datetime import datetime, timedelta, timezone
 from dataclasses import replace
 import json
 from pathlib import Path
+from typer import BadParameter
+import threading
 
 import pytest
 import yaml
@@ -183,6 +185,69 @@ def test_ordinary_report_rejects_fact_change_during_acquisition(
             store.detect_drift(pins[0][0])
     else:
         assert len(store.detect_drift(pins[0][0])) == 1
+
+
+@pytest.mark.parametrize("boundary", ["capture", "verdict"])
+def test_report_fences_fact_mutation_through_capture_and_verdict_assembly(
+    repo_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str,
+) -> None:
+    reports = stage_v2_report_workspace(repo_root, tmp_path)
+    programs_root = reports.parent / "programs"
+    disable_kusto_in_report_copy(reports)
+    monkeypatch.setenv("VERTEX_DB_PATH", str(tmp_path / "fact-db"))
+    store = ProgramFactStore("acme", db_root=tmp_path / "fact-db")
+    original = (
+        report_module.build_run_evidence_snapshot
+        if boundary == "capture"
+        else report_module.observe_program_verdict
+    )
+    committed = threading.Event()
+    writers: list[threading.Thread] = []
+
+    def write_during_boundary(*args, **kwargs):
+        def write() -> None:
+            store.append_fact(
+                ProgramFactInput(
+                    fact_type="decision",
+                    scope="program",
+                    entity_refs=("PROGRAM:acme",),
+                    payload={"decision": "after-capture"},
+                    natural_key="after-capture",
+                ),
+                recorded_at=datetime(2026, 5, 5, 18, 0, 1, tzinfo=timezone.utc),
+            )
+            committed.set()
+
+        writer = threading.Thread(target=write)
+        writers.append(writer)
+        writer.start()
+        assert not committed.wait(0.2)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        report_module,
+        "build_run_evidence_snapshot" if boundary == "capture" else "observe_program_verdict",
+        write_during_boundary,
+    )
+
+    result = generate_report_draft(
+        edition_name="acme_weekly",
+        reports_root=reports,
+        programs_root=programs_root,
+        archive_root=tmp_path / "archive",
+        as_of=datetime(2026, 5, 5, 18, tzinfo=timezone.utc),
+        work_item_loader=lambda bundle, timestamp: (_sample_items(timestamp), 0),
+        open_browser=False,
+    )
+
+    for writer in writers:
+        writer.join(timeout=5)
+    assert all(not writer.is_alive() for writer in writers)
+    assert committed.is_set()
+    capture = result.manifest.metadata["run_evidence_snapshot"]
+    assert capture.fact_content_sha256
+    assert capture.binding_declarations == ()
+    assert len(store.snapshot().facts) == 1
 
 
 @pytest.mark.parametrize("with_gather", [False, True])
@@ -437,6 +502,8 @@ def test_ordinary_report_compares_the_rendered_health_summary_without_promotion(
     assert captured.manifest_id == result.manifest.manifest_id
     assert captured.run_evidence_snapshot is not None
     assert captured.run_evidence_snapshot.sha256 == comparison.capture_sha256
+    assert captured.program_verdict_observation is not None
+    assert captured.program_verdict_comparison is not None
     assert (result.html_body, result.markdown_body) == rendered[0][:2]
     assert result.manifest.qg_results == rendered[0][2]
     assert not any("verdict" in gate for gate in result.manifest.qg_results)
@@ -446,6 +513,11 @@ def test_ordinary_report_compares_the_rendered_health_summary_without_promotion(
         assert observation.verdict.schedule_risk.value == "high"
         assert comparison.report_risk != comparison.verdict_risk
         assert comparison.risk_values_equal is False
+
+    persisted["metadata"]["program_verdict_observation"]["verdict_sha256"] = "sha256:changed"
+    result.manifest_path.write_text(json.dumps(persisted), encoding="utf-8")
+    with pytest.raises(BadParameter, match="ProgramVerdict observation"):
+        load_confirm_draft_manifest("acme_weekly", 1, draft_state=draft, programs_root=root)
 
 
 @pytest.mark.parametrize(("probability", "historical_target", "expected"), [

@@ -168,6 +168,54 @@ def test_record_confirmed_claims_skips_duplicates_and_flags_stale_claims(tmp_pat
     assert assessments[0].reason is not None and "current ADO target date is 2026-07-10" in assessments[0].reason
 
 
+def test_record_confirmed_claims_reports_dangling_claim_evidence_without_blocking(tmp_path) -> None:
+    programs_root = tmp_path / "programs"
+    extraction_result = extract_claims_from_confirmed_narratives(
+        program_id="other",
+        edition_id="other_weekly",
+        issue_number=1,
+        claim_date=date(2026, 5, 1),
+        narratives={"exec_summary.md": "WI:999 rollout expected by June 20."},
+        items=(_sample_item(999, target_date=date(2026, 6, 20)),),
+    )
+
+    recorded = record_confirmed_claims(
+        program_id="acme",
+        edition_id="acme_weekly",
+        issue_number=77,
+        claim_date=date(2026, 5, 10),
+        narratives={},
+        items=(_sample_item(1001, target_date=date(2026, 6, 15)),),
+        extraction_result=extraction_result,
+        programs_root=programs_root,
+    )
+
+    assert len(recorded.written_claims) == 1
+    assert (
+        "Claim evidence consistency (observe-only): 1 unsupported claim(s), "
+        "1 dangling evidence reference(s)."
+        in recorded.warnings
+    )
+
+
+def test_record_confirmed_claims_keeps_supported_claim_evidence_warning_free(tmp_path) -> None:
+    recorded = record_confirmed_claims(
+        program_id="acme",
+        edition_id="acme_weekly",
+        issue_number=77,
+        claim_date=date(2026, 5, 10),
+        narratives={"exec_summary.md": "WI:1001 rollout expected by June 20."},
+        items=(_sample_item(1001, target_date=date(2026, 6, 20)),),
+        programs_root=tmp_path / "programs",
+    )
+
+    assert len(recorded.written_claims) == 1
+    assert not any(
+        warning.startswith("Claim evidence consistency")
+        for warning in recorded.warnings
+    )
+
+
 def test_record_confirmed_claims_uses_provided_extraction_result_and_logs_calibration(tmp_path) -> None:
     programs_root = tmp_path / "programs"
 

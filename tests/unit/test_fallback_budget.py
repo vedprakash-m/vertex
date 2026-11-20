@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import traceback
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -16,7 +17,7 @@ from src.ai.ai_mode import AIMode
 from src.ai.claim_extractor import ClaimExtractor, ClaimExtractorBudgetError
 from src.ai.client import AIClient, AIClientError, AIPreflightError, BudgetConfigurationError, BudgetExceeded, BudgetStateError
 from src.ai.cost_guard import CostGuard
-from src.ai.deployment_fallback import FallbackAIClient, FallbackStructuredClient
+from src.ai.deployment_fallback import FallbackAIClient, FallbackStructuredClient, resolve_ai_deployments
 from src.ai.llm_trace import AITraceContext, use_trace_context
 from src.ai.structured_feature_runner import BatchProviderResult, FeatureOutcome, FeatureOutcomeStatus
 from src.ai.tiered_router import RouteOutcome, Tier
@@ -36,6 +37,26 @@ from tests.unit.test_ai_client import (
     _retry_reservation_client,
     _retry_reservation_rows,
 )
+
+
+@pytest.fixture(autouse=True)
+def synthetic_explicit_fallback_prices(monkeypatch: pytest.MonkeyPatch) -> None:
+    import src.ai.client as ai_client
+
+    monkeypatch.setattr(
+        ai_client,
+        "load_ai_model_cost_policy_exact",
+        lambda deployment: ai_client.load_ai_model_cost_policy(deployment),
+    )
+
+
+def test_deployment_resolution_deduplicates_identical_backup() -> None:
+    assert resolve_ai_deployments(
+        primary_candidates=("shared",),
+        backup_candidates=("shared",),
+        primary_fallback_envs=(),
+        backup_fallback_envs=(),
+    ) == ("shared",)
 
 
 @pytest.mark.parametrize("client_class", [FallbackAIClient, FallbackStructuredClient])
@@ -166,7 +187,11 @@ def _token_budget_client(
     factory_mock = Mock(side_effect=factory)
     trace = AITraceContext(
         edition="acme_weekly", run_id="token-budget", caller="test",
-        metadata={**({} if run_budget is None else {"run_budget_usd": run_budget}), **(trace_metadata or {})},
+        metadata={
+            "ai_feature": "risk_proposal_generator",
+            **({} if run_budget is None else {"run_budget_usd": run_budget}),
+            **(trace_metadata or {}),
+        },
     )
     client = client_class(
         deployments=("summary-model", "summary-backup"), temperature=0.2, budget_usd=budget,
@@ -228,6 +253,69 @@ def test_fallback_chain_refuses_before_dispatch_when_worst_case_exceeds_ceiling(
 
 
 @pytest.mark.parametrize("method", ["chat", "structured"])
+def test_fallback_chain_reserves_every_configured_deployment_occurrence(
+    tmp_path, monkeypatch, method,
+) -> None:
+    client, _clients, _factory, router, _trace_writer, _estimator = _token_budget_client(
+        tmp_path, monkeypatch, estimate=1000, custom_retry=True, default_factory=True,
+        run_budget=5 * _CHAIN_ATTEMPT_USD,
+    )
+    client._deployments = ("summary-model", "summary-model")
+    arguments = {"parser": lambda value: value} if method == "structured" else {}
+
+    with pytest.raises(BudgetExceeded):
+        getattr(client, method)("system", "user", max_tokens=1000, **arguments)
+
+    router.route.assert_not_called()
+    assert _chain_run_state().reserved_usd == 0.0
+
+
+@pytest.mark.parametrize("method", ["chat", "structured"])
+def test_fallback_chain_reserves_worst_case_against_feature_ceiling(
+    tmp_path, monkeypatch, method,
+) -> None:
+    feature_ceiling = 5 * _CHAIN_ATTEMPT_USD
+    client, _clients, _factory, router, _trace_writer, _estimator = _token_budget_client(
+        tmp_path,
+        monkeypatch,
+        estimate=1000,
+        custom_retry=True,
+        default_factory=True,
+        budget=feature_ceiling,
+        run_budget=1.0,
+    )
+    arguments = {"parser": lambda value: value} if method == "structured" else {}
+
+    with pytest.raises(BudgetExceeded, match="feature ceiling"):
+        getattr(client, method)("system", "user", max_tokens=1000, **arguments)
+
+    router.route.assert_not_called()
+    assert _chain_run_state().reserved_usd == 0.0
+
+
+@pytest.mark.parametrize("method", ["chat", "structured"])
+def test_fallback_chain_refuses_missing_feature_before_dispatch(
+    tmp_path, monkeypatch, method,
+) -> None:
+    client, _clients, _factory, router, _trace_writer, _estimator = _token_budget_client(
+        tmp_path,
+        monkeypatch,
+        estimate=1000,
+        custom_retry=True,
+        default_factory=True,
+        run_budget=1.0,
+        trace_metadata={"ai_feature": None},
+    )
+    arguments = {"parser": lambda value: value} if method == "structured" else {}
+
+    with pytest.raises(BudgetConfigurationError, match="feature"):
+        getattr(client, method)("system", "user", max_tokens=1000, **arguments)
+
+    router.route.assert_not_called()
+    assert _chain_run_state().reserved_usd == 0.0
+
+
+@pytest.mark.parametrize("method", ["chat", "structured"])
 def test_fallback_chain_refuses_unknown_backup_price_before_primary_dispatch(tmp_path, monkeypatch, method) -> None:
     from src.core.exceptions import ConfigError
     from src.core.policy_loader import load_ai_model_cost_policy
@@ -237,7 +325,7 @@ def test_fallback_chain_refuses_unknown_backup_price_before_primary_dispatch(tmp
             raise ConfigError("synthetic missing price")
         return load_ai_model_cost_policy(deployment)
 
-    monkeypatch.setattr("src.ai.client.load_ai_model_cost_policy", pricing)
+    monkeypatch.setattr("src.ai.client.load_ai_model_cost_policy_exact", pricing)
     client, _clients, _factory, router, _trace_writer, _estimator = _token_budget_client(
         tmp_path, monkeypatch, estimate=1000, custom_retry=True, run_budget=1.0,
     )
@@ -262,6 +350,157 @@ def test_fallback_chain_refuses_unknown_feature_before_dispatch(tmp_path, monkey
 
     router.route.assert_not_called()
     assert _chain_run_state().reserved_usd == 0.0
+
+
+def test_fallback_cost_telemetry_tracks_resolved_attempts_and_reservations(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.core.ai_telemetry import append_ai_telemetry, read_ai_telemetry
+    from src.core.policy_loader import AIModelCostPolicy
+
+    programs_root = tmp_path / "programs"
+    trace_file = tmp_path / "llm-trace.jsonl"
+    telemetry_root = tmp_path / "telemetry"
+    price = AIModelCostPolicy(
+        input_cost_per_1k_tokens=1.0,
+        output_cost_per_1k_tokens=2.0,
+    )
+    monkeypatch.setattr(
+        "src.ai.client.load_ai_model_cost_policy",
+        lambda _deployment: price,
+    )
+    monkeypatch.setattr(
+        "src.ai.client.resolve_token_estimator",
+        lambda _deployment: SimpleNamespace(estimate=lambda _text: 10),
+    )
+    monkeypatch.setattr("src.ai.client.get_ai_mode", lambda: AIMode.ACTIVE)
+    monkeypatch.setattr("src.ai.cost_guard.PROGRAMS_ROOT", programs_root)
+    monkeypatch.setattr(
+        "src.core.ai_telemetry.append_ai_telemetry",
+        lambda record: append_ai_telemetry(
+            record,
+            programs_root=telemetry_root,
+        ),
+    )
+    monkeypatch.setenv("VERTEX_LLM_TRACE", "1")
+
+    class RetryingPrimaryRouter:
+        def __init__(self) -> None:
+            self.primary_failed = False
+
+        def route(self, **kwargs):
+            if (
+                kwargs["deployment"] == "resolved-primary"
+                and not self.primary_failed
+            ):
+                self.primary_failed = True
+                kwargs["before_retry"]()
+                kwargs["before_retry"]()
+                raise RuntimeError("synthetic provider failure")
+            return _FakeResponse("ok", prompt_tokens=5, completion_tokens=7)
+
+    monkeypatch.setattr(
+        "src.ai.client.AIRequestRouter",
+        Mock(return_value=RetryingPrimaryRouter()),
+    )
+    trace = AITraceContext(
+        edition="acme_weekly",
+        run_id="resolved-attempts",
+        caller="test",
+        trace_file=trace_file,
+        metadata={
+            "program_id": "acme_weekly",
+            "feature": "action_extractor",
+            "ai_feature": "action_extractor",
+            "run_budget_usd": 10.0,
+        },
+    )
+    client = FallbackAIClient(
+        deployments=("resolved-primary", "resolved-backup"),
+        temperature=0.2,
+        budget_usd=10.0,
+        trace_context=trace,
+        client_factory=lambda **kwargs: AIClient(**kwargs),
+    )
+    private_system = "synthetic-private-system"
+    private_user = "synthetic-private-user"
+
+    assert client.chat(
+        private_system,
+        private_user,
+        max_tokens=10,
+        prompt_version="test.v1",
+    ) == "ok"
+
+    telemetry = read_ai_telemetry(
+        "acme_weekly",
+        programs_root=telemetry_root,
+    )
+    assert [record.resolved_deployment for record in telemetry] == [
+        "resolved-primary",
+        "resolved-primary",
+        "resolved-primary",
+        "resolved-backup",
+    ]
+    assert [record.attempt_index for record in telemetry] == [1, 2, 3, 4]
+    assert [record.outcome for record in telemetry] == [
+        "retry",
+        "retry",
+        "failed",
+        "succeeded",
+    ]
+    assert [record.run_id for record in telemetry] == ["resolved-attempts"] * 4
+    assert all(record.cost_reservation_id is not None for record in telemetry)
+    assert all(record.estimated_cost_usd is not None for record in telemetry)
+    assert telemetry[-1].tokens_in == 5
+    assert telemetry[-1].tokens_out == 7
+
+    traces = [
+        json.loads(line)
+        for line in trace_file.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [record["resolved_deployment"] for record in traces] == [
+        "resolved-primary",
+        "resolved-primary",
+        "resolved-primary",
+        "resolved-backup",
+    ]
+    assert [record["attempt_index"] for record in traces] == [1, 2, 3, 4]
+    assert [record["outcome"] for record in traces] == [
+        "retry",
+        "retry",
+        "failed",
+        "succeeded",
+    ]
+    assert private_system not in trace_file.read_text(encoding="utf-8")
+    assert private_user not in trace_file.read_text(encoding="utf-8")
+    serialized_telemetry = (
+        telemetry_root / "acme_weekly" / "_state" / "ai_telemetry.jsonl"
+    ).read_text(encoding="utf-8")
+    assert private_system not in serialized_telemetry
+    assert private_user not in serialized_telemetry
+
+    guard = CostGuard(
+        edition="acme_weekly",
+        run_id="resolved-attempts",
+        budget_usd=10.0,
+        programs_root=programs_root,
+    )
+    with sqlite3.connect(guard.ledger_path) as connection:
+        reservations = connection.execute(
+            "SELECT reservation_id, status "
+            "FROM ai_cost_reservations ORDER BY reservation_id",
+        ).fetchall()
+    assert [row[1] for row in reservations] == [
+        "reserved",
+        "reserved",
+        "reserved",
+        "settled",
+    ]
+    assert [record.cost_reservation_id for record in telemetry] == [
+        row[0] for row in reservations
+    ]
 
 
 def test_fallback_chain_retains_uncertain_attempt_and_releases_remainder(tmp_path, monkeypatch) -> None:
@@ -471,7 +710,8 @@ def test_pre_dispatch_feature_budget_rejects_estimated_excess(
     )
     if already_spent:
         router.route.return_value.usage.completion_tokens = 125
-        assert client.chat("synthetic-system", "synthetic-user", max_tokens=125) == "{}"
+        primary = cast(AIClient, client._get_client("summary-model"))
+        assert primary.chat("synthetic-system", "synthetic-user", max_tokens=125) == "{}"
         guard = clients[0]._run_cost_guard
         state_before = guard.current_state()
         ledger_before = guard.ledger_path.read_bytes()
@@ -508,13 +748,15 @@ def test_pre_dispatch_feature_budget_allows_exact_remaining(
         lambda _: SimpleNamespace(input_cost_per_1k_tokens=0.0, output_cost_per_1k_tokens=1.0),
     )
     # RELO-W1.4: the run ceiling must admit the whole-chain worst case (3 attempts x 2 deployments).
+    budget = 1.625 if already_spent else 1.5
     client, clients, factory, router, trace_writer, _ = _token_budget_client(
-        tmp_path, monkeypatch, estimate=0, custom_retry=True, budget=0.25, run_budget=10.0,
+        tmp_path, monkeypatch, estimate=0, custom_retry=True, budget=budget, run_budget=10.0,
     )
     tokens = 125 if already_spent else 250
     router.route.return_value.usage.completion_tokens = tokens
     if already_spent:
-        assert client.chat("synthetic-system", "synthetic-user", max_tokens=tokens) == "{}"
+        primary = cast(AIClient, client._get_client("summary-model"))
+        assert primary.chat("synthetic-system", "synthetic-user", max_tokens=tokens) == "{}"
 
     assert client.structured(
         "synthetic-system", "synthetic-user", parser=lambda value: value, max_tokens=tokens,
@@ -538,7 +780,7 @@ def test_pre_dispatch_feature_budget_counts_same_client_inflight(
         lambda _: SimpleNamespace(input_cost_per_1k_tokens=0.0, output_cost_per_1k_tokens=1.0),
     )
     client, clients, factory, router, trace_writer, _ = _token_budget_client(
-        tmp_path, monkeypatch, estimate=0, custom_retry=True, budget=1.0, run_budget=10.0,
+        tmp_path, monkeypatch, estimate=0, custom_retry=True, budget=3.6, run_budget=10.0,
     )
     primary = cast(AIClient, client._get_client("summary-model"))
     entered, release = Event(), Event()
@@ -593,7 +835,7 @@ def test_pre_dispatch_feature_budget_allows_same_client_concurrency_at_boundary(
         lambda _: SimpleNamespace(input_cost_per_1k_tokens=0.0, output_cost_per_1k_tokens=1.0),
     )
     client, clients, factory, router, trace_writer, _ = _token_budget_client(
-        tmp_path, monkeypatch, estimate=0, custom_retry=True, budget=1.0, run_budget=10.0,
+        tmp_path, monkeypatch, estimate=0, custom_retry=True, budget=3.6, run_budget=10.0,
     )
     primary = cast(AIClient, client._get_client("summary-model"))
     guard = clients[0]._run_cost_guard
@@ -630,7 +872,7 @@ def test_pre_dispatch_feature_budget_reuses_client_on_concurrent_first_call(
         lambda _: SimpleNamespace(input_cost_per_1k_tokens=0.0, output_cost_per_1k_tokens=1.0),
     )
     client, clients, factory, router, trace_writer, _ = _token_budget_client(
-        tmp_path, monkeypatch, estimate=0, custom_retry=True, budget=1.0, run_budget=10.0,
+        tmp_path, monkeypatch, estimate=0, custom_retry=True, budget=3.6, run_budget=10.0,
     )
     CostGuard(
         edition="acme_weekly", run_id="token-budget", budget_usd=10.0, programs_root=tmp_path / "programs",
@@ -770,7 +1012,7 @@ def test_pre_dispatch_feature_budget_preserves_uncertain_settlement(tmp_path, mo
     projection_before = guard.state_path.read_bytes()
     assert primary.spent_usd == 0.125 and before.reserved_usd == 0.6
 
-    with pytest.raises(BudgetExceeded, match="feature"):
+    with pytest.raises(BudgetStateError, match="settlement"):
         client.chat("synthetic-system", "synthetic-user", max_tokens=300)
 
     factory.assert_called_once()
@@ -793,23 +1035,26 @@ def test_pre_dispatch_feature_budget_counts_fallback_uncertain(
         lambda _: SimpleNamespace(input_cost_per_1k_tokens=0.0, output_cost_per_1k_tokens=1.0),
     )
     client, _, _, router, trace_writer, _ = _token_budget_client(
-        tmp_path, monkeypatch, estimate=0, custom_retry=custom_retry, budget=1.0, run_budget=10.0,
+        tmp_path, monkeypatch, estimate=0, custom_retry=custom_retry, budget=3.6, run_budget=10.0,
         default_factory=True, explicit_builtin_factory=explicit_builtin_factory, client_class=client_class,
     )
     router.route.side_effect = [TimeoutError("synthetic outcome unknown"), router.route.return_value]
     arguments = {"parser": lambda value: value} if method == "structured" else {}
 
-    with pytest.raises(BudgetExceeded, match="feature"):
-        getattr(client, method)("synthetic-system", "synthetic-user", max_tokens=600, **arguments)
+    assert getattr(client, method)(
+        "synthetic-system", "synthetic-user", max_tokens=600, **arguments,
+    ) == ({} if method == "structured" else "{}")
 
     assert set(client._clients) == {"summary-model", "summary-backup"}
-    router.route.assert_called_once()
-    trace_writer.assert_called_once()
+    assert router.route.call_count == 2
+    assert trace_writer.call_count == 2
     guard = cast(AIClient, client._clients["summary-model"])._run_cost_guard
     state = guard.current_state()
-    assert state.spent_usd == 0.0 and state.reserved_usd == 0.6 and state.ai_calls == 0
+    assert state.spent_usd == 0.0 and state.reserved_usd == 0.6 and state.ai_calls == 1
     with sqlite3.connect(guard.ledger_path) as connection:
-        assert connection.execute("SELECT status FROM ai_cost_reservations").fetchall() == [("reserved",)]
+        assert connection.execute(
+            "SELECT status FROM ai_cost_reservations ORDER BY reservation_id"
+        ).fetchall() == [("reserved",), ("settled",)]
 
 
 @pytest.mark.parametrize("client_class", [FallbackAIClient, FallbackStructuredClient])
@@ -826,7 +1071,7 @@ def test_pre_dispatch_feature_budget_allows_fallback_at_exact_remaining(
         ),
     )
     client, _, _, router, trace_writer, _ = _token_budget_client(
-        tmp_path, monkeypatch, estimate=0, custom_retry=False, budget=1.0, run_budget=10.0,
+        tmp_path, monkeypatch, estimate=0, custom_retry=False, budget=3.0, run_budget=10.0,
         default_factory=True, explicit_builtin_factory=explicit_builtin_factory, client_class=client_class,
     )
     router.route.side_effect = [TimeoutError("synthetic outcome unknown"), router.route.return_value]
@@ -863,15 +1108,20 @@ def test_pre_dispatch_feature_budget_counts_fallback_settled_usage(
         default_factory=True, explicit_builtin_factory=explicit_builtin_factory,
     )
     router.route.return_value.usage.completion_tokens = 600
-    router.route.return_value.choices[0].message.content = "not-json"
+    primary = cast(AIClient, client._get_client("summary-model"))
+    assert primary.chat("synthetic-system", "synthetic-user", max_tokens=600) == "{}"
 
     with pytest.raises(BudgetExceeded, match="feature"):
-        client.structured("synthetic-system", "synthetic-user", parser=lambda value: value, max_tokens=600)
+        client.structured(
+            "synthetic-system",
+            "synthetic-user",
+            parser=lambda value: value,
+            max_tokens=600,
+        )
 
-    assert set(client._clients) == {"summary-model", "summary-backup"}
+    assert set(client._clients) == {"summary-model"}
     router.route.assert_called_once()
     trace_writer.assert_called_once()
-    primary = cast(AIClient, client._clients["summary-model"])
     assert primary.spent_usd == 0.6
     state = primary._run_cost_guard.current_state()
     assert state.spent_usd == 0.6 and state.reserved_usd == 0.0 and state.ai_calls == 1
@@ -976,7 +1226,7 @@ def test_pre_dispatch_feature_budget_counts_fallback_inflight(
         lambda _: SimpleNamespace(input_cost_per_1k_tokens=0.0, output_cost_per_1k_tokens=1.0),
     )
     client, _, _, router, trace_writer, _ = _token_budget_client(
-        tmp_path, monkeypatch, estimate=0, custom_retry=True, budget=1.0, run_budget=10.0,
+        tmp_path, monkeypatch, estimate=0, custom_retry=True, budget=2.4, run_budget=10.0,
         default_factory=True, explicit_builtin_factory=explicit_builtin_factory,
     )
     entered, release = Event(), Event()
@@ -1010,20 +1260,19 @@ def test_pre_dispatch_feature_budget_counts_fallback_inflight(
             )
             with pytest.raises(BudgetExceeded, match="feature"):
                 second.result(timeout=10)
-            assert router.route.call_count == 2
-            assert trace_writer.call_count == 1
+            assert router.route.call_count == 1
+            trace_writer.assert_not_called()
             guard = cast(AIClient, client._clients["summary-model"])._run_cost_guard
             state = guard.current_state()
-            # RELO-W1.4: the in-flight chain holds its worst case (0.4 x 3 attempts x 2 deployments)
-            # alongside the refused chain's retained uncertain attempt.
-            assert state.spent_usd == 0.0 and state.reserved_usd == pytest.approx(2.8) and state.ai_calls == 0
+            # The in-flight chain holds its complete 0.4 x 3 x 2 bound.
+            assert state.spent_usd == 0.0 and state.reserved_usd == pytest.approx(2.4) and state.ai_calls == 0
         finally:
             release.set()
         assert first.result(timeout=10) == ({} if method == "structured" else "{}")
 
     state = guard.current_state()
-    assert state.spent_usd == 0.0 and state.reserved_usd == pytest.approx(0.4) and state.ai_calls == 1
-    assert trace_writer.call_count == 2
+    assert state.spent_usd == 0.0 and state.reserved_usd == 0.0 and state.ai_calls == 1
+    assert trace_writer.call_count == 1
 
 
 def test_pre_dispatch_feature_budget_counts_fallback_settlement_failure(tmp_path, monkeypatch) -> None:
@@ -1046,7 +1295,7 @@ def test_pre_dispatch_feature_budget_counts_fallback_settlement_failure(tmp_path
     state = guard.current_state()
     ledger_before, projection_before = guard.ledger_path.read_bytes(), guard.state_path.read_bytes()
 
-    with pytest.raises(BudgetExceeded, match="feature"):
+    with pytest.raises(BudgetStateError, match="settlement"):
         backup.chat("synthetic-system", "synthetic-user", max_tokens=300)
 
     assert primary.spent_usd == 0.125 and backup.spent_usd == 0.0
@@ -1158,7 +1407,7 @@ def test_pre_dispatch_feature_budget_remains_separate_for_distinct_wrappers(tmp_
         default_factory=True,
     )
     second = FallbackAIClient(
-        deployments=("summary-model",), temperature=0.2, budget_usd=1.0, trace_context=first._trace_context,
+        deployments=("summary-model",), temperature=0.2, budget_usd=1.8, trace_context=first._trace_context,
     )
     router.route.side_effect = [TimeoutError("synthetic outcome unknown"), router.route.return_value]
 
@@ -1298,12 +1547,13 @@ def test_post_usage_feature_budget_allows_exact_ceiling_once(tmp_path, monkeypat
     router.route.return_value.usage.prompt_tokens = 1000
     parser = Mock(return_value={})
     arguments = {"parser": parser} if method == "structured" else {}
+    primary = cast(AIClient, client._get_client("summary-model"))
 
-    assert getattr(client, method)("system", "user", max_tokens=500, **arguments) == (
+    assert getattr(primary, method)("system", "user", max_tokens=500, **arguments) == (
         {} if method == "structured" else "{}"
     )
     with pytest.raises(BudgetExceeded):
-        getattr(client, method)("system", "user", max_tokens=0, **arguments)
+        getattr(primary, method)("system", "user", max_tokens=0, **arguments)
 
     factory.assert_called_once()
     router.route.assert_called_once()
@@ -1396,10 +1646,11 @@ def test_post_usage_feature_budget_reaches_runner_without_retry(
     )
     router.route.return_value.usage.prompt_tokens = 1250
     parser = Mock(return_value={})
+    primary = cast(AIClient, client._get_client("summary-model"))
     provider = Mock(
         side_effect=(
-            (lambda *_: client.structured("system", "user", parser=parser, max_tokens=500))
-            if batch else (lambda *_: client.chat("system", "user", max_tokens=500))
+            (lambda *_: primary.structured("system", "user", parser=parser, max_tokens=500))
+            if batch else (lambda *_: primary.chat("system", "user", max_tokens=500))
         ),
     )
     fallback = FeatureOutcome(
@@ -1513,7 +1764,7 @@ def test_post_usage_feature_budget_preserves_settlement_failure_precedence(tmp_p
     monkeypatch.setattr(primary._run_cost_guard, "settle_call", Mock(side_effect=StateError("settlement failed")))
 
     with pytest.raises(BudgetStateError, match="settlement failed"):
-        client.chat("system", "user", max_tokens=500)
+        primary.chat("system", "user", max_tokens=500)
 
     assert set(client._clients) == {"summary-model"}
     assert primary.spent_usd == 1.25 and primary.usage_stats.call_count == 1
@@ -1548,7 +1799,12 @@ def test_model_price_admission_stops_fallback_and_runner(
     router_factory = Mock(return_value=router)
     monkeypatch.setattr("src.ai.client.AIRequestRouter", router_factory)
     factory = Mock(side_effect=lambda **kwargs: AIClient(**kwargs))
-    trace = AITraceContext(edition="acme_weekly", run_id="price-admission", caller="test")
+    trace = AITraceContext(
+        edition="acme_weekly",
+        run_id="price-admission",
+        caller="test",
+        metadata={"ai_feature": "risk_proposal_generator"},
+    )
     client = FallbackAIClient(
         deployments=("primary", "backup"), temperature=0.2, budget_usd=1.0,
         trace_context=trace, client_factory=factory,
@@ -1605,7 +1861,12 @@ def test_invalid_provider_usage_preserves_reservation_and_stops_fallback(
     monkeypatch.setattr("src.ai.client.get_ai_mode", lambda: AIMode.ACTIVE)
     monkeypatch.setattr("src.ai.client.AIClient._write_trace", trace_writer)
     monkeypatch.setattr("src.ai.cost_guard.PROGRAMS_ROOT", tmp_path / "programs")
-    trace = AITraceContext(edition="acme_weekly", run_id="invalid-usage", caller="test")
+    trace = AITraceContext(
+        edition="acme_weekly",
+        run_id="invalid-usage",
+        caller="test",
+        metadata={"ai_feature": "risk_proposal_generator"},
+    )
     factory = Mock(side_effect=lambda **kwargs: AIClient(**kwargs))
     client = FallbackAIClient(
         deployments=("summary-model", "summary-backup"), temperature=0.2, budget_usd=1.0,
@@ -1648,7 +1909,12 @@ def test_missing_provider_usage_preserves_reservation(tmp_path, monkeypatch, mis
     monkeypatch.setattr("src.ai.client.get_ai_mode", lambda: AIMode.ACTIVE)
     monkeypatch.setattr("src.ai.client.AIClient._write_trace", Mock())
     monkeypatch.setattr("src.ai.cost_guard.PROGRAMS_ROOT", tmp_path / "programs")
-    trace = AITraceContext(edition="acme_weekly", run_id="missing-usage", caller="test")
+    trace = AITraceContext(
+        edition="acme_weekly",
+        run_id="missing-usage",
+        caller="test",
+        metadata={"ai_feature": "risk_proposal_generator"},
+    )
     client = AIClient("summary-model", 0.2, 1.0, trace_context=trace)
 
     with pytest.raises(BudgetStateError, match="usage"):
@@ -1675,7 +1941,12 @@ def test_provider_usage_cost_overflow_preserves_reservation_and_stops_fallback(t
     monkeypatch.setattr("src.ai.client.get_ai_mode", lambda: AIMode.ACTIVE)
     monkeypatch.setattr("src.ai.client.AIClient._write_trace", trace_writer)
     monkeypatch.setattr("src.ai.cost_guard.PROGRAMS_ROOT", tmp_path / "programs")
-    trace = AITraceContext(edition="acme_weekly", run_id="overflow-usage", caller="test")
+    trace = AITraceContext(
+        edition="acme_weekly",
+        run_id="overflow-usage",
+        caller="test",
+        metadata={"ai_feature": "risk_proposal_generator"},
+    )
     factory = Mock(side_effect=lambda **kwargs: AIClient(**kwargs))
     client = FallbackAIClient(
         deployments=("summary-model", "summary-backup"), temperature=0.2, budget_usd=1e308,
@@ -1733,7 +2004,12 @@ def test_provider_usage_cumulative_spend_overflow_retains_reservation(tmp_path, 
     monkeypatch.setattr("src.ai.client.get_ai_mode", lambda: AIMode.ACTIVE)
     monkeypatch.setattr("src.ai.client.AIClient._write_trace", trace_writer)
     monkeypatch.setattr("src.ai.cost_guard.PROGRAMS_ROOT", tmp_path / "programs")
-    trace = AITraceContext(edition="acme_weekly", run_id="cumulative-overflow", caller="test")
+    trace = AITraceContext(
+        edition="acme_weekly",
+        run_id="cumulative-overflow",
+        caller="test",
+        metadata={"ai_feature": "risk_proposal_generator"},
+    )
     factory = Mock(side_effect=lambda **kwargs: AIClient(**kwargs))
     client = FallbackAIClient(
         deployments=("summary-model", "summary-backup"), temperature=0.2, budget_usd=1.7e308,
@@ -1778,7 +2054,12 @@ def test_zero_provider_usage_settles_reservation(tmp_path, monkeypatch, method) 
     monkeypatch.setattr("src.ai.client.get_ai_mode", lambda: AIMode.ACTIVE)
     monkeypatch.setattr("src.ai.client.AIClient._write_trace", trace_writer)
     monkeypatch.setattr("src.ai.cost_guard.PROGRAMS_ROOT", tmp_path / "programs")
-    trace = AITraceContext(edition="acme_weekly", run_id="zero-usage", caller="test")
+    trace = AITraceContext(
+        edition="acme_weekly",
+        run_id="zero-usage",
+        caller="test",
+        metadata={"ai_feature": "risk_proposal_generator"},
+    )
     client = AIClient("summary-model", 0.2, 1.0, trace_context=trace)
     arguments = {"parser": lambda value: value} if method == "structured" else {}
 
@@ -1819,7 +2100,12 @@ def test_ai_call_count_overflow_preserves_reservation_and_stops_fallback(tmp_pat
     monkeypatch.setattr("src.ai.client.get_ai_mode", lambda: AIMode.ACTIVE)
     monkeypatch.setattr("src.ai.client.AIClient._write_trace", trace_writer)
     monkeypatch.setattr("src.ai.cost_guard.PROGRAMS_ROOT", programs_root)
-    trace = AITraceContext(edition="acme_weekly", run_id="call-count-overflow", caller="test")
+    trace = AITraceContext(
+        edition="acme_weekly",
+        run_id="call-count-overflow",
+        caller="test",
+        metadata={"ai_feature": "risk_proposal_generator"},
+    )
     factory = Mock(side_effect=lambda **kwargs: AIClient(**kwargs))
     client = FallbackAIClient(
         deployments=("summary-model", "summary-backup"), temperature=0.2, budget_usd=1.0,
@@ -1899,7 +2185,7 @@ def _cost_state_failure_fixture(tmp_path, monkeypatch, phase):
     )
     trace = AITraceContext(
         edition="acme_weekly", run_id="fallback-state", caller="test",
-        metadata={"run_budget_usd": 1.0},
+        metadata={"run_budget_usd": 1.0, "ai_feature": "risk_proposal_generator"},
     )
     projection = []
     if phase in ("before", "preflight-io", "pre-projection-io", "pre-projection-unicode", "pre-projection-json"):
@@ -2211,7 +2497,7 @@ def test_fallback_budget_admission_reaches_runner_without_retry_or_dispatch(
     monkeypatch.setattr("src.ai.cost_guard.PROGRAMS_ROOT", tmp_path / "programs")
     trace = AITraceContext(
         edition="acme_weekly", run_id="fallback-admission", caller="test",
-        metadata={"run_budget_usd": run_budget},
+        metadata={"run_budget_usd": run_budget, "ai_feature": "risk_proposal_generator"},
     )
 
     def factory(**kwargs):
@@ -2297,7 +2583,7 @@ def test_actual_client_budget_exhaustion_through_fallback_reaches_runner(
     budget = 0.01 if post_usage else 0.000001
     trace = AITraceContext(
         edition="acme_weekly", run_id="fallback-budget", caller="test",
-        metadata={"run_budget_usd": budget},
+        metadata={"run_budget_usd": budget, "ai_feature": "risk_proposal_generator"},
     )
 
     def factory(**kwargs):

@@ -28,7 +28,7 @@ from src.core.rev.entity_types import EntityType
 from src.core.rev.governor import BudgetLimits, Governor
 from src.core.rev.identity import HydrationLocator
 from src.core.rev.ports import EnumeratedCandidate
-from src.core.rev.result import Success, Unsupported
+from src.core.rev.result import Incomplete, Success, Unsupported
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +76,32 @@ class TestSyncStateStore:
         loaded = store2.get(key)
         assert loaded is not None
         assert loaded.delta_link == "https://graph.microsoft.com/v1.0/delta?link=abc"
+
+    def test_failed_replace_preserves_prior_checkpoint(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from src.core.rev.sync_state import SyncStateStore, make_sync_state_key
+        import src.core.rev.sync_state as sync_state
+
+        store = SyncStateStore.load("prog-atomic", programs_root=tmp_path)
+        state = store.get_or_create("t1", "identity@fixture.example.net", "workiq", "v1")
+        state.last_page_token = "cursor-1"
+        store.save("prog-atomic", programs_root=tmp_path)
+
+        def fail_replace(*_args):
+            raise OSError("simulated")
+
+        monkeypatch.setattr(sync_state.os, "replace", fail_replace)
+        state.last_page_token = "cursor-2"
+
+        with pytest.raises(OSError, match="simulated"):
+            store.save("prog-atomic", programs_root=tmp_path)
+
+        loaded = SyncStateStore.load("prog-atomic", programs_root=tmp_path).get(
+            make_sync_state_key("t1", "identity@fixture.example.net", "workiq", "v1")
+        )
+        assert loaded is not None
+        assert loaded.last_page_token == "cursor-1"
 
     def test_ttl_eviction(self, tmp_path: Path) -> None:
         from src.core.rev.sync_state import SyncState, SyncStateStore, make_sync_state_key
@@ -147,6 +173,48 @@ class TestSyncStateStore:
         assert store.get(k2).delta_link is None   # cleared
         assert store.get(ko).delta_link == "link3"  # unaffected
 
+    def test_version_change_resets_persisted_delta_and_page_tokens(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from src.core.rev.sync_state import SyncStateStore, make_sync_state_key
+
+        store = SyncStateStore.load("prog-1", programs_root=tmp_path)
+        old = store.get_or_create("t1", "mailbox", "drive-1", "v1.0")
+        old.delta_link = "delta-v1"
+        old.last_page_token = "page-v1"
+        store.upsert(old)
+        store.save("prog-1", programs_root=tmp_path)
+
+        restarted = SyncStateStore.load("prog-1", programs_root=tmp_path)
+        restarted.invalidate_for_api_version_change(
+            "t1",
+            "mailbox",
+            "drive-1",
+            "v1.0",
+            "beta",
+        )
+        restarted.save("prog-1", programs_root=tmp_path)
+
+        final = SyncStateStore.load("prog-1", programs_root=tmp_path)
+        old_key = make_sync_state_key(
+            "t1",
+            "mailbox",
+            "drive-1",
+            "v1.0",
+        )
+        new_key = make_sync_state_key(
+            "t1",
+            "mailbox",
+            "drive-1",
+            "beta",
+        )
+        assert final.get(old_key) is None
+        current = final.get(new_key)
+        assert current is not None
+        assert current.delta_link is None
+        assert current.last_page_token is None
+
     def test_stats(self) -> None:
         from src.core.rev.sync_state import SyncStateStore
 
@@ -200,6 +268,152 @@ class TestFakeChangeFeed:
 
         feed = FakeChangeFeed(pages=[])
         result = feed.changes(delta_link=None, correlation_id="test")
+        assert isinstance(result, Success)
+        assert result.value == ()
+
+    def test_delta_link_resumes_after_prior_fixture_page(self) -> None:
+        from src.m365.rev.change_feeds import DeltaPage, FakeChangeFeed
+
+        feed = FakeChangeFeed(
+            entity_type=EntityType.DRIVE_ITEM,
+            pages=[
+                DeltaPage(
+                    changed=(
+                        _candidate(
+                            "item-1",
+                            source_type=EntityType.DRIVE_ITEM,
+                        ),
+                    ),
+                    tombstones=(),
+                    delta_link="next-1",
+                ),
+                DeltaPage(
+                    changed=(
+                        _candidate(
+                            "item-2",
+                            source_type=EntityType.DRIVE_ITEM,
+                        ),
+                    ),
+                    tombstones=(),
+                    delta_link="next-2",
+                ),
+            ],
+        )
+
+        result = feed.changes(delta_link="next-1", correlation_id="test")
+
+        assert isinstance(result, Success)
+        assert [
+            candidate.locator.resource_id for candidate in result.value
+        ] == ["item-2"]
+        assert feed.peek_delta_link() == "next-2"
+
+    def test_restart_resumes_from_persisted_fixture_delta_link(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from src.core.rev.sync_state import SyncStateStore
+        from src.m365.rev.change_feeds import DeltaPage, FakeChangeFeed
+
+        pages = [
+            DeltaPage(
+                changed=(
+                    _candidate(
+                        "item-1",
+                        source_type=EntityType.DRIVE_ITEM,
+                    ),
+                ),
+                tombstones=(),
+                delta_link="next-1",
+            ),
+            DeltaPage(
+                changed=(
+                    _candidate(
+                        "item-2",
+                        source_type=EntityType.DRIVE_ITEM,
+                    ),
+                ),
+                tombstones=(),
+                delta_link="next-2",
+            ),
+        ]
+        first = FakeChangeFeed(
+            entity_type=EntityType.DRIVE_ITEM,
+            pages=pages,
+        )
+        assert isinstance(
+            first.changes(delta_link=None, correlation_id="first"),
+            Success,
+        )
+
+        store = SyncStateStore()
+        state = store.get_or_create(
+            "t1",
+            "mailbox",
+            "drive-1",
+            "v1.0",
+        )
+        state.delta_link = first.peek_delta_link()
+        store.upsert(state)
+        store.save("prog-1", programs_root=tmp_path)
+
+        restarted_state = SyncStateStore.load(
+            "prog-1",
+            programs_root=tmp_path,
+        ).get_or_create(
+            "t1",
+            "mailbox",
+            "drive-1",
+            "v1.0",
+        )
+        restarted = FakeChangeFeed(
+            entity_type=EntityType.DRIVE_ITEM,
+            pages=pages,
+        )
+        result = restarted.changes(
+            delta_link=restarted_state.delta_link,
+            correlation_id="restart",
+        )
+
+        assert isinstance(result, Success)
+        assert [
+            candidate.locator.resource_id for candidate in result.value
+        ] == ["item-2"]
+
+    def test_fixture_rejects_unknown_delta_link_without_replaying(self) -> None:
+        from src.m365.rev.change_feeds import DeltaPage, FakeChangeFeed
+
+        feed = FakeChangeFeed(
+            pages=[
+                DeltaPage(
+                    changed=(_candidate("item-1"),),
+                    tombstones=(),
+                    delta_link="next-1",
+                )
+            ]
+        )
+
+        result = feed.changes(delta_link="expired", correlation_id="test")
+
+        assert isinstance(result, Incomplete)
+        assert result.value == ()
+        assert result.reason == "delta_link_not_found"
+
+    def test_fixture_terminal_delta_link_is_caught_up(self) -> None:
+        from src.m365.rev.change_feeds import DeltaPage, FakeChangeFeed
+
+        feed = FakeChangeFeed(
+            pages=[
+                DeltaPage(
+                    changed=(_candidate("item-1"),),
+                    tombstones=(),
+                    delta_link="next-1",
+                )
+            ]
+        )
+
+        result = feed.changes(delta_link="next-1", correlation_id="test")
+
         assert isinstance(result, Success)
         assert result.value == ()
 

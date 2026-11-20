@@ -3,7 +3,12 @@ from __future__ import annotations
 
 import pytest
 
-from src.core.charts.declarative import DeclarativeChartBuilder, PNG_HARD_GATE_BYTES, PNG_TARGET_BYTES
+from src.core.charts.declarative import (
+    DeclarativeChartBuilder,
+    MAX_VISIBLE_X_TICKS,
+    PNG_HARD_GATE_BYTES,
+    PNG_TARGET_BYTES,
+)
 from src.core.theme_context import ThemeContext
 
 pytest.importorskip("matplotlib", reason="matplotlib required for chart rendering tests")
@@ -336,6 +341,34 @@ def test_trend_description_shows_direction():
 def test_render_budget_is_in_performance_lane():
     marks = getattr(test_render_under_2_seconds, "pytestmark", ())
     assert any(mark.name == "perf" for mark in marks)
+
+
+def test_large_chart_limits_visible_x_ticks_without_changing_series(monkeypatch):
+    from matplotlib.figure import Figure
+
+    original_savefig = Figure.savefig
+    tick_state = []
+
+    def capture_ticks(figure, buffer, *args, **kwargs):
+        axis = figure.axes[0]
+        tick_state.append(
+            ([tick.get_loc() for tick in axis.xaxis.get_major_ticks()], axis.lines[0].get_xdata())
+        )
+        return original_savefig(figure, buffer, *args, **kwargs)
+
+    monkeypatch.setattr(Figure, "savefig", capture_ticks)
+    rows = [{"day": f"d{i}", "p50": float(i)} for i in range(200)]
+    config = {"type": "line", "x_axis": "day", "y_axes": ["p50"]}
+
+    result = _BUILDER.build("large", config, tuple(rows), ("day", "p50"), _THEME)
+
+    assert result is not None
+    assert len(tick_state) == 1
+    tick_positions, series_positions = tick_state[0]
+    assert len(tick_positions) == MAX_VISIBLE_X_TICKS
+    assert tick_positions[0] == 0
+    assert tick_positions[-1] == 199
+    assert list(series_positions) == list(range(200))
 
 
 @pytest.mark.perf

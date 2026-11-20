@@ -121,6 +121,9 @@ def test_from_draft_uses_store_detect_drift(monkeypatch) -> None:
             assert snapshot_id == "snap-9"
             return (SimpleNamespace(fact_type="milestone", natural_key="MS-1"),)
 
+        def load_pinned_snapshot(self, snapshot_id):
+            return SimpleNamespace(recovered_from_snapshot_id=None)
+
     monkeypatch.setattr(fact_drift, "ProgramFactStore", _FakeStore)
     report = evaluate_program_fact_drift_from_draft(
         draft_state={"program_fact_snapshot": {"snapshot_id": "snap-9", "program_id": "acme"}},
@@ -138,9 +141,41 @@ def test_from_draft_clean_store_passes(monkeypatch) -> None:
         def detect_drift(self, snapshot_id):
             return ()
 
+        def load_pinned_snapshot(self, snapshot_id):
+            return SimpleNamespace(recovered_from_snapshot_id=None)
+
     monkeypatch.setattr(fact_drift, "ProgramFactStore", _CleanStore)
     report = evaluate_program_fact_drift_from_draft(
         draft_state={"program_fact_snapshot": {"snapshot_id": "snap-9", "program_id": "acme"}},
         program_id="acme",
     )
     assert report.results[0].passed is True
+
+
+def test_from_draft_discloses_compatible_predecessor_recovery(monkeypatch) -> None:
+    class _RecoveredStore:
+        def __init__(self, program_id, *, db_root=None):
+            pass
+
+        def load_pinned_snapshot(self, snapshot_id):
+            return SimpleNamespace(recovered_from_snapshot_id="pfs_predecessor")
+
+        def detect_drift(self, snapshot_id):
+            assert snapshot_id == "pfs_predecessor"
+            return ()
+
+    monkeypatch.setattr(fact_drift, "ProgramFactStore", _RecoveredStore)
+
+    report = evaluate_program_fact_drift_from_draft(
+        draft_state={
+            "program_fact_snapshot": {
+                "snapshot_id": "pfs_requested",
+                "program_id": "acme",
+            },
+        },
+        program_id="acme",
+    )
+
+    gate = report.results[0]
+    assert gate.passed is True
+    assert "compatible committed predecessor pfs_predecessor" in gate.message

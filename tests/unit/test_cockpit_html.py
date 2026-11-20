@@ -135,6 +135,32 @@ def test_retained_html_exceptions_are_identified_ordered_and_non_actionable() ->
     assert "li.finding-ok {" not in html
 
 
+def test_html_exception_adapter_exposes_safe_revalidation_and_unavailable_metadata() -> None:
+    finding = _finding(
+        finding_id="reliability.intent.uncertain",
+        area="reliability",
+        summary="<script>unsafe</script>",
+        next_command="vertex inspect-intent --id unsafe",
+        evidence_refs=("javascript:bad",),
+    )
+
+    html = render_cockpit_html(_snapshot(findings=(finding,)), retained=True)
+
+    assert "uncertain_intent" in html
+    assert "Safe revalidation" in html
+    assert "--expect-input-hash" in html
+    assert "Historical next command (not current guidance)" in html
+    assert "Confidence</dt><dd>not available" in html
+    assert "Expected effect" in html
+    assert "Diff / preview</dt><dd>not available" in html
+    assert "Authority required</dt><dd>not available" in html
+    assert "Expiry / escalation</dt><dd>not available" in html
+    assert "&lt;script&gt;unsafe&lt;/script&gt;" in html
+    assert '<a href="javascript:' not in html
+    assert "<form" not in html and "<button" not in html
+    assert "Human accessibility and operator proficiency qualification: not established" in html
+
+
 def test_risk_color_reflects_overall_risk() -> None:
     green_html = render_cockpit_html(_snapshot())
     assert "#1a7f37" in green_html  # green

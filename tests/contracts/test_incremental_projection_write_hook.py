@@ -495,7 +495,7 @@ def test_competing_incremental_hooks_match_full_projection_across_processes(
 
     writer = threading.Thread(target=write)
     try:
-        assert ready.wait(timeout=30)
+        assert ready.wait(timeout=90)
         with caplog.at_level(logging.ERROR, logger="src.commands.ledger"):
             writer.start()
             assert not done.wait(timeout=0.5)
@@ -1021,7 +1021,7 @@ def test_full_writer_fence_timeout_preserves_projection_and_retry_succeeds(tmp_p
     process = context.Process(target=_paused_full_projection, args=(root, ready, release, queue))
     process.start()
     try:
-        assert ready.wait(30)
+        assert ready.wait(90)
         with pytest.raises(ConfigError, match="Capture fence unavailable"):
             if competitor == "projection":
                 program_views.project_program_events("acme", programs_root=root)

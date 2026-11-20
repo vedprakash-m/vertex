@@ -30,7 +30,8 @@ from src.core.program_reality import (
 from src.core.knowledge_claim_store import KnowledgeClaimRevision
 from src.core.truth_levels import TruthLevel
 from src.core.ledger.event_log import ConfidenceTier, TemporalConfidence, build_event_envelope
-from src.core.ledger.source_refs import LTDeckRef, OperatorAssertionRef
+from src.core.ledger.event_types import get_event_schema
+from src.core.ledger.source_refs import LTDeckRef, OperatorAssertionRef, source_document_key
 
 _REALITY_MODULE = Path("src/core/program_reality.py")
 
@@ -854,6 +855,182 @@ def test_knowledge_context_surfaces_period_correct_resolved_claims() -> None:
     assert entry.projection_coverage == "absent"
     assert entry.claims[0].claim_id == "01DOMAIN"
     assert entry.claims[0].value == "2025-H1"
+
+
+def test_knowledge_context_preserves_attribution_across_bitemporal_expiry() -> None:
+    valid_from = __import__("datetime").datetime(2026, 1, 1, tzinfo=__import__("datetime").timezone.utc)
+    expired_at = __import__("datetime").datetime(2026, 3, 1, tzinfo=__import__("datetime").timezone.utc)
+    original_ref = OperatorAssertionRef(
+        asserted_by="original-owner",
+        asserted_at=valid_from,
+    )
+    replacement_ref = OperatorAssertionRef(
+        asserted_by="replacement-owner",
+        asserted_at=expired_at,
+    )
+    pr = ProgramReality(
+        program_id="acme",
+        snapshot=_mock_snapshot(),
+        sor_mode="legacy",
+        as_of=__import__("datetime").datetime(2026, 5, 1, tzinfo=__import__("datetime").timezone.utc),
+        _entity_fact_index={},
+        _actions=(),
+        _risks=(),
+        _decisions=(),
+        _dependencies=(),
+        _milestones=(),
+        _assumptions=(),
+        _workstreams=(),
+        _claims=(),
+        _knowledge_scope_chain=("program:acme",),
+        _knowledge_claim_revisions=(
+            KnowledgeClaimRevision(
+                claim_id="01ORIGINAL",
+                scope="program:acme",
+                subject="milestone:m1",
+                predicate="first_deployment",
+                value="2026-H1",
+                valid_from=valid_from,
+                valid_until=expired_at,
+                recorded_at=valid_from,
+                confidence=ConfidenceTier.OPERATOR_CONFIRMED,
+                source_ref=original_ref,
+                supersedes=None,
+                natural_key="program:acme/milestone:m1/first_deployment",
+            ),
+            KnowledgeClaimRevision(
+                claim_id="02REPLACEMENT",
+                scope="program:acme",
+                subject="milestone:m1",
+                predicate="first_deployment",
+                value="2026-H2",
+                valid_from=expired_at,
+                valid_until=None,
+                recorded_at=__import__("datetime").datetime(2026, 4, 1, tzinfo=__import__("datetime").timezone.utc),
+                confidence=ConfidenceTier.OPERATOR_CONFIRMED,
+                source_ref=replacement_ref,
+                supersedes="01ORIGINAL",
+                natural_key="program:acme/milestone:m1/first_deployment",
+            ),
+            KnowledgeClaimRevision(
+                claim_id="03FOREIGN",
+                scope="program:other",
+                subject="milestone:m1",
+                predicate="launch_window",
+                value="ignored",
+                valid_from=valid_from,
+                valid_until=None,
+                recorded_at=valid_from,
+                confidence=ConfidenceTier.OPERATOR_CONFIRMED,
+                source_ref=original_ref,
+                supersedes=None,
+                natural_key="program:other/milestone:m1/launch_window",
+            ),
+            KnowledgeClaimRevision(
+                claim_id="04FUTURE",
+                scope="program:acme",
+                subject="milestone:m1",
+                predicate="future_window",
+                value="ignored",
+                valid_from=__import__("datetime").datetime(2027, 1, 1, tzinfo=__import__("datetime").timezone.utc),
+                valid_until=None,
+                recorded_at=valid_from,
+                confidence=ConfidenceTier.OPERATOR_CONFIRMED,
+                source_ref=original_ref,
+                supersedes=None,
+                natural_key="program:acme/milestone:m1/future_window",
+            ),
+        ),
+    )
+
+    before_expiry = pr.knowledge_context(
+        ("milestone:m1",),
+        as_of=__import__("datetime").datetime(2026, 2, 28, tzinfo=__import__("datetime").timezone.utc),
+        knowledge_as_of=__import__("datetime").datetime(2026, 2, 28, tzinfo=__import__("datetime").timezone.utc),
+    )
+    at_expiry = pr.knowledge_context(
+        ("milestone:m1",),
+        as_of=expired_at,
+        knowledge_as_of=__import__("datetime").datetime(2026, 2, 28, tzinfo=__import__("datetime").timezone.utc),
+    )
+    after_replacement = pr.knowledge_context(
+        ("milestone:m1",),
+        as_of=expired_at,
+        knowledge_as_of=__import__("datetime").datetime(2026, 4, 2, tzinfo=__import__("datetime").timezone.utc),
+    )
+
+    before_entry = before_expiry.entry("milestone:m1")
+    at_expiry_entry = at_expiry.entry("milestone:m1")
+    after_entry = after_replacement.entry("milestone:m1")
+    assert before_entry is not None
+    assert before_entry.claims[0].source_document_key == source_document_key(original_ref)
+    assert before_expiry.entry("missing") is None
+    assert at_expiry_entry is not None and at_expiry_entry.claims == ()
+    assert after_entry is not None
+    assert after_entry.claims[0].claim_id == "02REPLACEMENT"
+    assert after_entry.claims[0].source_document_key == source_document_key(replacement_ref)
+
+
+def test_program_reality_evidence_for_preserves_signal_and_entity_attribution() -> None:
+    snapshot = _mock_snapshot()
+    snapshot.facts = [
+        SimpleNamespace(
+            fact_id="fact-1",
+            source_signal_ids=("signal-1", "signal-2"),
+            entity_refs=("WI:42",),
+        )
+    ]
+    reality = ProgramReality(
+        program_id="test_program",
+        snapshot=snapshot,
+        sor_mode="legacy",
+        as_of=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
+        _entity_fact_index={},
+        _actions=(),
+        _risks=(),
+        _decisions=(),
+        _dependencies=(),
+        _milestones=(),
+        _assumptions=(),
+        _workstreams=(),
+        _claims=(),
+    )
+
+    assert [
+        (entry.signal_id, entry.entity_ref)
+        for entry in reality.evidence_for("fact-1")
+    ] == [
+        ("signal-1", None),
+        ("signal-2", None),
+        (None, "WI:42"),
+    ]
+    assert reality.evidence_for("missing") == ()
+
+
+@pytest.mark.parametrize(
+    ("event_type", "actor_field"),
+    [
+        ("decision.outcome_recorded.v1", "recorded_by"),
+        ("action.closed.v1", "closed_by"),
+    ],
+)
+def test_authoritative_lifecycle_outcomes_require_actor_and_evidence(
+    event_type: str, actor_field: str
+) -> None:
+    schema = get_event_schema(event_type)
+
+    assert actor_field in schema.required_fields
+    assert "evidence_refs" in schema.required_fields
+    with pytest.raises(ValueError, match="evidence_refs"):
+        schema.validate(
+            {
+                "decision_id": "decision-1",
+                "action_id": "action-1",
+                "outcome": "accepted",
+                "closed_state": "done",
+                actor_field: "operator",
+            }
+        )
 
 
 def test_ledger_timeline_surfaces_entity_events_in_occurred_order() -> None:

@@ -1,24 +1,47 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from src.core.jsonl_utils import append_jsonl_line, read_jsonl_records, validate_jsonl_row
-from src.core.knowledge.predicate_registry import validate_predicate_value
+from src.core.jsonl_utils import (
+    append_jsonl_line,
+    read_jsonl_records,
+    validate_jsonl_row,
+)
+from src.core.knowledge.predicate_registry import (
+    knowledge_class_for_predicate,
+    validate_predicate_value,
+)
 from src.core.knowledge_store import get_shared_knowledge_root
 from src.core.ledger.event_log import ConfidenceTier
-from src.core.ledger.source_refs import SourceRef, source_document_key, source_ref_from_dict, source_ref_to_dict
-from src.core.workspace_paths import PROGRAMS_ROOT
+from src.core.ledger.source_refs import (
+    SourceRef,
+    source_document_key,
+    source_ref_from_dict,
+    source_ref_to_dict,
+)
 from src.core.workspace_lease import cooperative_capture_fence
-
+from src.core.workspace_paths import PROGRAMS_ROOT
 
 SKIP_EXPIRY_DAYS = 90
 PENDING_MAX_BYTES = 10 * 1024 * 1024
 TRIAGED_MAX_BYTES = 10 * 1024 * 1024
+REVIEW_EVENT_KINDS = frozenset({"reviewed", "review_renewed"})
+TERMINAL_DECISION_KINDS = frozenset({"approved", "rejected", "skipped"})
+RESOLUTION_VERIFIED_KIND = "resolution_verified"
+
+
+class KnowledgeCandidateReviewState(str, Enum):
+    NOT_REQUIRED = "not_required"
+    UNREVIEWED = "unreviewed"
+    CURRENT = "current"
+    EXPIRED = "expired"
+    INVALID = "invalid"
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +76,8 @@ class KnowledgeCandidate:
     corroborating_refs: tuple[SourceRef, ...]
     batch_id: str
     created_at: datetime | None = None
+    knowledge_class: str | None = None
+    requires_authorized_review: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +90,22 @@ class KnowledgeCandidateDecisionRecord:
     reason: str | None = None
     edited: bool | None = None
     resulting_claim_id: str | None = None
+    review_valid_until: datetime | None = None
+    actor_principal: str | None = None
+    actor_machine: str | None = None
+    actor_session: str | None = None
+    candidate_sha256: str | None = None
+    review_authority_program: str | None = None
+    reviewed_subject: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeCandidateLifecycleSummary:
+    latest_review: KnowledgeCandidateDecisionRecord | None
+    latest_terminal_decision: KnowledgeCandidateDecisionRecord | None
+    latest_verified_resolution: KnowledgeCandidateDecisionRecord | None
+    review_state: KnowledgeCandidateReviewState
+    history: tuple[KnowledgeCandidateDecisionRecord, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,18 +224,24 @@ def load_triage_decisions(*, programs_root: Path = PROGRAMS_ROOT) -> tuple[Knowl
 def active_candidates(*, programs_root: Path = PROGRAMS_ROOT, scope: str | None = None, batch_id: str | None = None, as_of: datetime | None = None) -> tuple[KnowledgeCandidate, ...]:
     current = as_of or datetime.now(timezone.utc)
     pending = load_pending_candidates(programs_root=programs_root)
-    decisions = {decision.candidate_id: decision for decision in load_triage_decisions(programs_root=programs_root)}
+    terminal_decisions: dict[str, KnowledgeCandidateDecisionRecord] = {}
+    for decision in load_triage_decisions(programs_root=programs_root):
+        if decision.kind in TERMINAL_DECISION_KINDS:
+            terminal_decisions[decision.candidate_id] = decision
     active: list[KnowledgeCandidate] = []
     for candidate in pending:
         if scope is not None and candidate.scope != scope:
             continue
         if batch_id is not None and candidate.batch_id != batch_id:
             continue
-        decision = decisions.get(candidate.candidate_id)
-        if decision is None:
+        terminal_decision = terminal_decisions.get(candidate.candidate_id)
+        if terminal_decision is None:
             active.append(candidate)
             continue
-        if decision.kind == "skipped" and decision.decided_at + timedelta(days=SKIP_EXPIRY_DAYS) > current:
+        if (
+            terminal_decision.kind == "skipped"
+            and terminal_decision.decided_at + timedelta(days=SKIP_EXPIRY_DAYS) > current
+        ):
             active.append(candidate)
     return tuple(sorted(active, key=lambda item: (-item.extraction_confidence, item.candidate_id)))
 
@@ -208,7 +255,16 @@ def summarize_triage_activity(
     programs_root: Path = PROGRAMS_ROOT,
     session_gap_minutes: int = 30,
 ) -> KnowledgeTriageActivitySummary:
-    decisions = tuple(sorted(load_triage_decisions(programs_root=programs_root), key=lambda item: (item.decided_at, item.candidate_id, item.kind)))
+    decisions = tuple(
+        sorted(
+            (
+                decision
+                for decision in load_triage_decisions(programs_root=programs_root)
+                if decision.kind in TERMINAL_DECISION_KINDS
+            ),
+            key=lambda item: (item.decided_at, item.candidate_id, item.kind),
+        )
+    )
     if not decisions:
         return KnowledgeTriageActivitySummary(
             total_decision_count=0,
@@ -258,7 +314,8 @@ def summarize_batch_progress(*, programs_root: Path = PROGRAMS_ROOT) -> Knowledg
 
     latest_decisions_by_candidate: dict[str, KnowledgeCandidateDecisionRecord] = {}
     for decision in load_triage_decisions(programs_root=programs_root):
-        latest_decisions_by_candidate[decision.candidate_id] = decision
+        if decision.kind in TERMINAL_DECISION_KINDS:
+            latest_decisions_by_candidate[decision.candidate_id] = decision
 
     candidates_by_batch: dict[str, list[KnowledgeCandidate]] = {}
     for candidate in pending_candidates:
@@ -332,6 +389,134 @@ def summarize_batch_progress(*, programs_root: Path = PROGRAMS_ROOT) -> Knowledg
     )
 
 
+def candidate_history(
+    candidate_id: str,
+    *,
+    programs_root: Path = PROGRAMS_ROOT,
+) -> tuple[KnowledgeCandidateDecisionRecord, ...]:
+    return tuple(
+        record
+        for record in load_triage_decisions(programs_root=programs_root)
+        if record.candidate_id == candidate_id
+    )
+
+
+def candidate_payload_sha256(candidate: KnowledgeCandidate) -> str:
+    payload = json.dumps(
+        _candidate_to_record(candidate),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(payload).hexdigest()}"
+
+
+def candidate_knowledge_class(candidate: KnowledgeCandidate) -> str:
+    derived = knowledge_class_for_predicate(candidate.proposed_claim.predicate).value
+    if candidate.knowledge_class is not None and candidate.knowledge_class != derived:
+        raise ValueError(
+            f"Knowledge candidate '{candidate.candidate_id}' class does not match predicate "
+            f"'{candidate.proposed_claim.predicate}'."
+        )
+    return derived
+
+
+def latest_candidate_review(
+    candidate_id: str,
+    *,
+    programs_root: Path = PROGRAMS_ROOT,
+) -> KnowledgeCandidateDecisionRecord | None:
+    reviews = [
+        record
+        for record in candidate_history(candidate_id, programs_root=programs_root)
+        if record.kind in REVIEW_EVENT_KINDS
+    ]
+    return max(reviews, key=lambda item: (item.decided_at, item.kind), default=None)
+
+
+def latest_candidate_terminal_decision(
+    candidate_id: str,
+    *,
+    programs_root: Path = PROGRAMS_ROOT,
+) -> KnowledgeCandidateDecisionRecord | None:
+    terminal = [
+        record
+        for record in candidate_history(candidate_id, programs_root=programs_root)
+        if record.kind in TERMINAL_DECISION_KINDS
+    ]
+    return max(terminal, key=lambda item: (item.decided_at, item.kind), default=None)
+
+
+def latest_verified_candidate_resolution(
+    candidate_id: str,
+    *,
+    programs_root: Path = PROGRAMS_ROOT,
+) -> KnowledgeCandidateDecisionRecord | None:
+    resolutions = [
+        record
+        for record in candidate_history(candidate_id, programs_root=programs_root)
+        if record.kind == RESOLUTION_VERIFIED_KIND
+    ]
+    return max(resolutions, key=lambda item: (item.decided_at, item.kind), default=None)
+
+
+def candidate_lifecycle_summary(
+    candidate: KnowledgeCandidate,
+    *,
+    programs_root: Path = PROGRAMS_ROOT,
+    as_of: datetime | None = None,
+    review_authority_valid: bool | None = None,
+) -> KnowledgeCandidateLifecycleSummary:
+    current = as_of or datetime.now(timezone.utc)
+    history = candidate_history(candidate.candidate_id, programs_root=programs_root)
+    reviews = [record for record in history if record.kind in REVIEW_EVENT_KINDS]
+    terminal = [record for record in history if record.kind in TERMINAL_DECISION_KINDS]
+    resolutions = [record for record in history if record.kind == RESOLUTION_VERIFIED_KIND]
+    review = max(reviews, key=lambda item: (item.decided_at, item.kind), default=None)
+    review_state = _candidate_review_state(
+        candidate,
+        review,
+        as_of=current,
+        review_authority_valid=review_authority_valid,
+    )
+    return KnowledgeCandidateLifecycleSummary(
+        latest_review=review,
+        latest_terminal_decision=max(
+            terminal, key=lambda item: (item.decided_at, item.kind), default=None
+        ),
+        latest_verified_resolution=max(
+            resolutions, key=lambda item: (item.decided_at, item.kind), default=None
+        ),
+        review_state=review_state,
+        history=history,
+    )
+
+
+def _candidate_review_state(
+    candidate: KnowledgeCandidate,
+    review: KnowledgeCandidateDecisionRecord | None,
+    *,
+    as_of: datetime,
+    review_authority_valid: bool | None,
+) -> KnowledgeCandidateReviewState:
+    if not candidate.requires_authorized_review:
+        return KnowledgeCandidateReviewState.NOT_REQUIRED
+    if review is None:
+        return KnowledgeCandidateReviewState.UNREVIEWED
+    if (
+        review.candidate_sha256 != candidate_payload_sha256(candidate)
+        or review.actor_principal is None
+        or review.actor_machine is None
+        or review.actor_session is None
+        or review.review_valid_until is None
+        or review.decided_at > as_of
+        or review_authority_valid is False
+    ):
+        return KnowledgeCandidateReviewState.INVALID
+    if review.review_valid_until <= as_of:
+        return KnowledgeCandidateReviewState.EXPIRED
+    return KnowledgeCandidateReviewState.CURRENT
+
+
 def derive_candidate_dedupe_key(scope: str, subject: str, predicate: str, value: Any) -> str:
     digest = hashlib.sha256(f"{scope}|{subject}|{predicate}|{json.dumps(value, sort_keys=True, separators=(',', ':'))}".encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
@@ -354,6 +539,7 @@ def build_candidate(
     corroborating_refs: tuple[SourceRef, ...],
     batch_id: str,
     created_at: datetime | None = None,
+    requires_authorized_review: bool = False,
 ) -> KnowledgeCandidate:
     return KnowledgeCandidate(
         candidate_id=candidate_id,
@@ -375,6 +561,8 @@ def build_candidate(
         corroborating_refs=corroborating_refs,
         batch_id=batch_id,
         created_at=(created_at or datetime.now(timezone.utc)).astimezone(timezone.utc),
+        knowledge_class=knowledge_class_for_predicate(predicate).value,
+        requires_authorized_review=requires_authorized_review,
     )
 
 
@@ -407,17 +595,28 @@ def _candidate_to_record(candidate: KnowledgeCandidate) -> dict[str, Any]:
         "corroborating_refs": [source_ref_to_dict(ref) for ref in candidate.corroborating_refs],
         "batch_id": candidate.batch_id,
         "created_at": candidate.created_at.isoformat() if candidate.created_at is not None else None,
+        "knowledge_class": candidate_knowledge_class(candidate),
+        "requires_authorized_review": candidate.requires_authorized_review,
     }
 
 
 def _candidate_from_record(record: dict[str, Any]) -> KnowledgeCandidate:
     claim = record["proposed_claim"]
+    candidate_id = str(record["candidate_id"])
+    predicate = str(claim["predicate"])
+    derived_class = knowledge_class_for_predicate(predicate).value
+    stored_class = record.get("knowledge_class")
+    if stored_class is not None and (not isinstance(stored_class, str) or stored_class != derived_class):
+        raise ValueError(f"Knowledge candidate '{candidate_id}' has an invalid knowledge class.")
+    requires_review = record.get("requires_authorized_review", False)
+    if not isinstance(requires_review, bool):
+        raise ValueError(f"Knowledge candidate '{candidate_id}' has an invalid review requirement.")
     return KnowledgeCandidate(
-        candidate_id=str(record["candidate_id"]),
+        candidate_id=candidate_id,
         scope=str(record["scope"]),
         proposed_claim=ProposedKnowledgeClaim(
             subject=str(claim["subject"]),
-            predicate=str(claim["predicate"]),
+            predicate=predicate,
             value=claim.get("value"),
             valid_from=datetime.fromisoformat(str(claim["valid_from"])).astimezone(timezone.utc),
             valid_until=datetime.fromisoformat(str(claim["valid_until"])).astimezone(timezone.utc) if isinstance(claim.get("valid_until"), str) else None,
@@ -440,6 +639,8 @@ def _candidate_from_record(record: dict[str, Any]) -> KnowledgeCandidate:
         corroborating_refs=tuple(source_ref_from_dict(dict(item)) for item in record["corroborating_refs"]),
         batch_id=str(record["batch_id"]),
         created_at=datetime.fromisoformat(str(record["created_at"])).astimezone(timezone.utc) if isinstance(record.get("created_at"), str) else None,
+        knowledge_class=derived_class,
+        requires_authorized_review=requires_review,
     )
 
 
@@ -453,6 +654,13 @@ def _decision_to_record(decision: KnowledgeCandidateDecisionRecord) -> dict[str,
         "reason": decision.reason,
         "edited": decision.edited,
         "resulting_claim_id": decision.resulting_claim_id,
+        "review_valid_until": decision.review_valid_until.isoformat() if decision.review_valid_until is not None else None,
+        "actor_principal": decision.actor_principal,
+        "actor_machine": decision.actor_machine,
+        "actor_session": decision.actor_session,
+        "candidate_sha256": decision.candidate_sha256,
+        "review_authority_program": decision.review_authority_program,
+        "reviewed_subject": decision.reviewed_subject,
     }
 
 
@@ -466,4 +674,23 @@ def _decision_from_record(record: dict[str, Any]) -> KnowledgeCandidateDecisionR
         reason=str(record["reason"]) if isinstance(record.get("reason"), str) else None,
         edited=bool(record["edited"]) if isinstance(record.get("edited"), bool) else None,
         resulting_claim_id=str(record["resulting_claim_id"]) if isinstance(record.get("resulting_claim_id"), str) else None,
+        review_valid_until=(
+            datetime.fromisoformat(str(record["review_valid_until"])).astimezone(timezone.utc)
+            if isinstance(record.get("review_valid_until"), str)
+            else None
+        ),
+        actor_principal=str(record["actor_principal"]) if isinstance(record.get("actor_principal"), str) else None,
+        actor_machine=str(record["actor_machine"]) if isinstance(record.get("actor_machine"), str) else None,
+        actor_session=str(record["actor_session"]) if isinstance(record.get("actor_session"), str) else None,
+        candidate_sha256=str(record["candidate_sha256"]) if isinstance(record.get("candidate_sha256"), str) else None,
+        review_authority_program=(
+            str(record["review_authority_program"])
+            if isinstance(record.get("review_authority_program"), str)
+            else None
+        ),
+        reviewed_subject=(
+            str(record["reviewed_subject"])
+            if isinstance(record.get("reviewed_subject"), str)
+            else None
+        ),
     )

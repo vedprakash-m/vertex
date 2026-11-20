@@ -728,7 +728,11 @@ def test_confirm_uses_captured_identity_and_metadata_not_path_based_readers() ->
         and len(node.args) == 1 and isinstance(node.args[0], ast.Attribute)
         and isinstance(node.args[0].value, ast.Name) and node.args[0].value.id == "draft_manifest"
     ]
-    assert sorted(node.args[0].attr for node in projections) == ["draft_readiness"]
+    assert sorted(node.args[0].attr for node in projections) == [
+        "draft_readiness",
+        "program_verdict_comparison",
+        "program_verdict_observation",
+    ]
     metadata_assignments = [
         node for node in ast.walk(tree)
         if isinstance(node, ast.Assign)

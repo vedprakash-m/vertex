@@ -1411,6 +1411,7 @@ def test_narrative_respects_removed_executive_chart(removed, tmp_path, repo_root
 def test_confirm_restores_chart_with_current_workstream_visibility(target_state, tmp_path, repo_root):
     from dataclasses import asdict
     from src.commands.confirm_stages.deserialization import restore_chart_placements
+    from src.core.quality_gates.chart import evaluate_chart_gates
 
     original = _render_context()
     target = original.workstreams[0]
@@ -1431,11 +1432,26 @@ def test_confirm_restores_chart_with_current_workstream_visibility(target_state,
     else:
         assert tuple(chart.title for chart in context.kusto_sections) == ("Deployment",)
     rendered = HTMLRenderer("acme_weekly", reports_root=tmp_path, templates_root=repo_root / "templates").render(context)
-    assert [image["alt"] for image in _chart_images(rendered)] == ["Deployment chart"]
+    if target_state == "visible":
+        assert [image["alt"] for image in _chart_images(rendered)] == ["Deployment chart"]
+    else:
+        failure = context.kusto_sections[0]
+        assert not _chart_images(rendered)
+        assert failure.is_degraded and failure.chart_blocks_publish
+        assert failure.chart_png_size_bytes == 0
+        assert failure.captured_at is None and failure.cache_captured_at is None
+        assert "not bypassed" in failure.message
+        gate = next(
+            result
+            for result in evaluate_chart_gates(context.kusto_sections).results
+            if result.gate_id == "QG-22"
+        )
+        assert not gate.passed and not gate.forceable
 
 
-def test_draft_renders_chart_when_target_workstream_is_invisible(tmp_path, repo_root):
+def test_draft_refuses_chart_when_target_workstream_is_invisible(tmp_path, repo_root):
     from src.core.stages.render_stage import _route_chart_placements
+    from src.core.quality_gates.chart import evaluate_chart_gates
 
     original = _render_context()
     target = replace(original.workstreams[0], blurb=" ", items=())
@@ -1445,7 +1461,68 @@ def test_draft_renders_chart_when_target_workstream_is_invisible(tmp_path, repo_
 
     assert tuple(chart.title for chart in context.kusto_sections) == ("Deployment",)
     rendered = HTMLRenderer("acme_weekly", reports_root=tmp_path, templates_root=repo_root / "templates").render(context)
-    assert [image["alt"] for image in _chart_images(rendered)] == ["Deployment chart"]
+    failure = context.kusto_sections[0]
+    assert not _chart_images(rendered)
+    assert failure.is_degraded and failure.chart_blocks_publish
+    assert failure.chart_png_size_bytes == 0
+    assert failure.captured_at is None and failure.cache_captured_at is None
+    gate = next(
+        result
+        for result in evaluate_chart_gates(context.kusto_sections).results
+        if result.gate_id == "QG-22"
+    )
+    assert not gate.passed and not gate.forceable
+
+
+def test_draft_refuses_chart_when_workstream_target_is_removed():
+    from src.core.stages.render_stage import _route_chart_placements
+
+    original = _render_context()
+    target = original.workstreams[0]
+    section = replace(
+        _chart_section("workstream_registry"),
+        section_placement=f"workstream:{target.section_id}",
+    )
+
+    sections, executive, workstreams = _route_chart_placements(
+        (section,), (target,), hidden_sections=frozenset({target.section_id})
+    )
+
+    assert executive is None
+    assert workstreams[0].attached_charts == ()
+    assert len(sections) == 1
+    assert sections[0].is_degraded and sections[0].chart_blocks_publish
+    assert sections[0].captured_at is None
+    assert "hidden" in sections[0].message
+
+
+def test_confirm_refuses_chart_when_exec_summary_target_is_removed():
+    from dataclasses import asdict
+    from src.commands.confirm_stages.deserialization import restore_chart_placements
+
+    original = _render_context()
+    section = replace(
+        _chart_section("registry"),
+        section_placement="exec_summary",
+        reference_url="https://example.invalid/executive",
+    )
+    context = replace(
+        original,
+        hidden_render_sections=frozenset({"exec_summary"}),
+        kusto_sections=(),
+    )
+
+    restored = restore_chart_placements(
+        context, {"routed_chart_sections": [asdict(section)]}
+    )
+
+    assert restored.exec_summary_chart is None
+    assert len(restored.kusto_sections) == 1
+    failure = restored.kusto_sections[0]
+    assert failure.is_degraded and failure.chart_blocks_publish
+    assert failure.chart_png_size_bytes == 0
+    assert failure.image_data_url is None and failure.chart_png_base64 is None
+    assert failure.captured_at is None and failure.cache_captured_at is None
 
 
 @pytest.mark.parametrize(

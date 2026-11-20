@@ -36,7 +36,8 @@ def test_salience_show_refreshes_and_renders_model(monkeypatch, tmp_path: Path) 
 
     assert result.exit_code == 0
     assert "Author Salience - acme" in result.stdout
-    assert "deployment: weight=" in result.stdout
+    assert "No workstream salience observations yet." in result.stdout
+    assert "deployment: weight=" not in result.stdout
     assert "Cached model:" in result.stdout
 
 

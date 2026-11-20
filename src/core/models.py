@@ -162,7 +162,7 @@ class Enrichment:
     source: Literal["mail", "transcript", "teams_chat", "calendar", "local_kb"]
     source_id: str
     author: str
-    timestamp: datetime
+    timestamp: datetime | None
     excerpt: str
     permalink: str | None
     body_text: str | None = None

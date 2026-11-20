@@ -89,6 +89,9 @@ def test_provider_receives_only_complete_compiled_context(tmp_path: Path, monkey
         assert value in compiled.prompt_text
     assert "evidence-1" in compiled.manifest.included_evidence_ids
     assert hashlib.sha256(client.calls[0][0].encode()).hexdigest() == compiled.manifest.context_hash
+    assert compiled.included[0].verification_state == "operator_supplied"
+    assert compiled.included[1].trust_level == "operator_supplied"
+    assert compiled.included[1].verification_state == "unverified"
 
 
 @pytest.mark.parametrize("field", ["from_summary", "to_summary", "risk_if_broken", "current_status"])

@@ -1,6 +1,6 @@
 # AI provider-call inventory
 
-## Current W1.6a scope and dispositions (2026-10-24)
+## Current W1.6a scope and dispositions (2026-10-24, updated 2026-11-18)
 
 This source-only reconciliation supersedes the historical counts and consumer
 claims below. It does not authorize a provider call or establish runtime
@@ -8,20 +8,25 @@ authorization, qualification or production migration.
 
 The baseline contains **35 syntactic provider-bound expressions** under `src/`:
 **31 legacy feature invocations** (29 in `src/ai`, two in `src/commands`),
-**one test-only runner pilot**, **two fallback forwarding expressions** and
-**one SDK transport expression**. The 31 legacy invocations use **27 feature
-policy identities**; repeated invocations are not separate features. Of the 35
-expressions, 32 are `.structured`, two are `.chat` and one is the SDK
-`.chat.completions.create`. Infrastructure is excluded from the feature
-migration denominator. No legacy invocation has been retired by this work.
+**one opt-in-production runner invocation**, **two fallback forwarding
+expressions** and **one SDK transport expression**. The 31 legacy invocations
+use **27 feature policy identities**; repeated invocations are not separate
+features. Of the 35 expressions, 32 are `.structured`, two are `.chat` and one
+is the SDK `.chat.completions.create`. Infrastructure is excluded from the
+feature migration denominator. No legacy invocation has been retired by this
+work.
 
 Dispositions describe current source evidence, not permission:
 
 - `legacy`: feature invocation outside `StructuredFeatureRunner`, including
   application, advisory and evaluation paths. Classification as evaluation is
   not equivalent to having only test consumers.
-- `test-only-pilot`: runner-backed dependency blast-radius helper; known
-  consumers are its export and unit tests, not the actual proposal command.
+- `opt-in-production`: runner-backed invocation with an explicit command
+  consumer; the command remains legacy by default and admits the runner path
+  only through its named flag. This disposition is wiring evidence, not an
+  independent authorization or qualification finding.
+- `test-only-pilot`: runner-backed helper whose known consumers do not include
+  an application command.
 - `infrastructure`: fallback forwarding or SDK transport; not an additional
   feature, and not proof that its upstream callers are authorized.
 
@@ -32,19 +37,25 @@ site, `report_lookback.py`'s `_run_ai_route`, returns retrospective rows for a
 published report; it has its own `lookback_retrospective.v1` identity, bounded
 validation and release audit, but still uses legacy dispatch.
 
-The original dependency generator remains wired at
-`src/commands/ai_proposals.py`'s `_generate_dependency_blast_radius`. W1.6h
-requires the pilot's caller to supply `RunnerContext` instead of fabricating
-snapshot and principal values. That context is not independently authenticated
-or proven to represent a coherent snapshot, so the pilot cannot be switched
-into production as-is.
+The dependency proposal command's original generator remains its default.
+`src/commands/ai_proposals.py` additionally admits
+`generate_dependency_blast_radius_proposal_via_runner` only when the operator
+passes `--structured-runner`. `_build_dependency_runner_context` requires an
+attested OS principal, pins the current `ProgramFactStore` snapshot and records
+the feature, evidence references and principal in pin metadata before returning
+`RunnerContext`. This closes the one-feature caller-wiring gap without
+switching the default dispatch or migrating a second caller.
+
+The supplied principal, snapshot and `internal` classification are bound in
+the invocation, but are not independently authenticated, authorized or
+qualified by that wiring. The runner and inventory do not prove coherent
+snapshot capture, principal authority or classification correctness. Independent
+authority and qualification of that binding remains a prerequisite before any
+second caller migration. No migration is authorized by the source label alone.
 W1.6f now compiles all dependency request fields as required context alongside
 the referenced evidence and sends only compiled content to the provider.
 Unequal evidence-reference/text sequences abstain before compilation and
 released-cache lookup rather than being truncated by `zip`.
-No caller with both approved snapshot and principal binding was established
-by this discovery. Verified snapshot/principal binding remains a migration
-prerequisite; input-integrity tests and supplied values do not supply that authority.
 No identity, trust, budget or policy
 defaults are invented here. Existing prompt/model/schema versions, cache keys,
 failure contracts, release semantics and output consumers require feature-wise
@@ -79,7 +90,7 @@ named scope. Nested functions and methods retain their lexical qualification.
 | src/ai/decision_brief_advisor.py | _advise_on_item | client.structured | 1 | decision_brief_advisor | legacy |
 | src/ai/decision_brief_advisor.py | _advise_on_item_via_context_gateway | client.structured | 1 | decision_brief_advisor | legacy |
 | src/ai/dependency_blast_radius_generator.py | generate_dependency_blast_radius_proposal | client.structured | 1 | dependency_blast_radius_generator | legacy |
-| src/ai/dependency_blast_radius_generator.py | generate_dependency_blast_radius_proposal_via_runner.call_provider | client.structured | 1 | dependency_blast_radius_generator | test-only-pilot |
+| src/ai/dependency_blast_radius_generator.py | generate_dependency_blast_radius_proposal_via_runner.call_provider | client.structured | 1 | dependency_blast_radius_generator | opt-in-production |
 | src/ai/deployment_fallback.py | FallbackAIClient.chat | client.chat | 1 | shared-forwarding | infrastructure |
 | src/ai/deployment_fallback.py | FallbackAIClient.structured | client.structured | 1 | shared-forwarding | infrastructure |
 | src/ai/discovery/prose_event_extractor.py | _extract_via_llm | client.structured | 1 | prose_event_extractor | legacy |
@@ -103,6 +114,16 @@ named scope. Nested functions and methods retain their lexical qualification.
 | src/ai/top_three_candidate_generator.py | generate_top_three_candidates | client.structured | 1 | top_three_candidate_generator | legacy |
 | src/commands/kb.py | _plan_kb_update_with_ai | client.chat | 1 | default | legacy |
 | src/commands/report_lookback.py | _run_ai_route | client.structured | 1 | lookback_retrospective | legacy |
+
+## Structured-runner consumer baseline
+
+This table is a separate, machine-checked consumer baseline for runner-backed
+provider expressions. It records the application call and its explicit gate;
+it does not replace the provider syntax inventory above.
+
+| Path | Qualified function | Callee | Gate | Feature | Disposition |
+|---|---|---|---|---|---|
+| src/commands/ai_proposals.py | _generate_dependency_blast_radius | generate_dependency_blast_radius_proposal_via_runner | use_structured_runner | dependency_blast_radius_generator | opt-in-production |
 
 ## Static limitations and unreachable anchors
 
@@ -130,7 +151,10 @@ The adoption ratchet excludes literal boolean dead `if` branches, but does
 not solve arbitrary conditions, aliases, unreachable functions or runtime
 paths. A surviving router-call expression is syntactic evidence only.
 Neither ratchet claims zero unauthorized runtime calls, dynamic-dispatch
-completeness, real snapshot/principal binding or completed runner migration.
+completeness, independently authenticated snapshot/principal binding,
+classification authority or completed runner migration. The structured-runner
+consumer baseline proves only the named application consumer and explicit gate;
+it does not qualify that consumer's identities for another caller.
 
 ## Historical BL-C2 analysis (superseded where corrected above)
 
@@ -179,7 +203,7 @@ apply this label; see rev_judge's note).
 | context_synthesizer | `src/ai/context_synthesizer.py:150` / `:147` | Yes — `context_synthesizer.v1` | No | No | advisory | Module docstring: output is always a `ContextUpdateProposal`, "never auto-applied"; operator applies via `vertex context apply`. The only gateway/audit-eligible-looking feature that deliberately opts out of both — worth a human check on whether that's intentional. |
 | decision_brief_advisor | `src/ai/decision_brief_advisor.py:205` / `:202` | Yes — `decision_brief_advisor.v1` | Yes | Yes | production | `advise_on_decision_brief`, called from `src/commands/decision_brief.py:180` — the real command path. |
 | decision_brief_advisor | `src/ai/decision_brief_advisor.py:314` / `:311` | Yes — same version | Yes (via `_parse_advice_with_gateway`) | **No** | evaluation | `advise_on_decision_brief_via_context_gateway`. Docstring: "Not wired into any production command — only the blind A/B comparison harness (`src/commands/decision_brief_pilot.py`) calls this, pending real evidence before any production swap." |
-| dependency_blast_radius_generator | `src/ai/dependency_blast_radius_generator.py:95` / `:92` | Yes — `dependency_blast_radius_generator.v1` | Yes | Yes | advisory | Only CLI caller is `src/commands/ai_proposals.py`'s `generate`→`stage_proposal`→accept/reject flow. |
+| dependency_blast_radius_generator | `src/ai/dependency_blast_radius_generator.py:95` / `:92` | Yes — `dependency_blast_radius_generator.v1` | Yes | Yes | advisory | The CLI caller is `src/commands/ai_proposals.py`'s `generate`→runner→`stage_proposal`→accept/reject flow, with strict principal and pinned fact-snapshot binding. The direct implementation remains compatibility-only. |
 | exec_summary_drafter | `src/ai/exec_summary_drafter.py:162` / `:159` | Yes — `exec_summary_drafter.v1` | Yes | Yes | production | Used directly in the report pipeline, auto-included once released. |
 | governance_decision_brief_generator | `src/ai/governance_decision_brief_generator.py:100` / `:97` | Yes — `governance_decision_brief_generator.v1` | Yes | Yes | advisory | Same `ai_proposals.py` staged-proposal flow as dependency/risk/top-three/meeting_action. |
 | intent_router | `src/ai/intent_router.py` (`_run_ai_route`) | Yes — `intent_router.v1` | **Yes** | **Yes** | production | Used by `src/commands/ask.py`; output (a `RoutedInvocation`) directly determines which CLI command executes. **[FIXED 2026-07-22]** Raw response now bounds-checked via `validate_bounded_payload` before `_parse_routed_invocation`'s existing route-catalog/args check (which serves as the semantic validator — no separate class, since that validation already exists and already raises the exact `IntentRouterError` callers depend on); every run gets a full `planned→...→semantically_validated` lifecycle plus a durable `released`/`rejected`/`discarded` terminal via `ai_release_audit`. `route()` gained a `programs_root` parameter for this. Tests: `tests/unit/test_ai_intent_router.py` (2 new: released-trail + rejected-trail assertions). |
