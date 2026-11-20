@@ -461,8 +461,11 @@ class VertexRootGroup(TyperGroup):
                             probe.get_parameter_source(name) is click.core.ParameterSource.COMMANDLINE
                             for name in ("approve_draft", "mark_sent")
                         )
-            if "vertex_startup_dry_run" not in ctx.meta and resolved[1] is not None and any(
-                arg == "--dry-run" or arg.startswith("--dry-run=") for arg in resolved[2]
+            if (
+                "vertex_startup_dry_run" not in ctx.meta
+                and resolved[0] not in {"report", "draft"}
+                and resolved[1] is not None
+                and any(arg == "--dry-run" or arg.startswith("--dry-run=") for arg in resolved[2])
             ):
                 ctx.meta["vertex_startup_dry_run"] = _probe_dry_run_flag(
                     ctx, resolved[0], resolved[1], resolved[2]

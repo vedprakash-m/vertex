@@ -255,7 +255,7 @@ def _build_health_summary(
         milestone_assessments=milestone_assessments,
         as_of=as_of,
     )
-    if verdict_assessment.overall_risk in {RiskLevel.HIGH, RiskLevel.BLOCKED, RiskLevel.MEDIUM}:
+    if not needs_input_count and verdict_assessment.overall_risk in {RiskLevel.HIGH, RiskLevel.BLOCKED, RiskLevel.MEDIUM}:
         overall_risk = max((overall_risk, verdict_assessment.overall_risk), key={
             RiskLevel.DONE: 0, RiskLevel.LOW: 1, RiskLevel.UNKNOWN: 2,
             RiskLevel.MEDIUM: 3, RiskLevel.HIGH: 4, RiskLevel.BLOCKED: 5,

@@ -779,7 +779,8 @@ def resolve_authoritative_program_risk(
     schedule_risk = RiskLevel.UNKNOWN
 
     for row in scorecards:
-        row_risk = getattr(row, "risk", RiskLevel.UNKNOWN)
+        raw_risk = getattr(row, "risk", RiskLevel.UNKNOWN)
+        row_risk = RiskLevel.UNKNOWN if raw_risk == RiskLevel.BLOCKED else raw_risk
         levels.append(row_risk)
         if _RANK[row_risk] > _RANK[RiskLevel.UNKNOWN]:
             reasons.append(VerdictReason("dimension_risk_floor", (f"SCORECARD:{getattr(row, 'scorecard_name', 'Scorecard')}/{getattr(row, 'name', '')}",)))
@@ -844,13 +845,17 @@ def resolve_authoritative_program_risk(
             reasons.append(VerdictReason("milestone_target_overdue", (f"MILESTONE:{ms.id}",)))
 
     overall_sc = RiskLevel.UNKNOWN
+    has_unknown_sc = False
     for row in scorecards:
-        row_risk = getattr(row, "risk", RiskLevel.UNKNOWN)
+        raw_risk = getattr(row, "risk", RiskLevel.UNKNOWN)
+        row_risk = RiskLevel.UNKNOWN if raw_risk == RiskLevel.BLOCKED else raw_risk
+        if row_risk == RiskLevel.UNKNOWN:
+            has_unknown_sc = True
         if _RANK[row_risk] > _RANK[overall_sc]:
             overall_sc = row_risk
     if scorecards and all(getattr(row, "risk", RiskLevel.UNKNOWN) in {RiskLevel.LOW, RiskLevel.DONE} for row in scorecards):
         overall_sc = max((getattr(row, "risk", RiskLevel.UNKNOWN) for row in scorecards), key=_RANK.__getitem__)
-    elif any(getattr(row, "risk", RiskLevel.UNKNOWN) == RiskLevel.UNKNOWN for row in scorecards) and _RANK[overall_sc] < _RANK[RiskLevel.UNKNOWN]:
+    elif has_unknown_sc and _RANK[overall_sc] < _RANK[RiskLevel.UNKNOWN]:
         overall_sc = RiskLevel.UNKNOWN
     adverse_max = max((*levels, schedule_risk), key=_RANK.__getitem__)
     overall = adverse_max if _RANK[adverse_max] >= _RANK[RiskLevel.MEDIUM] else overall_sc
