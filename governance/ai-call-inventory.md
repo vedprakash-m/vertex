@@ -1,17 +1,17 @@
 # AI provider-call inventory
 
-## Current W1.6a scope and dispositions (2026-10-24, updated 2026-11-18)
+## Current W1.6a / RVX-D09 scope and dispositions (2026-10-24, updated 2026-11-20)
 
 This source-only reconciliation supersedes the historical counts and consumer
 claims below. It does not authorize a provider call or establish runtime
 authorization, qualification or production migration.
 
-The baseline contains **35 syntactic provider-bound expressions** under `src/`:
+The baseline contains **36 syntactic provider-bound expressions** under `src/`:
 **31 legacy feature invocations** (29 in `src/ai`, two in `src/commands`),
-**one opt-in-production runner invocation**, **two fallback forwarding
+**two opt-in-production runner invocations**, **two fallback forwarding
 expressions** and **one SDK transport expression**. The 31 legacy invocations
 use **27 feature policy identities**; repeated invocations are not separate
-features. Of the 35 expressions, 32 are `.structured`, two are `.chat` and one
+features. Of the 36 expressions, 33 are `.structured`, two are `.chat` and one
 is the SDK `.chat.completions.create`. Infrastructure is excluded from the
 feature migration denominator. No legacy invocation has been retired by this
 work.
@@ -95,6 +95,7 @@ named scope. Nested functions and methods retain their lexical qualification.
 | src/ai/deployment_fallback.py | FallbackAIClient.structured | client.structured | 1 | shared-forwarding | infrastructure |
 | src/ai/discovery/prose_event_extractor.py | _extract_via_llm | client.structured | 1 | prose_event_extractor | legacy |
 | src/ai/exec_summary_drafter.py | draft_exec_summary | client.structured | 1 | exec_summary_drafter | legacy |
+| src/ai/exec_summary_drafter.py | draft_exec_summary_via_runner.call_provider | client.structured | 1 | exec_summary_drafter | opt-in-production |
 | src/ai/governance_decision_brief_generator.py | generate_governance_decision_brief | client.structured | 1 | governance_decision_brief_generator | legacy |
 | src/ai/intent_router.py | _run_ai_route | client.structured | 1 | intent_router | legacy |
 | src/ai/learning_distiller.py | LearningDistiller.distill | client.structured | 1 | learning_distiller | legacy |
@@ -124,6 +125,7 @@ it does not replace the provider syntax inventory above.
 | Path | Qualified function | Callee | Gate | Feature | Disposition |
 |---|---|---|---|---|---|
 | src/commands/ai_proposals.py | _generate_dependency_blast_radius | generate_dependency_blast_radius_proposal_via_runner | use_structured_runner | dependency_blast_radius_generator | opt-in-production |
+| src/commands/report_ai.py | _synthesize_v2_ai_content | draft_exec_summary_via_runner | use_structured_runner | exec_summary_drafter | opt-in-production |
 
 ## Static limitations and unreachable anchors
 

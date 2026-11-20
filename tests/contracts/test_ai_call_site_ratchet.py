@@ -222,3 +222,29 @@ def test_dependency_blast_radius_command_is_bound_to_runner_adoption() -> None:
     ]
     assert len(adopted) == 1
     assert adopted[0][5] == "opt-in-production"
+
+
+def test_exec_summary_report_command_has_opt_in_runner_adoption() -> None:
+    report_ai_path = _REPO_ROOT / "src" / "commands" / "report_ai.py"
+    tree = ast.parse(report_ai_path.read_text(encoding="utf-8"))
+    caller = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_synthesize_v2_ai_content"
+    )
+    called = {
+        node.func.id
+        for node in ast.walk(caller)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "draft_exec_summary_via_runner" in called
+
+    rows = _inventory_rows(_INVENTORY_PATH.read_text(encoding="utf-8"))
+    adopted = [
+        row
+        for row in rows
+        if row[0] == "src/ai/exec_summary_drafter.py"
+        and row[1] == "draft_exec_summary_via_runner.call_provider"
+    ]
+    assert len(adopted) == 1
+    assert adopted[0][5] == "opt-in-production"
